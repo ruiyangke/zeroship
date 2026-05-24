@@ -192,10 +192,11 @@ impl VmIndexRetryPolicy {
     /// (the way `cad098e6` already did 30 → 120) and forgets to
     /// re-tune the wake budget separately.
     ///
-    /// Formula: `max_attempts = (host_fence_timeout_secs.saturating_sub(CLIENT_HEADROOM_SECS)) / INTERVAL_SECS + 1`
-    /// — the `+ 1` accounts for the first (zero-sleep) attempt, so
-    /// the wall-time `(max_attempts - 1) * INTERVAL_SECS` lands
-    /// exactly at `(host_fence - HEADROOM)` seconds.
+    /// Formula: `max_attempts = (teardown_estimate.saturating_sub(CLIENT_HEADROOM_SECS)) / INTERVAL_SECS + 1`
+    /// where `teardown_estimate = 2 * host_fence_timeout_secs` (see
+    /// C-8b note below). The `+ 1` accounts for the first (zero-sleep)
+    /// attempt, so the wall-time `(max_attempts - 1) * INTERVAL_SECS`
+    /// lands exactly at `(teardown_estimate - HEADROOM)` seconds.
     ///
     /// Constants:
     /// - `CLIENT_HEADROOM_SECS = 10` — leaves ≥10 s headroom under
@@ -216,10 +217,10 @@ impl VmIndexRetryPolicy {
     /// past the 60 s ntex client deadline, re-introducing the
     /// C-7-class silent cancellation. We now compute TWO ceilings
     /// and take the MIN:
-    ///   - fence-derived: `host_fence_timeout_secs - HEADROOM` —
-    ///     the IDEAL ceiling (envelopes the worst observed source
-    ///     teardown so a wake racing a fence-clear has a non-trivial
-    ///     chance of catching the release).
+    ///   - fence-derived: `teardown_estimate - HEADROOM` — the IDEAL
+    ///     ceiling (envelopes the worst observed source teardown so
+    ///     a wake racing a fence-clear has a non-trivial chance of
+    ///     catching the release).
     ///   - deadline-derived: `CLIENT_DEADLINE - HEADROOM = 50 s` —
     ///     the HARD ceiling (anything past this is silently dropped
     ///     by ntex when the client disconnects).
@@ -227,31 +228,64 @@ impl VmIndexRetryPolicy {
     /// fence; the ideal ceiling wins for tight per-cluster overrides
     /// (e.g. cluster-smoke at 30 s).
     ///
-    /// Examples:
-    /// - `host_fence_timeout_secs = 30` → fence=20 s, deadline=50 s,
-    ///   MIN=20 s → 11 attempts × 2 s = 20 s budget.
-    /// - `host_fence_timeout_secs = 60` → fence=50 s, deadline=50 s,
-    ///   MIN=50 s → 26 attempts × 2 s = 50 s budget.
-    /// - `host_fence_timeout_secs = 120` → fence=110 s, deadline=50 s,
-    ///   MIN=50 s → 26 attempts × 2 s = 50 s budget (CAPPED — the
-    ///   pre-C-8a derivation gave 110 s here, silent-cancelling at
-    ///   60 s; the cap forces a clean 503 inside the deadline so the
-    ///   exhausted-budget log fires before client disconnect).
+    /// **C-8b fix (T-8b-smoke-r10 cluster review)**: the fence-derived
+    /// ceiling originally used `host_fence_timeout_secs` directly,
+    /// implicitly assuming `teardown_wall_time ≈ fence_timeout`. Smoke-r10
+    /// empirically measured the *full* `stop()` pipeline at
+    /// **60.164 s for `host_fence=30 s`** — exactly 2× the fence. The
+    /// stop path is: agent `/shutdown` → host-fence wait (`wait_for_agent_silent`,
+    /// up to `fence_timeout`, often timing out because the agent's HTTP
+    /// listener takes >fence to actually close) → Nomad job purge tail
+    /// (~`fence_timeout`-shaped) → cleanup → `stop: complete`. The
+    /// `wait_for_agent_silent` 2-consecutive-misses contract is one
+    /// contributor; the Nomad purge tail is the other. Empirically the
+    /// two compose to a 2× ratio at the fence values we run in
+    /// production. We therefore baseline the fence-derived ceiling on
+    /// `teardown_estimate = 2 * host_fence_timeout_secs`. The MIN-of-two
+    /// design from C-8a still structurally prevents the C-7 silent
+    /// cancellation regardless of how this estimate is tuned.
+    ///
+    /// Examples (post-C-8b):
+    /// - `host_fence_timeout_secs = 30` → teardown_est=60 s,
+    ///   fence-ceil=50 s, deadline-ceil=50 s, MIN=50 s → 26 attempts ×
+    ///   2 s = 50 s budget. (Was 11 attempts / 20 s pre-C-8b — that
+    ///   exhausted ~40 s before the actual vm_index release.)
+    /// - `host_fence_timeout_secs = 60` → teardown_est=120 s,
+    ///   fence-ceil=110 s, deadline-ceil=50 s, MIN=50 s → 26 attempts ×
+    ///   2 s = 50 s budget (unchanged).
+    /// - `host_fence_timeout_secs = 120` → teardown_est=240 s,
+    ///   fence-ceil=230 s, deadline-ceil=50 s, MIN=50 s → 26 attempts ×
+    ///   2 s = 50 s budget (unchanged — deadline-ceil still binds).
+    /// - `host_fence_timeout_secs = 20` → teardown_est=40 s,
+    ///   fence-ceil=30 s, deadline-ceil=50 s, MIN=30 s → 16 attempts ×
+    ///   2 s = 30 s budget. (Was 6/10 s pre-C-8b.)
+    ///
+    /// **Long-term:** C-8b is defense-in-depth; the structural fix
+    /// is C-7-LT (async wake response + polling, R15-A1).
     pub fn from_host_fence_timeout(host_fence_timeout_secs: u64) -> Self {
         const CLIENT_HEADROOM_SECS: u64 = 10;
         const CLIENT_DEADLINE_SECS: u64 = 60;
         const INTERVAL_SECS: u64 = 2;
         const MIN_ATTEMPTS: u32 = 1;
 
+        // C-8b: empirical source-teardown wall-time is ~2× the
+        // host_fence_timeout — `wait_for_agent_silent` requires 2
+        // consecutive no-reply polls AND the Nomad job purge tail
+        // appends a second fence-shaped wait. The fence-derived
+        // ceiling must envelope this combined pipeline, not just the
+        // fence component. Smoke-r10 measured 60.164 s teardown at
+        // fence=30 s (deferred C-8b).
+        let teardown_estimate = host_fence_timeout_secs.saturating_mul(2);
+
         // Dual ceilings:
         //   - fence-derived is the IDEAL upper bound (matches the
-        //     observed source-teardown wall-time).
+        //     observed source-teardown wall-time, post-C-8b 2× factor).
         //   - deadline-derived is the HARD upper bound (anything past
         //     this is silently dropped when the ntex client
         //     disconnects — the C-7 / C-8a failure mode).
         // Take the MIN — the tighter of the two always wins.
         let max_budget_from_fence =
-            host_fence_timeout_secs.saturating_sub(CLIENT_HEADROOM_SECS);
+            teardown_estimate.saturating_sub(CLIENT_HEADROOM_SECS);
         let max_budget_from_deadline =
             CLIENT_DEADLINE_SECS.saturating_sub(CLIENT_HEADROOM_SECS);
         let effective_budget = max_budget_from_fence.min(max_budget_from_deadline);
@@ -1525,18 +1559,22 @@ mod unit_tests {
         );
     }
 
-    /// **R14-A6 short-timeout case**: a 20 s host_fence (an aggressive
-    /// per-cluster override) should yield a sensible non-trivial
-    /// budget — concretely `(20 - 10) / 2 + 1 = 6` attempts × 2 s =
-    /// 10 s wall-time. Pins the formula so a future refactor can't
-    /// silently collapse the policy to `max_attempts = 1` for short
-    /// fences.
+    /// **R14-A6 short-timeout case (post-C-8b)**: a 20 s host_fence
+    /// (an aggressive per-cluster override) should yield a sensible
+    /// non-trivial budget. Post-C-8b the fence-derived ceiling uses
+    /// `teardown_estimate = 2 * fence = 40 s`, so the formula is
+    /// `(40 - 10) / 2 + 1 = 16` attempts × 2 s = 30 s wall-time
+    /// (fence-ceil binds; deadline-ceil 50 s is looser here). Pins
+    /// the formula so a future refactor can't silently collapse the
+    /// policy to `max_attempts = 1` for short fences. **Pre-C-8b
+    /// this was 6 attempts / 10 s — the 1× fence assumption that
+    /// smoke-r10 disproved.**
     #[test]
     fn r14a6_policy_from_cfg_short_timeout() {
         let p = VmIndexRetryPolicy::from_host_fence_timeout(20);
         assert_eq!(
-            p.max_attempts, 6,
-            "20 s fence: (20 - 10 headroom) / 2 s interval + 1 = 6"
+            p.max_attempts, 16,
+            "20 s fence post-C-8b: (2*20 - 10 headroom) / 2 s interval + 1 = 16"
         );
         assert_eq!(p.interval, Duration::from_secs(2));
     }
@@ -1591,6 +1629,58 @@ mod unit_tests {
             p.max_attempts
         );
         assert_eq!(p.interval, Duration::from_secs(2));
+    }
+
+    /// **C-8b (T-8b-smoke-r10 cluster review)**: the fence-derived
+    /// ceiling must envelope the *full* source-teardown wall-time,
+    /// which smoke-r10 empirically measured at **2× the fence** (60.164 s
+    /// at `host_fence=30 s`). Pre-C-8b the policy at fence=30 was 11
+    /// attempts / 20 s — exhausted ~40 s before the actual vm_index
+    /// release. Post-C-8b the same input yields 26 attempts / 50 s
+    /// (deadline-ceil binds since fence-ceil would be 50 s too).
+    ///
+    /// Pins: at fence=30, max_attempts ≥ 21 (≥40 s wall-time budget),
+    /// strictly more than the pre-C-8b 11. Catches a future regression
+    /// that drops the 2× factor back to 1×.
+    ///
+    /// See `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r10.md`
+    /// for the smoke trace establishing the 2× ratio.
+    #[test]
+    fn c8b_default_policy_envelopes_doubled_fence() {
+        // 30 s is the cluster-smoke fence (C-8 cluster config).
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(30);
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            p.max_attempts >= 21,
+            "C-8b: 30 s fence post-fix must yield ≥21 attempts (≥40 s budget) \
+             to envelope the 2× teardown wall-time; got {} attempts. \
+             Pre-C-8b this was 11 attempts / 20 s and silently 503-d \
+             while teardown was still 40 s away from completing.",
+            p.max_attempts,
+        );
+        // And the budget MUST still fit under the 60 s ntex deadline
+        // (C-8a invariant — silent-cancel regression remains
+        // structurally prevented by the MIN-of-two design).
+        assert!(
+            wall_ms <= 50_000,
+            "C-8b must NOT regress C-8a: budget must remain ≤50 s under \
+             the 60 s ntex deadline; got {} ms (attempts={})",
+            wall_ms,
+            p.max_attempts,
+        );
+        // Pin the exact attempt count at the cluster-smoke fence so a
+        // future refactor that subtly changes the formula (e.g. wrong
+        // headroom or wrong factor) fails loudly here. Math:
+        //   teardown_est = 2 * 30 = 60
+        //   fence_ceil   = 60 - 10 = 50
+        //   deadline_ceil = 60 - 10 = 50
+        //   MIN(50, 50) = 50, /2 + 1 = 26
+        assert_eq!(
+            p.max_attempts, 26,
+            "C-8b: 30 s fence → (2*30 - 10) / 2 + 1 = 26 attempts; got {}",
+            p.max_attempts,
+        );
     }
 }
 
