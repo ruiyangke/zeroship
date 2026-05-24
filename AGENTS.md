@@ -6,6 +6,25 @@ This file is the AI-agent landing page. Read the **task router** below first.
 
 ---
 
+## Development status — pre-launch, no back-compat
+
+**Zeroship has never been published.** No production users, no production tenants, no creator apps in the wild. Every API, every wire format, every schema is fair game to break.
+
+This is a deliberate stance — not a limitation. Pre-launch is the moment to get shapes right. Building back-compat infrastructure for users that don't exist is wasted work.
+
+**Implications for any change you propose:**
+
+- **No `@deprecated` aliases.** Rename the symbol. Delete the old name. One PR.
+- **No migration shims, no detect-and-warn paths, no "legacy mode" fallbacks.** If the new shape is right, the old one disappears in the same PR.
+- **No back-compat shims for wire format / SDK contract / V8 RPC.** Break the shape and update every caller in the same change.
+- **No "scan the creator codebase" CLI tooling.** There are no creator codebases.
+- **No "ALTER existing tables for new system fields" backfills.** There are no existing tables in production. The detect-and-warn arms that exist today (plugin-db PR 5 Path C, the unreached migration scanners) are dead code waiting for the post-launch simplification pass.
+- **Wire-format versioning is for code-evolution discipline, not user-compat.** P5 encrypted ciphertext flags (`0x01` → `0x02`), masking sentinel formats, etc. exist so dev/test databases can re-decrypt across runtime versions — not so deployed apps can be left alone.
+
+**When this changes** (post-launch): this section gets a new "Migration discipline" subsection and `feedback_no_backward_compat.md` gets retired. Until then, treat back-compat constraints as user-requested guardrails only, never defaults.
+
+---
+
 ## Where to start, by task
 
 | If you're working on… | Start here |
