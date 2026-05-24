@@ -1472,3 +1472,42 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [C-6] CLOSED at `91ce9be5` — detach_isolated pattern via dedicated OS thread + private compio runtime. (Diagnosis refresh needed per R14-I1.)
 - [R14-Q2] CLOSED at `79b4d258` — seal_filename_for_str `#[cfg(test)]`-gated (CRITICAL-3 regression test needs the `&str` shape)
 - [R14-Q3 + R14-P2] CLOSED at `9afd0986` — snap-l2-upload thread name byte-slice simplification + accurate pr_set_name truncation docstring
+
+---
+
+## NEW r15 ROUND FINDINGS (added by pilot cycle 2026-05-25 r14 — test-cov r15, api-surface r15, code-quality r15)
+
+### [R15-T1 / EMERGENCY ESCALATION] (CRITICAL+, 7-round) Integration coverage gap structurally blocking velocity
+- **Source**: 2026-05-25 test-coverage-r15
+- **Symptom**: 9 cluster cycles, 7 distinct bugs (C-1..C-7), ~$3.80 burned. Per-cycle pattern: each fix shipped with "cluster smoke is the validation gate" disclaimer in the commit message. C-6 + C-7 fixes BOTH self-declared cluster-smoke as the validation surface. Observability tracing (`8e7f0b53`) has STRUCTURALLY REPLACED unit tests as the diagnostic primary.
+- **R15-T1a**: Future-drop coverage of `compio::time::sleep.await` — ZERO tests in the codebase exercise this. C-7 bug class is "future canceled by client disconnect mid-await"; no test catches it.
+- **R15-T1b**: OS-thread detach (C-3, C-6) — byte-coverage-zero. Both commit messages disclose "current test harness doesn't drive this scenario".
+- **Action**: dedicated R13-A1 sprint — ~80 LOC pg-e2e fixture + 5+ tests driving `StubRestoreBackend`-driven `restore_sandbox` end-to-end with `fail_submit` / `fail_livez` / `fail_unseal` / cancellation. Closes 7-round carry-forwards across 4 lenses (test-cov, architecture, concurrency, code-quality).
+
+### [R15-T2] (IMPORTANT, test-coverage-r15) Constant-arithmetic-only tests pattern recurring
+- **Source**: 2026-05-25 test-coverage-r15
+- **Symptom**: C-7 fix replaced `c4_default_policy_envelopes_observed_teardown` with `c7_retry_budget_default_is_under_client_deadline`. Both pin a constant against another constant — neither drives the retry LOOP. R14-A6 added 3 more constant-arithmetic tests + 1 wake-call-site regression-pin (good). Predicted: next refactor of the budget will require this delete-and-replace dance again.
+- **Action**: replace constant-arithmetic tests with property-based tests that DRIVE the loop. E.g., proptest: arbitrary host_fence_timeout → invariant that retry budget < client_deadline holds for ALL inputs.
+
+### [R15-Q1] (MAJOR, code-quality-r15) C-6 fix introduced same-cycle regression of R14-Q3
+- **Source**: 2026-05-25 code-quality-r15
+- **Files**: `admin_handlers.rs:1340-1352` (C-6 fix at 91ce9be5, 20:09 UTC) uses the EXACT `chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()` pattern. R14-Q3 closed this exact pattern at `snapshot_store_gcs.rs` 3 minutes later (20:12 UTC) WITHOUT propagating the cleanup.
+- **Symptom**: 2 detach sites now DIVERGE in shape — one uses byte-slice (9afd0986), one uses the over-engineered char dance (91ce9be5). Reviewer-induced inconsistency.
+- **Action**: 1-line fix at admin_handlers.rs:1340-1352. Apply byte-slice form: `let tail = &sandbox_id[sandbox_id.len().saturating_sub(8)..];`. Bundle with R15-Q3 helper extract.
+
+### [R15-Q2] (MINOR, code-quality-r15) C-7 per-attempt INFO log noisy at scale
+- **Source**: 2026-05-25 code-quality-r15
+- **File**: `restore_handler.rs:304-311` (C-7 added INFO log)
+- **Symptom**: 25 INFO lines/wake × c=20 stress = ~500 lines/cycle. Intentional for smoke-r9 diagnosis but no follow-through plan to demote to DEBUG.
+- **Action**: after smoke-r9 milestone, demote per-attempt log to DEBUG (or rate-limit). Keep first/last/budget-exhausted at INFO.
+
+### [R15-Q3] (MINOR-elevated, code-quality-r15, refile of R14-A1 with cost evidence) 3 detach sites without shared helper
+- **Source**: 2026-05-25 code-quality-r15
+- **Files**: snapshot_store_gcs.rs (C-3), admin_handlers.rs (C-6), nomad_ch.rs:2002 (CreateGuard::drop UNFIXED — sibling-C-6)
+- **Symptom**: R14-A1 architectural finding gained code-quality cost evidence — R15-Q1 is the regression cost of NOT having the helper.
+- **Action**: extract `detach_isolated(name, fut)` helper per R14-A1 sketch. Apply to all 3 sites.
+
+### Closures this cycle
+- [R14-A6 + R14-Q4] CLOSED at `c3edf968` — VmIndexRetryPolicy::from_host_fence_timeout derives from cfg + doc off-by-one fixed. +4 tests (332→336).
+- [R14-Q2 + R14-Q3 + R11-API1 expanded] verified CLOSED earlier this cycle.
+- [api-surface lowest backlog] 6→4 items. R10-API1 now longest 6-round carry.
