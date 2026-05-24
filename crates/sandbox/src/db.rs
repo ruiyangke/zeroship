@@ -94,13 +94,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "wake_jobs hardening: revoke audit SELECT, lessee_updated_at index, agent_url CHECK (R16-S1 + R17-A2 + R16-S3)",
         sql: include_str!("../migrations/0010_wake_jobs_hardening.sql"),
     },
+    Migration {
+        version: 11,
+        description: "wake_jobs UNIQUE INDEX on sandbox_id WHERE non-terminal — TOCTOU close-off on wake-POST (R17-C2 / GATE-C2)",
+        sql: include_str!("../migrations/0011_wake_jobs_unique.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 10;
+pub const LATEST_MIGRATION_VERSION: i64 = 11;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
