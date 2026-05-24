@@ -2340,6 +2340,16 @@ fn build_restore_nomad_job_json(
             // would either be ignored (best case) or fail HCL decode
             // if the schema gets stricter.
             let kernel_path = cfg.runtime_dir.join("vmlinuz");
+            // C-7-LT-12a (smoke-r22): the source bytes for rootfs.img
+            // the driver hardlinks (or copies on EXDEV) into runDir
+            // before CH spawn. Matches cold-boot's materializeRootfs
+            // source path (`$ZSBX_ARTIFACT_DIR/rootfs-slim.img` where
+            // `$ZSBX_ARTIFACT_DIR == cfg.runtime_dir`); the restore
+            // path needs an EXPLICIT field because the snapshot's
+            // config.json names the (now-GC'd) source-alloc dir for
+            // disks[0].path, so the driver has no other handle on the
+            // real source bytes once the rewriter retargets the path.
+            let rootfs_source = cfg.runtime_dir.join("rootfs-slim.img");
             (
                 "ch",
                 serde_json::json!({
@@ -2358,6 +2368,7 @@ fn build_restore_nomad_job_json(
                     "user_id": user_id,
                     "workspace_img": workspace_img.display().to_string(),
                     "user_home_img": user_home_img.display().to_string(),
+                    "rootfs_source": rootfs_source.display().to_string(),
                     // Empty: CH ignores --cmdline on --restore.
                     "pubkey_hex": "",
                     "subnet_base_octet": cfg.subnet_second_octet,
@@ -3609,6 +3620,70 @@ mod r12_i1_tests {
             Some("usr_alice"),
             "restore-path ChPlugin Config MUST carry user_id — driver \
              v8 allow-list rejects home.img without it (r21-A1)"
+        );
+        // C-7-LT-12a (smoke-r22): rootfs_source MUST appear in the
+        // restore-path Config so the driver knows where to hardlink
+        // the rootfs.img bytes from. Pre-fix the driver's rewriter
+        // retargeted disks[0].path → <runDir>/rootfs.img and the
+        // task_dir allow-list (C-7-LT-6) accepted it, but nothing
+        // staged a real file at the destination — CH then aborted
+        // at `VM Restore failed: DeviceManager(Disk(NotFound))`. The
+        // source path matches cold-boot's materializeRootfs source
+        // (`<runtime_dir>/rootfs-slim.img`).
+        assert_eq!(
+            config["rootfs_source"].as_str(),
+            Some("/var/lib/zeroship/ch/rootfs-slim.img"),
+            "restore-path ChPlugin Config MUST carry rootfs_source — \
+             driver v12 hardlinks this into runDir/rootfs.img before \
+             CH spawn (C-7-LT-12a)"
+        );
+    }
+
+    /// C-7-LT-12a invariant: the restore-path `rootfs_source` field
+    /// MUST point at the same on-disk artifact the cold-boot path's
+    /// `materializeRootfs` copies from. Cold-boot emits the source
+    /// implicitly through `ZSBX_ARTIFACT_DIR` (== `runtime_dir`) +
+    /// the hard-coded `chRootfsSourceName = "rootfs-slim.img"` in the
+    /// driver; the restore path emits the FULL path explicitly because
+    /// the driver has no env-derived handle on the cold-boot artifact
+    /// dir once the rewriter rewrites disks[0].path away from the
+    /// source alloc. A mismatch would mean wake VMs boot off different
+    /// rootfs bytes than fresh VMs — a class of bug the test pins
+    /// preemptively.
+    #[test]
+    fn ch_plugin_restore_jobspec_rootfs_source_matches_cold_boot() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-rootfs",
+            &cfg,
+            5,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            TaskDriverMode::ChPlugin,
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
+
+        // Cold-boot source: ZSBX_ARTIFACT_DIR (== runtime_dir) +
+        // "/rootfs-slim.img" baked into the driver. The restore path
+        // emits the same composition as an absolute path so the
+        // driver-side hardlink/copy uses identical bytes.
+        let artifact_dir = env["ZSBX_ARTIFACT_DIR"]
+            .as_str()
+            .expect("ZSBX_ARTIFACT_DIR must be emitted");
+        let want = format!("{artifact_dir}/rootfs-slim.img");
+
+        assert_eq!(
+            config["rootfs_source"].as_str(),
+            Some(want.as_str()),
+            "rootfs_source MUST match cold-boot's materializeRootfs \
+             source (ZSBX_ARTIFACT_DIR + /rootfs-slim.img); a mismatch \
+             means wake VMs boot off different bytes than fresh VMs"
         );
     }
 
