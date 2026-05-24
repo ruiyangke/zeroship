@@ -484,25 +484,102 @@ impl WakeMachine {
             };
             let agent_url = self.backend.derive_agent_url(snap.vm_index);
 
-            // ─── T5: signed /version fingerprint check ─────────────
+            // ─── T5 + clock_resync: parallel post-restore probes ───
             //
-            // After livez but BEFORE clock_resync. Same signing key as
-            // clock_resync; reuses the agent's already-spun-up HTTP
-            // server. Mismatch = partial-fleet rollout landed the
-            // wake on a stale agent binary; roll back with a distinct
-            // wire code so the SLO dashboard can route rollout-skew
-            // failures away from `livez_timeout` /
-            // `restore_backend_failed`. See
-            // `verify_agent_version_post_restore` for the sentinel
-            // semantics (legacy agent / "unknown" build SHA → skip
-            // with WARN, not fail).
-            match crate::restore_handler::verify_agent_version_post_restore(
+            // R28-I1 (parallelize): both probes hit the same agent
+            // HTTP surface with the same signing key, both are
+            // read-only against that surface (T5 GETs /version,
+            // clock_resync POSTs /_clock_resync; neither mutates
+            // controller-side state mid-call), and each carries a
+            // 10s ureq timeout. Running them serially doubles the
+            // failure-path latency for no benefit. `futures::join!`
+            // races them and returns when both complete.
+            //
+            // Cancel-safety: both futures wrap `compio::runtime::
+            // spawn_blocking` over a ureq call. The futures take all
+            // arguments by value (or as borrows that live for the
+            // span of the await); no shared mutable state, no
+            // Drop-side effects mid-call. Even if the outer task
+            // were cancelled, the spawn_blocking work would finish
+            // on its OS thread independently — here we await the
+            // join to completion, so cancellation is a non-issue.
+            //
+            // R28-I2 (half-dead-agent fingerprint): if BOTH probes
+            // transport-fail against the same agent URL within the
+            // budget, the agent is alive enough to bind its port
+            // (livez succeeded) but dead enough that two distinct
+            // signed HTTP requests both time out. Without paired
+            // detection the wake would burn 20s on what is plainly
+            // a wake failure; we surface it as a distinct WARN and
+            // roll back via `ClockResyncFailed` (the structured
+            // signal is the `transport_error: bool` on each
+            // outcome; the wire kind stays in the existing
+            // taxonomy).
+            let t5_future = crate::restore_handler::verify_agent_version_post_restore(
                 &agent_url,
                 &sealed.signing_key_bytes,
                 crate::restore_handler::CONTROLLER_GIT_COMMIT,
-            )
-            .await
-            {
+            );
+            let clock_resync_future =
+                crate::restore_handler::clock_resync_post_restore_typed(
+                    &agent_url,
+                    self.sandbox_id,
+                    &sealed.signing_key_bytes,
+                );
+            let (t5_outcome, clock_resync_outcome) =
+                futures::join!(t5_future, clock_resync_future);
+
+            // Half-dead-agent fingerprint (R28-I2): pair the two
+            // structured transport-error signals BEFORE branching on
+            // the individual outcomes. If both fired, route to a
+            // dedicated WARN so the SLO dashboard / log grep can
+            // distinguish "agent's HTTP surface is dead post-restore"
+            // from a routine clock_resync 401 or an isolated probe
+            // hiccup.
+            let t5_transport_error = t5_outcome.is_transport_error();
+            let clock_resync_transport_error = matches!(
+                clock_resync_outcome,
+                crate::restore_handler::ClockResyncOutcome::Err {
+                    transport_error: true,
+                    ..
+                }
+            );
+            if t5_transport_error && clock_resync_transport_error {
+                tracing::warn!(
+                    target: "sandbox::wake::half_dead_agent",
+                    wake_id = %self.wake_id,
+                    sandbox_id = %self.sandbox_id,
+                    agent_url = %agent_url,
+                    "half-dead-agent: both /version and /_clock_resync \
+                     transport-failed against agent_url — treating as wake failure"
+                );
+                let clock_message = match &clock_resync_outcome {
+                    crate::restore_handler::ClockResyncOutcome::Err {
+                        message, ..
+                    } => message.clone(),
+                    crate::restore_handler::ClockResyncOutcome::Ok => String::new(),
+                };
+                return self
+                    .rollback_with(
+                        g1,
+                        snap.vm_index,
+                        WakeErrorCode::ClockResyncFailed,
+                        format!(
+                            "half_dead_agent: both /version and /_clock_resync \
+                             transport-failed against {agent_url} \
+                             (clock_resync: {clock_message})"
+                        ),
+                    )
+                    .await;
+            }
+
+            // T5 branch: Match → continue; Skipped → WARN + continue
+            // (additive check, signed-auth on the wire is the trust
+            // anchor); Mismatch → fail wake with
+            // `AgentVersionMismatch`. See
+            // `verify_agent_version_post_restore` for sentinel
+            // semantics (legacy agent / "unknown" build SHA → skip).
+            match t5_outcome {
                 crate::restore_handler::VersionCheckOutcome::Match => {
                     tracing::debug!(
                         wake_id = %self.wake_id,
@@ -510,12 +587,16 @@ impl WakeMachine {
                         "T5 /version probe matched — wake proceeds"
                     );
                 }
-                crate::restore_handler::VersionCheckOutcome::Skipped { reason } => {
+                crate::restore_handler::VersionCheckOutcome::Skipped {
+                    reason,
+                    transport_error,
+                } => {
                     tracing::warn!(
                         target: "sandbox::wake::version_check",
                         wake_id = %self.wake_id,
                         sandbox_id = %self.sandbox_id,
                         reason,
+                        transport_error,
                         "T5 /version probe skipped — additive check disabled for this wake"
                     );
                 }
@@ -535,15 +616,24 @@ impl WakeMachine {
                 }
             }
 
-            if let Err(e) = crate::restore_handler::clock_resync_post_restore(
-                &agent_url,
-                self.sandbox_id,
-                &sealed.signing_key_bytes,
-            )
-            .await
+            // Clock-resync branch: any failure (transport or non-
+            // 200) rolls back with `ClockResyncFailed`. The paired
+            // half-dead-agent case above short-circuits BEFORE we
+            // reach here, so a transport_error reaching this match
+            // means T5 didn't also transport-fail (e.g., T5 matched
+            // or returned Mismatch — Mismatch already returned, so
+            // it matched).
+            if let crate::restore_handler::ClockResyncOutcome::Err {
+                message, ..
+            } = clock_resync_outcome
             {
                 return self
-                    .rollback_with(g1, snap.vm_index, WakeErrorCode::ClockResyncFailed, e)
+                    .rollback_with(
+                        g1,
+                        snap.vm_index,
+                        WakeErrorCode::ClockResyncFailed,
+                        message,
+                    )
                     .await;
             }
 

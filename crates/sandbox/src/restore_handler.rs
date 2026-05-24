@@ -3032,6 +3032,72 @@ pub(crate) async fn clock_resync_post_restore(
     .unwrap_or_else(|p| Err(format!("clock_resync spawn_blocking panic: {p:?}")))
 }
 
+/// R28-I2: structured outcome of [`clock_resync_post_restore_typed`]
+/// — a thin wrapper around [`clock_resync_post_restore`] that
+/// preserves the existing `Result<(), String>` shape for the sync
+/// path while surfacing a transport-error fingerprint for the wake
+/// state machine's half-dead-agent detector. The signed-POST function
+/// itself is unchanged; only the wake_machine consumes this typed
+/// variant.
+///
+/// The half-dead-agent fingerprint (R28-I2) is: both T5 `/version`
+/// and `/_clock_resync` transport-fail against the same agent URL
+/// within the wake budget. Without the structured boolean the caller
+/// would have to `contains("transport")` on the free-text error
+/// message — fragile and not a contract. This enum makes the signal
+/// load-bearing.
+#[derive(Debug, Clone)]
+pub(crate) enum ClockResyncOutcome {
+    /// `/_clock_resync` returned 200; the guest's wall clock is in
+    /// strict 5-second skew. Wake proceeds.
+    Ok,
+    /// `/_clock_resync` failed. `transport_error == true` means the
+    /// failure was at the HTTP transport layer (port closed, timeout,
+    /// dropped connection); `false` means the agent answered with a
+    /// non-200 status (e.g., 401 from wrong signing-key bytes). The
+    /// `message` is the same opaque diagnostic string the underlying
+    /// function returns — preserved for log fidelity, but the
+    /// transport-error routing decision goes through the bool.
+    Err {
+        transport_error: bool,
+        message: String,
+    },
+}
+
+/// R28-I1: typed-outcome wrapper around [`clock_resync_post_restore`].
+/// Used by the wake state machine to pair the result against the T5
+/// `/version` probe for the half-dead-agent fingerprint (R28-I2).
+///
+/// Returns:
+/// - [`ClockResyncOutcome::Ok`] — agent replied 200.
+/// - [`ClockResyncOutcome::Err`] — agent failed; `transport_error`
+///   distinguishes transport-layer failure (paired-fail → half-dead
+///   agent) from a non-200 agent response (e.g., 401).
+pub(crate) async fn clock_resync_post_restore_typed(
+    agent_url: &str,
+    sandbox_id: Uuid,
+    signing_key_bytes: &[u8; 32],
+) -> ClockResyncOutcome {
+    match clock_resync_post_restore(agent_url, sandbox_id, signing_key_bytes).await {
+        Ok(()) => ClockResyncOutcome::Ok,
+        Err(message) => {
+            // The underlying function's only "transport" branch wraps
+            // its message with `format!("/_clock_resync transport: {e}")`
+            // (see the ureq::Error fall-through above). A panic in
+            // spawn_blocking surfaces as `clock_resync spawn_blocking
+            // panic: …`, which is neither transport-layer nor a
+            // routine non-200 — classify it as non-transport so the
+            // half-dead-agent detector doesn't fire on a runtime bug.
+            let transport_error =
+                message.starts_with("/_clock_resync transport:");
+            ClockResyncOutcome::Err {
+                transport_error,
+                message,
+            }
+        }
+    }
+}
+
 /// Random hex nonce for `/_clock_resync`. Matches the agent's
 /// `MAX_NONCE_LEN=64` ceiling with plenty of margin (32 hex chars
 /// over 128 bits of entropy). Same `/dev/urandom`-backed shape as
@@ -3077,13 +3143,43 @@ pub(crate) enum VersionCheckOutcome {
     /// safely; caller logs WARN and continues (the signed-auth check
     /// at the wire layer is the existing trust anchor — see the
     /// `wait_for_agent_livez` legacy-fallback in nomad_ch.rs).
-    Skipped { reason: &'static str },
+    ///
+    /// R28-I2: `transport_error` is a structured boolean — true iff
+    /// the probe failed at the HTTP transport layer (port closed,
+    /// timeout, dropped connection) rather than at the
+    /// parse/sentinel layer. The wake_machine pairs this with the
+    /// clock_resync transport-error signal to detect the half-dead-
+    /// agent fingerprint (both T5 + clock_resync transport-fail
+    /// against the same agent_url within budget). Callers MUST NOT
+    /// string-match on `reason` to recover this signal — the
+    /// structured bool is the contract.
+    Skipped {
+        reason: &'static str,
+        transport_error: bool,
+    },
     /// Agent's `git_commit` is well-formed but disagrees with the
     /// controller's `CONTROLLER_GIT_COMMIT`. Mismatched build SHAs
     /// during a partial fleet rollout — the caller MUST fail the wake
     /// with `WakeErrorCode::AgentVersionMismatch` so the SLO dashboard
     /// can split rollout-skew from "real" wake failures.
     Mismatch { expected: String, got: String },
+}
+
+impl VersionCheckOutcome {
+    /// R28-I2: structured accessor for the half-dead-agent fingerprint
+    /// signal. Returns `true` iff the outcome is `Skipped` with a
+    /// transport-layer (not parse/sentinel) cause. Stable contract for
+    /// the wake_machine — `reason` strings are operator log fidelity,
+    /// this boolean is the routing signal.
+    pub(crate) fn is_transport_error(&self) -> bool {
+        matches!(
+            self,
+            VersionCheckOutcome::Skipped {
+                transport_error: true,
+                ..
+            }
+        )
+    }
 }
 
 /// T5: probe the just-restored agent's signed `/version` endpoint and
@@ -3144,6 +3240,7 @@ pub(crate) async fn verify_agent_version_post_restore(
     if expected_git_commit == "unknown" || expected_git_commit.is_empty() {
         return VersionCheckOutcome::Skipped {
             reason: "controller_build_sha_unknown",
+            transport_error: false,
         };
     }
 
@@ -3202,6 +3299,7 @@ pub(crate) async fn verify_agent_version_post_restore(
             );
             return VersionCheckOutcome::Skipped {
                 reason: "transport_error",
+                transport_error: true,
             };
         }
     };
@@ -3215,6 +3313,7 @@ pub(crate) async fn verify_agent_version_post_restore(
         );
         return VersionCheckOutcome::Skipped {
             reason: "non_200_response",
+            transport_error: false,
         };
     }
     let parsed: serde_json::Value = match serde_json::from_str(&body) {
@@ -3228,6 +3327,7 @@ pub(crate) async fn verify_agent_version_post_restore(
             );
             return VersionCheckOutcome::Skipped {
                 reason: "body_not_json",
+                transport_error: false,
             };
         }
     };
@@ -3245,6 +3345,7 @@ pub(crate) async fn verify_agent_version_post_restore(
             );
             return VersionCheckOutcome::Skipped {
                 reason: "agent_git_commit_missing",
+                transport_error: false,
             };
         }
     };
@@ -3260,6 +3361,7 @@ pub(crate) async fn verify_agent_version_post_restore(
         );
         return VersionCheckOutcome::Skipped {
             reason: "agent_build_sha_unknown",
+            transport_error: false,
         };
     }
     if got_git_commit == expected_git_commit {
@@ -4246,8 +4348,15 @@ mod real_backend_tests {
         )
         .await;
         match outcome {
-            VersionCheckOutcome::Skipped { reason } => {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
                 assert_eq!(reason, "controller_build_sha_unknown");
+                assert!(
+                    !transport_error,
+                    "controller sentinel must NOT report transport_error"
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -4279,8 +4388,15 @@ mod real_backend_tests {
         )
         .await;
         match outcome {
-            VersionCheckOutcome::Skipped { reason } => {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
                 assert_eq!(reason, "agent_git_commit_missing");
+                assert!(
+                    !transport_error,
+                    "legacy-agent skip must NOT report transport_error"
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -4307,8 +4423,15 @@ mod real_backend_tests {
         )
         .await;
         match outcome {
-            VersionCheckOutcome::Skipped { reason } => {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
                 assert_eq!(reason, "agent_build_sha_unknown");
+                assert!(
+                    !transport_error,
+                    "agent sentinel must NOT report transport_error"
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -4333,11 +4456,38 @@ mod real_backend_tests {
         )
         .await;
         match outcome {
-            VersionCheckOutcome::Skipped { reason } => {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
                 assert_eq!(reason, "transport_error");
+                assert!(
+                    transport_error,
+                    "transport-layer Skipped MUST set transport_error=true \
+                     (R28-I2 half-dead-agent fingerprint)"
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
+        // R28-I2: the structured accessor reflects the same signal.
+        let outcome2 = verify_agent_version_post_restore(
+            &format!(
+                "http://{}",
+                {
+                    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let a = l.local_addr().unwrap();
+                    drop(l);
+                    a
+                }
+            ),
+            &[0x66u8; 32],
+            "ctrl00000005",
+        )
+        .await;
+        assert!(
+            outcome2.is_transport_error(),
+            "is_transport_error() must be true for closed-port T5 probe"
+        );
     }
 
     /// T5: agent returns non-200 (e.g., 503 during a startup race) →
@@ -4355,8 +4505,16 @@ mod real_backend_tests {
         )
         .await;
         match outcome {
-            VersionCheckOutcome::Skipped { reason } => {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
                 assert_eq!(reason, "non_200_response");
+                assert!(
+                    !transport_error,
+                    "non-200 response is NOT a transport error \
+                     (the agent answered) — R28-I2 must not false-fire"
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -4377,8 +4535,15 @@ mod real_backend_tests {
         )
         .await;
         match outcome {
-            VersionCheckOutcome::Skipped { reason } => {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
                 assert_eq!(reason, "body_not_json");
+                assert!(
+                    !transport_error,
+                    "body-not-json is NOT a transport error"
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -4403,6 +4568,285 @@ mod real_backend_tests {
         assert!(
             is_short_hex || is_sentinel,
             "CONTROLLER_GIT_COMMIT must be 12-char short hex or \"unknown\"; got {CONTROLLER_GIT_COMMIT:?}"
+        );
+    }
+
+    // ─── R28-I1 + R28-I2: parallel T5 + clock_resync ──────────────
+    //
+    // These tests pin the shape the wake_machine.rs site depends on:
+    // (a) `futures::join!` on the two probes returns BOTH outcomes
+    //     after both complete, not after the first errors;
+    // (b) the typed `ClockResyncOutcome` wrapper correctly classifies
+    //     transport-layer failures distinctly from non-200 agent
+    //     responses (the R28-I2 structured boolean signal);
+    // (c) the paired half-dead-agent fingerprint — both probes
+    //     transport-fail against the same agent URL — is detectable
+    //     via the structured signals without string-matching the
+    //     diagnostic messages.
+
+    /// R28-I2: `clock_resync_post_restore_typed` returns `Err {
+    /// transport_error: true, .. }` when the agent's port is closed.
+    /// This is half of the half-dead-agent fingerprint signal — the
+    /// other half is the T5 probe's `is_transport_error()`.
+    #[ntex::test]
+    async fn clock_resync_typed_surfaces_transport_error_on_closed_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let agent_url = format!("http://{addr}");
+        let sandbox_id = Uuid::now_v7();
+        let outcome =
+            clock_resync_post_restore_typed(&agent_url, sandbox_id, &[0u8; 32]).await;
+        match outcome {
+            ClockResyncOutcome::Err {
+                transport_error,
+                message,
+            } => {
+                assert!(
+                    transport_error,
+                    "closed-port failure MUST set transport_error=true \
+                     (R28-I2 half-dead-agent fingerprint signal); got msg={message}"
+                );
+                assert!(
+                    message.contains("transport"),
+                    "underlying message preserved for log fidelity: {message}"
+                );
+            }
+            ClockResyncOutcome::Ok => panic!("closed port must not return Ok"),
+        }
+    }
+
+    /// R28-I2: `clock_resync_post_restore_typed` returns `Err {
+    /// transport_error: false, .. }` when the agent answers with a
+    /// non-200 status (e.g. 401 from wrong signing key). The
+    /// half-dead-agent detector MUST NOT fire on this case — the
+    /// agent's HTTP surface is healthy, the request was just
+    /// rejected.
+    #[ntex::test]
+    async fn clock_resync_typed_non_200_is_not_transport_error() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (401, r#"{"error":"unauthorized"}"#.to_string())
+        });
+        let sandbox_id = Uuid::now_v7();
+        let outcome =
+            clock_resync_post_restore_typed(&agent_url, sandbox_id, &[0xcdu8; 32])
+                .await;
+        match outcome {
+            ClockResyncOutcome::Err {
+                transport_error,
+                message,
+            } => {
+                assert!(
+                    !transport_error,
+                    "401 response is NOT a transport-layer failure \
+                     (the agent answered); R28-I2 must not false-fire. msg={message}"
+                );
+                assert!(
+                    message.contains("status 401"),
+                    "401 message preserved for triage: {message}"
+                );
+            }
+            ClockResyncOutcome::Ok => panic!("401 must not return Ok"),
+        }
+    }
+
+    /// R28-I1: pin the parallel-sequence behavior. `futures::join!`
+    /// over the two probes against a healthy fake agent must:
+    /// (a) issue BOTH HTTP calls (one /version, one /_clock_resync);
+    /// (b) return both outcomes successfully;
+    /// (c) complete in roughly max(t5, clock_resync) time, not
+    ///     t5 + clock_resync — which we proxy by counting calls and
+    ///     pinning that join! awaits both (a serial sequence would
+    ///     work too for the happy path, but the structured assertion
+    ///     here also exercises the same join-arity the wake_machine
+    ///     uses, so a future contributor who replaces join! with a
+    ///     plain serial sequence drops the parallel assertion).
+    #[ntex::test]
+    async fn parallel_t5_and_clock_resync_both_succeed_against_healthy_agent() {
+        let controller_sha = "ctrl00000010";
+        let agent_sha = controller_sha.to_string();
+        // The fake agent multiplexes both endpoints over the same
+        // listener; the request body distinguishes /version (GET, no
+        // body) from /_clock_resync (POST with JSON body). For this
+        // happy-path test we don't need to discriminate — 200 on both
+        // is enough; the call-counter pins that BOTH probes fired.
+        let body_version = format!(
+            r#"{{"agent_version":"0.1.0","git_commit":"{agent_sha}","protocol_version":1,"capabilities":[]}}"#
+        );
+        let body_resync = r#"{"resynced":true,"ts":1700000000}"#.to_string();
+        let bv = body_version.clone();
+        let br = body_resync.clone();
+        let (agent_url, calls) = spawn_fake_agent(move |_, req| {
+            // Crude method-distinguishing on the first request bytes.
+            if req.starts_with(b"GET") {
+                (200, bv.clone())
+            } else {
+                (200, br.clone())
+            }
+        });
+        let signing_key_bytes = [0xa1u8; 32];
+        let sandbox_id = Uuid::now_v7();
+
+        let t5 = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            controller_sha,
+        );
+        let cr = clock_resync_post_restore_typed(
+            &agent_url,
+            sandbox_id,
+            &signing_key_bytes,
+        );
+        let (t5_outcome, cr_outcome) = futures::join!(t5, cr);
+
+        assert_eq!(
+            t5_outcome,
+            VersionCheckOutcome::Match,
+            "T5 must Match when SHAs align"
+        );
+        assert!(
+            matches!(cr_outcome, ClockResyncOutcome::Ok),
+            "clock_resync must Ok against 200; got {cr_outcome:?}"
+        );
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            2,
+            "both T5 (/version) and clock_resync (/_clock_resync) MUST fire \
+             — join! is the parallel-arity pin"
+        );
+    }
+
+    /// R28-I2: half-dead-agent fingerprint — both T5 and clock_resync
+    /// transport-fail against the same closed agent URL. The wake
+    /// machine pairs `t5.is_transport_error()` with the
+    /// `ClockResyncOutcome::Err { transport_error: true, .. }`
+    /// signal to route this case distinctly from a normal
+    /// clock_resync 401 or an isolated probe hiccup.
+    ///
+    /// This test pins the typed-signal contract: BOTH probes MUST
+    /// report transport_error=true when the agent's port is closed,
+    /// AND the wake_machine's combined check
+    /// (`t5_transport_error && clock_resync_transport_error`) MUST
+    /// evaluate true. A future contributor who reverts the typed
+    /// boolean to a string-match would fail here.
+    #[ntex::test]
+    async fn half_dead_agent_fingerprint_detected_when_both_probes_transport_fail() {
+        // Bind + drop a port so all subsequent connections fail at
+        // transport layer (ECONNREFUSED).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let agent_url = format!("http://{addr}");
+        let signing_key_bytes = [0xbbu8; 32];
+        let sandbox_id = Uuid::now_v7();
+
+        let t5 = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "ctrl00000020",
+        );
+        let cr = clock_resync_post_restore_typed(
+            &agent_url,
+            sandbox_id,
+            &signing_key_bytes,
+        );
+        let (t5_outcome, cr_outcome) = futures::join!(t5, cr);
+
+        // Individual structured signals.
+        assert!(
+            t5_outcome.is_transport_error(),
+            "T5 must report is_transport_error()=true for closed port; \
+             got {t5_outcome:?}"
+        );
+        let cr_transport_error = matches!(
+            cr_outcome,
+            ClockResyncOutcome::Err {
+                transport_error: true,
+                ..
+            }
+        );
+        assert!(
+            cr_transport_error,
+            "clock_resync must report transport_error=true for closed port; \
+             got {cr_outcome:?}"
+        );
+
+        // The combined check — this is the literal expression the
+        // wake_machine.rs site evaluates. If a future refactor breaks
+        // it (e.g., one side becomes a string-match), this assertion
+        // catches the regression.
+        assert!(
+            t5_outcome.is_transport_error() && cr_transport_error,
+            "R28-I2 half-dead-agent fingerprint: both signals MUST be true \
+             when the agent's port is closed (typed-boolean contract)"
+        );
+    }
+
+    /// R28-I1: pin the "one succeeds, one fails" branch. If T5
+    /// transport-fails but clock_resync 401s (or vice-versa), the
+    /// half-dead-agent fingerprint MUST NOT fire — only one
+    /// transport_error signal is set. The wake will route through
+    /// the failing probe's normal branch (clock_resync's failure
+    /// → `ClockResyncFailed`; T5 Mismatch → `AgentVersionMismatch`).
+    /// This is the asymmetric case the spec calls out: "one fails /
+    /// one succeeds → wake continues with the successful one's
+    /// effect" (here adapted to "one's transport-fail does NOT
+    /// trigger half-dead-agent on its own").
+    #[ntex::test]
+    async fn parallel_asymmetric_failure_does_not_trip_half_dead_agent() {
+        // clock_resync gets a real agent that 401s; T5 hits a closed
+        // port → transport_error. Half-dead detector MUST require
+        // BOTH; with only one transport_error, the wake should route
+        // through clock_resync's normal 401 branch (or T5's
+        // Skipped-transport, depending on which side we wire to
+        // which URL).
+        let (resync_url, _) = spawn_fake_agent(|_, _req| {
+            (401, r#"{"error":"unauthorized"}"#.to_string())
+        });
+        let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_addr = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+        let t5_url = format!("http://{closed_addr}");
+        let signing_key_bytes = [0xccu8; 32];
+        let sandbox_id = Uuid::now_v7();
+
+        // Note: in the wake_machine path both probes share the SAME
+        // agent_url. We split them here to construct an asymmetric
+        // scenario at the unit-test layer — the combinator logic is
+        // what matters, not the URL identity.
+        let t5 = verify_agent_version_post_restore(
+            &t5_url,
+            &signing_key_bytes,
+            "ctrl00000030",
+        );
+        let cr = clock_resync_post_restore_typed(
+            &resync_url,
+            sandbox_id,
+            &signing_key_bytes,
+        );
+        let (t5_outcome, cr_outcome) = futures::join!(t5, cr);
+
+        // T5 transport-errors.
+        assert!(t5_outcome.is_transport_error(), "T5 closed port → true");
+        // clock_resync 401s — NOT a transport error.
+        let cr_transport_error = matches!(
+            cr_outcome,
+            ClockResyncOutcome::Err {
+                transport_error: true,
+                ..
+            }
+        );
+        assert!(
+            !cr_transport_error,
+            "clock_resync 401 must NOT report transport_error \
+             (the agent answered)"
+        );
+        // The wake_machine's combined predicate is FALSE.
+        assert!(
+            !(t5_outcome.is_transport_error() && cr_transport_error),
+            "asymmetric failure (one transport, one 401) MUST NOT trip \
+             the half-dead-agent fingerprint — that's a HARD requirement \
+             on the R28-I2 typed-boolean contract"
         );
     }
 }
