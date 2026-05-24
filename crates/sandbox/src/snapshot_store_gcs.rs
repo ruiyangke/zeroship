@@ -444,8 +444,15 @@ impl GcsSnapshotStore {
                 // write(2)s unbuffered; the 1 MiB BufWriter collapses
                 // that to ≈1024. We flush + drop before sync_all so
                 // the BufWriter's internal buffer is observed on disk.
+                //
+                // R12-P1 (perf-r12): wrap the READ side too. std's
+                // io::copy specialization uses BufferedCopySpec only
+                // when *both* sides are buffered; otherwise it falls
+                // back to an 8 KiB scratch read buffer, producing
+                // ≈131072 read(2) syscalls on a 1 GB body. Symmetric
+                // 1 MiB BufReader collapses those to ≈1024 too.
                 let mut writer = std::io::BufWriter::with_capacity(1 << 20, f);
-                let mut reader = r.into_reader();
+                let mut reader = std::io::BufReader::with_capacity(1 << 20, r.into_reader());
                 std::io::copy(&mut reader, &mut writer)?;
                 let f = writer.into_inner().map_err(|e| {
                     SnapshotError::Io(std::io::Error::new(
