@@ -4629,6 +4629,279 @@ mod wake_jobs_crud {
             "index predicate must be a negative match on terminal states; got {indexdef}"
         );
     }
+
+    // ─── R19-C1 takeover sweep ─────────────────────────────────────
+    //
+    // `claim_orphan_wake_for_recovery` is the read-side that finally
+    // gives `lessee_updated_at` (bumped by R17-A1 on every transition)
+    // a purpose: rows whose lessee has gone stale are forcibly
+    // transitioned to `failed` with `error_code = 'wake_worker_aborted'`
+    // so the `wake_jobs_sandbox_pending_uniq` UNIQUE INDEX (migration
+    // 0011) releases for a fresh wake POST. These tests pin the four
+    // shapes that close the wedge:
+    //
+    //   1. Stale orphan claimed         → count=1, state=failed.
+    //   2. Fresh non-terminal row       → count=0, untouched.
+    //   3. Terminal row                 → count=0, untouched.
+    //   4. Two concurrent sweeps        → exactly one count=1 (pg
+    //      row-locks serialize via the UPDATE).
+
+    /// Helper: backdate a row's `lessee_updated_at` by `secs` seconds
+    /// via a direct pg UPDATE so the test doesn't have to actually
+    /// sleep through the takeover threshold.
+    async fn backdate_lessee(url: &str, wake_id: &str, secs: i64) {
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "UPDATE sandbox.wake_jobs \
+                    SET lessee_updated_at = \
+                        now() - make_interval(secs => $1::BIGINT) \
+                  WHERE wake_id = $2::TEXT",
+                &[&secs, &wake_id.to_string()],
+            )
+            .await
+            .expect("backdate succeeded");
+    }
+
+    /// R19-C1: a single orphan whose `lessee_updated_at` is older
+    /// than the threshold is claimed: `claim_orphan_wake_for_recovery`
+    /// returns 1, and a follow-up read shows state=failed,
+    /// error_code=WakeWorkerAborted.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_marks_stale_row_failed() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Insert a row + drop it into the `restoring` state, then
+        // backdate `lessee_updated_at` 120 s into the past.
+        let row = sample_row("wak_orphan_a", "sbx_orphan_a", "hst_crashed");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        db.update_wake_job_state(
+            "wak_orphan_a",
+            WakeJobState::Restoring,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        backdate_lessee(&url, "wak_orphan_a", 120).await;
+
+        // Threshold 60s — the backdated row qualifies.
+        let n = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("claim succeeded");
+        assert_eq!(n, 1, "exactly one orphan must be claimed");
+
+        let after = db.get_wake_job("wak_orphan_a").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Failed,
+            "orphan must transition to failed"
+        );
+        assert_eq!(
+            after.error_code,
+            Some(WakeErrorCode::WakeWorkerAborted),
+            "error_code must record the takeover"
+        );
+        assert!(
+            after
+                .error_message
+                .as_deref()
+                .map(|m| m.contains("R19-C1") || m.contains("takeover"))
+                .unwrap_or(false),
+            "error_message must mention takeover; got {:?}",
+            after.error_message
+        );
+    }
+
+    /// R19-C1: a non-terminal row whose `lessee_updated_at` is
+    /// FRESH is NOT claimed — the threshold check fences against
+    /// stealing rows from a still-active controller.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_skips_fresh_row() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_fresh", "sbx_fresh", "hst_active");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        // Don't backdate — `lessee_updated_at` is server-NOW.
+
+        // 60s threshold — fresh row must NOT match.
+        let n = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("claim succeeded");
+        assert_eq!(n, 0, "fresh row must NOT be claimed");
+
+        // Row must still be in its original state.
+        let after = db.get_wake_job("wak_fresh").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Pending,
+            "fresh row must remain pending"
+        );
+        assert!(after.error_code.is_none(), "no error_code on fresh row");
+    }
+
+    /// R19-C1: a TERMINAL row (`ok` or `failed`) is NEVER claimed,
+    /// even when its `lessee_updated_at` is ancient. Terminal rows
+    /// are already out of the GATE-C2 UNIQUE INDEX's domain; the GC
+    /// sweep cleans them up by `updated_at` instead.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_skips_terminal_row() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Two terminal rows, both backdated past the threshold.
+        let row_ok = sample_row("wak_term_ok", "sbx_term_a", "hst_t");
+        let row_failed = sample_row("wak_term_failed", "sbx_term_b", "hst_t");
+        for r in [&row_ok, &row_failed] {
+            assert!(
+                matches!(
+                    db.insert_wake_job(r).await.unwrap(),
+                    InsertWakeJobOutcome::Inserted
+                ),
+                "fresh insert must return Inserted"
+            );
+        }
+        db.update_wake_job_state(
+            "wak_term_ok",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        db.update_wake_job_state(
+            "wak_term_failed",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::LivezTimeout),
+            Some("simulated livez timeout"),
+            None,
+        )
+        .await
+        .unwrap();
+        backdate_lessee(&url, "wak_term_ok", 600).await;
+        backdate_lessee(&url, "wak_term_failed", 600).await;
+
+        let n = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("claim succeeded");
+        assert_eq!(n, 0, "terminal rows must NOT be claimed");
+
+        // Existing error_code on the failed row must NOT be
+        // overwritten — the takeover sweep doesn't touch terminals.
+        let term = db
+            .get_wake_job("wak_term_failed")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(term.error_code, Some(WakeErrorCode::LivezTimeout));
+    }
+
+    /// R19-C1: two concurrent claims race cleanly — postgres
+    /// row-locks during UPDATE serialize them, so exactly one sees
+    /// `count == 1` and the other sees `count == 0` (the row is
+    /// already terminal by the time the loser's WHERE evaluates).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_concurrent_claims_race_cleanly() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_race", "sbx_race", "hst_crashed");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        db.update_wake_job_state(
+            "wak_race",
+            WakeJobState::Restoring,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        backdate_lessee(&url, "wak_race", 600).await;
+
+        // Drive two claim attempts back-to-back through the same
+        // Database. Under compio's single-threaded runtime they
+        // execute sequentially at the SQL boundary; the property the
+        // test pins is correctness, not parallelism: exactly one
+        // UPDATE matches the WHERE predicate, the other observes
+        // `state = 'failed'` and matches zero rows. Same outcome
+        // shape as a true concurrent race (postgres row-locks would
+        // serialize a true parallel pair to the same result).
+        let n_first = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("first claim");
+        let n_second = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("second claim");
+
+        assert_eq!(
+            n_first + n_second,
+            1,
+            "exactly one of the two claims must succeed (got first={n_first}, second={n_second})"
+        );
+        assert_eq!(n_first, 1, "first claim must observe the orphan");
+        assert_eq!(n_second, 0, "second claim must observe nothing to do");
+
+        // Final state: row is terminal, error code recorded once.
+        let after = db.get_wake_job("wak_race").await.unwrap().unwrap();
+        assert_eq!(after.state, WakeJobState::Failed);
+        assert_eq!(
+            after.error_code,
+            Some(WakeErrorCode::WakeWorkerAborted),
+            "exactly one takeover writer wins"
+        );
+    }
 }
 
 // Convenience accessor so tests can spell `row.is_state_terminal()`

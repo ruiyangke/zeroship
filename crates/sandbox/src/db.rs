@@ -99,13 +99,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "wake_jobs UNIQUE INDEX on sandbox_id WHERE non-terminal — TOCTOU close-off on wake-POST (R17-C2 / GATE-C2)",
         sql: include_str!("../migrations/0011_wake_jobs_unique.sql"),
     },
+    Migration {
+        version: 12,
+        description: "wake_jobs error_code CHECK accepts `wake_worker_aborted` for the takeover sweep (R19-C1)",
+        sql: include_str!("../migrations/0012_wake_jobs_aborted_code.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 11;
+pub const LATEST_MIGRATION_VERSION: i64 = 12;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
@@ -1495,6 +1500,19 @@ pub enum WakeErrorCode {
     /// Catch-all for unexpected failures; carries `error_message` for
     /// triage.
     Internal,
+    /// R19-C1: the wake worker that owned this row aborted before
+    /// reaching a terminal state (controller crash / OOM / panic /
+    /// graceful-shutdown mid-flight). The wake_jobs takeover sweep
+    /// observes a stale `lessee_updated_at` and marks the row failed
+    /// so the GATE-C2 UNIQUE INDEX releases for a fresh wake POST.
+    ///
+    /// Without this code the only takeover-class failure would
+    /// surface as `Internal`, which clients today branch on as
+    /// "retry — transient." Splitting it out lets clients (and the
+    /// SLO dashboard) tell "the wake itself failed" from "the
+    /// controller behind the wake disappeared and we cleaned up
+    /// after it" — operationally distinct.
+    WakeWorkerAborted,
 }
 
 impl WakeErrorCode {
@@ -1510,6 +1528,10 @@ impl WakeErrorCode {
             Self::ClockResyncFailed => "clock_resync_failed",
             Self::RegisterFailed => "register_failed",
             Self::Internal => "internal",
+            // R19-C1: paired with migration 0012 which extends the
+            // `wake_jobs_error_code_check` constraint to accept this
+            // value.
+            Self::WakeWorkerAborted => "wake_worker_aborted",
         }
     }
 
@@ -1522,6 +1544,7 @@ impl WakeErrorCode {
             "clock_resync_failed" => Self::ClockResyncFailed,
             "register_failed" => Self::RegisterFailed,
             "internal" => Self::Internal,
+            "wake_worker_aborted" => Self::WakeWorkerAborted,
             _ => return None,
         })
     }
@@ -1541,6 +1564,7 @@ impl WakeErrorCode {
     /// | `ClockResyncFailed`      | `clock_resync_failed`        |
     /// | `RegisterFailed`         | `register_failed`            |
     /// | `Internal`               | `internal_error`             |
+    /// | `WakeWorkerAborted`      | `wake_worker_aborted`        |
     ///
     /// `SourceTeardownTimeout` has no sibling on the landed wire
     /// (today's sync path surfaces this as `vm_index_unavailable` 503
@@ -1562,6 +1586,15 @@ impl WakeErrorCode {
             Self::ClockResyncFailed => "clock_resync_failed",
             Self::RegisterFailed => "register_failed",
             Self::Internal => "internal_error",
+            // R19-C1: distinct from `internal_error` so the SLO
+            // dashboard can split "wake step failed" (caller's app
+            // restart loop should back off + retry) from "controller
+            // crashed mid-wake" (caller should retry immediately —
+            // takeover cleared the UNIQUE INDEX guard). Mirrors the
+            // `source_teardown_timeout` precedent of carrying a
+            // distinct wire code even though clients today branch
+            // both into the same retry bucket.
+            Self::WakeWorkerAborted => "wake_worker_aborted",
         }
     }
 }
@@ -3185,7 +3218,8 @@ impl Database {
     /// rows deleted.
     ///
     /// Non-terminal rows are NEVER deleted by this sweep — those are
-    /// handled by PR2's takeover scan (lessee_updated_at-based, like
+    /// handled by [`Self::claim_orphan_wake_for_recovery`] (R19-C1
+    /// takeover sweep, `lessee_updated_at`-based, mirroring
     /// `sandboxes.lessee_updated_at`).
     ///
     /// `older_than` is a Duration; the SQL converts to an interval via
@@ -3208,6 +3242,81 @@ impl Database {
             .await
             .map_err(DatabaseError::Pg)?;
         Ok(n)
+    }
+
+    /// R19-C1: takeover sweep for abandoned non-terminal wake_jobs.
+    ///
+    /// Finds rows whose `lessee_updated_at` is older than `threshold`
+    /// AND whose state is non-terminal, then atomically transitions
+    /// them to:
+    ///   - `state = 'failed'`
+    ///   - `error_code = 'wake_worker_aborted'`
+    ///   - `error_message = '...controller lessee abandoned this wake...'`
+    ///   - `updated_at = NOW()`
+    ///   - `lessee_updated_at = NOW()`
+    ///
+    /// Returns the count of rows updated.
+    ///
+    /// **Why this exists.** [`Self::update_wake_job_state`] bumps
+    /// `lessee_updated_at = NOW()` on every transition (R17-A1) but
+    /// `gc_expired_wake_jobs` only filters TERMINAL rows. Combined
+    /// with the `wake_jobs_sandbox_pending_uniq` UNIQUE INDEX (GATE-
+    /// C2 / migration 0011), a controller crash during any
+    /// non-terminal phase wedges the sandbox permanently: every
+    /// subsequent wake POST gets a `Replay(stale_row)` shortcut, and
+    /// the client polls a dead wake_id forever. Reading
+    /// `lessee_updated_at` here closes the loop.
+    ///
+    /// **Atomicity.** A single `UPDATE ... WHERE ... RETURNING`
+    /// statement; postgres row-locks each matched row for the
+    /// duration of the update so concurrent callers race cleanly —
+    /// exactly one transitions a given row. The non-terminal predicate
+    /// inside the WHERE clause means a peer that just claimed the
+    /// row sees a no-op (state already `failed`); no double-claim,
+    /// no spurious counter bump.
+    ///
+    /// **Failure semantics.** The matched row's existing
+    /// `error_message` is OVERWRITTEN — the takeover message is the
+    /// authoritative record of what happened. (Contrast with
+    /// `update_wake_job_state`'s COALESCE behaviour, which preserves
+    /// prior values on `None`. Here we always want the takeover
+    /// breadcrumb to land so operators can correlate the row with
+    /// the crash event.)
+    ///
+    /// `threshold` is a Duration; the SQL converts to an interval
+    /// via `make_interval(secs => $1)` consistent with
+    /// `gc_expired_wake_jobs`.
+    pub async fn claim_orphan_wake_for_recovery(
+        &self,
+        threshold: std::time::Duration,
+    ) -> Result<u64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let secs = threshold.as_secs() as i64;
+        // RETURNING wake_id lets us COUNT the rows updated — even on
+        // pg drivers where `execute()` returns rowcount, RETURNING is
+        // the canonical "what did I touch" surface and keeps the
+        // shape symmetric with future debug logging that wants the
+        // ids.
+        let rows = client
+            .query(
+                "UPDATE sandbox.wake_jobs \
+                    SET state = 'failed', \
+                        error_code = 'wake_worker_aborted', \
+                        error_message = \
+                            'controller lessee abandoned this wake \
+                             (R19-C1 takeover sweep)', \
+                        updated_at = now(), \
+                        lessee_updated_at = now() \
+                  WHERE state NOT IN ('ok', 'failed') \
+                    AND lessee_updated_at \
+                          < now() - make_interval(secs => $1::BIGINT) \
+              RETURNING wake_id",
+                &[&secs],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(rows.len() as u64)
     }
 
     /// INSERT an audit-pipe row.
@@ -3403,6 +3512,7 @@ mod tests {
             WakeErrorCode::ClockResyncFailed,
             WakeErrorCode::RegisterFailed,
             WakeErrorCode::Internal,
+            WakeErrorCode::WakeWorkerAborted,
         ] {
             let s = variant.as_str();
             let parsed = WakeErrorCode::from_str_opt(s)
@@ -3432,6 +3542,10 @@ mod tests {
             (WakeErrorCode::ClockResyncFailed, "clock_resync_failed"),
             (WakeErrorCode::RegisterFailed, "register_failed"),
             (WakeErrorCode::Internal, "internal_error"),
+            // R19-C1: wake_worker_aborted is the takeover sweep's
+            // signal. The wire code is intentionally distinct from
+            // `internal_error` (operationally distinct failure mode).
+            (WakeErrorCode::WakeWorkerAborted, "wake_worker_aborted"),
         ];
         for (variant, wire) in cases {
             assert_eq!(
