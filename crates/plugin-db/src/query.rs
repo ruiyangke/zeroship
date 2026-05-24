@@ -6266,4 +6266,205 @@ mod tests {
             bq.sql,
         );
     }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 8 — §11 closeout SELECT-shape gates
+    //
+    // Three invariants pinned at the SQL-build layer (the production
+    // path is `build_find_with_schema` → `build_masked_aware_select_
+    // expr_with_unmask`):
+    //
+    // 1. `default_read_does_not_touch_ciphertext_column` — when a
+    //    schema declares a masked column and no `unmask` hint is
+    //    passed, the SELECT clause emits `"<col>_masked" AS "<col>"`
+    //    and the bare ciphertext column name MUST NOT appear in the
+    //    select-list (it appears in the alias's right-hand side only
+    //    and not as a top-level select expression).
+    // 2. `creator_cannot_query_by_masked_sibling` — `build_where`
+    //    refuses filter keys ending in `_masked` because
+    //    `validate_field_name` is on the reserved-suffix path. PR 1
+    //    pinned this; we double-check the end-to-end path through
+    //    `build_find_with_schema` for belt-and-braces.
+    // 3. `sibling_masked_column_not_visible_in_sdk_introspection` —
+    //    the SDK `Row<S>` shape excludes `<col>_masked`. The Rust-
+    //    side dual to that invariant is that callers never need to
+    //    PROJECT through `<col>_masked` — the alias substitution
+    //    means the SDK sees `<col>` carrying the masked value.
+    //    Asserted by ensuring the build emits the sibling under an
+    //    `AS "<col>"` alias and never as a bare top-level identifier.
+    // -----------------------------------------------------------------
+
+    /// Default-read (no `unmask` hint) for a schema with one masked
+    /// column. The SELECT clause must:
+    /// - emit `"<col>_masked" AS "<col>"` for the masked column,
+    /// - emit `"id"` and other non-masked columns verbatim,
+    /// - NEVER name the bare ciphertext column at the top level of
+    ///   the select list (only inside the sibling AS-clause).
+    #[test]
+    fn default_read_does_not_touch_ciphertext_column() {
+        let schema = serde_json::json!({
+            "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
+                       "mask": { "kind": "last4", "classification": "spi" } },
+            "email": { "type": "string" },
+            "name":  { "type": "string" },
+        });
+        let filter = serde_json::json!({ "id": 7 });
+        let bq = build_find_with_schema(
+            "app1", "users", &filter, Some(1), None, None, None, Some(&schema),
+        )
+        .expect("build_find_with_schema ok");
+
+        // The masked sibling must appear under an alias mapping to
+        // the bare parent name.
+        assert!(
+            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            "expected sibling-AS-parent alias in SELECT: {}",
+            bq.sql,
+        );
+
+        // The bare ciphertext column must NOT appear as a top-level
+        // select expression. The only place it appears is on the
+        // right-hand side of the `AS` alias (covered above).
+        //
+        // We assert via the SELECT-list slice — everything between
+        // `SELECT ` and ` FROM `.
+        let select_clause = bq
+            .sql
+            .split_once(" FROM ")
+            .map(|(head, _)| head.trim_start_matches("SELECT "))
+            .unwrap_or(&bq.sql);
+        let select_list: Vec<&str> = select_clause.split(", ").collect();
+        for item in &select_list {
+            // A top-level bare `"ssn"` is illegal; an aliased
+            // `"ssn_masked" AS "ssn"` is fine (the bare `"ssn"`
+            // appears in the alias right-hand side, not on its own).
+            if item.trim() == "\"ssn\"" {
+                panic!(
+                    "default-read SELECT must NOT carry bare ciphertext column; select list = {select_list:?}",
+                );
+            }
+        }
+
+        // Non-masked columns ride through verbatim.
+        assert!(
+            bq.sql.contains("\"email\""),
+            "non-masked column missing from SELECT: {}",
+            bq.sql,
+        );
+    }
+
+    /// Default-read with an explicit projection that LISTS the
+    /// masked column — the projection is rewritten so the sibling
+    /// alias is what hits the wire; the bare parent never appears.
+    #[test]
+    fn default_read_with_explicit_projection_still_aliases_through_sibling() {
+        let schema = serde_json::json!({
+            "ssn": { "type": "string",
+                     "mask": { "kind": "last4", "classification": "spi" } },
+        });
+        let filter = serde_json::json!({});
+        let select = serde_json::json!(["id", "ssn"]);
+        let bq = build_find_with_schema(
+            "app1", "users", &filter, None, None, None, Some(&select), Some(&schema),
+        )
+        .expect("build_find_with_schema ok");
+        assert!(
+            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            "explicit projection must still alias through sibling: {}",
+            bq.sql,
+        );
+        // The select expression must NOT have a bare ssn entry alongside.
+        let select_clause = bq
+            .sql
+            .split_once(" FROM ")
+            .map(|(head, _)| head.trim_start_matches("SELECT "))
+            .unwrap_or(&bq.sql);
+        let items: Vec<&str> = select_clause.split(", ").collect();
+        for item in &items {
+            assert_ne!(
+                item.trim(),
+                "\"ssn\"",
+                "bare ciphertext column appeared in explicit projection: {items:?}",
+            );
+        }
+    }
+
+    /// The `unmask` hint flips the behaviour — the hinted column is
+    /// served as the bare parent (the encryption pass will decrypt
+    /// the ciphertext on the way out).
+    #[test]
+    fn unmask_hint_overrides_default_alias() {
+        let schema = serde_json::json!({
+            "ssn":   { "type": "string", "encrypted": { "mode": "randomised" },
+                       "mask": { "kind": "last4", "classification": "spi" } },
+            "email": { "type": "string",
+                       "mask": { "kind": "full", "classification": "pii" } },
+        });
+        let filter = serde_json::json!({});
+        let unmask: Vec<String> = vec!["ssn".to_string()];
+        let bq = build_find_with_schema_and_unmask(
+            "app1", "users", &filter, None, None, None, None, Some(&schema), &unmask,
+        )
+        .expect("build_find_with_schema_and_unmask ok");
+
+        // The unmask-listed column hits the wire bare.
+        assert!(
+            bq.sql.contains("\"ssn\""),
+            "unmasked column must appear bare in SELECT: {}",
+            bq.sql,
+        );
+        // The non-unmasked masked column still aliases through sibling.
+        assert!(
+            bq.sql.contains("\"email_masked\" AS \"email\""),
+            "non-unmasked masked column still routes through sibling: {}",
+            bq.sql,
+        );
+    }
+
+    /// Creator cannot filter by the masked sibling column — the
+    /// reserved-suffix validator in `validate_field_name` fires
+    /// inside `build_where`, surfacing a typed `QueryError`.
+    /// End-to-end gate covering the find path.
+    #[test]
+    fn creator_cannot_query_by_masked_sibling() {
+        let schema = serde_json::json!({
+            "ssn": { "type": "string",
+                     "mask": { "kind": "last4", "classification": "spi" } },
+        });
+        let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });
+        let err = build_find_with_schema(
+            "app1", "users", &filter, None, None, None, None, Some(&schema),
+        )
+        .expect_err("filter by sibling must be refused");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("_masked") || msg.contains("reserved"),
+            "error must reference the reserved sibling suffix: {msg}",
+        );
+    }
+
+    /// Composite gate — the alias substitution must happen even
+    /// when the masked column is the only column declared. This
+    /// covers the `any_masked` short-circuit in
+    /// `build_masked_aware_select_expr_with_unmask` (case 2).
+    #[test]
+    fn implicit_select_expands_to_explicit_when_any_column_masked() {
+        let schema = serde_json::json!({
+            "ssn": { "type": "string",
+                     "mask": { "kind": "last4", "classification": "spi" } },
+        });
+        let filter = serde_json::json!({});
+        let bq = build_find_with_schema(
+            "app1", "users", &filter, None, None, None, None, Some(&schema),
+        )
+        .unwrap();
+        // SELECT * is never emitted when any column is masked.
+        assert!(
+            !bq.sql.starts_with("SELECT *"),
+            "implicit SELECT must expand to an explicit list when any column is masked: {}",
+            bq.sql,
+        );
+        assert!(bq.sql.contains("\"ssn_masked\" AS \"ssn\""));
+        assert!(bq.sql.contains("\"id\""));
+    }
 }

@@ -16,5 +16,11 @@ zeroship-plugin-storage = { workspace = true }
 zeroship-plugin-kv = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# P5.5 PR 8 — `migrate.rs` scanner tests create a temp source tree
+# rooted in `tempdir()`; the workspace already pulls `tempfile` for
+# other crates, so we re-use the same dep without adding a new one.
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

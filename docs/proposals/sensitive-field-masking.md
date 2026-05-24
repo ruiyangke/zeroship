@@ -772,3 +772,32 @@ This is a breaking change for any code (creator's or AI-generated) that currentl
 **Mitigation**: PR 6's migration guide + the `zeroship migrate scan-mask-usage` tool make the upgrade mechanical. The TypeScript compiler does the heavy lifting at app-rebuild time.
 
 This decision needs explicit user sign-off before PR 1 dispatches. **The P5 read semantic shift is creator-visible and changes the SDK contract.** Per the pilot directive, this is exactly the kind of decision that requires check-in.
+
+---
+
+## Status: SHIPPED 2026-05-24
+
+All 8 PRs landed (commit-only; not pushed per pilot directive). Test
+counts as of PR 8 close: plugin-db `lib` 599 / `lib+hardening` ≥ 613
+/ `lib+sqlite` ≥ 689 / `sqlite_integration` 85 / `zeroship` CLI 9.
+
+| PR | Commit     | One-line summary                                                                  |
+|----|------------|-----------------------------------------------------------------------------------|
+| 1  | `49857c31` | Masking foundation: `MaskedValue<T>`, reserved `_masked` suffix, `ColumnInfo.mask`. |
+| 2  | `d8e54269` | DDL sibling-column emission (`<col>_masked TEXT NOT NULL`) + dual-write CRUD pass.|
+| 3  | `2e866360` | Default read flipped to masked: aliased SELECT + `MaskedValue<T>` rehydration.    |
+| 4  | `9e9b9a62` | `unmaskField` RPC + `__zeroship_audit_unmask` table + authorization stub.         |
+| 5  | `a6ed24d3` | `defineMaskPolicy()` + per-app policy storage + classification-based authorization.|
+| 6  | `e22e0754` | Mask backfill (6a) + rewrite (6b) + removal (6c) under deploy strictness.         |
+| 7  | `e08adb44` | Drift detection cron + bulk unmask + per-query `{ unmask: [...] }` hint.          |
+| 8  | _this PR_  | `zeroship migrate scan-mask-usage` CLI + creator docs + §11 closeout gates → P5.5 COMPLETE. |
+
+The amendment block in `docs/proposals/db-system-design.md`
+(2026-05-24) records the cross-system perspective. Creator docs
+land in `docs/reference/db.md` (Masking section) and
+`docs/reference/migration/p5-to-masked-decrypt.md` (migration
+walkthrough).
+
+Deferred follow-ups recorded in the db-system-design amendment:
+AAD version binding (→ P7.5 once `version` lands), P6+ drift
+dashboard, per-collection mask policies (Q-MASK-H, → P9+).

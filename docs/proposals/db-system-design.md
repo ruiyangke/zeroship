@@ -1589,3 +1589,73 @@ P6a precedes P6b; both ship together at day-1 readiness.
 - **schema_pending** — `.code` returned by `subscribe(...)` while a worker's schema-pending decoder is engaged (§16.7); SDK retries with bounded backoff. Also the tag attached to a pgoutput frame the PG-side decoder drops when a column rename arrives mid-drain. <!-- Round 6 -->
 - **preupdate_hook** — SQLite C API `sqlite3_preupdate_hook` (available since SQLite 3.16, 2017), exposed by rusqlite behind the `preupdate_hook` Cargo feature, compiled into the `bundled` amalgamation via `SQLITE_ENABLE_PREUPDATE_HOOK`. Fires synchronously BEFORE every rowid-table mutation with native OLD/NEW row accessors (`sqlite3_preupdate_old` / `sqlite3_preupdate_new`); the basis for SQLite CDC (§11.5). <!-- preupdate_hook amendment -->
 - **`db_sqlite_preupdate_buffer_depth`** — operational gauge sampled **after each COMMIT in the writer actor** (§16.3 — not idle-driven; a continuously-busy writer never idles); steady-state 0 across consecutive samples, alerting threshold for stuck flush. <!-- preupdate_hook amendment, replaces former db_pre_image_outbox_rows -->
+
+---
+
+## Amendment 2026-05-24 — Masking subsystem (P5.5)
+
+Append-only amendment. Does not alter any text above this block.
+
+### Semantic flip
+
+Prior to P5.5, `t.encrypted(...)` columns followed the standard
+encryption-at-rest model: stored bytes were ciphertext, but reads
+returned the decrypted plaintext transparently. Under P5.5, the
+default read returns a `MaskedValue<T>` wrapper carrying a
+pre-computed mask string — plaintext requires an explicit
+`.unmask()` call (audited, authorisation-gated). The two-line
+summary of WHY: AI-generated handlers leak rows wholesale through
+`console.log` / `Response.json` / error messages; the
+default-safe model converts that from a runtime leak into a
+compile-time `tsc` error.
+
+### Storage strategy — Path B (sibling columns)
+
+The masked representation lives in a **sibling** `<col>_masked TEXT`
+column auto-emitted at DDL time alongside the ciphertext parent.
+A default read SELECT-aliases the sibling onto the parent name
+(`"<col>_masked" AS "<col>"`) so the ciphertext bytes never leave
+the database and the per-column AEAD key is never consulted.
+Per-query unmask hints (`findOne({...}, { unmask: ["ssn"] })`)
+flip the alias back to the bare parent and the standard
+decrypt-on-read pass runs.
+
+Alternative considered: Path A (compute the mask on every read).
+Rejected because it forces decryption on every default read —
+the exact cost we wanted to avoid — and complicates the live-query
+fanout (which would have to decrypt per subscriber).
+
+### Shipped PRs
+
+| PR | Commit     | Scope                                                                      |
+|----|------------|----------------------------------------------------------------------------|
+| 1  | `49857c31` | Masking foundation: `MaskedValue<T>` types, reserved `_masked` suffix, `ColumnInfo.mask`. |
+| 2  | `d8e54269` | DDL sibling-column emission + dual-write CRUD pass.                        |
+| 3  | `2e866360` | Default read flipped to masked: aliased SELECT + `MaskedValue` rehydration.|
+| 4  | `9e9b9a62` | `unmaskField` RPC + `__zeroship_audit_unmask` table + authorization stub.  |
+| 5  | `a6ed24d3` | `defineMaskPolicy()` + per-app policy storage + real authorization.        |
+| 6  | `e22e0754` | Mask backfill (PR 6a) + rewrite (PR 6b) + removal (PR 6c) under strictness.|
+| 7  | `e08adb44` | Drift detection cron + bulk unmask + per-query unmask hint.                |
+| 8  | _this PR_  | `zeroship migrate scan-mask-usage` CLI + creator-facing docs + closeout.   |
+
+### Read this next
+
+For the full design — the eight mask kinds, the six classifications,
+the Path A vs B trade-off, Q-MASK-A through Q-MASK-M, the risk
+analysis — see `docs/proposals/sensitive-field-masking.md`.
+For creator docs see the new "Masking" section in
+`docs/reference/db.md` and the migration walkthrough in
+`docs/reference/migration/p5-to-masked-decrypt.md`.
+
+### Deferred follow-ups
+
+- **AAD version binding (wire flag 0x01 → 0x02)**: the AEAD wire
+  format gains a version byte in the AAD so a per-row `version`
+  column binds the ciphertext to the row's CAS guard. This needs a
+  `version` column on every row, which depends on P7 (universal
+  versioning) — deferred to **P7.5** once the prerequisite lands.
+- **P6+ drift dashboard surface**: the drift-detection cron writes
+  to `__zeroship_audit_mask_drift`; the operator dashboard wire
+  lands with the P6 control-plane drift surface.
+- **Per-collection mask policies** (Q-MASK-H): app-level is
+  default; per-collection is a refinement deferred to P9+.

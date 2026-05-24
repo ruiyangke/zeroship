@@ -1,8 +1,9 @@
-//! zeroship CLI — serve, deploy, secret, var.
+//! zeroship CLI — serve, deploy, secret, var, migrate.
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
 //!   zeroship deploy  <path-to-.zship> --app=<id> [--control=URL] [--key=KEY]
+//!   zeroship migrate <subcommand>     # P5.5 PR 8 — migration tooling
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use zeroship_runtime::{ModuleEntry, NativePlugin};
 
+mod migrate;
 mod secrets;
 
 fn main() {
@@ -31,6 +33,7 @@ fn main() {
         "deploy" => cmd_deploy(&args),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
+        "migrate" => migrate::cmd_migrate(&args),
         _ => print_usage(),
     }
 }
@@ -262,6 +265,8 @@ fn print_usage() {
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("  zeroship secret   set|list|rm  --app=<uuid>");
     eprintln!("  zeroship var      set|list|rm  --app=<uuid>");
+    eprintln!("  zeroship migrate  scan-mask-usage [--path=<dir>] [--format=text|json]");
+    eprintln!("                   P5.5 migration aid — flag pre-masking field reads.");
     eprintln!();
     eprintln!("Builds go through @zeroship/vite-plugin. There is no `zeroship build`.");
 }

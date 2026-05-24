@@ -1626,4 +1626,78 @@ mod tests {
             Err(DbError::Coded { .. })
         ));
     }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 8 — §11 closeout: `cdc_event_carries_masked_value_for_
+    // masked_columns`
+    //
+    // The proposal (Q-MASK-G) asserts that CDC subscribers see the
+    // MASKED representation of a masked column — never the plaintext.
+    // For Path B (sibling-column storage) the WAL pipeline never
+    // decrypts: `tuple_to_map` (in `wal_consumer.rs`) zips pgoutput
+    // tuple bytes verbatim into `new_tuple`, so the parent column
+    // carries ciphertext text-encoded by PG (e.g. `\xDEADBEEF` for
+    // BYTEA) and the sibling carries the pre-computed mask string.
+    //
+    // The gate below pins the contract by constructing a synthetic
+    // `ChangeEvent` mirroring the wal_consumer's output (parent =
+    // ciphertext text-encoding, sibling = masked text) and asserts
+    // both that the WS frame round-trips both columns AND that the
+    // parent column NEVER carries an obvious plaintext "ssn-shape"
+    // string. A regression that wires decrypt-on-CDC would land the
+    // plaintext in `new_tuple["ssn"]` and flip this assertion.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn cdc_event_carries_masked_value_for_masked_columns() {
+        // Synthetic encrypted-column ciphertext: PG renders BYTEA
+        // as `\xHHHHHH...` in the text protocol. The pre-computed
+        // mask sibling carries the human-readable last-4 form.
+        let parent_ciphertext_text = "\\x0123456789abcdef0123456789abcdef";
+        let sibling_masked_text = "***-**-6789";
+        let plaintext = "123-45-6789";
+
+        let mut tuple = HashMap::new();
+        tuple.insert("id".into(), "42".into());
+        tuple.insert("ssn".into(), parent_ciphertext_text.into());
+        tuple.insert("ssn_masked".into(), sibling_masked_text.into());
+
+        let ev = ChangeEvent {
+            app_id: "app".into(),
+            collection: "users".into(),
+            op: ChangeOp::Insert,
+            pk: Some(42),
+            changed_columns: vec!["id".into(), "ssn".into(), "ssn_masked".into()],
+            new_tuple: tuple,
+            old_tuple: None,
+        };
+
+        // The ChangeEvent itself must carry both columns verbatim.
+        assert_eq!(
+            ev.new_tuple.get("ssn").map(String::as_str),
+            Some(parent_ciphertext_text),
+            "parent column must carry the raw stored (ciphertext) value, not plaintext",
+        );
+        assert_eq!(
+            ev.new_tuple.get("ssn_masked").map(String::as_str),
+            Some(sibling_masked_text),
+            "sibling column must carry the pre-computed masked value",
+        );
+        assert!(
+            !ev.new_tuple.values().any(|v| v == plaintext),
+            "no value in the CDC tuple may equal the plaintext: {:?}",
+            ev.new_tuple,
+        );
+
+        // The WS push frame must carry the same shape (both columns
+        // present; plaintext absent).
+        let frame = ws_frame_for_change("sub_x", &ev);
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["event"]["row"]["ssn"], parent_ciphertext_text);
+        assert_eq!(v["event"]["row"]["ssn_masked"], sibling_masked_text);
+        assert!(
+            !frame.contains(plaintext),
+            "WS frame must not contain plaintext: {frame}",
+        );
+    }
 }

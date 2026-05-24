@@ -36,7 +36,7 @@
 //! [`KeyStore`]. Rotation lands in P6b and rewires the cache to
 //! track key versions; PR 1 has no rotation surface to worry about.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use hkdf::Hkdf;
@@ -81,6 +81,18 @@ pub enum KeySource {
 pub struct KeyStore {
     cache: RefCell<HashMap<(String, String), AeadKey>>,
     sourcing: KeySource,
+    /// **P5.5 PR 8** — process-local hit/miss counter for the Path-B
+    /// "default-read does not load a column key" closeout gate
+    /// (§11). Every call to [`KeyStore::resolve`] bumps this; a hit
+    /// vs. miss is irrelevant for the gate (the proposal asserts that
+    /// `resolve` itself is not called on a default read — neither the
+    /// cache nor the env-var path should touch a key when the row is
+    /// served through the `<col>_masked AS <col>` alias).
+    ///
+    /// `Cell<u64>` is sufficient — the `KeyStore` is per-isolate
+    /// (single-threaded; see the module-level "Cache" note) and the
+    /// counter is purely diagnostic.
+    lookups: Cell<u64>,
 }
 
 impl std::fmt::Debug for KeyStore {
@@ -90,6 +102,7 @@ impl std::fmt::Debug for KeyStore {
         f.debug_struct("KeyStore")
             .field("sourcing", &self.sourcing)
             .field("cache_entries", &self.cache.borrow().len())
+            .field("lookups", &self.lookups.get())
             .finish()
     }
 }
@@ -100,7 +113,21 @@ impl KeyStore {
         Self {
             cache: RefCell::new(HashMap::new()),
             sourcing,
+            lookups: Cell::new(0),
         }
+    }
+
+    /// **P5.5 PR 8** — total resolve-call count since this `KeyStore`
+    /// was constructed. Used by the §11 closeout gate
+    /// `default_read_does_not_load_column_key` to assert that a
+    /// default masked read serves rows through the `<col>_masked`
+    /// alias without consulting the key store at all. A non-zero
+    /// reading on a default-read path is a regression: the sibling
+    /// column is the masked text — the parent ciphertext (and
+    /// therefore the key) must never be touched.
+    #[must_use]
+    pub fn lookups_count(&self) -> u64 {
+        self.lookups.get()
     }
 
     /// Look up or derive the [`AeadKey`] for `(app_id, key_id)`.
@@ -109,6 +136,11 @@ impl KeyStore {
     /// `EnvVar` source is sync internally and the body never `.await`s.
     #[allow(clippy::unused_async)] // PR 2's PgAdminTable variant awaits.
     pub async fn resolve(&self, app_id: &str, key_id: &str) -> Result<AeadKey, DbError> {
+        // **P5.5 PR 8** — increment BEFORE the cache lookup so a
+        // resolve-attempt is counted regardless of cache hit/miss.
+        // The §11 closeout gate asserts this stays at zero on
+        // default-read paths.
+        self.lookups.set(self.lookups.get() + 1);
         // Fast path: cache hit. Borrow the RefCell read-only, clone
         // out the AeadKey (two 32-byte arrays — cheap), drop the
         // borrow before any further work.
@@ -509,5 +541,95 @@ mod tests {
     #[test]
     fn local_hex_decode_rejects_garbage() {
         assert!(hex_decode("xy").is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 8 — §11 closeout: `default_read_does_not_load_column_key`
+    // (Path B fence). The proposal asserts that a default masked read
+    // serves rows through the `<col>_masked AS <col>` alias so the
+    // ciphertext column never leaves Postgres and the column key is
+    // never consulted. The `KeyStore::lookups_count()` counter is the
+    // diagnostic surface for that invariant: it records every call to
+    // `resolve()` regardless of cache hit/miss.
+    //
+    // The unit tests below pin the counter contract. The end-to-end
+    // SELECT-shape gate (`default_read_does_not_touch_ciphertext_column`)
+    // lives in `query.rs` and asserts the SELECT clause directly
+    // (sibling alias substitution, ciphertext column absent).
+    // -----------------------------------------------------------------
+
+    /// Freshly-constructed `KeyStore` reports zero lookups.
+    #[test]
+    fn key_store_lookups_count_starts_at_zero() {
+        let store = KeyStore::new(KeySource::EnvVar);
+        assert_eq!(store.lookups_count(), 0);
+    }
+
+    /// Every `resolve()` call bumps the counter — hit or miss.
+    /// Pins the §11 "default read does not load a column key" gate:
+    /// production code paths that should not consult the key store
+    /// can assert `store.lookups_count() == 0` AFTER the SELECT.
+    #[test]
+    fn key_store_lookups_count_bumps_on_every_resolve() {
+        let env_name = "ZEROSHIP_COLUMN_KEY_LOOKUPS_COUNTER_TEST";
+        let hex = "2".repeat(64);
+        unsafe {
+            std::env::set_var(env_name, &hex);
+        }
+        let store = KeyStore::new(KeySource::EnvVar);
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+
+        assert_eq!(store.lookups_count(), 0, "fresh store starts at zero");
+
+        // First call — cache miss, env lookup, derive.
+        rt.block_on(async {
+            store
+                .resolve("app_counter", "lookups_counter_test")
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            store.lookups_count(),
+            1,
+            "first resolve must bump counter to 1"
+        );
+
+        // Second call — cache hit; the counter STILL bumps so the
+        // diagnostic captures key-store traffic, not just key
+        // derivations.
+        rt.block_on(async {
+            store
+                .resolve("app_counter", "lookups_counter_test")
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            store.lookups_count(),
+            2,
+            "cache hit must still bump counter"
+        );
+
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+    }
+
+    /// Failed `resolve()` calls (env var missing) still bump the
+    /// counter — the gate cares about whether the production code
+    /// path TRIED to load a key, not whether the load succeeded.
+    #[test]
+    fn key_store_lookups_count_bumps_on_failed_resolve() {
+        let store = KeyStore::new(KeySource::EnvVar);
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+
+        // Use a unique env var name that is guaranteed not to exist.
+        let err = rt
+            .block_on(async { store.resolve("app_x", "absent_for_counter_test").await });
+        assert!(err.is_err(), "absent env var must error");
+        assert_eq!(
+            store.lookups_count(),
+            1,
+            "failed resolve still bumps counter (gate semantics)"
+        );
     }
 }

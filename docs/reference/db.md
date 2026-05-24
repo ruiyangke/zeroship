@@ -974,3 +974,200 @@ SELECT * FROM "<app-uuid>"."users" WHERE ...
 
 The `app_id` is injected by the runtime from `env_vars`; user code can
 neither read nor override it. `env.db` is frozen.
+
+## Masking
+
+**Encryption hides at rest. Masking hides at read time.** They are
+sibling concerns and compose: an `t.encrypted(...)` column without
+an explicit `.mask(...)` declaration is treated as `.mask({ kind:
+"full", classification: "pii" })` by default. The full design lives
+in `docs/proposals/sensitive-field-masking.md`; the migration
+walkthrough is `docs/reference/migration/p5-to-masked-decrypt.md`.
+
+### Mental model
+
+| Layer       | What it does                                  | When it runs       |
+|-------------|-----------------------------------------------|--------------------|
+| Encryption  | Replaces stored bytes with ciphertext (AEAD)  | Insert / update    |
+| Masking     | Returns a `MaskedValue<T>` wrapper on reads   | Find / get / live  |
+| Unmask      | Trades the wrapper for plaintext (audited)    | Explicit call only |
+
+A default read of a masked column **never** decrypts. The platform
+stores a pre-computed mask in a sibling `<col>_masked` column (Path
+B) and the SELECT clause aliases it: `"<col>_masked" AS "<col>"`.
+The ciphertext column never leaves the database on a default read,
+and the column-derivation key is never consulted.
+
+### Schema declaration
+
+```ts
+import { t, schema } from "@zeroship/db";
+
+export default {
+  schema: {
+    users: schema({
+      name:  t.string().required(),
+      email: t.encrypted({ wraps: t.string() })
+              .mask({ kind: "email", classification: "pii" }),
+      ssn:   t.encrypted({ wraps: t.string() })
+              .mask({ kind: "last4", classification: "spi" }),
+      dob:   t.encrypted({ wraps: t.string() })
+              .mask({ kind: "dateYear", classification: "phi" }),
+    }),
+  },
+};
+```
+
+`t.encrypted({...})` without `.mask({...})` is shorthand for
+`.mask({ kind: "full", classification: "pii" })`. `t.string().mask({
+kind: "full", classification: "public" })` (mask without encryption)
+is also valid — masking is the read-side; encryption is the
+storage-side; they're independent.
+
+### The eight mask kinds
+
+| Kind         | Input            | Output             | Use case                       |
+|--------------|------------------|--------------------|--------------------------------|
+| `full`       | `"123-45-6789"`  | `"***********"`    | Default — safest                |
+| `last4`      | `"123-45-6789"`  | `"***-**-6789"`    | Card tail / SSN tail            |
+| `first4`     | `"4111222233334444"` | `"4111************"` | Card BIN visible       |
+| `email`      | `"alice@x.com"`  | `"a****@x.com"`    | Identifiable but not enumerable |
+| `name`       | `"Alice Smith"`  | `"A. S."`          | Initials only                   |
+| `dateYear`   | `"1990-05-12"`   | `"1990"`           | Year-only for analytics         |
+| `dateDecade` | `"1990-05-12"`   | `"1990s"`          | Decade-only — coarser           |
+| `none`       | `"x"`            | `"x"`              | Opt-out — read returns bare `T` |
+
+`null` plaintext passes through as `null` (no mask). Empty string
+becomes `""`. Numbers and `Uint8Array` are supported by `full`;
+the string-oriented kinds throw `mask_kind_incompatible` at deploy
+time if the column type doesn't match.
+
+### The six classifications
+
+| Classification | Scope                                          |
+|----------------|------------------------------------------------|
+| `public`       | Display names, public profile data — visible to all. |
+| `pii`          | Email, address, phone, DOB. Default for `t.encrypted()`. |
+| `spi`          | CPRA "sensitive PI": SSN, biometric, driver's licence. |
+| `phi`          | HIPAA scope: medical records, diagnosis.              |
+| `pci`          | PCI-DSS scope: card numbers, CVV.                     |
+| `internal`     | Platform-internal metadata.                           |
+
+`defineMaskPolicy()` (below) grants unmask rights per role per
+classification.
+
+### Reading masked
+
+Default — the row carries `MaskedValue<T>` for masked columns:
+
+```ts
+const { data: user } = await env.db.users.get(id);
+user.ssn;             // MaskedValue<string>
+user.ssn.toString();  // "***-**-6789"
+user.ssn.toJSON();    // "***-**-6789"  (Response.json safe)
+user.name;            // "Alice"  (non-masked, bare string)
+```
+
+`MaskedValue` is intentionally NOT transparent — `tsc` rejects
+`user.ssn.length` so a leak path that "just works" at runtime
+doesn't compile.
+
+### Unmasking
+
+Single column on a row (writes one `__zeroship_audit_unmask` row):
+
+```ts
+const plain = await user.ssn.unmask({
+  actor: "support_agent",
+  reason: "verify ticket #12345",
+});
+```
+
+Multiple columns on the same row, atomic (the FIRST unauthorised
+column fails the whole call):
+
+```ts
+const [ssn, dob] = await user.unmask(["ssn", "dob"], {
+  actor: "tax_handler",
+  reason: "1099 generation",
+});
+```
+
+Bulk unmask across rows (single RPC; atomic):
+
+```ts
+const plains = await env.db.users.bulkUnmask(
+  [
+    { id: 1, columns: ["ssn"] },
+    { id: 2, columns: ["ssn", "email"] },
+  ],
+  { actor, reason },
+);
+```
+
+Per-query unmask hint (auth check runs once before the SELECT;
+hinted columns arrive as bare `T`, others as `MaskedValue<T>`):
+
+```ts
+const { data: user } = await env.db.users.findOne(
+  { id },
+  { unmask: ["ssn"], actor, reason },
+);
+user.ssn;    // "123-45-6789"  (plaintext, hint applied)
+user.email;  // MaskedValue<string>  (not hinted)
+```
+
+### `defineMaskPolicy()`
+
+App-wide policy mapping `actor` → permitted classifications.
+Recommended pattern: declare at the app's entry module so every
+isolate sees the same policy on boot.
+
+```ts
+import { defineMaskPolicy } from "@zeroship/db";
+
+export default {
+  schema: { /* ... */ },
+  async startup(env) {
+    await defineMaskPolicy(env.db, {
+      admin:    ["public", "pii", "spi", "phi", "pci", "internal"],
+      support:  ["public", "pii"],
+      end_user: ["public"],
+      // `auto` (the system actor) has uniform access UNLESS listed.
+    });
+  },
+};
+```
+
+Policy is keyed by app id — app A's policy never leaks to app B's
+isolate. Two policies under the same app id replace, never merge.
+
+### Drift detection
+
+A weekly per-app cron samples 1% of rows per masked column,
+recomputes the mask from the live ciphertext, and writes a row to
+`__zeroship_audit_mask_drift` if the stored `<col>_masked` doesn't
+match. P6+ surfaces drift counts to the operator dashboard; until
+then, query the table directly:
+
+```sql
+SELECT collection, column_name, row_pk, stored_masked, expected_masked
+  FROM "<app_id>".__zeroship_audit_mask_drift
+  ORDER BY created_at DESC
+  LIMIT 100;
+```
+
+A persistent drift means a `.mask({ kind })` change landed without
+the row being rewritten — usually that's a P5.5-PR-6b migration
+that hasn't finished. The drift row carries enough context to
+re-run the rewrite cron for the affected slice.
+
+### Audit tables
+
+| Table                              | Written by                          |
+|------------------------------------|-------------------------------------|
+| `__zeroship_audit_unmask`          | Every `.unmask()` call (granted or denied). |
+| `__zeroship_audit_mask_drift`      | Drift detection cron, on mismatch.  |
+
+Both tables live in the per-app schema; standard isolation rules
+apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).

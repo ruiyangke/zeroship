@@ -706,4 +706,68 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 8 — §11 closeout: `mask_policy_per_app_isolated`
+    //
+    // The proposal asserts that a `defineMaskPolicy()` write under
+    // app A's isolate-context entry must NOT be visible from app B's
+    // entry. The cache is keyed by app_id on
+    // `IsolateDbContext.mask_policies` (PR 5); this test pins that
+    // invariant directly through the public surface so a future
+    // refactor that accidentally widens the key (e.g. to a shared
+    // singleton) trips the gate.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn mask_policy_per_app_isolated() {
+        use crate::context::IsolateDbContext;
+
+        // Build two distinct policies — one permissive for `admin`,
+        // one restrictive for `support` — and seed them under
+        // different app ids.
+        let mut admin_set: HashSet<String> = HashSet::new();
+        admin_set.insert("pii".to_string());
+        admin_set.insert("spi".to_string());
+        admin_set.insert("phi".to_string());
+        let mut roles_a: HashMap<String, HashSet<String>> = HashMap::new();
+        roles_a.insert("admin".to_string(), admin_set);
+        let policy_a = MaskPolicy { roles: roles_a };
+
+        let mut support_set: HashSet<String> = HashSet::new();
+        support_set.insert("public".to_string());
+        let mut roles_b: HashMap<String, HashSet<String>> = HashMap::new();
+        roles_b.insert("support".to_string(), support_set);
+        let policy_b = MaskPolicy { roles: roles_b };
+
+        // Construct a fresh context (mirrors the pattern in the
+        // `context` module's tests — avoids touching the thread-local
+        // ISOLATE_CTX so test ordering is irrelevant).
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_mask_policy_for_app("app_a", Some(policy_a.clone()));
+        ctx.set_mask_policy_for_app("app_b", Some(policy_b.clone()));
+
+        // App A sees policy A only — admin grants are visible; the
+        // app-B `support` role is not in the cache for app A.
+        let a = ctx.mask_policy_for("app_a").expect("app_a cached");
+        assert!(a.allows("admin", "pii"));
+        assert!(a.allows("admin", "spi"));
+        assert!(!a.allows("support", "public"), "app_b's role must not leak into app_a");
+
+        // App B sees policy B only — support grants are visible; the
+        // app-A `admin` role is not in the cache for app B.
+        let b = ctx.mask_policy_for("app_b").expect("app_b cached");
+        assert!(b.allows("support", "public"));
+        assert!(!b.allows("admin", "pii"), "app_a's role must not leak into app_b");
+        assert!(!b.allows("admin", "spi"), "app_a's role must not leak into app_b");
+
+        // App C — never seeded — sees nothing.
+        assert!(ctx.mask_policy_for("app_c").is_none());
+
+        // Clearing app A leaves app B intact (fence against a clear-
+        // implementation that walks the whole map).
+        ctx.set_mask_policy_for_app("app_a", None);
+        assert!(ctx.mask_policy_for("app_a").is_none());
+        assert!(ctx.mask_policy_for("app_b").is_some());
+    }
 }
