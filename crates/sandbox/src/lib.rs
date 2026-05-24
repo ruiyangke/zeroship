@@ -174,6 +174,12 @@ pub struct AppState {
     /// can't grant or weaken any privilege; it only selects the
     /// response shape).
     pub wake_response_mode: crate::config::WakeResponseMode,
+
+    /// C-7-LT (PR2-FOLLOWUP, R16-S5): wake-job lifecycle configuration.
+    /// Resolved at boot from env (`SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`).
+    /// Owns the GC retention window the wake_jobs GC sweep reads at
+    /// every iteration. Static at runtime (env reload not supported).
+    pub wake_lifecycle: crate::config::WakeLifecycleConfig,
 }
 
 impl AppState {
@@ -423,6 +429,7 @@ impl AppState {
             // exercise the (PR2) async path will set this via field
             // assignment on `let mut state = new_fixture(...)`.
             wake_response_mode: crate::config::WakeResponseMode::Sync,
+            wake_lifecycle: crate::config::WakeLifecycleConfig::default(),
         }
     }
 }
@@ -802,10 +809,21 @@ impl AppState {
         // C-7-LT (PR1): resolve wake-response mode from env at boot.
         // PR1 only carries the flag; the wake handler still emits the
         // legacy 200-OK shape regardless of the value here.
-        let wake_response_mode = crate::config::WakeResponseMode::from_env();
+        //
+        // R16-S4 fail-CLOSED: any unrecognised env value aborts boot
+        // instead of silently defaulting to sync. Misconfigured
+        // feature flags are config bugs, not silent-fallback hazards.
+        let wake_response_mode = crate::config::WakeResponseMode::from_env()
+            .map_err(|e| format!("WakeResponseMode::from_env: {e}"))?;
+        // R16-S5: wake lifecycle config (GC retention). Resolved at
+        // boot; propagates to `sweep::run_wake_jobs_gc_once` via
+        // `AppState::wake_lifecycle`.
+        let wake_lifecycle = crate::config::WakeLifecycleConfig::from_env()
+            .map_err(|e| format!("WakeLifecycleConfig::from_env: {e}"))?;
         tracing::info!(
             mode = wake_response_mode.as_str(),
-            "sandbox wake-response: contract mode resolved (PR1 carries flag; handler still legacy)"
+            wake_jobs_gc_retention_secs = wake_lifecycle.wake_jobs_gc_retention_secs,
+            "sandbox wake-response: contract mode + lifecycle resolved"
         );
 
         let state = Arc::new(Self {
@@ -821,6 +839,7 @@ impl AppState {
             ch_remote,
             restore_backend,
             wake_response_mode,
+            wake_lifecycle,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once

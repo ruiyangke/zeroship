@@ -867,8 +867,10 @@ where
 ///   handler; PR1 only carries the flag.
 ///
 /// Env: `SANDBOX_WAKE_RESPONSE_MODE` (sync|async). Defaults to `sync`.
-/// Unrecognised values warn and default to `sync` (fail-safe — never
-/// strand a wake by silently rejecting the env).
+/// Unrecognised values cause [`from_env`] to return `Err` — the
+/// controller refuses to boot. This is fail-CLOSED (R16-S4 mirror of
+/// R15-S1's AEAD posture): a misconfigured feature flag is a config
+/// bug, not a silent fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeResponseMode {
     /// 200 OK + full wake state baked in (legacy).
@@ -878,19 +880,24 @@ pub enum WakeResponseMode {
 }
 
 impl WakeResponseMode {
-    /// Resolve the mode from `SANDBOX_WAKE_RESPONSE_MODE`. Empty / unset /
-    /// unrecognised → `Sync` (default). Unrecognised emits a `tracing::warn!`.
-    pub fn from_env() -> Self {
+    /// Resolve the mode from `SANDBOX_WAKE_RESPONSE_MODE`.
+    ///
+    /// - Unset / empty → `Sync` (default; existing contract).
+    /// - `sync` → `Sync`.
+    /// - `async` → `Async`.
+    /// - Anything else → `Err` (R16-S4 fail-CLOSED). The boot path
+    ///   in `AppState::from_config` propagates the error, refusing
+    ///   to start with an ambiguous feature-flag value. Mirrors the
+    ///   R15-S1 / A1-FOLLOWUP AEAD pattern: misconfig is a config
+    ///   bug, not a silent papering-over.
+    pub fn from_env() -> Result<Self, String> {
         match std::env::var("SANDBOX_WAKE_RESPONSE_MODE").as_deref() {
-            Ok("async") => Self::Async,
-            Ok("sync") | Ok("") | Err(_) => Self::Sync,
-            Ok(other) => {
-                tracing::warn!(
-                    value = %other,
-                    "SANDBOX_WAKE_RESPONSE_MODE unrecognized; defaulting to sync"
-                );
-                Self::Sync
-            }
+            Ok("async") => Ok(Self::Async),
+            Ok("sync") | Ok("") | Err(_) => Ok(Self::Sync),
+            Ok(other) => Err(format!(
+                "SANDBOX_WAKE_RESPONSE_MODE={other:?} not recognized; \
+                 expected one of: sync, async, \"\" (empty)"
+            )),
         }
     }
 
@@ -903,6 +910,70 @@ impl WakeResponseMode {
 
     pub fn is_async(self) -> bool {
         matches!(self, Self::Async)
+    }
+}
+
+/// Configuration knobs for the C-7-LT wake-job lifecycle. All
+/// fields are resolved once at boot from env vars and stored on
+/// `AppState`; the controller does not support runtime reload (the
+/// flag is structural — flipping it mid-flight would strand
+/// in-flight wakes between contracts).
+#[derive(Debug, Clone, Copy)]
+pub struct WakeLifecycleConfig {
+    /// Retention period for terminal wake_jobs rows. The GC sweep
+    /// (`sweep::run_wake_jobs_gc_once`) deletes terminal
+    /// (`ok`/`failed`) rows whose `updated_at` is older than this.
+    ///
+    /// **Minimum**: must exceed the client's max polling interval —
+    /// otherwise a client that observes a row terminal-ok at T and
+    /// re-polls at T + retention sees a 404 wake_not_found before
+    /// it gets to read the final response. 5 min is the default;
+    /// dev / test can set lower via `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`.
+    ///
+    /// Env: `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`. Default 300 s
+    /// (5 min). Values < 1 s are rejected (would race the client's
+    /// first poll).
+    pub wake_jobs_gc_retention_secs: u64,
+}
+
+impl WakeLifecycleConfig {
+    pub const DEFAULT_GC_RETENTION_SECS: u64 = 300;
+    pub const MIN_GC_RETENTION_SECS: u64 = 1;
+
+    /// Resolve from env. Unset → defaults; unparseable / out-of-
+    /// range → `Err` (boot refuses to start).
+    pub fn from_env() -> Result<Self, String> {
+        let retention = match std::env::var("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS") {
+            Ok(s) if !s.trim().is_empty() => {
+                let n: u64 = s.trim().parse().map_err(|e| {
+                    format!(
+                        "SANDBOX_WAKE_JOBS_GC_RETENTION_SECS={s:?}: parse: {e}"
+                    )
+                })?;
+                if n < Self::MIN_GC_RETENTION_SECS {
+                    return Err(format!(
+                        "SANDBOX_WAKE_JOBS_GC_RETENTION_SECS={n} \
+                         must be >= {} (the minimum exceeds the client's \
+                         max polling interval; a smaller value races \
+                         the client's first post-terminal poll)",
+                        Self::MIN_GC_RETENTION_SECS
+                    ));
+                }
+                n
+            }
+            _ => Self::DEFAULT_GC_RETENTION_SECS,
+        };
+        Ok(Self {
+            wake_jobs_gc_retention_secs: retention,
+        })
+    }
+}
+
+impl Default for WakeLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            wake_jobs_gc_retention_secs: Self::DEFAULT_GC_RETENTION_SECS,
+        }
     }
 }
 
@@ -941,21 +1012,30 @@ mod wake_response_mode_tests {
     #[test]
     fn default_when_unset() {
         with_env("SANDBOX_WAKE_RESPONSE_MODE", None, || {
-            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Sync
+            );
         });
     }
 
     #[test]
     fn explicit_sync() {
         with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("sync"), || {
-            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Sync
+            );
         });
     }
 
     #[test]
     fn explicit_async() {
         with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("async"), || {
-            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Async);
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Async
+            );
             assert!(WakeResponseMode::Async.is_async());
             assert!(!WakeResponseMode::Sync.is_async());
             assert_eq!(WakeResponseMode::Async.as_str(), "async");
@@ -966,18 +1046,131 @@ mod wake_response_mode_tests {
     #[test]
     fn empty_defaults_to_sync() {
         with_env("SANDBOX_WAKE_RESPONSE_MODE", Some(""), || {
-            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Sync
+            );
+        });
+    }
+
+    /// R16-S4: unrecognised values fail-CLOSED. The previous
+    /// contract (silent fallback to Sync) was a config-bug-papering
+    /// hazard; mirrors R15-S1's AEAD fail-CLOSED.
+    #[test]
+    fn unrecognised_value_fails_closed() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("polling"), || {
+            let err = WakeResponseMode::from_env().expect_err(
+                "unrecognised value must return Err, not silently default",
+            );
+            assert!(
+                err.contains("polling"),
+                "error must mention the offending value; got: {err}"
+            );
         });
     }
 
     #[test]
-    fn unrecognised_warns_and_defaults_to_sync() {
-        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("polling"), || {
-            // The warn is fire-and-forget; we only assert the fallback
-            // behaviour (default sync). Capturing the warn would require
-            // a tracing-subscriber probe; not worth the dependency.
-            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+    fn unrecognised_uppercase_async_fails_closed() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("ASYNC"), || {
+            let err = WakeResponseMode::from_env()
+                .expect_err("ASYNC (uppercase) must reject");
+            assert!(err.contains("ASYNC"));
         });
+    }
+
+    #[test]
+    fn unrecognised_truthy_strings_fail_closed() {
+        for v in ["1", "true", "on", "yes"] {
+            with_env("SANDBOX_WAKE_RESPONSE_MODE", Some(v), || {
+                assert!(
+                    WakeResponseMode::from_env().is_err(),
+                    "value {v:?} must NOT silently map to Sync or Async"
+                );
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod wake_lifecycle_config_tests {
+    use super::*;
+
+    /// Distinct ENV_LOCK per-key (the R12-S1 carry — codified by
+    /// R16-S3-b). This test module touches only
+    /// `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK serialises this module's env mutations.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn default_retention_when_unset() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", None, || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.wake_jobs_gc_retention_secs,
+                WakeLifecycleConfig::DEFAULT_GC_RETENTION_SECS
+            );
+            assert_eq!(cfg.wake_jobs_gc_retention_secs, 300);
+        });
+    }
+
+    #[test]
+    fn explicit_retention_value_accepted() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some("600"), || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(cfg.wake_jobs_gc_retention_secs, 600);
+        });
+    }
+
+    #[test]
+    fn empty_retention_falls_through_to_default() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some(""), || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.wake_jobs_gc_retention_secs,
+                WakeLifecycleConfig::DEFAULT_GC_RETENTION_SECS
+            );
+        });
+    }
+
+    #[test]
+    fn unparseable_retention_rejected() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some("five"), || {
+            let err = WakeLifecycleConfig::from_env()
+                .expect_err("garbage value must fail-closed");
+            assert!(err.contains("five"), "error must mention value: {err}");
+        });
+    }
+
+    #[test]
+    fn zero_retention_rejected() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some("0"), || {
+            let err = WakeLifecycleConfig::from_env().expect_err("0 < minimum");
+            assert!(err.contains("minimum") || err.contains("polling"));
+        });
+    }
+
+    #[test]
+    fn default_struct_matches_env_default() {
+        // Confirms the `Default` impl agrees with the env-default
+        // path (so callers that use `WakeLifecycleConfig::default()`
+        // get the same retention as the env-unset path).
+        let d = WakeLifecycleConfig::default();
+        assert_eq!(d.wake_jobs_gc_retention_secs, 300);
     }
 }
 

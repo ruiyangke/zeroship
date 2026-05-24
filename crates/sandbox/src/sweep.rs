@@ -81,10 +81,19 @@ pub const TRANSIENT_TAKEOVER_POLL_SECS: u64 = 30;
 /// query cost.
 pub const WAKE_JOBS_GC_POLL_SECS: u64 = 60;
 
-/// C-7-LT-PR2: how long a terminal wake_jobs row is retained for
-/// post-completion polling. 5 min per proposal § 2.cleanup: matches
-/// the standard async-operation cleanup story (S3 multipart, GCP LRO).
-/// Polls after the row is GC'd return 404 `wake_not_found`.
+/// C-7-LT-PR2: legacy hard-coded retention. The runtime value now
+/// lives on [`crate::config::WakeLifecycleConfig::wake_jobs_gc_retention_secs`]
+/// (env `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`); this constant is the
+/// fallback default + a single source of truth for the proposal-
+/// documented value (5 min per § 2.cleanup, matching the standard
+/// async-operation cleanup story — S3 multipart, GCP LRO).
+///
+/// Kept `pub` so existing tests / cluster smoke harnesses that ref
+/// the proposal default don't break. R16-S5: the controller reads
+/// `state.wake_lifecycle.wake_jobs_gc_retention_secs` at every
+/// sweep tick, not this constant — operators can shorten the value
+/// for dev / test or lengthen it for high-latency clients (the
+/// minimum is 1 s, enforced by `WakeLifecycleConfig::from_env`).
 pub const WAKE_JOBS_T_KEEP: Duration = Duration::from_secs(300);
 
 /// Idle-eviction sweep candidates per pg call. Bounds the per-sweep
@@ -278,8 +287,10 @@ pub fn spawn_transient_state_takeover(state: Arc<AppState>) {
 // ────────────────────────────────────────────────────────────────────
 
 /// Run a single iteration of the wake_jobs GC sweep. Calls
-/// `Database::gc_expired_wake_jobs(T_KEEP)` and returns the number
-/// of rows deleted. Errors are logged-and-continued.
+/// `Database::gc_expired_wake_jobs(retention)` where `retention` is
+/// taken from `state.wake_lifecycle.wake_jobs_gc_retention_secs`
+/// (env `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`, default 300 s). Returns
+/// the number of rows deleted. Errors are logged-and-continued.
 ///
 /// Public so the pg-gated tests can drive a single pass without
 /// spawning the loop.
@@ -287,12 +298,14 @@ pub async fn run_wake_jobs_gc_once(state: &Arc<AppState>) -> u64 {
     let Some(db) = state.database.as_ref() else {
         return 0;
     };
-    match db.gc_expired_wake_jobs(WAKE_JOBS_T_KEEP).await {
+    let retention_secs = state.wake_lifecycle.wake_jobs_gc_retention_secs;
+    let retention = Duration::from_secs(retention_secs);
+    match db.gc_expired_wake_jobs(retention).await {
         Ok(n) => {
             if n > 0 {
                 tracing::info!(
                     deleted = n,
-                    t_keep_secs = WAKE_JOBS_T_KEEP.as_secs(),
+                    t_keep_secs = retention_secs,
                     "sandbox wake_jobs GC: deleted terminal rows"
                 );
             }
@@ -324,7 +337,7 @@ pub fn spawn_wake_jobs_gc(state: Arc<AppState>) {
         let interval = Duration::from_secs(WAKE_JOBS_GC_POLL_SECS);
         tracing::info!(
             interval_secs = WAKE_JOBS_GC_POLL_SECS,
-            t_keep_secs = WAKE_JOBS_T_KEEP.as_secs(),
+            t_keep_secs = state.wake_lifecycle.wake_jobs_gc_retention_secs,
             "sandbox wake_jobs GC: loop started"
         );
         loop {
