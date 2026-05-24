@@ -459,6 +459,17 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
   # can leak. The write is atomic (tmp file + fsync + rename) to
   # avoid leaving a half-written config.json that CH would then
   # refuse to parse.
+  #
+  # R15-S2 (security-r15): a snapshot's `disks[].path` whose value
+  # does NOT match the alloc-prefix used to pass through verbatim.
+  # With AEAD authentication on the snapshot artifact (post-A1-
+  # FOLLOWUP) a forged config.json requires KEK compromise — but
+  # defence-in-depth says belt-and-braces. After rewriting, every
+  # `disks[].path` / `serial.file` / `console.file` MUST resolve
+  # under `NOMAD_TASK_DIR`. Any path that doesn't (e.g. a malicious
+  # `/etc/shadow`, or a relative path that `..`'s out of the alloc
+  # dir) is rejected with a clear error pointing at both the
+  # offending value and the expected prefix.
   if ! NOMAD_TASK_DIR="$NOMAD_TASK_DIR" \
        CONFIG_JSON="$ZSBX_RESTORE_FROM/config.json" \
        /usr/bin/python3 - <<'PY'
@@ -498,6 +509,80 @@ def rewrite(value):
     return task_dir + m.group(1) + value[m.end():]
 
 
+# R15-S2: allow-list / prefix-guard. After rewriting, every path
+# fed to CH MUST live under the alloc's task_dir. A malicious
+# snapshot whose `disks[].path` is something like `/etc/shadow`
+# would otherwise reach CH verbatim (since it doesn't match the
+# `ALLOC_PREFIX` regex above) and CH would open it as a backing
+# block device — disastrous if the snapshot AEAD KEK were ever
+# compromised or the AEAD path bypassed.
+#
+# The guard:
+#   * The path must be a non-empty string.
+#   * It must be absolute (start with `/`). Relative paths are not
+#     a thing CH accepts; reject them rather than letting CH's CWD
+#     (the alloc dir per `cd "$ZSBX_ARTIFACT_DIR"` above) silently
+#     re-anchor them.
+#   * No path component may equal `..` (path-traversal defence in
+#     depth — even if realpath resolution below would catch the
+#     escape, an explicit reject lets the operator see the intent).
+#   * `os.path.realpath(value)` (which resolves `..` and symlinks
+#     against the live filesystem) must equal `task_dir` itself or
+#     start with `task_dir + os.sep`. Comparing realpaths defends
+#     against symlinked components inside the alloc dir that point
+#     outside it.
+TASK_DIR_REAL = os.path.realpath(task_dir)
+
+
+def assert_under_task_dir(field_name, value):
+    """Reject any path that doesn't live under task_dir. Exits 1
+    with a clear operator-readable error on the first violation."""
+    if not isinstance(value, str) or not value:
+        print(
+            f"[wrapper] FATAL: R15-S2 reject: config.json {field_name} "
+            f"is empty/non-string (got type={type(value).__name__}); "
+            f"expected absolute path under {task_dir}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not value.startswith("/"):
+        print(
+            f"[wrapper] FATAL: R15-S2 reject: config.json {field_name} "
+            f"= {value!r} is not absolute; "
+            f"expected a path under {task_dir}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Path-component traversal defence. `..` as ANY component is a
+    # red flag in a snapshot config.json — the controller's
+    # rewriter never emits one, and CH itself doesn't need them.
+    parts = value.split("/")
+    if any(part == ".." for part in parts):
+        print(
+            f"[wrapper] FATAL: R15-S2 reject: config.json {field_name} "
+            f"= {value!r} contains a `..` component (path-traversal "
+            f"defence); expected a path under {task_dir}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Realpath check — resolves symlinks and remaining `.` segments
+    # (`..` already rejected). `realpath` on a non-existent path
+    # resolves the components that DO exist and leaves the tail
+    # literal, which is fine for our prefix check.
+    real = os.path.realpath(value)
+    if real != TASK_DIR_REAL and not real.startswith(
+        TASK_DIR_REAL + os.sep
+    ):
+        print(
+            f"[wrapper] FATAL: R15-S2 reject: config.json {field_name} "
+            f"= {value!r} resolves to {real!r}, which is NOT under "
+            f"expected prefix {TASK_DIR_REAL!r} (task_dir). "
+            f"Possible malicious snapshot or misrouted restore.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 with open(config_path, "r", encoding="utf-8") as f:
     config = json.load(f)
 
@@ -510,29 +595,33 @@ if not isinstance(disks, list):
         file=sys.stderr,
     )
     sys.exit(1)
-for disk in disks:
+for i, disk in enumerate(disks):
     if isinstance(disk, dict) and "path" in disk:
         disk["path"] = rewrite(disk["path"])
+        assert_under_task_dir(f"disks[{i}].path", disk["path"])
 
 # serial.file — single dict, optional `file` string.
 serial = config.get("serial")
 if isinstance(serial, dict) and "file" in serial:
     serial["file"] = rewrite(serial["file"])
+    assert_under_task_dir("serial.file", serial["file"])
 
 # console.file — same shape as serial, may also carry a path post-
 # pivot. Touch it for symmetry; no-op when not present.
 console = config.get("console")
 if isinstance(console, dict) and "file" in console:
     console["file"] = rewrite(console["file"])
+    assert_under_task_dir("console.file", console["file"])
 
 # fs[].socket — legacy virtio-fs sockets. Rewritten for diagnostic
 # clarity (the restore will still fail at CH level — see comment
 # block above), but the rewrite itself is safe.
 fs_entries = config.get("fs") or []
 if isinstance(fs_entries, list):
-    for entry in fs_entries:
+    for i, entry in enumerate(fs_entries):
         if isinstance(entry, dict) and "socket" in entry:
             entry["socket"] = rewrite(entry["socket"])
+            assert_under_task_dir(f"fs[{i}].socket", entry["socket"])
 
 # Atomic write: write to a temp file in the same dir, fsync, rename.
 # Same-dir rename is atomic on ext4/xfs, so a crash mid-write can't
@@ -556,6 +645,32 @@ PY
     echo "[wrapper] FATAL: config.json path rewrite failed" >&2
     exit 1
   fi
+
+  # R15-S2 test sketch — no automated harness exists for this heredoc
+  # today (adding one would mean a new Rust integration test under
+  # `crates/sandbox/tests/`, outside this fixer's scope; tracked
+  # implicitly in the deferred backlog under "wrapper test harness").
+  # Manual repro recipe for the new allow-list / prefix-guard:
+  #
+  #   tmp=$(mktemp -d) && mkdir -p "$tmp/alloc"
+  #
+  #   # Case 1 — happy path: alloc-prefix path rewrites + passes.
+  #   printf '%s\n' '{"disks": [{"path":
+  #     "/opt/nomad/data/alloc/aaaa/t/local/rootfs.img"}]}' \
+  #     > "$tmp/config.json"
+  #   NOMAD_TASK_DIR="$tmp/alloc" CONFIG_JSON="$tmp/config.json" \
+  #       python3 <(awk '/^import json, os, re, sys, tempfile/,/^PY$/' \
+  #                   crates/sandbox/scripts/nomad-vm-wrapper.sh \
+  #                   | sed '$d')
+  #   # → exit 0, config.json now has "$tmp/alloc/rootfs.img"
+  #
+  #   # Case 2 — attack: `/etc/shadow` rejected (R15-S2 reject + rc!=0).
+  #   #   {"disks": [{"path": "/etc/shadow"}]}
+  #
+  #   # Case 3 — `..` traversal: rejected by the explicit component
+  #   # check before realpath.
+  #   #   {"disks": [{"path":
+  #   #     "/opt/nomad/data/alloc/aaaa/t/local/../../escape"}]}
 
   echo "[wrapper] restore path: source=$ZSBX_RESTORE_FROM, NOMAD_TASK_DIR=$NOMAD_TASK_DIR"
   cloud-hypervisor \
