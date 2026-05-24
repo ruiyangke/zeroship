@@ -2151,6 +2151,12 @@ pub fn build_find_with_schema(
 /// SQLite) — the encryption pass will decrypt it on the way out, and
 /// the unmask-for-query pass will overwrite the row slot with the
 /// plaintext for the SDK to consume.
+///
+/// **P7 PR 5** — thin shim around
+/// [`build_find_with_schema_and_unmask_and_soft_delete`] passing
+/// `filter_soft_deleted = false` so direct callers (the legacy CRUD
+/// entry points + tests) keep the pre-PR-5 contract. The CRUD dispatch
+/// path threads the soft-delete flag through the dedicated entry.
 #[allow(clippy::too_many_arguments)]
 pub fn build_find_with_schema_and_unmask(
     app_id: &str,
@@ -2162,6 +2168,54 @@ pub fn build_find_with_schema_and_unmask(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
     unmask_columns: &[String],
+) -> Result<BuiltQuery, QueryError> {
+    build_find_with_schema_and_unmask_and_soft_delete(
+        app_id,
+        collection,
+        filter,
+        limit,
+        offset,
+        order_by,
+        select,
+        schema_hint,
+        unmask_columns,
+        false,
+    )
+}
+
+/// **P7 PR 5** — schema-aware SELECT builder with the soft-delete
+/// auto-filter. Same shape as [`build_find_with_schema_and_unmask`],
+/// plus `filter_soft_deleted`: when `true`, appends
+/// `AND deleted_at IS NULL` to the WHERE clause so soft-deleted rows
+/// are invisible. Callers thread this through from the dispatch
+/// layer's `should_filter_soft_deleted` decision.
+///
+/// The auto-filter slot uses `AND` composition with whatever the
+/// creator's filter produced. When the creator's filter is empty, the
+/// auto-filter becomes the entire WHERE clause (`WHERE
+/// "deleted_at" IS NULL`). When the creator's filter is non-empty,
+/// it composes as `WHERE <creator filter> AND "deleted_at" IS NULL`
+/// (left-precedence — the creator-supplied filter is the typical
+/// load-bearing predicate; the soft-delete filter is the cheap suffix
+/// the existing `deleted_at` B-tree index can short-circuit).
+///
+/// `false` is the back-compat path: emits SQL byte-identical to the
+/// pre-PR-5 builder. Direct callers (tests, raw SQL probes) keep
+/// passing `false` so nothing visible changes; only the CRUD dispatch
+/// path threads `true` when the schema marker promises a post-
+/// migration table.
+#[allow(clippy::too_many_arguments)]
+pub fn build_find_with_schema_and_unmask_and_soft_delete(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+    unmask_columns: &[String],
+    filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -2177,9 +2231,10 @@ pub fn build_find_with_schema_and_unmask(
         build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns);
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
-    if !where_clause.is_empty() {
+    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
-        sql.push_str(&where_clause);
+        sql.push_str(&composed_where);
     }
 
     if let Some(order) = order_by {
@@ -2198,6 +2253,30 @@ pub fn build_find_with_schema_and_unmask(
     }
 
     Ok(BuiltQuery { sql, params })
+}
+
+/// **P7 PR 5** — compose a WHERE clause body with the soft-delete
+/// auto-filter. Mirrors the same `creator AND deleted_at IS NULL`
+/// pattern used by [`build_soft_delete_one_with_system_fields`] /
+/// [`build_restore_one_with_system_fields`] inner SELECTs.
+///
+/// Three cases:
+/// 1. `!filter_soft_deleted` → return `where_clause` verbatim (back-
+///    compat with pre-PR-5 callers).
+/// 2. `filter_soft_deleted && where_clause.is_empty()` → return
+///    `"deleted_at" IS NULL` (the auto-filter becomes the whole
+///    WHERE body).
+/// 3. `filter_soft_deleted && !where_clause.is_empty()` → return
+///    `<where_clause> AND "deleted_at" IS NULL`.
+fn compose_where_with_soft_delete(where_clause: &str, filter_soft_deleted: bool) -> String {
+    if !filter_soft_deleted {
+        return where_clause.to_string();
+    }
+    if where_clause.is_empty() {
+        "\"deleted_at\" IS NULL".to_string()
+    } else {
+        format!("{where_clause} AND \"deleted_at\" IS NULL")
+    }
 }
 
 /// **P5.5 PR 3** — compose the SELECT column-list expression, accounting
@@ -2324,10 +2403,26 @@ fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
 }
 
 /// Build a SELECT COUNT(*) query.
+///
+/// **P7 PR 5** — thin shim around [`build_count_with_soft_delete`]
+/// passing `filter_soft_deleted = false`.
 pub fn build_count(
     app_id: &str,
     collection: &str,
     filter: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_count_with_soft_delete(app_id, collection, filter, false)
+}
+
+/// **P7 PR 5** — COUNT(*) with the soft-delete auto-filter. The CRUD
+/// dispatch path threads `should_filter_soft_deleted` through here so
+/// `db.posts.count()` on a post-migration table excludes soft-deleted
+/// rows by default.
+pub fn build_count_with_soft_delete(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -2339,9 +2434,10 @@ pub fn build_count(
     let where_clause = build_where(filter, &mut params)?;
 
     let mut sql = format!("SELECT COUNT(*) AS count FROM {schema}.{table}");
-    if !where_clause.is_empty() {
+    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
-        sql.push_str(&where_clause);
+        sql.push_str(&composed_where);
     }
 
     Ok(BuiltQuery { sql, params })
@@ -3101,6 +3197,262 @@ pub fn build_delete_one(
     Ok(BuiltQuery { sql, params })
 }
 
+// ---------------------------------------------------------------------------
+// **P7 PR 5** — soft-delete / restore SQL builders.
+//
+// `delete()` on a post-migration table becomes an UPDATE that flips
+// `deleted_at` from NULL to `NOW()` / `CURRENT_TIMESTAMP`. The
+// builders mirror `build_update_*_with_system_fields` but stamp the
+// `deleted_at` SET clause themselves (system-field, not creator-
+// supplied) and add `AND deleted_at IS NULL` to the WHERE clause so
+// re-deleting an already-deleted row is a no-op (affected-rows = 0).
+//
+// `restore()` is the symmetric UPDATE: `deleted_at = NULL` with
+// `AND deleted_at IS NOT NULL` so restoring a live row is a no-op.
+//
+// Both bump `version` + `updated_at` + `updated_by` via the same
+// `SystemFieldAutoBump` knob the UPDATE path uses; the SET clauses are
+// composed inline (rather than routing through
+// `build_set_clauses_with_system_fields`) because the creator's "patch"
+// for soft-delete / restore is fixed by the platform — only the actor
+// and the timestamp expression differ from the auto-bump set.
+// ---------------------------------------------------------------------------
+
+/// **P7 PR 5** — dialect-appropriate `NOW()` / `CURRENT_TIMESTAMP`
+/// expression for stamping a `deleted_at` column on the soft-delete
+/// path. Mirrors the same lookup
+/// [`build_set_clauses_with_system_fields`] does for `updated_at`.
+fn now_expr(dialect: SqlDialect) -> &'static str {
+    match dialect {
+        SqlDialect::Postgres => "NOW()",
+        SqlDialect::Sqlite => "CURRENT_TIMESTAMP",
+    }
+}
+
+/// **P7 PR 5** — compose the SET clauses for a soft-delete: the
+/// `deleted_at` stamp + the standard `version` / `updated_at` /
+/// `updated_by` auto-bump triple (per the `autobump` knobs).
+///
+/// `actor_id` flows through into the `updated_by` placeholder when
+/// non-null; the dialect-flag picks the timestamp expression for both
+/// `deleted_at` and `updated_at`. `skip_*` knobs work identically to
+/// [`build_set_clauses_with_system_fields`].
+///
+/// SET clause ordering (grep-friendly diff): `deleted_at` first
+/// (the soft-delete-specific stamp), then the standard `version` /
+/// `updated_at` / `updated_by` bumps in that order.
+fn build_soft_delete_set_clauses(
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Vec<String> {
+    let now = now_expr(dialect);
+    let mut clauses = vec![format!("\"deleted_at\" = {now}")];
+    if !autobump.skip_version {
+        clauses.push("\"version\" = \"version\" + 1".to_string());
+    }
+    if !autobump.skip_updated_at {
+        clauses.push(format!("\"updated_at\" = {now}"));
+    }
+    if let Some(actor) = autobump.actor_id {
+        if !autobump.skip_updated_by {
+            params.push(actor.to_string());
+            let n = params.len();
+            clauses.push(format!("\"updated_by\" = ${n}"));
+        }
+    }
+    clauses
+}
+
+/// **P7 PR 5** — compose the SET clauses for `restore()`: clear
+/// `deleted_at` + bump the standard triple. Symmetric to
+/// [`build_soft_delete_set_clauses`]. The timestamp expression isn't
+/// needed for `deleted_at` here (we write `NULL` directly, not a stamp).
+fn build_restore_set_clauses(
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Vec<String> {
+    let now = now_expr(dialect);
+    let mut clauses = vec!["\"deleted_at\" = NULL".to_string()];
+    if !autobump.skip_version {
+        clauses.push("\"version\" = \"version\" + 1".to_string());
+    }
+    if !autobump.skip_updated_at {
+        clauses.push(format!("\"updated_at\" = {now}"));
+    }
+    if let Some(actor) = autobump.actor_id {
+        if !autobump.skip_updated_by {
+            params.push(actor.to_string());
+            let n = params.len();
+            clauses.push(format!("\"updated_by\" = ${n}"));
+        }
+    }
+    clauses
+}
+
+/// **P7 PR 5** — dialect-aware `soft_delete_one` builder. Used by the
+/// CRUD dispatch path on post-migration tables when `delete()` /
+/// `deleteOne()` reaches a row that hasn't already been soft-deleted.
+///
+/// Generated SQL example (PG):
+/// ```sql
+/// UPDATE "app1"."posts"
+/// SET "deleted_at" = NOW(), "version" = "version" + 1, "updated_at" = NOW(), "updated_by" = $2
+/// WHERE ctid = (
+///   SELECT ctid FROM "app1"."posts" WHERE "id" = $1 AND "deleted_at" IS NULL LIMIT 1
+/// )
+/// RETURNING *
+/// ```
+///
+/// The `AND deleted_at IS NULL` in the inner SELECT keeps the call
+/// idempotent: re-deleting an already-deleted row affects 0 rows. The
+/// dispatch layer translates 0-affected to a `null` result (matches the
+/// `deleteOne` contract pre-PR-5).
+pub fn build_soft_delete_one_with_system_fields(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut params: Vec<String> = Vec::new();
+    let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
+
+    let where_clause = build_where(filter, &mut params)?;
+    // The inner SELECT scopes the soft-delete to a single live row.
+    // If the filter is empty the WHERE becomes just `deleted_at IS
+    // NULL` (any single live row). The dispatch path doesn't call this
+    // builder with an empty filter — `Collection::delete()` requires an
+    // id or filter — but we mirror the same defensive behaviour as
+    // `build_delete_one`.
+    let inner_where = if where_clause.is_empty() {
+        " WHERE \"deleted_at\" IS NULL".to_string()
+    } else {
+        format!(" WHERE {where_clause} AND \"deleted_at\" IS NULL")
+    };
+
+    let sql = format!(
+        "UPDATE {schema}.{table} SET {} WHERE ctid = (SELECT ctid FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
+        set_clauses.join(", "),
+    );
+
+    Ok(BuiltQuery { sql, params })
+}
+
+/// **P7 PR 5** — dialect-aware `soft_delete_many` builder. Same shape
+/// as [`build_soft_delete_one_with_system_fields`] minus the `ctid`
+/// LIMIT 1 narrowing — every live row matching `filter` flips
+/// `deleted_at` to the dialect's `NOW()`-equivalent.
+///
+/// `AND deleted_at IS NULL` is preserved so re-deleting an already-
+/// deleted row is still a no-op.
+pub fn build_soft_delete_many_with_system_fields(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut params: Vec<String> = Vec::new();
+    let set_clauses = build_soft_delete_set_clauses(&mut params, dialect, autobump);
+
+    let where_clause = build_where(filter, &mut params)?;
+    let where_sql = if where_clause.is_empty() {
+        " WHERE \"deleted_at\" IS NULL".to_string()
+    } else {
+        format!(" WHERE {where_clause} AND \"deleted_at\" IS NULL")
+    };
+
+    let sql = format!(
+        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING *",
+        set_clauses.join(", "),
+    );
+
+    Ok(BuiltQuery { sql, params })
+}
+
+/// **P7 PR 5** — dialect-aware `restore_one` builder. Symmetric to
+/// [`build_soft_delete_one_with_system_fields`]: clears `deleted_at`
+/// and scopes to rows that are CURRENTLY soft-deleted
+/// (`deleted_at IS NOT NULL`) so restoring a live row is a no-op
+/// (affected-rows = 0 → typed `not_found_or_already_live` via the
+/// dispatch layer).
+pub fn build_restore_one_with_system_fields(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut params: Vec<String> = Vec::new();
+    let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
+
+    let where_clause = build_where(filter, &mut params)?;
+    let inner_where = if where_clause.is_empty() {
+        " WHERE \"deleted_at\" IS NOT NULL".to_string()
+    } else {
+        format!(" WHERE {where_clause} AND \"deleted_at\" IS NOT NULL")
+    };
+
+    let sql = format!(
+        "UPDATE {schema}.{table} SET {} WHERE ctid = (SELECT ctid FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
+        set_clauses.join(", "),
+    );
+
+    Ok(BuiltQuery { sql, params })
+}
+
+/// **P7 PR 5** — dialect-aware `restore_many` builder.
+pub fn build_restore_many_with_system_fields(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut params: Vec<String> = Vec::new();
+    let set_clauses = build_restore_set_clauses(&mut params, dialect, autobump);
+
+    let where_clause = build_where(filter, &mut params)?;
+    let where_sql = if where_clause.is_empty() {
+        " WHERE \"deleted_at\" IS NOT NULL".to_string()
+    } else {
+        format!(" WHERE {where_clause} AND \"deleted_at\" IS NOT NULL")
+    };
+
+    let sql = format!(
+        "UPDATE {schema}.{table} SET {}{where_sql} RETURNING *",
+        set_clauses.join(", "),
+    );
+
+    Ok(BuiltQuery { sql, params })
+}
+
 /// Build an aggregate query from a pipeline of stages.
 ///
 /// Supported stages:
@@ -3109,10 +3461,30 @@ pub fn build_delete_one(
 /// - `$having` → HAVING clause
 /// - `$sort`   → ORDER BY
 /// - `$limit`  → LIMIT N
+///
+/// **P7 PR 5** — thin shim around
+/// [`build_aggregate_with_soft_delete`] passing
+/// `filter_soft_deleted = false`. CRUD dispatch threads the auto-
+/// filter through the dedicated entry; direct callers keep the pre-
+/// PR-5 SQL byte-identical.
 pub fn build_aggregate(
     app_id: &str,
     collection: &str,
     pipeline: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_aggregate_with_soft_delete(app_id, collection, pipeline, false)
+}
+
+/// **P7 PR 5** — aggregate builder with the soft-delete auto-filter.
+///
+/// When `filter_soft_deleted = true`, appends `AND deleted_at IS NULL`
+/// to whatever WHERE clause the pipeline's `$match` stage produced
+/// (or `WHERE deleted_at IS NULL` when no `$match` is present).
+pub fn build_aggregate_with_soft_delete(
+    app_id: &str,
+    collection: &str,
+    pipeline: &Value,
+    filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -3290,9 +3662,10 @@ pub fn build_aggregate(
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
 
-    if !where_clause.is_empty() {
+    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
-        sql.push_str(&where_clause);
+        sql.push_str(&composed_where);
     }
 
     if !group_by_cols.is_empty() {
@@ -3320,11 +3693,26 @@ pub fn build_aggregate(
 
 /// Build a SELECT DISTINCT query:
 /// `SELECT DISTINCT "field" FROM "schema"."table" WHERE ... ORDER BY "field"`
+///
+/// **P7 PR 5** — thin shim around
+/// [`build_distinct_with_soft_delete`] passing
+/// `filter_soft_deleted = false`.
 pub fn build_distinct(
     app_id: &str,
     collection: &str,
     field: &str,
     filter: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_distinct_with_soft_delete(app_id, collection, field, filter, false)
+}
+
+/// **P7 PR 5** — DISTINCT builder with the soft-delete auto-filter.
+pub fn build_distinct_with_soft_delete(
+    app_id: &str,
+    collection: &str,
+    field: &str,
+    filter: &Value,
+    filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -3337,9 +3725,10 @@ pub fn build_distinct(
     let where_clause = build_where(filter, &mut params)?;
 
     let mut sql = format!("SELECT DISTINCT {col} FROM {schema}.{table}");
-    if !where_clause.is_empty() {
+    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
-        sql.push_str(&where_clause);
+        sql.push_str(&composed_where);
     }
     sql.push_str(&format!(" ORDER BY {col}"));
 
@@ -8263,5 +8652,253 @@ mod tests {
         );
         assert!(bq.sql.contains("\"ssn_masked\" AS \"ssn\""));
         assert!(bq.sql.contains("\"id\""));
+    }
+
+    // ----------------------------------------------------------------
+    // P7 PR 5 — soft-delete / restore SQL builders +
+    // compose-where-with-soft-delete behaviour
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn compose_where_with_soft_delete_no_op_when_flag_false() {
+        assert_eq!(compose_where_with_soft_delete("", false), "");
+        assert_eq!(
+            compose_where_with_soft_delete("\"id\" = $1", false),
+            "\"id\" = $1"
+        );
+    }
+
+    #[test]
+    fn compose_where_with_soft_delete_empty_to_lone_predicate() {
+        assert_eq!(
+            compose_where_with_soft_delete("", true),
+            "\"deleted_at\" IS NULL"
+        );
+    }
+
+    #[test]
+    fn compose_where_with_soft_delete_appends_with_and() {
+        assert_eq!(
+            compose_where_with_soft_delete("\"id\" = $1", true),
+            "\"id\" = $1 AND \"deleted_at\" IS NULL"
+        );
+    }
+
+    #[test]
+    fn build_soft_delete_one_emits_update_with_deleted_at_now() {
+        let filter = serde_json::json!({ "id": "post_x" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_soft_delete_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(q.sql.starts_with("UPDATE \"app1\".\"posts\" SET"), "sql: {}", q.sql);
+        assert!(
+            q.sql.contains("\"deleted_at\" = NOW()"),
+            "expected deleted_at = NOW(); got: {}",
+            q.sql
+        );
+        assert!(q.sql.contains("\"version\" = \"version\" + 1"));
+        assert!(q.sql.contains("\"updated_at\" = NOW()"));
+        assert!(q.sql.contains("\"updated_by\" ="));
+        assert!(q.sql.contains("AND \"deleted_at\" IS NULL"));
+        assert!(q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+    }
+
+    #[test]
+    fn build_soft_delete_one_sqlite_uses_current_timestamp() {
+        let filter = serde_json::json!({ "id": "post_x" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr"),
+            ..Default::default()
+        };
+        let q = build_soft_delete_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            SqlDialect::Sqlite,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains("\"deleted_at\" = CURRENT_TIMESTAMP"),
+            "SQLite must use CURRENT_TIMESTAMP: {}",
+            q.sql
+        );
+        assert!(q.sql.contains("\"updated_at\" = CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn build_soft_delete_many_omits_ctid_narrowing() {
+        let filter = serde_json::json!({ "author": "usr_x" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_soft_delete_many_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            !q.sql.contains("WHERE ctid ="),
+            "bulk soft-delete must not narrow via ctid: {}",
+            q.sql
+        );
+        assert!(q.sql.contains("AND \"deleted_at\" IS NULL"));
+        assert!(q.sql.ends_with("RETURNING *"));
+    }
+
+    #[test]
+    fn build_soft_delete_one_no_actor_omits_updated_by_clause() {
+        let filter = serde_json::json!({ "id": "post_x" });
+        let autobump = SystemFieldAutoBump::default();
+        let q = build_soft_delete_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            !q.sql.contains("\"updated_by\""),
+            "no actor → no updated_by SET clause: {}",
+            q.sql
+        );
+        assert!(q.sql.contains("\"deleted_at\" = NOW()"));
+    }
+
+    #[test]
+    fn build_restore_one_clears_deleted_at_and_scopes_to_soft_deleted() {
+        let filter = serde_json::json!({ "id": "post_x" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_restore_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(q.sql.contains("\"deleted_at\" = NULL"));
+        assert!(q.sql.contains("\"version\" = \"version\" + 1"));
+        assert!(q.sql.contains("\"updated_at\" = NOW()"));
+        assert!(q.sql.contains("\"updated_by\" ="));
+        assert!(q.sql.contains("AND \"deleted_at\" IS NOT NULL"));
+    }
+
+    #[test]
+    fn build_restore_many_omits_ctid_narrowing() {
+        let filter = serde_json::json!({ "author": "usr_x" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_restore_many_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(!q.sql.contains("WHERE ctid ="));
+        assert!(q.sql.contains("AND \"deleted_at\" IS NOT NULL"));
+        assert!(q.sql.ends_with("RETURNING *"));
+    }
+
+    #[test]
+    fn build_find_with_soft_delete_flag_appends_filter() {
+        let filter = serde_json::json!({ "title": "hi" });
+        let q = build_find_with_schema_and_unmask_and_soft_delete(
+            "app1", "posts", &filter, None, None, None, None, None, &[], true,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(" AND \"deleted_at\" IS NULL"),
+            "soft-delete filter must be appended: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn build_find_with_soft_delete_flag_off_is_byte_identical_to_legacy() {
+        let filter = serde_json::json!({ "title": "hi" });
+        let q_legacy = build_find_with_schema_and_unmask(
+            "app1", "posts", &filter, None, None, None, None, None, &[],
+        )
+        .unwrap();
+        let q_new = build_find_with_schema_and_unmask_and_soft_delete(
+            "app1", "posts", &filter, None, None, None, None, None, &[], false,
+        )
+        .unwrap();
+        assert_eq!(q_legacy.sql, q_new.sql, "back-compat: identical SQL");
+        assert_eq!(q_legacy.params, q_new.params);
+    }
+
+    #[test]
+    fn build_find_empty_filter_with_soft_delete_flag_emits_lone_predicate() {
+        let filter = serde_json::json!({});
+        let q = build_find_with_schema_and_unmask_and_soft_delete(
+            "app1", "posts", &filter, None, None, None, None, None, &[], true,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains("WHERE \"deleted_at\" IS NULL"),
+            "lone soft-delete predicate when no creator filter: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn build_count_with_soft_delete_appends_filter() {
+        let filter = serde_json::json!({});
+        let q = build_count_with_soft_delete("app1", "posts", &filter, true).unwrap();
+        assert!(q.sql.contains("WHERE \"deleted_at\" IS NULL"));
+        let q2 = build_count_with_soft_delete("app1", "posts", &filter, false).unwrap();
+        assert!(!q2.sql.contains("WHERE"));
+    }
+
+    #[test]
+    fn build_aggregate_with_soft_delete_appends_filter() {
+        let pipeline = serde_json::json!([
+            { "$match": { "country": "US" } },
+            { "$group": { "by": "city", "n": { "$count": 1 } } },
+        ]);
+        let q = build_aggregate_with_soft_delete("app1", "users", &pipeline, true).unwrap();
+        assert!(
+            q.sql.contains("WHERE ") && q.sql.contains("AND \"deleted_at\" IS NULL"),
+            "aggregate WHERE must compose creator $match AND soft-delete: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn build_distinct_with_soft_delete_appends_filter() {
+        let filter = serde_json::json!({});
+        let q = build_distinct_with_soft_delete("app1", "users", "country", &filter, true).unwrap();
+        assert!(q.sql.contains("WHERE \"deleted_at\" IS NULL"));
+    }
+
+    #[test]
+    fn legacy_build_count_is_byte_identical_to_soft_delete_off() {
+        let filter = serde_json::json!({ "id": "x" });
+        let q_legacy = build_count("app1", "posts", &filter).unwrap();
+        let q_new = build_count_with_soft_delete("app1", "posts", &filter, false).unwrap();
+        assert_eq!(q_legacy.sql, q_new.sql);
     }
 }

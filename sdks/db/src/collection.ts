@@ -1366,6 +1366,132 @@ export class Collection<
   }
 
   /**
+   * **P7 PR 5** — explicit hard-delete the first matching row,
+   * regardless of whether `delete()` is currently doing soft-delete
+   * (runtime-side on post-migration tables, or client-side when
+   * `softDelete: true`).
+   *
+   * Use this for compliance / right-to-be-forgotten flows. Resolves
+   * with the deleted row, or `null` when nothing matched.
+   */
+  async purge(
+    idOrFilter: string | number | Filter<S>,
+  ): Promise<Result<Row<S> | null>> {
+    return this._run(async () => {
+      const isBareId =
+        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const filter = (isBareId
+        ? ({ id: idOrFilter } as Filter<S>)
+        : idOrFilter);
+      if (!isBareId) {
+        validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+      }
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
+      const native = this._nativeCollection() as NativeCollection & {
+        purge?: (f: ZeroshipDbFilter) => Promise<Record<string, unknown> | null>;
+      };
+      if (typeof native.purge !== "function") {
+        throw Object.assign(
+          new Error(
+            "@zeroship/db: env.db.<collection>.purge not available — " +
+              "runtime is missing the P7 PR 5 purge surface.",
+          ),
+          { code: "purge_not_available" as const },
+        );
+      }
+      const result = await native.purge(mapped);
+      if (result === null) return null;
+      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
+    });
+  }
+
+  /** **P7 PR 5** — bulk-purge. Resolves with `{ purgedCount: N }`. */
+  async purgeMany(
+    filter: Filter<S> = {} as Filter<S>,
+  ): Promise<Result<{ purgedCount: number }>> {
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
+    return this._run(async () => {
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
+      const native = this._nativeCollection() as NativeCollection & {
+        purgeMany?: (f: ZeroshipDbFilter) => Promise<number>;
+      };
+      if (typeof native.purgeMany !== "function") {
+        throw Object.assign(
+          new Error(
+            "@zeroship/db: env.db.<collection>.purgeMany not available — " +
+              "runtime is missing the P7 PR 5 purge surface.",
+          ),
+          { code: "purge_not_available" as const },
+        );
+      }
+      const n = await native.purgeMany(mapped);
+      return { purgedCount: n };
+    });
+  }
+
+  /**
+   * **P7 PR 5** — restore a previously soft-deleted row by clearing
+   * `deleted_at`. Bumps `version` + `updated_at` + `updated_by`.
+   * Resolves with the restored row, or `null` when nothing matched.
+   */
+  async restore(
+    idOrFilter: string | number | Filter<S>,
+  ): Promise<Result<Row<S> | null>> {
+    return this._run(async () => {
+      const isBareId =
+        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const filter = (isBareId
+        ? ({ id: idOrFilter } as Filter<S>)
+        : idOrFilter);
+      if (!isBareId) {
+        validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+      }
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
+      const native = this._nativeCollection() as NativeCollection & {
+        restore?: (f: ZeroshipDbFilter) => Promise<Record<string, unknown> | null>;
+      };
+      if (typeof native.restore !== "function") {
+        throw Object.assign(
+          new Error(
+            "@zeroship/db: env.db.<collection>.restore not available — " +
+              "runtime is missing the P7 PR 5 restore surface.",
+          ),
+          { code: "restore_not_available" as const },
+        );
+      }
+      const result = await native.restore(mapped);
+      if (result === null) return null;
+      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
+    });
+  }
+
+  /** **P7 PR 5** — bulk-restore. Resolves with `{ restoredCount: N }`. */
+  async restoreMany(
+    filter: Filter<S> = {} as Filter<S>,
+  ): Promise<Result<{ restoredCount: number }>> {
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
+    return this._run(async () => {
+      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
+      const native = this._nativeCollection() as NativeCollection & {
+        restoreMany?: (f: ZeroshipDbFilter) => Promise<number>;
+      };
+      if (typeof native.restoreMany !== "function") {
+        throw Object.assign(
+          new Error(
+            "@zeroship/db: env.db.<collection>.restoreMany not available — " +
+              "runtime is missing the P7 PR 5 restore surface.",
+          ),
+          { code: "restore_not_available" as const },
+        );
+      }
+      const n = await native.restoreMany(mapped);
+      return { restoredCount: n };
+    });
+  }
+
+  /**
    * Counts documents matching `filter`. Defaults to counting all documents when
    * no filter is provided.
    */

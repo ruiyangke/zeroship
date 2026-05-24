@@ -16,8 +16,9 @@ use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8
 use crate::crud::{
     dispatch_aggregate, dispatch_count, dispatch_delete_many, dispatch_delete_one,
     dispatch_distinct, dispatch_find, dispatch_find_one, dispatch_find_or_create,
-    dispatch_insert, dispatch_insert_many, dispatch_near, dispatch_search,
-    dispatch_update_many, dispatch_update_one, dispatch_upsert,
+    dispatch_insert, dispatch_insert_many, dispatch_near, dispatch_purge_many, dispatch_purge_one,
+    dispatch_restore_many, dispatch_restore_one, dispatch_search, dispatch_update_many,
+    dispatch_update_one, dispatch_upsert,
 };
 use crate::v8_bridge::{read_json_arg, refuse_if_query_capability};
 
@@ -189,6 +190,68 @@ impl Collection {
         dispatch_delete_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
+    /// `collection.purge(filter)` — **P7 PR 5**. Explicit hard-delete
+    /// of a single matching row. Always emits `DELETE FROM ...`
+    /// regardless of the system-fields marker. For compliance /
+    /// right-to-be-forgotten flows.
+    #[v8_method]
+    fn purge<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purge") {
+            return p.into();
+        }
+        let filter_v = read_json_arg(scope, Some(filter));
+        dispatch_purge_one(scope, &self.app_id, &self.name, filter_v).into()
+    }
+
+    /// `collection.purgeMany(filter)` — **P7 PR 5**. Bulk hard-delete.
+    #[v8_method]
+    #[v8_name = "purgeMany"]
+    fn purge_many<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purgeMany") {
+            return p.into();
+        }
+        let filter_v = read_json_arg(scope, Some(filter));
+        dispatch_purge_many(scope, &self.app_id, &self.name, filter_v).into()
+    }
+
+    /// `collection.restore(filter)` — **P7 PR 5**. Clear `deleted_at`
+    /// on the first matching soft-deleted row.
+    #[v8_method]
+    fn restore<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restore") {
+            return p.into();
+        }
+        let filter_v = read_json_arg(scope, Some(filter));
+        dispatch_restore_one(scope, &self.app_id, &self.name, filter_v).into()
+    }
+
+    /// `collection.restoreMany(filter)` — **P7 PR 5**. Bulk-restore.
+    #[v8_method]
+    #[v8_name = "restoreMany"]
+    fn restore_many<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restoreMany") {
+            return p.into();
+        }
+        let filter_v = read_json_arg(scope, Some(filter));
+        dispatch_restore_many(scope, &self.app_id, &self.name, filter_v).into()
+    }
+
     /// `collection.upsert(doc, opts)` — insert or update on conflict.
     ///
     /// `opts.conflictFields` (string[]) names the ON CONFLICT target
@@ -281,19 +344,28 @@ impl Collection {
         Ok(dispatch_find_or_create(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
     }
 
+    /// `collection.count(filter, opts?)` — count matching rows.
+    ///
+    /// **P7 PR 5** — `opts.include_deleted: true` opts out of the
+    /// auto `AND deleted_at IS NULL` filter.
     #[v8_method]
     fn count<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let filter_v = read_json_arg(scope, Some(filter));
-        dispatch_count(scope, &self.app_id, &self.name, filter_v).into()
+        let opts_v = read_json_arg(scope, Some(opts));
+        dispatch_count(scope, &self.app_id, &self.name, filter_v, opts_v).into()
     }
 
     /// `collection.distinct(filter, opts)` — return the unique values
     /// of `opts.field` across rows matching `filter`. Filter-first to
     /// match the rest of the read surface.
+    ///
+    /// **P7 PR 5** — `opts.include_deleted: true` opts out of the
+    /// auto `AND deleted_at IS NULL` filter.
     #[v8_method]
     fn distinct<'s>(
         &self,
@@ -311,17 +383,24 @@ impl Collection {
                 "distinct: opts.field must be a non-empty string",
             ))?
             .to_string();
-        Ok(dispatch_distinct(scope, &self.app_id, &self.name, &field, filter_v).into())
+        Ok(dispatch_distinct(scope, &self.app_id, &self.name, &field, filter_v, opts_v).into())
     }
 
+    /// `collection.aggregate(pipeline, opts?)` — run an aggregation
+    /// pipeline.
+    ///
+    /// **P7 PR 5** — `opts.include_deleted: true` opts out of the
+    /// auto-prepended soft-delete `$match`.
     #[v8_method]
     fn aggregate<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         pipeline: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let pipeline_v = read_json_arg(scope, Some(pipeline));
-        dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v).into()
+        let opts_v = read_json_arg(scope, Some(opts));
+        dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v, opts_v).into()
     }
 
     /// `collection.search(args)` — **P4 PR 2** vector / FTS search.

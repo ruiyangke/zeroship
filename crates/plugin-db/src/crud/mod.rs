@@ -235,6 +235,12 @@ pub(crate) fn dispatch_find_one<'s>(
         .get("unmaskReason")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    // **P7 PR 5** — `include_deleted: true` opts out of the auto
+    // `AND deleted_at IS NULL` filter. Default = "filter out".
+    let include_deleted = opts
+        .get("include_deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let app = app_id.to_string();
@@ -267,7 +273,11 @@ pub(crate) fn dispatch_find_one<'s>(
         // emits `"<col>_masked" AS "<col>"` so the ciphertext column
         // never leaves Postgres on a default read.
         let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
-        let built = query::build_find_with_schema_and_unmask(
+        // **P7 PR 5** — gate the soft-delete auto-filter on the
+        // schema's `_systemFields` marker.
+        let filter_soft_deleted =
+            system_fields_pass::should_filter_soft_deleted(&app, &coll, include_deleted);
+        let built = query::build_find_with_schema_and_unmask_and_soft_delete(
             &app,
             &coll,
             &filter,
@@ -277,6 +287,7 @@ pub(crate) fn dispatch_find_one<'s>(
             select.as_ref(),
             schema_hint.as_ref(),
             &unmask_columns,
+            filter_soft_deleted,
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -411,6 +422,10 @@ pub(crate) fn dispatch_find<'s>(
         .get("unmaskReason")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let include_deleted = opts
+        .get("include_deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let app = app_id.to_string();
@@ -439,7 +454,10 @@ pub(crate) fn dispatch_find<'s>(
         // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
         // See `dispatch_find_one` for the rationale.
         let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
-        let built = query::build_find_with_schema_and_unmask(
+        // **P7 PR 5** — soft-delete auto-filter gate.
+        let filter_soft_deleted =
+            system_fields_pass::should_filter_soft_deleted(&app, &coll, include_deleted);
+        let built = query::build_find_with_schema_and_unmask_and_soft_delete(
             &app,
             &coll,
             &filter,
@@ -449,6 +467,7 @@ pub(crate) fn dispatch_find<'s>(
             select.as_ref(),
             schema_hint.as_ref(),
             &unmask_columns,
+            filter_soft_deleted,
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -977,12 +996,149 @@ pub(crate) fn dispatch_update_many<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// deleteOne / deleteMany — write paths
+// deleteOne / deleteMany / purge / restore — write paths
+//
+// **P7 PR 5** — `delete()` becomes soft-delete on post-migration tables
+// (Path C from §11 of the proposal). The dispatch helpers route through
+// `system_fields_pass::schema_has_system_fields_marker` to decide:
+//
+//   - Marker present → soft-delete via
+//     `build_soft_delete_*_with_system_fields`. The emitted broker
+//     event is `ChangeOp::Update` (soft-delete IS an UPDATE setting
+//     `deleted_at`) — see §6 of the proposal.
+//   - Marker absent → legacy hard `DELETE` with a one-shot
+//     `tracing::warn!` on the `zeroship_plugin_db::soft_delete_legacy`
+//     target.
+//
+// `purge()` (new in PR 5) always hard-deletes regardless of marker
+// state. `restore()` (also new) clears `deleted_at` on a soft-deleted
+// row.
 // ---------------------------------------------------------------------------
 
 /// Shared dispatch for `deleteOne`. See [`dispatch_insert`] for the
 /// capability-gate contract.
+///
+/// **P7 PR 5** — Path C semantics: soft-delete on post-migration
+/// tables, legacy hard-delete with `tracing::warn!` on pre-migration
+/// tables.
 pub(crate) fn dispatch_delete_one<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    let coll = collection.to_string();
+    let app = app_id.to_string();
+    let actor_id = system_fields_pass::current_actor_id(&state);
+    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
+
+    if has_marker {
+        let autobump = query::SystemFieldAutoBump {
+            actor_id: actor_id.as_deref(),
+            ..Default::default()
+        };
+        let built = query::build_soft_delete_one_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            query::SqlDialect::Postgres,
+            &autobump,
+        );
+        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+            resolver,
+            request_id,
+            built,
+            move |bq| async move {
+                // Tagged as Update because soft-delete IS an UPDATE
+                // setting `deleted_at`. Subscribers wanting to react
+                // to soft-deletes inspect `new_tuple.deleted_at`.
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            },
+            first_row_or_null,
+        )));
+    } else {
+        system_fields_pass::warn_legacy_hard_delete(&app, &coll);
+        let built = query::build_delete_one(&app, &coll, &filter);
+        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+            resolver,
+            request_id,
+            built,
+            move |bq| async move {
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
+            },
+            first_row_or_null,
+        )));
+    }
+
+    promise
+}
+
+/// Shared dispatch for `deleteMany`. Resolves with the count of
+/// affected rows as a JS `number`.
+///
+/// **P7 PR 5** — same Path C semantics as [`dispatch_delete_one`].
+pub(crate) fn dispatch_delete_many<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    let coll = collection.to_string();
+    let app = app_id.to_string();
+    let actor_id = system_fields_pass::current_actor_id(&state);
+    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
+
+    if has_marker {
+        let autobump = query::SystemFieldAutoBump {
+            actor_id: actor_id.as_deref(),
+            ..Default::default()
+        };
+        let built = query::build_soft_delete_many_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            query::SqlDialect::Postgres,
+            &autobump,
+        );
+        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+            resolver,
+            request_id,
+            built,
+            move |bq| async move {
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            },
+            row_count_as_f64,
+        )));
+    } else {
+        system_fields_pass::warn_legacy_hard_delete(&app, &coll);
+        let built = query::build_delete_many(&app, &coll, &filter);
+        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+            resolver,
+            request_id,
+            built,
+            move |bq| async move {
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
+            },
+            row_count_as_f64,
+        )));
+    }
+
+    promise
+}
+
+/// **P7 PR 5** — explicit hard-delete entry point. Always emits
+/// `DELETE FROM ...` regardless of marker state. Used by the SDK's
+/// `purge(filter)` for compliance / right-to-be-forgotten flows.
+///
+/// `purge` does NOT respect the `deleted_at IS NULL` auto-filter —
+/// it removes both live and soft-deleted rows matching the filter.
+pub(crate) fn dispatch_purge_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
     collection: &str,
@@ -1008,9 +1164,8 @@ pub(crate) fn dispatch_delete_one<'s>(
     promise
 }
 
-/// Shared dispatch for `deleteMany`. Resolves with the count of
-/// affected rows as a JS `number`.
-pub(crate) fn dispatch_delete_many<'s>(
+/// **P7 PR 5** — bulk-purge entry point.
+pub(crate) fn dispatch_purge_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
     collection: &str,
@@ -1036,17 +1191,126 @@ pub(crate) fn dispatch_delete_many<'s>(
     promise
 }
 
+/// **P7 PR 5** — restore a soft-deleted row. Refuses with
+/// `restore_unsupported_legacy_table` when the cached schema lacks
+/// the system-fields marker.
+pub(crate) fn dispatch_restore_one<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    let coll = collection.to_string();
+    let app = app_id.to_string();
+    let actor_id = system_fields_pass::current_actor_id(&state);
+    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
+
+    if !has_marker {
+        let err = DbError::restore_unsupported_legacy_table(&coll);
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(err.to_op_error()),
+                request_id,
+            }
+        }));
+        return promise;
+    }
+
+    let autobump = query::SystemFieldAutoBump {
+        actor_id: actor_id.as_deref(),
+        ..Default::default()
+    };
+    let built = query::build_restore_one_with_system_fields(
+        &app,
+        &coll,
+        &filter,
+        query::SqlDialect::Postgres,
+        &autobump,
+    );
+    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+        resolver,
+        request_id,
+        built,
+        move |bq| async move {
+            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+        },
+        first_row_or_null,
+    )));
+
+    promise
+}
+
+/// **P7 PR 5** — bulk-restore entry point.
+pub(crate) fn dispatch_restore_many<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    let coll = collection.to_string();
+    let app = app_id.to_string();
+    let actor_id = system_fields_pass::current_actor_id(&state);
+    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
+
+    if !has_marker {
+        let err = DbError::restore_unsupported_legacy_table(&coll);
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(err.to_op_error()),
+                request_id,
+            }
+        }));
+        return promise;
+    }
+
+    let autobump = query::SystemFieldAutoBump {
+        actor_id: actor_id.as_deref(),
+        ..Default::default()
+    };
+    let built = query::build_restore_many_with_system_fields(
+        &app,
+        &coll,
+        &filter,
+        query::SqlDialect::Postgres,
+        &autobump,
+    );
+    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+        resolver,
+        request_id,
+        built,
+        move |bq| async move {
+            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+        },
+        row_count_as_f64,
+    )));
+
+    promise
+}
+
 // ---------------------------------------------------------------------------
 // aggregate / distinct / count — read paths
 // ---------------------------------------------------------------------------
 
 /// Shared dispatch for `aggregate`. Pipeline is a JSON array of stage
 /// objects.
+///
+/// **P7 PR 5** — `opts.include_deleted: true` opts out of the auto
+/// soft-delete `$match` (per Q-SF-J in the proposal — every read-side
+/// method auto-filters for consistency).
 pub(crate) fn dispatch_aggregate<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
     collection: &str,
     pipeline: Value,
+    opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
 
@@ -1064,8 +1328,20 @@ pub(crate) fn dispatch_aggregate<'s>(
         crate::read_set::record_if_active(collection, &captured_filter);
     }
 
+    let include_deleted = opts
+        .get("include_deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let filter_soft_deleted =
+        system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    let built = query::build_aggregate(app_id, collection, &pipeline);
+    let built = query::build_aggregate_with_soft_delete(
+        app_id,
+        collection,
+        &pipeline,
+        filter_soft_deleted,
+    );
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1080,17 +1356,33 @@ pub(crate) fn dispatch_aggregate<'s>(
 
 /// Shared dispatch for `distinct`. `field` is the column name; `filter`
 /// is the WHERE-clause JSON.
+///
+/// **P7 PR 5** — `opts.include_deleted: true` opts out of the auto-
+/// filter; see [`dispatch_find`].
 pub(crate) fn dispatch_distinct<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
     collection: &str,
     field: &str,
     filter: Value,
+    opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_distinct(app_id, collection, field, &filter);
+    let include_deleted = opts
+        .get("include_deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let filter_soft_deleted =
+        system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let built = query::build_distinct_with_soft_delete(
+        app_id,
+        collection,
+        field,
+        &filter,
+        filter_soft_deleted,
+    );
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1120,19 +1412,31 @@ pub(crate) fn dispatch_distinct<'s>(
 
 /// Shared dispatch for `count`. Resolves with a real JS `number`
 /// (not a JSON-stringified integer).
+///
+/// **P7 PR 5** — `opts.include_deleted: true` opts out of the auto-
+/// filter.
 pub(crate) fn dispatch_count<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
     collection: &str,
     filter: Value,
+    opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     // P8b — record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
+    let include_deleted = opts
+        .get("include_deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let filter_soft_deleted =
+        system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    let built = query::build_count(app_id, collection, &filter);
+    let built =
+        query::build_count_with_soft_delete(app_id, collection, &filter, filter_soft_deleted);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,

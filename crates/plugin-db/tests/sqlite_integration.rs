@@ -7346,3 +7346,560 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// P7 PR 5 — delete becomes soft-delete; add purge + restore; find auto-
+// filters deleted_at
+//
+// We use the `_many` builders on the SQLite arm because the `_one`
+// builders narrow via the PG-flavoured `ctid` subquery (SQLite doesn't
+// carry `ctid`); the PR4 UPDATE e2e tests follow the same convention.
+// Filter is narrowed to a single id so the multi-row builder still
+// touches exactly one row in practice.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_sd1", "title": "to be deleted" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &p).await.unwrap();
+
+        let filter = serde_json::json!({ "id": "post_sd1" });
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_deleter"),
+            ..Default::default()
+        };
+        let sd = build_soft_delete_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &filter,
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        let returning = client.query(&sd.sql, &p).await.unwrap();
+        assert_eq!(returning.len(), 1, "soft-delete returned 1 row");
+
+        let rows = client
+            .query(
+                "SELECT deleted_at IS NOT NULL AS dn, version, updated_by FROM \"app_demo\".\"posts\" WHERE id = 'post_sd1'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_deref(), Some("1"), "deleted_at IS NOT NULL");
+        assert_eq!(rows[0][1].as_deref(), Some("2"), "version bumped from 1");
+        assert_eq!(
+            rows[0][2].as_deref(),
+            Some("usr_deleter"),
+            "updated_by stamped from actor"
+        );
+    });
+}
+
+#[test]
+fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_idem", "title": "x" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &p).await.unwrap();
+
+        let filter = serde_json::json!({ "id": "post_idem" });
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_x"),
+            ..Default::default()
+        };
+        let sd = build_soft_delete_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &filter,
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p1: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        let r1 = client.query(&sd.sql, &p1).await.unwrap();
+        assert_eq!(r1.len(), 1, "first soft-delete hits");
+        let r2 = client.query(&sd.sql, &p1).await.unwrap();
+        assert!(r2.is_empty(), "re-soft-deleting is a no-op");
+    });
+}
+
+#[test]
+fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_find_with_schema_and_unmask_and_soft_delete,
+        build_insert_with_dialect, build_soft_delete_many_with_system_fields, FkEmission,
+        SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        for id in &["post_alive_a", "post_alive_b", "post_dead"] {
+            let doc = serde_json::json!({ "id": id, "title": id });
+            let ins =
+                build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+            let client = backend.acquire_dedicated_client().await.unwrap();
+            client.query(&ins.sql, &p).await.unwrap();
+        }
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let sd = build_soft_delete_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "id": "post_dead" }),
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&sd.sql, &p).await.unwrap();
+
+        let q = build_find_with_schema_and_unmask_and_soft_delete(
+            "app_demo",
+            "posts",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            true,
+        )
+        .unwrap();
+        let rows = client.query(&q.sql, &[]).await.unwrap();
+        assert_eq!(rows.len(), 2, "soft-deleted row hidden by auto-filter");
+
+        let q2 = build_find_with_schema_and_unmask_and_soft_delete(
+            "app_demo",
+            "posts",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .unwrap();
+        let rows2 = client.query(&q2.sql, &[]).await.unwrap();
+        assert_eq!(rows2.len(), 3, "include_deleted: all rows visible");
+    });
+}
+
+#[test]
+fn restore_clears_deleted_at_and_bumps_version_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_restore_many_with_system_fields, build_soft_delete_many_with_system_fields,
+        FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_rs", "title": "x" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &p).await.unwrap();
+
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_x"),
+            ..Default::default()
+        };
+        let sd = build_soft_delete_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "id": "post_rs" }),
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        client.query(&sd.sql, &p).await.unwrap();
+
+        let rs = build_restore_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "id": "post_rs" }),
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = rs.params.iter().map(String::as_str).collect();
+        let returning = client.query(&rs.sql, &p).await.unwrap();
+        assert_eq!(returning.len(), 1, "restore hit the soft-deleted row");
+
+        let rows = client
+            .query(
+                "SELECT deleted_at IS NULL AS dn, version FROM \"app_demo\".\"posts\" WHERE id = 'post_rs'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("1"), "deleted_at IS NULL");
+        assert_eq!(rows[0][1].as_deref(), Some("3"), "version bumped twice");
+    });
+}
+
+#[test]
+fn restore_on_already_live_row_affects_zero_rows_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_restore_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_live", "title": "x" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &p).await.unwrap();
+
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_x"),
+            ..Default::default()
+        };
+        let rs = build_restore_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "id": "post_live" }),
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = rs.params.iter().map(String::as_str).collect();
+        let returning = client.query(&rs.sql, &p).await.unwrap();
+        assert!(returning.is_empty(), "restoring a live row is a no-op");
+        let rows = client
+            .query(
+                "SELECT version FROM \"app_demo\".\"posts\" WHERE id = 'post_live'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("1"), "version untouched");
+    });
+}
+
+#[test]
+fn soft_delete_then_restore_full_lifecycle_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_find_with_schema_and_unmask_and_soft_delete,
+        build_insert_with_dialect, build_restore_many_with_system_fields,
+        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_lc", "title": "lifecycle" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &p).await.unwrap();
+
+        let find_default = build_find_with_schema_and_unmask_and_soft_delete(
+            "app_demo",
+            "posts",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            true,
+        )
+        .unwrap();
+        let r = client.query(&find_default.sql, &[]).await.unwrap();
+        assert_eq!(r.len(), 1, "live row visible pre-delete");
+
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_x"),
+            ..Default::default()
+        };
+        let sd = build_soft_delete_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "id": "post_lc" }),
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        client.query(&sd.sql, &p).await.unwrap();
+
+        let r = client.query(&find_default.sql, &[]).await.unwrap();
+        assert!(r.is_empty(), "soft-deleted row hidden");
+
+        let find_inc = build_find_with_schema_and_unmask_and_soft_delete(
+            "app_demo",
+            "posts",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            false,
+        )
+        .unwrap();
+        let r = client.query(&find_inc.sql, &[]).await.unwrap();
+        assert_eq!(r.len(), 1, "include_deleted reveals it");
+
+        let rs = build_restore_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "id": "post_lc" }),
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = rs.params.iter().map(String::as_str).collect();
+        client.query(&rs.sql, &p).await.unwrap();
+
+        let r = client.query(&find_default.sql, &[]).await.unwrap();
+        assert_eq!(r.len(), 1, "restored row visible to default find");
+
+        let rows = client
+            .query(
+                "SELECT version FROM \"app_demo\".\"posts\" WHERE id = 'post_lc'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("3"));
+    });
+}
+
+#[test]
+fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_soft_delete_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "author": { "type": "string" }, "title": { "type": "string" } }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        for (id, author) in &[
+            ("post_a1", "usr_a"),
+            ("post_a2", "usr_a"),
+            ("post_a3_dead", "usr_a"),
+            ("post_b1", "usr_b"),
+            ("post_b2", "usr_b"),
+        ] {
+            let doc = serde_json::json!({ "id": id, "author": author, "title": id });
+            let ins =
+                build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+            let p: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+            let client = backend.acquire_dedicated_client().await.unwrap();
+            client.query(&ins.sql, &p).await.unwrap();
+        }
+        backend
+            .pool_exec(
+                "UPDATE \"app_demo\".\"posts\" SET deleted_at = CURRENT_TIMESTAMP WHERE id = 'post_a3_dead'",
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_admin"),
+            ..Default::default()
+        };
+        let sd = build_soft_delete_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "author": "usr_a" }),
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p: Vec<&str> = sd.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        let returning = client.query(&sd.sql, &p).await.unwrap();
+        assert_eq!(
+            returning.len(),
+            2,
+            "only 2 live usr_a rows affected; already-deleted excluded"
+        );
+
+        let dead_a = client
+            .query(
+                "SELECT COUNT(*) FROM \"app_demo\".\"posts\" WHERE author = 'usr_a' AND deleted_at IS NOT NULL",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(dead_a[0][0].as_deref(), Some("3"));
+        let live_b = client
+            .query(
+                "SELECT COUNT(*) FROM \"app_demo\".\"posts\" WHERE author = 'usr_b' AND deleted_at IS NULL",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_b[0][0].as_deref(), Some("2"));
+    });
+}
+
+#[test]
+fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
+    use zeroship_plugin_db::query::build_delete_one;
+
+    let q = build_delete_one("app1", "posts", &serde_json::json!({ "id": "x" })).unwrap();
+    assert!(q.sql.starts_with("DELETE FROM"));
+    assert!(!q.sql.contains("deleted_at"));
+    assert!(q.sql.contains("RETURNING *"));
+}

@@ -432,6 +432,31 @@ impl DbError {
         }
     }
 
+    /// **P7 PR 5** — `restore()` called on a table that lacks the
+    /// `deleted_at` column (no `_systemFields` marker on the cached
+    /// schema). The legacy-hard-delete fallback for `delete()` makes
+    /// sense (drop a row from a pre-PR-2 table), but there's no
+    /// equivalent "soft-restore" target for a table that never had a
+    /// `deleted_at` column. Refuse with a typed code so SDK consumers
+    /// can surface the remediation message verbatim.
+    pub fn restore_unsupported_legacy_table(collection: &str) -> Self {
+        DbError::ValidationFailed {
+            code: "restore_unsupported_legacy_table",
+            message: format!(
+                "`{collection}` was created before the platform system-fields \
+                 contract (no `deleted_at` column); `restore()` is not \
+                 supported on pre-migration tables."
+            ),
+            hint: Some(
+                "Re-register the model via `db.registerModel(...)` after \
+                 the platform's system-fields migration (PR 6) has run, or \
+                 manually ALTER the table to add the seven system field \
+                 columns."
+                    .to_string(),
+            ),
+        }
+    }
+
     /// Build the canonical [`DbError::Configuration`] returned when
     /// [`crate::backend::BackendHandle::as_postgres`] yields `None` —
     /// i.e. the active backend isn't the Postgres arm. Every call site

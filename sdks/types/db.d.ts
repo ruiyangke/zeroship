@@ -82,6 +82,14 @@ interface ZeroshipDbFindOpts {
   unmask?: string[];
   actor?: Record<string, unknown>;
   unmaskReason?: string;
+  /**
+   * **P7 PR 5** — opt out of the default `AND deleted_at IS NULL`
+   * auto-filter. When `true`, soft-deleted rows participate in the
+   * result set. Default omitted means "filter soft-deleted out" on
+   * post-migration tables (no-op on pre-migration tables where the
+   * column doesn't exist).
+   */
+  include_deleted?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,11 +236,35 @@ interface ZeroshipCollection {
   /** Update multiple documents. Returns the count of affected rows. */
   updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<number>;
 
-  /** Delete one document. Returns the deleted row or `null` when nothing matched. */
+  /** Delete one document. Returns the deleted row or `null` when nothing matched.
+   *
+   *  **P7 PR 5** — on post-migration tables (those carrying the
+   *  platform `deleted_at` column) this performs a SOFT delete:
+   *  `UPDATE ... SET deleted_at = NOW()` and the returned row carries
+   *  the populated `deleted_at`. On pre-migration tables it still
+   *  performs a hard DELETE with an operator-side warning. Use
+   *  `purge` for explicit hard-delete regardless of table state. */
   deleteOne(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
-  /** Delete multiple documents. Returns the count of affected rows. */
+  /** Delete multiple documents. Returns the count of affected rows.
+   *
+   *  **P7 PR 5** — same Path C semantics as `deleteOne`. */
   deleteMany(filter: ZeroshipDbFilter): Promise<number>;
+
+  /** **P7 PR 5** — explicit hard-delete. Always emits `DELETE FROM ...`,
+   *  regardless of the system-fields marker. */
+  purge(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
+
+  /** **P7 PR 5** — bulk hard-delete. Returns the count of affected rows. */
+  purgeMany(filter: ZeroshipDbFilter): Promise<number>;
+
+  /** **P7 PR 5** — restore a soft-deleted row by clearing `deleted_at`.
+   *  Refuses with `restore_unsupported_legacy_table` on pre-migration
+   *  tables. */
+  restore(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
+
+  /** **P7 PR 5** — bulk-restore. Returns the count of restored rows. */
+  restoreMany(filter: ZeroshipDbFilter): Promise<number>;
 
   /** Upsert a document (insert or update on conflict). Returns the row.
    *  `opts.conflictFields` names the ON CONFLICT target columns — must
@@ -252,17 +284,27 @@ interface ZeroshipCollection {
     opts: { conflictFields: string[] },
   ): Promise<{ row: Record<string, unknown>; created: boolean }>;
 
-  /** Count documents matching `filter`. No opts — `count` is
-   *  conceptually unbounded; use `find` with a `limit` to cap a row
-   *  scan. */
-  count(filter: ZeroshipDbFilter): Promise<number>;
+  /** Count documents matching `filter`. `opts.include_deleted: true`
+   *  (P7 PR 5) opts out of the auto soft-delete filter. */
+  count(
+    filter: ZeroshipDbFilter,
+    opts?: { include_deleted?: boolean },
+  ): Promise<number>;
 
   /** Get distinct values for `opts.field` across rows matching
-   *  `filter`. Returns a flat array of scalar values. */
-  distinct(filter: ZeroshipDbFilter, opts: { field: string }): Promise<(string | number | boolean | null)[]>;
+   *  `filter`. `opts.include_deleted: true` (P7 PR 5) opts out of the
+   *  soft-delete auto-filter. */
+  distinct(
+    filter: ZeroshipDbFilter,
+    opts: { field: string; include_deleted?: boolean },
+  ): Promise<(string | number | boolean | null)[]>;
 
-  /** Run an aggregation pipeline. Returns the result rows. */
-  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<Record<string, unknown>[]>;
+  /** Run an aggregation pipeline. `opts.include_deleted: true` (P7
+   *  PR 5) opts out of the soft-delete auto-`$match`. */
+  aggregate(
+    pipeline: ZeroshipDbAggregateStage[],
+    opts?: { include_deleted?: boolean },
+  ): Promise<Record<string, unknown>[]>;
 
   /**
    * **P4 PR 2** — unified vector / FTS search entry. Discriminated by

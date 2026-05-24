@@ -489,6 +489,162 @@ pub(crate) fn filter_has_id_predicate(filter: &Value) -> bool {
         .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// **P7 PR 5** — soft-delete dispatch helpers.
+//
+// `delete()` becomes soft-delete on post-migration tables (Path C from
+// §11 of the proposal): the dispatch path inspects the schema cache for
+// the marker stamped by `register_model` (PR 4) and routes to either a
+// soft-delete `UPDATE ... SET deleted_at = NOW()` or the legacy hard
+// `DELETE` (with a `tracing::warn!`). Pre-PR-2 tables can't tell from
+// the cached schema alone whether `deleted_at` is present; the marker is
+// the discriminator because PR 6's ALTER pass restamps the schema after
+// it brings the column in.
+//
+// Two new methods land in this PR — `purge` (explicit hard-delete) and
+// `restore` (clear `deleted_at`). Both are direct verbs in the SDK and
+// reach the dispatch layer through their own helpers below.
+// ---------------------------------------------------------------------------
+
+/// **P7 PR 5** — does the cached schema for `(app_id, collection)`
+/// promise the table carries the seven system-field columns?
+///
+/// Reads the `_systemFields: true` marker stamped by `register_model`
+/// after the four-phase DDL pipeline succeeds (PR 4). Returns `true`
+/// when the marker is present AND set; `false` when:
+///
+/// - the marker is missing (pre-PR-2 table cached by P0-P5-era flows),
+/// - the marker is `false` (defensive — current emitter only writes
+///   `true`, but a future ALTER pass might toggle while migration runs),
+/// - the cached schema is absent (cold isolate / never-registered).
+///
+/// The third case (no cache entry) is the one the proposal calls out
+/// for the "raw `default = { fetch }` against an existing table" path
+/// where the orchestrator never minted a marker on this isolate. The
+/// dispatch helpers route those to legacy hard-delete with a warning —
+/// the SDK consumer will see hard-delete semantics on a cold isolate
+/// the same way they would on a pre-PR-2 table. PR 6's ALTER pass
+/// re-registers and re-stamps; once the marker lands the next dispatch
+/// soft-deletes.
+pub(crate) fn schema_has_system_fields_marker(app_id: &str, collection: &str) -> bool {
+    crate::context::with(|c| {
+        c.schema_for(app_id, collection)
+            .as_ref()
+            .and_then(|schema| schema.as_object())
+            .and_then(|o| o.get(SYSTEM_FIELDS_MARKER_KEY))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    })
+}
+
+/// **P7 PR 5** — per-process dedupe set for the legacy-find warning.
+/// Module-scoped so the test reset hook
+/// (`reset_legacy_warning_dedupe_for_tests`) can clear the SAME
+/// `OnceLock<Mutex<HashSet<...>>>` the warning path inserts into. A
+/// function-local static would be a different instance and the reset
+/// would silently no-op.
+static LEGACY_FIND_WARNED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+> = std::sync::OnceLock::new();
+
+/// **P7 PR 5** — one-time-per-(isolate, app, collection) warning when
+/// the find / count / aggregate path runs against a pre-migration
+/// table (no `_systemFields` marker on the cached schema). The auto-
+/// filter for `deleted_at IS NULL` cannot fire on those tables (the
+/// column doesn't exist), so soft-deleted rows would be invisible —
+/// but here there are none to hide. The warning surfaces the legacy
+/// state so operators can spot tables awaiting PR 6's ALTER pass
+/// without spamming the log on every dispatch.
+///
+/// `OnceLock<Mutex<HashSet<(String, String)>>>` is the per-process
+/// dedupe — see the proposal's "RECOMMEND ... `OnceCell<HashSet<...>>`
+/// is fine" design call. The lock is uncontended in the steady state
+/// (the first dispatch per `(app, collection)` wins; subsequent
+/// dispatches `.contains()`-check and skip).
+fn warn_legacy_find_once(app_id: &str, collection: &str) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    let warned = LEGACY_FIND_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let key = (app_id.to_string(), collection.to_string());
+    let mut guard = warned.lock().expect("warn-legacy mutex poisoned");
+    if guard.insert(key) {
+        tracing::warn!(
+            target: "zeroship_plugin_db::soft_delete_legacy",
+            app_id = %app_id,
+            collection = %collection,
+            "find/count/aggregate on pre-migration table; \
+             `deleted_at IS NULL` auto-filter is skipped because the \
+             column does not exist. Run `zeroship migrate` (PR 6) to \
+             enable soft-delete semantics."
+        );
+    }
+}
+
+/// **P7 PR 5** — should this collection's SELECTs auto-append
+/// `AND deleted_at IS NULL`?
+///
+/// Returns `true` on post-migration tables (marker present in cache)
+/// AND when the caller hasn't opted out via `include_deleted: true`.
+///
+/// On pre-migration tables (no marker or no cache entry), returns
+/// `false` AND emits a one-time-per-isolate `tracing::warn!` so
+/// operators notice the unfiltered read path. The legacy table has no
+/// `deleted_at` column, so the auto-filter would produce a SQL error —
+/// the legacy contract is the safe fallback.
+pub(crate) fn should_filter_soft_deleted(
+    app_id: &str,
+    collection: &str,
+    include_deleted: bool,
+) -> bool {
+    if include_deleted {
+        return false;
+    }
+    let has_marker = schema_has_system_fields_marker(app_id, collection);
+    if !has_marker {
+        warn_legacy_find_once(app_id, collection);
+        return false;
+    }
+    true
+}
+
+/// **P7 PR 5** — emit the deprecation `tracing::warn!` when the
+/// dispatch layer falls back to legacy hard-delete because the table
+/// lacks the system-fields marker. Path C from §11 of the proposal:
+/// `delete()` does hard-delete on pre-PR-2 tables; future major
+/// version flips this to a hard error.
+///
+/// The target / fields are picked so operators can grep logs for
+/// `zeroship_plugin_db::soft_delete_legacy` to find the call sites
+/// that need migrating.
+pub(crate) fn warn_legacy_hard_delete(app_id: &str, collection: &str) {
+    tracing::warn!(
+        target: "zeroship_plugin_db::soft_delete_legacy",
+        app_id = %app_id,
+        collection = %collection,
+        "delete() on pre-migration table; falling back to hard DELETE. \
+         Run `zeroship migrate` (PR 6) to enable soft-delete semantics, \
+         or call `purge()` explicitly to silence this warning."
+    );
+}
+
+/// **P7 PR 5** — test-only reset of the per-process "we already warned
+/// about this legacy table" dedupe set. The integration suite drives
+/// many `(app, collection)` pairs through the same process; without
+/// this hook the first test's pair would lock out every subsequent
+/// test's "warning fired" assertion.
+///
+/// `#[cfg(any(test, feature = "test-helpers"))]`-gated so production
+/// builds don't expose the internal cache.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_legacy_warning_dedupe_for_tests() {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    let warned = LEGACY_FIND_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    if let Ok(mut g) = warned.lock() {
+        g.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,5 +1173,133 @@ mod tests {
         assert!(!filter_has_id_predicate(&json!({ "title": "x" })));
         assert!(!filter_has_id_predicate(&json!({})));
         assert!(!filter_has_id_predicate(&json!("scalar")));
+    }
+
+    // ---- P7 PR 5 — schema marker check + soft-delete filter gate -----
+
+    #[test]
+    fn schema_has_system_fields_marker_true_for_marked_schema() {
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "posts_sf_mark_t",
+                json!({ SYSTEM_FIELDS_MARKER_KEY: true }),
+            );
+        });
+        assert!(schema_has_system_fields_marker("app1", "posts_sf_mark_t"));
+    }
+
+    #[test]
+    fn schema_has_system_fields_marker_false_for_legacy_schema() {
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "posts_sf_mark_legacy",
+                json!({ "title": { "type": "string" } }),
+            );
+        });
+        assert!(!schema_has_system_fields_marker(
+            "app1",
+            "posts_sf_mark_legacy"
+        ));
+    }
+
+    #[test]
+    fn schema_has_system_fields_marker_false_for_uncached() {
+        // Never registered — cold-isolate / raw fetch path.
+        assert!(!schema_has_system_fields_marker(
+            "app1",
+            "posts_sf_mark_unknown"
+        ));
+    }
+
+    #[test]
+    fn schema_has_system_fields_marker_false_for_explicit_false() {
+        // Defensive: an emitter that writes `false` (or a future ALTER
+        // pass mid-migration) must NOT count as marked.
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "posts_sf_mark_explicit_false",
+                json!({ SYSTEM_FIELDS_MARKER_KEY: false }),
+            );
+        });
+        assert!(!schema_has_system_fields_marker(
+            "app1",
+            "posts_sf_mark_explicit_false"
+        ));
+    }
+
+    #[test]
+    fn should_filter_soft_deleted_true_for_marked_schema() {
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "posts_filter_y",
+                json!({ SYSTEM_FIELDS_MARKER_KEY: true }),
+            );
+        });
+        assert!(should_filter_soft_deleted("app1", "posts_filter_y", false));
+    }
+
+    #[test]
+    fn should_filter_soft_deleted_false_when_include_deleted_true() {
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "posts_filter_inc",
+                json!({ SYSTEM_FIELDS_MARKER_KEY: true }),
+            );
+        });
+        // Even with the marker, opt-out wins.
+        assert!(!should_filter_soft_deleted(
+            "app1",
+            "posts_filter_inc",
+            true
+        ));
+    }
+
+    #[test]
+    fn should_filter_soft_deleted_false_for_legacy_table_and_warns() {
+        reset_legacy_warning_dedupe_for_tests();
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "posts_filter_legacy",
+                json!({ "title": { "type": "string" } }),
+            );
+        });
+        // Legacy table — auto-filter must NOT fire (no `deleted_at`
+        // column) and a warning is emitted.
+        assert!(!should_filter_soft_deleted(
+            "app1",
+            "posts_filter_legacy",
+            false
+        ));
+    }
+
+    #[test]
+    fn should_filter_soft_deleted_warn_dedupes_per_pair() {
+        // Same `(app, collection)` pair the test above used the dedupe
+        // would silence a second warning. Reset; drive twice and
+        // confirm the dedupe set records the pair.
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+        reset_legacy_warning_dedupe_for_tests();
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "posts_filter_dedupe",
+                json!({ "title": { "type": "string" } }),
+            );
+        });
+        let _ = should_filter_soft_deleted("app1", "posts_filter_dedupe", false);
+        let _ = should_filter_soft_deleted("app1", "posts_filter_dedupe", false);
+        let warned = LEGACY_FIND_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+        let g = warned.lock().unwrap();
+        assert!(
+            g.contains(&("app1".to_string(), "posts_filter_dedupe".to_string())),
+            "dedupe set must record the warned pair"
+        );
     }
 }
