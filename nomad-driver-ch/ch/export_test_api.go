@@ -110,6 +110,28 @@ func SetRunIPForTest(fn func(args ...string) ([]byte, error)) func(...string) ([
 	return prev
 }
 
+// SetSleepForTapPollForTest swaps the per-attempt sleep used by
+// `waitForTapAbsent` in the collision-replace path so tests can drive
+// the poll loop without wall-time. Returns the previous fn.
+//
+// Callers pass a no-op (e.g., `func(time.Duration) {}`) to make the
+// poll loop spin without real wait, then validate the poll count via
+// the runIP recorder.
+func SetSleepForTapPollForTest(fn func(d time.Duration)) func(time.Duration) {
+	prev := sleepForTapPoll
+	if fn != nil {
+		sleepForTapPoll = fn
+	}
+	return prev
+}
+
+// TapReleasePollAttempts exposes the bounded retry count to tests so
+// they can pin the "no progress after N tries" invariant without
+// re-deriving the constant.
+func TapReleasePollAttempts() int {
+	return tapReleasePollAttempts
+}
+
 // CallRealSetupTap drives the production setup path with the seam'd `ip`
 // command for testing. Bypasses setupTapFn so tests can exercise
 // realSetupTap's branching directly without re-implementing it.

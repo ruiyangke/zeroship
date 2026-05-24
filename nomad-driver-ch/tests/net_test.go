@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/zeroship/nomad-driver-ch/ch"
 )
@@ -230,7 +231,15 @@ func TestSetupTap_HappyPath(t *testing.T) {
 // Closes T-8b-stress Bug 2: 9/11 wake failures on tap-already-exists.
 // vm_index serialisation makes the tap name driver-owned, so a leftover
 // at the target name is always safe to replace.
+//
+// T-8b-stress-r3 update: the post-delete poll loop now interleaves
+// `ip link show <tap>` calls between `link delete` and the retry
+// `tuntap add`. The test pins the new sequence (one `link show`
+// returning ENODEV → poll exits → retry).
 func TestSetupTap_DeletesAndReAddsOnExistingTap(t *testing.T) {
+	prevSleep := ch.SetSleepForTapPollForTest(func(d time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForTapPollForTest(prevSleep) })
+
 	rec := newIPRecorder(
 		// Call 1: tuntap-add → EEXIST (the prior alloc's leftover).
 		ipScript{
@@ -238,13 +247,17 @@ func TestSetupTap_DeletesAndReAddsOnExistingTap(t *testing.T) {
 			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
 			err:         &fakeExitErr{msg: "exit status 2"},
 		},
-		// Call 2: link delete → success (defaults handle this; but pin
-		// explicitly so a future re-ordering surfaces here, not in a
-		// flaky cluster smoke).
+		// Call 2: link delete → success.
 		ipScript{matchPrefix: "link", out: nil, err: nil},
-		// Call 3: tuntap-add retry → success (defaults: nil/nil).
-		// Call 4: addr-add → success.
-		// Call 5: link-set-up → success.
+		// Call 3: link show → ENODEV (kernel released the netdev).
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("Device \"zsbx-nm-7\" does not exist.\n"),
+			err:         &fakeExitErr{msg: "exit status 1"},
+		},
+		// Call 4: tuntap-add retry → success (defaults: nil/nil).
+		// Call 5: addr-add → success.
+		// Call 6: link-set-up → success.
 	)
 	prev := ch.SetRunIPForTest(rec.run)
 	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
@@ -253,8 +266,8 @@ func TestSetupTap_DeletesAndReAddsOnExistingTap(t *testing.T) {
 		t.Fatalf("realSetupTap should pre-delete + re-add on existing tap, got %v", err)
 	}
 	calls := rec.recorded()
-	if len(calls) != 5 {
-		t.Fatalf("call count = %d, want 5 (tuntap-add-eexist, link-del, tuntap-add-retry, addr-add, link-set-up): %v", len(calls), calls)
+	if len(calls) != 6 {
+		t.Fatalf("call count = %d, want 6 (tuntap-add-eexist, link-del, link-show, tuntap-add-retry, addr-add, link-set-up): %v", len(calls), calls)
 	}
 
 	// Pin the EXACT sequence — operator hand-debug depends on this
@@ -262,6 +275,7 @@ func TestSetupTap_DeletesAndReAddsOnExistingTap(t *testing.T) {
 	wantSeq := [][]string{
 		{"tuntap", "add", "dev", "zsbx-nm-7", "mode", "tap", "user", "nobody"},
 		{"link", "delete", "zsbx-nm-7"},
+		{"link", "show", "zsbx-nm-7"},
 		{"tuntap", "add", "dev", "zsbx-nm-7", "mode", "tap", "user", "nobody"},
 		{"addr", "add", "10.99.107.1/30", "dev", "zsbx-nm-7"},
 		{"link", "set", "dev", "zsbx-nm-7", "up"},
@@ -278,6 +292,9 @@ func TestSetupTap_DeletesAndReAddsOnExistingTap(t *testing.T) {
 // our tuntap-add EEXIST and our delete (e.g., another process raced us
 // to teardown). The retry tuntap-add must still succeed.
 func TestSetupTap_ToleratesDeleteRaceOnReAdd(t *testing.T) {
+	prevSleep := ch.SetSleepForTapPollForTest(func(d time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForTapPollForTest(prevSleep) })
+
 	rec := newIPRecorder(
 		ipScript{
 			matchPrefix: "tuntap",
@@ -290,6 +307,14 @@ func TestSetupTap_ToleratesDeleteRaceOnReAdd(t *testing.T) {
 			out:         []byte("Cannot find device \"zsbx-nm-7\"\n"),
 			err:         &fakeExitErr{msg: "exit status 1"},
 		},
+		// link show → ENODEV (tap is gone). The poll exits on the
+		// first attempt — the race-tolerated delete left us with a
+		// clean kernel state.
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("Device \"zsbx-nm-7\" does not exist.\n"),
+			err:         &fakeExitErr{msg: "exit status 1"},
+		},
 		// retry tuntap-add succeeds; addr/link defaults.
 	)
 	prev := ch.SetRunIPForTest(rec.run)
@@ -299,8 +324,8 @@ func TestSetupTap_ToleratesDeleteRaceOnReAdd(t *testing.T) {
 		t.Fatalf("realSetupTap should tolerate Cannot-find-device on delete-race, got %v", err)
 	}
 	calls := rec.recorded()
-	if len(calls) != 5 {
-		t.Errorf("call count = %d, want 5: %v", len(calls), calls)
+	if len(calls) != 6 {
+		t.Errorf("call count = %d, want 6: %v", len(calls), calls)
 	}
 }
 
@@ -343,6 +368,9 @@ func TestSetupTap_SurfacesUnrecognizedDeleteFailure(t *testing.T) {
 // scenario), we DON'T loop forever; the second EEXIST surfaces as an
 // error so the operator can investigate.
 func TestSetupTap_SurfacesPersistentEexist(t *testing.T) {
+	prevSleep := ch.SetSleepForTapPollForTest(func(d time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForTapPollForTest(prevSleep) })
+
 	rec := newIPRecorder(
 		ipScript{
 			matchPrefix: "tuntap",
@@ -351,6 +379,13 @@ func TestSetupTap_SurfacesPersistentEexist(t *testing.T) {
 		},
 		// delete → success (defaults)
 		ipScript{matchPrefix: "link", out: nil, err: nil},
+		// link show → ENODEV (kernel released; the race that
+		// re-creates the tap concurrently does so AFTER our poll).
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("Device \"zsbx-nm-7\" does not exist.\n"),
+			err:         &fakeExitErr{msg: "exit status 1"},
+		},
 		// retry tuntap-add ALSO EEXIST — surface it.
 		ipScript{
 			matchPrefix: "tuntap",
@@ -418,6 +453,192 @@ func TestSetupTap_BubblesUnexpectedErr(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tuntap") && !strings.Contains(err.Error(), "zsbx-nm-7") {
 		t.Errorf("err = %v, want hint about which step / tap failed", err)
+	}
+}
+
+// --- T-8b-stress-r3: tap-release poll between delete and retry --------
+//
+// Stress-r3 surfaced a kernel-level race: `ip link delete <tap>` returns
+// success synchronously but the tun-driver's exclusive netdev lock is
+// released asynchronously. An immediate retry `ip tuntap add` hits
+// `ioctl(TUNSETIFF): Device or resource busy` (2/60 CREATEs on w1
+// in stress-r3). The fix interleaves `ip link show <tap>` polls until
+// the kernel reports ENODEV, capped at tapReleasePollAttempts.
+
+// TestSetupTap_PollsForDeleteBeforeReadd_SinglePoll pins the happy path
+// of the new behaviour: the FIRST `ip link show` returns ENODEV, so
+// the poll loop exits immediately and the retry tuntap-add fires next.
+func TestSetupTap_PollsForDeleteBeforeReadd_SinglePoll(t *testing.T) {
+	prevSleep := ch.SetSleepForTapPollForTest(func(d time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForTapPollForTest(prevSleep) })
+
+	rec := newIPRecorder(
+		// 1: tuntap-add → EEXIST
+		ipScript{
+			matchPrefix: "tuntap",
+			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+		// 2: link delete → success
+		ipScript{matchPrefix: "link", out: nil, err: nil},
+		// 3: link show → ENODEV on the FIRST poll attempt
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("Device \"zsbx-nm-7\" does not exist.\n"),
+			err:         &fakeExitErr{msg: "exit status 1"},
+		},
+		// 4: tuntap-add retry → success (defaults)
+		// 5: addr-add → success (defaults)
+		// 6: link-set-up → success (defaults)
+	)
+	prev := ch.SetRunIPForTest(rec.run)
+	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
+
+	if _, err := ch.CallRealSetupTap(7, 99); err != nil {
+		t.Fatalf("realSetupTap should succeed with single-poll ENODEV, got %v", err)
+	}
+	calls := rec.recorded()
+	// Exactly ONE `link show` between the delete and the retry.
+	showCount := 0
+	for _, c := range calls {
+		if len(c) >= 2 && c[0] == "link" && c[1] == "show" {
+			showCount++
+		}
+	}
+	if showCount != 1 {
+		t.Errorf("expected exactly 1 link-show poll, got %d (calls=%v)", showCount, calls)
+	}
+}
+
+// TestSetupTap_PollsForDeleteBeforeReadd_MultipleAttempts pins the
+// kernel-lag case: the first few `ip link show` polls return success
+// (tap still in tun-driver release queue), then a later poll returns
+// ENODEV. The retry tuntap-add must still fire and succeed.
+func TestSetupTap_PollsForDeleteBeforeReadd_MultipleAttempts(t *testing.T) {
+	prevSleep := ch.SetSleepForTapPollForTest(func(d time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForTapPollForTest(prevSleep) })
+
+	rec := newIPRecorder(
+		// 1: tuntap-add → EEXIST
+		ipScript{
+			matchPrefix: "tuntap",
+			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+		// 2: link delete → success
+		ipScript{matchPrefix: "link", out: nil, err: nil},
+		// 3: link show → success (tap still there; kernel hasn't
+		//    released the netdev yet — first poll attempt)
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("99: zsbx-nm-7: <NO-CARRIER,BROADCAST,MULTICAST,UP> ...\n"),
+			err:         nil,
+		},
+		// 4: link show → success (still there; second poll attempt)
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("99: zsbx-nm-7: <NO-CARRIER,BROADCAST,MULTICAST,UP> ...\n"),
+			err:         nil,
+		},
+		// 5: link show → ENODEV (kernel released; third poll wins)
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("Device \"zsbx-nm-7\" does not exist.\n"),
+			err:         &fakeExitErr{msg: "exit status 1"},
+		},
+		// 6: tuntap-add retry → success (defaults)
+	)
+	prev := ch.SetRunIPForTest(rec.run)
+	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
+
+	if _, err := ch.CallRealSetupTap(7, 99); err != nil {
+		t.Fatalf("realSetupTap should succeed when kernel releases on the 3rd poll, got %v", err)
+	}
+	calls := rec.recorded()
+	showCount := 0
+	for _, c := range calls {
+		if len(c) >= 2 && c[0] == "link" && c[1] == "show" {
+			showCount++
+		}
+	}
+	if showCount != 3 {
+		t.Errorf("expected 3 link-show polls (2 still-present + 1 ENODEV), got %d (calls=%v)", showCount, calls)
+	}
+	// After the poll loop, the retry tuntap-add MUST fire.
+	tuntapRetries := 0
+	for _, c := range calls {
+		if len(c) >= 2 && c[0] == "tuntap" && c[1] == "add" {
+			tuntapRetries++
+		}
+	}
+	if tuntapRetries != 2 {
+		t.Errorf("expected 2 tuntap-add calls (initial EEXIST + post-poll retry), got %d", tuntapRetries)
+	}
+}
+
+// TestSetupTap_FailsAfterPollTimeout pins the unhappy path: if the
+// kernel never releases the netdev within tapReleasePollAttempts ×
+// tapReleasePollInterval (5 × 100 ms today), surface a clear error so
+// the operator triages the kernel-side wedge rather than chasing the
+// downstream EBUSY on the retry tuntap-add.
+func TestSetupTap_FailsAfterPollTimeout(t *testing.T) {
+	prevSleep := ch.SetSleepForTapPollForTest(func(d time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForTapPollForTest(prevSleep) })
+
+	// Build a script that returns "still present" on every link-show
+	// poll attempt. We pre-fill enough entries to outlast the bounded
+	// retry, plus the initial EEXIST + delete.
+	scripts := []ipScript{
+		// 1: tuntap-add → EEXIST
+		{
+			matchPrefix: "tuntap",
+			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+		// 2: link delete → success
+		{matchPrefix: "link", out: nil, err: nil},
+	}
+	// 3..(2+N): link show → success ("tap still present") for all N
+	// poll attempts. After N attempts the poll loop bails with an
+	// error.
+	for i := 0; i < ch.TapReleasePollAttempts(); i++ {
+		scripts = append(scripts, ipScript{
+			matchPrefix: "link",
+			out:         []byte("99: zsbx-nm-7: <NO-CARRIER,BROADCAST,MULTICAST,UP> ...\n"),
+			err:         nil,
+		})
+	}
+	rec := newIPRecorder(scripts...)
+	prev := ch.SetRunIPForTest(rec.run)
+	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
+
+	_, err := ch.CallRealSetupTap(7, 99)
+	if err == nil {
+		t.Fatal("expected error when kernel never releases the netdev within budget, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not release netdev") &&
+		!strings.Contains(err.Error(), "still present after") {
+		t.Errorf("err = %v, want a clear kernel-release-timeout hint", err)
+	}
+	calls := rec.recorded()
+	showCount := 0
+	for _, c := range calls {
+		if len(c) >= 2 && c[0] == "link" && c[1] == "show" {
+			showCount++
+		}
+	}
+	if showCount != ch.TapReleasePollAttempts() {
+		t.Errorf("expected %d link-show polls (full budget), got %d", ch.TapReleasePollAttempts(), showCount)
+	}
+	// The retry tuntap-add MUST NOT have fired — the poll bailed first.
+	tuntapCalls := 0
+	for _, c := range calls {
+		if len(c) >= 2 && c[0] == "tuntap" && c[1] == "add" {
+			tuntapCalls++
+		}
+	}
+	if tuntapCalls != 1 {
+		t.Errorf("expected 1 tuntap-add call (only the initial EEXIST; retry should NOT fire when poll exhausts), got %d", tuntapCalls)
 	}
 }
 

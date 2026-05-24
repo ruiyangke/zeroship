@@ -51,7 +51,27 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// tapReleasePollAttempts caps the post-`ip link delete` poll loop on
+// `ip link show <tap>` returning ENODEV. T-8b-stress-r3 saw two
+// instances of `ioctl(TUNSETIFF): Device or resource busy` on the
+// retry tuntap-add immediately following a collision-replace delete —
+// the kernel's tun-driver doesn't release the netdev exclusive lock
+// synchronously with `ip link delete`'s success return. Bounded poll
+// avoids both pathological loops and an immediate-retry that hits
+// EBUSY. 5 attempts × 100 ms = 500 ms wall worst case; in practice
+// the kernel typically releases within one tick.
+const tapReleasePollAttempts = 5
+
+// tapReleasePollInterval is the per-attempt sleep in the post-delete
+// poll loop. Picked at 100 ms so 5 attempts cap at 500 ms wall — well
+// inside the 60 s alloc_running_timeout budget the controller waits
+// for. Smaller intervals (e.g., 10 ms) would just spin syscalls
+// without reducing real-world wait (kernel release is dominated by
+// the tun-driver's internal cleanup tick, not poll cadence).
+var tapReleasePollInterval = 100 * time.Millisecond
 
 // defaultSubnetBaseOctet matches the bash wrapper's ZSBX_SUBNET_BASE_OCTET
 // default (99). Exposed as a constant so tests pin the contract.
@@ -152,6 +172,20 @@ func realSetupTap(idx uint16, subnetBaseOctet uint8) (string, error) {
 				return "", fmt.Errorf("ip link delete %s (collision-replace): %w (output=%q)", tapName, delErr, string(delOut))
 			}
 		}
+		// T-8b-stress-r3 fix: poll for the kernel to release the
+		// netdev before retrying tuntap-add. `ip link delete` returns
+		// success synchronously but the tun-driver's exclusive lock on
+		// the netdev is released asynchronously by the kernel — an
+		// immediate retry hits `ioctl(TUNSETIFF): Device or resource
+		// busy` (stress-r3: 2/60 CREATEs on worker-1). We poll
+		// `ip link show <tap>` until it returns ENODEV ("Device
+		// <tap> does not exist") with a bounded retry. Tolerate the
+		// race where the kernel already released the netdev by the
+		// time we poll (first attempt returns ENODEV) — that's the
+		// happy path, just exits the loop immediately.
+		if err := waitForTapAbsent(tapName); err != nil {
+			return "", fmt.Errorf("ip link delete %s (collision-replace): kernel did not release netdev: %w", tapName, err)
+		}
 		// Second attempt at tuntap-add. If THIS still fails with
 		// already-exists, something else races us (e.g., concurrent
 		// driver / orchestration manipulating the same name) — surface
@@ -230,6 +264,49 @@ var runIP = func(args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
+// sleepForTapPoll is the package-level seam tests swap so the poll
+// loop in waitForTapAbsent doesn't add real wall time. Default is
+// time.Sleep — production callers block on the kernel's tun release.
+var sleepForTapPoll = func(d time.Duration) {
+	time.Sleep(d)
+}
+
+// waitForTapAbsent polls `ip link show <tap>` until the kernel reports
+// ENODEV (no such device), or `tapReleasePollAttempts` ticks pass.
+// Used after `ip link delete <tap>` in the collision-replace path so a
+// subsequent `ip tuntap add` doesn't race the tun-driver's asynchronous
+// netdev release (stress-r3 mechanism for `ioctl(TUNSETIFF): Device or
+// resource busy` on the retry tuntap-add).
+//
+// Returns nil as soon as `ip link show` returns ENODEV. Returns an
+// error if all attempts exhaust without seeing ENODEV — that means the
+// netdev is wedged in the tun-driver's queue (rare but bounded
+// reporting beats an opaque EBUSY downstream).
+//
+// Tolerates the "device already gone" race on the FIRST poll
+// (kernel released synchronously by the time we got here) — that's
+// the happy path.
+func waitForTapAbsent(tapName string) error {
+	for i := 0; i < tapReleasePollAttempts; i++ {
+		out, err := runIP("link", "show", tapName)
+		if err != nil && isNoSuchDevice(out) {
+			// ENODEV — kernel released the netdev. Safe to retry
+			// tuntap-add.
+			return nil
+		}
+		// Either `ip link show` succeeded (tap still present) or it
+		// failed with a non-ENODEV stderr (transient netlink error,
+		// privilege issue). Retry until budget exhausts; if the
+		// surface is a real error (EPERM etc.), the subsequent
+		// tuntap-add will surface it loudly with the EBUSY/EEXIST
+		// shape.
+		if i+1 < tapReleasePollAttempts {
+			sleepForTapPoll(tapReleasePollInterval)
+		}
+	}
+	return fmt.Errorf("tap %s still present after %d × %v poll", tapName, tapReleasePollAttempts, tapReleasePollInterval)
+}
+
 // isAlreadyExists matches the stderr shapes `ip` emits when the device or
 // address we're adding is already present. Case-insensitive substring
 // match: keeps the matcher resilient to minor wording drift between
@@ -253,12 +330,26 @@ func isAlreadyExists(out []byte) bool {
 	return false
 }
 
-// isNoSuchDevice matches the stderr shape `ip` emits when the link we're
-// addressing is gone.
+// isNoSuchDevice matches the stderr shapes `ip` emits when the link we're
+// addressing is gone. Two distinct shapes depending on the subcommand:
 //
-// Observed shape:
-//   - 'Cannot find device "<tap>"'
+//   - `ip link delete <tap>` (when the device is already gone):
+//     'Cannot find device "<tap>"'
+//   - `ip link show <tap>`   (when the device doesn't exist):
+//     'Device "<tap>" does not exist.'
+//
+// Both shapes mean ENODEV. The collision-replace post-delete poll
+// (T-8b-stress-r3) drives `ip link show` so this matcher must cover
+// both. Case-insensitive substring keeps the matcher resilient to
+// minor wording drift across iproute2 versions.
 func isNoSuchDevice(out []byte) bool {
 	s := strings.ToLower(string(out))
-	return strings.Contains(s, "cannot find device")
+	switch {
+	case strings.Contains(s, "cannot find device"):
+		return true
+	case strings.Contains(s, "does not exist"):
+		// "Device \"X\" does not exist." — `ip link show` shape.
+		return true
+	}
+	return false
 }
