@@ -72,6 +72,21 @@ pub const DEFAULT_TRANSIENT_TIMEOUT_SECS: i64 = 120;
 /// what matters for correctness, not the poll cadence).
 pub const TRANSIENT_TAKEOVER_POLL_SECS: u64 = 30;
 
+/// C-7-LT-PR2: cadence for the wake_jobs GC sweep. 60 s per
+/// `docs/proposals/c7-lt-async-wake.md` § 5 ("every 60 s the
+/// controller deletes wake_jobs rows where finished_at IS NOT NULL
+/// AND now() - finished_at > T_KEEP"). The sweep is cheap (a single
+/// indexed DELETE) so the cadence floor is set by responsiveness for
+/// clients polling a wake_id around the T_KEEP boundary, not by
+/// query cost.
+pub const WAKE_JOBS_GC_POLL_SECS: u64 = 60;
+
+/// C-7-LT-PR2: how long a terminal wake_jobs row is retained for
+/// post-completion polling. 5 min per proposal § 2.cleanup: matches
+/// the standard async-operation cleanup story (S3 multipart, GCP LRO).
+/// Polls after the row is GC'd return 404 `wake_not_found`.
+pub const WAKE_JOBS_T_KEEP: Duration = Duration::from_secs(300);
+
 /// Idle-eviction sweep candidates per pg call. Bounds the per-sweep
 /// pg work; if more rows are eligible they'll be picked up next
 /// iteration.
@@ -254,6 +269,74 @@ pub fn spawn_transient_state_takeover(state: Arc<AppState>) {
             if seen > 0 {
                 tracing::debug!(seen, recovered, "sandbox transient-takeover: tick");
             }
+        }
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────
+// C-7-LT-PR2: wake_jobs GC sweep
+// ────────────────────────────────────────────────────────────────────
+
+/// Run a single iteration of the wake_jobs GC sweep. Calls
+/// `Database::gc_expired_wake_jobs(T_KEEP)` and returns the number
+/// of rows deleted. Errors are logged-and-continued.
+///
+/// Public so the pg-gated tests can drive a single pass without
+/// spawning the loop.
+pub async fn run_wake_jobs_gc_once(state: &Arc<AppState>) -> u64 {
+    let Some(db) = state.database.as_ref() else {
+        return 0;
+    };
+    match db.gc_expired_wake_jobs(WAKE_JOBS_T_KEEP).await {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(
+                    deleted = n,
+                    t_keep_secs = WAKE_JOBS_T_KEEP.as_secs(),
+                    "sandbox wake_jobs GC: deleted terminal rows"
+                );
+            }
+            n
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "sandbox wake_jobs GC: sweep failed (continuing)"
+            );
+            0
+        }
+    }
+}
+
+/// Spawn the wake_jobs GC loop. Runs on its own dedicated OS thread
+/// with a private compio runtime (`detach_isolated`) so the GC's pg
+/// DELETE doesn't share runtime time with the ntex worker. Lives for
+/// the process lifetime, observes `state.shutdown_requested()`
+/// between iterations.
+///
+/// Skipped when `state.database` is `None` — without pg there are
+/// no wake_jobs rows to GC.
+pub fn spawn_wake_jobs_gc(state: Arc<AppState>) {
+    if state.database.is_none() {
+        return;
+    }
+    crate::detach::detach_isolated("wake-gc", move || async move {
+        let interval = Duration::from_secs(WAKE_JOBS_GC_POLL_SECS);
+        tracing::info!(
+            interval_secs = WAKE_JOBS_GC_POLL_SECS,
+            t_keep_secs = WAKE_JOBS_T_KEEP.as_secs(),
+            "sandbox wake_jobs GC: loop started"
+        );
+        loop {
+            if state.shutdown_requested() {
+                tracing::info!("sandbox wake_jobs GC: shutdown");
+                break;
+            }
+            compio::time::sleep(interval).await;
+            if state.shutdown_requested() {
+                break;
+            }
+            let _ = run_wake_jobs_gc_once(&state).await;
         }
     });
 }

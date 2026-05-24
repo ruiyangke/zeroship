@@ -885,6 +885,16 @@ impl AppState {
         if state.database.is_some() {
             sweep::spawn_transient_state_takeover(state.clone());
         }
+        // C-7-LT-PR2: periodically GC terminal wake_jobs rows older
+        // than T_KEEP (5 min). Without this loop a row stays in pg
+        // forever after wake completes; polls keep returning the
+        // terminal state and the table grows unbounded. The proposal
+        // (§ 5) chose to wire GC at 60 s cadence — cheap (one
+        // indexed DELETE) and responsive enough that clients hitting
+        // the T_KEEP boundary observe the 404 cleanly.
+        if state.database.is_some() {
+            sweep::spawn_wake_jobs_gc(state.clone());
+        }
         // T6: auto-spawn idle eviction sweep. Production now has all
         // deps wired (snapshot_store + ch_remote + restore_backend
         // populated above, Backend::lookup_source_vm_ops async lookup
