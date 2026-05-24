@@ -144,6 +144,13 @@ impl WakeMachine {
                 }
             }
             Phase::Failed { code, message } => {
+                // R16-S2: sanitize the human-readable error before pg
+                // write. The full unredacted message is logged at
+                // tracing::warn! level (operator-only journald), but
+                // the pg column is SELECT-able by other roles and
+                // retained for T_KEEP (5 min) — strip RFC1918 / IPv6
+                // link-local / agent URLs and truncate.
+                let sanitized = sanitize_error_message(message);
                 tracing::warn!(
                     wake_id = %self.wake_id,
                     sandbox_id = %self.sandbox_id,
@@ -157,7 +164,7 @@ impl WakeMachine {
                         &self.wake_id,
                         WakeJobState::Failed,
                         Some(*code),
-                        Some(message.as_str()),
+                        Some(sanitized.as_str()),
                         None,
                     )
                     .await
@@ -667,6 +674,271 @@ async fn read_snapshot_row(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Error-message sanitizer (R16-S2)
+// ────────────────────────────────────────────────────────────────────
+
+/// Maximum length of a sanitized error message in bytes. The wake_jobs
+/// `error_message` column is unbounded TEXT, but operator-facing poll
+/// responses don't need more than a sentence-or-two of context. 256
+/// bytes is generous — matches the standard "log line length" rule of
+/// thumb and bounds the controller-side memory footprint of a wedged
+/// fleet's wake-job rows.
+const ERROR_MESSAGE_MAX_BYTES: usize = 256;
+
+const REDACT_TOKEN: &str = "[redacted]";
+
+/// Sanitize a human-readable error message before writing to the pg
+/// `wake_jobs.error_message` column.
+///
+/// The column is SELECT-able by `sandbox_app` (and any future
+/// read-only audit role) and retained for `T_KEEP` post-completion.
+/// Wake-path errors today often carry cluster-internal IPs
+/// (`10.x.y.z`), agent URLs (`http://10.x.y.z:7000/...`), ureq error
+/// bodies, and filesystem paths. None of these should land in a
+/// durably-stored, role-readable column.
+///
+/// Strategy (conservative starting set; **TODO**: expand as new leak
+/// surfaces emerge during PR2 cluster smoke — kerberos tickets,
+/// pubkey fingerprints, jwt suffixes, GCS signed-URL query strings):
+/// 1. Strip agent-shape URLs (`http(s)://<rfc1918-host>:port/...`)
+///    as a unit, so the redaction reads as one `[redacted]` rather
+///    than `http://[redacted]:7000/[redacted]`.
+/// 2. Strip bare RFC1918 IPv4 addresses (10/8, 172.16/12,
+///    192.168/16), optionally followed by `:port`.
+/// 3. Strip IPv6 link-local prefixes (`fe80::/10`).
+/// 4. Truncate to [`ERROR_MESSAGE_MAX_BYTES`] (char-boundary safe).
+///
+/// Implementation uses a byte-scan rather than `regex` to keep the
+/// crate-graph thin (the workspace deliberately avoids `regex` in
+/// hot paths). The patterns are simple enough — RFC1918 prefixes
+/// are short string constants, port suffixes are `:\d{1,5}` — that
+/// a hand-rolled scanner is comparable in cost and far simpler to
+/// audit.
+pub(crate) fn sanitize_error_message(msg: &str) -> String {
+    // Two passes: first replace agent URLs (longer matches), then
+    // bare IPs (shorter matches). The IPv6-LL pass is independent of
+    // the IPv4 ones; do it last.
+    let pass1 = strip_agent_urls(msg);
+    let pass2 = strip_rfc1918(&pass1);
+    let pass3 = strip_ipv6_link_local(&pass2);
+
+    let s: &str = &pass3;
+    if s.len() <= ERROR_MESSAGE_MAX_BYTES {
+        return s.to_string();
+    }
+    // Truncate at a char boundary ≤ ERROR_MESSAGE_MAX_BYTES.
+    let mut end = ERROR_MESSAGE_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// Scan for the start of an RFC1918 IPv4 literal. Returns the byte
+/// length of the match (including optional `:port`) at the given
+/// offset, or 0 if no match starts there. Match shapes:
+/// - `10.\d{1,3}.\d{1,3}.\d{1,3}`
+/// - `172.(1[6-9]|2\d|3[01]).\d{1,3}.\d{1,3}`
+/// - `192.168.\d{1,3}.\d{1,3}`
+/// followed by optional `:\d{1,5}`. The function deliberately
+/// over-accepts (e.g. `10.999.0.0` would match) — the goal is
+/// redaction, not validation. A non-RFC1918 IP that happens to share
+/// the `10.` prefix is still cluster-topology; redacting it is the
+/// correct conservative choice.
+fn match_rfc1918_at(s: &[u8], i: usize) -> usize {
+    let n = s.len();
+    if i >= n {
+        return 0;
+    }
+    // Encodes (bytes_consumed, octets_remaining) for each prefix.
+    let prefix_match: (usize, usize) = if s[i..].starts_with(b"10.") {
+        (3, 3)
+    } else if s[i..].starts_with(b"192.168.") {
+        (8, 2)
+    } else if s[i..].starts_with(b"172.") {
+        // Second octet must be 16-31. Parse it.
+        let mut j = i + 4;
+        let start = j;
+        while j < n && s[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j - start == 0 || j - start > 3 || j >= n || s[j] != b'.' {
+            return 0;
+        }
+        // Parse the 1-3 digit number.
+        let octet: u32 = std::str::from_utf8(&s[start..j])
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0);
+        if !(16..=31).contains(&octet) {
+            return 0;
+        }
+        (j + 1 - i, 2) // through the `.`, then 2 octets remain
+    } else {
+        return 0;
+    };
+    let (bytes_consumed, need_octets) = prefix_match;
+    let mut j = i + bytes_consumed;
+    for k in 0..need_octets {
+        let start = j;
+        while j < n && s[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j - start == 0 || j - start > 3 {
+            return 0;
+        }
+        if k + 1 < need_octets {
+            if j >= n || s[j] != b'.' {
+                return 0;
+            }
+            j += 1;
+        }
+    }
+    // Optional `:port`.
+    if j < n && s[j] == b':' {
+        let mut k = j + 1;
+        let start = k;
+        while k < n && s[k].is_ascii_digit() {
+            k += 1;
+        }
+        if k - start >= 1 && k - start <= 5 {
+            j = k;
+        }
+    }
+    j - i
+}
+
+/// Strip agent-shape URLs (`http(s)://<rfc1918>:<port>/<path>`).
+/// Path consumes anything up to whitespace or quote terminator.
+fn strip_agent_urls(msg: &str) -> String {
+    let bytes = msg.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let rest = &bytes[i..];
+        let scheme_len = if rest.starts_with(b"http://") {
+            7
+        } else if rest.starts_with(b"https://") {
+            8
+        } else {
+            0
+        };
+        if scheme_len == 0 {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let ip_len = match_rfc1918_at(bytes, i + scheme_len);
+        if ip_len == 0 {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        // Consume the optional path: any non-whitespace / non-quote
+        // character.
+        let mut j = i + scheme_len + ip_len;
+        if j < n && bytes[j] == b'/' {
+            while j < n {
+                let b = bytes[j];
+                if b.is_ascii_whitespace() || b == b'"' || b == b'\'' || b == b'`' {
+                    break;
+                }
+                j += 1;
+            }
+        }
+        out.push_str(REDACT_TOKEN);
+        i = j;
+    }
+    out
+}
+
+/// Strip bare RFC1918 IPv4 + optional port.
+fn strip_rfc1918(msg: &str) -> String {
+    let bytes = msg.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        // Only attempt to match at a "word boundary" — start of
+        // string OR previous char is non-digit/non-dot. This avoids
+        // partial matches inside a larger numeric literal.
+        let at_boundary = i == 0 || {
+            let p = bytes[i - 1];
+            !p.is_ascii_digit() && p != b'.'
+        };
+        if at_boundary {
+            let len = match_rfc1918_at(bytes, i);
+            if len > 0 {
+                out.push_str(REDACT_TOKEN);
+                i += len;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Strip IPv6 link-local prefix (`fe80::/10`). Conservative: matches
+/// `fe80::` followed by `[0-9a-fA-F:%.]` chars + optional `]:port`.
+/// Case-insensitive on the `fe80::` prefix.
+fn strip_ipv6_link_local(msg: &str) -> String {
+    let bytes = msg.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let rest = &bytes[i..];
+        let starts = rest
+            .get(..6)
+            .map(|p| p.eq_ignore_ascii_case(b"fe80::"))
+            .unwrap_or(false);
+        if starts {
+            let mut j = i + 6;
+            // Hex / colon body.
+            while j < n {
+                let b = bytes[j];
+                if b.is_ascii_hexdigit() || matches!(b, b':' | b'.') {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            // Optional zone-id (`%<alnum>+`) — accept letters &
+            // digits AFTER the `%` only, so `%eth0` consumes the
+            // whole zone-id, not just the hex-prefix.
+            if j < n && bytes[j] == b'%' {
+                j += 1;
+                while j < n && (bytes[j].is_ascii_alphanumeric()) {
+                    j += 1;
+                }
+            }
+            // Optional `]:port`.
+            if j + 1 < n && bytes[j] == b']' && bytes[j + 1] == b':' {
+                let mut k = j + 2;
+                let start = k;
+                while k < n && bytes[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k - start >= 1 && k - start <= 5 {
+                    j = k;
+                }
+            }
+            if j > i + 6 {
+                out.push_str(REDACT_TOKEN);
+                i = j;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────
 
@@ -724,5 +996,113 @@ mod tests {
         let s = sandbox_id_typed(u);
         assert!(s.starts_with("sbx_"), "got {s}");
         assert_eq!(s.len(), 4 + 22, "sbx_ + 22 base62 chars");
+    }
+
+    // ─── R16-S2 sanitize_error_message ──────────────────────────────
+
+    #[test]
+    fn sanitize_strips_rfc1918_10_dot() {
+        let s = sanitize_error_message("connect failed to 10.0.0.1");
+        assert_eq!(s, "connect failed to [redacted]");
+    }
+
+    #[test]
+    fn sanitize_strips_rfc1918_with_port() {
+        let s = sanitize_error_message("agent /livez 503 from 10.128.0.7:7000");
+        assert_eq!(s, "agent /livez 503 from [redacted]");
+    }
+
+    #[test]
+    fn sanitize_strips_rfc1918_192_168() {
+        let s = sanitize_error_message("peer 192.168.5.42:9090 timed out");
+        assert_eq!(s, "peer [redacted] timed out");
+    }
+
+    #[test]
+    fn sanitize_strips_rfc1918_172_16_through_31() {
+        // 172.15 is NOT private; 172.16 + 172.31 are.
+        let s = sanitize_error_message("hosts: 172.16.1.1, 172.31.255.1, 172.15.0.1");
+        assert_eq!(
+            s,
+            "hosts: [redacted], [redacted], 172.15.0.1"
+        );
+    }
+
+    #[test]
+    fn sanitize_preserves_loopback_and_public_ips() {
+        // 127.0.0.1 is loopback (not RFC1918); 8.8.8.8 is public.
+        let s = sanitize_error_message("from 127.0.0.1 via 8.8.8.8");
+        assert_eq!(s, "from 127.0.0.1 via 8.8.8.8");
+    }
+
+    #[test]
+    fn sanitize_strips_agent_url_with_path() {
+        let s = sanitize_error_message(
+            "GET http://10.0.0.1:7000/livez timed out",
+        );
+        assert_eq!(s, "GET [redacted] timed out");
+    }
+
+    #[test]
+    fn sanitize_strips_agent_url_https() {
+        let s = sanitize_error_message(
+            "TLS error against https://172.16.0.1:443/agent/v1",
+        );
+        assert_eq!(s, "TLS error against [redacted]");
+    }
+
+    #[test]
+    fn sanitize_strips_ipv6_link_local() {
+        let s = sanitize_error_message(
+            "could not reach fe80::1234:5678:abcd:ef01%eth0",
+        );
+        assert_eq!(s, "could not reach [redacted]");
+    }
+
+    #[test]
+    fn sanitize_truncates_to_256_bytes() {
+        let long = "x".repeat(500);
+        let s = sanitize_error_message(&long);
+        assert_eq!(s.len(), 256);
+        assert!(s.chars().all(|c| c == 'x'));
+    }
+
+    #[test]
+    fn sanitize_handles_truncation_at_char_boundary() {
+        // 254 bytes of "x" + 4-byte char "💩" + more chars: must
+        // truncate at a char boundary <= 256, so the 4-byte char
+        // either fits or is dropped wholesale.
+        let mut s = String::new();
+        for _ in 0..254 {
+            s.push('x');
+        }
+        s.push('💩'); // 4 bytes; would land at 258
+        s.push('a');
+        let out = sanitize_error_message(&s);
+        assert!(out.len() <= 256);
+        // Must end at a valid UTF-8 boundary.
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn sanitize_passes_through_clean_messages() {
+        let s = sanitize_error_message("snapshot artifact corrupt");
+        assert_eq!(s, "snapshot artifact corrupt");
+    }
+
+    #[test]
+    fn sanitize_handles_empty() {
+        assert_eq!(sanitize_error_message(""), "");
+    }
+
+    #[test]
+    fn sanitize_multiple_ips_in_one_message() {
+        let s = sanitize_error_message(
+            "primary 10.0.0.1 / fallback 192.168.1.5 / link fe80::1",
+        );
+        assert_eq!(
+            s,
+            "primary [redacted] / fallback [redacted] / link [redacted]"
+        );
     }
 }
