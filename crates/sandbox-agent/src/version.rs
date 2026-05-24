@@ -188,4 +188,45 @@ mod tests {
              (see restore_handler.rs `clock_resync_post_restore`)",
         );
     }
+
+    #[test]
+    fn mandatory_proxy_ws_v1_present() {
+        // R11-T3 regression guard, paired with
+        // `mandatory_clock_resync_v1_present`. `proxy.ws-v1` is named
+        // by the R7-API2 commit body and the const-level doc comment
+        // as one of the genuinely feature-detected capabilities — the
+        // controller (see `crates/sandbox-agent/src/proxy_ws.rs` and
+        // the WS Upgrade path) keys behavior off its presence. Silent
+        // removal without simultaneously updating the controller-side
+        // detection would leave the controller branching on a string
+        // that no agent advertises, masking a Phase-2 regression. The
+        // capability list is a versioned implementation manifest, not
+        // an arbitrary set; pin the entry.
+        assert!(
+            CAPABILITIES.contains(&"proxy.ws-v1"),
+            "proxy.ws-v1 is a feature-detected capability; removing it \
+             without updating controller-side detection (proxy_ws WS Upgrade \
+             path) would silently break Phase 2 WS proxy",
+        );
+    }
+
+    #[test]
+    fn mandatory_auth_ed25519_v1_1_present() {
+        // R11-T3 regression guard, paired with
+        // `mandatory_clock_resync_v1_present`. `auth.ed25519-v1.1` is
+        // the v1.1 canonical signing scheme (path+query, ED25519-V1.1
+        // tag) used for `/proxy/...` requests and is named by the
+        // const-level doc comment as feature-detected by the
+        // controller. Silent removal without updating the
+        // controller's signature-building code would either fall back
+        // to v1 (wrong canonical form, signature mismatch on /proxy)
+        // or break the call path entirely. Pin the entry so the
+        // dependency is explicit.
+        assert!(
+            CAPABILITIES.contains(&"auth.ed25519-v1.1"),
+            "auth.ed25519-v1.1 is a feature-detected capability; removing it \
+             without updating controller-side signature canonicalization \
+             would break /proxy request authentication",
+        );
+    }
 }
