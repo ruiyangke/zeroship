@@ -1082,11 +1082,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - `crates/sandbox/tests/` and `crates/sandbox-agent/tests/` saw ZERO new tests in r10, r11, r12
 - The integration gap is structural debt the per-finding pattern can't close
 
-### [R12-P1] (IMPORTANT, performance-r12) R11-P2 BufWriter wrapped WRITE side only; READ side still 8 KiB
+### [R12-P1] (IMPORTANT, performance-r12) R11-P2 BufWriter wrapped WRITE side only; READ side still 8 KiB — CLOSED at 94a8a043
 - **Source**: 2026-05-25 performance-r12
 - **File**: `crates/sandbox/src/snapshot_store_gcs.rs:438-458` (`download_to_disk`)
 - **Symptom**: R11-P2 (3d5c527f) wrapped the destination File in BufWriter (1 MiB). But std lib's `io::copy(reader, writer)` uses BufferedCopySpec when one side is buffered — reader side falls back to 8 KiB scratch buffer. 1 GB download = ~131072 read(2) calls + 1024 write(2) calls. Half the win was unrealized.
 - **Action**: symmetric 1-line fix — wrap the source reader: `BufReader::with_capacity(1 << 20, r.into_reader())`.
+- **Resolution**: CLOSED at 94a8a043. Reader now wrapped in `BufReader::with_capacity(1 << 20, r.into_reader())`; both sides of `io::copy` are buffered, so BufferedCopySpec uses 1 MiB chunks throughout. 327/327 lib tests pass (unchanged; perf-only).
 
 ### [R11-P1 thread-local feasibility CONFIRMED]
 - **Source**: 2026-05-25 performance-r12 verification
