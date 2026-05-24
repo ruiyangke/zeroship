@@ -218,11 +218,19 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Action**: re-audit both sites against the C-6 mechanism. If wedge-prone, apply the OS-thread fix (mirrors C-3/C-6 pattern) OR extract the R14-A1 `detach_isolated` helper and migrate.
 - **Blocker**: best applied alongside C-7-LT's `detach_isolated` extraction.
 
-### [R16-I2] (OPEN) C-8b 2× factor envelopes OK case but not the LEAK case (IMPORTANT, concurrency-r16)
+### [R16-I2] (PARTIAL — instrumentation closed 2026-05-25 at `417cd6cd`; structural fix subsumed by C-7-LT) C-8b 2× factor envelopes OK case but not the LEAK case (IMPORTANT, concurrency-r16)
 - **Location**: `crates/sandbox/src/backend/nomad_ch.rs::wait_for_agent_silent` (lines 3205-3273)
 - **Symptom**: smoke-r10 log line "consecutive_misses=1 at the 30s deadline" — alternating-answer pathology where the agent emits a stray response at the wrong cadence, keeping `consecutive_misses<2` until deadline. Wall-time becomes fence-bound (60s) instead of ~200ms.
 - **C-8b coverage**: only the OK case (rapid 2-miss-in-a-row → ~200ms). The LEAK case remains.
-- **Subsumed by**: C-7-LT (no client deadline pressure in async-response).
+- **Status**: diagnostic surface landed at `417cd6cd` (paired with R16-A2 instrumentation). The LEAK pathology now emits an info-level `host_fence: agent reachable mid-fence — consecutive_misses counter reset (R16-I2 LEAK signal)` line on every alternating-answer flip; the final `host_fence: deadline reached` warn line carries `consecutive_misses` so smoke-r12 (and ad-hoc triage) can immediately distinguish LEAK (=1) from TIMEOUT (=0). Tests pin the discriminators end-to-end via the error-string surface (3 new lib tests).
+- **Subsumed by**: C-7-LT (no client deadline pressure in async-response). The structural fix waits on C-7-LT's 3-PR sprint.
+
+### [R16-A2] (CLOSED 2026-05-25 at `417cd6cd`) `wait_for_agent_silent` has zero phase instrumentation (architecture-r16)
+- **Location**: `crates/sandbox/src/backend/nomad_ch.rs::wait_for_agent_silent` (lines 3205-3273 pre-fix).
+- **Symptom**: function drives the empirical teardown distribution but predicted next-cycle diagnostic cost from absent per-iteration phase logs. Smoke-r10 could only observe the deadline-side error string; the intermediate transitions were invisible.
+- **Fix shape**: `tracing::{debug,info,warn}` calls under target `sandbox::teardown::fence` at function entry, poll start, miss, threshold reached, mid-fence counter reset, and deadline. `MISS_THRESHOLD` constant surfaces in the entry log. Signature unchanged; no caller behaviour change.
+- **Closure surface**: 3 new lib tests pin the OK / LEAK / TIMEOUT cases via the error-string discriminator (no log-capture infra in this crate; documented inline). `cargo test -p zeroship-sandbox --lib host_fence` → 8 passed.
+- **Co-closes**: R16-I2 (instrumentation half).
 
 ### [R16-A1] (DOCUMENTED in C-8c entry) C-8b 2× factor is a numeric coincidence, not a model
 - See C-8c entry above. Architecture-r16 critical finding.
