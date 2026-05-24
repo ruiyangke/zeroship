@@ -48,6 +48,14 @@ pub(crate) mod encryption_pass;
 #[cfg(feature = "test-helpers")]
 pub mod encryption_pass;
 
+// **P5.5 PR 2** — Path B mask transforms + dual-write CRUD pass.
+// Same visibility pattern as `encryption_pass` so integration tests
+// can reach the helpers when `test-helpers` is on.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod mask_pass;
+#[cfg(feature = "test-helpers")]
+pub mod mask_pass;
+
 // ---------------------------------------------------------------------------
 // dispatch_op template
 // ---------------------------------------------------------------------------
@@ -1243,6 +1251,14 @@ pub(crate) fn dispatch_find_or_create<'s>(
 /// would still encrypt consistently (the AAD just doesn't bind a row
 /// identity, which is a known limitation for callers who explicitly
 /// pass a doc without an `id`).
+///
+/// **P5.5 PR 2** — also runs the mask pass after the encryption pass
+/// using the plaintext sidechannel produced by
+/// `encrypt_row_on_write_with_sidechannel`. The mask pass appends
+/// `<col>_masked` siblings to `doc` for every masked column; the SQL
+/// builder picks them up naturally because the row is iterated as a
+/// map. Non-encrypted-but-masked columns are handled by the mask pass
+/// reading `doc[col]` directly (empty sidechannel for those columns).
 async fn apply_encryption_on_write(
     app_id: &str,
     collection: &str,
@@ -1251,7 +1267,9 @@ async fn apply_encryption_on_write(
     let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
         return Ok(());
     };
-    if !schema_has_encrypted_columns(&schema) {
+    let has_enc = schema_has_encrypted_columns(&schema);
+    let has_mask = schema_has_masked_columns(&schema);
+    if !has_enc && !has_mask {
         return Ok(());
     }
     // Row PK lookup: prefer `doc["id"]` (typed_id string), fall back to
@@ -1264,7 +1282,14 @@ async fn apply_encryption_on_write(
             _ => None,
         })
         .unwrap_or_default();
-    encryption_pass_dispatch(app_id, collection, &schema, &row_pk, doc).await
+    let mut sidechannel = mask_pass::MaskPlaintextSidechannel::new();
+    if has_enc {
+        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, doc, &mut sidechannel).await?;
+    }
+    if has_mask {
+        mask_pass::apply_mask_on_write(&schema, &sidechannel, doc)?;
+    }
+    Ok(())
 }
 
 /// **P5 PR 2** — UPDATE variant that pulls `row_pk` from a filter
@@ -1290,7 +1315,9 @@ async fn apply_encryption_on_update(
     let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
         return Ok(());
     };
-    if !schema_has_encrypted_columns(&schema) {
+    let has_enc = schema_has_encrypted_columns(&schema);
+    let has_mask = schema_has_masked_columns(&schema);
+    if !has_enc && !has_mask {
         return Ok(());
     }
     let row_pk = filter
@@ -1304,12 +1331,28 @@ async fn apply_encryption_on_update(
 
     // Encrypt fields nested under `$set` if present, otherwise the
     // top-level field map. We mirror the SET-clause flattening the
-    // build layer does.
-    if let Some(set_obj) = patch.get_mut("$set") {
-        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, set_obj).await
+    // build layer does. Same target object feeds both the encryption
+    // pass and the mask pass so the sibling `<col>_masked` lands on
+    // the same `$set` (or top-level) the SQL builder iterates.
+    let target: &mut Value = if patch.get("$set").is_some() {
+        patch.get_mut("$set").expect("checked above")
     } else {
-        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, patch).await
+        patch
+    };
+    let mut sidechannel = mask_pass::MaskPlaintextSidechannel::new();
+    if has_enc {
+        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, target, &mut sidechannel).await?;
     }
+    if has_mask {
+        // **P5.5 PR 2** — mask pass derives `<col>_masked` ONLY for
+        // columns that are present in the patch (`apply_mask_on_write`
+        // skips absent fields). This achieves "when the parent column
+        // is NOT in the UPDATE SET, don't touch the sibling" — partial
+        // updates that don't touch a masked field leave the existing
+        // sibling untouched on disk.
+        mask_pass::apply_mask_on_write(&schema, &sidechannel, target)?;
+    }
+    Ok(())
 }
 
 /// Decrypt every encrypted column on each row of `rows`. Short-circuits
@@ -1404,14 +1447,15 @@ async fn encryption_pass_dispatch(
     schema: &Value,
     row_pk: &str,
     doc: &mut Value,
+    sidechannel: &mut mask_pass::MaskPlaintextSidechannel,
 ) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
     #[cfg(all(feature = "pg", feature = "hardening"))]
     {
         if let Some(pg) = backend.as_encrypted_column_pg() {
-            return crate::crud::encryption_pass::encrypt_row_on_write(
-                pg, app_id, collection, schema, row_pk, doc,
+            return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+                pg, app_id, collection, schema, row_pk, doc, sidechannel,
             )
             .await;
         }
@@ -1419,8 +1463,8 @@ async fn encryption_pass_dispatch(
     #[cfg(feature = "sqlite")]
     {
         if let Some(sq) = backend.as_encrypted_column_sqlite() {
-            return crate::crud::encryption_pass::encrypt_row_on_write(
-                sq, app_id, collection, schema, row_pk, doc,
+            return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+                sq, app_id, collection, schema, row_pk, doc, sidechannel,
             )
             .await;
         }
@@ -1447,5 +1491,28 @@ fn schema_has_encrypted_columns(schema: &Value) -> bool {
     schema
         .as_object()
         .map(|o| o.values().any(|def| def.get("encrypted").is_some()))
+        .unwrap_or(false)
+}
+
+/// **P5.5 PR 2** — cheap walk: does any field def on `schema` carry a
+/// `mask` entry with `kind != "none"`? Drives the per-write decision
+/// to invoke `mask_pass::apply_mask_on_write`. A `kind: "none"` opt-out
+/// returns false (no sibling column to populate).
+fn schema_has_masked_columns(schema: &Value) -> bool {
+    schema
+        .as_object()
+        .map(|o| {
+            o.values().any(|def| {
+                def.get("mask")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.get("kind")
+                            .and_then(|k| k.as_str())
+                            .map(|k| k != "none")
+                            .unwrap_or(true) // missing kind defaults to "full" → masked
+                    })
+                    .unwrap_or(false)
+            })
+        })
         .unwrap_or(false)
 }

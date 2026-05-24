@@ -79,6 +79,14 @@ use crate::error::DbError;
 /// encrypted column it processed. The SQL builder uses this marker to
 /// know which placeholders need the `decode($N, 'base64')::bytea`
 /// cast. The marker is stripped before the row leaves the SQL builder.
+///
+/// **P5.5 PR 2** — overload that captures plaintexts for the
+/// downstream mask pass. See [`encrypt_row_on_write_with_sidechannel`]
+/// for the version that populates a [`MaskPlaintextSidechannel`]
+/// (`HashMap<String, String>`) BEFORE replacing the plaintext with
+/// ciphertext, so the mask pass can derive the sibling
+/// `<col>_masked` column without re-decrypting. The original
+/// signature stays for callers that don't care about mask integration.
 pub async fn encrypt_row_on_write<B>(
     backend: &B,
     app_id: &str,
@@ -86,6 +94,44 @@ pub async fn encrypt_row_on_write<B>(
     schema: &Value,
     row_pk: &str,
     row: &mut Value,
+) -> Result<(), DbError>
+where
+    B: EncryptedColumn,
+{
+    let mut sidechannel = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
+    encrypt_row_on_write_with_sidechannel(
+        backend,
+        app_id,
+        collection,
+        schema,
+        row_pk,
+        row,
+        &mut sidechannel,
+    )
+    .await
+}
+
+/// **P5.5 PR 2** — encrypt with plaintext sidechannel capture.
+///
+/// Behaves identically to [`encrypt_row_on_write`] EXCEPT it populates
+/// `sidechannel[col]` with the raw plaintext for every encrypted
+/// column it processes (UTF-8-decoded when `wraps = "string"`; the
+/// stringified `f64` for `wraps = "number"`; the base64-encoded raw
+/// bytes for `wraps = "bytes"`). The mask pass consumes this map to
+/// derive the sibling `<col>_masked` column without paying the
+/// decryption round-trip.
+///
+/// Non-encrypted columns and `null`-valued columns are NOT added to
+/// the sidechannel — the mask pass already handles those by reading
+/// `row[col]` directly (the non-encrypted path) or skipping (`null`).
+pub(crate) async fn encrypt_row_on_write_with_sidechannel<B>(
+    backend: &B,
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    row_pk: &str,
+    row: &mut Value,
+    sidechannel: &mut crate::crud::mask_pass::MaskPlaintextSidechannel,
 ) -> Result<(), DbError>
 where
     B: EncryptedColumn,
@@ -99,12 +145,25 @@ where
         ));
     };
 
-    // Collect (col, mode, key_id, wraps, plaintext_bytes) up front so
-    // we can release the borrow on `obj` before calling the async
-    // `resolve_key` (which would otherwise hold a mutable borrow across
-    // the await).
-    let mut to_encrypt: Vec<(String, crate::backend::EncryptionMode, String, &'static str, Vec<u8>)> =
-        Vec::new();
+    // Collect (col, mode, key_id, wraps, plaintext_bytes, sidechannel_str)
+    // up front so we can release the borrow on `obj` before calling the
+    // async `resolve_key` (which would otherwise hold a mutable borrow
+    // across the await).
+    //
+    // `sidechannel_str` is the human-readable plaintext form the mask
+    // pass uses to derive `<col>_masked`. Per `wraps`:
+    // - `string` → UTF-8 decode of the bytes (same as JS-side string).
+    // - `number` → `f64`.to_string() (the SDK has the same lossiness).
+    // - `bytes`  → the JSON-wire base64 form (the same string the SDK
+    //              sees on `t.bytes()` fields).
+    let mut to_encrypt: Vec<(
+        String,
+        crate::backend::EncryptionMode,
+        String,
+        &'static str,
+        Vec<u8>,
+        String,
+    )> = Vec::new();
     for (col, def) in schema_obj.iter() {
         let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
             continue;
@@ -124,10 +183,11 @@ where
             continue; // NULL stays NULL — encrypting NULL has no semantic meaning
         }
         let plaintext = serialise_wrapped(value, wraps)?;
-        to_encrypt.push((col.clone(), mode, key_id, wraps, plaintext));
+        let sidechannel_str = plaintext_to_sidechannel_string(value, wraps);
+        to_encrypt.push((col.clone(), mode, key_id, wraps, plaintext, sidechannel_str));
     }
 
-    for (col, mode, key_id, _wraps, plaintext) in to_encrypt {
+    for (col, mode, key_id, _wraps, plaintext, sidechannel_str) in to_encrypt {
         let key = backend.resolve_key(app_id, &key_id).await?;
         let aad = crate::encryption::aad::canonical_aad(
             collection,
@@ -139,6 +199,9 @@ where
         );
         let ciphertext = backend.encrypt(&key, mode, &plaintext, &aad)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
+        // Stash the plaintext for the mask pass BEFORE replacing the
+        // row value with the base64 ciphertext.
+        sidechannel.insert(col.clone(), sidechannel_str);
         let obj = row.as_object_mut().expect("checked above");
         obj.insert(col.clone(), Value::String(b64));
         // Sibling marker so the SQL builder knows to wrap the
@@ -147,6 +210,18 @@ where
         obj.insert(format!("__zsenc__{col}"), Value::Bool(true));
     }
     Ok(())
+}
+
+/// Render a plaintext JSON `Value` to the canonical string form the
+/// mask pass needs. Mirrors [`serialise_wrapped`]'s shape but stays in
+/// `String` land (the mask pass consumes strings, not bytes).
+fn plaintext_to_sidechannel_string(value: &Value, wraps: &str) -> String {
+    match wraps {
+        "string" => value.as_str().unwrap_or("").to_string(),
+        "number" => value.as_f64().map(|n| n.to_string()).unwrap_or_default(),
+        "bytes" => value.as_str().unwrap_or("").to_string(),
+        _ => String::new(),
+    }
 }
 
 /// Decrypt every `t.encrypted(...)`-declared column on `row` in place.

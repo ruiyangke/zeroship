@@ -405,6 +405,37 @@ pub fn build_create_table_with_fks(
             let col_def = field_to_column(field, def)?;
             columns.push(col_def);
 
+            // **P5.5 PR 2** — Path B sibling-column emission. When the
+            // field carries a `.mask({...})` declaration (or the
+            // auto-default mask attached to `t.encrypted(...)` columns)
+            // AND the mask kind is NOT `"none"`, emit a sibling
+            // `<col>_masked TEXT NOT NULL` column alongside the parent.
+            // The sibling stores the pre-computed masked representation
+            // (e.g. `"***-**-6789"`) computed at INSERT/UPDATE time by
+            // `crud::mask_pass::apply_mask_on_write`. Reads default to
+            // the sibling (PR 3 flips the read path); writes dual-bind
+            // both columns atomically (PR 2 SQL builder change).
+            //
+            // The sibling type is `TEXT` for every PR 2 mask kind
+            // (full / last4 / first4 / email / name / dateYear /
+            // dateDecade) — the union of mask outputs is string-shaped.
+            // Future BYTEA-shaped masks would extend this with a per-
+            // kind type lookup.
+            //
+            // Explicit `.mask({ kind: "none" })` opt-out → no sibling
+            // emission. The P5 decrypt-on-read path continues to serve
+            // such columns; the parent column is the only storage site.
+            if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
+                // `_masked` suffix is platform-reserved
+                // (`validate_field_name`'s `ReservedName::Suffix`
+                // forbids creator-declared columns ending in
+                // `_masked`); no collision possible.
+                columns.push(format!(
+                    "{} TEXT NOT NULL",
+                    quote_ident(&sibling_col)
+                ));
+            }
+
             // B2 — append FOREIGN KEY clause when this is a ref. Inline
             // FK clauses live in the same CREATE TABLE statement as the
             // column, after the column definition.
@@ -905,6 +936,35 @@ pub fn build_create_indexes(
                 kind: IndexKind::BTree,
             });
         }
+
+        // **P5.5 PR 2** — auto-emit a B-tree index on the sibling
+        // `<col>_masked` column when the parent column has `.index()`
+        // or `.uniqueIndex()` declared AND the field carries a mask
+        // declaration with `kind != "none"`. The sibling index lets PR 3
+        // route equality / sort queries through the masked sibling
+        // without a sequential scan. Naming: `<coll>__<col>_masked_idx`
+        // (double-underscore separator, matching `named_index_name`'s
+        // collision-avoidance convention). Never UNIQUE — uniqueness
+        // applies to the parent column only (the sibling is a derived
+        // value, multiple rows can share the same masked output).
+        if wants_index || wants_unique {
+            if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
+                let idx_name = format!("{collection}__{sibling_col}_idx");
+                let sql = format!(
+                    "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
+                    quote_ident(&idx_name),
+                    table_qualified,
+                    quote_ident(&sibling_col),
+                );
+                out.push(IndexSpec {
+                    name: idx_name,
+                    columns: vec![sibling_col],
+                    unique: false,
+                    sql,
+                    kind: IndexKind::BTree,
+                });
+            }
+        }
     }
 
     // **P4 PR 3** — emit a single composite FTS spec covering every
@@ -1108,6 +1168,28 @@ fn short_hash_base32(input: &str) -> String {
     }
     // Safety: ALPHABET is ASCII so out is valid UTF-8.
     String::from_utf8(out.to_vec()).expect("ALPHABET is ASCII")
+}
+
+/// **P5.5 PR 2** — return the sibling column name `<field>_masked` IFF
+/// the field's schema entry carries a `.mask({...})` declaration with
+/// `kind != "none"`. Returns `None` for non-masked columns and for
+/// columns that explicitly opt out via `.mask({ kind: "none" })`.
+///
+/// The platform reserves the `_masked` suffix at the field-name level
+/// (`validate_field_name`'s `ReservedName::Suffix`) so a creator cannot
+/// shadow a sibling. Called by both `build_create_table_with_fks`
+/// (DDL emission) and `build_insert` / `build_set_clauses` (atomic
+/// dual-write).
+pub(crate) fn mask_sibling_column_for_field(
+    field: &str,
+    def: &serde_json::Value,
+) -> Option<String> {
+    let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
+    let kind = mask_meta.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
+    if kind == "none" {
+        return None;
+    }
+    Some(format!("{field}_masked"))
 }
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
@@ -5501,5 +5583,207 @@ mod tests {
             .filter(|p| p.starts_with(SQLITE_ENC_BLOB_PREFIX))
             .count();
         assert_eq!(tagged, 2, "both encrypted ssn params must be tagged: {:?}", bq.params);
+    }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 2 — Path B sibling-column DDL emission
+    // -----------------------------------------------------------------
+
+    /// `mask_sibling_column_for_field` returns `Some("<col>_masked")`
+    /// for masked columns and `None` for non-masked / kind=none columns.
+    #[test]
+    fn mask_sibling_column_for_field_returns_sibling_for_masked() {
+        let def = serde_json::json!({
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        });
+        assert_eq!(
+            mask_sibling_column_for_field("ssn", &def),
+            Some("ssn_masked".to_string())
+        );
+    }
+
+    #[test]
+    fn mask_sibling_column_for_field_returns_none_for_unmasked() {
+        let def = serde_json::json!({ "type": "string" });
+        assert_eq!(mask_sibling_column_for_field("name", &def), None);
+    }
+
+    #[test]
+    fn mask_sibling_column_for_field_returns_none_for_kind_none() {
+        let def = serde_json::json!({
+            "type": "string",
+            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+            "mask": { "kind": "none", "classification": "spi" }
+        });
+        assert_eq!(mask_sibling_column_for_field("ssn", &def), None);
+    }
+
+    /// **DDL shape** — masked column emits parent + sibling
+    /// `<col>_masked TEXT NOT NULL`.
+    #[test]
+    fn build_create_table_emits_sibling_for_masked_column() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "name": { "type": "string" }
+        });
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+            .expect("build_create_table_with_fks ok");
+        assert!(
+            sql.contains("\"ssn_masked\" TEXT NOT NULL"),
+            "expected sibling column with TEXT NOT NULL: {sql}"
+        );
+        assert!(sql.contains("\"ssn\""), "parent column still present: {sql}");
+        assert!(
+            !sql.contains("\"name_masked\""),
+            "non-masked column must NOT emit sibling: {sql}"
+        );
+    }
+
+    /// **DDL shape** — `t.encrypted(...)` (default-mask path) gets the
+    /// sibling because PR 1 auto-populates `mask: {kind: "full", ...}`
+    /// on encrypted columns at schema-normalisation time.
+    #[test]
+    fn build_create_table_emits_sibling_for_encrypted_with_default_mask() {
+        // Mirror the SDK's auto-fill: `t.encrypted(...)` -> mask = full.
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "mask": { "kind": "full", "classification": "pii" }
+            }
+        });
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+            .expect("build_create_table_with_fks ok");
+        assert!(
+            sql.contains("\"ssn\" BYTEA"),
+            "parent encrypted column stays BYTEA: {sql}"
+        );
+        assert!(
+            sql.contains("\"ssn_masked\" TEXT NOT NULL"),
+            "encrypted column with default mask emits sibling: {sql}"
+        );
+    }
+
+    /// **DDL shape** — `kind: "none"` explicit opt-out → no sibling.
+    /// The parent encrypted column behaves like P5 baseline.
+    #[test]
+    fn build_create_table_no_sibling_when_mask_kind_none() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "mask": { "kind": "none", "classification": "pii" }
+            }
+        });
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+            .expect("build_create_table_with_fks ok");
+        assert!(
+            !sql.contains("\"ssn_masked\""),
+            "kind=none must NOT emit a sibling: {sql}"
+        );
+        assert!(sql.contains("\"ssn\" BYTEA"), "parent still present: {sql}");
+    }
+
+    /// **Index auto-emit** — `.index()` on the parent masked column
+    /// produces a B-tree index on the sibling, NEVER unique.
+    #[test]
+    fn build_create_indexes_emits_btree_on_sibling_when_parent_indexed() {
+        let schema = serde_json::json!({
+            "email": {
+                "type": "string",
+                "index": true,
+                "mask": { "kind": "email", "classification": "pii" }
+            }
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        // One index on the parent (B-tree), one on the sibling
+        // (B-tree, never unique).
+        let sibling_idx: Vec<_> = out
+            .iter()
+            .filter(|s| s.columns.iter().any(|c| c == "email_masked"))
+            .collect();
+        assert_eq!(sibling_idx.len(), 1, "expected one sibling index: {out:?}");
+        assert!(
+            !sibling_idx[0].unique,
+            "sibling index must NEVER be UNIQUE: {sibling_idx:?}"
+        );
+        assert!(
+            sibling_idx[0].sql.contains("CREATE INDEX"),
+            "sibling index uses CREATE INDEX, not CREATE UNIQUE INDEX: {}",
+            sibling_idx[0].sql,
+        );
+        assert!(
+            !sibling_idx[0].sql.contains("UNIQUE"),
+            "sibling index DDL must not say UNIQUE: {}",
+            sibling_idx[0].sql,
+        );
+    }
+
+    /// **Index auto-emit** — `.unique()` on the parent still emits a
+    /// (non-unique) B-tree index on the sibling alongside the unique
+    /// index on the parent.
+    #[test]
+    fn build_create_indexes_unique_parent_btree_sibling() {
+        let schema = serde_json::json!({
+            "email": {
+                "type": "string",
+                "unique": true,
+                "mask": { "kind": "email", "classification": "pii" }
+            }
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let parent_idx = out
+            .iter()
+            .find(|s| s.columns.iter().any(|c| c == "email"))
+            .expect("parent unique index");
+        assert!(parent_idx.unique, "parent uniqueness preserved");
+        let sibling_idx = out
+            .iter()
+            .find(|s| s.columns.iter().any(|c| c == "email_masked"))
+            .expect("sibling index");
+        assert!(
+            !sibling_idx.unique,
+            "sibling must be non-unique even when parent is unique: {sibling_idx:?}"
+        );
+    }
+
+    /// **Index auto-emit** — no sibling index when parent has no
+    /// `.index()` / `.unique()`.
+    #[test]
+    fn build_create_indexes_no_sibling_when_parent_not_indexed() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert!(
+            out.iter().all(|s| !s.columns.iter().any(|c| c == "ssn_masked")),
+            "no sibling index when parent isn't indexed: {out:?}"
+        );
+    }
+
+    /// **Build insert** — when the row carries both parent + sibling
+    /// (mask pass already ran), the INSERT statement includes both
+    /// columns atomically.
+    #[test]
+    fn build_insert_includes_sibling_column_when_present() {
+        let doc = serde_json::json!({
+            "id": "usr_01",
+            "ssn": "123-45-6789",
+            "ssn_masked": "***-**-6789"
+        });
+        let bq = build_insert("app1", "users", &doc).expect("build_insert ok");
+        assert!(bq.sql.contains("\"ssn\""), "parent column in SQL: {}", bq.sql);
+        assert!(
+            bq.sql.contains("\"ssn_masked\""),
+            "sibling column in SQL: {}",
+            bq.sql,
+        );
     }
 }

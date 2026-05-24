@@ -3916,6 +3916,156 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 }
 
 // ===========================================================================
+// P5.5 PR 2 — Path B sibling-column dual-write integration
+// ===========================================================================
+//
+// Tests the end-to-end Path B contract on the SQLite arm:
+// (a) CREATE TABLE emits both the parent + `<col>_masked` sibling.
+// (b) INSERT writes both atomically (mask pass runs before SQL build).
+// (c) The masked sibling contains the pre-computed mask string while the
+//     parent stores the ciphertext / plaintext as before.
+
+/// **P5.5 PR 2 — DDL shape on SQLite**: `build_create_table_with_fks`
+/// emits both the parent and a sibling `<col>_masked TEXT NOT NULL`
+/// column for every masked field. The SQLite arm receives the SQL
+/// byte-identical to PG; the sibling clause itself is standard SQL
+/// (`TEXT NOT NULL`) so the SQLite engine accepts it once executed
+/// through the SQLite-flavoured `CREATE TABLE` path.
+#[test]
+fn sibling_column_emitted_for_masked_field_sqlite() {
+    use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+    let schema = serde_json::json!({
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+        "name": { "type": "string" }
+    });
+    let sql =
+        build_create_table_with_fks("app_demo", "users", &schema, &FkEmission::Inline).unwrap();
+    assert!(
+        sql.contains("\"ssn_masked\" TEXT NOT NULL"),
+        "sibling column must be emitted: {sql}"
+    );
+    assert!(
+        !sql.contains("\"name_masked\""),
+        "non-masked column must not emit a sibling: {sql}"
+    );
+}
+
+/// **P5.5 PR 2 — atomic dual-write on SQLite**: when a row carries
+/// both the parent + sibling (mask pass already ran), the
+/// SQLite-flavoured `build_insert_with_dialect` INSERT statement
+/// includes both columns atomically. Then we execute the INSERT
+/// against a hand-rolled SQLite-shaped table to confirm the engine
+/// accepts the dual write end-to-end and persists the masked value
+/// alongside the plaintext.
+#[test]
+fn dual_write_insert_persists_parent_and_sibling_sqlite() {
+    use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        // Hand-rolled SQLite-flavoured CREATE TABLE — the SQLite
+        // CREATE TABLE dialect doesn't speak PG's SERIAL /
+        // TIMESTAMPTZ; the orchestrator emits SQLite-flavoured DDL
+        // elsewhere. PR 2's responsibility is the sibling-column
+        // CLAUSE, which is standard SQL; we exercise it inside a
+        // SQLite-valid table here.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"users\" (\
+                     id    INTEGER PRIMARY KEY, \
+                     ssn   TEXT, \
+                     ssn_masked TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE ok");
+
+        // Simulate the dispatch_insert → apply_mask_on_write step:
+        // the mask pass has populated `ssn_masked`. The SQL builder
+        // walks the row map, so the sibling key naturally lands on
+        // the INSERT column list (no special-casing needed).
+        let doc = serde_json::json!({
+            "ssn": "123-45-6789",
+            "ssn_masked": "***-**-6789"
+        });
+        let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite).unwrap();
+        assert!(
+            bq.sql.contains("\"ssn\"") && bq.sql.contains("\"ssn_masked\""),
+            "INSERT must reference both parent + sibling: {}",
+            bq.sql,
+        );
+
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let _ = client
+            .query(&bq.sql, &param_refs)
+            .await
+            .expect("dual-write INSERT must succeed");
+
+        // Verify both columns landed atomically.
+        let rows = client
+            .query(
+                "SELECT ssn, ssn_masked FROM \"app_demo\".\"users\"",
+                &[],
+            )
+            .await
+            .expect("SELECT both columns");
+        assert_eq!(rows.len(), 1, "exactly one row inserted");
+        assert_eq!(rows[0][0].as_deref(), Some("123-45-6789"));
+        assert_eq!(rows[0][1].as_deref(), Some("***-**-6789"));
+    });
+}
+
+/// **P5.5 PR 2 — NOT NULL contract on the sibling**: omitting the
+/// sibling from an INSERT against a masked-column DDL must fail at the
+/// engine level (the sibling is `TEXT NOT NULL`). This is the
+/// load-bearing assertion that mask-pass must run before the SQL
+/// builder — skip it and the engine rejects with a NOT NULL violation.
+#[test]
+fn missing_sibling_fails_not_null_constraint_sqlite() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"users\" (\
+                     id  INTEGER PRIMARY KEY, \
+                     ssn TEXT, \
+                     ssn_masked TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE ok");
+        // Insert WITHOUT the sibling. The engine must refuse.
+        let res = backend
+            .pool_exec(
+                "INSERT INTO \"app_demo\".\"users\" (\"ssn\") VALUES (?)",
+                &["plaintext-no-mask"],
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "INSERT without sibling MUST fail (sibling is NOT NULL); got Ok"
+        );
+    });
+}
+
+// ===========================================================================
 // P5 PR 5 — SQLite `Backup` impl (VACUUM INTO snapshot + atomic
 // file-swap restore + `pitr_pg_only` refusal). Five tests covering the
 // gates in plan §11 + the CRITICAL #3 fence (concurrent writer):
