@@ -389,12 +389,45 @@ impl WakeMachine {
                     .submit_restore_job(sandbox_id, vm_index, &alloc_dir_owned, &user_id_owned)
             })
             .await
-            .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
+            .unwrap_or_else(|p| {
+                Err(crate::restore_handler::SubmitRestoreError::Other(format!(
+                    "spawn_blocking panic: {p:?}"
+                )))
+            })
         };
-        if let Err(e) = submit_result {
-            return self
-                .rollback_and_classify(g1, snap.vm_index, RestoreHandlerError::Backend(e))
-                .await;
+        // R23-API1 / R25-S1 / R25-I2: typed submit-error split.
+        // `Preflight` → `RestoreHandlerError::StagingPreflight` (path-
+        // free Display, typed-id form via the local helper) which
+        // `classify_failure` maps to `WakeErrorCode::StagingPathMissing`
+        // and the wire code `staging_image_missing`. Verbatim host
+        // path + source error are tracing-logged here at the
+        // controller boundary BEFORE the path-free typed map; they
+        // never cross the wire to an RO admin bearer.
+        match submit_result {
+            Ok(()) => {}
+            Err(e @ crate::restore_handler::SubmitRestoreError::Preflight { .. }) => {
+                let sandbox_id_typed = sandbox_id_typed(self.sandbox_id);
+                e.log_detail(&sandbox_id_typed);
+                let crate::restore_handler::SubmitRestoreError::Preflight { which, .. } = e
+                else {
+                    unreachable!()
+                };
+                return self
+                    .rollback_and_classify(
+                        g1,
+                        snap.vm_index,
+                        RestoreHandlerError::StagingPreflight {
+                            which,
+                            sandbox_id_typed,
+                        },
+                    )
+                    .await;
+            }
+            Err(crate::restore_handler::SubmitRestoreError::Other(s)) => {
+                return self
+                    .rollback_and_classify(g1, snap.vm_index, RestoreHandlerError::Backend(s))
+                    .await;
+            }
         }
 
         // ─── Phase: livez_polling ──────────────────────────────────
@@ -646,6 +679,16 @@ fn classify_failure(err: &RestoreHandlerError) -> WakeErrorCode {
         RestoreHandlerError::Store(_) => WakeErrorCode::RestoreFailed,
         RestoreHandlerError::ConfigRewrite(_) => WakeErrorCode::RestoreFailed,
         RestoreHandlerError::Database(_) => WakeErrorCode::Internal,
+        // R23-API1 / R25-S1: controller-side staging preflight
+        // rejection (workspace.img / user_home.img missing) routes
+        // to its own typed wire code so the SLO dashboard and
+        // operator triage path can distinguish it from the generic
+        // alloc-level `restore_backend_failed` bucket. The
+        // `error_message` recorded with this variant is path-free
+        // (see `RestoreHandlerError::StagingPreflight`'s `Display`
+        // impl) — the host path is logged controller-side via
+        // tracing only.
+        RestoreHandlerError::StagingPreflight { .. } => WakeErrorCode::StagingPathMissing,
         // FeatureDisabled / StateMismatch / NotFound are pre-flight
         // and the async handler refuses to spawn the machine in those
         // shapes — but defense-in-depth: if they leak here, surface as
@@ -1043,7 +1086,8 @@ mod tests {
     /// classify_failure pins the structural mapping: `VmIndexUnavailable`
     /// → `SlotUnavailable` (renders as `vm_index_unavailable` on the
     /// wire via `wire_code`); `SnapshotCorrupt` / `Backend` / `Store`
-    /// / `ConfigRewrite` → `RestoreFailed`; `Database` → `Internal`.
+    /// / `ConfigRewrite` → `RestoreFailed`; `Database` → `Internal`;
+    /// `StagingPreflight` → `StagingPathMissing` (R23-API1 / R25-S1).
     #[test]
     fn classify_failure_maps_restore_variants_to_wake_codes() {
         assert_eq!(
@@ -1061,6 +1105,44 @@ mod tests {
         assert_eq!(
             classify_failure(&RestoreHandlerError::ConfigRewrite("any".into())),
             WakeErrorCode::RestoreFailed
+        );
+        // R23-API1 / R25-S1: staging-preflight routes to its own wire
+        // bucket. The Display impl on this variant is path-free, so
+        // the `error_message` recorded by `rollback_and_classify`
+        // never carries a host path.
+        assert_eq!(
+            classify_failure(&RestoreHandlerError::StagingPreflight {
+                which: "workspace.img",
+                sandbox_id_typed: "sbx_abc".to_string(),
+            }),
+            WakeErrorCode::StagingPathMissing
+        );
+    }
+
+    /// R25-S1 pin: the `Display` impl on `StagingPreflight` MUST be
+    /// path-free so the `error_message` field that flows to
+    /// `wake_jobs` (and thence to an RO admin via `GET
+    /// /admin/sandboxes/{id}/wake/{wake_id}`) never carries a host
+    /// path. The typed-id form goes on the wire; the host path stays
+    /// in tracing logs only.
+    #[test]
+    fn staging_preflight_display_is_path_free() {
+        let err = RestoreHandlerError::StagingPreflight {
+            which: "workspace.img",
+            sandbox_id_typed: "sbx_01h00000000000000000000000".to_string(),
+        };
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains('/'),
+            "Display must not contain any path separator; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("workspace.img"),
+            "Display must name the resource; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("sbx_01h00000000000000000000000"),
+            "Display must include the typed-id form; got: {rendered}"
         );
     }
 

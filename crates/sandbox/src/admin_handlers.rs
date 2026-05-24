@@ -1295,6 +1295,25 @@ fn map_restore_error(e: RestoreHandlerError) -> HttpResponse {
         RestoreHandlerError::Internal(s) => {
             err_safe(500, "internal_error", "internal error", s)
         }
+        // R23-API1 / R25-S1: controller-side disk-image staging
+        // preflight rejection. Wire code matches the wake-poll
+        // contract (`staging_image_missing`) so a client triaging a
+        // failed sync-wake POST sees the same code-name they'd see
+        // on the async-wake `GET /admin/sandboxes/{id}/wake/{wake_id}`
+        // path. The `message` is path-free by construction (the
+        // `Display` impl on `RestoreHandlerError::StagingPreflight`).
+        RestoreHandlerError::StagingPreflight { which, sandbox_id_typed } => {
+            ErrorEnvelope::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "staging_image_missing",
+                format!("staging image missing: {which} for {sandbox_id_typed}"),
+            )
+            .with_extra(serde_json::json!({
+                "which": which,
+                "sandbox_id": sandbox_id_typed,
+            }))
+            .into_response()
+        }
     }
 }
 

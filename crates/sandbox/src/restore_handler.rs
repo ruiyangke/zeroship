@@ -59,6 +59,7 @@ pub struct RestoreOutcome {
 /// - `SnapshotCorrupt`      → 500 `snapshot_corrupt` (CAS to suspect)
 /// - `Backend` / `Database` → 500 (controller-internal)
 /// - `NotFound`             → 404
+/// - `StagingPreflight`     → 500 `staging_image_missing` (R23-API1 / R25-S1 — host path stays controller-side via tracing; wire carries the typed-id form + resource name only)
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreHandlerError {
     #[error("snapshot feature disabled (SANDBOX_SNAPSHOT_ENABLED=false)")]
@@ -90,6 +91,136 @@ pub enum RestoreHandlerError {
 
     #[error("internal: {0}")]
     Internal(String),
+
+    /// R23-API1 / R25-S1 / R25-I1 / R25-I2: controller-side disk-image
+    /// staging preflight rejection (`submit_restore_job` refused to
+    /// hand the alloc to Nomad because `workspace.img` or
+    /// `user_home.img` was missing/empty/wrong-type on the host).
+    ///
+    /// The free-text `Display` form is intentionally PATH-FREE
+    /// because this error string ends up in `wake_jobs.error_message`
+    /// and is surfaced via `GET /admin/sandboxes/{id}/wake/{wake_id}`
+    /// to `AdminRole::ReadOnly` bearers (R25-S1 leak: paths +
+    /// locale-dependent OS errors used to flow through this channel).
+    /// The structured fields (`which`, `sandbox_id_typed`) describe
+    /// the failure resource + tenant in user-safe form; the
+    /// path-bearing detail is captured ONLY in tracing logs on the
+    /// controller side via [`SubmitRestoreError::log_detail`] at the
+    /// raising site.
+    ///
+    /// `which` is one of `"workspace.img"` / `"user_home.img"`
+    /// (operator-facing resource name, NOT the host path). The wake
+    /// state machine maps this variant to
+    /// [`crate::db::WakeErrorCode::StagingPathMissing`] which renders
+    /// as the wire code `staging_image_missing` per R23-API1.
+    #[error("staging image missing: {which} for {sandbox_id_typed}")]
+    StagingPreflight {
+        /// Operator-facing resource name (`"workspace.img"` or
+        /// `"user_home.img"`). Not a host path.
+        which: &'static str,
+        /// Typed-id form (`sbx_<base62>`) of the sandbox — matches
+        /// sibling sites at `:633-636` / `:731-734` so operators
+        /// grepping the typed-id form find preflight rejections too
+        /// (R25-I2).
+        sandbox_id_typed: String,
+    },
+}
+
+/// R23-API1 / R25-S1 / R25-I1 / R25-I2: typed error returned by
+/// [`RestoreBackend::submit_restore_job`].
+///
+/// Pre-fix shape was `Result<(), String>` — the bundle's preflight
+/// embedded the host path + locale-dependent `std::fs::metadata` error
+/// in the string. Two problems:
+///
+///   1. The string round-trips through `wake_jobs.error_message`,
+///      which RO admin bearers can read. Paths and `os error 2`
+///      "no such file or directory" strings have no place there.
+///   2. Clients (and the SLO dashboard) couldn't distinguish
+///      "controller refused to submit because a host disk image is
+///      missing" (operator-actionable) from "Nomad alloc failed
+///      mid-restore" (transient/retry).
+///
+/// Typed variants make both routing decisions explicit:
+///
+///   - `Preflight` — structured fields (`which`, `path`, `source`)
+///     stay inside the controller. The wake-machine classifier maps
+///     this to `RestoreHandlerError::StagingPreflight` (whose
+///     `Display` impl is path-free) which then maps to
+///     `WakeErrorCode::StagingPathMissing` and the wire code
+///     `staging_image_missing`. The host path is logged via tracing
+///     at the wake-machine boundary so operators have triage
+///     context without exposing it on the wire.
+///   - `Other` — every existing failure mode (Nomad POST 500,
+///     `wait_for_alloc_running` timeout, JSON serialise error) keeps
+///     its free-text shape and routes to
+///     `WakeErrorCode::RestoreFailed` as before.
+#[derive(Debug)]
+pub enum SubmitRestoreError {
+    /// Controller-side staging preflight rejection. `which` is the
+    /// operator-facing resource name (`"workspace.img"` /
+    /// `"user_home.img"`); `path` is the verbatim host path that
+    /// failed the `assert_disk_image_present` check (used ONLY for
+    /// controller-side tracing logs, never surfaced on the wire);
+    /// `source` is the raw error from `assert_disk_image_present`
+    /// (also tracing-only).
+    Preflight {
+        which: &'static str,
+        path: PathBuf,
+        source: String,
+    },
+    /// Catch-all: Nomad submit RPC failure, alloc-running timeout,
+    /// JSON serialise error, etc. Maps to
+    /// `WakeErrorCode::RestoreFailed` (the existing classification).
+    Other(String),
+}
+
+impl std::fmt::Display for SubmitRestoreError {
+    /// Path-free `Display` so accidental `{err}` formatting at a wake
+    /// edge (or via the `?` operator into a `String`-shaped sink)
+    /// doesn't leak host paths. The `Preflight` arm renders the
+    /// resource name only; the `Other` arm passes through.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preflight { which, .. } => {
+                write!(f, "staging image missing: {which}")
+            }
+            Self::Other(s) => f.write_str(s),
+        }
+    }
+}
+
+impl std::error::Error for SubmitRestoreError {}
+
+impl SubmitRestoreError {
+    /// Convenience constructor for the preflight rejection at the
+    /// `submit_restore_job` site. Captures the verbatim host path +
+    /// the `assert_disk_image_present` source error string. The wake
+    /// machine boundary calls [`Self::log_detail`] before mapping
+    /// into `RestoreHandlerError::StagingPreflight` so the host path
+    /// surfaces in tracing logs (controller-side only) but not on
+    /// the wire.
+    pub fn preflight(which: &'static str, path: PathBuf, source: String) -> Self {
+        Self::Preflight { which, path, source }
+    }
+
+    /// Emit a tracing WARN with the verbatim host path + source error
+    /// for controller-side triage. Called at the wake-machine
+    /// boundary BEFORE the error is mapped into the path-free
+    /// `RestoreHandlerError::StagingPreflight` shape that crosses the
+    /// wire.
+    pub fn log_detail(&self, sandbox_id_typed: &str) {
+        if let Self::Preflight { which, path, source } = self {
+            tracing::warn!(
+                target: "sandbox::wake::preflight",
+                sandbox_id = %sandbox_id_typed,
+                which = %which,
+                path = %path.display(),
+                source = %source,
+                "submit_restore_job: controller-side staging preflight rejected the alloc (R23-API1)"
+            );
+        }
+    }
 }
 
 /// C-4 fix (T-8b-smoke-r5 cluster review, 2026-05-25): bounded retry
@@ -285,13 +416,23 @@ pub trait RestoreBackend: Send + Sync {
     /// task's env so the wrapper's restore branch fires (PR 3f).
     /// Synchronous return on success means the job was *enqueued*;
     /// readiness is signalled by [`Self::wait_for_livez`].
+    ///
+    /// R23-API1 / R25-S1 / R25-I1 / R25-I2 typed-error shape: the
+    /// `Err` arm distinguishes controller-side staging-preflight
+    /// rejection ([`SubmitRestoreError::Preflight`]) from every other
+    /// submit-time failure ([`SubmitRestoreError::Other`]). The wake
+    /// state machine routes the former to
+    /// `WakeErrorCode::StagingPathMissing` / wire
+    /// `staging_image_missing` and keeps the host path off the wire;
+    /// the latter folds into `WakeErrorCode::RestoreFailed` as
+    /// before.
     fn submit_restore_job(
         &self,
         sandbox_id: Uuid,
         vm_index: i16,
         alloc_dir: &Path,
         user_id: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), SubmitRestoreError>;
 
     /// Block until the restored VM's agent serves `/livez 200`. Best
     /// implemented over `compio::time::sleep` polling; v1 ships the
@@ -855,7 +996,7 @@ async fn do_restore_inner(
         let alloc_dir_owned = alloc_dir.clone();
         let user_id_owned = snap.user_id.clone();
         let vm_index = snap.vm_index;
-        compio::runtime::spawn_blocking(move || {
+        let submit_result = compio::runtime::spawn_blocking(move || {
             backend_clone.submit_restore_job(
                 sandbox_id,
                 vm_index,
@@ -864,8 +1005,35 @@ async fn do_restore_inner(
             )
         })
         .await
-        .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
-        .map_err(RestoreHandlerError::Backend)?;
+        .unwrap_or_else(|p| Err(SubmitRestoreError::Other(format!(
+            "spawn_blocking panic: {p:?}"
+        ))));
+        // R23-API1 / R25-S1 / R25-I2: preflight failures get a typed
+        // `RestoreHandlerError::StagingPreflight` (path-free Display);
+        // every other shape folds into `Backend(_)` as before. The
+        // verbatim host path + source error are logged via tracing
+        // before the typed map so operators have triage context that
+        // doesn't cross the wire.
+        match submit_result {
+            Ok(()) => {}
+            Err(e @ SubmitRestoreError::Preflight { .. }) => {
+                let sandbox_id_typed = format!(
+                    "sbx_{}",
+                    zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+                );
+                e.log_detail(&sandbox_id_typed);
+                let SubmitRestoreError::Preflight { which, .. } = e else {
+                    unreachable!()
+                };
+                return Err(RestoreHandlerError::StagingPreflight {
+                    which,
+                    sandbox_id_typed,
+                });
+            }
+            Err(SubmitRestoreError::Other(s)) => {
+                return Err(RestoreHandlerError::Backend(s));
+            }
+        }
     }
     tracing::info!(
         sandbox_id = %sandbox_id,
@@ -1209,11 +1377,13 @@ impl RestoreBackend for StubRestoreBackend {
         _vm_index: i16,
         _alloc_dir: &Path,
         _user_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SubmitRestoreError> {
         self.submit_called
             .store(true, std::sync::atomic::Ordering::SeqCst);
         if self.fail_submit {
-            return Err("stub: submit_restore_job failed".into());
+            return Err(SubmitRestoreError::Other(
+                "stub: submit_restore_job failed".into(),
+            ));
         }
         Ok(())
     }
@@ -2032,7 +2202,7 @@ impl RestoreBackend for RealRestoreBackend {
         vm_index: i16,
         alloc_dir: &Path,
         user_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SubmitRestoreError> {
         let job_id = format!("zsbx-restore-{}", sandbox_id.simple());
         // R12-I1 (T-8 blocker): the wake path now respects the same
         // SANDBOX_TASK_DRIVER feature flag T-7 wired into the cold-boot
@@ -2058,35 +2228,45 @@ impl RestoreBackend for RealRestoreBackend {
         // `create_ext4_image_if_missing`. Mirrors the driver's
         // `preflightDiskPaths` discipline (3-strike pattern: user_id,
         // rootfs_source, now workspace.img + home.img).
+        //
+        // R25-I1 fix: reuse the existing `pub(crate)`
+        // path-derivation helpers (`workspace_image_path` at
+        // `nomad_ch.rs:3627`, `user_home_image_path` at `:3618`)
+        // instead of re-inlining the `{root}/{sid}/<file>` shape. The
+        // cold-boot path uses the same helpers; convergence
+        // eliminates the 3-strike DRY shape r21-A1 flagged.
+        //
+        // R23-API1 / R25-S1 / R25-I2 fix: return a typed
+        // `SubmitRestoreError::Preflight` carrying structured fields
+        // (resource name + host path) so the wake state machine can
+        // route to `WakeErrorCode::StagingPathMissing` AND keep the
+        // host path off the wire (RO admins reading
+        // `/admin/sandboxes/{id}/wake/{wake_id}` see only "staging
+        // image missing: workspace.img" with no fs path). The host
+        // path is logged via tracing at the wake-machine boundary.
         let host_dir = self
             .cfg
             .host_state_dir
             .join(sandbox_id.simple().to_string());
-        let workspace_img = host_dir.join("workspace.img");
-        let user_home_img = self
-            .cfg
-            .user_home_dir_root
-            .join(user_id)
-            .join("home.img");
-        crate::backend::nomad_ch::assert_disk_image_present(&workspace_img).map_err(|e| {
-            format!(
-                "restore submit: workspace.img missing for sandbox {} \
-                 (snapshot teardown should have preserved it via \
-                 stop_preserving_state; controller will not submit \
-                 restore job that the driver's preflight would reject \
-                 with a generic Failed-tasks rollup): {e}",
-                sandbox_id
-            )
-        })?;
-        crate::backend::nomad_ch::assert_disk_image_present(&user_home_img).map_err(|e| {
-            format!(
-                "restore submit: user_home.img missing for sandbox {} \
-                 user {} (per-user image should persist across the user's \
-                 sandboxes — source create() mkfs'd it; only host disk \
-                 corruption or out-of-band rm would explain this): {e}",
-                sandbox_id, user_id
-            )
-        })?;
+        let workspace_img = crate::backend::nomad_ch::workspace_image_path(&host_dir);
+        let user_home_img = crate::backend::nomad_ch::user_home_image_path(
+            &self.cfg.user_home_dir_root,
+            user_id,
+        );
+        if let Err(e) = crate::backend::nomad_ch::assert_disk_image_present(&workspace_img) {
+            return Err(SubmitRestoreError::preflight(
+                "workspace.img",
+                workspace_img,
+                e,
+            ));
+        }
+        if let Err(e) = crate::backend::nomad_ch::assert_disk_image_present(&user_home_img) {
+            return Err(SubmitRestoreError::preflight(
+                "user_home.img",
+                user_home_img,
+                e,
+            ));
+        }
 
         let job_json = build_restore_nomad_job_json(
             &job_id,
@@ -2100,15 +2280,18 @@ impl RestoreBackend for RealRestoreBackend {
             mode,
         );
         let body = serde_json::to_vec(&job_json)
-            .map_err(|e| format!("serialize Nomad job JSON: {e}"))?;
+            .map_err(|e| {
+                SubmitRestoreError::Other(format!("serialize Nomad job JSON: {e}"))
+            })?;
         let url = format!("{}/v1/jobs", self.cfg.nomad_addr);
-        let resp = nomad_post_blocking(&url, &body, Duration::from_secs(15))?;
+        let resp = nomad_post_blocking(&url, &body, Duration::from_secs(15))
+            .map_err(SubmitRestoreError::Other)?;
         if resp.status != 200 {
-            return Err(format!(
+            return Err(SubmitRestoreError::Other(format!(
                 "POST {url} → status {}: {}",
                 resp.status,
                 resp.body.trim()
-            ));
+            )));
         }
         // Now poll until the alloc reaches running (or terminal).
         wait_for_alloc_running_blocking(
@@ -2116,6 +2299,7 @@ impl RestoreBackend for RealRestoreBackend {
             &job_id,
             self.alloc_running_timeout,
         )
+        .map_err(SubmitRestoreError::Other)
     }
 
     fn wait_for_livez(
@@ -2959,7 +3143,16 @@ mod real_backend_tests {
         let err = backend
             .submit_restore_job(sid, 8, &alloc_dir, "usr_test")
             .expect_err("500 must error");
-        assert!(err.contains("status 500"), "{err}");
+        // R23-API1: typed error — a Nomad 500 is the `Other` arm
+        // (the `Preflight` arm is reserved for the staging-image
+        // checks). The free-text inner string still carries the
+        // HTTP status for triage.
+        let rendered = err.to_string();
+        assert!(rendered.contains("status 500"), "{rendered}");
+        assert!(
+            matches!(err, SubmitRestoreError::Other(_)),
+            "Nomad 500 must classify as SubmitRestoreError::Other; got {err:?}"
+        );
         let _ = std::fs::remove_dir_all(&host_state);
     }
 
@@ -3076,9 +3269,17 @@ mod real_backend_tests {
         let err = backend
             .submit_restore_job(sid, 9, &alloc_dir, "usr_test")
             .expect_err("never-running must time out");
+        // R23-API1: the alloc-running timeout is `SubmitRestoreError::Other`
+        // (it's a Nomad-side alloc-poll exhaustion, not a controller
+        // preflight). Pin both the typed variant and the inner text.
+        let rendered = err.to_string();
         assert!(
-            err.contains("never reached running"),
-            "{err}"
+            rendered.contains("never reached running"),
+            "{rendered}"
+        );
+        assert!(
+            matches!(err, SubmitRestoreError::Other(_)),
+            "alloc-running timeout must classify as Other; got {err:?}"
         );
         let _ = std::fs::remove_dir_all(&host_state);
     }
@@ -3108,9 +3309,26 @@ mod real_backend_tests {
         let err = backend
             .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
             .expect_err("missing workspace.img must reject before submit");
+        // R23-API1 / R25-S1: the error is typed —
+        // `SubmitRestoreError::Preflight { which: "workspace.img", .. }`.
+        // The `Display` impl is path-free; the structured `which`
+        // field is what callers branch on.
+        match &err {
+            SubmitRestoreError::Preflight { which, .. } => {
+                assert_eq!(*which, "workspace.img");
+            }
+            other => panic!("expected SubmitRestoreError::Preflight; got {other:?}"),
+        }
+        // R25-S1: the path-free Display form names the resource but
+        // contains NO `/` (no host fs path on the wire).
+        let rendered = err.to_string();
         assert!(
-            err.contains("workspace.img missing"),
-            "err must name the missing precondition; got: {err}"
+            rendered.contains("workspace.img"),
+            "Display must name the resource; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains('/'),
+            "Display must not contain a path separator; got: {rendered}"
         );
         // Crucially, no submit RPC fired.
         assert_eq!(
@@ -3147,9 +3365,22 @@ mod real_backend_tests {
         let err = backend
             .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
             .expect_err("missing user_home.img must reject before submit");
+        // R23-API1 / R25-S1: typed shape — `which: "user_home.img"`.
+        match &err {
+            SubmitRestoreError::Preflight { which, .. } => {
+                assert_eq!(*which, "user_home.img");
+            }
+            other => panic!("expected SubmitRestoreError::Preflight; got {other:?}"),
+        }
+        // R25-S1: path-free Display.
+        let rendered = err.to_string();
         assert!(
-            err.contains("user_home.img missing"),
-            "err must name the missing precondition; got: {err}"
+            rendered.contains("user_home.img"),
+            "Display must name the resource; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains('/'),
+            "Display must not contain a path separator; got: {rendered}"
         );
         assert_eq!(
             calls.load(AOrdering::SeqCst),
