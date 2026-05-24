@@ -118,9 +118,15 @@ fn cmd_serve(args: &[String]) {
     plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
     eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
 
-    // KV plugin: Redis-backed when ZEROSHIP_KV_URL is set (distributed-
-    // correctness: shared across workers/regions), in-memory otherwise
-    // (dev default — single worker only).
+    // KV plugin backend selection, in priority order:
+    //   1. ZEROSHIP_KV_URL set        → Redis (distributed-correctness:
+    //                                    shared across workers/regions).
+    //   2. ZEROSHIP_KV_PATH set        → redb (single-process persistent
+    //                                    embedded store; self-host tier —
+    //                                    only when the `redb` feature is
+    //                                    compiled in).
+    //   3. otherwise                   → in-memory (dev default; single
+    //                                    worker only, no persistence).
     let kv_plugin = match std::env::var("ZEROSHIP_KV_URL") {
         Ok(url) if !url.is_empty() => {
             eprintln!("[zeroship] kv plugin registered (redis)");
@@ -128,10 +134,22 @@ fn cmd_serve(args: &[String]) {
                 Arc::new(zeroship_plugin_kv::Redis::new(url))
             )
         }
-        _ => {
-            eprintln!("[zeroship] kv plugin registered (in-memory; single-worker only)");
-            zeroship_plugin_kv::KvPlugin::in_memory()
-        }
+        _ => match std::env::var("ZEROSHIP_KV_PATH") {
+            #[cfg(feature = "kv-redb")]
+            Ok(path) if !path.is_empty() => {
+                let backend = zeroship_plugin_kv::RedbBackend::open(&path)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[zeroship] kv: failed to open redb at '{path}': {e}");
+                        std::process::exit(1);
+                    });
+                eprintln!("[zeroship] kv plugin registered (redb; path={path})");
+                zeroship_plugin_kv::KvPlugin::with_backend(Arc::new(backend))
+            }
+            _ => {
+                eprintln!("[zeroship] kv plugin registered (in-memory; single-worker only)");
+                zeroship_plugin_kv::KvPlugin::in_memory()
+            }
+        },
     };
     plugins.push(Arc::new(kv_plugin));
 

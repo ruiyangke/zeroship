@@ -1,8 +1,10 @@
 //! Backend abstraction for `env.kv.*`.
 //!
-//! Two impls ship today:
+//! Three impls ship today:
 //! - `InMemory` — per-worker HashMap, dev only. No cross-worker state.
-//! - `Redis` — network-backed, strongly consistent. Production.
+//! - `RedbBackend` — single-process embedded persistent store (`redb`),
+//!   the self-host / single-worker-process tier. Exclusive file lock.
+//! - `Redis` — network-backed, strongly consistent. Production fleets.
 //!
 //! Commitment (permanent): **every backend is strongly consistent with
 //! atomic INCR / set-if-absent semantics.** If a future backend can't
@@ -25,10 +27,14 @@
 //!   key's existing expiry untouched.
 
 pub mod memory;
+#[cfg(feature = "redb")]
+pub mod redb;
 #[cfg(feature = "redis")]
 pub mod redis;
 
 pub use memory::InMemory;
+#[cfg(feature = "redb")]
+pub use redb::RedbBackend;
 #[cfg(feature = "redis")]
 pub use redis::Redis;
 

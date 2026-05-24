@@ -36,6 +36,8 @@ pub mod limits;
 pub mod v8_class;
 
 pub use backend::{Backend, InMemory, TtlState};
+#[cfg(feature = "redb")]
+pub use backend::RedbBackend;
 #[cfg(feature = "redis")]
 pub use backend::Redis;
 pub use error::KvError;
