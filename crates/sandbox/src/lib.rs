@@ -136,11 +136,32 @@ pub struct AppState {
     /// A5 (api-surface-2026-05-24-r1): restricted to `pub(crate)` so
     /// no out-of-crate caller can clobber the field with an empty
     /// `Zeroizing<String>` (which would defeat the constant-time
-    /// compare — see `admin_handlers::admin_check`). Tests and other
-    /// in-crate constructors set the field via the safe
+    /// compare — see `admin_handlers::admin_check_required`). Tests
+    /// and other in-crate constructors set the field via the safe
     /// [`AppState::with_admin_token`] builder, which rejects empty
     /// strings before they can reach the auth path.
     pub(crate) admin_token: Option<zeroize::Zeroizing<String>>,
+
+    /// T1 (sandbox_admin_ro role, 2026-05-25): the read-only admin
+    /// bearer. Mirrors [`admin_token`] in lifecycle (read ONCE at
+    /// boot from `SANDBOX_ADMIN_RO_TOKEN_PATH`, mode 0o400, owner
+    /// uid 0). `None` is the disabled-by-absence shape; the admin
+    /// API's role-gate then accepts only the full bearer (when
+    /// configured) or 503's the read endpoints (when both bearers
+    /// are absent).
+    ///
+    /// Threat model: bearer leak via an unprivileged dashboard or
+    /// on-call tooling. The RO bearer authorizes GETs only —
+    /// destructive endpoints (snapshot / wake / GDPR / cold-boot)
+    /// surface 403 `insufficient_role` against this token. A leak
+    /// limits the attacker to fleet enumeration, not write actions.
+    ///
+    /// Field is `pub(crate)` for the same reason as `admin_token`:
+    /// the empty-string footgun must not be plantable from outside
+    /// the crate. The builder [`AppState::with_admin_ro_token`]
+    /// rejects empty strings; the boot loader rejects equal-content
+    /// full+ro token files at boot.
+    pub(crate) admin_ro_token: Option<zeroize::Zeroizing<String>>,
 
     /// Phase-A snapshot/restore wiring: present (`Some`) only when
     /// `config.snapshot_enabled = true`. The trio of stores +
@@ -257,12 +278,48 @@ impl AppState {
 
     /// Read-only accessor for the admin bearer. Returns the raw
     /// string slice; callers MUST use constant-time comparison
-    /// (`subtle::ConstantTimeEq` via `admin_handlers::admin_check`)
-    /// rather than `==` against user-presented bytes. Mainly here
-    /// so integration tests can assert wiring without poking the
-    /// `pub(crate)` field.
+    /// (`subtle::ConstantTimeEq` via
+    /// `admin_handlers::admin_check_required`) rather than `==`
+    /// against user-presented bytes. Mainly here so integration
+    /// tests can assert wiring without poking the `pub(crate)` field.
     pub fn admin_token(&self) -> Option<&str> {
         self.admin_token.as_deref().map(|z| z.as_str())
+    }
+
+    /// T1: safe builder for the read-only admin bearer. Mirrors
+    /// [`AppState::with_admin_token`] verbatim: the field is
+    /// `pub(crate)` and the only legal out-of-crate write path is
+    /// this builder, which rejects empty strings before the auth
+    /// path can see them.
+    ///
+    /// Semantics:
+    ///   - `token = None` → clears the field (RO bearer disabled).
+    ///   - `token = Some("")` → `Err("admin_ro_token must not be empty")`.
+    ///   - `token = Some(non-empty)` → wraps in `Zeroizing<String>`.
+    pub fn with_admin_ro_token(
+        mut self,
+        token: Option<String>,
+    ) -> Result<Self, String> {
+        match token {
+            None => {
+                self.admin_ro_token = None;
+                Ok(self)
+            }
+            Some(t) if t.is_empty() => {
+                Err("admin_ro_token must not be empty".to_string())
+            }
+            Some(t) => {
+                self.admin_ro_token = Some(zeroize::Zeroizing::new(t));
+                Ok(self)
+            }
+        }
+    }
+
+    /// T1: read-only accessor for the read-only admin bearer. Mirrors
+    /// [`AppState::admin_token`]; used by integration tests to assert
+    /// wiring without poking the `pub(crate)` field.
+    pub fn admin_ro_token(&self) -> Option<&str> {
+        self.admin_ro_token.as_deref().map(|z| z.as_str())
     }
 
     /// A6 (api-surface-2026-05-24-r1): safe builder for `persist`.
@@ -422,6 +479,7 @@ impl AppState {
             persist: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             admin_token: None,
+            admin_ro_token: None,
             snapshot_store: None,
             ch_remote: None,
             restore_backend: None,
@@ -635,6 +693,30 @@ impl AppState {
         let admin_token = load_admin_token(admin_token_path.as_deref())?
             .map(zeroize::Zeroizing::new);
 
+        // T1: same shape for the read-only admin bearer. Re-uses
+        // `load_admin_token` so the mode 0o400 + uid 0 + non-empty
+        // invariants apply identically.
+        let admin_ro_token_path = std::env::var("SANDBOX_ADMIN_RO_TOKEN_PATH")
+            .ok()
+            .and_then(|v| {
+                let t = v.trim();
+                if t.is_empty() { None } else { Some(std::path::PathBuf::from(t)) }
+            });
+        let admin_ro_token = load_admin_token(admin_ro_token_path.as_deref())?
+            .map(zeroize::Zeroizing::new);
+
+        // T1 boot guard: refuse to boot when both bearers resolve to
+        // the SAME secret. The whole point of the RO bearer is least-
+        // privilege; if the operator pointed both env vars at the
+        // same file (or two files with identical contents), the RO
+        // distinction is illusory and any leak of the RO bearer
+        // grants Full admin too. Fail loud at boot rather than
+        // silently equalise the two roles.
+        assert_distinct_admin_tokens(
+            admin_token.as_deref().map(|z| z.as_str()),
+            admin_ro_token.as_deref().map(|z| z.as_str()),
+        )?;
+
         // C-7-LT (PR1): resolve wake-response mode from env at boot.
         // Resolved BEFORE the snapshot-wiring block so the value can
         // be threaded into `RealRestoreBackend::with_wake_response_mode`
@@ -844,6 +926,7 @@ impl AppState {
             persist,
             shutdown: Arc::new(AtomicBool::new(false)),
             admin_token,
+            admin_ro_token,
             snapshot_store,
             ch_remote,
             restore_backend,
@@ -936,6 +1019,21 @@ impl AppState {
         // but on the `wake_jobs` table instead of `sandboxes`.
         if state.database.is_some() {
             sweep::spawn_wake_jobs_takeover(state.clone());
+        }
+        // T-8b-stress-r2 controller v34: host_dir GC sweep. Reaps
+        // `<host_state_dir>/<sandbox-id>/` directories whose sandbox is
+        // in a terminal state (or absent from the DB) with no pending
+        // wake_jobs row, after a 1-hour grace. THIS is the load-bearing
+        // fix for Bug 1 (`workspace.img does not exist`) — the per-alloc
+        // `rm -rf` paths in CreateGuard::drop / stop_inner now leak the
+        // dir on purpose; this sweeper is the catchall. See
+        // `crates/sandbox/src/backend/nomad_ch.rs` doc comment ("Cleanup
+        // contract") and `docs/reviews/sandbox-snapshot-restore-cluster-
+        // 2026-05-25-T8b-stress-r2.md` for the full diagnosis. Gated on
+        // `database.is_some()` for the same reason as the other pg-only
+        // sweeps; single-tenant deploys keep the operator-wipe story.
+        if state.database.is_some() {
+            sweep::spawn_host_dir_gc(state.clone());
         }
         // T6: auto-spawn idle eviction sweep. Production now has all
         // deps wired (snapshot_store + ch_remote + restore_backend
@@ -1150,6 +1248,57 @@ pub(crate) fn load_admin_token(
         ));
     }
     Ok(Some(trimmed))
+}
+
+/// T1: boot-time guard against the operator footgun where both
+/// `SANDBOX_ADMIN_TOKEN_PATH` and `SANDBOX_ADMIN_RO_TOKEN_PATH` point
+/// at files containing the same secret (whether by symlink, identical
+/// generated content, or paste error). If both bearers resolve to
+/// the same string, the role-gate's "full ⊋ read-only" distinction
+/// collapses: the RO bearer matches the Full ct_eq compare, so an
+/// attacker who leaks the RO bearer trivially escalates to Full
+/// admin via any destructive endpoint.
+///
+/// The check runs in `AppState::from_config` AFTER both env-resolved
+/// `load_admin_token` calls have succeeded. We compare in
+/// constant-time so the boot log doesn't leak which prefix of the
+/// secrets matched — irrelevant in practice (boot happens once and
+/// the error is fatal), but it keeps the invariant local to the
+/// auth path's overall posture.
+///
+/// Three outcomes:
+///   - both `None` → `Ok(())` (no tokens configured; admin API is
+///     disabled by either env var being absent).
+///   - one `Some`, other `None` → `Ok(())` (the asymmetric, legal
+///     "Full only" or "RO only" deployment shapes).
+///   - both `Some` with EQUAL contents → `Err(...)` (the footgun).
+///   - both `Some` with DISTINCT contents → `Ok(())`.
+pub(crate) fn assert_distinct_admin_tokens(
+    full: Option<&str>,
+    ro: Option<&str>,
+) -> Result<(), String> {
+    let (Some(f), Some(r)) = (full, ro) else {
+        return Ok(());
+    };
+    // Constant-time compare of two configured boot-time secrets. The
+    // boot path runs once; this is purely defense-in-depth so the
+    // error log doesn't telegraph a partial match.
+    use subtle::ConstantTimeEq;
+    if f.as_bytes().ct_eq(r.as_bytes()).into() {
+        return Err(
+            "FATAL: SANDBOX_ADMIN_TOKEN_PATH and SANDBOX_ADMIN_RO_TOKEN_PATH \
+             contain identical secrets. The read-only role exists to \
+             limit blast radius on bearer leak; pointing both env vars \
+             at the same secret collapses the Full ⊋ ReadOnly \
+             distinction. Fix: generate two distinct random tokens, one \
+             per file (chmod 0o400, chown root:root each). To run with \
+             only the full bearer, unset SANDBOX_ADMIN_RO_TOKEN_PATH. \
+             To run with only the RO bearer, unset \
+             SANDBOX_ADMIN_TOKEN_PATH."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Periodic backend probe. `probe()` updates the `healthy` flag
@@ -1822,6 +1971,86 @@ mod boot_loader_tests {
         );
     }
 
+    // ─── T1: distinct-token boot guard ──────────────────────────
+    //
+    // Pure-function tests over `assert_distinct_admin_tokens`. The
+    // production caller in `AppState::from_config` runs this AFTER
+    // both `load_admin_token` calls succeed; we test the truth
+    // table here without spinning up a backend probe.
+
+    #[test]
+    fn distinct_admin_tokens_both_none_is_ok() {
+        // Default-disabled shape. The role-gate will 503 every
+        // /admin/* endpoint; nothing to compare.
+        assert_distinct_admin_tokens(None, None)
+            .expect("both None → admin API disabled, no comparison needed");
+    }
+
+    #[test]
+    fn distinct_admin_tokens_only_full_configured_is_ok() {
+        // Legal asymmetric shape: operator wired the full bearer but
+        // hasn't provisioned an RO yet. Read endpoints still work
+        // via the full bearer; RO bearers don't exist on the wire.
+        assert_distinct_admin_tokens(Some("full-bearer-aaaa"), None)
+            .expect("full only → legal");
+    }
+
+    #[test]
+    fn distinct_admin_tokens_only_ro_configured_is_ok() {
+        // Legal asymmetric shape: operator wired only the RO
+        // bearer (e.g. a dashboard-only deploy where there's no
+        // operator with destructive privileges). Destructive
+        // endpoints 503 `admin_api_disabled`; read endpoints work
+        // via the RO bearer.
+        assert_distinct_admin_tokens(None, Some("ro-bearer-aaaaa"))
+            .expect("ro only → legal");
+    }
+
+    #[test]
+    fn distinct_admin_tokens_with_distinct_contents_is_ok() {
+        // The intended production shape: two distinct random tokens,
+        // one per file.
+        assert_distinct_admin_tokens(
+            Some("full-bearer-aaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("ro-bearer-bbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .expect("two distinct tokens → legal");
+    }
+
+    /// T1 boot guard: equal contents on both paths must refuse to
+    /// boot. The footgun this closes is an operator who symlinks
+    /// `SANDBOX_ADMIN_RO_TOKEN_PATH` at the full-bearer file, or
+    /// generates the two files from the same source — silently
+    /// collapsing the role distinction.
+    #[test]
+    fn distinct_admin_tokens_with_equal_contents_is_err() {
+        let shared = "secret-pasted-into-both-files-aaaa";
+        let err = assert_distinct_admin_tokens(Some(shared), Some(shared))
+            .expect_err("equal contents must refuse to boot");
+        assert!(
+            err.contains("FATAL"),
+            "error must announce FATAL severity; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_ADMIN_TOKEN_PATH")
+                && err.contains("SANDBOX_ADMIN_RO_TOKEN_PATH"),
+            "error must name both env vars so the operator can locate \
+             the misconfig; got: {err}"
+        );
+    }
+
+    /// Negative test: tokens differing in only one byte are still
+    /// distinct. Belt-and-suspenders against a sloppy substring
+    /// compare regression.
+    #[test]
+    fn distinct_admin_tokens_with_one_byte_difference_is_ok() {
+        assert_distinct_admin_tokens(
+            Some("matching-prefix-aaaaaaaaaaaaaaa1"),
+            Some("matching-prefix-aaaaaaaaaaaaaaa2"),
+        )
+        .expect("one-byte difference is still distinct");
+    }
+
     /// R9-S4d positive arm: when the test runs as root, a 0o400
     /// admin-token file owned by root passes the check. Skipped
     /// when not running as root (the common case in CI/dev) — the
@@ -1974,6 +2203,79 @@ mod admin_token_setter_tests {
             Err(e) => panic!("None clears unconditionally: {e}"),
         };
         assert!(state.admin_token().is_none(), "None must clear the field");
+    }
+
+    // ─── T1: with_admin_ro_token mirror tests ─────────────────────
+
+    #[test]
+    fn admin_ro_token_setter_rejects_empty() {
+        let state = min_state();
+        match state.with_admin_ro_token(Some(String::new())) {
+            Ok(_) => panic!("empty string must yield Err"),
+            Err(e) => assert!(
+                e.contains("empty"),
+                "error message must mention 'empty'; got {e}"
+            ),
+        }
+    }
+
+    #[test]
+    fn admin_ro_token_setter_accepts_non_empty() {
+        let state = min_state();
+        let state = match state
+            .with_admin_ro_token(Some("ro-bearer-abcdef".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty string must be accepted: {e}"),
+        };
+        assert_eq!(
+            state.admin_ro_token(),
+            Some("ro-bearer-abcdef"),
+            "the reader must surface the wrapped RO token"
+        );
+        assert!(
+            state.admin_token().is_none(),
+            "with_admin_ro_token must not touch the full-bearer field"
+        );
+    }
+
+    #[test]
+    fn admin_ro_token_setter_none_clears_field() {
+        let state = min_state();
+        let state = match state
+            .with_admin_ro_token(Some("ro-bearer-to-clear-aaaa".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty accepted: {e}"),
+        };
+        assert!(state.admin_ro_token().is_some(), "precondition: set");
+        let state = match state.with_admin_ro_token(None) {
+            Ok(s) => s,
+            Err(e) => panic!("None clears unconditionally: {e}"),
+        };
+        assert!(state.admin_ro_token().is_none(), "None must clear the field");
+    }
+
+    #[test]
+    fn full_and_ro_setters_are_independent() {
+        // Both bearers can be set without one clobbering the other.
+        // The role-gate distinguishes them on the auth path; the
+        // builders are pure field setters.
+        let state = min_state();
+        let state = state
+            .with_admin_token(Some("full-bearer-aaaaaaaaaaaaaaaa".into()))
+            .expect("non-empty full accepted");
+        let state = state
+            .with_admin_ro_token(Some("ro-bearer-bbbbbbbbbbbbbbbb".into()))
+            .expect("non-empty ro accepted");
+        assert_eq!(
+            state.admin_token(),
+            Some("full-bearer-aaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            state.admin_ro_token(),
+            Some("ro-bearer-bbbbbbbbbbbbbbbb")
+        );
     }
 }
 
