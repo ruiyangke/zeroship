@@ -81,6 +81,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Captured, not fixed** per brief constraint (NEW bug → capture verbatim).
 - **Blocked**: B-SLO empirical validation at c=20 scale (deferred until #23 is fixed).
 
+### [C-5] (CLOSED at `__C5_HASH__`) Worker VM GCS scope too narrow — L2 upload 403 "Provided scope(s) are not authorized"
+- **Source**: T-8b-smoke-r5 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r5.md` § "C-5 (minor, non-blocking) — GCS scope 403"); minor, but must close before T-8b-stress (c=20) or every L2 upload silently drops to GCS.
+- **Symptom**: Detached L2 upload runs cleanly as code (no compio panic — C-3 already closed that surface), but the HTTPS call returns 403: `GCS single-shot upload snapshots/v1/.../config.json: status 403, … Provided scope(s) are not authorized`. Fire-and-forget detach masks the failure in smoke (CREATE/SNAPSHOT/WAKE assertions still pass), but at c=20 stress every L2 upload would fail silently — defeating the snapshot-tier purpose.
+- **Root cause**: `crates/sandbox/scripts/provision-gcp-cluster.sh:286` provisioned the worker VM with `--scopes=storage-ro,logging-write,monitoring-write` (read-only on `devstorage`). `gs_pull` (controller binary fetch) works, but `GcsSnapshotStore::put` needs `devstorage.read_write`.
+- **Fix**: narrow scope upgrade — `storage-ro` → `storage-rw` (gcloud shorthand for `https://www.googleapis.com/auth/devstorage.read_write`). Server VM scope (line 250) left at `storage-ro` — the server doesn't perform L2 uploads (no `GcsSnapshotStore::put` runs there; postgres + nomad-server only). Verified shellcheck clean (`crates/sandbox/scripts/lint.sh` 7 scripts clean at `--severity=error`).
+- **Scope manifests on next provision only**: existing cluster instances keep their old (read-only) scope until destroyed and re-created; no in-place hot-fix needed for the change itself.
+
 ### [A1] (CLOSED at `18e2034b`) AeadSnapshotStore now wraps prod store when SANDBOX_SNAPSHOT_ROOT_KEK_PATH provided. Follow-up: A1-FOLLOWUP (boot assertion vs warn when key missing in tiered+GCS mode — per arch-r9 fail-CLOSED gap)
 - **Source**: 2026-05-24 security review (also flagged by arch-r1)
 - **File**: `crates/sandbox/src/lib.rs:316-345`

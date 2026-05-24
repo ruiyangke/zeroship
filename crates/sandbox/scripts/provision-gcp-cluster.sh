@@ -283,7 +283,7 @@ create_worker() {
     --network "$NETWORK" \
     --subnet "$SUBNET" \
     --enable-nested-virtualization \
-    --scopes=storage-ro,logging-write,monitoring-write \
+    --scopes=storage-rw,logging-write,monitoring-write \
     --metadata-from-file "startup-script=$WORKER_STARTUP,server-ips=$SERVER_IPS_FILE" \
     --metadata "$meta" \
     --quiet >/dev/null
