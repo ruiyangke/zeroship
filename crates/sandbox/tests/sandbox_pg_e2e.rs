@@ -5487,4 +5487,204 @@ mod wake_machine_e2e {
         let _ = std::fs::remove_dir_all(&store_root);
         let _ = std::fs::remove_dir_all(&backend_root);
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // R23-I1 (Path B): WakeMachine terminal-overwrite counter wiring.
+    //
+    // R22-I1 placed the `inc_wake_terminal_overwrite_blocked()` bumps
+    // at the wake_machine.rs callers (lines :146, :191, :528) instead
+    // of inside `db::update_wake_job_state`, so each caller can WARN
+    // with its own `attempted_state` context. The bare db noop tests
+    // in `wake_job_terminal_overwrite_guard` only prove the SQL guard
+    // (rows_affected == 0); they do NOT cover the counter wiring at
+    // the WakeMachine callers.
+    //
+    // These two tests drive the full WakeMachine end-to-end with the
+    // wake_jobs row pre-flipped to a terminal state, so every
+    // `update_wake_job_state` call inside the machine (both the
+    // intermediate `set_state` writes and the terminal write in
+    // `drive`'s outer match) hits the R20-C1 guard. They assert:
+    //
+    //   1. The counter strictly INCREASED (>= pre + 1) — proving the
+    //      bump in wake_machine.rs is actually wired up.
+    //   2. The DB row's `state` field is UNCHANGED from the pre-set
+    //      terminal (the sweep's breadcrumb survives — the machine's
+    //      attempted overwrite no-op'd).
+    //
+    // Why `>= pre + 1` and not `== pre + 1`: the WakeMachine issues
+    // 5-6 `set_state` calls during a run plus one terminal write. Each
+    // one no-ops + bumps when the row is already terminal. The exact
+    // delta depends on how far the machine progresses before any
+    // backend failure; asserting strict monotonic increase is the
+    // honest contract, asserting `== 1` would require the production
+    // machine to short-circuit on first guard fire (which it does not
+    // — and should not: intermediate writes are best-effort).
+    // ════════════════════════════════════════════════════════════════
+
+    /// Pre-flip the wake_jobs row to `Failed`, then drive the
+    /// happy-path machine. The machine's terminal write attempts
+    /// `Ok`, hits the R20-C1 guard, and bumps the counter at
+    /// wake_machine.rs:146.
+    #[compio::test]
+    #[ignore = "needs Postgres; R23-I1 terminal-overwrite counter (failed → ok)"]
+    async fn wake_machine_terminal_overwrite_failed_to_ok_bumps_counter() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_r23_fto_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_r23_fto_back");
+        // Happy-path backend: drive() would reach Phase::Ok if the
+        // wake_job row weren't already terminal.
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) =
+            make_machine(StdArc::clone(&db), backend, &store_root, sid).await;
+
+        // Pre-flip the wake_job row to terminal Failed BEFORE driving
+        // the machine. Use db.update_wake_job_state directly to bypass
+        // the state machine for this setup step (R20-C1's guard does
+        // not block transitions INTO a terminal — only transitions
+        // out of one).
+        let flipped = db
+            .update_wake_job_state(
+                &wake_id,
+                WakeJobState::Failed,
+                Some(WakeErrorCode::LivezTimeout),
+                Some("pre-seeded terminal failure"),
+                None,
+            )
+            .await
+            .expect("seed: pending → failed must succeed");
+        assert_eq!(flipped, 1, "seed transition must affect exactly 1 row");
+
+        // Capture counter pre. Note: the counter is process-global and
+        // monotonic across all tests in the binary; always delta.
+        let pre = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+
+        machine.drive().await;
+
+        let post = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+        assert!(
+            post >= pre + 1,
+            "wake_machine.rs counter wiring did NOT fire on terminal-overwrite-blocked: \
+             pre={pre} post={post} (expected post >= pre + 1; machine writes \
+             several intermediate set_state calls + one terminal write — each \
+             must no-op + bump when the row is already terminal)"
+        );
+
+        // DB row's state must be unchanged from the pre-set terminal.
+        // The sweep's breadcrumb (Failed + LivezTimeout) survived the
+        // machine's attempted overwrite.
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(
+            final_row.state,
+            WakeJobState::Failed,
+            "row must remain Failed (R20-C1 guard blocked machine's Ok overwrite); \
+             got {:?}",
+            final_row.state
+        );
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "pre-seeded error_code must NOT be overwritten by terminal Ok attempt"
+        );
+        assert_eq!(
+            final_row.error_message.as_deref(),
+            Some("pre-seeded terminal failure"),
+            "pre-seeded error_message must NOT be overwritten by terminal Ok attempt"
+        );
+        assert!(
+            final_row.agent_url.is_none(),
+            "agent_url must NOT be populated — terminal Ok write no-op'd"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// Pre-flip the wake_jobs row to `Ok`, then drive the machine
+    /// with `fail_livez=true` so it attempts terminal `Failed`. The
+    /// terminal write hits the R20-C1 guard and bumps the counter at
+    /// wake_machine.rs:191.
+    #[compio::test]
+    #[ignore = "needs Postgres; R23-I1 terminal-overwrite counter (ok → failed)"]
+    async fn wake_machine_terminal_overwrite_ok_to_failed_bumps_counter() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_r23_otf_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_r23_otf_back");
+        // fail_livez=true: machine progresses through reserving_slot
+        // and restoring, then trips livez and lands in Phase::Failed
+        // → terminal Failed write attempt.
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_livez = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) =
+            make_machine(StdArc::clone(&db), backend, &store_root, sid).await;
+
+        // Pre-flip the wake_job row to terminal Ok BEFORE driving.
+        let flipped = db
+            .update_wake_job_state(
+                &wake_id,
+                WakeJobState::Ok,
+                None,
+                None,
+                Some("http://10.0.0.99:7000"),
+            )
+            .await
+            .expect("seed: pending → ok must succeed");
+        assert_eq!(flipped, 1, "seed transition must affect exactly 1 row");
+
+        let pre = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+
+        machine.drive().await;
+
+        let post = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+        assert!(
+            post >= pre + 1,
+            "wake_machine.rs counter wiring did NOT fire on terminal-overwrite-blocked: \
+             pre={pre} post={post} (expected post >= pre + 1; the machine attempts \
+             terminal Failed via the wake_machine.rs:191 call site after fail_livez)"
+        );
+
+        // DB row's state must be unchanged from the pre-set terminal Ok.
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(
+            final_row.state,
+            WakeJobState::Ok,
+            "row must remain Ok (R20-C1 guard blocked machine's Failed overwrite); \
+             got {:?}",
+            final_row.state
+        );
+        assert_eq!(
+            final_row.agent_url.as_deref(),
+            Some("http://10.0.0.99:7000"),
+            "pre-seeded agent_url must NOT be overwritten by terminal Failed attempt"
+        );
+        assert!(
+            final_row.error_code.is_none(),
+            "error_code must remain None — terminal Failed write no-op'd"
+        );
+        assert!(
+            final_row.error_message.is_none(),
+            "error_message must remain None — terminal Failed write no-op'd"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
 }
