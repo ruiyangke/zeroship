@@ -453,6 +453,29 @@ impl AppState {
             persist_test_override,
         )?;
 
+        // A1-FOLLOWUP (arch-r9 fail-CLOSED gap). Refuse to boot in the
+        // production-shaped configuration where snapshot/restore writes
+        // to a non-local L2 (GCS) AND no AEAD root KEK is configured:
+        // bare guest RAM would land in the remote object store in clear.
+        // Local-only L1 stores still warn-and-continue (dev/test
+        // ergonomics) — the warn arm lives in the snapshot-store
+        // composition site below.
+        //
+        // Escape hatch (matching R6-A1's naming convention so operator
+        // misuse is obvious from any unit-file env block):
+        // ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1.
+        let remote_unencrypted_test_override = matches!(
+            std::env::var("ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE")
+                .as_deref(),
+            Ok("1")
+        );
+        assert_kek_required_for_remote_store(
+            config.snapshot_enabled,
+            config.snapshot_use_gcs,
+            config.snapshot_root_kek_path.is_some(),
+            remote_unencrypted_test_override,
+        )?;
+
         // Phase-0 pg-backed state: build BEFORE the backend probe so
         // the schema reaches the right version before any backend op
         // could try to write. Pg-required features stay dormant in
@@ -652,15 +675,22 @@ impl AppState {
                         "snapshot_store: AEAD ENABLED (tiered L1+GCS)"
                     );
                 } else {
+                    // A1-FOLLOWUP: this branch is gated by
+                    // `assert_kek_required_for_remote_store` at the top
+                    // of `from_config`, which returns Err before we ever
+                    // reach the snapshot-store composition. The only way
+                    // to land here is via the named test override
+                    // `ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1`
+                    // — log loudly so a misconfigured test env can't
+                    // pretend to be prod.
                     tracing::error!(
                         l1_root = %l1_root.display(),
                         gcs_bucket = %bucket,
                         kek_env = ROOT_KEK_ENV,
-                        "snapshot_store: AEAD DISABLED — guest RAM \
-                         plaintext on disk + GCS (kek env unset). \
-                         Tiered L1+GCS without AEAD writes guest \
-                         memory in clear to the object store. Set the \
-                         kek env to a 32-byte mode-0o400 file."
+                        "snapshot_store: AEAD DISABLED via test override — \
+                         guest RAM plaintext on disk + GCS \
+                         (ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1). \
+                         NOT for production."
                     );
                 }
                 Arc::new(AeadSnapshotStore::new(tiered, aead_root_kek))
@@ -898,6 +928,71 @@ pub(crate) fn assert_persist_required_when_snapshot_enabled(
              32-byte mode-0o400 file. \
              Test-only override (NOT for production): \
              ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// A1-FOLLOWUP (arch-r9 fail-CLOSED gap). Refuse to boot in the silent
+/// fail-OPEN configuration where snapshot/restore writes to a non-local
+/// L2 (GCS) AND no AEAD root KEK is configured: bare guest RAM would
+/// land in the remote object store in clear, while the audit trail in
+/// pg (`snapshot_aead_dek_id="v1"`, stamped unconditionally by
+/// `snapshot_handler.rs`) would still claim the snapshot is encrypted.
+///
+/// **Why this matters.** A1 (commit `18e2034b`) wrapped the inner
+/// snapshot store in `AeadSnapshotStore` when `RootKek::from_env`
+/// returned `Ok(Some(_))`. But when the operator FORGOT to set
+/// `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` in a production-shaped
+/// `tiered+GCS` deploy, boot logged a warning and continued — the
+/// AEAD wrapper composed in passthrough mode, plaintext guest RAM
+/// landed in GCS. The boot warning is invisible compared to the pg
+/// audit row's "encrypted=v1" claim; an operator reading the row
+/// would believe the snapshot is encrypted at rest when it is not.
+///
+/// **What this checks.** When `snapshot_enabled=true && use_gcs=true`:
+///   - `kek_present=true` → `Ok(())` (the production-correct shape).
+///   - `kek_present=false` + `test_override=true` → `Ok(())` (the
+///     `ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1` escape hatch
+///     for non-prod envs that explicitly opt in to plaintext-to-GCS).
+///   - `kek_present=false` + `test_override=false` → `Err(...)`
+///     (fail-CLOSED).
+///
+/// When `snapshot_enabled=false` OR `use_gcs=false` (local-only L1
+/// store), the KEK is optional; the local-only warn-and-continue path
+/// lives in the snapshot-store composition site (dev/test ergonomics —
+/// a single-node dev box doesn't need at-rest encryption to a
+/// non-existent L2).
+///
+/// **Why the override env var has a `ZEROSHIP_SANDBOX_TEST_` prefix**
+/// (matches R6-A1's reasoning for the persist assertion's override).
+/// The env var is read on the production boot path; an operator who
+/// set a confusingly-named `SANDBOX_*` variant would re-enable the
+/// exact audit-trail-vs-reality gap A1-FOLLOWUP closes. The explicit
+/// `TEST_ALLOW_UNENCRYPTED_REMOTE` suffix screams operator-misuse the
+/// moment it appears in a unit file's environment block.
+pub(crate) fn assert_kek_required_for_remote_store(
+    snapshot_enabled: bool,
+    snapshot_use_gcs: bool,
+    kek_present: bool,
+    test_override: bool,
+) -> Result<(), String> {
+    if snapshot_enabled
+        && snapshot_use_gcs
+        && !kek_present
+        && !test_override
+    {
+        return Err(
+            "FATAL: SANDBOX_SNAPSHOT_ENABLED=true + SANDBOX_SNAPSHOT_USE_GCS=true \
+             but SANDBOX_SNAPSHOT_ROOT_KEK_PATH is unset. Tiered L1+GCS without \
+             AEAD writes guest RAM in clear to the remote object store, while \
+             the pg audit row stamps snapshot_aead_dek_id=\"v1\" \
+             (audit-trail-vs-reality gap, arch-r9 fail-CLOSED). \
+             Fix: set SANDBOX_SNAPSHOT_ROOT_KEK_PATH to a 32-byte mode-0o400 \
+             file owned by uid 0. \
+             Test-only override (NOT for production): \
+             ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1."
                 .to_string(),
         );
     }
@@ -2235,6 +2330,93 @@ mod persist_required_assertion_tests {
         // block of any production unit it appears in.
         check(true, false, true).expect(
             "ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1 \
+             overrides the assertion",
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// A1-FOLLOWUP (arch-r9 fail-CLOSED gap) — boot-time fail-CLOSED for the
+// `snapshot_enabled=true && snapshot_use_gcs=true && kek_path=None`
+// configuration. Truth table is pinned per-cell so a future drift in
+// the assertion (e.g. accidentally gating on `snapshot_enabled` alone,
+// which would break L1-only dev fixtures) fails loudly.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod kek_required_for_remote_store_tests {
+    use super::assert_kek_required_for_remote_store as check;
+
+    #[test]
+    fn tiered_gcs_with_kek_is_ok() {
+        // The production-correct shape: snapshot enabled, GCS tier
+        // wired, KEK file path set. AEAD wraps the tiered store.
+        check(true, true, true, false).expect(
+            "snapshot_enabled + use_gcs + kek_present → ok (prod shape)",
+        );
+    }
+
+    #[test]
+    fn tiered_gcs_without_kek_is_err() {
+        // The fail-OPEN shape A1-FOLLOWUP closes: prod-shaped deploy
+        // with GCS enabled but the operator forgot the KEK env. MUST
+        // refuse to boot — plaintext guest RAM in GCS while the pg
+        // audit row claims "encrypted=v1" is the exact
+        // audit-trail-vs-reality gap the assertion exists to prevent.
+        let err = check(true, true, false, false).expect_err(
+            "snapshot_enabled + use_gcs + kek_unset must refuse to boot",
+        );
+        assert!(
+            err.contains("FATAL"),
+            "error must announce FATAL severity; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_SNAPSHOT_ROOT_KEK_PATH"),
+            "error must name the env var the operator must set; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_SNAPSHOT_USE_GCS"),
+            "error must name the GCS flag so the operator sees which \
+             mode triggered the assertion; got: {err}"
+        );
+    }
+
+    #[test]
+    fn local_only_with_kek_is_ok() {
+        // Operator wired the KEK even though the store is L1-only —
+        // perfectly fine; AEAD encrypts at rest on disk too.
+        check(true, false, true, false).expect(
+            "snapshot_enabled + L1-only + kek_present → ok",
+        );
+    }
+
+    #[test]
+    fn local_only_without_kek_is_ok() {
+        // Dev/test shape: snapshot enabled but L1-only, no KEK. The
+        // assertion does NOT fire — the warn-and-continue path lives in
+        // the snapshot-store composition site for local-only stores
+        // (dev-box ergonomics; no remote leak surface).
+        check(true, false, false, false).expect(
+            "snapshot_enabled + L1-only + kek_unset → ok (dev ergonomics)",
+        );
+    }
+
+    #[test]
+    fn snapshot_disabled_is_ok_regardless_of_kek() {
+        // Feature flag off: KEK is irrelevant. Phase-A default shape.
+        check(false, false, false, false).expect("snap off → ok");
+        check(false, false, true, false).expect("snap off + kek set → ok");
+        check(false, true, false, false).expect("snap off + use_gcs ignored → ok");
+        check(false, true, true, false).expect("snap off + use_gcs + kek → ok");
+    }
+
+    #[test]
+    fn tiered_gcs_without_kek_with_test_override_is_ok() {
+        // Non-prod envs that need plaintext-to-GCS for debugging set
+        // ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1. The
+        // override is intentional, named, and visible in any unit
+        // file's environment block.
+        check(true, true, false, true).expect(
+            "ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1 \
              overrides the assertion",
         );
     }
