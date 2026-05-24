@@ -1307,21 +1307,82 @@ pub async fn snapshot_sandbox(
             // Errors surface as `tracing::error!` (not warn) — the
             // operator has no other signal that the background teardown
             // failed, so it must be loud in the logs.
+            //
+            // **C-6 fix** (T-8b-smoke-r7 cluster review, 2026-05-25):
+            // do NOT detach via `compio::runtime::spawn(...).detach()`.
+            // That puts the teardown future on the SAME ntex-worker
+            // compio runtime that subsequent wake requests land on
+            // (1-worker fleet → guaranteed collision; N-worker fleets
+            // pin requests per TCP connection, so a wake reusing the
+            // same client connection co-locates with the teardown too).
+            // `stop_inner`'s first await is `http_signed_async("/shutdown")`
+            // whose underlying ureq call burns up to 60 s on connection-
+            // timeout against a half-dead agent. While that future was
+            // mid-`/shutdown`, the runtime starved C-4's
+            // `reserve_vm_index_with_retry` 2 s sleep — the wake handler
+            // emitted `phase=pre_reserve_vm_index` and then nothing for
+            // the full 60 s client deadline, dropping the wake future.
+            //
+            // Mirror C-3's pattern (`snapshot_store_gcs.rs::Tiered::put`):
+            // spawn a dedicated OS thread with its own short-lived compio
+            // runtime via `compio::runtime::Runtime::new().block_on(...)`.
+            // Decoupling from the ntex worker's runtime is the only way
+            // to guarantee no cross-task starvation; `spawn_blocking` on
+            // the worker runtime is insufficient because the teardown
+            // future itself (between blocking calls) runs on the worker.
+            //
+            // `std::thread::spawn` only fails on ENOMEM / EAGAIN — if we
+            // can't allocate a thread the controller has bigger problems;
+            // log + drop the teardown (the contract is already best-effort
+            // / fire-and-forget). Orphan-prune at next boot reclaims the
+            // vm_index.
             let state_for_teardown = Arc::clone(&state);
-            compio::runtime::spawn(async move {
-                if let Err(e) = state_for_teardown
-                    .backend
-                    .teardown_source_for_snapshot(sandbox_id)
-                    .await
-                {
-                    tracing::error!(
-                        sandbox_id = %sandbox_id,
-                        error = %e,
-                        "admin/snapshot: detached teardown_source_for_snapshot failed (non-fatal; orphan-prune will reclaim)"
-                    );
-                }
-            })
-            .detach();
+            let teardown_thread = std::thread::Builder::new().name(format!(
+                "snap-teardown-{}",
+                // Linux's 15-char thread-name cap; take the entropy
+                // tail of the sandbox base62 id.
+                zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+                    .chars()
+                    .rev()
+                    .take(8)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            ));
+            let spawn_res = teardown_thread.spawn(move || {
+                let rt = match compio::runtime::Runtime::new() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(
+                            sandbox_id = %sandbox_id,
+                            error = %e,
+                            "admin/snapshot: detached teardown could not mint compio runtime (orphan-prune will reclaim)"
+                        );
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    if let Err(e) = state_for_teardown
+                        .backend
+                        .teardown_source_for_snapshot(sandbox_id)
+                        .await
+                    {
+                        tracing::error!(
+                            sandbox_id = %sandbox_id,
+                            error = %e,
+                            "admin/snapshot: detached teardown_source_for_snapshot failed (non-fatal; orphan-prune will reclaim)"
+                        );
+                    }
+                });
+            });
+            if let Err(e) = spawn_res {
+                tracing::error!(
+                    sandbox_id = %sandbox_id,
+                    error = %e,
+                    "admin/snapshot: could not spawn detached teardown thread; vm_index will leak until orphan-prune"
+                );
+            }
             HttpResponse::Ok().json(&serde_json::json!({
                 "sandbox_id": format!(
                     "sbx_{}",
