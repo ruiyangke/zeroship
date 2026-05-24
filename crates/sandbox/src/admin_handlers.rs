@@ -117,54 +117,102 @@ fn constant_time_bearer_eq(presented: &[u8], expected: &[u8]) -> bool {
     p_digest.ct_eq(&e_digest).into()
 }
 
-/// Validates the admin bearer. Returns:
-///   - `Ok(())` when the request bears the configured admin token.
-///   - `Err(503)` when admin API is disabled (no `SANDBOX_ADMIN_TOKEN_PATH`).
-///   - `Err(401)` when the bearer is missing or wrong.
+/// Admin endpoint role gate. `Full` accepts only the production
+/// `sandbox_admin` bearer (`SANDBOX_ADMIN_TOKEN_PATH`); `ReadOnly`
+/// accepts EITHER bearer (Full ⊇ ReadOnly) and is mounted on the
+/// non-mutating read endpoints (T1).
+///
+/// Authorization matrix:
+///
+/// | endpoint kind          | required        | RO bearer? | Full bearer? |
+/// |------------------------|-----------------|------------|--------------|
+/// | GET `/admin/sandboxes` | `ReadOnly`      | accepted   | accepted     |
+/// | GET `/admin/...`       | `ReadOnly`      | accepted   | accepted     |
+/// | POST/DELETE/snapshot   | `Full`          | rejected   | accepted     |
+///
+/// The matrix is enforced by [`admin_check_required`]; per-endpoint
+/// callers thread the right `AdminRole` literal in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdminRole {
+    /// Mutating endpoints (snapshot / wake / cold-boot / GDPR delete /
+    /// export). Only the `sandbox_admin` bearer is accepted.
+    Full,
+    /// Read endpoints (list, detail, hosts, share-list, poll-wake).
+    /// Either bearer is accepted; Full ⊇ ReadOnly.
+    ReadOnly,
+}
+
+/// Validates the admin bearer against the role required by the
+/// endpoint. Returns:
+///   - `Ok(())` when the request bears a bearer matching the role.
+///   - `Err(401 unauthorized)` when the bearer is missing or matches
+///     NEITHER configured token.
+///   - `Err(403 insufficient_role)` when the bearer matches the
+///     RO token but the endpoint requires `AdminRole::Full`.
+///   - `Err(503 admin_api_disabled)` when the endpoint's required
+///     role has zero configured tokens (Full requested + full=None,
+///     OR ReadOnly requested + both=None).
 ///
 /// Round-3 / Phase-3 CRITICAL #3: reads from the boot-cached
-/// `state.admin_token` instead of stat()+read()'ing the file per
-/// request. Bounded amplification at 10k req/s; no slow-FS DoS;
-/// no fail-open on chmod-error (boot-time read fails loud).
+/// `state.admin_token` / `state.admin_ro_token` instead of stat()+
+/// read()'ing the file per request. Bounded amplification at 10k
+/// req/s; no slow-FS DoS; no fail-open on chmod-error.
 ///
-/// Round-4 / IMPORTANT #2 + A5 (api-surface-2026-05-24-r1):
-/// defense-in-depth empty-token guard. The post-Round-4 footgun was
-/// that `AppState.admin_token` was a `pub` field — anyone could
-/// build `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
-/// and the constant-time compare against an empty
-/// `Authorization: Bearer ` presented bytes would PASS (silent
-/// unauthenticated admin access). A5 closed the front door by
-/// restricting the field to `pub(crate)` and routing all writes
-/// through `AppState::with_admin_token`, which rejects empty
-/// strings. The boot loader (`load_admin_token`) also rejects
-/// empty tokens loudly, so production never reaches the branch
-/// below. We KEEP this check as defense-in-depth for any future
-/// in-crate setter that bypasses the builder — treat empty
-/// `expected` as "no token configured" → 401.
-pub(crate) fn admin_check(
+/// T1 (2026-05-25): both candidate tokens are checked unconditionally
+/// even when only one is configured, so the timing of the auth path
+/// doesn't reveal which bearer matched. The cost is a single extra
+/// SHA-256 of the (capped ~8 KiB) presented bytes per request — the
+/// admin endpoint is not a hot path. Defense-in-depth empty-token
+/// guards from Round-4 / IMPORTANT #2 stay: an empty configured token
+/// (post-A5 builders reject this, but the comparator itself doesn't
+/// special-case empty) is treated as "not configured" so the empty
+/// `Authorization: Bearer ` presented bytes can't silently pass.
+pub(crate) fn admin_check_required(
     req: &HttpRequest,
     state: &AppState,
+    required: AdminRole,
 ) -> Result<(), HttpResponse> {
-    use zeroize::Zeroizing;
-    let expected: &Zeroizing<String> = match state.admin_token.as_ref() {
-        Some(t) => t,
-        None => {
-            return Err(error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "admin_api_disabled",
-                "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH not configured)",
-            ));
+    // Step 1: load both candidate bearers. `None`/empty are mapped to
+    // `None` for the rest of the function so the "no token configured"
+    // distinction is centralised here. `Zeroizing<String>` derefs to
+    // `&str`; we grab `as_bytes()` for the constant-time compare.
+    let full: Option<&[u8]> = state
+        .admin_token
+        .as_deref()
+        .map(|s: &String| s.as_bytes())
+        .filter(|b: &&[u8]| !b.is_empty());
+    let ro: Option<&[u8]> = state
+        .admin_ro_token
+        .as_deref()
+        .map(|s: &String| s.as_bytes())
+        .filter(|b: &&[u8]| !b.is_empty());
+
+    // Step 2: 503 when the role can't possibly be satisfied.
+    //   - `Full` needs the full bearer configured.
+    //   - `ReadOnly` accepts EITHER bearer, so requires at least one.
+    match required {
+        AdminRole::Full => {
+            if full.is_none() {
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "admin_api_disabled",
+                    "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH not configured)",
+                ));
+            }
         }
-    };
-    let expected_bytes: &[u8] = expected.as_bytes();
-    // Defense-in-depth: empty configured token must never authenticate
-    // any request. Reject BEFORE the constant-time compare; we'd
-    // otherwise need the comparator itself to special-case empty
-    // input, and folding the check into admin_check keeps the
-    // comparator's invariant simple.
-    if expected_bytes.is_empty() {
-        return Err(unauthorized());
+        AdminRole::ReadOnly => {
+            if full.is_none() && ro.is_none() {
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "admin_api_disabled",
+                    "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH and \
+                     SANDBOX_ADMIN_RO_TOKEN_PATH not configured)",
+                ));
+            }
+        }
     }
+
+    // Step 3: parse the bearer once.
     let header = req
         .headers()
         .get("authorization")
@@ -174,10 +222,53 @@ pub(crate) fn admin_check(
         .strip_prefix("Bearer ")
         .unwrap_or("")
         .as_bytes();
-    if constant_time_bearer_eq(presented, expected_bytes) {
-        Ok(())
-    } else {
-        Err(unauthorized())
+
+    // Step 4: compare against BOTH candidates unconditionally. Even
+    // when only one is configured, the other comparison is run against
+    // a fixed-size empty digest so the auth path's wall-time doesn't
+    // depend on which bearers exist. (The comparator is itself
+    // constant-time on its inputs; we're only equalising the
+    // "is_some/is_none" branch.)
+    let matches_full = match full {
+        Some(b) => constant_time_bearer_eq(presented, b),
+        None => {
+            // Hash anyway — discard the bool. The SHA-256 of presented
+            // is the only length-dependent work; running it on both
+            // paths means the request's wall-time is symmetric.
+            let _ = constant_time_bearer_eq(presented, b"");
+            false
+        }
+    };
+    let matches_ro = match ro {
+        Some(b) => constant_time_bearer_eq(presented, b),
+        None => {
+            let _ = constant_time_bearer_eq(presented, b"");
+            false
+        }
+    };
+
+    // Step 5: enforce the role.
+    match required {
+        AdminRole::Full => {
+            if matches_full {
+                Ok(())
+            } else if matches_ro {
+                // The bearer is a valid RO token, but the endpoint
+                // requires Full. 403, distinct from 401, so operator
+                // tooling can branch on the difference.
+                Err(insufficient_role())
+            } else {
+                Err(unauthorized())
+            }
+        }
+        AdminRole::ReadOnly => {
+            // Full ⊇ ReadOnly — either match is accepted.
+            if matches_full || matches_ro {
+                Ok(())
+            } else {
+                Err(unauthorized())
+            }
+        }
     }
 }
 
@@ -186,6 +277,15 @@ fn unauthorized() -> HttpResponse {
         StatusCode::UNAUTHORIZED,
         "unauthorized",
         "authentication required",
+    )
+}
+
+fn insufficient_role() -> HttpResponse {
+    error_response(
+        StatusCode::FORBIDDEN,
+        "insufficient_role",
+        "this endpoint requires the sandbox_admin bearer; the read-only \
+         bearer is accepted only on GET endpoints",
     )
 }
 
@@ -307,7 +407,8 @@ pub async fn list_all_sandboxes(
     state: State,
     query: web::types::Query<ListSandboxesQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let pool = match open_app_pool(&state).await {
@@ -429,7 +530,8 @@ pub async fn get_sandbox_detail(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let raw = path.into_inner();
@@ -487,7 +589,8 @@ pub async fn list_user_sandboxes(
     path: web::types::Path<String>,
     query: web::types::Query<ListSandboxesQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let user_id = path.into_inner();
@@ -580,7 +683,8 @@ pub async fn list_user_shares(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let user_id = path.into_inner();
@@ -650,7 +754,8 @@ pub async fn list_hosts(
     req: HttpRequest,
     state: State,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let pool = match open_app_pool(&state).await {
@@ -717,7 +822,17 @@ pub async fn export_user(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: GDPR-cascade export is a heavyweight read (REPEATABLE READ
+    // tx + multi-table aggregation; `crates/sandbox/TODO.md` P1 §T2
+    // tracks rate-limiting for the same reason). Classified `Full`
+    // here, NOT `ReadOnly`, because (a) it surfaces every event row
+    // ever recorded for the user — same blast radius as a leak; (b)
+    // an operator-tooling bug looping the endpoint can saturate the
+    // gdpr pool; an RO-only operator (dashboard, on-call) has no
+    // legitimate need to trigger it. RO is for routine "what's the
+    // fleet doing right now" queries; export is a deliberate,
+    // gdpr-cascade-shaped operation.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     let user_id = path.into_inner();
@@ -885,7 +1000,8 @@ pub async fn delete_user(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: destructive GDPR cascade — requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     let user_id = path.into_inner();
@@ -1221,7 +1337,9 @@ pub async fn snapshot_sandbox(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: destructive state transition (running → snapshotted +
+    // detached source teardown). Requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     if !state.config.snapshot_enabled {
@@ -1428,7 +1546,9 @@ pub async fn wake_sandbox(
     path: web::types::Path<String>,
     query: web::types::Query<WakeQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: destructive state transition (snapshotted → running +
+    // wake-machine state-machine spawn). Requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     if !state.config.snapshot_enabled {
@@ -1745,7 +1865,8 @@ pub async fn poll_wake(
     state: State,
     path: web::types::Path<(String, String)>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: pure read of `sandbox.wake_jobs` row — accepts either bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     if !state.config.snapshot_enabled {
@@ -1879,7 +2000,9 @@ pub(crate) fn render_wake_poll_response(row: &crate::db::WakeJobRow) -> HttpResp
 }
 
 pub async fn cold_boot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: cold-boot is a fresh-VM state transition (no source, no
+    // memory snapshot). Mutating — requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     // Cold-boot is a separate state machine (no source VM, no
