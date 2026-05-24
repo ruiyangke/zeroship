@@ -3741,6 +3741,117 @@ mod r12_i1_tests {
         let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
         assert_eq!(task["Driver"], "ch");
     }
+
+    /// R22-T1 / R21-API2 — ChPlugin Config field-list parity contract.
+    ///
+    /// Twice (r21-A1: `user_id`; C-7-LT-12a: `rootfs_source`) a field
+    /// landed in cold-boot's Config emitter but missed the restore-path
+    /// emitter, leading to cluster failures only caught by smoke-rN.
+    ///
+    /// This test asserts that the symmetric difference between the
+    /// cold-boot and restore-path Config key sets is EXACTLY the two
+    /// documented intentional divergences:
+    ///
+    ///   • `rootfs_source` — restore-path only: cold-boot relies on
+    ///                       `ZSBX_ARTIFACT_DIR` env + the hard-coded
+    ///                       `chRootfsSourceName` const in the driver;
+    ///                       the restore emitter provides the full path
+    ///                       explicitly because the rewriter has already
+    ///                       moved disks[0].path away from the source
+    ///                       alloc by the time the driver runs (C-7-LT-12a).
+    ///
+    /// Note: `pubkey_hex` and `restore_from` ARE present in both paths
+    /// (with different values — empty string on cold-boot / restore-path
+    /// respectively), so they are NOT in the symmetric difference.
+    ///
+    /// Any other asymmetry means a field was added to one emitter but
+    /// not the other — the test names both sides in the failure message
+    /// so the author knows exactly what to add.
+    #[test]
+    fn ch_plugin_config_field_list_parity() {
+        use std::collections::HashSet;
+
+        // ── cold-boot side ────────────────────────────────────────────
+        // `build_nomad_job_json_with` takes a &SandboxConfig; use the
+        // shared fixture (same runtime_dir / subnet_second_octet as
+        // fixture_cfg() above so paths compare cleanly if ever needed).
+        let cold_sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        let cold_v = crate::backend::nomad_ch::build_nomad_job_json_with(
+            "zsbx-parity-cold",
+            &cold_sandbox_cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/usr_alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None, // cold-boot: no restore_from
+            TaskDriverMode::ChPlugin,
+        );
+        let cold_config = &cold_v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        let cold_fields: HashSet<&str> = cold_config
+            .as_object()
+            .expect("cold-boot Config must be a JSON object")
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+
+        // ── restore-path side ─────────────────────────────────────────
+        let restore_cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-deadbeef/restore");
+        let restore_v = build_restore_nomad_job_json(
+            "zsbx-parity-restore",
+            &restore_cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            TaskDriverMode::ChPlugin,
+        );
+        let restore_config = &restore_v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        let restore_fields: HashSet<&str> = restore_config
+            .as_object()
+            .expect("restore-path Config must be a JSON object")
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+
+        // ── parity assertion ──────────────────────────────────────────
+        // The ONLY documented intentional divergence. Update this set
+        // only when a new deliberate asymmetry is agreed and documented.
+        // • rootfs_source — restore-path only (cold-boot uses
+        //                   ZSBX_ARTIFACT_DIR env + driver const;
+        //                   restore emits full path explicitly, C-7-LT-12a)
+        //
+        // pubkey_hex and restore_from are present in BOTH paths
+        // (with semantically different values — empty string on the
+        // non-applicable side), so they are NOT in the diff set.
+        let expected_diff: HashSet<&str> = ["rootfs_source"].iter().copied().collect();
+
+        let cold_only: HashSet<&str> = cold_fields.difference(&restore_fields).copied().collect();
+        let restore_only: HashSet<&str> =
+            restore_fields.difference(&cold_fields).copied().collect();
+        let actual_diff: HashSet<&str> = cold_fields
+            .symmetric_difference(&restore_fields)
+            .copied()
+            .collect();
+
+        assert_eq!(
+            actual_diff,
+            expected_diff,
+            "ChPlugin Config field-list drifted from the documented contract.\n\
+             cold-only (add to restore emitter?):   {cold_only:?}\n\
+             restore-only (add to cold emitter?):   {restore_only:?}\n\
+             expected symmetric diff:               {expected_diff:?}\n\
+             \n\
+             Only {{\"rootfs_source\"}} is the documented intentional divergence.\n\
+             See R22-T1 / R21-API2 for the contract history.",
+        );
+    }
 }
 
 // Silence unused-Arc warning if no caller imports the alias.
