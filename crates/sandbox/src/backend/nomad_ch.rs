@@ -2271,12 +2271,47 @@ impl Drop for CreateGuard {
                         // state is still being torn down. Tagged
                         // `reason=create-failure-cleanup` to keep
                         // FM-B's failed-create attribution.
-                        VmIndexAllocator::spawn_delayed_release(
-                            vm_index_allocator.clone(),
-                            i,
-                            release_delay,
-                            "create-failure-cleanup",
-                            sandbox_id,
+                        //
+                        // R28-C1: the delay + release is INLINED
+                        // here rather than dispatched via
+                        // `VmIndexAllocator::spawn_delayed_release`.
+                        // Reason: this cleanup_future runs on the
+                        // short-lived private compio runtime minted
+                        // by `detach_isolated("create-rollbk", …)`,
+                        // which is dropped as soon as the future
+                        // returns Ready. `spawn_delayed_release`
+                        // calls `compio::runtime::spawn(…).detach()`
+                        // against the CURRENT runtime — so the
+                        // detached timer task would be planted on
+                        // that same short-lived runtime, then
+                        // dropped pending when the runtime tears
+                        // down (compio 0.11 `Scheduler::clear` at
+                        // runtime drop discards pending futures),
+                        // leaking the vm_index until the next
+                        // controller-boot orphan prune.
+                        //
+                        // The `stop_inner` site at the top of this
+                        // file uses `spawn_delayed_release`
+                        // correctly because it runs on the
+                        // long-lived ntex-worker compio runtime,
+                        // which outlives the 5 s delay. Do NOT
+                        // unify the two call sites by changing
+                        // `spawn_delayed_release` — the bug is the
+                        // runtime lifetime mismatch, not the helper
+                        // itself.
+                        if !release_delay.is_zero() {
+                            compio::time::sleep(release_delay).await;
+                        }
+                        vm_index_allocator
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .release(i);
+                        tracing::info!(
+                            vm_index = i,
+                            reason = "create-failure-cleanup",
+                            sandbox_id = %sandbox_id,
+                            delay_ms = release_delay.as_millis() as u64,
+                            "sandbox/nomad-ch vm_index released (r24-A2-S3 delayed, R28-C1 inline)"
                         );
                     }
                 } else if let Some(i) = vm_index_opt {
@@ -4552,6 +4587,93 @@ mod tests {
             "CreateGuard::drop did not release vm_index when called \
              outside an ambient compio runtime — R17-A5 regression: \
              `detach_isolated` should mint its own runtime"
+        );
+    }
+
+    /// R28-C1: regression test for the vm_index leak that fires
+    /// when `CreateGuard::drop` runs under `detach_isolated`'s
+    /// short-lived runtime AND `release_delay > 0`.
+    ///
+    /// Pre-fix behaviour: `spawn_delayed_release` planted a
+    /// `compio::runtime::spawn(sleep(delay).then(release)).detach()`
+    /// task on the SAME short-lived runtime the cleanup future was
+    /// running on. The cleanup future returns Ready before the
+    /// delay elapses → `block_on` returns → `Runtime::Drop` runs
+    /// `Scheduler::clear()` (compio 0.11) → the pending timer task
+    /// is dropped → release never fires → vm_index leaks until the
+    /// next controller-boot orphan prune. The
+    /// `create_guard_releases_vm_index_when_no_job_submitted` and
+    /// `create_guard_drop_runs_without_ambient_compio_runtime`
+    /// tests above do NOT catch this because they use
+    /// `Duration::ZERO`, which collapses the spawn-and-sleep to a
+    /// near-synchronous shape that fits inside the post-Ready
+    /// `self.run()` cycle.
+    ///
+    /// Post-fix behaviour: the delay + release is inlined into the
+    /// cleanup future itself, so `block_on` cannot return until the
+    /// release has happened.
+    ///
+    /// This is a `#[test]` (NOT `#[compio::test]`) so the ambient
+    /// runtime is plain `std::thread`, exactly mirroring the
+    /// `detach_isolated` dispatch shape that triggers the bug.
+    #[test]
+    fn create_guard_drop_releases_vm_index_under_isolated_runtime() {
+        // Single-element pool so a leak is observable as a failed
+        // alloc and a correct release as a successful one.
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(99, 99)));
+        let allocated = pool.lock().unwrap().alloc().expect("first alloc");
+        assert_eq!(allocated, 99);
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        {
+            let mut g = CreateGuard::new(
+                pool.clone(),
+                "http://127.0.0.1:1".to_string(), // unreachable
+                "zsbx-test-r28-c1".to_string(),
+                PathBuf::from("/tmp/zsbx-r28-c1-test"),
+                Uuid::nil(),
+                // Non-zero delay is the load-bearing detail: the
+                // pre-fix bug was specifically that a delay > 0
+                // gave the short-lived runtime time to drop before
+                // the timer fired. 100 ms is long enough to outlive
+                // the post-Ready `self.run()` cycle (well under 1
+                // ms) yet short enough that the test wall-time
+                // stays cheap.
+                Duration::from_millis(100),
+            );
+            g.vm_index = Some(allocated);
+            g.job_submitted = false; // skip http_delete; purge_ok = true
+            g.host_dir_created = false; // skip rm -rf
+            // Drop fires HERE on a plain std::thread. Inside Drop,
+            // `detach_isolated("create-rollbk", …)` spawns a fresh
+            // OS thread + private compio runtime that block_on's
+            // the cleanup future. With the fix in place the
+            // inlined `sleep(100ms).await; release` runs to
+            // completion before `block_on` returns; without the
+            // fix the detached timer is discarded when the
+            // private runtime drops.
+        }
+
+        // Poll up to 5 s for the index to reappear. The fix means
+        // it should show up ~100 ms after Drop (delay + OS thread
+        // spawn + runtime mint). Without the fix it never does.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while Instant::now() < deadline {
+            if let Ok(i) = pool.lock().unwrap().alloc() {
+                assert_eq!(i, 99);
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            released,
+            "CreateGuard::drop did not release vm_index when \
+             release_delay > 0 and Drop runs under a short-lived \
+             detach_isolated runtime — R28-C1 regression: the \
+             delayed-release task is being planted on a runtime \
+             that drops before the timer fires"
         );
     }
 
