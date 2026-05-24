@@ -179,6 +179,56 @@ impl OpError {
             message: message.into(),
         }
     }
+
+    /// Materialise this `OpError` as a JS exception value of the right
+    /// class (`TypeError` / `RangeError` / `Error` / `DOMException` /
+    /// Node-coded / plugin-coded), or the captured value verbatim for
+    /// the `JsValue` variant.
+    ///
+    /// This is the single source of truth for the OpError → JS-exception
+    /// lowering used by (a) the async pump's `OpResult::JsValue` →
+    /// `ResolveValue::RejectError` arm, and (b) any caller that needs to
+    /// reject a `v8::PromiseResolver` with a typed error directly from
+    /// Rust (e.g. plugin-db's native `Db.transaction(fn)` orchestrator).
+    /// It mirrors the macro's `gen_throw_op_error_arms` shape so a throw
+    /// and a Promise rejection produce byte-identical JS error objects.
+    pub fn to_exception<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> v8::Local<'s, v8::Value> {
+        match &self.kind {
+            OpErrorKind::JsValue(global) => v8::Local::new(scope, global),
+            _ => {
+                let msg = v8::String::new(scope, &self.message).unwrap();
+                match &self.kind {
+                    OpErrorKind::TypeError => v8::Exception::type_error(scope, msg),
+                    OpErrorKind::RangeError => v8::Exception::range_error(scope, msg),
+                    OpErrorKind::Error => v8::Exception::error(scope, msg),
+                    OpErrorKind::DomException(name) => {
+                        crate::dom::exception::build(scope, &self.message, name).into()
+                    }
+                    OpErrorKind::NodeError(code) => {
+                        crate::node_error::build_node_exception(scope, code, &self.message)
+                    }
+                    OpErrorKind::CodedError { code, hint } => {
+                        let exc = v8::Exception::error(scope, msg);
+                        if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
+                            let code_key = v8::String::new(scope, "code").unwrap();
+                            let code_val = v8::String::new(scope, code).unwrap();
+                            obj.set(scope, code_key.into(), code_val.into());
+                            if let Some(h) = hint {
+                                let hint_key = v8::String::new(scope, "hint").unwrap();
+                                let hint_val = v8::String::new(scope, h).unwrap();
+                                obj.set(scope, hint_key.into(), hint_val.into());
+                            }
+                        }
+                        exc
+                    }
+                    OpErrorKind::JsValue(_) => unreachable!("handled above"),
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for OpError {
@@ -746,6 +796,38 @@ pub enum ResolveValue {
     /// `Result<T, OpError>` and the pump constructs the right JS
     /// exception kind without the future needing a scope.
     RejectError(OpError),
+    /// **P9 PR 3** — run a plugin-supplied continuation inside the
+    /// pump's V8 scope **instead of** resolving the bound resolver.
+    ///
+    /// Unlike every other variant, this one does not settle a promise by
+    /// itself: the pump simply invokes `run(scope, state)` inside the
+    /// `enter_v8!` block (where a live `ContextScope` and the
+    /// `SharedState` are both in hand) and lets the closure decide what
+    /// to do — typically: build more V8 objects, call a user `Function`,
+    /// and attach `.then(...)` handlers whose own callbacks push fresh
+    /// `spawned_ops`.
+    ///
+    /// This is the seam the native `Db.transaction(fn)` orchestrator
+    /// uses: after the async `BEGIN` / `SAVEPOINT` completes, the spawned
+    /// op hands back a `Continuation` that (1) mints the tx-view object,
+    /// (2) calls the creator's async callback, (3) coerces the return to
+    /// a Promise, and (4) attaches Rust-backed commit / rollback
+    /// handlers. The runtime stays oblivious to all of that — it only
+    /// knows "run this closure in a scope."
+    ///
+    /// The closure is a `Box<dyn FnOnce>` (not a bare `fn`) so it can
+    /// capture the orchestrator's owned state — the user-callback
+    /// `Global<Function>`, the outer `Global<PromiseResolver>`, the
+    /// savepoint name, the app id. The whole `OpResult` chain is already
+    /// `!Send` (it carries `v8::Global` handles and is polled on a
+    /// single-threaded compio executor), so the boxed closure adds no
+    /// new thread-safety constraint.
+    ///
+    /// The bound resolver on the `OpResult::JsValue` envelope carrying
+    /// this variant is unused (the continuation owns whichever resolver
+    /// it intends to settle); callers pass a throwaway resolver to keep
+    /// the envelope shape uniform.
+    Continuation(Box<dyn FnOnce(&mut v8::PinScope, &SharedState)>),
 }
 
 /// Convert a Rust value into a `ResolveValue` so async methods can

@@ -190,9 +190,10 @@ export type Collections<T extends Record<string, SchemaInput>> = {
 
 /**
  * The shape `installSchema` plants on `env.db` (the native handle) on
- * top of the per-collection wrappers — `transaction` and `live` are
- * SDK-level helpers that wrap the native `beginTransaction` /
- * subscription primitives.
+ * top of the per-collection wrappers. `transaction` is a thin
+ * `Result`-wrapping shim over the native `env.db.transaction(fn)`
+ * orchestrator (begin / commit / rollback / nested-savepoint all live in
+ * Rust as of P9 PR 3); `live` wraps the subscription primitives.
  */
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
   transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;

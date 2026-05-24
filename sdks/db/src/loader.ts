@@ -24,10 +24,10 @@
  * tx (snapshot === 0) but a tx opened before flush (current > 0), the
  * batched `find` would route through `TX_CONN` in Rust and leak the
  * non-tx read into the tx scope. We reject those entries with a clear
- * error rather than silently routing them wrong — the prior drain-
- * before-begin in `db.transaction` closes the common window, but a
- * second-microtask enqueue between the drain and `beginTransaction`'s
- * resolution remains observable.
+ * error rather than silently routing them wrong — the drain-before-begin
+ * in `db.transaction` closes the common window, but a second-microtask
+ * enqueue between the drain and the native `transaction(fn)` opening its
+ * BEGIN remains observable.
  *
  * **P7 PR 3** — id keyspace widened from `number` to `string` (typed_id)
  * in lockstep with the Rust-side `id TEXT PRIMARY KEY` + auto-mint

@@ -39,8 +39,9 @@ function makeMockNative() {
     async registerModel(_name: string, _schema: unknown, _indexes?: unknown): Promise<void> {
       // no-op
     },
-    async beginTransaction() {
-      return { async commit() { /* */ }, async rollback() { /* */ } };
+    // P9 PR 3: native `transaction(callback)` orchestrator stub.
+    async transaction(cb: (raw: unknown) => unknown) {
+      return cb(undefined);
     },
     collection(_name: string) {
       return {
@@ -105,9 +106,11 @@ describe("installSchema", () => {
 
   test("throws when a schema name collides with a native v8_class method", () => {
     const native = makeMockNative();
+    // P9 PR 3: `beginTransaction` is no longer reserved — the native
+    // primitive was deleted; the creator-facing `transaction` (native
+    // method as of PR 3) stays reserved.
     for (const reserved of [
       "collection",
-      "beginTransaction",
       "registerModel",
       "openSubscription",
       "startReplicationConsumer",
@@ -125,6 +128,21 @@ describe("installSchema", () => {
         `reserved name "${reserved}" must throw`,
       );
     }
+  });
+
+  test("beginTransaction is no longer a reserved env.db name (P9 PR 3)", () => {
+    // The native `beginTransaction` primitive was deleted entirely, so a
+    // collection named `beginTransaction` no longer collides. (A creator
+    // would be unwise to name a collection this, but the platform no
+    // longer forbids it.)
+    const native = makeMockNative();
+    assert.doesNotThrow(
+      () => installSchema(
+        { beginTransaction: { name: t.string().required() } },
+        native,
+      ),
+      "beginTransaction must not be a reserved name after P9 PR 3",
+    );
   });
 
   test("returned `ready` resolves once registerModel has settled", async () => {
@@ -148,9 +166,8 @@ describe("installSchema", () => {
       async registerModel(_name: string): Promise<void> {
         throw Object.assign(new Error("DDL bombed"), { code: "ddl_failed" });
       },
-      async beginTransaction() {
-        return { async commit() {}, async rollback() {} };
-      },
+      // P9 PR 3: native `transaction(callback)` orchestrator stub.
+      async transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
       collection(_name: string) { return { async find() { return []; } }; },
     } as unknown as ZeroshipDb;
     const { ready } = installSchema(

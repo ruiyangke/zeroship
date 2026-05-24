@@ -7903,3 +7903,136 @@ fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
     assert!(!q.sql.contains("deleted_at"));
     assert!(q.sql.contains("RETURNING *"));
 }
+
+// ---------------------------------------------------------------------------
+// P9 PR 3 — nested-transaction SAVEPOINT SQL validated against the SQLite
+// engine.
+//
+// The native `Db.transaction(fn)` orchestrator
+// (`crates/plugin-db/src/orchestrator/transaction.rs`) is Postgres-bound
+// today (the `tx_conn` slot holds a `compio_postgres::Client`; `run_sql`
+// only consults it on the PG path — same scope as the pre-P9
+// `beginTransaction` / auto-tx wrappers). It cannot drive the SQLite
+// session actor end-to-end without a separate SQLite-tx wiring.
+//
+// What we CAN — and do — validate here is that the exact savepoint SQL
+// the orchestrator emits (`SAVEPOINT zs_sp_N`, `ROLLBACK TO SAVEPOINT
+// zs_sp_N`, `RELEASE SAVEPOINT zs_sp_N`, inside a `BEGIN ... COMMIT`)
+// behaves correctly on the SQLite engine — so the SQL is proven valid for
+// the eventual SQLite-tx wiring. The dedicated client multiplexes the
+// single shared writer session, so the savepoint statements all land on
+// the one connection (exactly the orchestrator's single-connection
+// model).
+
+/// Inner savepoint rolled back to → only the outer write survives the
+/// COMMIT. Mirrors `nested_inner_reject_rolls_back_to_savepoint_outer_continues`
+/// at the SQL level.
+#[test]
+fn nested_savepoint_rollback_to_keeps_outer_sqlite() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+
+        backend
+            .client_exec(&client, "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)", &[])
+            .await
+            .expect("create table");
+
+        // Top-level BEGIN (what the orchestrator emits for a non-nested tx).
+        backend.client_exec(&client, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer')", &[])
+            .await
+            .expect("outer insert");
+
+        // Nested transaction → SAVEPOINT zs_sp_1 (the orchestrator's
+        // savepoint_name(1)).
+        backend.client_exec(&client, "SAVEPOINT zs_sp_1", &[]).await.expect("SAVEPOINT");
+        backend
+            .client_exec(&client, "INSERT INTO notes (title) VALUES ('inner-doomed')", &[])
+            .await
+            .expect("inner insert");
+        // Inner callback rejected → ROLLBACK TO SAVEPOINT (inner reverts,
+        // outer tx continues — not poisoned).
+        backend
+            .client_exec(&client, "ROLLBACK TO SAVEPOINT zs_sp_1", &[])
+            .await
+            .expect("ROLLBACK TO SAVEPOINT");
+
+        // Outer continues + COMMITs.
+        backend
+            .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer-2')", &[])
+            .await
+            .expect("outer insert 2 after savepoint rollback");
+        backend.client_exec(&client, "COMMIT", &[]).await.expect("COMMIT");
+
+        // Only the two outer rows survive; the inner row was rolled back
+        // to the savepoint.
+        let rows = client
+            .query("SELECT COUNT(*) FROM notes", &[])
+            .await
+            .expect("count");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("2"),
+            "inner SAVEPOINT row must be reverted by ROLLBACK TO; both outer rows survive"
+        );
+        let titles = client
+            .query("SELECT title FROM notes ORDER BY id", &[])
+            .await
+            .expect("titles");
+        assert_eq!(titles[0][0].as_deref(), Some("outer"));
+        assert_eq!(titles[1][0].as_deref(), Some("outer-2"));
+    });
+}
+
+/// Inner savepoint released → both inner and outer writes persist after
+/// COMMIT. Mirrors `nested_inner_resolve_releases_savepoint`.
+#[test]
+fn nested_savepoint_release_keeps_both_sqlite() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+
+        backend
+            .client_exec(&client, "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)", &[])
+            .await
+            .expect("create table");
+
+        backend.client_exec(&client, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&client, "SAVEPOINT zs_sp_1", &[])
+            .await
+            .expect("SAVEPOINT");
+        backend
+            .client_exec(&client, "INSERT INTO notes (title) VALUES ('inner-kept')", &[])
+            .await
+            .expect("inner insert");
+        // Inner callback resolved → RELEASE SAVEPOINT.
+        backend
+            .client_exec(&client, "RELEASE SAVEPOINT zs_sp_1", &[])
+            .await
+            .expect("RELEASE SAVEPOINT");
+        backend
+            .client_exec(&client, "INSERT INTO notes (title) VALUES ('outer-kept')", &[])
+            .await
+            .expect("outer insert");
+        backend.client_exec(&client, "COMMIT", &[]).await.expect("COMMIT");
+
+        let rows = client
+            .query("SELECT COUNT(*) FROM notes", &[])
+            .await
+            .expect("count");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("2"),
+            "RELEASE SAVEPOINT then COMMIT must persist both the inner and outer rows"
+        );
+    });
+}

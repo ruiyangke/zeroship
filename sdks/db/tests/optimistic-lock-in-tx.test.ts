@@ -23,11 +23,19 @@ function makeNativeCasMissOnUpdate() {
   let committed = false;
   const native = {
     registerModel: () => Promise.resolve(),
-    async beginTransaction(_opts?: { isolationLevel?: string }) {
-      return {
-        async commit() { committed = true; },
-        async rollback() { rolledBack = true; },
-      };
+    // P9 PR 3: native `transaction(callback)` orchestrator. Commit on
+    // resolve, rollback (re-throw) on the callback throwing — exactly the
+    // Rust orchestrator's contract. The mock records which settle path
+    // ran so the test can assert "rolled back, did not commit".
+    async transaction(cb: (raw: unknown) => unknown, _opts?: { isolationLevel?: string }) {
+      try {
+        const out = await cb(undefined);
+        committed = true;
+        return out;
+      } catch (e) {
+        rolledBack = true;
+        throw e;
+      }
     },
     collection(_name: string) {
       return {
@@ -88,9 +96,8 @@ describe("db.transaction — OptimisticLockError surfaces via result.error", () 
   test("a non-OCC throw from the body also rolls back and surfaces as result.error", async () => {
     const native = {
       registerModel: () => Promise.resolve(),
-      async beginTransaction() {
-        return { async commit() {}, async rollback() {} };
-      },
+      // P9 PR 3: native orchestrator stub — re-throws on callback throw.
+      async transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
       collection(_name: string) {
         return {
           async update(_f: AnyRec, _u: AnyRec) { return { id: 1, name: "x" }; },

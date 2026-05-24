@@ -721,7 +721,10 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
   "collection",
   "migrations",
   "replication",
-  "beginTransaction",
+  // **P9 PR 3** — `beginTransaction` removed: the native primitive was
+  // deleted entirely (transaction orchestration moved into Rust). The
+  // creator-facing `transaction` (below) is now a native method on
+  // `env.db`, so it stays reserved.
   "openSubscription",
   "registerModel",
   "startReplicationConsumer",
@@ -783,6 +786,45 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const native = env;
   const namingStrategy = options?.naming ?? naming.snakeCase;
   const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
+
+  // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
+  // method BEFORE the install loop overwrites `env.db.transaction` with
+  // the bootstrap `transactionImpl` wrapper.
+  //
+  // The hazard: the install loop does `Object.defineProperty(native,
+  // "transaction", transactionImpl)`, planting an OWN property that
+  // shadows the native prototype method. A naive `native.transaction`
+  // read on a *re-install* would then resolve to the previously-installed
+  // `transactionImpl` (own property) — and `transactionImpl` calling
+  // itself recurses forever.
+  //
+  // Fix: stash the captured native method under a non-enumerable hidden
+  // key the first time, and reuse it on every subsequent install. The
+  // first capture reads `native.transaction` before any own property is
+  // planted, so it picks up the real native orchestrator (in production a
+  // `Db.prototype` method; in tests a mock's own `transaction`). Bound to
+  // `native` so the v8_class receiver check passes.
+  const NATIVE_TX_KEY = "__zsNativeTransaction";
+  const nativeHolder = native as unknown as {
+    [NATIVE_TX_KEY]?: (
+      callback: (rawTxView: unknown) => unknown,
+      opts?: { isolationLevel?: string },
+    ) => Promise<unknown>;
+    transaction?: unknown;
+  };
+  if (nativeHolder[NATIVE_TX_KEY] === undefined && typeof nativeHolder.transaction === "function") {
+    const captured = (nativeHolder.transaction as (
+      callback: (rawTxView: unknown) => unknown,
+      opts?: { isolationLevel?: string },
+    ) => Promise<unknown>).bind(native);
+    Object.defineProperty(native, NATIVE_TX_KEY, {
+      value: captured,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
+  }
+  const nativeTransaction = nativeHolder[NATIVE_TX_KEY];
 
   validateRefTargets(schemas);
 
@@ -858,33 +900,68 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     return createLive<R>(collections as Record<string, unknown>, queryFn, liveOptions);
   }
 
+  // **P9 PR 3** — transaction orchestration moved into Rust.
+  //
+  // The native `env.db.transaction(callback, opts)` v8_method owns
+  // begin / commit / rollback / nested-savepoint (see
+  // `crates/plugin-db/src/orchestrator/transaction.rs`). It calls
+  // `callback(rawTxView)` once BEGIN/SAVEPOINT succeeds and returns a
+  // promise that resolves with the callback's result on commit (callback
+  // resolved) or rejects with the callback's error on rollback (callback
+  // threw). The four observable error codes — `begin_failed`,
+  // `commit_failed_indeterminate`, `savepoint_depth_exceeded`, and the
+  // body-error passthrough — are emitted by Rust and surface verbatim on
+  // the rejection (`err.code`).
+  //
+  // This wrapper keeps only the JS-side concerns that have no Rust
+  // counterpart:
+  //   1. **DataLoader drain** — the per-collection `IdLoader` microtask
+  //      queues are pure JS state; we flush them before opening the tx so
+  //      a batched `get(id)` issued just before `transaction(...)`
+  //      completes on the pool, not the tx connection.
+  //   2. **`_txDepth` bookkeeping** — bumped on every collection while the
+  //      tx is open so (a) the IdLoader's `loader_tx_race` guard rejects a
+  //      non-tx batched read that finds a tx opened mid-batch, and (b)
+  //      `live()` refuses with `live_in_transaction` when called inside a
+  //      tx body. (The Rust orchestrator owns *nesting depth*; this JS
+  //      counter is purely the "am I inside a tx on this collection"
+  //      signal those two JS-layer checks read.)
+  //   3. **`Result` wrapping** — `transaction(fn)` returns
+  //      `Promise<Result<R>>`; the native promise resolves/rejects, so we
+  //      adapt resolve → `ok`, reject → `err`.
+  //
+  // The `txCollections` (SDK collections wrapped `Result`→throw) route
+  // through the tx connection automatically, since the native CRUD path
+  // consults the `tx_conn` slot the orchestrator set. We therefore pass
+  // `txCollections` to the creator callback and ignore the native
+  // `rawTxView` (its collections are the same connection; the SDK
+  // wrappers add the field-mapping + throwing contract the callback
+  // expects).
   async function transactionImpl<R>(
     fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>,
     txOptions?: TransactionOptions,
   ): Promise<Result<R>> {
-    const nativeAny = native as unknown as {
-      beginTransaction?: (opts?: { isolationLevel?: string }) => Promise<{
-        commit(): Promise<void>;
-        rollback(): Promise<void>;
-      }>;
-    };
-    if (typeof nativeAny.beginTransaction !== "function") {
+    if (nativeTransaction === undefined) {
       return err(
         Object.assign(
           new Error(
-            "@zeroship/bootstrap: env.db.beginTransaction not available — " +
-              "runtime is missing the Transaction v8_class surface.",
+            "@zeroship/bootstrap: env.db.transaction not available — " +
+              "runtime is missing the native Db.transaction(fn) orchestrator.",
           ),
           { code: "native_transaction_unavailable" as const },
         ),
       );
     }
+
     const collectionList = Object.values(collections).map(
       (c) => c as unknown as {
         _txDepth: number;
         _idLoader: { _drain(): Promise<void> } | null;
       },
     );
+
+    // 1. Drain the JS DataLoader queues (JS-only state; cannot move to
+    //    Rust). A drain failure aborts before any BEGIN runs.
     try {
       await Promise.all(
         collectionList
@@ -904,49 +981,36 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return err(wrapped);
     }
 
-    for (const c of collectionList) {
-      c._txDepth += 1;
-    }
-    let tx: { commit(): Promise<void>; rollback(): Promise<void> };
+    // 2. Mark every collection in-tx so the loader race-guard +
+    //    live-in-tx refusal see depth > 0 for the duration. Bumped
+    //    synchronously *before* the native call so an in-flight batched
+    //    read observes the tx the instant BEGIN opens.
+    for (const c of collectionList) c._txDepth += 1;
     try {
-      tx = await nativeAny.beginTransaction(
-        txOptions?.isolationLevel ? { isolationLevel: txOptions.isolationLevel } : undefined,
-      );
-    } catch (beginErr) {
+      // 3. Native orchestrator: begin → callback(txCollections) →
+      //    commit/rollback. Resolves with the callback's result on
+      //    commit; rejects (with the typed `.code`) on rollback /
+      //    begin-failed / commit-indeterminate / depth-exceeded.
+      const opts = txOptions?.isolationLevel
+        ? { isolationLevel: txOptions.isolationLevel }
+        : undefined;
+      const bodyResult = (await nativeTransaction(
+        // The native view's collections share the tx connection, so we
+        // hand the creator our SDK-wrapped `txCollections` (Result→throw
+        // + field mapping). `rawTxView` is intentionally unused.
+        (_rawTxView: unknown) => fn(txCollections),
+        opts,
+      )) as R;
+      return ok(bodyResult);
+    } catch (txErr) {
+      // The native rejection already carries the right code
+      // (`commit_failed_indeterminate` / `begin_failed` /
+      // `savepoint_depth_exceeded`) or is the creator's own thrown error
+      // verbatim. Surface it as `result.error`.
+      return err(txErr instanceof Error ? txErr : new Error(String(txErr)));
+    } finally {
       for (const c of collectionList) c._txDepth -= 1;
-      const baseErr =
-        beginErr instanceof Error ? beginErr : new Error(String(beginErr));
-      const finalErr =
-        typeof (baseErr as Error & { code?: unknown }).code === "string"
-          ? baseErr
-          : Object.assign(baseErr, { code: "begin_failed" as const });
-      return err(finalErr);
     }
-
-    let bodyResult: R;
-    try {
-      bodyResult = await fn(txCollections);
-    } catch (bodyErr) {
-      try { await tx.rollback(); } catch { /* rollback failure tolerated */ }
-      for (const c of collectionList) c._txDepth -= 1;
-      return err(bodyErr instanceof Error ? bodyErr : new Error(String(bodyErr)));
-    }
-    try {
-      await tx.commit();
-    } catch (commitErr) {
-      try { await tx.rollback(); } catch { /* commit-half may make rollback a no-op */ }
-      for (const c of collectionList) c._txDepth -= 1;
-      const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
-      const wrapped = Object.assign(
-        new Error(`commit failed — transaction state indeterminate: ${msg}`, {
-          cause: commitErr instanceof Error ? commitErr : undefined,
-        }),
-        { code: "commit_failed_indeterminate" as const },
-      );
-      return err(wrapped);
-    }
-    for (const c of collectionList) c._txDepth -= 1;
-    return ok(bodyResult);
   }
 
   {

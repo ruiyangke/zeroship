@@ -80,10 +80,11 @@ function makeMockNative() {
 
   const native = {
     registerModel: async () => undefined,
-    beginTransaction: async () => ({
-      commit: async () => undefined,
-      rollback: async () => undefined,
-    }),
+    // P9 PR 3: native `transaction(callback)` orchestrator stub. The
+    // bootstrap wrapper bumps `_txDepth` before invoking this, so the
+    // callback (run synchronously here) sees the in-tx state that makes
+    // `db.live(...)` throw `live_in_transaction`.
+    transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(name: string) {
       return {
         async find(_filter: AnyRec, _opts: AnyRec) {

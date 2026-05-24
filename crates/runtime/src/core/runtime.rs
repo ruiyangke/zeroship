@@ -2083,51 +2083,30 @@ impl RuntimeInner {
                         }
                         ResolveValue::RejectError(e) => {
                             // Materialise the typed exception per
-                            // OpError::kind. Mirrors the sync-path
-                            // `gen_throw_error` shape, including the
-                            // JsValue passthrough that re-throws the
-                            // captured user exception verbatim.
-                            let exc: v8::Local<v8::Value> = match &e.kind {
-                                crate::state::OpErrorKind::JsValue(global) => {
-                                    v8::Local::new(scope, global)
-                                }
-                                _ => {
-                                    let msg = v8::String::new(scope, &e.message).unwrap();
-                                    match &e.kind {
-                                        crate::state::OpErrorKind::TypeError => {
-                                            v8::Exception::type_error(scope, msg)
-                                        }
-                                        crate::state::OpErrorKind::RangeError => {
-                                            v8::Exception::range_error(scope, msg)
-                                        }
-                                        crate::state::OpErrorKind::Error => {
-                                            v8::Exception::error(scope, msg)
-                                        }
-                                        crate::state::OpErrorKind::DomException(name) => {
-                                            crate::dom::exception::build(scope, &e.message, name).into()
-                                        }
-                                        crate::state::OpErrorKind::NodeError(code) => {
-                                            crate::node_error::build_node_exception(scope, code, &e.message)
-                                        }
-                                        crate::state::OpErrorKind::CodedError { code, hint } => {
-                                            let exc = v8::Exception::error(scope, msg);
-                                            if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
-                                                let code_key = v8::String::new(scope, "code").unwrap();
-                                                let code_val = v8::String::new(scope, code).unwrap();
-                                                obj.set(scope, code_key.into(), code_val.into());
-                                                if let Some(h) = hint {
-                                                    let hint_key = v8::String::new(scope, "hint").unwrap();
-                                                    let hint_val = v8::String::new(scope, h).unwrap();
-                                                    obj.set(scope, hint_key.into(), hint_val.into());
-                                                }
-                                            }
-                                            exc
-                                        }
-                                        crate::state::OpErrorKind::JsValue(_) => unreachable!(),
-                                    }
-                                }
-                            };
+                            // OpError::kind via the shared lowering (the
+                            // same one plugin-db's native tx orchestrator
+                            // uses to reject directly) so a throw and a
+                            // Promise rejection produce identical error
+                            // objects. Includes the JsValue passthrough
+                            // that re-throws the captured user exception
+                            // verbatim.
+                            let exc = e.to_exception(scope);
                             r.reject(scope, exc);
+                        }
+                        ResolveValue::Continuation(run) => {
+                            // **P9 PR 3** — the orchestrator's begin/savepoint
+                            // step finished; run the plugin-supplied
+                            // continuation in this live scope. It owns
+                            // whichever resolver it settles (it does NOT
+                            // touch `r`, the throwaway resolver on this
+                            // envelope) — typically it mints the tx-view,
+                            // calls the creator callback, and attaches
+                            // commit/rollback handlers to the returned
+                            // promise. `state` is the SharedState the
+                            // continuation needs to push the follow-up
+                            // commit/rollback `spawned_ops`.
+                            let state = self.state.clone();
+                            run(scope, &state);
                         }
                     }
                     scope.perform_microtask_checkpoint();

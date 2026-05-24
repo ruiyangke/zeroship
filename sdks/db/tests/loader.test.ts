@@ -54,12 +54,17 @@ function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Erro
   for (const [k, v] of Object.entries(rows)) stringIndex[k] = v;
   const native = {
     registerModel: () => Promise.resolve(),
-    beginTransaction: async (_o?: { isolationLevel?: string }) => {
+    // P9 PR 3: native `transaction(callback)` orchestrator stub. The
+    // begin tick happens when this is invoked (the bootstrap wrapper has
+    // already drained the loaders + bumped `_txDepth`); the callback runs
+    // with the tx active so id-reads dispatch directly (limit:1) rather
+    // than batching.
+    transaction: async (
+      cb: (raw: unknown) => unknown,
+      _o?: { isolationLevel?: string },
+    ) => {
       beginCount += 1;
-      return {
-        commit: async () => undefined,
-        rollback: async () => undefined,
-      };
+      return cb(undefined);
     },
     collection(_name: string) {
       return {
@@ -261,13 +266,15 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.equal(calls.findBatched.length, 0);
   });
 
-  test("pre-tx batched reads complete BEFORE beginTransaction runs", async () => {
+  test("pre-tx batched reads complete BEFORE the tx begin runs", async () => {
     // The race: a `get(id)` queued in the same turn as `db.transaction(...)`
-    // is held by IdLoader for the next microtask. If `beginTransaction`
-    // installs TX_CONN before the batch flushes, the supposedly-non-tx
-    // batched read leaks onto the transaction's connection. We assert the
-    // observable ordering: every batched `find` settled before `beginCount`
-    // tick. See db.ts drain-before-begin.
+    // is held by IdLoader for the next microtask. If the tx installs
+    // TX_CONN before the batch flushes, the supposedly-non-tx batched read
+    // leaks onto the transaction's connection. We assert the observable
+    // ordering: every batched `find` settled before the begin tick. The
+    // drain-before-begin lives in the bootstrap `transactionImpl` wrapper
+    // (the JS-side DataLoader queues have no Rust counterpart, so the
+    // drain stays in JS even though the begin moved into Rust).
     const events: string[] = [];
     const rowsByTable: Record<string, Record<number, AnyRec>> = {
       users: {
@@ -277,12 +284,20 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     };
     const native = {
       registerModel: () => Promise.resolve(),
-      async beginTransaction(_o?: { isolationLevel?: string }) {
-        events.push("beginTransaction");
-        return {
-          commit: async () => { events.push("commit"); },
-          rollback: async () => { events.push("rollback"); },
-        };
+      // P9 PR 3: native `transaction(callback)` orchestrator. The "begin"
+      // tick fires when the orchestrator is invoked — AFTER the bootstrap
+      // wrapper drained the loaders. The callback resolving pushes
+      // "commit"; throwing would push "rollback".
+      async transaction(cb: (raw: unknown) => unknown, _o?: { isolationLevel?: string }) {
+        events.push("begin");
+        try {
+          const out = await cb(undefined);
+          events.push("commit");
+          return out;
+        } catch (e) {
+          events.push("rollback");
+          throw e;
+        }
       },
       collection(name: string) {
         return {
@@ -329,9 +344,10 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // Reach into the loader and queue an entry directly: this models a
     // get() that has already passed ensureReady and called load(), so
     // it's in the loader queue at the moment tx starts. The original
-    // bug: this queued dispatch fires AFTER beginTransaction, and the
-    // find lands on TX_CONN. The fix: drain awaits the flush before
-    // beginTransaction is called.
+    // bug: this queued dispatch fires AFTER the tx begin, and the find
+    // lands on TX_CONN. The fix: the bootstrap wrapper awaits the loader
+    // drain before invoking the native transaction(fn) (whose begin runs
+    // in Rust).
     const usersCol = (db as unknown as Record<string, unknown>).users as {
       _idLoader: { load(id: string): Promise<unknown> } | null;
     };
@@ -364,21 +380,22 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
         e.startsWith("find(users,") &&
         (e.includes('"$in":[1]') || e.includes('"$in":["1"]')),
     );
-    const beginIdx = events.indexOf("beginTransaction");
+    const beginIdx = events.indexOf("begin");
     assert.ok(batchedFindIdx >= 0, `expected a batched find, got events=${JSON.stringify(events)}`);
-    assert.ok(beginIdx >= 0, `expected beginTransaction, got events=${JSON.stringify(events)}`);
+    assert.ok(beginIdx >= 0, `expected the tx begin tick, got events=${JSON.stringify(events)}`);
     assert.ok(
       batchedFindIdx < beginIdx,
-      `expected batched find (idx=${batchedFindIdx}) BEFORE beginTransaction (idx=${beginIdx}) — events=${JSON.stringify(events)}`,
+      `expected batched find (idx=${batchedFindIdx}) BEFORE the tx begin (idx=${beginIdx}) — events=${JSON.stringify(events)}`,
     );
   });
 
   test("tx-race: get(id) queued pre-tx that flushes mid-tx is rejected", async () => {
     // Models the residual race left after `d218e54c`'s drain-before-begin:
     // a `get(id)` enqueues an entry, then `db.transaction(...)` runs.
-    // `beginTransaction` resolves AFTER `_txDepth` is bumped, so by the
-    // time the loader's microtask fires, `_txDepth > 0` and TX_CONN is
-    // live in Rust. The loader detects the snapshot/current mismatch
+    // `_txDepth` is bumped synchronously before the native transaction(fn)
+    // is invoked, so by the time the loader's microtask fires,
+    // `_txDepth > 0` and TX_CONN is live in Rust. The loader detects the
+    // snapshot/current mismatch
     // and rejects with a clear error instead of routing the batched
     // find onto the tx connection.
     const { IdLoader } = await import("../src/loader.js");

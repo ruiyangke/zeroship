@@ -298,6 +298,29 @@ impl DbError {
         }
     }
 
+    /// Borrowing variant of [`Self::into_string`] — the message body
+    /// without consuming `self`. Used by callers that need to embed the
+    /// underlying error text in a wrapping message (e.g. the
+    /// `begin_failed` / `commit_failed_indeterminate` wrappers in
+    /// [`crate::orchestrator::transaction`]) while keeping the original
+    /// `DbError` available.
+    pub fn message_str(&self) -> &str {
+        match self {
+            DbError::SchemaRefused { envelope_json, .. } => envelope_json,
+            DbError::ValidationFailed { message, .. }
+            | DbError::UniqueViolation { message }
+            | DbError::FkViolation { message }
+            | DbError::NotNullViolation { message }
+            | DbError::CheckViolation { message }
+            | DbError::Serialization { message }
+            | DbError::LockContention { message }
+            | DbError::Transient { message }
+            | DbError::Configuration { message, .. }
+            | DbError::Coded { message, .. }
+            | DbError::Internal { message } => message,
+        }
+    }
+
     /// Convenience: configuration error with a static `code` and no
     /// hint. For configs that ship with operator-remediation text,
     /// use [`DbError::config_hinted`].
@@ -474,7 +497,7 @@ impl DbError {
     /// hint stable as the backend-arm dispatcher evolves.
     ///
     /// `op` names the operation surface for the message body
-    /// (e.g. `"beginTransaction"`, `"register_model"`, `"migration RPC"`)
+    /// (e.g. `"transaction"`, `"register_model"`, `"migration RPC"`)
     /// so the operator-facing text stays specific without forcing each
     /// call site to re-spell the static `code` / `hint`.
     pub(crate) fn backend_unsupported(op: &str) -> Self {

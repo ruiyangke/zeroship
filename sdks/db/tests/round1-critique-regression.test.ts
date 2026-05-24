@@ -311,21 +311,23 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
 // ---------------------------------------------------------------------------
 
 describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", () => {
-  test("get(id) issued during a slow beginTransaction sees _txDepth > 0", async () => {
+  test("get(id) issued during a slow tx begin sees _txDepth > 0", async () => {
     let beginTriggered: () => void = () => { /* set below */ };
     const beginGate = new Promise<void>((resolve) => { beginTriggered = resolve; });
     const events: string[] = [];
 
     const native = {
       registerModel: () => Promise.resolve(),
-      async beginTransaction() {
-        events.push("beginTransaction:enter");
+      // P9 PR 3: native `transaction(callback)` orchestrator. The
+      // bootstrap wrapper bumps `_txDepth` synchronously before invoking
+      // this; we then stall (await the gate) BEFORE running the callback,
+      // modelling a slow BEGIN. A `get(id)` issued during the stall sees
+      // `_txDepth > 0` and bypasses the loader.
+      async transaction(cb: (raw: unknown) => unknown) {
+        events.push("begin:enter");
         await beginGate;
-        events.push("beginTransaction:resolve");
-        return {
-          commit: async () => { events.push("commit"); },
-          rollback: async () => { events.push("rollback"); },
-        };
+        events.push("begin:resolve");
+        return cb(undefined);
       },
       collection: () => ({
         async find(filter: Record<string, unknown>, opts: Record<string, unknown>) {
@@ -355,16 +357,17 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
       { native },
     );
 
-    // Open a tx that pauses inside beginTransaction. The synchronous
-    // bump happens BEFORE the await, so any get(id) issued before
-    // begin resolves should see _txDepth > 0 and bypass the loader.
+    // Open a tx that pauses inside the native transaction(fn) before the
+    // callback runs. The `_txDepth` bump happens (in the bootstrap
+    // wrapper) before that, so any get(id) issued before the begin
+    // resolves should see _txDepth > 0 and bypass the loader.
     const txPromise = db.transaction(async () => {
       // Body runs after begin resolves.
       return { ok: true };
     });
 
-    // Wait for begin to be entered (we know `_txDepth` was bumped one
-    // microtask earlier — synchronously after drain settles).
+    // Wait for begin to be entered (we know `_txDepth` was bumped after
+    // the drain settled, one microtask earlier).
     await new Promise((r) => setTimeout(r, 5));
 
     // Issue a get(id) WHILE begin is still pending. The pre-fix
@@ -394,11 +397,16 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
     );
   });
 
-  test("beginTransaction throw rolls back the _txDepth bump", async () => {
+  test("native transaction begin failure rolls back the _txDepth bump", async () => {
     const native = {
       registerModel: () => Promise.resolve(),
-      async beginTransaction() {
-        throw new Error("BEGIN failed");
+      // P9 PR 3: native orchestrator rejects (begin failed) — the callback
+      // never runs. The bootstrap wrapper's `finally` must still decrement
+      // `_txDepth`.
+      async transaction(_cb: (raw: unknown) => unknown) {
+        throw Object.assign(new Error("db.transaction: BEGIN failed: boom"), {
+          code: "begin_failed",
+        });
       },
       collection: () => ({
         async find() { return []; },
@@ -414,6 +422,11 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
     const res = await db.transaction(async () => ({}));
     assert.ok(res.error, "expected the transaction to fail");
     assert.match(res.error!.message, /BEGIN failed/);
+    assert.equal(
+      (res.error as { code?: string }).code,
+      "begin_failed",
+      "begin failure must carry code=begin_failed",
+    );
 
     // The decrement must have happened — a subsequent get(id) sees
     // _txDepth === 0 and routes through the loader normally.

@@ -2,7 +2,7 @@
 //!
 //! `DbPlugin::build_instance` returns a `Db` instance from this
 //! module; the `NativeRegistrar` then attaches the Db-scoped entry
-//! points (`registerModel`, `beginTransaction`, the `replication*`
+//! points (`registerModel`, `transaction`, the `replication*`
 //! ops) on top. `Migrations` is reached via the `migrations` getter
 //! on this class, not via flat callbacks.
 //!
@@ -38,7 +38,7 @@ use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::crud::dispatch_set_mask_policy_field;
 use crate::orchestrator::register_model::register_model_dispatch;
-use crate::orchestrator::transaction::begin_transaction_dispatch;
+use crate::orchestrator::transaction::transaction_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
 use crate::v8_bridge::{read_json_arg, v8_value_to_serde_json};
 use crate::v8_classes::collection::mint_collection;
@@ -171,26 +171,50 @@ impl Db {
         .into())
     }
 
-    /// `db.beginTransaction(opts?)` — open a transaction.
+    /// `db.transaction(asyncFn, opts?)` — run `asyncFn` inside a
+    /// transaction (P9 PR 3).
+    ///
+    /// This is the native orchestrator behind the creator-facing
+    /// `await env.db.transaction(async tx => { ... })`. `asyncFn` is
+    /// called with a collections-only `tx` view
+    /// ([`super::transaction::mint_tx_view`]); the returned promise
+    /// resolves with the callback's result on **commit** (callback
+    /// resolved) and rejects with the callback's error on **rollback**
+    /// (callback threw / rejected). There is no `tx.commit()` /
+    /// `tx.rollback()` — abort by throwing.
+    ///
+    /// A `transaction()` call made while a transaction is already active
+    /// for this isolate (an enclosing `transaction()` or the auto-tx
+    /// wrapper) opens a `SAVEPOINT` instead of a fresh `BEGIN`; the inner
+    /// callback's failure rolls back only to that savepoint. See
+    /// [`crate::orchestrator::transaction`] for the full state machine.
     ///
     /// `opts` is `{ isolationLevel?: "readCommitted" | "repeatableRead"
-    /// | "serializable" }`. Returns a [`super::transaction::Transaction`]
-    /// wrapper whose `.commit()` / `.rollback()` are explicit; Drop
-    /// auto-rollbacks on GC.
+    /// | "serializable" }` (honoured only on the outermost `BEGIN`; a
+    /// `SAVEPOINT` inherits the enclosing transaction's isolation).
     #[v8_method]
-    #[v8_name = "beginTransaction"]
-    fn begin_transaction<'s>(
+    #[v8_name = "transaction"]
+    fn transaction<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
+        callback: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        // First arg must be a callable.
+        let user_fn: v8::Local<v8::Function> = callback.try_into().map_err(|_| {
+            let got = js_type_name(callback);
+            OpError::type_error(format!(
+                "db.transaction: first argument must be a function, got {got}"
+            ))
+        })?;
+
         let isolation = if opts.is_null_or_undefined() {
             None
         } else {
             if !opts.is_object() {
                 let got = js_type_name(opts);
                 return Err(OpError::type_error(format!(
-                    "beginTransaction: opts must be an object, got {got}"
+                    "db.transaction: opts must be an object, got {got}"
                 )));
             }
             let parsed = v8_value_to_serde_json(scope, opts);
@@ -204,7 +228,7 @@ impl Db {
                 None => None,
             }
         };
-        Ok(begin_transaction_dispatch(scope, isolation, self.app_id.clone()).into())
+        Ok(transaction_dispatch(scope, user_fn, isolation, self.app_id.clone()).into())
     }
 
     /// `db.startReplicationConsumer(opts?)` — provisions the per-app
@@ -363,7 +387,7 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
         "serializable" | "SERIALIZABLE" => "SERIALIZABLE",
         _ => {
             return Err(OpError::type_error(format!(
-                "db.beginTransaction: unknown isolationLevel '{raw}' \
+                "db.transaction: unknown isolationLevel '{raw}' \
                  (expected readCommitted | repeatableRead | serializable)"
             )));
         }
@@ -380,7 +404,7 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 /// Called from `DbPlugin::build_instance` once per V8 isolate during
 /// `build_env_object`. The returned object becomes the `env.db`
 /// namespace value; the runtime then layers the Db-scoped entry
-/// points (registerModel, beginTransaction, …) on top via the
+/// points (registerModel, transaction, …) on top via the
 /// `NativeRegistrar` returned by `DbPlugin::register`.
 pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,

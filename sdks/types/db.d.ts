@@ -348,24 +348,19 @@ interface ZeroshipCollection {
 }
 
 /**
- * A live transaction wrapper minted by `env.db.beginTransaction(opts?)`.
- * The wrapper's Drop auto-rollbacks if neither `.commit()` nor
- * `.rollback()` is called.
+ * The collections-only view handed to a `env.db.transaction(fn)`
+ * callback (P9 PR 3).
  *
- * Collections obtained via `tx.collection(name)` are tx-scoped (every
- * CRUD op routes through the transaction connection) and distinct
- * from `db.collection(name)`.
+ * Each property is a tx-bound {@link ZeroshipCollection} — every CRUD op
+ * routes through the open transaction connection automatically. There is
+ * NO `commit` / `rollback` / `collection` method: the transaction
+ * lifecycle is owned entirely by the native Rust orchestrator. Abort by
+ * throwing inside the callback; commit by resolving. The native
+ * `Transaction` v8_class (with explicit `.commit()` / `.rollback()` and a
+ * GC-auto-rollback finalizer) was removed.
  */
-interface ZeroshipTransaction {
-  /** Mint a tx-scoped Collection wrapper. Identity is cached per
-   *  name on this transaction. */
-  collection(name: string): ZeroshipCollection;
-  /** Commit the transaction. Idempotent — resolves void on a
-   *  second call instead of rejecting. */
-  commit(): Promise<void>;
-  /** Rollback the transaction. Idempotent — resolves void on a
-   *  second call instead of rejecting. */
-  rollback(): Promise<void>;
+interface ZeroshipTxView {
+  [collection: string]: ZeroshipCollection;
 }
 
 /**
@@ -570,15 +565,31 @@ interface ZeroshipDb {
   collection(name: string): ZeroshipCollection;
 
   /**
-   * Begin a transaction. `opts.isolationLevel` accepts
-   * `"readCommitted"` / `"repeatableRead"` / `"serializable"` (and the
-   * matching SQL strings). Returns a Transaction wrapper whose
-   * `.commit()` / `.rollback()` are explicit methods. The wrapper's
-   * Drop auto-rollbacks via connection close if neither is called.
+   * Run `callback` inside a transaction (P9 PR 3 — native orchestrator).
+   *
+   * `callback` receives a collections-only {@link ZeroshipTxView}; the
+   * returned promise resolves with the callback's result on **commit**
+   * (callback resolved) and rejects with the callback's error on
+   * **rollback** (callback threw / rejected). A `transaction(...)` call
+   * made while a transaction is already active opens a `SAVEPOINT`
+   * instead of a fresh `BEGIN` (nested-tx via implicit savepoint; depth
+   * cap 8 → `savepoint_depth_exceeded`).
+   *
+   * `opts.isolationLevel` accepts `"readCommitted"` / `"repeatableRead"`
+   * / `"serializable"` (and the matching SQL strings); honoured on the
+   * outermost `BEGIN` only.
+   *
+   * This is the low-level native primitive. The `@zeroship/db` SDK wraps
+   * it as `env.db.transaction(fn): Promise<Result<R>>` (the
+   * `Result`-returning creator API); the native promise rejects rather
+   * than returning a `Result`.
    */
-  beginTransaction(opts?: {
-    isolationLevel?: "readCommitted" | "repeatableRead" | "serializable";
-  }): Promise<ZeroshipTransaction>;
+  transaction<R>(
+    callback: (tx: ZeroshipTxView) => R | Promise<R>,
+    opts?: {
+      isolationLevel?: "readCommitted" | "repeatableRead" | "serializable";
+    },
+  ): Promise<R>;
 
   /**
    * Mint (or return the cached) Migrations namespace wrapper. Identity

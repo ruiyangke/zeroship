@@ -31,7 +31,7 @@ pub struct PostgresBackend {
     pool: Rc<compio_postgres::Pool>,
     /// Configured URL — used by [`Self::acquire_dedicated_client`] to
     /// open a fresh connection outside the pool (for the
-    /// `db.beginTransaction()` and `migrationBegin` paths that need a
+    /// `db.transaction(fn)` and `migrationBegin` paths that need a
     /// connection that survives across pool-return points).
     url: String,
     /// **P5 PR 2** — per-backend column-key cache. Lazily resolves

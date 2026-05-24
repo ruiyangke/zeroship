@@ -34,10 +34,11 @@ function makeRecordingNative() {
   const calls: { op: string; filter: unknown }[] = [];
   const native = {
     registerModel: async () => undefined,
-    beginTransaction: async () => ({
-      commit: async () => undefined,
-      rollback: async () => undefined,
-    }),
+    // P9 PR 3: native `transaction(callback)` orchestrator — call the
+    // callback (begin already succeeded), resolve with its result
+    // (commit), propagate a throw (rollback). The bootstrap wrapper
+    // passes a callback that ignores the raw tx-view.
+    transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(_name: string) {
       return {
         async findOne(_f: AnyRec) { return null; },

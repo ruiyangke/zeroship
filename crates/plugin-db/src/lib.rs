@@ -209,14 +209,6 @@ pub(crate) mod test_support;
 // All per-isolate slots live on [`context::IsolateDbContext`]; this
 // module just re-exports the helpers the rest of the crate calls.
 
-/// Allocate a fresh non-zero [`crate::context::IsolateDbContext::tx_token`]
-/// value. Called by
-/// `orchestrator::transaction::begin_transaction_dispatch` right before
-/// stamping the token onto the freshly-minted `Transaction` wrapper.
-pub(crate) fn next_tx_token() -> u64 {
-    ctx_mut(|c| c.next_tx_token())
-}
-
 /// Check if a model is already registered for this app on this thread.
 pub(crate) fn is_model_registered(app_id: &str, collection: &str) -> bool {
     context::with(|c| c.is_model_registered(app_id, collection))

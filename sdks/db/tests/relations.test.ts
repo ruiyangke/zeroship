@@ -51,10 +51,8 @@ function makeMock(
   const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
   const native = {
     registerModel: () => Promise.resolve(),
-    beginTransaction: async () => ({
-      commit: async () => undefined,
-      rollback: async () => undefined,
-    }),
+    // P9 PR 3: native `transaction(callback)` orchestrator stub.
+    transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(name: string) {
       return {
         async find(filter: AnyRec, opts: AnyRec) {
@@ -378,10 +376,8 @@ describe("with: parallel relation loading", () => {
     const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
     const native = {
       registerModel: () => Promise.resolve(),
-      beginTransaction: async () => ({
-        commit: async () => undefined,
-        rollback: async () => undefined,
-      }),
+      // P9 PR 3: native `transaction(callback)` orchestrator stub.
+      transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
       collection(name: string) {
         return {
           async find(filter: AnyRec, opts: AnyRec) {
@@ -611,10 +607,8 @@ describe("with: soft-delete + relations contract", () => {
     const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
     const native = {
       registerModel: () => Promise.resolve(),
-      beginTransaction: async () => ({
-        commit: async () => undefined,
-        rollback: async () => undefined,
-      }),
+      // P9 PR 3: native `transaction(callback)` orchestrator stub.
+      transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
       collection(name: string) {
         return {
           async find(filter: AnyRec, opts: AnyRec) {

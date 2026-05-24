@@ -9,14 +9,14 @@
 //!   `v8::Local<Value>` args directly into a `serde_json::Value` via
 //!   `v8_bridge::v8_value_to_serde_json` (no JSON.stringify/parse) and
 //!   calls a shared `crud::dispatch_*` helper.
-//! - [`transaction`] — `env.db.beginTransaction(isolationLevel?)`
-//!   resolves with a `Transaction` instance whose Weak finalizer
-//!   auto-rollbacks if user code drops the handle without explicit
-//!   `.commit()` / `.rollback()`. `.collection(name)` returns a
-//!   Collection wrapper bound to the open transaction (CRUD routes
-//!   through `IsolateDbContext::tx_conn` — formerly the `TX_CONN`
-//!   thread-local, folded into `IsolateDbContext` in Stage 8d-R4 —
-//!   automatically).
+//! - [`transaction`] — **P9 PR 3**: hosts `mint_tx_view`, the
+//!   collections-only object handed to a `Db.transaction(fn)` callback.
+//!   The `Transaction` v8_class (`commit`/`rollback`/`collection` +
+//!   GC-auto-rollback) is gone; transaction orchestration lives entirely
+//!   in [`crate::orchestrator::transaction`]. CRUD on the view's
+//!   collections routes through the open transaction connection
+//!   (`IsolateDbContext::tx_conn`) automatically, since the orchestrator
+//!   sets that slot for the transaction's duration.
 //! - [`migrations`] — `env.db.migrations` (v8_getter) is the
 //!   `Migrations` namespace exposing `.start / .status / .cancel /
 //!   .reset(spec)`. `.start(spec)` returns a [`migration::Migration`]

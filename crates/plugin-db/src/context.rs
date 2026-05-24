@@ -1,12 +1,11 @@
 //! Per-isolate DB context — single typed home for every plug-in
 //! thread-local. Before Stage 8d-R4 the plug-in carried ten separate
 //! `thread_local!` declarations (`DB_POOL`, `DB_URL`, `REGISTERED_MODELS`,
-//! `TX_CONN`, `AUTO_TX_OWNED`, `TX_TOKEN`, `TX_TOKEN_COUNTER`,
-//! `PENDING_EMITS` in `lib.rs`; `MIG_LOCK` in `migrations.rs`;
-//! `RUNNING_CONSUMERS` in `replication_ops.rs`). Each had its own
-//! borrow/take/replace ritual; lifecycle invariants (e.g. "TX_TOKEN
-//! matches the live transaction's token" or "MIG_LOCK never holds two
-//! `MigrationLock` snapshots") were enforced by convention only.
+//! `TX_CONN`, `AUTO_TX_OWNED`, `PENDING_EMITS` in `lib.rs`; `MIG_LOCK` in
+//! `migrations.rs`; `RUNNING_CONSUMERS` in `replication_ops.rs`). Each had
+//! its own borrow/take/replace ritual; lifecycle invariants (e.g.
+//! "MIG_LOCK never holds two `MigrationLock` snapshots") were enforced by
+//! convention only.
 //!
 //! This module folds all of those slots into a single
 //! [`IsolateDbContext`] stashed in one [`thread_local!`]. Typed
@@ -14,10 +13,10 @@
 //!
 //! * [`IsolateDbContext::with`] / [`IsolateDbContext::with_mut`] are
 //!   the only entry points; every consumer goes through them.
-//! * `*_tx_*` methods coordinate the four tx-state slots (`tx_conn`,
-//!   `tx_token`, `tx_token_counter`, `auto_tx_owned`) so that the
-//!   TX_TOKEN-versus-Drop race documented on
-//!   [`crate::v8_classes::transaction::Transaction`] still holds.
+//! * `*_tx_*` methods coordinate the tx-state slots (`tx_conn`,
+//!   `auto_tx_owned`, `savepoint_depth`) so the single-connection model
+//!   the transaction orchestrator relies on holds (one BEGIN per isolate,
+//!   nested `SAVEPOINT`s reusing the same connection).
 //! * Pending broker emits live on the context; the queue is drained by
 //!   the transaction settle path (`drain_pending_emits_on_commit`) and
 //!   cleared on ROLLBACK / fresh BEGIN.
@@ -99,12 +98,10 @@ pub(crate) struct MigrationLock {
 /// by the [`ISOLATE_CTX`] thread-local.
 ///
 /// All fields are private. Every consumer goes through an accessor
-/// method on this `impl` — [`Self::pool`], [`Self::tx_token`],
+/// method on this `impl` — [`Self::pool`], [`Self::savepoint_depth`],
 /// [`Self::set_mig_lock`], etc. Direct field access from inside the
 /// crate is rejected at compile time. This closes deferred [I16]
-/// (api-surface r3 M1+M2; r9 ceiling step "privatise context fields")
-/// and the `tx_token_counter`-specific advert that "only
-/// `next_tx_token` should touch it".
+/// (api-surface r3 M1+M2; r9 ceiling step "privatise context fields").
 #[allow(missing_debug_implementations)]
 pub struct IsolateDbContext {
     /// Connection pool — created lazily on first DB operation.
@@ -139,38 +136,34 @@ pub struct IsolateDbContext {
     /// user-owned tx.
     auto_tx_owned: bool,
 
-    /// Ownership token for the active transaction connection.
+    /// **P9 PR 3** — number of nested `SAVEPOINT`s currently open within
+    /// the active transaction (auto-tx or explicit). `0` means either no
+    /// transaction is active, or the only open transaction is the
+    /// outermost one (the `BEGIN`, whether opened by the native
+    /// `Db.transaction(fn)` orchestrator or the auto-tx wrapper). Each
+    /// nested `env.db.transaction(...)` call that finds `has_tx() == true`
+    /// emits `SAVEPOINT zs_sp_<depth+1>` and increments this; the matching
+    /// `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT` decrements it.
     ///
-    /// Stamped non-zero by `begin_transaction` on success and cleared
-    /// to zero by any path that drains [`Self::tx_conn`] (the
-    /// `Transaction` v8_class's `.commit()` / `.rollback()` methods,
-    /// or its Weak-finalizer-driven `Drop`).
-    ///
-    /// Each `Transaction` wrapper carries the token it was minted
-    /// with; commit / rollback / GC all compare against the live
-    /// `tx_token` before acting, so the wrapper never double-acts on
-    /// a transaction another path already settled (e.g. an explicit
-    /// `.commit()` followed by the finalizer running on GC).
-    tx_token: u64,
-
-    /// Monotonic counter feeding [`Self::tx_token`]. Incremented
-    /// inside [`Self::next_tx_token`]; never reset (a u64 at 1 GHz
-    /// tx/s would take ~584 years to wrap, so non-uniqueness within a
-    /// worker lifetime is a non-issue).
-    tx_token_counter: u64,
+    /// The native orchestrator (`orchestrator::transaction`) is the only
+    /// writer: the savepoint name `zs_sp_<N>` is derived from this counter
+    /// so RELEASE/ROLLBACK TO always target the savepoint the matching
+    /// nested call opened. Capped at [`crate::orchestrator::transaction::MAX_SAVEPOINT_DEPTH`]
+    /// (a 9th level throws `savepoint_depth_exceeded`).
+    savepoint_depth: u32,
 
     /// Broker events queued during an active transaction.
     ///
     /// While [`Self::tx_conn`] is `Some`, every successful CRUD
     /// mutation pushes its `ChangeEvent` here instead of calling
     /// [`crate::wal_consumer::emit_local`] directly. The transaction
-    /// settle path (`Transaction::end` for user-driven tx;
-    /// `exec_auto_end` for the auto-tx wrapper) drains the queue and
-    /// either fires every event through `emit_local` on COMMIT or
-    /// clears it on ROLLBACK. This closes the "emit-before-commit"
-    /// dual-write window where a subscriber could `find()` rows that
-    /// don't yet exist on disk (or that a ROLLBACK is about to
-    /// undo).
+    /// settle path (the native `Db.transaction(fn)` orchestrator for
+    /// user-driven tx; `exec_auto_end` for the auto-tx wrapper) drains
+    /// the queue and either fires every event through `emit_local` on
+    /// COMMIT or clears it on ROLLBACK. This closes the
+    /// "emit-before-commit" dual-write window where a subscriber could
+    /// `find()` rows that don't yet exist on disk (or that a ROLLBACK is
+    /// about to undo).
     ///
     /// `None` outside a transaction; non-empty `Some(Vec<_>)` only
     /// while a tx is active. Drained atomically by `Vec::take`.
@@ -250,8 +243,7 @@ impl IsolateDbContext {
             registered_models: HashSet::new(),
             tx_conn: None,
             auto_tx_owned: false,
-            tx_token: 0,
-            tx_token_counter: 0,
+            savepoint_depth: 0,
             pending_emits: None,
             mig_lock: None,
             running_consumers: HashSet::new(),
@@ -446,7 +438,7 @@ impl IsolateDbContext {
         self.mask_policies.contains_key(app_id)
     }
 
-    // ----- TX_CONN / TX_TOKEN / TX_TOKEN_COUNTER / AUTO_TX_OWNED ------
+    // ----- TX_CONN / AUTO_TX_OWNED / SAVEPOINT_DEPTH ------
 
     /// `true` if a transaction connection is currently parked in the
     /// slot (`tx_conn = Some`). Note: returns `true` even between an
@@ -478,36 +470,8 @@ impl IsolateDbContext {
         self.tx_conn = Some(client);
     }
 
-    /// Read the live ownership token (zero outside a transaction).
-    pub(crate) fn tx_token(&self) -> u64 {
-        self.tx_token
-    }
-
-    /// Stamp the live ownership token. Called by the begin path after
-    /// the BEGIN SQL succeeds; cleared to zero by every settle path.
-    ///
-    /// Invariant: a non-zero token implies the tx_conn slot is
-    /// occupied — every settle path drains the client BEFORE
-    /// clearing the token.
-    pub(crate) fn set_tx_token(&mut self, token: u64) {
-        debug_assert!(
-            token == 0 || self.tx_conn.is_some(),
-            "set_tx_token: non-zero token without an active tx_conn",
-        );
-        self.tx_token = token;
-    }
-
-    /// Allocate a fresh non-zero TX_TOKEN value. Called by
-    /// `orchestrator::transaction::begin_transaction_dispatch` right
-    /// before stamping the token onto the freshly-minted
-    /// `Transaction` wrapper.
-    pub(crate) fn next_tx_token(&mut self) -> u64 {
-        self.tx_token_counter = self.tx_token_counter.wrapping_add(1);
-        self.tx_token_counter
-    }
-
     /// True iff the live transaction was opened by the auto-tx
-    /// wrapper (vs. a user-driven `db.beginTransaction`).
+    /// wrapper (vs. a user-driven `db.transaction(fn)`).
     pub(crate) fn auto_tx_owned(&self) -> bool {
         self.auto_tx_owned
     }
@@ -526,6 +490,42 @@ impl IsolateDbContext {
             "set_auto_tx_owned(true) called without an active tx_conn",
         );
         self.auto_tx_owned = owned;
+    }
+
+    /// **P9 PR 3** — read the current nested-savepoint depth (zero when
+    /// no savepoint is open above the outermost `BEGIN`).
+    pub(crate) fn savepoint_depth(&self) -> u32 {
+        self.savepoint_depth
+    }
+
+    /// **P9 PR 3** — bump the nested-savepoint depth on `SAVEPOINT
+    /// zs_sp_N`. Returns the new depth, which is also the `N` in the
+    /// savepoint name the caller just opened. Requires an active
+    /// transaction connection (a savepoint without an enclosing `BEGIN`
+    /// is a state-machine bug).
+    pub(crate) fn push_savepoint(&mut self) -> u32 {
+        debug_assert!(
+            self.tx_conn.is_some(),
+            "push_savepoint called without an active tx_conn",
+        );
+        self.savepoint_depth = self.savepoint_depth.saturating_add(1);
+        self.savepoint_depth
+    }
+
+    /// **P9 PR 3** — decrement the nested-savepoint depth on `RELEASE
+    /// SAVEPOINT` / `ROLLBACK TO SAVEPOINT`. Saturates at zero so a
+    /// double-settle (handler + finalizer race) cannot underflow.
+    pub(crate) fn pop_savepoint(&mut self) {
+        self.savepoint_depth = self.savepoint_depth.saturating_sub(1);
+    }
+
+    /// **P9 PR 3** — reset the nested-savepoint depth to zero. Called by
+    /// the top-level settle path (COMMIT / ROLLBACK) so a fresh
+    /// transaction on the same isolate starts from a clean slate even if
+    /// an inner savepoint settle was skipped (e.g. the whole tx is being
+    /// torn down by a top-level rollback).
+    pub(crate) fn reset_savepoint_depth(&mut self) {
+        self.savepoint_depth = 0;
     }
 
     // ----- PENDING_EMITS ---------------------------------------------
@@ -723,13 +723,12 @@ mod tests {
     //! * [`IsolateDbContext::install_tx_client`] /
     //!   [`IsolateDbContext::take_tx_client`] /
     //!   [`IsolateDbContext::put_tx_client`] round-trip.
-    //! * The `debug_assert!` inside [`IsolateDbContext::set_tx_token`]
-    //!   that a non-zero token requires `tx_conn = Some` — we test the
-    //!   *zero* branch only (which is always allowed).
     //! * The `debug_assert!` inside
     //!   [`IsolateDbContext::set_auto_tx_owned`] that `owned = true`
-    //!   requires `tx_conn = Some` — same constraint; we only test the
-    //!   `false` branch.
+    //!   requires `tx_conn = Some` — we only test the `false` branch.
+    //! * The `debug_assert!` inside [`IsolateDbContext::push_savepoint`]
+    //!   that a savepoint requires an active `tx_conn` — same constraint;
+    //!   the pop/reset arms (no such precondition) are unit-tested.
     //! * [`IsolateDbContext::set_mig_lock`] /
     //!   [`IsolateDbContext::take_mig_client`] /
     //!   [`IsolateDbContext::return_mig_client`] / `mig_lock_snapshot`
@@ -768,8 +767,8 @@ mod tests {
         assert!(ctx.backend().is_none());
         assert!(ctx.db_url().is_none());
         assert!(!ctx.has_tx());
-        assert_eq!(ctx.tx_token(), 0);
         assert!(!ctx.auto_tx_owned());
+        assert_eq!(ctx.savepoint_depth(), 0);
         assert!(!ctx.has_mig_lock());
         assert!(ctx.mig_lock_snapshot().is_none());
         // pending_emits starts as None (the slot is allocated lazily on
@@ -786,7 +785,7 @@ mod tests {
         let b = IsolateDbContext::new();
         // Compare observable state (no PartialEq on the struct).
         assert_eq!(a.pool_initialised(), b.pool_initialised());
-        assert_eq!(a.tx_token(), b.tx_token());
+        assert_eq!(a.savepoint_depth(), b.savepoint_depth());
         assert_eq!(a.auto_tx_owned(), b.auto_tx_owned());
         assert_eq!(a.has_tx(), b.has_tx());
         assert_eq!(a.has_mig_lock(), b.has_mig_lock());
@@ -876,34 +875,21 @@ mod tests {
     // ----- TX token monotonic counter ------------------------------------
 
     #[test]
-    fn next_tx_token_starts_at_one() {
+    fn savepoint_depth_pop_and_reset_saturate_at_zero() {
+        // `push_savepoint` carries a `debug_assert!(tx_conn.is_some())`
+        // and so needs a real Client (see module-level note) — covered
+        // by the integration/V8 end-to-end paths. The decrement / reset
+        // arms have no such precondition: a double-settle (handler +
+        // finalizer race) must NOT underflow the unsigned counter.
         let mut ctx = IsolateDbContext::new();
-        assert_eq!(ctx.next_tx_token(), 1);
-    }
-
-    #[test]
-    fn next_tx_token_increments_monotonically() {
-        let mut ctx = IsolateDbContext::new();
-        let a = ctx.next_tx_token();
-        let b = ctx.next_tx_token();
-        let c = ctx.next_tx_token();
-        assert_eq!(a, 1);
-        assert_eq!(b, 2);
-        assert_eq!(c, 3);
-    }
-
-    #[test]
-    fn set_tx_token_zero_is_always_allowed() {
-        // The non-zero branch requires an active tx_conn (debug_assert!);
-        // we test the zero (clearing) branch here. Zero clears in every
-        // settle path, regardless of slot occupancy.
-        let mut ctx = IsolateDbContext::new();
-        ctx.set_tx_token(0);
-        assert_eq!(ctx.tx_token(), 0);
-        // Even after a counter bump, zero stays clear-only.
-        ctx.next_tx_token();
-        ctx.set_tx_token(0);
-        assert_eq!(ctx.tx_token(), 0);
+        assert_eq!(ctx.savepoint_depth(), 0);
+        // pop on an already-zero depth saturates rather than wrapping to
+        // u32::MAX.
+        ctx.pop_savepoint();
+        assert_eq!(ctx.savepoint_depth(), 0, "pop must saturate at zero");
+        // reset on zero is a no-op.
+        ctx.reset_savepoint_depth();
+        assert_eq!(ctx.savepoint_depth(), 0);
     }
 
     #[test]

@@ -19,16 +19,27 @@ import { t } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 
-function makeDoubleFailingNative(commitErr: Error, rollbackErr: Error) {
+// P9 PR 3: commit failure is now owned by the native orchestrator. The
+// mock's `transaction(callback)` runs the callback (begin succeeded),
+// then simulates a COMMIT that fails — rejecting with the
+// `commit_failed_indeterminate`-coded error the Rust orchestrator emits
+// (`crates/plugin-db/src/orchestrator/transaction.rs::exec_settle_top_level`).
+// The `.cause` is preserved on the rejection so the SDK's `result.error`
+// keeps the cause chain the pre-PR3 JS `transactionImpl` produced.
+function makeCommitFailingNative(commitErr: Error) {
   let txCount = 0;
   const native = {
     registerModel: () => Promise.resolve(),
-    async beginTransaction(_opts?: { isolationLevel?: string }) {
+    async transaction(cb: (raw: unknown) => unknown, _opts?: { isolationLevel?: string }) {
       txCount += 1;
-      return {
-        async commit() { throw commitErr; },
-        async rollback() { throw rollbackErr; },
-      };
+      // begin → callback resolves (the body succeeded) → COMMIT fails.
+      await cb(undefined);
+      throw Object.assign(
+        new Error(`commit failed — transaction state indeterminate: ${commitErr.message}`, {
+          cause: commitErr,
+        }),
+        { code: "commit_failed_indeterminate" as const },
+      );
     },
     collection(_name: string) {
       return {
@@ -42,14 +53,15 @@ function makeDoubleFailingNative(commitErr: Error, rollbackErr: Error) {
 }
 
 describe("db.transaction — commit_failed_indeterminate", () => {
-  test("commit rejects + rollback rejects → result.error carries the code and the cause chain", async () => {
+  test("COMMIT failure → result.error carries commit_failed_indeterminate + the cause chain", async () => {
+    // Migrated from the pre-PR3 double-failing-native shape. The native
+    // orchestrator now owns COMMIT and the best-effort ROLLBACK; the mock
+    // models a COMMIT that fails after the body resolved, rejecting with
+    // the same coded error + cause the Rust path emits.
     const commitErr = Object.assign(new Error("network drop after COMMIT"), {
       code: "connection_lost",
     });
-    const rollbackErr = Object.assign(new Error("rollback after commit is moot"), {
-      code: "rollback_after_commit",
-    });
-    const native = makeDoubleFailingNative(commitErr, rollbackErr);
+    const native = makeCommitFailingNative(commitErr);
 
     const db = installSchemaForTest(
       { users: { name: t.string().required() } },
@@ -57,7 +69,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
     );
 
     const result = await db.transaction(async () => {
-      // empty body — we only care about the commit/rollback failure.
+      // empty body — we only care about the commit failure.
       return 42;
     });
 
@@ -70,29 +82,19 @@ describe("db.transaction — commit_failed_indeterminate", () => {
       "wrapped error must carry the indeterminate code",
     );
     assert.match(err.message, /commit failed/i);
-    // The audit's "cause chain" requirement: at minimum, the commit
-    // error must be reachable via `.cause`. The rollback error is not
-    // exposed (Gap E flags this separately).
+    // The "cause chain" requirement: the commit error must be reachable
+    // via `.cause` (the native orchestrator preserves it on the
+    // rejection; the bootstrap wrapper passes the rejection through
+    // verbatim).
     assert.equal(err.cause, commitErr, "cause must be the original commit rejection");
     assert.equal((err.cause as Error).message, "network drop after COMMIT");
   });
 
-  test("commit rejects, rollback succeeds → still surfaces the indeterminate code", async () => {
+  test("COMMIT failure surfaces the indeterminate code even when the body resolved", async () => {
     const commitErr = Object.assign(new Error("deadlock at commit"), {
       code: "deadlock_detected",
     });
-    const native = {
-      registerModel: () => Promise.resolve(),
-      async beginTransaction() {
-        return {
-          async commit() { throw commitErr; },
-          async rollback() { /* succeeds */ },
-        };
-      },
-      collection(_name: string) {
-        return { async findOne() { return null; }, async find() { return []; } };
-      },
-    } as unknown as ZeroshipDb;
+    const native = makeCommitFailingNative(commitErr);
 
     const db = installSchemaForTest(
       { users: { name: t.string().required() } },

@@ -20,7 +20,8 @@ import { installSchemaForTest } from "./_install-helper.js";
 
 const native = {
   registerModel: () => Promise.resolve(),
-  beginTransaction: () => Promise.resolve({ commit: () => Promise.resolve(), rollback: () => Promise.resolve() }),
+  // P9 PR 3: native `transaction(callback)` orchestrator stub.
+  transaction: (cb: (raw: unknown) => unknown) => Promise.resolve(cb(undefined)),
   collection: (_n: string) => ({ async find() { return []; }, async findOne() { return null; }, async insert(r: Record<string, unknown>) { return r; } }),
 } as unknown as ZeroshipDb;
 

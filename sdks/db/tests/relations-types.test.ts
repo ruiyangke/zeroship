@@ -25,10 +25,8 @@ type AnyRec = Record<string, unknown>;
 
 const native = {
   registerModel: () => Promise.resolve(),
-  beginTransaction: async () => ({
-    commit: async () => undefined,
-    rollback: async () => undefined,
-  }),
+  // P9 PR 3: native `transaction(callback)` orchestrator stub.
+  transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
   collection(_name: string) {
     return {
       async findOne(_filter: AnyRec, _opts: AnyRec) { return null; },

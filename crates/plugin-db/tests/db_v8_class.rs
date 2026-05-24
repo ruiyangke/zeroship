@@ -178,3 +178,50 @@ fn db_brand_check_rejects_non_db() {
     );
 }
 
+
+// ---------------------------------------------------------------------------
+// P9 PR 3 — native Db.transaction surface
+// ---------------------------------------------------------------------------
+
+/// `db.transaction` is a native method (function) on the `Db` v8 surface.
+/// (Previously the tx entry point on `Db` was `beginTransaction`; the
+/// creator-facing `transaction` was a bootstrap-installed JS function.
+/// P9 PR 3 makes `transaction` the native method.)
+#[test]
+fn db_transaction_is_a_native_method() {
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let db = mint_db(scope, "test_app").expect("mint_db");
+    let key = v8::String::new(scope, "transaction").unwrap();
+    let v = db.get(scope, key.into()).expect("transaction prop");
+    assert!(
+        v.is_function(),
+        "env.db.transaction must be a native function (the orchestrator entry point)"
+    );
+}
+
+/// `db.beginTransaction` is GONE — not on the instance, not up the
+/// prototype chain. The native primitive was deleted entirely in P9 PR 3
+/// (not hidden behind `__platform`).
+#[test]
+fn db_begin_transaction_is_not_exposed() {
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let db = mint_db(scope, "test_app").expect("mint_db");
+    let key = v8::String::new(scope, "beginTransaction").unwrap();
+    // `get` walks the whole prototype chain, so this also proves it isn't
+    // on Db.prototype.
+    let v = db.get(scope, key.into()).expect("get beginTransaction");
+    assert!(
+        v.is_undefined(),
+        "env.db.beginTransaction must be undefined — the native primitive was deleted in P9 PR 3"
+    );
+}

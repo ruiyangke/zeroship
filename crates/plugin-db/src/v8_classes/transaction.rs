@@ -1,340 +1,165 @@
-//! `Transaction` — native V8 wrapper for an open DB transaction.
+//! `mint_tx_view` — the collections-only object handed to a
+//! `Db.transaction(fn)` callback (P9 PR 3).
 //!
-//! Returned by `env.db.beginTransaction(isolationLevel?)`. The wrapper
-//! owns the per-isolate `tx_conn` slot (`IsolateDbContext::tx_conn`)
-//! for the lifetime of the transaction; `.commit()` / `.rollback()`
-//! drain it and run the matching SQL, and a `v8::Weak` guaranteed
-//! finalizer reclaims the wrapper's `Box<Transaction>` on GC. If user
-//! code drops the wrapper without explicit `.commit()` / `.rollback()`,
-//! the `Drop` impl takes the still-active `Client` out of the slot, and
-//! Postgres observes the connection close and auto-rollbacks server-side.
+//! ## What changed in P9 PR 3
 //!
-//! ## JS surface
+//! The `Transaction` `#[v8_class]` (with its `commit`/`rollback`/
+//! `collection` methods and GC-driven auto-rollback finalizer) is
+//! **gone**. Transaction orchestration moved entirely into Rust
+//! ([`crate::orchestrator::transaction`]): begin/commit/rollback/
+//! savepoint are driven by the native `Db.transaction(fn)` orchestrator,
+//! never by JS-reachable methods. There is no `env.db.beginTransaction`
+//! and no `tx.commit()` / `tx.rollback()` anywhere in the object graph —
+//! creators abort by throwing inside the callback and commit by resolving.
 //!
-//! ```ts
-//! const tx = await env.db.beginTransaction("read committed");
-//! await tx.collection("todos").insert({ ... });
-//! await tx.commit();              // explicit
-//! // (or) await tx.rollback();
-//! // (or) tx goes out of scope    → GC finalizer rollbacks
-//! ```
+//! What remains here is [`mint_tx_view`]: the object the orchestrator
+//! passes to the creator callback. It is a plain `v8::Object` whose
+//! properties are one [`Collection`](super::collection::Collection) per
+//! cached-schema collection — **collections as props, no methods**
+//! (Q-P9-C). `tx.posts.find(...)` works because each property is a real
+//! `Collection`; every CRUD method on it routes through the open
+//! transaction connection automatically, since
+//! [`crate::exec::run_sql`] consults
+//! [`crate::context::IsolateDbContext::tx_conn`] whenever it is set (the
+//! orchestrator sets it for the duration of the transaction).
 //!
-//! `.collection(name)` returns a [`super::collection::Collection`]
-//! v8_class instance bound to this Transaction. Because `tx_conn` is
-//! set while the transaction is active, every CRUD method on that
-//! Collection (which calls `crate::crud::dispatch_*` → `run_sql`)
-//! automatically routes through the transaction connection.
+//! ## Why collections-as-props (not a `Transaction` instance)
 //!
-//! ## Ownership token
-//!
-//! `tx_conn` is a single per-isolate slot; an explicit `.commit()` and
-//! the wrapper's `Drop` finalizer can race (commit succeeds, GC
-//! finalizer wakes up afterwards). To make the race safe, every
-//! successful BEGIN bumps `tx_token` (`IsolateDbContext::tx_token`) and
-//! stamps the same value onto the wrapper. Commit / rollback / Drop all
-//! check `self.token == tx_token` before touching the connection — once
-//! one path settles the tx and clears the slot, the others no-op.
+//! A `tx` object that exposed `commit` / `rollback` / `collection` would
+//! re-introduce a JS-reachable transaction primitive — exactly the
+//! capability surface P9 set out to remove. By minting a bare object with
+//! only collection properties, there is no method for creator (or
+//! escaped) code to call: the transaction lifecycle is owned by Rust end
+//! to end. The bootstrap layer wraps each native collection prop in a
+//! `Result`→throw shim before the creator sees it (so the callback sees
+//! the throwing contract), but the *shape* — collections only — is fixed
+//! here.
 
 #![allow(unsafe_code)]
 
-use std::cell::{Cell, RefCell};
-
 use zeroship_runtime::state::OpError;
-
-// The transaction wrapper owns a backend session client borrowed
-// out of the per-isolate context's tx slot. The concrete type is
-// `<PostgresBackend as Backend>::Client` (= `compio_postgres::Client`
-// today) but consumer files name it through the type alias so the
-// `compio_postgres` crate stays scoped to `backend/postgres.rs` and
-// `context.rs`.
-type Client = <crate::backend::PostgresBackend as crate::backend::SqlExecutor>::Client;
-use zeroship_runtime_macros::v8_class;
-#[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_method};
 
 use crate::v8_classes::collection::mint_collection;
 
-// ---------------------------------------------------------------------------
-// Transaction state
-// ---------------------------------------------------------------------------
-
-/// Owned state for one JS `Transaction` instance.
+/// Mint the collections-only `tx` view for a `Db.transaction(fn)`
+/// callback.
 ///
-/// Field 0 of the wrapper holds a `Box<Transaction>` (this struct).
-/// The Weak finalizer registered by [`mint_transaction`] reclaims the
-/// Box on GC and our `Drop` impl auto-rollbacks if this wrapper still
-/// owns the active transaction.
-pub struct Transaction {
-    /// Ownership token stamped into [`crate::context::IsolateDbContext::tx_token`]
-    /// at successful BEGIN. Commit / rollback / GC compare to the current
-    /// `tx_token` before taking action — once one path settles the tx and
-    /// clears `tx_token`, the others see the mismatch and no-op (so an
-    /// explicit `.commit()` followed by GC doesn't run COMMIT twice).
-    pub(crate) token: Cell<u64>,
-    /// True once the wrapper has been committed or rolled back.
-    /// Further `.commit()` / `.rollback()` calls resolve void; new
-    /// `.collection()` calls reject (the tx connection is gone).
-    pub(crate) settled: Cell<bool>,
-    /// app_id inherited from the parent `Db` wrapper at mint time. The
-    /// canonical source for `tx.collection(name)`-minted Collections so
-    /// they bind to the same app as the Db that began the transaction
-    /// (rather than re-reading the runtime slot, which can drift if a
-    /// nested execution context replaces the SharedState).
-    pub(crate) app_id: String,
-    /// Cache of `(collection_name -> Collection JS wrapper)`. Same shape
-    /// as `Db::collection_cache` so identity holds across calls:
-    /// `tx.collection("users") === tx.collection("users")`.
-    pub(crate) collection_cache: RefCell<std::collections::HashMap<String, v8::Global<v8::Object>>>,
-}
-
-impl std::fmt::Debug for Transaction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Transaction")
-            .field("token", &self.token.get())
-            .field("settled", &self.settled.get())
-            .field("cache_len", &self.collection_cache.borrow().len())
-            .finish()
-    }
-}
-
-impl Drop for Transaction {
-    /// GC-time auto-rollback.
-    ///
-    /// Fires from the Weak finalizer that [`mint_transaction`] registers
-    /// on every instance: when V8 collects the wrapper, the finalizer
-    /// drops the Box, which runs this.
-    ///
-    /// If our token still matches the current `tx_token`, this wrapper is
-    /// the live owner of `IsolateDbContext::tx_conn` — take the Client
-    /// out and drop it.
-    /// Dropping the Client closes the per-tx connection (the spawned
-    /// `Connection` run-loop observes the closed sender and sends
-    /// Terminate), and Postgres rolls the open transaction back
-    /// server-side.
-    ///
-    /// If our token doesn't match — either the user committed via
-    /// `.commit()` / `commitTransaction()`, rolled back, or the
-    /// auto-tx wrapper repurposed `tx_conn` — we leave
-    /// `IsolateDbContext::tx_conn` alone.
-    fn drop(&mut self) {
-        let token = self.token.get();
-        if token == 0 || self.settled.get() {
-            return;
-        }
-        let current = crate::context::with(|c| c.tx_token());
-        if current != token {
-            return;
-        }
-        // We are the live owner. Take and drop the Client; Postgres
-        // auto-rollbacks at connection close. Also clear `tx_token` so
-        // run_sql / a future begin sees a clean slate.
-        let client: Option<Client> = crate::context::with_mut(|c| {
-            let client = c.take_tx_client();
-            c.set_tx_token(0);
-            client
-        });
-        drop(client);
-        // GC-driven implicit rollback — drop any queued broker events
-        // so subscribers never observe the now-aborted writes.
-        crate::exec::clear_pending_emits();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Transaction IDL surface
-// ---------------------------------------------------------------------------
-
-#[v8_class]
-#[allow(dead_code)]
-impl Transaction {
-    /// `new Transaction()` from JS rejects — real instances come from
-    /// [`mint_transaction`] via `env.db.beginTransaction(...)`, which
-    /// stamps the ownership token onto the wrapper only after a
-    /// successful BEGIN.
-    #[v8_constructor]
-    fn new() -> Result<Transaction, OpError> {
-        Err(OpError::type_error("Illegal constructor"))
-    }
-
-    /// `tx.collection(name)` — returns a [`super::collection::Collection`]
-    /// instance whose CRUD methods forward through this Transaction
-    /// wrapper. Cached by `name`; identity holds across calls.
-    ///
-    /// Because each CRUD callback consults [`crate::context::IsolateDbContext::tx_conn`]
-    /// via `run_sql`, any operation through this collection automatically
-    /// participates in the open transaction.
-    #[v8_method]
-    fn collection<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        name: String,
-    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        if name.is_empty() {
-            return Err(OpError::type_error(
-                "tx.collection: name must be a non-empty string",
-            ));
-        }
-        if self.settled.get() {
-            return Err(crate::error::DbError::validation(
-                "tx_settled",
-                "tx.collection: transaction already committed or rolled back",
-            )
-            .to_op_error());
-        }
-        if let Some(existing) = self.collection_cache.borrow().get(&name) {
-            return Ok(v8::Local::new(scope, existing));
-        }
-        let obj = mint_collection(scope, name.clone(), self.app_id.clone())?;
-        let global = v8::Global::new(scope, obj);
-        self.collection_cache.borrow_mut().insert(name, global);
-        Ok(obj)
-    }
-
-    /// `tx.commit(): Promise<void>` — run COMMIT against the
-    /// transaction connection, clear [`crate::context::IsolateDbContext::tx_conn`],
-    /// and mark this wrapper settled. Idempotent: a second `commit()` /
-    /// `rollback()` resolves void instead of rejecting, and the GC
-    /// finalizer no-ops once a settle path has run.
-    #[v8_async_method]
-    async fn commit(&self) -> Result<(), OpError> {
-        end(self, "COMMIT").await
-    }
-
-    /// `tx.rollback(): Promise<void>` — symmetric to [`Self::commit`]
-    /// but issues ROLLBACK instead. Idempotent.
-    #[v8_async_method]
-    async fn rollback(&self) -> Result<(), OpError> {
-        end(self, "ROLLBACK").await
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Shared commit/rollback implementation
-// ---------------------------------------------------------------------------
-
-/// Run `cmd` (`"COMMIT"` or `"ROLLBACK"`) against the transaction's
-/// connection, then clear [`crate::context::IsolateDbContext::tx_conn`] /
-/// [`crate::context::IsolateDbContext::tx_token`] and mark the wrapper settled.
+/// Builds a fresh `v8::Object` and sets one
+/// [`Collection`](super::collection::Collection) property per collection
+/// the per-isolate schema cache knows about for `app_id` (the same set
+/// `register_model_dispatch` populates). Each minted `Collection` is an
+/// ordinary v8_class instance — identical to what `db.collection(name)`
+/// returns — so its CRUD methods route through the active transaction
+/// connection via the `tx_conn` slot the orchestrator set before calling
+/// the creator callback.
 ///
-/// Idempotent: if our `token` is zero, the wrapper is already settled,
-/// or `tx_token` has been claimed by another path (Drop finalizer,
-/// concurrent commit), `end` returns `Ok(())` without re-running the
-/// SQL. Postgres errors during the live commit path are surfaced
-/// verbatim.
-async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
-    let token = this.token.get();
-    if token == 0 || this.settled.get() {
-        return Ok(());
-    }
-    let current = crate::context::with(|c| c.tx_token());
-    if current != token {
-        this.settled.set(true);
-        return Ok(());
-    }
-
-    // Take the Client out. We hold it through the cmd execution and
-    // drop it at the end of this scope; that lets the spawned
-    // Connection task observe the closed sender and tear the conn
-    // down cleanly.
-    let client_opt = crate::context::with_mut(|c| c.take_tx_client());
-    let Some(client) = client_opt else {
-        // tx_conn already cleared by another path — treat as already
-        // settled rather than a fresh failure.
-        this.settled.set(true);
-        crate::context::with_mut(|c| c.set_tx_token(0));
-        return Ok(());
-    };
-
-    // Clear ownership BEFORE awaiting so a concurrent finalizer (the
-    // wrapper getting GC'd while the await is in flight) observes
-    // "settled" and no-ops instead of running ROLLBACK on a connection
-    // we already have in hand.
-    crate::context::with_mut(|c| c.set_tx_token(0));
-    this.settled.set(true);
-
-    let result = client
-        .execute(cmd, &[])
-        .await
-        .map_err(|e| crate::error::DbError::from_pg(&e).to_op_error());
-    // Client dropped here either way.
-    drop(client);
-
-    // Settle the deferred broker queue (Gap B). On a successful COMMIT
-    // fire every event we'd have published mid-tx; on ROLLBACK or
-    // COMMIT failure drop the queue so subscribers never see writes
-    // Postgres just undid.
-    if cmd == "COMMIT" && result.is_ok() {
-        crate::exec::drain_pending_emits_on_commit();
-    } else {
-        crate::exec::clear_pending_emits();
-    }
-
-    result.map(|_| ())
-}
-
-// ---------------------------------------------------------------------------
-// mint_transaction — build the wrapper at begin-time
-// ---------------------------------------------------------------------------
-
-/// Mint a Transaction v8_class instance and stamp `token` into the
-/// wrapper state. The matching [`crate::context::IsolateDbContext::tx_token`]
-/// write happens in
-/// [`crate::orchestrator::transaction::begin_transaction_dispatch`] only after the async BEGIN
-/// succeeds — so a failed BEGIN leaves the wrapper with a token that
-/// never matches, and its `Drop` is a no-op when V8 eventually
-/// collects it.
+/// No `commit` / `rollback` / `collection` / `transaction` / `live`
+/// method is set on the view: the only members are collections. Manual
+/// abort = throw inside the callback; commit is implicit on resolve.
 ///
-/// Caller invariant: [`crate::context::IsolateDbContext::tx_conn`] has just
-/// been set by a successful BEGIN and no other Transaction wrapper is alive
-/// for the same `tx_conn` —
-/// enforced by the "nested transactions not supported" check in
-/// [`crate::orchestrator::transaction::begin_transaction_dispatch`]'s async path.
-pub(crate) fn mint_transaction<'s>(
+/// When the schema cache is empty for `app_id` (no `registerModel` has
+/// run on this isolate yet — e.g. a raw-JS deploy that opens a tx before
+/// declaring a schema), the view is an empty object. That is correct: a
+/// transaction with no declared collections has nothing to address
+/// through `tx.<name>`; the creator can still drive raw work, and the
+/// commit/rollback envelope still applies.
+pub(crate) fn mint_tx_view<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    token: u64,
-    app_id: String,
+    app_id: &str,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-    let class_tmpl = Transaction::install(scope);
-    let inst_tmpl = class_tmpl.instance_template(scope);
-    let obj = inst_tmpl
-        .new_instance(scope)
-        .ok_or_else(|| OpError::type_error("Transaction instance allocation failed"))?;
+    let view = v8::Object::new(scope);
 
-    // Set the prototype so .commit / .rollback / .collection resolve.
-    let class_fn = class_tmpl
-        .get_function(scope)
-        .ok_or_else(|| OpError::type_error("Transaction template missing function"))?;
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn
-        .get(scope, proto_key.into())
-        .ok_or_else(|| OpError::type_error("Transaction prototype missing"))?;
-    obj.set_prototype(scope, proto_v);
+    // One tx-bound Collection per cached-schema collection. The list
+    // mirrors `Db::collection(name)`'s minting; the binding to the open
+    // tx is implicit (the `tx_conn` slot is set), so no per-object tx id
+    // is threaded.
+    let collections: Vec<String> = crate::context::with(|c| {
+        c.cached_schemas_for_app(app_id)
+            .into_iter()
+            .map(|(name, _schema)| name)
+            .collect()
+    });
 
-    let state = Transaction {
-        token: Cell::new(token),
-        settled: Cell::new(false),
-        app_id,
-        collection_cache: RefCell::new(std::collections::HashMap::new()),
-    };
-    let boxed: Box<Transaction> = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    obj.set_internal_field(0, ext.into());
+    for name in collections {
+        let col = mint_collection(scope, name.clone(), app_id.to_string())?;
+        let key = v8::String::new(scope, &name)
+            .ok_or_else(|| OpError::type_error("tx-view: collection name allocation failed"))?;
+        view.set(scope, key.into(), col.into());
+    }
 
-    // SAFETY: `raw_addr` was Box::into_raw'd from `Box<Transaction>`;
-    // the finalizer closure casts back to the same type and drops the
-    // Box exactly once when V8 reclaims the wrapper. The `Drop` impl
-    // above checks the current `IsolateDbContext::tx_token` and
-    // auto-rollbacks if we still own the open transaction.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Transaction));
-        }),
-    );
-    std::mem::forget(weak);
+    Ok(view)
+}
 
-    Ok(obj)
+#[cfg(test)]
+mod tests {
+    //! Shape guards for the `Db.transaction(fn)` callback argument.
+    //!
+    //! The proposal (Q-P9-C, §4.4) fixes the tx-view as **collections
+    //! only** — no `commit` / `rollback` / `collection` / `transaction` /
+    //! `live` method. These tests mint a view directly (no DB needed —
+    //! the per-isolate schema cache is empty in a fresh isolate, so the
+    //! view is a bare object) and assert no tx-lifecycle method leaked
+    //! onto it. If a future change re-introduces a `commit`/`rollback`
+    //! method on the view, these fail.
+    #![allow(unsafe_code)]
+
+    use zeroship_runtime::init_v8;
+
+    fn assert_absent(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) {
+        let key = v8::String::new(scope, name).unwrap();
+        let v = obj.get(scope, key.into()).unwrap();
+        assert!(
+            v.is_undefined(),
+            "tx-view must NOT expose `{name}` — it is collections-only \
+             (no JS-reachable transaction primitive); got a defined value"
+        );
+    }
+
+    #[test]
+    fn tx_view_has_no_commit_or_rollback_methods() {
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let view = super::mint_tx_view(scope, "test_app").expect("mint_tx_view");
+
+        // None of the legacy `Transaction` methods, nor `transaction` /
+        // `live`, may appear on the view.
+        for forbidden in ["commit", "rollback", "collection", "transaction", "live", "beginTransaction"] {
+            assert_absent(scope, view, forbidden);
+        }
+
+        // It is a plain object (its [[Prototype]] is Object.prototype,
+        // not some Transaction.prototype carrying methods). Confirm the
+        // prototype chain has no `commit`.
+        let key = v8::String::new(scope, "commit").unwrap();
+        // `get` walks the prototype chain; a plain object's chain ends at
+        // Object.prototype which has no `commit`.
+        let v = view.get(scope, key.into()).unwrap();
+        assert!(v.is_undefined(), "commit must be absent up the whole prototype chain");
+    }
+
+    #[test]
+    fn tx_view_is_empty_when_no_schema_registered() {
+        // A fresh isolate has registered no collections, so the view has
+        // no own enumerable properties. (Real requests register a schema
+        // first; the empty case is the raw-JS-deploy path.)
+        init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let view = super::mint_tx_view(scope, "test_app").expect("mint_tx_view");
+        let names = view
+            .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
+            .unwrap();
+        assert_eq!(
+            names.length(),
+            0,
+            "tx-view for an isolate with no registered schema must be empty"
+        );
+    }
 }

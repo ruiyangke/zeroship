@@ -61,7 +61,7 @@ pub fn auto_begin_transaction(
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Route via the typed `OpResult::JsValue` channel so the COMMIT-
         // time error path preserves `DbError.code` / `.hint` (mirrors
-        // `orchestrator::transaction::begin_transaction_dispatch`). The
+        // `orchestrator::transaction::transaction_dispatch`). The
         // legacy `OpResult::Failed { error: String }` rail flattened the
         // typed `DbError` and stripped the SDK's retry-by-code signal —
         // the exact site retry-by-code matters most.
@@ -113,7 +113,7 @@ pub fn auto_end_transaction(
 
 /// Convert an `exec_auto_begin` result into the `ResolveValue` that
 /// settles the promise handed to JS. Mirrors the
-/// `orchestrator::transaction::begin_transaction_dispatch` pattern —
+/// `orchestrator::transaction::transaction_dispatch` pattern —
 /// success carries the u32 token, failure carries the *typed* `OpError`
 /// (code + hint preserved) instead of a flat string. Extracted as a
 /// standalone fn so tests can exercise the conversion without a V8
@@ -192,8 +192,8 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
         return Ok(0);
     }
 
-    // Open a dedicated connection (same pattern as user-driven
-    // `begin_transaction`).
+    // Open a dedicated connection (same pattern as the native
+    // `transaction(fn)` orchestrator's top-level BEGIN).
     //
     // **Post-P0 mop-up (I-R12-1)**: routed through
     // [`SqlExecutor::acquire_dedicated_client`] so the

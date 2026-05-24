@@ -37,10 +37,8 @@ function makeBrandedNative() {
       calls.push({ this: this, name });
       return Promise.resolve();
     },
-    beginTransaction: async () => ({
-      commit: async () => undefined,
-      rollback: async () => undefined,
-    }),
+    // P9 PR 3: native `transaction(callback)` orchestrator stub.
+    transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(_name: string) {
       return {
         async findOne() { return null; },
