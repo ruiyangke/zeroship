@@ -722,11 +722,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: zero cross-crate consumers; same anti-pattern R8-API1 closed.
 - **Action**: pub→pub(crate). Mechanical.
 
-### [R10-API3] persist.rs has 5 module-level `pub fn`s with only in-crate callers (MINOR, api-surface-r10)
-- **Source**: 2026-05-25 api-surface-r10
+### [R10-API3] (CLOSED at `f50c95da`, partial) persist.rs had 5 module-level `pub fn`s with only in-crate callers (MINOR, api-surface-r10)
+- **Source**: 2026-05-25 api-surface-r10 (4-round api-surface carry through r11/r12)
 - **File**: `crates/sandbox/src/persist.rs` — `seal`, `unseal_one`, `unseal_dir`, `seal_filename_for`, `seal_filename_for_str`
-- **Symptom**: bypasses the `Persistence` handle's discipline. Pub on a stable boundary not justified externally.
-- **Action**: pub→pub(crate). Mechanical.
+- **Symptom**: bypassed the `Persistence` handle's discipline. Pub on a stable boundary not justified externally.
+- **Fix (f50c95da)**: pub→pub(crate) on the 3 with zero external callers (`seal`, `unseal_dir`, `seal_filename_for_str`). Verified via `grep -rn 'persist::{seal\b,unseal_dir,seal_filename_for_str}'` across `crates/sandbox/src/`, `crates/sandbox/tests/`, `crates/sandbox-agent/src/` — zero matches outside `persist.rs` itself.
+- **Out of scope**: `unseal_one` + `seal_filename_for` stay `pub` — externally consumed by `crates/sandbox/tests/sandbox_preview_share_e2e.rs` (`unseal_one` at :1034,1065,1079,1114; `seal_filename_for` at :1058,1112). Documented in the R11 partial-invalidation note below.
+- **Verification post-fix**: `cargo check -p zeroship-sandbox` clean (1 dead-code warning on `seal_filename_for_str` — only referenced under `#[cfg(test)]`, expected since pub(crate) lets the compiler see the prod-build callgraph). `cargo test -p zeroship-sandbox --lib` → 327 passed / 0 failed / 1 ignored (unchanged from HEAD). E2e test still compiles.
 
 ### [R10-API4] `readyz` returns `{"status":"draining"}` rather than §10.0 envelope (MINOR, api-surface-r10)
 - **Source**: 2026-05-25 api-surface-r10
@@ -812,11 +814,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: zero callers anywhere. Same flavor as R10-API1's `_test_build_auth_from_sealed`.
 - **Action**: delete or move to `#[cfg(test)]`. Cluster with R10-API1 in a single sweep.
 
-### [R10-API3 PARTIALLY INVALIDATED — only 3 of 5 `persist::*` pub fns are safely demotable]
+### [R10-API3 PARTIALLY INVALIDATED — only 3 of 5 `persist::*` pub fns are safely demotable] (CLOSED at `f50c95da`)
 - **Source**: 2026-05-25 api-surface-r11 audit re-verified r10's claim
 - **Files**: `crates/sandbox/src/persist.rs`
 - **Resolution**: `unseal_one` + `seal_filename_for` ARE externally consumed by `tests/sandbox_preview_share_e2e.rs:151,1064,1114` — must stay `pub`. Only `seal`, `unseal_dir`, `seal_filename_for_str` are safely demotable.
 - **Action**: when picking up R10-API3, only demote those 3.
+- **Fix (f50c95da)**: 3 fns demoted pub→pub(crate); 2 stayed pub per the r11 carve-out. See the R10-API3 closure entry above for full verification record.
 
 ### [R10-S1] (IMPORTANT, security-r10) R9-S4 KEK uid check has symlink-attack residual
 - **Source**: 2026-05-25 security-r10
