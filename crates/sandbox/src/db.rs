@@ -1599,6 +1599,27 @@ fn wake_job_row_from_pg(r: compio_postgres::Row) -> WakeJobRow {
     }
 }
 
+/// Result of [`Database::insert_wake_job`].
+///
+/// GATE-C2 (R17-C2): the migration-0011 UNIQUE INDEX
+/// `wake_jobs_sandbox_pending_uniq` enforces at-most-one non-terminal
+/// row per sandbox. The INSERT uses `ON CONFLICT … DO NOTHING`, so a
+/// concurrent caller that races and loses gets the existing winner's
+/// row back via a follow-up SELECT — surfaced here as
+/// [`InsertWakeJobOutcome::Replay`]. The handler MUST NOT spawn a
+/// duplicate `WakeMachine` in the `Replay` branch; doing so re-introduces
+/// the vm_index race the unique index is built to close.
+#[derive(Debug, Clone)]
+pub enum InsertWakeJobOutcome {
+    /// This caller's row was the one that landed; spawn the state
+    /// machine + return the freshly-minted `wake_id` to the client.
+    Inserted,
+    /// A concurrent POST won the unique-index race. The carried row
+    /// is the winner's; the handler returns its `wake_id` with
+    /// `replay: true` and does NOT spawn a new state machine.
+    Replay(WakeJobRow),
+}
+
 impl Database {
     /// Build a fresh `EventRow` with a freshly-minted typed-id for
     /// `event_id`. Caller fills `kind` + `data_json`.
@@ -2966,16 +2987,44 @@ impl Database {
     ///
     /// `started_at`, `updated_at`, and `lessee_updated_at` default to
     /// `now()` server-side; callers cannot override them on insert.
-    pub async fn insert_wake_job(&self, row: &WakeJobRow) -> Result<()> {
+    ///
+    /// **GATE-C2 (R17-C2)**: the migration-0011 partial UNIQUE INDEX
+    /// `wake_jobs_sandbox_pending_uniq` (over `sandbox_id` filtered to
+    /// non-terminal states) enforces at-most-one non-terminal wake row
+    /// per sandbox at the database level. The INSERT therefore uses
+    /// `ON CONFLICT (sandbox_id) WHERE state NOT IN ('ok','failed')
+    /// DO NOTHING` so two concurrent POSTs race atomically. The caller
+    /// inspects [`InsertWakeJobOutcome`]:
+    ///
+    /// - [`InsertWakeJobOutcome::Inserted`]: this caller's row landed;
+    ///   spawn the state machine.
+    /// - [`InsertWakeJobOutcome::Replay(winner)`]: a concurrent POST
+    ///   inserted first. Return the winner's `wake_id` with
+    ///   `replay: true` and DO NOT spawn a state machine — doing so
+    ///   would let the loser's `rollback_with` tear down the winner's
+    ///   vm_index (R10-C1-shape race).
+    ///
+    /// The follow-up SELECT on the conflict path uses
+    /// `find_pending_wake_for_sandbox`, which targets the same
+    /// non-terminal partition as the unique index. A race where the
+    /// winner transitions to terminal in the microseconds between the
+    /// conflict and the read is treated as a hard error — it shouldn't
+    /// happen in practice (state-machine transitions take ≫ 1ms) and
+    /// the alternative (silently re-insert) re-opens the original
+    /// TOCTOU.
+    pub async fn insert_wake_job(&self, row: &WakeJobRow) -> Result<InsertWakeJobOutcome> {
         let pool = self.open_pool().await?;
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        client
+        let rows_affected = client
             .execute(
                 "INSERT INTO sandbox.wake_jobs \
                     (wake_id, sandbox_id, state, error_code, error_message, \
                      ready_at, agent_url, lessee) \
                  VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, $5::TEXT, \
-                         NULL, $6::TEXT, $7::TEXT)",
+                         NULL, $6::TEXT, $7::TEXT) \
+                 ON CONFLICT (sandbox_id) \
+                     WHERE state NOT IN ('ok', 'failed') \
+                     DO NOTHING",
                 &[
                     &row.wake_id,
                     &row.sandbox_id,
@@ -2988,7 +3037,25 @@ impl Database {
             )
             .await
             .map_err(DatabaseError::Pg)?;
-        Ok(())
+        if rows_affected == 1 {
+            return Ok(InsertWakeJobOutcome::Inserted);
+        }
+        // Race lost: a concurrent POST won the unique-index conflict.
+        // Read the winner's row so the handler can return its wake_id
+        // with `replay: true`. The lookup uses the same non-terminal
+        // partition as the UNIQUE INDEX so we observe the row the
+        // conflict referenced.
+        let winner = self
+            .find_pending_wake_for_sandbox(&row.sandbox_id)
+            .await?
+            .ok_or_else(|| {
+                DatabaseError::Validation(
+                    "insert_wake_job: ON CONFLICT but no pending row found — \
+                     possible terminal transition mid-race"
+                        .to_string(),
+                )
+            })?;
+        Ok(InsertWakeJobOutcome::Replay(winner))
     }
 
     /// Lookup a wake job by id. Returns `None` if the row has been
