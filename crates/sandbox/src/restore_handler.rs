@@ -283,16 +283,21 @@ impl VmIndexRetryPolicy {
     /// deadline that no longer exists).
     ///
     /// Examples by mode (post-C-7-LT-1):
+    /// (wall-time = (attempts − 1) × interval; first attempt has no
+    /// preceding sleep)
     /// - fence=30, Sync   → MIN(2*30-10, 60-10) = MIN(50, 50) = 50 s
-    ///   → 26 attempts × 2 s = 50 s budget (unchanged).
+    ///   → 26 attempts (25 sleeps × 2 s) = 50 s budget (unchanged).
     /// - fence=30, Async  → 2*30 + 10 = 70 s
-    ///   → 36 attempts × 2 s = 70 s budget (envelopes smoke-r12's
-    ///     60.166 s teardown with ~10 s slack).
+    ///   → 36 attempts (35 sleeps × 2 s) = 70 s budget (envelopes
+    ///     smoke-r12's 60.166 s teardown with ~10 s slack).
     /// - fence=20, Sync   → MIN(2*20-10, 50) = MIN(30, 50) = 30 s
-    ///   → 16 attempts × 2 s = 30 s.
-    /// - fence=20, Async  → 2*20 + 10 = 50 s → 26 attempts × 2 s.
-    /// - fence=120, Sync  → MIN(230, 50) = 50 s → 26 attempts × 2 s.
-    /// - fence=120, Async → 2*120 + 10 = 250 s → 126 attempts × 2 s.
+    ///   → 16 attempts (15 sleeps × 2 s) = 30 s.
+    /// - fence=20, Async  → 2*20 + 10 = 50 s
+    ///   → 26 attempts (25 sleeps × 2 s) = 50 s.
+    /// - fence=120, Sync  → MIN(230, 50) = 50 s
+    ///   → 26 attempts (25 sleeps × 2 s) = 50 s.
+    /// - fence=120, Async → 2*120 + 10 = 250 s
+    ///   → 126 attempts (125 sleeps × 2 s) = 250 s.
     pub fn from_host_fence_timeout(
         host_fence_timeout_secs: u64,
         wake_mode: crate::config::WakeResponseMode,
