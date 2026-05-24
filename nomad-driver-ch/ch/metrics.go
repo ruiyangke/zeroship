@@ -21,6 +21,16 @@
 //     next alloc's CH `--restore` will hit `DiskLockError: AlreadyLocked`
 //     until init/runner finally reaps. Operators rate-graph this; a
 //     healthy fleet trends to zero. See T-8b-stress-r4 r4-A.
+//   - `nomad_driver_ch_destroy_task_lock_held_total` — bumped when
+//     DestroyTask's bounded OFD-lock-probe exhausts without successfully
+//     acquiring the F_OFD_SETLK write lock on a disk path (i.e. the
+//     kernel's `__fput` workqueue still holds the file open AFTER
+//     `wait4()` reaped the CH process). r4-A's reap predicate is
+//     necessary but not sufficient — the OFD write lock on `rootfs.img`
+//     persists (attributed to PID=-1) until `__fput` completes, and the
+//     next alloc's CH `--restore` then hits `DiskLockError →
+//     AlreadyLocked`. Operators rate-graph this; a healthy fleet trends
+//     to zero. See T-8b-stress-r5 r5-A.
 
 package ch
 
@@ -78,4 +88,39 @@ func DestroyTaskUnreapedTotal() int64 {
 // its own baseline without depending on sibling-test ordering.
 func ResetDestroyTaskUnreapedForTest() {
 	destroyTaskUnreapedTotal.Store(0)
+}
+
+// destroyTaskLockHeldTotal is the process-global counter behind
+// `nomad_driver_ch_destroy_task_lock_held_total`. Bumped when DestroyTask's
+// bounded OFD-lock-acquire probe exhausts without successfully acquiring
+// the F_OFD_SETLK write lock on a disk path — i.e. the kernel `__fput`
+// workqueue still holds the file open after `wait4()` reaped the CH
+// process. See T-8b-stress-r5 r5-A: r4-A's reap predicate (Go's
+// `cmd.Wait()` returning) is necessary but not sufficient; until the
+// deferred `__fput` runs, the OFD write lock on `rootfs.img` persists
+// (attributed to PID=-1) and the next alloc's CH `--restore` hits
+// `DiskLockError → AlreadyLocked`.
+//
+// Operators rate-graph this; a healthy fleet trends to zero. A spike
+// here means the kernel workqueue is backed up — orthogonal to the
+// driver, but the operator-facing diagnostic is the metric + WARN line.
+var destroyTaskLockHeldTotal atomic.Int64
+
+// incDestroyTaskLockHeld bumps `nomad_driver_ch_destroy_task_lock_held_total`
+// by one. Goroutine-safe; the atomic Int64 carries its own ordering.
+func incDestroyTaskLockHeld() {
+	destroyTaskLockHeldTotal.Add(1)
+}
+
+// DestroyTaskLockHeldTotal returns the current counter value. Exported for
+// tests (asserts the OFD-lock-probe budget-exhaustion branch fires); a
+// future `/metrics` exporter would also use this read path.
+func DestroyTaskLockHeldTotal() int64 {
+	return destroyTaskLockHeldTotal.Load()
+}
+
+// ResetDestroyTaskLockHeldForTest zeroes the counter so a test can pin
+// its own baseline without depending on sibling-test ordering.
+func ResetDestroyTaskLockHeldForTest() {
+	destroyTaskLockHeldTotal.Store(0)
 }
