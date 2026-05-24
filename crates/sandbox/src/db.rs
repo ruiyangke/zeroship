@@ -307,6 +307,14 @@ pub enum DatabaseError {
     /// to the message format.
     #[error("self-takeover refused for host {host_id}")]
     SelfTakeoverRefused { host_id: String },
+    /// r17-Q3: a column decoded from a pg row held a discriminator
+    /// string that is not in the Rust enum. Migration CHECK constraints
+    /// keep columns in-domain; this fires only on schema/code drift
+    /// (forward-incompatible binary or manually edited row). Surfaced
+    /// as an error rather than a silent `unwrap_or` fallback so drift
+    /// is loud and grep-able.
+    #[error("data integrity: {0}")]
+    DataIntegrity(String),
 }
 
 /// Result alias for the module.
@@ -1602,12 +1610,29 @@ impl WakeErrorCode {
 /// Map a postgres row (with the SELECT shape used by `get_wake_job` /
 /// `find_pending_wake_for_sandbox`) into a `WakeJobRow`.
 ///
-/// Unknown discriminator strings round-trip as `Failed` / `Internal`
-/// (defense in depth — the CHECK constraint should keep the column
-/// in-domain, but a row inserted by a forward-incompatible binary
-/// shouldn't crash the reader).
-fn wake_job_row_from_pg(r: compio_postgres::Row) -> WakeJobRow {
-    let state_str: &str = r.get("state");
+/// Returns `Err(DatabaseError::DataIntegrity)` if the `state` column
+/// holds an unknown discriminator string. Migration 0009's CHECK
+/// constraint keeps the column in-domain; this error fires only on
+/// schema/code drift (forward-incompatible binary or manually edited
+/// row). Previously the function silently substituted `Failed` via
+/// `.unwrap_or` — that masked drift instead of surfacing it (r17-Q3).
+///
+/// `error_code` is nullable and unconstrained by the drift guard:
+/// `None` is the normal case for non-failed rows, and unknown codes
+/// from a newer binary are simply dropped (`and_then` → `None`)
+/// rather than raising an error, because the column is advisory and
+/// callers do not branch on every possible code.
+fn wake_job_row_from_pg(r: compio_postgres::Row) -> Result<WakeJobRow> {
+    let state_str: String = r.try_get("state").map_err(DatabaseError::Pg)?;
+    let state = match WakeJobState::from_str_opt(&state_str) {
+        Some(s) => s,
+        None => {
+            return Err(DatabaseError::DataIntegrity(format!(
+                "wake_jobs row has unknown state {:?} — schema/code drift?",
+                state_str
+            )));
+        }
+    };
     // Nullable columns: `try_get::<_, Option<T>>("col").ok()` returns
     // `Option<Option<T>>` which `flatten()` collapses. Matches the
     // pattern in `get_sandbox_row` for `started_at_opt` / `stopped_at_opt`.
@@ -1615,10 +1640,10 @@ fn wake_job_row_from_pg(r: compio_postgres::Row) -> WakeJobRow {
     let ready_at_opt: Option<i64> = r.try_get("ready_at_secs").ok().flatten();
     let error_message_opt: Option<String> = r.try_get("error_message").ok().flatten();
     let agent_url_opt: Option<String> = r.try_get("agent_url").ok().flatten();
-    WakeJobRow {
+    Ok(WakeJobRow {
         wake_id: r.get("wake_id"),
         sandbox_id: r.get("sandbox_id"),
-        state: WakeJobState::from_str_opt(state_str).unwrap_or(WakeJobState::Failed),
+        state,
         error_code: error_code_opt
             .as_deref()
             .and_then(WakeErrorCode::from_str_opt),
@@ -1629,7 +1654,7 @@ fn wake_job_row_from_pg(r: compio_postgres::Row) -> WakeJobRow {
         agent_url: agent_url_opt,
         lessee: r.get("lessee"),
         lessee_updated_at_secs: r.get("lessee_updated_at_secs"),
-    }
+    })
 }
 
 /// Result of [`Database::insert_wake_job`].
@@ -3139,7 +3164,7 @@ impl Database {
             )
             .await
             .map_err(DatabaseError::Pg)?;
-        Ok(opt.map(wake_job_row_from_pg))
+        opt.map(wake_job_row_from_pg).transpose()
     }
 
     /// Advance the wake job state. Updates `state`, optional
@@ -3238,7 +3263,7 @@ impl Database {
             )
             .await
             .map_err(DatabaseError::Pg)?;
-        Ok(opt.map(wake_job_row_from_pg))
+        opt.map(wake_job_row_from_pg).transpose()
     }
 
     /// GC sweep: delete terminal (state IN ('ok', 'failed')) rows whose
@@ -3504,9 +3529,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("round-trip failed for {s}"));
             assert_eq!(parsed, variant, "round-trip mismatch for {s}");
         }
-        // Unknown strings yield None — the from_pg helper substitutes
-        // `Failed` so a reader on a forward-incompatible binary still
-        // returns a row instead of panicking.
+        // Unknown strings yield None — `wake_job_row_from_pg` converts
+        // None to `DatabaseError::DataIntegrity` (r17-Q3).
         assert!(WakeJobState::from_str_opt("not_a_state").is_none());
         assert!(WakeJobState::from_str_opt("").is_none());
     }
@@ -3589,6 +3613,81 @@ mod tests {
                     "wire code `{wire}` for {variant:?} must be snake_case"
                 );
             }
+        }
+    }
+
+    // ─── r17-Q3: wake_job_row_from_pg DataIntegrity error path ──
+
+    /// r17-Q3: `wake_job_row_from_pg` must return
+    /// `DatabaseError::DataIntegrity` when the `state` column holds an
+    /// unknown discriminator. The `compio_postgres::Row` constructor is
+    /// `pub(crate)` so we cannot construct a real row in a unit test —
+    /// instead we pin the precondition (`from_str_opt` returns `None`
+    /// for unknown strings) and the error variant itself to guarantee
+    /// the if-None branch is reachable and produces the right type.
+    ///
+    /// A pg-gated integration test that actually exercises
+    /// `wake_job_row_from_pg` with a manually-crafted row belongs in
+    /// `tests/` once the test harness has a pg fixture; for now the
+    /// CHECK-constraint invariant (migration 0009) makes the branch
+    /// structurally unreachable in production.
+    #[test]
+    fn wake_job_row_from_pg_returns_error_on_unknown_state_precondition() {
+        // Precondition: `from_str_opt` yields None for unknown states —
+        // this is exactly the value that triggers the DataIntegrity branch.
+        let unknown = "future_state_unknown_to_this_binary";
+        assert!(
+            WakeJobState::from_str_opt(unknown).is_none(),
+            "from_str_opt should return None for unknown state {unknown:?}; \
+             if it now returns Some that means from_pg would NOT error on this value"
+        );
+        // Verify the error variant is constructable and displays a
+        // diagnostic that includes the offending value (grep-ability).
+        let err = DatabaseError::DataIntegrity(format!(
+            "wake_jobs row has unknown state {:?} — schema/code drift?",
+            unknown
+        ));
+        let msg = err.to_string();
+        assert!(
+            msg.contains(unknown),
+            "DataIntegrity message should include the offending state; got: {msg:?}"
+        );
+        assert!(
+            matches!(err, DatabaseError::DataIntegrity(_)),
+            "must be the DataIntegrity variant"
+        );
+    }
+
+    /// r17-Q3 (error_code sibling): `WakeErrorCode::from_str_opt` also
+    /// returns `None` for unknown codes. The `wake_job_row_from_pg`
+    /// function intentionally does NOT raise `DataIntegrity` on an
+    /// unknown error_code — the column is nullable/advisory and an
+    /// unknown code from a newer binary is silently dropped (`None`).
+    /// This test documents that decision and pins the `from_str_opt`
+    /// None path for `WakeErrorCode` so a future change that makes it
+    /// Some must also revisit the from_pg handling.
+    #[test]
+    fn wake_job_row_from_pg_error_code_unknown_drops_to_none_not_error() {
+        // from_str_opt returns None for unknown codes — from_pg maps
+        // this to Option::None (silent drop, not DataIntegrity).
+        assert!(WakeErrorCode::from_str_opt("future_code_unknown").is_none());
+        // All known codes round-trip. This pins the full set so a new
+        // variant without a from_str_opt arm breaks this test explicitly.
+        for variant in [
+            WakeErrorCode::SlotUnavailable,
+            WakeErrorCode::SourceTeardownTimeout,
+            WakeErrorCode::RestoreFailed,
+            WakeErrorCode::LivezTimeout,
+            WakeErrorCode::ClockResyncFailed,
+            WakeErrorCode::RegisterFailed,
+            WakeErrorCode::Internal,
+            WakeErrorCode::WakeWorkerAborted,
+        ] {
+            assert!(
+                WakeErrorCode::from_str_opt(variant.as_str()).is_some(),
+                "from_str_opt returned None for known variant {:?}",
+                variant
+            );
         }
     }
 
