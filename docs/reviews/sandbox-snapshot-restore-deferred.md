@@ -1385,3 +1385,74 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R11-API1 expanded] CLOSED at `370fdbba` — 3 orphan #[doc(hidden)] pub fns deleted from sandbox/src/metrics.rs (path correction: were in sandbox not sandbox-agent)
 - [C-6] CLOSED at `91ce9be5` — detached teardown moved off ntex-worker compio runtime onto a dedicated OS thread + short-lived compio runtime (mirrors C-3 pattern). Root cause: runtime starvation by the detached teardown's 60s `/shutdown` ureq blocker (whose `spawn_blocking` wrap inside was insufficient — the outer future itself was on the worker runtime). +75 / −14 LOC. 332 pass unchanged.
 - [R14-Q3 + R14-P2] CLOSED at `9afd0986` — snap-l2-upload thread-name builder simplified from 4-pass char-walk + 2 String allocs to single byte-slice (`&s[s.len().saturating_sub(8)..]`, ASCII-safe per B24-FOLLOWUP). Doc comment now calls out the 15-char `pr_set_name` truncation explicitly (tail is grep-correlatable in logs but NOT visible in `ps`/`top -H`). +19 / −12 LOC. 332 pass unchanged.
+
+---
+
+## NEW r14 ROUND 2 FINDINGS (added by pilot cycle 2026-05-25 r13 — architecture r14, concurrency r14, security r14)
+
+### [R14-A1] (CRITICAL, architecture-r14) 9 `compio::runtime::spawn(...).detach()` sites; 2 problematic; needs `detach_isolated` helper
+- **Source**: 2026-05-25 architecture-r14
+- **Files**: `crates/sandbox/src/admin_handlers.rs:1311` (C-6 FIXED at 91ce9be5), `crates/sandbox/src/backend/nomad_ch.rs:2002` CreateGuard::drop (STILL UNFIXED, same pattern)
+- **Symptom**: C-3 + C-6 fixes converge on the same `std::thread::Builder::spawn + Runtime::new() + block_on` pattern. CreateGuard::drop on create failure has the same runtime-starvation shape but is admin-reachable (create-failure spam). Code-review fence not structural.
+- **Action**: extract `detach_isolated(name, fut)` helper. Migrate C-3 (snapshot_store_gcs.rs:1132) + C-6 (admin_handlers.rs:1340-1378) + CreateGuard::drop site to use it. ~30 LOC helper + 3 call-site updates.
+
+### [R14-A2] (IMPORTANT, architecture-r14) restore_handler.rs crossed 3000 LOC: 2662 → 3101 (+439)
+- **Source**: 2026-05-25 architecture-r14
+- **Symptom**: +178 from C-4 fix (b2892368) + 261 from C-6 phase tracing (8e7f0b53). Now 4 files >3000 LOC (was 3 at r13).
+- **Action**: extract `restore_phase` module (phase tracing) + types module. Drop file back below 2700 LOC.
+
+### [R14-A3] (IMPORTANT, architecture-r14) R13-A2 L2-detach pull-up MUST use new detach_isolated helper
+- **Source**: 2026-05-25 architecture-r14
+- **Action**: when extracting the helper (R14-A1), simultaneously pull C-3's L2 detach up to the handler layer (R13-A2's recommendation) using the new helper.
+
+### [R14-A4] (IMPORTANT, architecture-r14) Phase-tracing should be discipline, not C-6 one-off
+- **Source**: 2026-05-25 architecture-r14
+- **Symptom**: `restore_handler.rs` has 21 phase lines (8e7f0b53); `snapshot_handler.rs`, `admin_handlers.rs`, `nomad_ch::stop_inner` have ZERO. Architecture r14 predicts next cluster bug will wedge in stop_inner.
+- **Action**: extend phase tracing to: snapshot_handler.rs::snapshot_sandbox, admin_handlers.rs::handlers, nomad_ch::stop_inner. Same `phase=<name>` field pattern.
+
+### [R14-A5] (MINOR, architecture-r14) 6 un-wrapped std::fs::* sites on async restore/snapshot path
+- **Files**: `restore_handler.rs:568, 574, 638, 923, 954` + `snapshot_handler.rs:355`
+- **Symptom**: Same C-6 shape (sync I/O on shared runtime), smaller amplitude. Audit + wrap in spawn_blocking where appropriate.
+
+### [R14-A6] (MINOR, architecture-r14) VmIndexRetryPolicy::default magic 60×2s
+- **Source**: 2026-05-25 architecture-r14
+- **Action**: derive from `cfg.host_fence_timeout_secs` instead of hard-coded constants. Also closes R14-Q4 doc off-by-one.
+
+### [R14-C1] (CRITICAL, concurrency-r14) sweep.rs:563 idle-eviction is sibling-C-6 site (commit-message MISLABELED safe)
+- **Source**: 2026-05-25 concurrency-r14
+- **File**: `crates/sandbox/src/sweep.rs:563` (idle-eviction loop in ControllerIdleSnapshotter)
+- **Symptom**: 91ce9be5's commit message classified sweep.rs:563 as "safe (steady-state loop with top-of-loop sleep)" but the loop BODY does 90s tail awaits via `teardown_source_for_snapshot(...).await` × cap=2 concurrent INLINE. Latent until idle-eviction overlaps wake traffic on the same worker.
+- **Action**: same `detach_isolated` migration (R14-A1) applied here. Or restructure ControllerIdleSnapshotter to use spawn_blocking for the teardown awaits.
+
+### [R14-I2] (IMPORTANT, concurrency-r14) registry.rs:829 idle-GC is sibling-C-6 site
+- **Source**: 2026-05-25 concurrency-r14
+- **File**: `crates/sandbox/src/registry.rs:829`
+- **Symptom**: awaits `state.backend.stop(id).await` inline; same shape.
+
+### [R14-I1] (IMPORTANT, concurrency-r14) C-4 retry budget mismatch + observability gap
+- **Source**: 2026-05-25 concurrency-r14
+- **Symptom**: VmIndexRetryPolicy::default = 60×2s = 120s budget but client deadline is 60s; retry body has NO per-attempt INFO log. The diagnostic gap that made smoke-r6/r7 mysterious.
+- **Truer C-6 mechanism**: C-4 retry budget > client deadline. Wake canceled mid-retry before any success/exhausted log. The runtime-starvation framing (in C-6 commit message) is imprecise; OS-thread fix is defense-in-depth.
+- **Action**: (a) reduce C-4 retry budget to client deadline - 5s (e.g., 55s); (b) emit per-attempt log; (c) refresh C-6 commit-message diagnosis.
+
+### [R14-V1] (VERIFICATION, concurrency-r14) do_restore_inner await count: 8, not 7
+- **Source**: 2026-05-25 concurrency-r14
+- **Resolution**: r13's enumeration was off-by-one on the reserve_vm_index_with_retry await at :558. Inner retry adds up to 60 inner suspension points under contention.
+
+### [R14-D1] (concurrency-r14) Phase tracing was sufficient to LOCALIZE but insufficient to ROOT-CAUSE
+- **Source**: 2026-05-25 concurrency-r14
+- **Lesson**: per-iteration markers needed inside retry loops, not just async-boundary markers between statements.
+
+### [R14-S1] (IMPORTANT, security-r14) C-6 fix closes snap-teardown arm only — sibling sites remain admin-reachable
+- **Source**: 2026-05-25 security-r14
+- **Symptom**: nomad_ch.rs:2002 CreateGuard::drop is admin-reachable via CREATE-failure spam. Same runtime-starvation shape.
+- **Action**: subsumed by R14-A1 helper extract.
+
+### [R14-S2] (MINOR posture, security-r14) C-4's 120s retry budget amplifies any future R14-class regression
+- **Source**: 2026-05-25 security-r14
+- **Symptom**: ~80 wedged wakes at default max_connections=100 + ntex connection-slot hold. Capacity planning issue.
+
+### Closures this cycle
+- [C-6] CLOSED at `91ce9be5` — detach_isolated pattern via dedicated OS thread + private compio runtime. (Diagnosis refresh needed per R14-I1.)
+- [R14-Q2] CLOSED at `79b4d258` — seal_filename_for_str `#[cfg(test)]`-gated (CRITICAL-3 regression test needs the `&str` shape)
+- [R14-Q3 + R14-P2] CLOSED at `9afd0986` — snap-l2-upload thread name byte-slice simplification + accurate pr_set_name truncation docstring
