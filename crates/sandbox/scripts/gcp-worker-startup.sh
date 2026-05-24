@@ -40,7 +40,7 @@
 #   - sandbox-admin-token: bearer for /admin/sandboxes/*
 #   - artifact-bucket:     GCS bucket name (no `gs://`)
 #   - controller-object:   GCS object name for the controller binary
-#                          (e.g. zeroship-sandbox.snapshot-v6)
+#                          (e.g. zeroship-sandbox.snapshot-v19)
 #   - vm-index-ceil:       int, default 12; number of taps to create
 #   - snapshot-bucket:     GCS bucket for L2 snapshot storage
 #                          (default = artifact-bucket; can be same/separate)
@@ -173,7 +173,7 @@ gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
 if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
   echo "[startup] INSTALL_CH_PLUGIN_DRIVER=1 — installing nomad-driver-ch"
   mkdir -p /etc/zeroship/nomad-plugins
-  gs_pull nomad-driver-ch.v1 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
+  gs_pull nomad-driver-ch.v2 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
   chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
   # Surface the embedded gitSHA so we can confirm which build landed.
   /etc/zeroship/nomad-plugins/nomad-driver-ch --version || true
