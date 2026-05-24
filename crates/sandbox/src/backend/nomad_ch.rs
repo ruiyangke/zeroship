@@ -191,6 +191,15 @@ pub struct NomadCHBackend {
     /// [`crate::persist::Persistence`]. `None` when
     /// `SANDBOX_PERSIST_AUTH` is unset.
     persist: Option<Arc<crate::persist::Persistence>>,
+    /// r3-A (T-8b-stress-r3 fix): cached local Nomad node ID for
+    /// the `Constraints` block emitted on every cold-boot jobspec.
+    /// `Some` when [`fetch_local_nomad_node_id`] returned Ok at
+    /// boot; `None` (fallback to random cross-node placement) when
+    /// the boot-time lookup failed. Installed via
+    /// [`Self::with_local_nomad_node_id`] from
+    /// `crate::AppState::from_config`; tests construct `None` by
+    /// default and exercise the `Some` shape via the builder.
+    local_nomad_node_id: Option<String>,
 }
 
 /// Phase B / snapshot wiring: resolved source-VM identity for a
@@ -391,7 +400,39 @@ impl NomadCHBackend {
             healthy: Arc::new(AtomicBool::new(false)),
             last_probe_err: Arc::new(Mutex::new(None)),
             persist,
+            // r3-A default: None. Production wiring sets this via
+            // `with_local_nomad_node_id` from
+            // `AppState::from_config` after the boot-time
+            // `/v1/agent/self` lookup succeeds.
+            local_nomad_node_id: None,
         })
+    }
+
+    /// r3-A (T-8b-stress-r3 fix): install the cached local Nomad
+    /// node_id. When set, [`build_nomad_job_json_with`] emits a
+    /// `Constraints` block pinning every cold-boot alloc to THIS
+    /// worker — closing the cross-node placement race where
+    /// `workspace.img` is staged on local fs but Nomad schedules
+    /// the alloc on a different worker (the driver's
+    /// `assert_disk_image_present` ENOENTs there).
+    ///
+    /// Mirrors the [`Self::vm_index_allocator`] / [`RealRestoreBackend::
+    /// with_nomad_handle`] builder shape: replaces any prior value;
+    /// `None` (the constructor default) disables the constraint
+    /// emission entirely. The production wiring (`AppState::from_config`)
+    /// passes either `Some(id)` (lookup succeeded) or never calls
+    /// the builder (lookup failed → metric bumped at boot).
+    pub fn with_local_nomad_node_id(mut self, node_id: Option<String>) -> Self {
+        self.local_nomad_node_id = node_id;
+        self
+    }
+
+    /// r3-A: read accessor for the cached local Nomad node_id. Mainly
+    /// here so the AppState wiring (which constructs the backend via
+    /// `Backend::from_config_with_persist` and then re-wraps with the
+    /// builder) can assert post-install state.
+    pub fn local_nomad_node_id(&self) -> Option<&str> {
+        self.local_nomad_node_id.as_deref()
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -748,6 +789,7 @@ impl NomadCHBackend {
             user_id,
             project_id,
             &sandbox_id.simple().to_string(),
+            self.local_nomad_node_id.as_deref(),
         );
         submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json)
             .await
@@ -2292,6 +2334,7 @@ pub(crate) fn build_nomad_job_json(
     user_id: &str,
     project_id: &str,
     sandbox_id: &str,
+    local_nomad_node_id: Option<&str>,
 ) -> serde_json::Value {
     build_nomad_job_json_with(
         job_id,
@@ -2305,6 +2348,7 @@ pub(crate) fn build_nomad_job_json(
         sandbox_id,
         None,
         task_driver_mode_from_env(),
+        local_nomad_node_id,
     )
 }
 
@@ -2326,6 +2370,7 @@ pub(crate) fn build_nomad_job_json_with(
     sandbox_id: &str,
     restore_from: Option<&Path>,
     mode: TaskDriverMode,
+    local_nomad_node_id: Option<&str>,
 ) -> serde_json::Value {
     // Per-VM env block. Populated under BOTH driver modes:
     //   - RawExec: the bash wrapper reads these to construct CH argv.
@@ -2477,42 +2522,61 @@ pub(crate) fn build_nomad_job_json_with(
         }
     };
 
-    serde_json::json!({
-        "Job": {
-            "ID": job_id,
-            "Name": job_id,
-            "Type": "service",
-            "Datacenters": [cfg.nomad_ch.datacenter],
-            "Meta": {
-                "zeroship.user": user_id,
-                "zeroship.project": project_id,
-                "zeroship.sandbox": sandbox_id,
-                "zeroship.vm_index": vm_index.to_string(),
+    let mut job = serde_json::json!({
+        "ID": job_id,
+        "Name": job_id,
+        "Type": "service",
+        "Datacenters": [cfg.nomad_ch.datacenter],
+        "Meta": {
+            "zeroship.user": user_id,
+            "zeroship.project": project_id,
+            "zeroship.sandbox": sandbox_id,
+            "zeroship.vm_index": vm_index.to_string(),
+        },
+        "TaskGroups": [{
+            "Name": "vm",
+            "Count": 1,
+            "RestartPolicy": {
+                "Attempts": 0,
+                "Mode": "fail",
+                "Interval": 30_000_000_000u64,    // 30s, ns
+                "Delay":     5_000_000_000u64,    //  5s, ns
             },
-            "TaskGroups": [{
-                "Name": "vm",
-                "Count": 1,
-                "RestartPolicy": {
-                    "Attempts": 0,
-                    "Mode": "fail",
-                    "Interval": 30_000_000_000u64,    // 30s, ns
-                    "Delay":     5_000_000_000u64,    //  5s, ns
-                },
-                "ReschedulePolicy": {
-                    "Attempts": 0,
-                    "Unlimited": false,
-                },
-                "Tasks": [{
-                    "Name": "ch",
-                    "Driver": driver_name,
-                    "Config": config,
-                    "Env": env,
-                    "Resources": resources,
-                    "KillTimeout": 10_000_000_000u64,  // 10s, ns
-                }],
+            "ReschedulePolicy": {
+                "Attempts": 0,
+                "Unlimited": false,
+            },
+            "Tasks": [{
+                "Name": "ch",
+                "Driver": driver_name,
+                "Config": config,
+                "Env": env,
+                "Resources": resources,
+                "KillTimeout": 10_000_000_000u64,  // 10s, ns
             }],
-        }
-    })
+        }],
+    });
+    // r3-A (T-8b-stress-r3 fix): pin alloc placement to THIS worker
+    // when the controller cached its local Nomad node_id at boot.
+    // The constraint targets `${node.unique.id}` (Nomad's per-client
+    // unique-ID interpolation, equal to `stats.client.node_id`) with
+    // a strict equality operand — Nomad rejects the alloc as
+    // unschedulable if no client matches, surfacing the
+    // misconfiguration loudly rather than silently scheduling
+    // elsewhere. See `crate::backend::nomad_ch::fetch_local_nomad_node_id`
+    // for the boot-time lookup; `None` (lookup failed / dev tests)
+    // omits the Constraints block entirely so the pre-r3-A
+    // random-placement shape is preserved as the fallback.
+    if let Some(node_id) = local_nomad_node_id {
+        job["Constraints"] = serde_json::json!([
+            {
+                "LTarget": "${node.unique.id}",
+                "Operand": "=",
+                "RTarget": node_id,
+            }
+        ]);
+    }
+    serde_json::json!({ "Job": job })
 }
 
 // ─── Nomad HTTP helpers ─────────────────────────────────────────
@@ -4842,6 +4906,7 @@ mod tests {
             "abc",
             None,
             TaskDriverMode::RawExec,
+            None, // r3-A: no node pin in legacy tests
         );
         let job = &v["Job"];
         assert_eq!(job["ID"], "zsbx-abc");
@@ -4933,6 +4998,7 @@ mod tests {
             Path::new("/w.img"), Path::new("/u.img"), "ab",
             "u", "p", "s",
             None, TaskDriverMode::RawExec,
+            None, // r3-A: no node pin
         );
         assert_eq!(
             v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["ZSBX_SUBNET_BASE_OCTET"],
@@ -4974,6 +5040,7 @@ mod tests {
             &sandbox_id_simple,
             None,
             TaskDriverMode::RawExec,
+            None, // r3-A: no node pin
         );
         let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
         // 1. The entry exists and equals the passed value.
@@ -5030,6 +5097,7 @@ mod tests {
             "s",
             None,
             TaskDriverMode::RawExec,
+            None, // r3-A: no node pin
         );
         let s = serde_json::to_string(&v).expect("serialize");
         // Round-trip — Nomad parses as JSON, so we should too.
@@ -5057,6 +5125,7 @@ mod tests {
                 Path::new("/w.img"), Path::new("/u.img"),
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 "alice", "proj1", "abcdef0123456789abcdef0123456789",
+                None, // r3-A: no node pin in this test
             );
             let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
             assert_eq!(task["Driver"], "raw_exec");
@@ -5084,6 +5153,7 @@ mod tests {
                 Path::new("/w.img"), Path::new("/u.img"),
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 "alice", "proj1", "abcdef0123456789abcdef0123456789",
+                None, // r3-A: no node pin in this test
             );
             let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
             assert_eq!(
@@ -5115,6 +5185,7 @@ mod tests {
             "abcdef0123456789abcdef0123456789",
             None,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
 
@@ -5190,6 +5261,7 @@ mod tests {
             "abcdef0123456789abcdef0123456789",
             Some(restore_dir),
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         assert_eq!(
@@ -5217,6 +5289,7 @@ mod tests {
             "abcdef0123456789abcdef0123456789",
             None,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         // Cold-boot: the field must be PRESENT (so the Go driver's
@@ -5250,6 +5323,7 @@ mod tests {
             "abcdef0123456789abcdef0123456789",
             None,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         assert!(
@@ -5282,6 +5356,7 @@ mod tests {
             sandbox_id,
             None,
             TaskDriverMode::RawExec,
+            None, // r3-A: no node pin
         );
         let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
         assert_eq!(task["Driver"], "raw_exec");

@@ -697,7 +697,11 @@ impl AppState {
                 }
             };
 
-        let backend = Backend::from_config_with_persist(&config, persist.clone())?;
+        let backend = Backend::from_config_full(
+            &config,
+            persist.clone(),
+            local_nomad_node_id.clone(),
+        )?;
         backend.probe().await?;
         // Clean up orphan Pods + ConfigMaps from a previous run.
         // Errors here are non-fatal — operators may want to keep

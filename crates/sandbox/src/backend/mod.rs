@@ -198,6 +198,25 @@ impl Backend {
         cfg: &SandboxConfig,
         persist: Option<std::sync::Arc<crate::persist::Persistence>>,
     ) -> Result<Self, String> {
+        Self::from_config_full(cfg, persist, None)
+    }
+
+    /// r3-A (T-8b-stress-r3 fix): full constructor variant — same as
+    /// [`Self::from_config_with_persist`] plus a `local_nomad_node_id`
+    /// that is installed on the inner `NomadCHBackend` when the
+    /// backend is `nomad-ch`. Other backends (`docker`, `k8s`) ignore
+    /// the field — the constraint is meaningful only for the
+    /// Nomad-driven path.
+    ///
+    /// Boot wiring (`crate::AppState::from_config`) calls this
+    /// directly; tests + the legacy lifecycle examples keep using
+    /// [`Self::from_config`] / [`Self::from_config_with_persist`]
+    /// which thread `None` through.
+    pub fn from_config_full(
+        cfg: &SandboxConfig,
+        persist: Option<std::sync::Arc<crate::persist::Persistence>>,
+        local_nomad_node_id: Option<String>,
+    ) -> Result<Self, String> {
         match cfg.backend.as_str() {
             "docker" => Ok(Self::Docker(docker::DockerBackend::new(
                 cfg.clone(),
@@ -205,7 +224,8 @@ impl Backend {
             ))),
             "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone(), persist)?)),
             "nomad-ch" => Ok(Self::NomadCh(std::sync::Arc::new(
-                nomad_ch::NomadCHBackend::new(cfg.clone(), persist)?,
+                nomad_ch::NomadCHBackend::new(cfg.clone(), persist)?
+                    .with_local_nomad_node_id(local_nomad_node_id),
             ))),
             other => Err(format!(
                 "unknown SANDBOX_BACKEND={other:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""

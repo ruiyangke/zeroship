@@ -4202,6 +4202,9 @@ mod r12_i1_tests {
             "abcdef0123456789abcdef0123456789",
             None, // cold-boot: no restore_from
             TaskDriverMode::ChPlugin,
+            None, // r3-A: parity test omits node pin (intentionally —
+                  // the Constraints block is verified by the
+                  // r3_a_node_affinity_* sibling tests below).
         );
         let cold_config = &cold_v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         let cold_fields: HashSet<&str> = cold_config
