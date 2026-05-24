@@ -6501,3 +6501,236 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// P7 PR 2 — system-field prefix + auto-indexes end-to-end on SQLite
+//
+// These tests exercise `build_create_table_with_fks_for_dialect(Sqlite)`
+// end-to-end: the emitter produces SQLite-flavoured DDL, the engine
+// accepts the multi-statement payload (CREATE TABLE + 3 CREATE INDEX),
+// and `PRAGMA table_info` / `sqlite_master` confirm the seven columns
+// and three indexes are present.
+//
+// The production register_model orchestrator is PG-only today — these
+// tests drive the dialect emitter directly and `pool_exec` the result,
+// the same pattern PR 6 introspection tests use for SQLite.
+// ---------------------------------------------------------------------------
+
+/// `build_create_table_with_fks_for_dialect(Sqlite)` produces DDL the
+/// SQLite engine accepts, and PRAGMA `table_info` reports all 7 system
+/// fields after execution.
+#[test]
+fn freshly_registered_model_has_seven_system_field_columns_end_to_end() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, FkEmission, SqlDialect,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        let schema = serde_json::json!({
+            "title": { "type": "string", "required": true },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build sqlite DDL");
+
+        // Execute the multi-statement payload through the session
+        // actor — `pool_exec` routes through `sqlite3_exec` which
+        // accepts multi-statement SQL.
+        // SQLite's `Connection::execute` runs ONE statement per call
+        // (unlike PG's libpq simple-query); the production register_model
+        // orchestrator is PG-only today, so this test splits the
+        // multi-statement payload and executes each piece individually,
+        // exercising the canonical per-statement DDL the SQLite arm
+        // would see once a dialect-aware orchestrator lands.
+        for stmt in sql.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend
+                .pool_exec(trimmed, &[])
+                .await
+                .unwrap_or_else(|e| panic!("engine must accept statement: {trimmed}\n{e:?}"));
+        }
+
+        // Confirm via introspection: all 7 system field columns
+        // present, plus the 1 user column.
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("introspect_schema");
+        let cols = live
+            .tables
+            .get("posts")
+            .expect("posts table must be present");
+        for name in &[
+            "id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "version",
+            "deleted_at",
+        ] {
+            assert!(
+                cols.contains_key(*name),
+                "system field {name:?} missing from introspected cols: {:?}",
+                cols.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            cols.contains_key("title"),
+            "user-declared `title` must coexist: {:?}",
+            cols.keys().collect::<Vec<_>>()
+        );
+    });
+}
+
+/// All three auto-indexes (`deleted_at`, `updated_at`, `created_by`)
+/// land in `sqlite_master` after the CREATE TABLE payload executes.
+/// The `id` PK uses ROWID (no autoindex entry) and `version` is
+/// intentionally unindexed (see `create_table_does_not_emit_index_for_version`).
+#[test]
+fn freshly_registered_model_has_three_indexes_end_to_end() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, index_name, FkEmission, SqlDialect,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        let sql = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({}),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build sqlite DDL");
+        // SQLite's `Connection::execute` runs ONE statement per call
+        // (unlike PG's libpq simple-query); the production register_model
+        // orchestrator is PG-only today, so this test splits the
+        // multi-statement payload and executes each piece individually,
+        // exercising the canonical per-statement DDL the SQLite arm
+        // would see once a dialect-aware orchestrator lands.
+        for stmt in sql.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend
+                .pool_exec(trimmed, &[])
+                .await
+                .unwrap_or_else(|e| panic!("engine must accept statement: {trimmed}\n{e:?}"));
+        }
+
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("introspect_schema");
+        let idx_map = live
+            .indexes
+            .get("posts")
+            .expect("posts must have an index map");
+
+        for col in &["deleted_at", "updated_at", "created_by"] {
+            let expected = index_name("posts", &[col], /* unique = */ false);
+            assert!(
+                idx_map.contains_key(&expected),
+                "expected auto-index {expected} for column {col}; have: {:?}",
+                idx_map.keys().collect::<Vec<_>>()
+            );
+        }
+    });
+}
+
+/// **Deferred to PR 3** — the SDK INSERT auto-populate path (which
+/// supplies `id` + `created_at` etc. from the runtime) lands in PR 3.
+/// PR 2's responsibility is the DDL only, so this end-to-end test
+/// supplies the system fields manually via a raw-SQL INSERT to confirm
+/// the emitted columns accept the canonical value shapes (TEXT id,
+/// CURRENT_TIMESTAMP defaults firing on omitted columns).
+#[test]
+fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, FkEmission, SqlDialect,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        let sql = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({}),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build sqlite DDL");
+        // Split on `;\n` — SQLite's `Connection::execute` runs one
+        // statement per call (see sibling test's note).
+        for stmt in sql.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend
+                .pool_exec(trimmed, &[])
+                .await
+                .unwrap_or_else(|e| panic!("engine must accept statement: {trimmed}\n{e:?}"));
+        }
+
+        // PR 2-era INSERT: supply only `id` (no SDK auto-populate yet
+        // — PR 3 wires that). The 3 NULL-able columns + 3 DEFAULT'd
+        // columns fill in from the engine.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_demo\".\"posts\" (id) VALUES ('post_01')",
+                &[],
+            )
+            .await
+            .expect("INSERT with only id must succeed");
+
+        // Round-trip: confirm `version = 1`, `deleted_at IS NULL`,
+        // `created_at IS NOT NULL`. Pin the canonical shape the DDL
+        // promises.
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                "SELECT id, version, deleted_at IS NULL AS dn, \
+                        created_at IS NOT NULL AS cn \
+                 FROM \"app_demo\".\"posts\"",
+                &[],
+            )
+            .await
+            .expect("SELECT ok");
+        assert_eq!(rows.len(), 1, "expected one row");
+        let row = &rows[0];
+        assert_eq!(row[0].as_deref(), Some("post_01"), "id round-trip");
+        assert_eq!(row[1].as_deref(), Some("1"), "version default = 1");
+        assert_eq!(row[2].as_deref(), Some("1"), "deleted_at IS NULL default");
+        assert_eq!(row[3].as_deref(), Some("1"), "created_at IS NOT NULL default");
+    });
+}

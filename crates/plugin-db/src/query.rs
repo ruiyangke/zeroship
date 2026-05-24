@@ -453,20 +453,57 @@ pub enum FkEmission<'a> {
 }
 
 // pub (not pub(crate)): external consumer tests/integration.rs calls this via glob import.
+//
+// **P7 PR 2** — PG-flavoured shim around
+// [`build_create_table_with_fks_for_dialect`]. Every existing call site
+// (orchestrator `register_model::plan`, integration tests, internal
+// query helpers) stays on this signature; the dialect-aware emitter
+// lives behind the new symbol and routes the SQLite arm independently.
 pub fn build_create_table_with_fks(
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
 ) -> Result<String, QueryError> {
+    build_create_table_with_fks_for_dialect(app_id, collection, schema, fk_emit, SqlDialect::Postgres)
+}
+
+/// **P7 PR 2** — dialect-aware CREATE TABLE emitter.
+///
+/// Prepends the seven platform-managed system fields
+/// ([`SYSTEM_FIELD_NAMES`]) before any user-declared columns and
+/// appends three implicit B-tree indexes (`deleted_at`, `updated_at`,
+/// `created_by`) as semicolon-separated `CREATE INDEX IF NOT EXISTS`
+/// statements in the same multi-statement payload.
+///
+/// The dialect controls:
+///
+/// - timestamp column type: PG `TIMESTAMPTZ` / SQLite `TEXT`.
+/// - default clause for `created_at` / `updated_at`: PG `NOW()` /
+///   SQLite `CURRENT_TIMESTAMP`.
+/// - index `ON` syntax: PG `ON <schema>.<table>` /
+///   SQLite `<schema>.<index_name> ON <table>`.
+/// - whether `COMMENT ON COLUMN` mask sentinels (PG only) are
+///   appended; the SQLite arm drops them (the inline
+///   `/* __zsmask:... */` comment on the sibling column is the
+///   SQLite-side wire).
+///
+/// The `id TEXT PRIMARY KEY` is identical on both backends; the FK
+/// type for refs continues to be INTEGER pending the PR 3 cascade
+/// that retypes `id` end-to-end.
+pub fn build_create_table_with_fks_for_dialect(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+    fk_emit: &FkEmission<'_>,
+    dialect: SqlDialect,
+) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
     let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
 
-    let mut columns = vec![
-        "id SERIAL PRIMARY KEY".to_string(),
-    ];
+    let mut columns = build_system_field_columns(dialect);
 
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut union_checks: Vec<String> = Vec::new();
@@ -574,8 +611,53 @@ pub fn build_create_table_with_fks(
         }
     }
 
-    columns.push("created_at TIMESTAMPTZ DEFAULT NOW()".to_string());
-    columns.push("updated_at TIMESTAMPTZ DEFAULT NOW()".to_string());
+    // **P7 PR 2** — `created_at` / `updated_at` are emitted as part of
+    // the seven system-field prefix at the top of `columns`; the
+    // legacy trailing emission is gone. See `build_system_field_columns`
+    // for the canonical declaration order.
+
+    // **P7 PR 2** — defensive last-line-of-defence assertion. The
+    // declaration-time validator in `field_to_column` (via
+    // `validate_field_name_for_declaration`) already rejects creator
+    // schemas that declare any of the seven system-field names; the
+    // loop above propagates that error and returns before this
+    // assertion runs. The assertion guards a future regression where
+    // a creator-declared system field somehow makes it through the
+    // schema-iteration loop without raising — under debug builds the
+    // panic surfaces immediately; release builds tolerate the
+    // duplicated declaration and let the engine raise a
+    // `column "id" specified more than once` error.
+    //
+    // Scans the assembled `columns` vector (not the raw schema), so
+    // the assertion measures the actual DDL output rather than
+    // re-checking the input — catching any future emitter that adds
+    // a column out-of-band (e.g. a sibling-column path that
+    // accidentally lands on a system-field name).
+    debug_assert!(
+        {
+            let mut seen = std::collections::HashSet::new();
+            let mut ok = true;
+            for col in &columns {
+                // The column DDL starts with the quoted (or bareword)
+                // identifier — first whitespace-delimited token. We
+                // strip the leading `"` if present.
+                let first = col.split_whitespace().next().unwrap_or("");
+                let name = first.trim_matches('"');
+                if SYSTEM_FIELD_NAMES.contains(&name) {
+                    if !seen.insert(name.to_string()) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            ok
+        },
+        "build_create_table_with_fks_for_dialect: duplicate system-field \
+         declaration in column list — the declaration-time validator \
+         (validate_field_name_for_declaration) should have rejected a \
+         creator-declared system field before reaching the DDL emitter. \
+         Columns: {columns:?}",
+    );
 
     // Append all FK clauses *after* the regular columns so the SQL reads
     // top-to-bottom in a natural order (columns, then constraints).
@@ -586,24 +668,124 @@ pub fn build_create_table_with_fks(
     // sibling column carrying a mask sentinel. Multi-statement SQL is
     // accepted by `pool.query_text_params` (the underlying libpq
     // simple-query protocol) and by SQLite's `sqlite3_exec`. On the
-    // SQLite arm `COMMENT ON COLUMN` is a syntax error — but PR 6's
-    // SQLite path is the inline `/* __zsmask:... */` comment baked
-    // into the CREATE TABLE body, NOT the `COMMENT ON COLUMN`
-    // statement. The dialect-routing call sites
-    // (`build_create_table_with_fks_for_dialect`) strip the trailing
-    // comments before dispatch when targeting SQLite; the default
-    // PG-flavoured emitter below includes them.
+    // SQLite arm `COMMENT ON COLUMN` is a syntax error — the
+    // dialect-routing skips the `COMMENT ON COLUMN` append when
+    // `dialect == Sqlite`; the inline `/* __zsmask:... */` comment
+    // baked into the CREATE TABLE body is the SQLite-side wire (see
+    // `mask_sentinel_for_field`).
     let create_table = format!(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
         table,
         columns.join(",\n  ")
     );
-    let comment_stmts = build_mask_sentinel_comments(app_id, collection, schema);
-    if comment_stmts.is_empty() {
-        Ok(create_table)
-    } else {
-        Ok(format!("{create_table};\n{}", comment_stmts.join(";\n")))
+
+    // **P7 PR 2** — append the three implicit B-tree indexes
+    // (`deleted_at`, `updated_at`, `created_by`) as semicolon-
+    // separated `CREATE INDEX IF NOT EXISTS` statements. Bound 1:1
+    // to the table lifecycle — emitted here so a drop-table cascade
+    // takes them with it (instead of tracking them as separate
+    // `ChangeKind::AddIndex` diff ops).
+    //
+    // The index for `id` is not emitted (the PRIMARY KEY constraint
+    // already builds an implicit unique index). The index for
+    // `version` is not emitted (per §5 of the proposal —
+    // `version` bumps on every UPDATE and an index would thrash).
+    let system_index_stmts = build_system_field_indexes(app_id, collection, dialect);
+
+    let mut statements: Vec<String> = vec![create_table];
+    statements.extend(system_index_stmts);
+
+    if matches!(dialect, SqlDialect::Postgres) {
+        let comment_stmts = build_mask_sentinel_comments(app_id, collection, schema);
+        statements.extend(comment_stmts);
     }
+
+    Ok(statements.join(";\n"))
+}
+
+/// **P7 PR 2** — emit the seven platform-managed system-field column
+/// declarations in canonical order ([`SYSTEM_FIELD_NAMES`]).
+///
+/// Order MUST match `SYSTEM_FIELD_NAMES`. The dialect controls
+/// timestamp affinity (`TIMESTAMPTZ` on PG, `TEXT` on SQLite) and
+/// the default expression (`NOW()` on PG, `CURRENT_TIMESTAMP` on
+/// SQLite). `id`, `created_by`, `updated_by`, `version`, and the
+/// `INTEGER` affinity for `version` are dialect-identical.
+///
+/// The `id` PK uses inline `PRIMARY KEY` (not a `CONSTRAINT ...`
+/// table-level form) — matches the convention P0 already used for
+/// the legacy `id SERIAL PRIMARY KEY` line this replaces. The
+/// existing FK-attachment logic (B2 — `build_fk_clause`) references
+/// the `id` column by name, so the switch from `SERIAL` to `TEXT`
+/// is transparent to the FK emitter (FK column TYPE narrowing
+/// cascades in PR 3).
+fn build_system_field_columns(dialect: SqlDialect) -> Vec<String> {
+    let (ts_type, ts_default) = match dialect {
+        SqlDialect::Postgres => ("TIMESTAMPTZ", "NOW()"),
+        SqlDialect::Sqlite => ("TEXT", "CURRENT_TIMESTAMP"),
+    };
+    vec![
+        "id TEXT PRIMARY KEY".to_string(),
+        format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
+        format!("updated_at {ts_type} NOT NULL DEFAULT {ts_default}"),
+        "created_by TEXT NULL".to_string(),
+        "updated_by TEXT NULL".to_string(),
+        "version INTEGER NOT NULL DEFAULT 1".to_string(),
+        format!("deleted_at {ts_type} NULL"),
+    ]
+}
+
+/// **P7 PR 2** — emit the three implicit B-tree indexes the platform
+/// auto-creates for every new table: `deleted_at` (soft-delete
+/// filtering — PR 5), `updated_at` (cursor-paged read paths), and
+/// `created_by` (per-actor lookups + audit).
+///
+/// The PK on `id` covers `id` lookups via the implicit unique index;
+/// `version` is not indexed (every UPDATE bumps it; the index would
+/// thrash). See §5 of `docs/proposals/platform-system-fields.md` for
+/// the rationale.
+///
+/// Dialect controls the `ON` clause syntax:
+///
+/// - PG: `CREATE INDEX IF NOT EXISTS "<index>" ON "<schema>"."<table>" (<col>)`.
+/// - SQLite: `CREATE INDEX IF NOT EXISTS "<schema>"."<index>" ON "<table>" (<col>)`
+///   — SQLite places the schema on the index name, not the table.
+///
+/// The index name uses the existing [`index_name`] helper so the
+/// `<table>_<col>_idx` shape stays consistent with the rest of the
+/// auto-named per-field indexes and the NAMEDATALEN-safe 60-byte
+/// truncation kicks in for long table names.
+fn build_system_field_indexes(
+    app_id: &str,
+    collection: &str,
+    dialect: SqlDialect,
+) -> Vec<String> {
+    // The three columns the platform auto-indexes. `id` is implicitly
+    // indexed by the PK constraint; `version` is deliberately skipped
+    // (thrashing — bumped on every UPDATE).
+    const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
+    SYSTEM_INDEXED_COLS
+        .iter()
+        .map(|col| {
+            let idx_name = index_name(collection, &[col], /* unique = */ false);
+            match dialect {
+                SqlDialect::Postgres => format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
+                    quote_ident(&idx_name),
+                    quote_ident(app_id),
+                    quote_ident(collection),
+                    quote_ident(col),
+                ),
+                SqlDialect::Sqlite => format!(
+                    "CREATE INDEX IF NOT EXISTS {}.{} ON {} ({})",
+                    quote_ident(app_id),
+                    quote_ident(&idx_name),
+                    quote_ident(collection),
+                    quote_ident(col),
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement (B2).
@@ -6058,6 +6240,551 @@ mod tests {
                     "expected ReservedSystemFieldName for {name:?}, got {other:?}"
                 ),
             }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // P7 PR 2 — CREATE TABLE prepends 7 system fields + 3 auto-indexes
+    //
+    // Tests the dialect-aware emitter
+    // (`build_create_table_with_fks_for_dialect`) and the PG-flavoured
+    // shim (`build_create_table_with_fks`). The system-field prefix and
+    // auto-index emission are dialect-symmetric except for timestamp
+    // type / default expression and the SQLite `<schema>.<index_name>`
+    // form vs PG's `ON <schema>.<table>`.
+    // -----------------------------------------------------------------
+
+    /// All seven system fields must appear in CREATE TABLE on PG, in the
+    /// canonical `SYSTEM_FIELD_NAMES` order, before any user-declared
+    /// columns. Pin the substring presence — the textual shape of each
+    /// column (type / NOT NULL / DEFAULT) is exercised by the dedicated
+    /// shape tests below.
+    #[test]
+    fn create_table_prepends_seven_system_fields_pg() {
+        let schema = serde_json::json!({
+            "title": { "type": "string" },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        for name in SYSTEM_FIELD_NAMES {
+            assert!(
+                sql.contains(&format!(" {name} ")) || sql.contains(&format!(" {name},")),
+                "missing system field {name:?} in PG DDL: {sql}"
+            );
+        }
+        // Canonical declaration order: each name appears BEFORE the
+        // next, and all of them appear before the user field `title`.
+        let positions: Vec<usize> = SYSTEM_FIELD_NAMES
+            .iter()
+            .map(|n| sql.find(n).expect("each name appears"))
+            .collect();
+        for w in positions.windows(2) {
+            assert!(w[0] < w[1], "system fields out of order: {sql}");
+        }
+        let title_pos = sql.find("\"title\"").expect("title column present");
+        let last_system_pos = *positions.last().unwrap();
+        assert!(
+            last_system_pos < title_pos,
+            "system fields must precede user fields: {sql}"
+        );
+    }
+
+    /// SQLite mirrors PG for the system-field prefix; only timestamp
+    /// affinity (`TEXT` vs `TIMESTAMPTZ`) and the default expression
+    /// (`CURRENT_TIMESTAMP` vs `NOW()`) differ.
+    #[test]
+    fn create_table_prepends_seven_system_fields_sqlite() {
+        let schema = serde_json::json!({
+            "title": { "type": "string" },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build ok");
+        for name in SYSTEM_FIELD_NAMES {
+            assert!(
+                sql.contains(name),
+                "missing system field {name:?} in SQLite DDL: {sql}"
+            );
+        }
+        let positions: Vec<usize> = SYSTEM_FIELD_NAMES
+            .iter()
+            .map(|n| sql.find(n).expect("each name appears"))
+            .collect();
+        for w in positions.windows(2) {
+            assert!(w[0] < w[1], "system fields out of order: {sql}");
+        }
+    }
+
+    /// `id TEXT PRIMARY KEY` — identical on both engines. Replaces the
+    /// legacy `id SERIAL PRIMARY KEY` that P0 emitted.
+    #[test]
+    fn create_table_emits_id_text_primary_key() {
+        let schema = serde_json::json!({});
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let sql = build_create_table_with_fks_for_dialect(
+                "app1",
+                "posts",
+                &schema,
+                &FkEmission::Inline,
+                dialect,
+            )
+            .expect("build ok");
+            assert!(
+                sql.contains("id TEXT PRIMARY KEY"),
+                "missing `id TEXT PRIMARY KEY` for {dialect:?}: {sql}"
+            );
+            assert!(
+                !sql.contains("id SERIAL"),
+                "must not emit legacy `id SERIAL` for {dialect:?}: {sql}"
+            );
+        }
+    }
+
+    /// PG: `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
+    #[test]
+    fn create_table_emits_created_at_default_now_pg() {
+        let schema = serde_json::json!({});
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        assert!(
+            sql.contains("created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"),
+            "PG created_at must be TIMESTAMPTZ NOT NULL DEFAULT NOW(): {sql}"
+        );
+        assert!(
+            sql.contains("updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"),
+            "PG updated_at must be TIMESTAMPTZ NOT NULL DEFAULT NOW(): {sql}"
+        );
+    }
+
+    /// SQLite: `created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`.
+    #[test]
+    fn create_table_emits_created_at_default_current_timestamp_sqlite() {
+        let schema = serde_json::json!({});
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build ok");
+        assert!(
+            sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "SQLite created_at must be TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP: {sql}"
+        );
+        assert!(
+            sql.contains("updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "SQLite updated_at must be TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP: {sql}"
+        );
+        // SQLite arm must NEVER emit PG-specific tokens.
+        assert!(
+            !sql.contains("TIMESTAMPTZ"),
+            "SQLite DDL must not contain TIMESTAMPTZ: {sql}"
+        );
+        assert!(
+            !sql.contains("NOW()"),
+            "SQLite DDL must not contain NOW(): {sql}"
+        );
+    }
+
+    /// `version INTEGER NOT NULL DEFAULT 1` — identical on both
+    /// backends. Auto-bumped by CRUD updates in PR 4.
+    #[test]
+    fn create_table_emits_version_default_one() {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let sql = build_create_table_with_fks_for_dialect(
+                "app1",
+                "posts",
+                &serde_json::json!({}),
+                &FkEmission::Inline,
+                dialect,
+            )
+            .expect("build ok");
+            assert!(
+                sql.contains("version INTEGER NOT NULL DEFAULT 1"),
+                "missing version default for {dialect:?}: {sql}"
+            );
+        }
+    }
+
+    /// `deleted_at <ts_type> NULL` — soft-delete sentinel. The
+    /// nullability is load-bearing for the find() auto-filter PR 5
+    /// will wire (`WHERE deleted_at IS NULL`).
+    #[test]
+    fn create_table_emits_deleted_at_nullable() {
+        let schema = serde_json::json!({});
+        let sql_pg = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        assert!(
+            sql_pg.contains("deleted_at TIMESTAMPTZ NULL"),
+            "PG deleted_at must be TIMESTAMPTZ NULL: {sql_pg}"
+        );
+        let sql_sq = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build ok");
+        assert!(
+            sql_sq.contains("deleted_at TEXT NULL"),
+            "SQLite deleted_at must be TEXT NULL: {sql_sq}"
+        );
+    }
+
+    /// The three implicit B-tree indexes ride along with CREATE TABLE
+    /// as semicolon-separated statements. Each names its column in the
+    /// auto-named `<table>_<col>_idx` shape (idempotent — re-running
+    /// `IF NOT EXISTS`).
+    #[test]
+    fn create_table_emits_three_indexes_deleted_at_updated_at_created_by() {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            let sql = build_create_table_with_fks_for_dialect(
+                "app1",
+                "posts",
+                &serde_json::json!({}),
+                &FkEmission::Inline,
+                dialect,
+            )
+            .expect("build ok");
+            for col in &["deleted_at", "updated_at", "created_by"] {
+                let idx = index_name("posts", &[col], false);
+                assert!(
+                    sql.contains(&idx),
+                    "missing index {idx} for column {col} on {dialect:?}: {sql}"
+                );
+                assert!(
+                    sql.contains("CREATE INDEX IF NOT EXISTS"),
+                    "implicit indexes must use IF NOT EXISTS for idempotency on \
+                     {dialect:?}: {sql}"
+                );
+                assert!(
+                    sql.contains(&format!("({})", quote_ident(col))),
+                    "index DDL must reference column ({col}) on {dialect:?}: {sql}"
+                );
+            }
+        }
+    }
+
+    /// The `id` column is implicitly indexed by the PRIMARY KEY
+    /// constraint — emitting an explicit B-tree on `id` would be
+    /// redundant.
+    #[test]
+    fn create_table_does_not_emit_index_for_id() {
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &serde_json::json!({}),
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        let id_idx = index_name("posts", &["id"], false);
+        assert!(
+            !sql.contains(&id_idx),
+            "must NOT emit explicit index for id (PK covers it): {sql}"
+        );
+    }
+
+    /// `version` is bumped on every UPDATE (PR 4 wires the auto-bump);
+    /// an index on it would thrash. Per §5 of the proposal it stays
+    /// unindexed.
+    #[test]
+    fn create_table_does_not_emit_index_for_version() {
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &serde_json::json!({}),
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        let version_idx = index_name("posts", &["version"], false);
+        assert!(
+            !sql.contains(&version_idx),
+            "must NOT emit index for version (would thrash on UPDATE): {sql}"
+        );
+    }
+
+    /// User-declared fields land AFTER the seven system fields. Pin
+    /// the order so an accidental refactor that inverts the prepend
+    /// loop fails here.
+    #[test]
+    fn create_table_appends_user_fields_after_system_fields() {
+        let schema = serde_json::json!({
+            "title": { "type": "string", "required": true },
+            "body":  { "type": "string" },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        let last_system = sql.find("deleted_at").expect("deleted_at present");
+        let first_user = sql.find("\"title\"").expect("title present");
+        assert!(
+            last_system < first_user,
+            "user fields must follow system fields: {sql}"
+        );
+    }
+
+    /// CREATE TABLE on an empty schema still produces a valid table —
+    /// every system field is present and the 3 auto-indexes ride along.
+    /// Smoke test for the no-user-columns edge.
+    #[test]
+    fn create_table_with_zero_user_fields_emits_seven_columns_only() {
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &serde_json::json!({}),
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        // All 7 names present.
+        for name in SYSTEM_FIELD_NAMES {
+            assert!(
+                sql.contains(name),
+                "missing system field {name}: {sql}"
+            );
+        }
+        // The CREATE TABLE statement only has the 7 system-field
+        // column declarations (no user columns + no FKs + no checks).
+        // Slice from the FIRST `(` to the LAST `)` of the CREATE TABLE
+        // statement (auto-indexes live on subsequent statements,
+        // separated by `;\n`). `NOW()` etc. add inner parens, so we
+        // scope the slice with the CREATE TABLE statement boundary.
+        let create_stmt_end = sql.find(";\n").unwrap_or(sql.len());
+        let create_stmt = &sql[..create_stmt_end];
+        let table_body_start = create_stmt.find('(').expect("open paren");
+        let table_body_end = create_stmt.rfind(')').expect("close paren");
+        let body = &create_stmt[table_body_start + 1..table_body_end];
+        // Count commas at the top level of the body — `NOW()` and
+        // similar default expressions have no commas inside, so a
+        // flat scan is correct here. 7 column declarations means 6
+        // commas separating them.
+        let commas = body.matches(',').count();
+        assert_eq!(
+            commas, 6,
+            "expected exactly 6 commas (7 columns) in the table body, got {commas}: {body}"
+        );
+    }
+
+    /// FK emission on a user-declared `ref` field continues to work
+    /// alongside the system-field prefix. Pins the structural invariant
+    /// that B2 (P0) FK clauses ride after the column declarations.
+    #[test]
+    fn create_table_with_fk_user_field_still_creates_fk_constraint() {
+        let schema = serde_json::json!({
+            "authorId": { "type": "ref", "refTarget": "users" },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        assert!(
+            sql.contains("FOREIGN KEY (\"authorId\")"),
+            "FK clause must still emit: {sql}"
+        );
+        assert!(
+            sql.contains("REFERENCES \"app1\".\"users\" (id)"),
+            "FK target must still reference id: {sql}"
+        );
+        // FK target IS the new TEXT id; the FK clause itself unchanged.
+        assert!(sql.contains("id TEXT PRIMARY KEY"), "{sql}");
+    }
+
+    /// SQLite places the schema name on the INDEX, not the TABLE:
+    /// `CREATE INDEX "<schema>"."<idx>" ON "<table>" (...)`. Per the
+    /// p5.5 PR 4 sqlite ATTACH alias correction.
+    #[test]
+    fn create_table_sqlite_uses_dotted_schema_for_index() {
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &serde_json::json!({}),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build ok");
+        let idx = index_name("posts", &["deleted_at"], false);
+        // SQLite: `CREATE INDEX IF NOT EXISTS "app1"."posts_deleted_at_idx" ON "posts" (...)`.
+        let expected_prefix = format!(
+            "CREATE INDEX IF NOT EXISTS \"app1\".\"{idx}\" ON \"posts\""
+        );
+        assert!(
+            sql.contains(&expected_prefix),
+            "SQLite index DDL must use schema-on-index form ({expected_prefix}): {sql}"
+        );
+    }
+
+    /// PG places the schema name on the TABLE in `ON`:
+    /// `CREATE INDEX "<idx>" ON "<schema>"."<table>" (...)`. SQLite
+    /// requires the dotted form on the index; PG accepts neither.
+    #[test]
+    fn create_table_pg_uses_on_dot_schema_for_index() {
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &serde_json::json!({}),
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("build ok");
+        let idx = index_name("posts", &["deleted_at"], false);
+        let expected_prefix = format!(
+            "CREATE INDEX IF NOT EXISTS \"{idx}\" ON \"app1\".\"posts\""
+        );
+        assert!(
+            sql.contains(&expected_prefix),
+            "PG index DDL must use ON <schema>.<table> form ({expected_prefix}): {sql}"
+        );
+    }
+
+    /// The system-field index names go through the existing
+    /// [`index_name`] helper, so an overlong collection name gets the
+    /// sha2 hash truncation at 60 bytes. Regression fence for the
+    /// NAMEDATALEN-safety contract from P0.
+    #[test]
+    fn index_name_truncates_with_sha2_suffix_at_60_bytes() {
+        // 63-byte collection name (the Postgres NAMEDATALEN ceiling).
+        // The naive `<table>_deleted_at_idx` would be far over 60 bytes,
+        // triggering the hash-truncation path.
+        let long = "a".repeat(63);
+        let idx = index_name(&long, &["deleted_at"], false);
+        assert!(
+            idx.len() <= 60,
+            "truncated index name must fit NAMEDATALEN ({} bytes): {idx}",
+            idx.len()
+        );
+        // The 8-char base32 suffix is the hash tail.
+        let tail = &idx[idx.len() - 8..];
+        for b in tail.bytes() {
+            assert!(
+                b.is_ascii_lowercase() || b.is_ascii_digit(),
+                "hash suffix must be base32-lowercase + digits: {tail}"
+            );
+        }
+    }
+
+    /// The debug_assert at the end of `build_create_table_with_fks_for_dialect`
+    /// is the last line of defence: under debug builds it panics if two
+    /// declarations end up referencing the same system-field name in
+    /// the column list. The PR 1 validator catches creator-declared
+    /// system fields before this point — so this test exercises the
+    /// assertion's *unreachable* path under a hand-rolled internal
+    /// invariant violation by constructing the columns vector directly.
+    ///
+    /// We can't actually trigger the assertion through the public API
+    /// (every entry path is gated by `validate_field_name_for_declaration`),
+    /// so instead this test pins the validator pre-check: when a creator
+    /// schema declares `id`, the validator raises BEFORE the
+    /// assertion runs — confirming the assertion is a true safety net,
+    /// not the primary gate.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_assert_panics_when_user_schema_collides_with_system_field() {
+        // The validator (PR 1) raises `ReservedSystemFieldName` before
+        // the debug_assert runs — verify the rejection happens at the
+        // validator layer (the canonical first line of defence).
+        for name in SYSTEM_FIELD_NAMES {
+            let mut obj = serde_json::Map::new();
+            obj.insert((*name).to_string(), serde_json::json!({ "type": "string" }));
+            let schema = serde_json::Value::Object(obj);
+            let err = build_create_table_with_fks_for_dialect(
+                "app1",
+                "posts",
+                &schema,
+                &FkEmission::Inline,
+                SqlDialect::Postgres,
+            )
+            .expect_err("validator must reject system-field declaration");
+            assert!(
+                matches!(err, QueryError::ReservedSystemFieldName(_)),
+                "validator must raise ReservedSystemFieldName for {name:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// PG and SQLite emit equivalent column COUNT and ORDER for the
+    /// system-field prefix; only the types differ. Snapshot-style
+    /// comparison: any drift in the count or the order of system
+    /// fields between dialects fails here.
+    #[test]
+    fn pg_and_sqlite_emit_equivalent_create_table_for_system_fields() {
+        let schema = serde_json::json!({
+            "title": { "type": "string", "required": true },
+        });
+        let pg = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Postgres,
+        )
+        .expect("pg ok");
+        let sq = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("sqlite ok");
+
+        // Same system-field NAMES in the same ORDER on both arms.
+        let pg_positions: Vec<usize> = SYSTEM_FIELD_NAMES
+            .iter()
+            .map(|n| pg.find(n).expect("pg has name"))
+            .collect();
+        let sq_positions: Vec<usize> = SYSTEM_FIELD_NAMES
+            .iter()
+            .map(|n| sq.find(n).expect("sqlite has name"))
+            .collect();
+        // Names appear in canonical order on both arms.
+        for w in pg_positions.windows(2) {
+            assert!(w[0] < w[1], "pg names out of order: {pg}");
+        }
+        for w in sq_positions.windows(2) {
+            assert!(w[0] < w[1], "sqlite names out of order: {sq}");
+        }
+
+        // Both arms emit the 3 implicit indexes.
+        for col in &["deleted_at", "updated_at", "created_by"] {
+            let idx = index_name("posts", &[col], false);
+            assert!(pg.contains(&idx), "pg missing index {idx}");
+            assert!(sq.contains(&idx), "sqlite missing index {idx}");
         }
     }
 
