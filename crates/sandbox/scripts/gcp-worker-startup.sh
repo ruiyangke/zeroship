@@ -40,7 +40,7 @@
 #   - sandbox-admin-token: bearer for /admin/sandboxes/*
 #   - artifact-bucket:     GCS bucket name (no `gs://`)
 #   - controller-object:   GCS object name for the controller binary
-#                          (e.g. zeroship-sandbox.snapshot-v21)
+#                          (e.g. zeroship-sandbox.snapshot-v22)
 #   - vm-index-ceil:       int, default 12; number of taps to create
 #   - snapshot-bucket:     GCS bucket for L2 snapshot storage
 #                          (default = artifact-bucket; can be same/separate)
