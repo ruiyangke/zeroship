@@ -1083,8 +1083,8 @@ where
         // l2_upload_pending / l2_upload_failed_total so operators
         // see the L2-lag during a worker drain.
         //
-        // ## C-3 (T-8b-smoke-r4): why `std::thread::spawn`, not
-        // `compio::runtime::spawn_blocking`
+        // ## C-3 (T-8b-smoke-r4): why a dedicated OS thread (not
+        // `compio::runtime::spawn_blocking`)
         //
         // `SnapshotStore::put` is a sync trait method and the
         // snapshot handler at `snapshot_handler.rs:397` already
@@ -1099,13 +1099,22 @@ where
         //
         // `GcsSnapshotStore::put` (and the mock L2 used in tests)
         // is purely synchronous (ureq HTTPS + std::fs) and does
-        // NOT need a compio runtime, so a plain `std::thread::
-        // spawn` is sufficient. It also keeps `Tiered::put`
-        // callable from *any* context — compio task, spawn_
-        // blocking worker, or a unit test on a non-compio thread —
-        // which is the whole point of declaring the trait method
-        // sync. The detached compio Task primitive bought us
-        // nothing here because we never await its handle.
+        // NOT need a compio runtime, so a plain `std::thread`
+        // dispatch is sufficient. The OS-thread isolation also
+        // keeps `Tiered::put` callable from *any* context — compio
+        // task, spawn_blocking worker, or a unit test on a
+        // non-compio thread — which is the whole point of
+        // declaring the trait method sync.
+        //
+        // R14-A1 (C-7-LT-PR1 commit 1, 3d8acc23): replaced the open-coded
+        // `std::thread::Builder::new().spawn(...)` block with the shared
+        // `crate::detach::detach_isolated` helper (the canonical C-3/C-6
+        // OS-thread pattern). The helper mints a private compio runtime
+        // even though this L2 future never awaits a compio I/O op — the
+        // overhead is negligible (one runtime allocation per upload) and
+        // unifies the isolation surface across all detach sites. The
+        // future body is wrapped in `async move { ... }`; it returns
+        // immediately once the sync `l2.put(...)` returns.
         //
         // We can't `clone` arbitrary L2; require Arc-shareable above.
         let l2 = self.l2.clone();
@@ -1125,47 +1134,39 @@ where
         // the Rust-side name (which `tracing`/log lines that include
         // `std::thread::current().name()` will pick up).
         //
-        // `spawn` only fails on the very rare ENOMEM / EAGAIN — if
-        // we can't allocate a thread the controller has bigger
-        // problems; log + drop the upload (fire-and-forget contract).
-        //
         // Byte-slice is ASCII-safe: sandbox_id is hex (32 chars) per
         // B24-FOLLOWUP, so `s.len() - 8` lands on a char boundary.
         let tail = sandbox_id
             .get(sandbox_id.len().saturating_sub(8)..)
-            .unwrap_or(&sandbox_id);
-        let builder =
-            std::thread::Builder::new().name(format!("snap-l2-upload-{tail}"));
-        let spawn_res = builder.spawn(move || {
-            match l2.put(&sandbox_id, &artifact_path, &ch_version_owned) {
-                Ok(m) => {
-                    if m.sha256 != sha256 {
+            .unwrap_or(&sandbox_id)
+            .to_string();
+        crate::detach::detach_isolated(
+            format!("snap-l2-upload-{tail}"),
+            move || async move {
+                match l2.put(&sandbox_id, &artifact_path, &ch_version_owned) {
+                    Ok(m) => {
+                        if m.sha256 != sha256 {
+                            tracing::warn!(
+                                sandbox_id = %sandbox_id,
+                                "tiered: L2 returned a different sha256; possible re-encrypt drift"
+                            );
+                        } else {
+                            tracing::debug!(
+                                sandbox_id = %sandbox_id,
+                                "tiered: L2 upload completed"
+                            );
+                        }
+                    }
+                    Err(e) => {
                         tracing::warn!(
                             sandbox_id = %sandbox_id,
-                            "tiered: L2 returned a different sha256; possible re-encrypt drift"
-                        );
-                    } else {
-                        tracing::debug!(
-                            sandbox_id = %sandbox_id,
-                            "tiered: L2 upload completed"
+                            error = %e,
+                            "tiered: L2 upload failed (v1 fire-and-forget; GCS PR adds retry)"
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        sandbox_id = %sandbox_id,
-                        error = %e,
-                        "tiered: L2 upload failed (v1 fire-and-forget; GCS PR adds retry)"
-                    );
-                }
-            }
-        });
-        if let Err(e) = spawn_res {
-            tracing::warn!(
-                error = %e,
-                "tiered: could not spawn L2 upload thread; dropping (fire-and-forget)"
-            );
-        }
+            },
+        );
 
         Ok(meta)
     }
