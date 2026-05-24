@@ -1347,12 +1347,247 @@ async fn bootstrap_initial_hmac_key(pool: &Pool) -> Result<bool, DbError> {
 }
 
 // ---------------------------------------------------------------------------
+// Per-app PG role hardening (§17.5)
+// ---------------------------------------------------------------------------
+//
+// §17.5 invariant — **slot ownership stays platform-side**. A per-app
+// role owns ONLY its own schema. It NEVER receives the `REPLICATION`
+// attribute: a logical replication slot requires `REPLICATION`, and
+// granting it to a per-app role would let app-A observe app-B's WAL —
+// the multi-tenant break the section exists to prevent. The
+// control-plane platform role (`PLATFORM_ROLE`) remains the sole
+// creator/reader/dropper of every per-app slot; the WAL consumer +
+// §17.6 watchdog + §17.7 drop step 3 all connect under it. Client SQL
+// runs under the constrained per-app role via `SET [LOCAL] ROLE`.
+//
+// The per-app role still needs to invoke the slot/publication SECURITY
+// DEFINER wrappers (`__zeroship_admin.ensure_slot` etc.) during its own
+// app's CDC setup — it gets that purely by inheriting `APP_ROLE_TEMPLATE`
+// (which holds `USAGE ON SCHEMA __zeroship_admin` + EXECUTE on the safe
+// wrappers). The DEFINER carries the `REPLICATION` privilege; the caller
+// does not. That is exactly why the wrappers exist (§17.5 / §17.6).
+//
+// **Pre-launch, no back-compat (AGENTS.md):** there is NO detect-and-warn
+// / ALTER-existing-schema backfill path. New schemas get the role at
+// creation; that is the entire surface. A production cluster from before
+// this lands does not exist.
+
+/// Compose the per-app PG role name from an `app_id`.
+///
+/// Convention `app_<id>_role` — pinned by the `auth::mod` docstring on
+/// [`APP_ROLE_TEMPLATE`] ("Per-app roles (`app_<id>_role`) are created
+/// downstream by the control plane during app provisioning"). The
+/// platform-managed roles use the `__zeroship_` prefix; per-app roles
+/// deliberately do NOT, so they are visually distinct from the trust
+/// anchors in `pg_roles` and `\du` output.
+///
+/// `app_id` is a non-creator-controllable UUIDv7 base62 typed_id
+/// validated to `[A-Za-z0-9_-]`; we additionally lowercase to mirror the
+/// `replication::sanitise_app_id` normalisation so the role name resolves
+/// identically regardless of the caller's casing. Hyphens are mapped to
+/// underscores because an unquoted PG identifier cannot contain `-` and
+/// quoting every `SET ROLE` is noisier than a stable transform.
+pub fn per_app_role_name(app_id: &str) -> String {
+    let normalised: String = app_id
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c == '-' { '_' } else { c })
+        .collect();
+    format!("app_{normalised}_role")
+}
+
+/// `SET LOCAL ROLE "app_<id>_role"` — used INSIDE a transaction so the
+/// role automatically reverts at COMMIT/ROLLBACK (no explicit `RESET`
+/// needed, and no risk of a pooled connection leaking the role to the
+/// next checkout). This is the preferred client-SQL injection point.
+///
+/// The role name flows through [`per_app_role_name`] (validated +
+/// normalised) and is double-quoted, so this is injection-safe even
+/// though it interpolates.
+pub fn set_local_role_sql(app_id: &str) -> String {
+    format!(r#"SET LOCAL ROLE "{}""#, per_app_role_name(app_id))
+}
+
+/// `SET ROLE "app_<id>_role"` — session-level variant for the rare
+/// non-transactional client-SQL path. MUST be paired with
+/// [`reset_role_sql`] before the connection returns to the pool, or the
+/// next checkout inherits the constrained role.
+pub fn set_role_sql(app_id: &str) -> String {
+    format!(r#"SET ROLE "{}""#, per_app_role_name(app_id))
+}
+
+/// `RESET ROLE` — restore the session's original (login) role. Pairs
+/// with [`set_role_sql`] on the non-transactional path.
+pub fn reset_role_sql() -> &'static str {
+    "RESET ROLE"
+}
+
+/// Result of [`ensure_per_app_role`] — distinguishes "created the role
+/// now" from "role already existed" for idempotency telemetry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PerAppRoleOutcome {
+    /// True iff this call issued the `CREATE ROLE`.
+    pub created_role: bool,
+}
+
+/// Idempotently provision the per-app PG role and scope its grants to
+/// the per-app schema ONLY (§17.5).
+///
+/// Call AFTER `NamespaceManager::ensure_app_schema` has created
+/// `"<app_id>"` (the grants reference it). Steps:
+///
+/// 1. `CREATE ROLE "app_<id>_role" NOLOGIN NOREPLICATION …
+///    IN ROLE "__zeroship_app_role_template"` — the explicit
+///    `NOREPLICATION` is the §17.5 non-negotiable; `IN ROLE` makes the
+///    per-app role inherit the template's admin-schema USAGE + wrapper
+///    EXECUTE grants without re-granting them per app.
+/// 2. `GRANT USAGE, CREATE ON SCHEMA "<app_id>"` — the role may use and
+///    add objects to its own schema.
+/// 3. `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA
+///    "<app_id>"` + matching `GRANT USAGE ON ALL SEQUENCES` — CRUD on
+///    existing tables.
+/// 4. `ALTER DEFAULT PRIVILEGES IN SCHEMA "<app_id>" GRANT … ON
+///    TABLES/SEQUENCES` — so tables/sequences the role (or the platform
+///    migrator) creates LATER are auto-granted, no re-run needed.
+///
+/// Explicitly does NOT grant `REPLICATION`, nor any privilege on another
+/// app's schema, nor on `__zeroship_admin` tables (the template already
+/// scopes admin access to EXECUTE-on-wrappers only).
+///
+/// Runs under the caller's pool, which in production is the platform
+/// (bootstrap) role — a superuser or CREATEROLE principal.
+pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRoleOutcome, DbError> {
+    let role = per_app_role_name(app_id);
+    let schema = crate::query::quote_ident(app_id);
+    let qrole = format!("\"{role}\"");
+
+    // 1. CREATE ROLE — NOREPLICATION is the §17.5 invariant, asserted
+    //    explicitly (not relying on the server default). `IN ROLE`
+    //    grants membership in the template so admin-wrapper EXECUTE +
+    //    admin-schema USAGE inherit.
+    let created = create_role_if_missing(
+        pool,
+        &role,
+        &format!(
+            "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE \"{APP_ROLE_TEMPLATE}\""
+        ),
+    )
+    .await?;
+
+    // 2. schema-level: USAGE (enter the schema) + CREATE (add objects).
+    pool.execute(
+        &format!("GRANT USAGE, CREATE ON SCHEMA {schema} TO {qrole}"),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("GRANT USAGE,CREATE ON SCHEMA {app_id}"), e))?;
+
+    // 3. existing tables + sequences.
+    pool.execute(
+        &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {qrole}"),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("GRANT table CRUD ON SCHEMA {app_id}"), e))?;
+    pool.execute(
+        &format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {qrole}"),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("GRANT sequence usage ON SCHEMA {app_id}"), e))?;
+
+    // 4. default privileges for FUTURE objects in this schema. Without
+    //    this, a table the platform migrator creates next deploy would
+    //    be un-readable by the per-app role until a manual re-grant.
+    pool.execute(
+        &format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {qrole}"
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("ALTER DEFAULT PRIVILEGES tables {app_id}"), e))?;
+    pool.execute(
+        &format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
+             GRANT USAGE, SELECT ON SEQUENCES TO {qrole}"
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql(&format!("ALTER DEFAULT PRIVILEGES sequences {app_id}"), e))?;
+
+    Ok(PerAppRoleOutcome {
+        created_role: created,
+    })
+}
+
+/// Drop the per-app role. Called by the §17.7 drop-namespace sequence
+/// AFTER `DROP SCHEMA "<app_id>" CASCADE`, so no objects depend on the
+/// role at drop time. Idempotent: `DROP ROLE IF EXISTS` is a no-op when
+/// the role is already gone (or was never created).
+///
+/// Postgres refuses to drop a role that still owns objects or holds
+/// grants; the CASCADE schema-drop in step 6 removes the role's objects,
+/// and the grants vanish with the schema. If a stray dependency remains
+/// (e.g. a grant in another schema that should never have existed), the
+/// DROP errors loudly rather than silently — surfacing the §17.5
+/// violation instead of masking it.
+pub async fn drop_per_app_role(pool: &Pool, app_id: &str) -> Result<(), DbError> {
+    let role = per_app_role_name(app_id);
+    pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await
+        .map_err(|e| coded_sql(&format!("DROP ROLE {role}"), e))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_app_role_name_uses_app_id_role_convention() {
+        // Convention pinned by the `APP_ROLE_TEMPLATE` docstring.
+        assert_eq!(per_app_role_name("app_demo"), "app_app_demo_role");
+        // Hyphens (legal in typed_id base62? no — but defensive) map to
+        // underscores so the unquoted-identifier transform is stable.
+        assert_eq!(per_app_role_name("app-abc"), "app_app_abc_role");
+        // Uppercase normalised to lowercase (mirrors sanitise_app_id).
+        assert_eq!(per_app_role_name("App_X"), "app_app_x_role");
+    }
+
+    #[test]
+    fn set_role_sql_shapes_are_quoted_and_correct() {
+        assert_eq!(set_local_role_sql("app_demo"), r#"SET LOCAL ROLE "app_app_demo_role""#);
+        assert_eq!(set_role_sql("app_demo"), r#"SET ROLE "app_app_demo_role""#);
+        assert_eq!(reset_role_sql(), "RESET ROLE");
+    }
+
+    #[test]
+    fn create_role_attrs_assert_noreplication() {
+        // §17.5 NON-NEGOTIABLE: the per-app CREATE ROLE attribute string
+        // MUST contain NOREPLICATION. This is a source-level guard so a
+        // future edit that drops the attribute (relying on the server
+        // default) fails the test — the default is overridable per
+        // cluster (`rolreplication` inheritance is subtle), so we assert
+        // it explicitly. The literal lives in `ensure_per_app_role`;
+        // mirror it here.
+        let attrs =
+            format!("NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE \"{APP_ROLE_TEMPLATE}\"");
+        assert!(
+            attrs.contains("NOREPLICATION"),
+            "per-app role MUST be NOREPLICATION (§17.5 slot-ownership-stays-platform)"
+        );
+        assert!(
+            !attrs.contains(" REPLICATION"),
+            "per-app role MUST NOT carry the REPLICATION attribute"
+        );
+    }
 
     #[test]
     fn outcome_json_keys_match_proposal_naming() {

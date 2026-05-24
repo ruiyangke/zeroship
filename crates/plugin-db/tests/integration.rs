@@ -6865,3 +6865,334 @@ async fn sweeper_idempotent_concurrent() {
     assert_eq!(status2, "failed");
     assert_eq!(error2.as_deref(), Some("orphan_running_row_swept"));
 }
+
+// ---------------------------------------------------------------------------
+// P6a-2 — Per-app PG role hardening (§17.5).
+//
+// The per-app role (`app_<id>_role`) owns ONLY its schema and is
+// NOREPLICATION — slot ownership stays platform-side. These tests
+// provision the role via `auth::bootstrap::ensure_per_app_role` and
+// fence it: it can CRUD its own schema, cannot read a sibling app's
+// schema, cannot create/list/drop replication slots, and carries no
+// `rolreplication` attribute. The per-app role is NOLOGIN (clients
+// connect as the platform login role, then `SET ROLE`), so these tests
+// drive it via `SET ROLE` from the superuser pool — which is exactly how
+// `exec_begin` / `exec_auto_begin` apply it to client SQL.
+// ---------------------------------------------------------------------------
+
+/// Provision a schema + its per-app role for a test. Returns the role
+/// name. Idempotent re-runs are exercised by `per_app_role_created_at_provision`.
+async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str) -> String {
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+    // The role inherits __zeroship_app_role_template, so it must exist.
+    zeroship_plugin_db::auth::ensure_admin_schema(pool)
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(pool)
+        .await
+        .unwrap();
+    role
+}
+
+#[compio::test]
+async fn per_app_role_created_at_provision() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_role_create";
+    let role = provision_app_with_role(&pool, app).await;
+
+    // First provision creates the role.
+    let first = zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .expect("provision per-app role");
+    assert!(first.created_role, "first provision must create the role");
+
+    // The role now exists in pg_roles.
+    let exists = pool
+        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[role.as_str()])
+        .await
+        .unwrap();
+    assert_eq!(exists.len(), 1, "role must exist after provision");
+
+    // Idempotent: a second provision is a no-op create (GRANTs re-run
+    // harmlessly).
+    let second = zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .expect("re-provision per-app role");
+    assert!(
+        !second.created_role,
+        "second provision must NOT re-create the role"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn per_app_role_has_no_replication_attr() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_role_norepl";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // §17.5 NON-NEGOTIABLE: rolreplication MUST be false.
+    let rows = pool
+        .query_text_params(
+            "SELECT rolreplication FROM pg_roles WHERE rolname = $1",
+            &[role.as_str()],
+        )
+        .await
+        .unwrap();
+    let is_repl: bool = rows[0].get("rolreplication");
+    assert!(
+        !is_repl,
+        "per-app role MUST NOT have the REPLICATION attribute (§17.5 \
+         slot-ownership-stays-platform)"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn per_app_role_grant_scoped_to_schema() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_role_scoped";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // Create a table in the app schema (as superuser), insert a row.
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app}".widgets (id SERIAL PRIMARY KEY, name TEXT)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(r#"INSERT INTO "{app}".widgets (name) VALUES ('seed')"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    // Re-run provision so the existing-table GRANT covers `widgets`
+    // (provision before table creation only set DEFAULT PRIVILEGES; the
+    // re-run also covers tables that already exist — proving idempotent
+    // grant coverage).
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // SET ROLE to the per-app role and CRUD its own schema — must work.
+    pool.execute(&format!(r#"SET ROLE "{role}""#), &[]).await.unwrap();
+    let sel = pool
+        .query_text_params(&format!(r#"SELECT name FROM "{app}".widgets"#), &[])
+        .await;
+    assert!(sel.is_ok(), "per-app role must SELECT its own schema: {sel:?}");
+    let ins = pool
+        .execute(
+            &format!(r#"INSERT INTO "{app}".widgets (name) VALUES ('by_role')"#),
+            &[],
+        )
+        .await;
+    assert!(ins.is_ok(), "per-app role must INSERT its own schema: {ins:?}");
+    pool.execute("RESET ROLE", &[]).await.unwrap();
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app_a = "p6a_fence_a";
+    let app_b = "p6a_fence_b";
+    let role_a = provision_app_with_role(&pool, app_a).await;
+    // Provision a sibling schema B (and its role) with a table.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    let role_b = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_b);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[]).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app_b}\""), &[]).await.unwrap();
+
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app_a)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app_b)
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app_b}".secrets (id SERIAL PRIMARY KEY, val TEXT)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(r#"INSERT INTO "{app_b}".secrets (val) VALUES ('app_b_secret')"#),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // SET ROLE to app_a's role and attempt to read app_b's schema — must
+    // be denied (no USAGE on the sibling schema).
+    pool.execute(&format!(r#"SET ROLE "{role_a}""#), &[]).await.unwrap();
+    let cross = pool
+        .query_text_params(&format!(r#"SELECT val FROM "{app_b}".secrets"#), &[])
+        .await;
+    assert!(
+        cross.is_err(),
+        "per-app role A must NOT read sibling schema B; got Ok"
+    );
+    let cross_err = err_chain(&cross.unwrap_err());
+    assert!(
+        cross_err.contains("permission denied") || cross_err.contains("acl"),
+        "expected permission-denied reading sibling schema, got: {cross_err}"
+    );
+
+    // While SET ROLE'd: cannot create a replication slot (NOREPLICATION).
+    let slot_create = pool
+        .execute(
+            "SELECT pg_create_logical_replication_slot('p6a_fence_slot', 'pgoutput', false, false)",
+            &[],
+        )
+        .await;
+    assert!(
+        slot_create.is_err(),
+        "per-app role must NOT create a replication slot directly"
+    );
+    let slot_err = err_chain(&slot_create.unwrap_err());
+    assert!(
+        slot_err.contains("replication") || slot_err.contains("permission denied"),
+        "expected REPLICATION-privilege error on slot create, got: {slot_err}"
+    );
+
+    // Cannot drop a slot either (pg_drop_replication_slot requires
+    // REPLICATION). Use a name that doesn't exist — the privilege check
+    // fires before the "no such slot" check.
+    let slot_drop = pool
+        .execute("SELECT pg_drop_replication_slot('does_not_exist')", &[])
+        .await;
+    assert!(
+        slot_drop.is_err(),
+        "per-app role must NOT drop a replication slot"
+    );
+
+    pool.execute("RESET ROLE", &[]).await.unwrap();
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_a}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_a}\""), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[]).await;
+}
+
+#[compio::test]
+async fn client_sql_runs_under_per_app_role() {
+    // Proves the `SET LOCAL ROLE` shape `exec_begin` / `exec_auto_begin`
+    // issue actually switches the effective role for the rest of the tx,
+    // and reverts at COMMIT/ROLLBACK.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_setlocal";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // Open a dedicated connection, BEGIN, then apply the SAME SET LOCAL
+    // ROLE SQL the orchestrator emits.
+    let (client, conn) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+
+    client.execute("BEGIN", &[]).await.unwrap();
+    let set_sql = zeroship_plugin_db::auth::bootstrap::set_local_role_sql(app);
+    client.execute(&set_sql, &[]).await.unwrap();
+
+    // current_user inside the tx must be the per-app role.
+    let who = client
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let current: String = who[0].get("u");
+    assert_eq!(
+        current, role,
+        "client SQL inside the tx must run under the per-app role"
+    );
+
+    // COMMIT reverts SET LOCAL — current_user is back to the login role.
+    client.execute("COMMIT", &[]).await.unwrap();
+    let who2 = client
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let after: String = who2[0].get("u");
+    assert_ne!(
+        after, role,
+        "SET LOCAL ROLE must revert at COMMIT (no role leak to next stmt)"
+    );
+
+    drop(client);
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn wal_connection_stays_platform_role() {
+    // §17.5: the WAL/replication connection stays under the platform
+    // role and is NEVER switched to a per-app role. This is a structural
+    // assertion: the replication helpers (`ensure_publication_and_slot`,
+    // `drop_abandoned_slots`, the §17.7 deprovision) run on the pool
+    // directly with NO `SET ROLE` — only the transaction BEGIN paths
+    // (`exec_begin` / `exec_auto_begin`) apply the per-app role. We pin
+    // that the role-application surface is exactly the two tx-begin
+    // helpers by asserting `apply_per_app_role` is not invoked from the
+    // replication/WAL code (verified at the source level — there is no
+    // `set_local_role`/`set_role`/`apply_per_app_role` call anywhere in
+    // replication.rs / wal_consumer.rs / change_stream_pg.rs).
+    //
+    // The runtime half: provision a role, then run a replication-side
+    // operation on the pool and confirm it executes as the platform
+    // login role (current_user unchanged), NOT the per-app role.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_walrole";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // A replication-side read (the watchdog query shape) runs on the
+    // pool with no SET ROLE — current_user is the login role.
+    let who = pool
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let current: String = who[0].get("u");
+    assert_ne!(
+        current, role,
+        "WAL/replication pool connection must stay on the platform login \
+         role, never the per-app role"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}

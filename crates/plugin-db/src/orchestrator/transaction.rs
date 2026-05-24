@@ -54,6 +54,9 @@ pub fn begin_transaction_dispatch<'s>(
     // `tx_token` stays 0 so the wrapper's Drop sees
     // `current(0) != token` and no-ops.
     let token = crate::next_tx_token();
+    // Clone before the move into `mint_transaction` so the spawned BEGIN
+    // future can apply `SET LOCAL ROLE "<per-app role>"` (§17.5).
+    let app_id_for_begin = app_id.clone();
     let tx_obj = match crate::v8_classes::transaction::mint_transaction(scope, token, app_id) {
         Ok(obj) => obj,
         Err(e) => {
@@ -75,7 +78,7 @@ pub fn begin_transaction_dispatch<'s>(
     let request_id = state.borrow().executing_request_id;
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_begin(isolation_level.as_deref()).await {
+        match exec_begin(isolation_level.as_deref(), &app_id_for_begin).await {
             Ok(()) => {
                 // Stamp ownership now that the transaction-conn slot
                 // holds the client — the wrapper's commit / rollback /
@@ -112,7 +115,7 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
     "SERIALIZABLE",
 ];
 
-async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
+async fn exec_begin(isolation_level: Option<&str>, app_id: &str) -> Result<(), DbError> {
     // Check: no nested transactions
     let has_tx = crate::context::with(|c| c.has_tx());
     if has_tx {
@@ -169,6 +172,14 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
         .execute(&begin_sql, &[])
         .await
         .map_err(|e| DbError::from_pg(&e))?;
+
+    // §17.5 — constrain client SQL to the per-app role for the lifetime
+    // of this transaction. `SET LOCAL ROLE` auto-reverts at COMMIT /
+    // ROLLBACK, so the dedicated tx connection never leaks the role.
+    // Production-only (`hardening`): the per-app role is provisioned at
+    // `register_model` time on the same gate. Without the feature, client
+    // SQL runs under the platform login role exactly as before.
+    super::apply_per_app_role(&client, app_id).await?;
 
     crate::context::with_mut(|c| {
         let _previous = c.install_tx_client(client);

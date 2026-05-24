@@ -56,6 +56,12 @@ pub fn auto_begin_transaction(
     // ("read committed" | "repeatable read" | "serializable"). Empty /
     // missing → use the per-kind default in `auto_tx_begin_sql`.
     let isolation = get_string_arg(scope, &args, 1);
+    // §17.5 — app_id for the per-app `SET LOCAL ROLE` inside the auto-tx.
+    // Read from the same `APP_ID` env-var convention every other dispatch
+    // uses; empty if the runtime didn't inject it (dev/raw-JS), in which
+    // case `apply_per_app_role` is a no-op anyway (hardening-off or the
+    // role doesn't exist).
+    let app_id = crate::v8_bridge::get_app_id_pub(&state);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -65,7 +71,9 @@ pub fn auto_begin_transaction(
         // legacy `OpResult::Failed { error: String }` rail flattened the
         // typed `DbError` and stripped the SDK's retry-by-code signal —
         // the exact site retry-by-code matters most.
-        let value = begin_to_resolve_value(exec_auto_begin(kind.as_deref(), isolation.as_deref()).await);
+        let value = begin_to_resolve_value(
+            exec_auto_begin(kind.as_deref(), isolation.as_deref(), &app_id).await,
+        );
         OpResult::JsValue {
             resolver,
             value,
@@ -176,7 +184,11 @@ fn normalize_isolation(s: Option<&str>) -> Option<&'static str> {
     }
 }
 
-async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<u32, DbError> {
+async fn exec_auto_begin(
+    kind: Option<&str>,
+    isolation: Option<&str>,
+    app_id: &str,
+) -> Result<u32, DbError> {
     // Skip if this kind isn't wrapped (action / stream / subscription /
     // unknown). Token 0 → end is a no-op.
     let Some(sql) = auto_tx_begin_sql(kind, isolation) else {
@@ -220,6 +232,11 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
         .execute(&sql, &[])
         .await
         .map_err(|e| DbError::from_pg(&e))?;
+
+    // §17.5 — constrain the auto-tx's client SQL to the per-app role.
+    // `SET LOCAL ROLE` reverts at the auto-tx COMMIT/ROLLBACK. No-op
+    // without `hardening`. See `orchestrator::apply_per_app_role`.
+    super::apply_per_app_role(&client, app_id).await?;
 
     crate::context::with_mut(|c| {
         let _previous = c.install_tx_client(client);
