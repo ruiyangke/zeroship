@@ -4772,3 +4772,309 @@ fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
         "expected reserved-name message, got: {msg}"
     );
 }
+
+// ===========================================================================
+// P5.5 PR 4 — unmask RPC + audit table (SQLite arm)
+// ===========================================================================
+//
+// These tests exercise `crud::unmask::dispatch_unmask` end-to-end on the
+// SQLite arm:
+//   - the audit table is created idempotently on first call;
+//   - the default-deny stub grants `kind: "auto"` and denies everyone else;
+//   - both granted AND denied paths emit a row to the per-app audit table;
+//   - the encrypted-column read path decrypts via the EncryptedColumn impl;
+//   - the typed error rail surfaces `unmask_column_not_masked` /
+//     `unmask_not_permitted` on the SDK's `.code`-branchable path.
+//
+// Schema cache + backend handle are installed via the `*_for_tests`
+// helpers in `lib.rs`. Each test uses a fresh tempdir so the audit
+// table is observed from a clean slate.
+
+use zeroship_plugin_db::crud::unmask;
+
+/// Helper — install backend + schema for an unmask test. Returns the
+/// backend (kept alive for the test duration via Rc) + the TempDir
+/// guard the caller binds to keep the on-disk directory alive.
+async fn unmask_setup_with_schema(
+    app_id: &str,
+    collection: &str,
+    schema: serde_json::Value,
+) -> (Rc<SqliteBackend>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let backend = Rc::new(
+        SqliteBackend::new(std::path::PathBuf::from(dir.path()))
+            .expect("SqliteBackend::new"),
+    );
+    backend
+        .ensure_app_schema(app_id)
+        .await
+        .expect("ensure_app_schema");
+    // Install into the per-isolate context so dispatch_unmask's
+    // backend() lookup succeeds.
+    zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
+    zeroship_plugin_db::cache_schema_for_tests(app_id, collection, schema);
+    (backend, dir)
+}
+
+/// Read every row from `__zeroship_audit_unmask` for a given app.
+/// Returns `Vec<(outcome, actor_role, classification)>`.
+async fn read_audit_rows(
+    backend: &SqliteBackend,
+    app_id: &str,
+) -> Vec<(String, String, String)> {
+    use zeroship_plugin_db::backend::DialectBuilder as _;
+    let client = backend
+        .acquire_dedicated_client()
+        .await
+        .expect("acquire client");
+    let q_app = backend.quote_ident(app_id);
+    let sql = format!(
+        r#"SELECT outcome, actor_role, classification
+           FROM {q_app}."__zeroship_audit_unmask"
+           ORDER BY id"#
+    );
+    let rows = client.query(&sql, &[]).await.expect("query audit rows");
+    rows.into_iter()
+        .map(|r| {
+            (
+                r[0].clone().unwrap_or_default(),
+                r[1].clone().unwrap_or_default(),
+                r[2].clone().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// **P5.5 PR 4 — gate #1**: an `auto` actor unmasking an encrypted +
+/// masked column recovers plaintext, and a `granted` audit row is
+/// emitted with the right classification.
+#[test]
+fn unmask_with_auto_actor_returns_plaintext() {
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P55_PR4_AUTO", &"a".repeat(64));
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "encrypted": {
+                "mode": "randomised",
+                "keyId": "p55_pr4_auto",
+                "wraps": "string",
+            },
+            "mask": { "kind": "last4", "classification": "spi" },
+        },
+    });
+    let app_id = "app_unmask_auto";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        // Manually create the table — the encryption pass + dual-write
+        // pipeline lives in CRUD, but the unmask SELECT only needs
+        // `id TEXT PRIMARY KEY, ssn BLOB`. Mirrors the e2e CRUD test.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_unmask_auto\".\"users\" (\
+                     id  TEXT PRIMARY KEY, \
+                     ssn BLOB, \
+                     ssn_masked TEXT NOT NULL DEFAULT '***-**-XXXX'\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+
+        // Encrypt + insert one row inline.
+        use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
+        use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+        let row_pk = "usr_auto_01";
+        let plaintext = "123-45-6789";
+        let mut doc = serde_json::json!({
+            "id": row_pk,
+            "ssn": plaintext,
+            "ssn_masked": "***-**-6789",
+        });
+        encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
+            .await
+            .expect("encrypt_row_on_write");
+        let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
+            .expect("build_insert_with_dialect");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+
+        // Dispatch unmask with `kind: "auto"` actor — must succeed.
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: row_pk.to_string(),
+            column: "ssn".to_string(),
+            actor: Some(serde_json::json!({ "kind": "auto", "id": null })),
+            reason: Some("integration test".to_string()),
+        };
+        let result = unmask::dispatch_unmask(app_id, args)
+            .await
+            .expect("dispatch_unmask must succeed for auto actor");
+        assert_eq!(
+            result.plaintext, plaintext,
+            "plaintext must recover via decrypt path"
+        );
+
+        // Audit row must show `granted` + `spi`.
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1, "exactly one audit row expected: {audit:?}");
+        assert_eq!(audit[0].0, "granted", "outcome must be granted");
+        assert_eq!(audit[0].1, "auto", "actor_role must be 'auto'");
+        assert_eq!(
+            audit[0].2, "spi",
+            "classification must be 'spi' (from the schema mask block)"
+        );
+    });
+}
+
+/// **P5.5 PR 4 — gate #2**: a `user`-kind actor is denied by the PR 4
+/// default-policy stub; a `denied` audit row is emitted; the typed
+/// error `unmask_not_permitted` reaches the caller.
+#[test]
+fn unmask_with_user_actor_returns_forbidden_audit_logged() {
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P55_PR4_USER", &"b".repeat(64));
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "encrypted": {
+                "mode": "randomised",
+                "keyId": "p55_pr4_user",
+                "wraps": "string",
+            },
+            "mask": { "kind": "last4", "classification": "spi" },
+        },
+    });
+    let app_id = "app_unmask_user";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_unmask_user\".\"users\" (\
+                     id  TEXT PRIMARY KEY, \
+                     ssn BLOB, \
+                     ssn_masked TEXT NOT NULL DEFAULT '***'\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+
+        // No need to insert a row — the authorization check happens
+        // BEFORE the SELECT, so a denied path doesn't touch the data
+        // table at all. Even if the row exists, the SELECT is gated
+        // by `allowed = false`.
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: "usr_anywhere".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            reason: None,
+        };
+        let err = unmask::dispatch_unmask(app_id, args)
+            .await
+            .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
+        match err {
+            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+                assert_eq!(code, "unmask_not_permitted");
+            }
+            other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
+        }
+
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1, "denied path must still emit one audit row");
+        assert_eq!(audit[0].0, "denied", "outcome must be 'denied'");
+        assert_eq!(audit[0].1, "user", "actor_role must be 'user'");
+        assert_eq!(
+            audit[0].2, "spi",
+            "classification must be 'spi' even on denied path"
+        );
+    });
+}
+
+/// **P5.5 PR 4 — gate #3**: unmask of a column that has no mask
+/// declaration on the cached schema returns the typed
+/// `unmask_column_not_masked` error. Pins the contract that the
+/// dispatcher refuses to leak plaintext through a "forged" RPC for
+/// arbitrary columns.
+#[test]
+fn unmask_column_not_masked_returns_typed_error() {
+    // Schema declares `name` as a bare string — no mask block.
+    let schema = serde_json::json!({
+        "id":   { "type": "string" },
+        "name": { "type": "string" },
+    });
+    let app_id = "app_unmask_unmasked";
+    let collection = "users";
+
+    run(async {
+        let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: "any_pk".to_string(),
+            column: "name".to_string(),
+            actor: Some(serde_json::json!({ "kind": "auto" })),
+            reason: None,
+        };
+        let err = unmask::dispatch_unmask(app_id, args)
+            .await
+            .expect_err("unmask of non-masked column must refuse");
+        match err {
+            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "unmask_column_not_masked");
+            }
+            other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
+        }
+    });
+}
+
+/// **P5.5 PR 4 — gate #4**: classification flows through to the audit
+/// row regardless of outcome. We register a column with `classification:
+/// "phi"`, force the denied path (user actor), and assert the audit
+/// row's classification text matches.
+#[test]
+fn unmask_writes_audit_row_with_correct_classification() {
+    let schema = serde_json::json!({
+        "id":      { "type": "string" },
+        "diag":    {
+            "type": "string",
+            // Mask-only (no encryption) — exercises the plaintext-storage
+            // fetch path indirectly (although the denied branch never
+            // reaches it). The dispatcher's denied audit-row write still
+            // pulls classification from the cached schema.
+            "mask": { "kind": "full", "classification": "phi" },
+        },
+    });
+    let app_id = "app_unmask_phi";
+    let collection = "patients";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: "pat_01".to_string(),
+            column: "diag".to_string(),
+            actor: Some(serde_json::json!({ "kind": "user", "id": "doctor_x" })),
+            reason: Some("chart review".to_string()),
+        };
+        let _err = unmask::dispatch_unmask(app_id, args)
+            .await
+            .expect_err("user actor denied");
+
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "denied");
+        assert_eq!(
+            audit[0].2, "phi",
+            "classification 'phi' must round-trip onto the audit row"
+        );
+    });
+}

@@ -56,6 +56,16 @@ pub(crate) mod mask_pass;
 #[cfg(feature = "test-helpers")]
 pub mod mask_pass;
 
+// **P5.5 PR 4** — `unmask()` RPC dispatch + audit row writer.
+// Same visibility pattern as the sibling passes so integration tests
+// can exercise `dispatch_unmask` directly when `test-helpers` is on.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod unmask;
+#[cfg(feature = "test-helpers")]
+pub mod unmask;
+
+pub(crate) use unmask::dispatch_unmask_field;
+
 // ---------------------------------------------------------------------------
 // dispatch_op template
 // ---------------------------------------------------------------------------

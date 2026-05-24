@@ -358,6 +358,31 @@ pub fn set_db_url_for_tests(url: &str) {
     });
 }
 
+/// **P5.5 PR 4 test helper**: install a `SqliteBackend` into the per-
+/// isolate context so the unmask integration suite can drive
+/// `crud::unmask::dispatch_unmask` against a freshly-constructed
+/// backend without the full V8 runtime + plugin wiring.
+///
+/// Production code reaches the SQLite arm through the
+/// `DbPlugin::build_instance` path; this helper short-circuits that
+/// for SQLite-only integration tests in `tests/sqlite_integration.rs`.
+#[cfg(all(any(test, feature = "test-helpers"), feature = "sqlite"))]
+#[doc(hidden)]
+pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBackend>) {
+    ctx_mut(|c| c.set_sqlite_backend(backend));
+}
+
+/// **P5.5 PR 4 test helper**: cache a schema in the per-isolate
+/// context so the unmask dispatcher's `lookup_mask_meta` /
+/// `lookup_encryption_meta` calls find the column metadata. Mirrors
+/// the cache install the production `register_model` orchestrator
+/// performs on the SDK boundary.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
+    ctx_mut(|c| c.cache_schema(app_id, collection, schema));
+}
+
 /// **Test-only**: clear [`crate::context::IsolateDbContext::mig_lock`]
 /// for the current thread. Safe across test boundaries when an earlier
 /// test left the lock held.

@@ -487,6 +487,53 @@ export interface MaskedValueRepr {
 export type Actor = Record<string, unknown>;
 
 /**
+ * **P5.5 PR 4** — resolve the native `env.db.unmaskField` callable.
+ *
+ * Throws `unmask_not_available` with a remediation `hint` when the
+ * runtime hasn't exposed `env.db.unmaskField`. This shape mirrors
+ * `Collection._nativeCollection()`'s "missing native surface" error:
+ * the SDK can surface a typed code to consumers without leaking the
+ * raw `undefined` access.
+ *
+ * Resolved lazily on every `.unmask()` call so:
+ *
+ * - Test harnesses that monkey-patch `env.db.unmaskField` later in the
+ *   process pick up the patched function on subsequent calls.
+ * - Modules imported before the runtime finishes wiring `env` (rare,
+ *   but possible during `installSchema`'s plant phase) don't bake a
+ *   stale `undefined` into the closure.
+ *
+ * The lookup is O(1) (two property accesses) so the per-call overhead
+ * is negligible compared to the V8↔Rust round-trip that follows.
+ */
+function resolveUnmaskField(): (args: {
+  collection: string;
+  row_pk: string;
+  column: string;
+  actor?: unknown;
+  reason?: string;
+}) => Promise<unknown> {
+  const envAny = (globalThis as { env?: { db?: { unmaskField?: unknown } } }).env;
+  const fn = envAny?.db?.unmaskField;
+  if (typeof fn !== "function") {
+    throw Object.assign(
+      new Error(
+        "MaskedValue.unmask(): env.db.unmaskField not available — " +
+          "runtime is missing the P5.5 PR 4 unmask RPC surface.",
+      ),
+      { code: "unmask_not_available" as const },
+    );
+  }
+  return fn as (args: {
+    collection: string;
+    row_pk: string;
+    column: string;
+    actor?: unknown;
+    reason?: string;
+  }) => Promise<unknown>;
+}
+
+/**
  * **P5.5 PR 1** — masked-value wrapper.
  *
  * Encapsulates the masked representation of a sensitive field
@@ -537,42 +584,76 @@ export class MaskedValue<T extends string | number | Uint8Array = string> {
   /**
    * Round-trip to the platform to fetch plaintext.
    *
-   * **PR 1 stub**: signature only — throws `unmask_not_implemented`.
-   * PR 4 wires this to the `zeroship.db.unmaskField` native op,
-   * which checks the actor's role against the column's
-   * classification, emits an audit row, and returns the decrypted
-   * plaintext on success.
+   * **PR 4**: wired to the `env.db.unmaskField` native op (registered
+   * by `crates/plugin-db` as a `#[v8_method]` on the `Db` v8_class).
+   * The native dispatcher:
    *
-   * Errors PR 4 will surface:
+   * 1. Looks up the column's mask + encryption metadata from the
+   *    cached schema (must match the `_meta.column` on this instance).
+   * 2. Authorises the actor against the column's classification.
+   *    PR 4 ships a strict default-deny stub: only `kind: "auto"`
+   *    actors are granted access; PR 5 will swap the stub for a
+   *    per-app `defineMaskPolicy()` lookup.
+   * 3. SELECTs the row, decrypts the ciphertext (if encrypted) or
+   *    reads the parent column directly (mask-only).
+   * 4. Writes one row to `<app>.__zeroship_audit_unmask`. Both
+   *    granted AND denied paths emit an audit row per the design
+   *    Q-MASK-C contract.
+   * 5. Returns `{ plaintext }` on success; throws a coded error
+   *    otherwise.
+   *
+   * Errors surfaced:
    * - `unmask_not_permitted` — actor's role does not include the
    *   column's classification per the platform's mask policy.
-   * - `unmask_not_found` — row no longer exists.
+   * - `unmask_column_not_masked` — the named column has no mask
+   *   declaration on the cached schema; cannot unmask.
+   * - `unmask_not_found` — row PK no longer matches a row in the
+   *   collection.
+   * - `unmask_value_null` — the parent column is NULL; there's
+   *   no plaintext to recover.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async unmask(_opts?: { actor?: Actor; reason?: string }): Promise<T> {
-    throw Object.assign(
-      new Error(
-        "MaskedValue.unmask(): not implemented in PR 1 — wired in P5.5 PR 4",
-      ),
-      { code: "unmask_not_implemented" as const },
-    );
+  async unmask(opts?: { actor?: Actor; reason?: string }): Promise<T> {
+    const native = resolveUnmaskField();
+    const result = (await native({
+      collection: this._meta.collection,
+      row_pk: this._meta.row_pk,
+      column: this._meta.column,
+      actor: opts?.actor,
+      reason: opts?.reason,
+    })) as { plaintext: string };
+    // The native dispatcher returns a JSON-string plaintext regardless
+    // of the column's `wraps` declaration:
+    //   - wraps=string → UTF-8 string body.
+    //   - wraps=number → stringified f64 (caller may `Number(...)` it).
+    //   - wraps=bytes  → base64-encoded raw bytes (caller may
+    //                    `Uint8Array.from(atob(...), c => c.charCodeAt(0))`).
+    // We return the string verbatim as `T` — the SDK's type parameter
+    // is informational; the call site knows the wrap kind from the
+    // schema and decodes accordingly.
+    return result.plaintext as unknown as T;
   }
 
   /**
    * Check whether `actor` (or the current request's actor) is
-   * authorized to unmask this field WITHOUT triggering the audit
-   * row write.
+   * authorized to unmask this field.
    *
-   * **PR 1 stub**: signature only — throws `unmask_not_implemented`.
+   * **PR 4 contract**: implemented as a "dry-run unmask" — issues a
+   * real `unmask()` call with reason `"permission probe"` and treats
+   * `unmask_not_permitted` as a `false` answer; any other error
+   * rethrows. Per the design Q-MASK-C contract, the probe DOES write
+   * an audit row (with whichever outcome the authorisation returned).
+   * If you want a no-audit probe, that's a separate `dry_run: true`
+   * flag deferred to PR 5+.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async canUnmask(_opts?: { actor?: Actor }): Promise<boolean> {
-    throw Object.assign(
-      new Error(
-        "MaskedValue.canUnmask(): not implemented in PR 1 — wired in P5.5 PR 4",
-      ),
-      { code: "unmask_not_implemented" as const },
-    );
+  async canUnmask(opts?: { actor?: Actor }): Promise<boolean> {
+    try {
+      await this.unmask({ actor: opts?.actor, reason: "permission probe" });
+      return true;
+    } catch (e: unknown) {
+      const code = (e as { code?: string } | null | undefined)?.code;
+      if (code === "unmask_not_permitted") return false;
+      throw e;
+    }
   }
 
   /** Implicit string coercion → masked representation. */

@@ -36,6 +36,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
+use crate::crud::dispatch_unmask_field;
 use crate::orchestrator::register_model::register_model_dispatch;
 use crate::orchestrator::transaction::begin_transaction_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
@@ -261,6 +262,42 @@ impl Db {
     ) -> v8::Local<'s, v8::Value> {
         let app_id = resolve_consumer_app_id(&self.app_id, scope, opts);
         start_replication_consumer_dispatch(scope, app_id).into()
+    }
+
+    /// `db.unmaskField(args)` — **P5.5 PR 4**. Round-trip a single
+    /// `MaskedValue.unmask()` request through the platform: look up
+    /// the column's mask + encryption metadata in the cached schema,
+    /// authorise the actor against the column's classification (PR 4
+    /// stub: default-deny outside `kind: "auto"`), SELECT + decrypt
+    /// (or SELECT plaintext for mask-only columns), emit a
+    /// per-app audit row, and return `{ plaintext }`.
+    ///
+    /// `args` shape (validated by `crud::unmask::parse_args`):
+    /// ```js
+    /// {
+    ///   collection: string,
+    ///   row_pk:     string,        // non-empty
+    ///   column:     string,
+    ///   actor?:     { kind, id, ... } | null,
+    ///   reason?:    string,
+    /// }
+    /// ```
+    ///
+    /// Resolves with `{ plaintext: string }` on success; rejects with
+    /// `unmask_not_permitted` (denied), `unmask_column_not_masked`
+    /// (no mask declaration on that column), `unmask_not_found`
+    /// (row PK missing), or one of the typed SQL / config errors on
+    /// failure. Every dispatch — granted OR denied — writes one row
+    /// to `<app>.__zeroship_audit_unmask`.
+    #[v8_method]
+    #[v8_name = "unmaskField"]
+    fn unmask_field<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        args: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let args_v = read_json_arg(scope, Some(args));
+        Ok(dispatch_unmask_field(scope, &self.app_id, args_v).into())
     }
 
     /// `db.replication` — returns the [`super::replication::Replication`]

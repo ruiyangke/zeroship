@@ -275,6 +275,27 @@ impl IsolateDbContext {
         self.backend = None;
     }
 
+    /// **P5.5 PR 4** — install a SQLite backend handle.
+    ///
+    /// Production wiring of the SQLite arm currently happens through
+    /// the `DbPlugin` build-instance path (per-isolate) and the
+    /// register-model orchestrator. This helper exists so the
+    /// `tests/sqlite_integration.rs` unmask suite can drive
+    /// `crud::unmask::dispatch_unmask` end-to-end without needing the
+    /// full V8 runtime + isolate-bound plugin wiring. Behind the same
+    /// `test-helpers` gate as the other `*_for_tests` helpers in
+    /// `lib.rs`.
+    ///
+    /// The matching public entry point lives at
+    /// `crate::set_sqlite_backend_for_tests`.
+    #[cfg(all(any(test, feature = "test-helpers"), feature = "sqlite"))]
+    pub(crate) fn set_sqlite_backend(
+        &mut self,
+        backend: Rc<crate::backend::sqlite::SqliteBackend>,
+    ) {
+        self.backend = Some(BackendHandle::Sqlite(backend));
+    }
+
     /// Snapshot the backend facade (cloned enum — Rc-clone of the
     /// inner arm, see [`BackendHandle`]). The `Clone` derive on
     /// [`BackendHandle`] makes this cheap: the `Postgres` arm clones

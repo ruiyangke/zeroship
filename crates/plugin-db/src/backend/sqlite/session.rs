@@ -687,6 +687,35 @@ impl SqliteSessionHandle {
     ) -> Result<TypedRows, DbError> {
         self.0.query_typed(sql, params).await
     }
+
+    /// **P5.5 PR 4** — crate-private `query` for the unmask RPC dispatch.
+    ///
+    /// Separate symbol from the `cfg(test-helpers)` `query` above so the
+    /// production `crate::crud::unmask::dispatch_unmask` path can reach
+    /// the underlying session without forcing the `test-helpers` feature
+    /// on default-feature builds. Both wrappers ultimately delegate to
+    /// the same `SqliteSession::query` actor command — the visibility
+    /// fork is purely about exposing the symbol at the right scope.
+    pub(crate) async fn query_internal(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>, DbError> {
+        self.0.query(sql, params).await
+    }
+
+    /// **P5.5 PR 4** — crate-private `query_typed` counterpart for
+    /// the unmask RPC dispatch (encrypted-column read path needs raw
+    /// `TypedCell::Blob` bytes, not the `<N bytes blob>` stringification
+    /// `query` emits). Same visibility-fork rationale as
+    /// [`Self::query_internal`].
+    pub(crate) async fn query_typed_internal(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<TypedRows, DbError> {
+        self.0.query_typed(sql, params).await
+    }
 }
 
 impl From<Rc<SqliteSession>> for SqliteSessionHandle {
