@@ -326,6 +326,22 @@ pub async fn restore_sandbox(
         return Err(RestoreHandlerError::FeatureDisabled);
     }
 
+    // C-6 trace (T-8b-smoke-r6 wake silent-stall investigation,
+    // 2026-05-25). The wake handler emitted ZERO log lines between
+    // "admin/wake started" (handler entry) and the eventual stall —
+    // every step between row read, CAS-to-restoring,
+    // reserve_vm_index_with_retry, store.get, submit_restore_job,
+    // wait_for_livez, unseal, clock_resync, register_restored, and
+    // CAS-to-running was silent. After-the-fact we could not localize
+    // which step wedged. These phase-boundary `restore: phase=*` logs
+    // let the next cluster smoke pinpoint the stall (whichever phase
+    // is the LAST `restore: phase=*` emitted before the 60 s client
+    // timeout is the wedge site). Kept at INFO so they show up in the
+    // standard controller log without per-restore `RUST_LOG` gymnastics;
+    // the volume is one batch of ~14 lines per wake which is fine at
+    // c=1 stress and easy to grep at c=20.
+    tracing::info!(sandbox_id = %sandbox_id, phase = "entry", "restore: phase");
+
     // 1. Read row + check state.
     let row = db
         .get_sandbox_row(sandbox_id)
@@ -336,6 +352,13 @@ pub async fn restore_sandbox(
                 zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
             ))
         })?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "row_read_ok",
+        status = row.status.as_str(),
+        generation = row.generation,
+        "restore: phase"
+    );
     if !matches!(
         row.status,
         SandboxStatus::Snapshotted | SandboxStatus::SnapshottedSuspect
@@ -358,11 +381,23 @@ pub async fn restore_sandbox(
     //    ripple through every existing reader; v1 keeps the read
     //    local to this handler.)
     let snap = read_snapshot_row(db, sandbox_id).await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "read_snapshot_row_ok",
+        vm_index = snap.vm_index,
+        "restore: phase"
+    );
 
     // 3. CAS to restoring.
     let g1 = db
         .update_sandbox_status(sandbox_id, SandboxStatus::Restoring, g0, None)
         .await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "cas_restoring_ok",
+        generation = g1,
+        "restore: phase"
+    );
 
     // From here on use a closure + rollback semantics.
     let result = do_restore_inner(
@@ -514,7 +549,19 @@ async fn do_restore_inner(
     // detached teardown's `release()` fires. Total budget defaults
     // to ~120 s; exhaustion still surfaces as 503 with the same
     // wire shape.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_reserve_vm_index",
+        vm_index = snap.vm_index,
+        "restore: phase"
+    );
     reserve_vm_index_with_retry(backend.as_ref(), sandbox_id, snap.vm_index).await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_reserve_vm_index",
+        vm_index = snap.vm_index,
+        "restore: phase"
+    );
 
     let alloc_dir = backend.restore_alloc_dir(sandbox_id);
     if alloc_dir.exists() {
@@ -529,6 +576,12 @@ async fn do_restore_inner(
             "create alloc_dir {}: {e}", alloc_dir.display()
         ))
     })?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "alloc_dir_ready",
+        alloc_dir = %alloc_dir.display(),
+        "restore: phase"
+    );
 
     // 4. Fetch artifact. ChecksumMismatch / InvalidArtifact → corrupt.
     let sandbox_id_typed = format!(
@@ -545,6 +598,11 @@ async fn do_restore_inner(
     // `crates/sandbox/src/persist.rs:677-687`. Owned clones of the
     // by-ref args are needed because spawn_blocking requires
     // `'static + Send + FnOnce`.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_store_get",
+        "restore: phase"
+    );
     let get_result = {
         let store_clone = Arc::clone(&store);
         let sid_clone = sandbox_id_typed.clone();
@@ -560,6 +618,12 @@ async fn do_restore_inner(
             ))
         })
     };
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_store_get",
+        ok = get_result.is_ok(),
+        "restore: phase"
+    );
     // Bug-#14a diagnostic: surface what's on disk immediately after
     // store.get returns. Prior cluster smokes (2026-05-22) reported
     // the wake-time staging dir was empty despite a successful Ok
@@ -617,6 +681,11 @@ async fn do_restore_inner(
     let config_path = alloc_dir.join("config.json");
     rewrite_config_json(&config_path, snap.vm_index)
         .map_err(RestoreHandlerError::ConfigRewrite)?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "config_rewritten",
+        "restore: phase"
+    );
 
     // 6. Submit the restore job.
     //
@@ -632,6 +701,11 @@ async fn do_restore_inner(
     // other RPCs while Nomad churns. Pattern mirrors R7-P1
     // (79428d53) on snapshot's ch.pause + ch.snapshot and R5-P1b
     // (cdd2e677) on store.get.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_submit_restore_job",
+        "restore: phase"
+    );
     {
         let backend_clone = Arc::clone(&backend);
         let alloc_dir_owned = alloc_dir.clone();
@@ -649,6 +723,11 @@ async fn do_restore_inner(
         .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
         .map_err(RestoreHandlerError::Backend)?;
     }
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_submit_restore_job",
+        "restore: phase"
+    );
 
     // 7. Wait for /livez.
     //
@@ -657,6 +736,11 @@ async fn do_restore_inner(
     // between attempts until the agent answers 200 or the deadline
     // hits (typically 1-3 s post-`running`). Same blocking-poll
     // shape as `submit_restore_job`; same spawn_blocking treatment.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_wait_for_livez",
+        "restore: phase"
+    );
     {
         let backend_clone = Arc::clone(&backend);
         let vm_index = snap.vm_index;
@@ -667,6 +751,11 @@ async fn do_restore_inner(
         .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
         .map_err(RestoreHandlerError::Backend)?;
     }
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_wait_for_livez",
+        "restore: phase"
+    );
 
     // 7b (B19 fix, cluster smoke 2026-05-23 r4). Install the restored
     //    VM into the backend's in-memory state map. Without this step
@@ -706,12 +795,28 @@ async fn do_restore_inner(
     //    There is no window where the state map says "ready" but
     //    the clock is still broken.
     if let Some(p) = persist {
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "pre_unseal",
+            "restore: phase"
+        );
         let sealed = p.unseal(sandbox_id).await.map_err(|e| {
             RestoreHandlerError::Internal(format!(
                 "post-wake unseal sandbox {sandbox_id}: {e}"
             ))
         })?;
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "post_unseal",
+            "restore: phase"
+        );
         let agent_url = backend.derive_agent_url(snap.vm_index);
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "pre_clock_resync",
+            agent_url = %agent_url,
+            "restore: phase"
+        );
         clock_resync_post_restore(
             &agent_url,
             sandbox_id,
@@ -723,6 +828,11 @@ async fn do_restore_inner(
                 "post-wake clock_resync to {agent_url}: {e}"
             ))
         })?;
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "post_clock_resync",
+            "restore: phase"
+        );
         backend
             .register_restored(
                 sandbox_id,
@@ -731,6 +841,11 @@ async fn do_restore_inner(
                 &snap.user_id,
             )
             .map_err(RestoreHandlerError::Backend)?;
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "post_register_restored",
+            "restore: phase"
+        );
     } else {
         // Test path — `restore_sandbox` was called with persist=None
         // (StubRestoreBackend driven). The trait default impl is a
@@ -748,9 +863,20 @@ async fn do_restore_inner(
     //    once the VM is live again. (Per § 1: snapshot is
     //    destructive of the source; restore is destructive of the
     //    snapshot. Idle-eviction will produce a fresh snapshot.)
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_cas_running",
+        "restore: phase"
+    );
     let g2 = db
         .update_sandbox_status(sandbox_id, SandboxStatus::Running, expected_generation, None)
         .await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_cas_running",
+        generation = g2,
+        "restore: phase"
+    );
     if let Err(e) = db.clear_snapshot_metadata(sandbox_id, g2).await {
         // Non-fatal: the row is `running` and serves traffic; the
         // operator's stale snapshot_* columns become a tidy-up
