@@ -76,6 +76,171 @@ const chStderrLogName = "ch-stderr.log"
 // CH panic / errno trace without bloating the Nomad event log.
 const chStderrTailBytes = 4096
 
+// Stage labels for startTaskRestoreBranch failure returns. Every
+// error return in startTaskRestoreBranch tags itself with one of
+// these constants — the tag surfaces in the operator-facing Nomad
+// event message as `stage=<tag>` AND bumps the labelled
+// `nomad_driver_ch_start_task_restore_failures_total{stage=<tag>}`
+// counter. This closes the diagnostic gap T-8b-stress-r9-retry-4
+// surfaced: 5 of 6 wakes failed with a generic
+// `restore_backend_failed: ch: startTaskRestoreBran[truncated]`
+// message that didn't say WHICH step inside the restore branch
+// failed. Operators can now rate-graph failures by stage label.
+//
+// Naming convention: lowercase snake_case, matches the order the
+// stages execute in startTaskRestoreBranch top-to-bottom. The list
+// stays in sync with the error-return audit at v20 sprint planning:
+// every `return …, err` inside startTaskRestoreBranch attributes to
+// exactly one stage.
+const (
+	// stageValidateTaskConfig: nil / zero / out-of-range inputs to
+	// startTaskRestoreBranch. Fires before any I/O — a spike here
+	// signals a controller-side bug emitting a malformed
+	// TaskConfig, NOT a worker-side failure.
+	stageValidateTaskConfig = "validate_taskconfig"
+
+	// stageValidateSnapshot: validateSnapshotDir failed (RestoreFrom
+	// missing / not-a-dir / missing one of {state.json, config.json,
+	// memory-ranges}). Signals the controller staged an incomplete
+	// snapshot artifact dir — typically a staging-side bug (incomplete
+	// rsync, GC race) rather than a CH-internal failure.
+	stageValidateSnapshot = "validate_snapshot"
+
+	// stageResolveBinary: the cloud-hypervisor binary path couldn't
+	// be resolved (env var unset AND config field empty). Operator
+	// misconfiguration; rare in practice once the driver plugin
+	// config is wired.
+	stageResolveBinary = "resolve_binary"
+
+	// stageMkdirRundir: MkdirAll on the per-alloc run dir failed.
+	// Disk-full / EACCES / EROFS on /opt/nomad. Adjacent disk
+	// metrics (df, inodes) usually tell the story.
+	stageMkdirRundir = "mkdir_rundir"
+
+	// stageReadSnapshotConfig: ReadFile on <RestoreFrom>/config.json
+	// failed. The validateSnapshot stage proved the file exists at
+	// stat-time; a failure here means it disappeared mid-restore
+	// (GC race on the staging dir, or a torn write the controller
+	// hasn't fsynced).
+	stageReadSnapshotConfig = "read_snapshot_config"
+
+	// stageRewriteConfig: rewriteConfigJSON rejected the snapshot's
+	// config.json (path outside allow-list, parse failure, missing
+	// required field). C-7-LT-4..C-7-LT-7 invariants — operator-
+	// visible because the rewriter's error names the offending
+	// field + value verbatim.
+	stageRewriteConfig = "rewrite_config"
+
+	// stageWriteRewrittenConfig: WriteFile on the rewritten
+	// config.json in runDir failed. Same disk-class causes as
+	// stageMkdirRundir.
+	stageWriteRewrittenConfig = "write_rewritten_config"
+
+	// stageSymlinkSnapshotArtifact: os.Symlink failed when wiring
+	// state.json / memory-ranges from RestoreFrom into runDir.
+	// EPERM on a noexec mount, or a stale fs-cache. C-7-LT-10.
+	stageSymlinkSnapshotArtifact = "symlink_snapshot_artifact"
+
+	// stageRootfsSourceMissing: RootfsSource was empty OR the path
+	// it pointed at couldn't be stat'd. The controller MUST emit a
+	// valid Config.rootfs_source on every restore alloc — a failure
+	// here is a controller contract bug, NOT a worker-side issue.
+	// C-7-LT-12a.
+	stageRootfsSourceMissing = "rootfs_source_missing"
+
+	// stageStageRootfs: stageRootfsForRestore failed materialising
+	// the rootfs into runDir. Hardlink + copy fallback both errored —
+	// disk-full / cross-device-link issues / permissions on the
+	// runtime_dir.
+	stageStageRootfs = "stage_rootfs"
+
+	// stagePrecreateRuntimeFile: pre-creation of serial.file /
+	// console.file in runDir failed (CH `--restore` opens these
+	// without O_CREAT; pre-creation is required, see C-7-LT-9).
+	// Same disk-class causes as stageMkdirRundir.
+	stagePrecreateRuntimeFile = "precreate_runtime_file"
+
+	// stageTapSetup: ensureTapUp / setupTapForVM failed. Kernel-
+	// side netdev wedge, or a previously-leaked tap on the same
+	// VMIndex (the r24-A2-S2 wedge stress-r8 closed via netlink-
+	// verified DestroyTask, but a residual race can still surface
+	// here on a contended host).
+	stageTapSetup = "tap_setup"
+
+	// stageRestoreSpawn: exec.Cmd.Start() returned an error.
+	// CH binary missing at exec time, ENOMEM, ulimit, AppArmor /
+	// SELinux denial, or fork/exec races. CH stderr is meaningful
+	// here ONLY if exec made it to the child process before
+	// failing — most often the spawn errors before any stderr is
+	// written.
+	stageRestoreSpawn = "restore_spawn"
+
+	// stageLivezProbe: the API-socket readiness probe
+	// (waitForCHSocketReady wrapped by pollAPISocketFn) exhausted
+	// its budget without observing CH bind the socket. Signals CH
+	// is alive but slow to deserialise the memory image, or CH
+	// crashed during deserialisation (in which case the captured
+	// stderr tail carries the panic / errno trace). The labelling
+	// here matches the smoke-r14 "ch-remote ping" diagnostic from
+	// the pre-C-7-LT-3 wrapper era.
+	stageLivezProbe = "livez_probe"
+
+	// stageResume: ch-remote resume (vm.resume RPC) failed.
+	// CH bound the socket but refused the resume — historical
+	// shapes include HTTP 500 "VM is not running" (smoke-r21) and
+	// HTTP 500 "VM Restore failed: DeviceManager(Disk(NotFound))"
+	// (smoke-r22). C-7-LT-11 + C-7-LT-12a closed those specific
+	// shapes; a fresh failure here points at a new CH-internal
+	// surface visible only via the captured stderr tail.
+	stageResume = "resume"
+
+	// stagePersistState: handle.SetDriverState failed serialising
+	// the new TaskState. nomad/plugins/drivers internal — extremely
+	// rare; usually signals a schema-evolution bug.
+	stagePersistState = "persist_state"
+)
+
+// restoreErrorf wraps an error return for startTaskRestoreBranch
+// with the stage label + bumps the per-stage failure counter. The
+// returned error always carries `stage=<stage>` so the operator-
+// facing Nomad event message (which the controller may truncate at
+// the wake_jobs error_message column or a 180-char display budget)
+// always names the failing stage near the start of the wrapped
+// message.
+//
+// The wrapped error preserves `%w` semantics so errors.Is / errors.As
+// still inspect the underlying cause.
+//
+// Naming note: detail goes BEFORE the optional stderr tail so a
+// truncated display still surfaces the stage + cause; the tail is
+// the tail of the message intentionally.
+func restoreErrorf(stage string, format string, args ...any) error {
+	incStartTaskRestoreFailures(stage)
+	return fmt.Errorf("ch: startTaskRestoreBranch: stage=%s: "+format, append([]any{stage}, args...)...)
+}
+
+// restoreErrorWithStderr is the variant for stages where CH was
+// already spawned and may have written to its stderr log. Appends
+// `ch_stderr_tail=<tail>` after the cause + records the on-disk
+// path so an operator can `cat` it for the full content if the
+// 4 KiB tail wasn't enough.
+//
+// Behaves identically to restoreErrorf when tail is empty (drops
+// the tail clause, keeps the path clause for triage continuity).
+func restoreErrorWithStderr(stage string, stderrPath string, tail []byte, format string, args ...any) error {
+	incStartTaskRestoreFailures(stage)
+	if len(tail) > 0 {
+		return fmt.Errorf(
+			"ch: startTaskRestoreBranch: stage=%s: "+format+"; ch_stderr_tail=%q (path=%s)",
+			append(append([]any{stage}, args...), string(tail), stderrPath)...,
+		)
+	}
+	return fmt.Errorf(
+		"ch: startTaskRestoreBranch: stage=%s: "+format+" (no ch stderr captured; path=%s)",
+		append(append([]any{stage}, args...), stderrPath)...,
+	)
+}
+
 // defaultAPISocketPollTimeout bounds the time we wait for CH's
 // --api-socket to become responsive after --restore. C-7-LT-3
 // (smoke-r14, 2026-05-25) widened this from 10s → 60s after a
@@ -338,13 +503,13 @@ func isCrossDeviceLinkErr(err error) bool {
 // roll-back model).
 func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
 	if cfg == nil {
-		return nil, nil, errors.New("ch: startTaskRestoreBranch: nil TaskConfig")
+		return nil, nil, restoreErrorf(stageValidateTaskConfig, "nil TaskConfig")
 	}
 	if driverConfig == nil {
-		return nil, nil, errors.New("ch: startTaskRestoreBranch: nil driverConfig")
+		return nil, nil, restoreErrorf(stageValidateTaskConfig, "nil driverConfig")
 	}
 	if driverConfig.RestoreFrom == "" {
-		return nil, nil, errors.New("ch: startTaskRestoreBranch: RestoreFrom is empty")
+		return nil, nil, restoreErrorf(stageValidateTaskConfig, "RestoreFrom is empty")
 	}
 
 	// VMIndex is the one cold-boot validation that DOES apply on the
@@ -354,10 +519,10 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	// memory image, and the controller wakes a snapshot WITHOUT
 	// re-supplying those fields.
 	if driverConfig.VMIndex < 1 || driverConfig.VMIndex > 155 {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: vm_index %d out of range [1,155]", driverConfig.VMIndex)
+		return nil, nil, restoreErrorf(stageValidateTaskConfig, "vm_index %d out of range [1,155]", driverConfig.VMIndex)
 	}
 	if driverConfig.SubnetBaseOctet > 255 {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: subnet_base_octet %d out of u8 range", driverConfig.SubnetBaseOctet)
+		return nil, nil, restoreErrorf(stageValidateTaskConfig, "subnet_base_octet %d out of u8 range", driverConfig.SubnetBaseOctet)
 	}
 
 	mode := "restore"
@@ -370,7 +535,7 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 
 	// Step 1: validate the staged snapshot dir.
 	if err := validateSnapshotDir(driverConfig.RestoreFrom); err != nil {
-		return nil, nil, err
+		return nil, nil, restoreErrorf(stageValidateSnapshot, "%v (restore_from=%s)", err, driverConfig.RestoreFrom)
 	}
 
 	chBin := p.chClient.CHBin()
@@ -384,12 +549,12 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 		}
 	}
 	if chBin == "" {
-		return nil, nil, errors.New("ch: startTaskRestoreBranch: cloud-hypervisor binary not found (set ZSBX_CH_BIN or config.cloud_hypervisor_bin)")
+		return nil, nil, restoreErrorf(stageResolveBinary, "cloud-hypervisor binary not found (set ZSBX_CH_BIN or config.cloud_hypervisor_bin)")
 	}
 
 	runDir := taskRunDir(cfg, p.config)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: mkdir runDir %s: %w", runDir, err)
+		return nil, nil, restoreErrorf(stageMkdirRundir, "mkdir runDir %s: %v", runDir, err)
 	}
 
 	apiSocket := filepath.Join(runDir, chAPISocketName)
@@ -420,7 +585,7 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	snapshotConfigPath := filepath.Join(driverConfig.RestoreFrom, snapshotConfigFile)
 	origConfig, err := os.ReadFile(snapshotConfigPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: read snapshot config %s: %w", snapshotConfigPath, err)
+		return nil, nil, restoreErrorf(stageReadSnapshotConfig, "read snapshot config %s: %v", snapshotConfigPath, err)
 	}
 	base := uint8(driverConfig.SubnetBaseOctet)
 	if base == 0 {
@@ -444,10 +609,10 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	}
 	rewritten, runtimeFiles, err := rewriteConfigJSON(origConfig, runDir, driverConfig.VMIndex, base, driverConfig.SandboxId, driverConfig.UserId, contentRoots)
 	if err != nil {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: rewrite config: %w", err)
+		return nil, nil, restoreErrorf(stageRewriteConfig, "rewrite config (source=%s, runDir=%s): %v", snapshotConfigPath, runDir, err)
 	}
 	if err := os.WriteFile(rewrittenConfigPath, rewritten, 0o600); err != nil {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: write rewritten config %s: %w", rewrittenConfigPath, err)
+		return nil, nil, restoreErrorf(stageWriteRewrittenConfig, "write rewritten config %s: %v", rewrittenConfigPath, err)
 	}
 
 	// C-7-LT-10 (smoke-r20): symlink the immutable snapshot artifacts
@@ -476,7 +641,7 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 		src := filepath.Join(driverConfig.RestoreFrom, name)
 		dst := filepath.Join(runDir, name)
 		if err := os.Symlink(src, dst); err != nil && !errors.Is(err, fs.ErrExist) {
-			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: symlink %s -> %s: %w", src, dst, err)
+			return nil, nil, restoreErrorf(stageSymlinkSnapshotArtifact, "symlink %s -> %s: %v", src, dst, err)
 		}
 	}
 
@@ -506,14 +671,14 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	// falls back to a stdlib copy on EXDEV (cross-device — runtime
 	// dir on a separate filesystem from the alloc dir).
 	if driverConfig.RootfsSource == "" {
-		return nil, nil, errors.New("ch: startTaskRestoreBranch: rootfs_source is empty; controller must emit ChPlugin Config.rootfs_source on the restore branch (C-7-LT-12a)")
+		return nil, nil, restoreErrorf(stageRootfsSourceMissing, "rootfs_source is empty; controller must emit ChPlugin Config.rootfs_source on the restore branch (C-7-LT-12a)")
 	}
 	if _, err := os.Stat(driverConfig.RootfsSource); err != nil {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: rootfs_source %s not readable: %w", driverConfig.RootfsSource, err)
+		return nil, nil, restoreErrorf(stageRootfsSourceMissing, "rootfs_source %s not readable: %v", driverConfig.RootfsSource, err)
 	}
 	rootfsDst := filepath.Join(runDir, chRootfsName)
 	if err := stageRootfsForRestore(driverConfig.RootfsSource, rootfsDst); err != nil {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: stage rootfs %s -> %s: %w", driverConfig.RootfsSource, rootfsDst, err)
+		return nil, nil, restoreErrorf(stageStageRootfs, "stage rootfs %s -> %s: %v", driverConfig.RootfsSource, rootfsDst, err)
 	}
 
 	// C-7-LT-9 (smoke-r19): pre-create each runtime file the rewriter
@@ -542,10 +707,10 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	for _, path := range runtimeFiles {
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
 		if err != nil {
-			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: pre-create runtime file %s: %w", path, err)
+			return nil, nil, restoreErrorf(stagePrecreateRuntimeFile, "open runtime file %s: %v", path, err)
 		}
 		if err := f.Close(); err != nil {
-			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: close runtime file %s: %w", path, err)
+			return nil, nil, restoreErrorf(stagePrecreateRuntimeFile, "close runtime file %s: %v", path, err)
 		}
 	}
 
@@ -555,11 +720,11 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	tapName, _ := resolveNet(driverConfig)
 	if len(driverConfig.Net) > 0 {
 		if err := ensureTapUp(tapName); err != nil {
-			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: tap %s not ready: %w", tapName, err)
+			return nil, nil, restoreErrorf(stageTapSetup, "tap %s not ready: %v", tapName, err)
 		}
 	} else {
 		if _, err := setupTapForVM(driverConfig.VMIndex, base); err != nil {
-			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: setup tap for vm_index=%d: %w", driverConfig.VMIndex, err)
+			return nil, nil, restoreErrorf(stageTapSetup, "setup tap for vm_index=%d: %v", driverConfig.VMIndex, err)
 		}
 	}
 
@@ -618,7 +783,15 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 
 	runner := p.chClient.RunnerFactory()(cmd)
 	if err := runner.Start(); err != nil {
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: spawn cloud-hypervisor --restore: %w", err)
+		// Spawn errors typically fire before exec() reaches the child
+		// (ENOENT on the binary path, EACCES on the runtime_dir,
+		// ulimit / cgroup denial). Best-effort capture the stderr
+		// tail anyway — if the runner factory's tee opened the file
+		// the child MAY have written diagnostics before dying.
+		tail := readStderrTail(stderrLogPath, chStderrTailBytes)
+		return nil, nil, restoreErrorWithStderr(stageRestoreSpawn, stderrLogPath, tail,
+			"spawn cloud-hypervisor --restore (chBin=%s, api_socket=%s, run_dir=%s): %v",
+			chBin, apiSocket, runDir, err)
 	}
 
 	startedAt := time.Now().UTC()
@@ -642,10 +815,8 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 		if len(tail) == 0 {
 			tail = runner.StderrTail(chStderrTailBytes)
 		}
-		if len(tail) > 0 {
-			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: %w; ch_stderr_tail=%q (path=%s)", err, string(tail), stderrLogPath)
-		}
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: %w (no ch stderr captured; path=%s)", err, stderrLogPath)
+		return nil, nil, restoreErrorWithStderr(stageLivezProbe, stderrLogPath, tail,
+			"api socket readiness probe failed (api_socket=%s): %v", apiSocket, err)
 	}
 
 	// Step 6: ch-remote resume. THIS is what brings the VM back from
@@ -660,10 +831,8 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 		if len(tail) == 0 {
 			tail = runner.StderrTail(chStderrTailBytes)
 		}
-		if len(tail) > 0 {
-			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: resume failed: %w; ch_stderr_tail=%q (path=%s)", err, string(tail), stderrLogPath)
-		}
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: resume failed: %w (no ch stderr captured; path=%s)", err, stderrLogPath)
+		return nil, nil, restoreErrorWithStderr(stageResume, stderrLogPath, tail,
+			"resume failed (api_socket=%s): %v", apiSocket, err)
 	}
 
 	// Step 7: persist TaskState + register handle + start supervisor.
@@ -682,7 +851,7 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	handle.Config = cfg
 	if err := handle.SetDriverState(state); err != nil {
 		_ = runner.Signal(os.Kill)
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: persist TaskState: %w", err)
+		return nil, nil, restoreErrorf(stagePersistState, "persist TaskState (task_id=%s): %v", cfg.ID, err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

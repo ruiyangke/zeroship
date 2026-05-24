@@ -415,6 +415,39 @@ func RunDriverMetricsExporterForTest(ctx context.Context, logger hclog.Logger) {
 	runDriverMetricsExporter(ctx, logger)
 }
 
+// -- T-8b-stress-r9-retry-4: per-stage restore failure observability --
+
+// StartTaskRestoreBranchForTest is the test entry point for the
+// restore-branch StartTask flow. Exposed so the v20-sprint per-stage
+// failure tests can drive validation-level failures (where the
+// production dispatch site decodes the driver config from msgpack)
+// without engineering a full TaskConfig round-trip. T-8b-driver-v20.
+func (p *Plugin) StartTaskRestoreBranchForTest(cfg *drivers.TaskConfig, driverConfig *TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	return p.startTaskRestoreBranch(cfg, driverConfig)
+}
+
+// Stage label constants re-exported for the tests/ package so a
+// future rename of the in-package constants surfaces at compile
+// time rather than via a string-mismatch test failure. T-8b-driver-v20.
+const (
+	StageValidateTaskConfigForTest      = stageValidateTaskConfig
+	StageValidateSnapshotForTest        = stageValidateSnapshot
+	StageResolveBinaryForTest           = stageResolveBinary
+	StageMkdirRundirForTest             = stageMkdirRundir
+	StageReadSnapshotConfigForTest      = stageReadSnapshotConfig
+	StageRewriteConfigForTest           = stageRewriteConfig
+	StageWriteRewrittenConfigForTest    = stageWriteRewrittenConfig
+	StageSymlinkSnapshotArtifactForTest = stageSymlinkSnapshotArtifact
+	StageRootfsSourceMissingForTest     = stageRootfsSourceMissing
+	StageStageRootfsForTest             = stageStageRootfs
+	StagePrecreateRuntimeFileForTest    = stagePrecreateRuntimeFile
+	StageTapSetupForTest                = stageTapSetup
+	StageRestoreSpawnForTest            = stageRestoreSpawn
+	StageLivezProbeForTest              = stageLivezProbe
+	StageResumeForTest                  = stageResume
+	StagePersistStateForTest            = stagePersistState
+)
+
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing
 // to spawn a real CH process. Mirrors the minimal shape RecoverTask
