@@ -592,11 +592,11 @@ $( [ "$IS_MIGRATOR" = "1" ] && echo "Environment=SANDBOX_PG_RUN_MIGRATIONS=1" )
 $( [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ] && echo "Environment=SANDBOX_TASK_DRIVER=ch_plugin" )
 
 # Option C Phase 4 (T-8b-stress-r7) — driver-side disk image staging.
-# With this flag flipped TRUE, the controller emits `zsbx_stage_disks=true`
+# With this flag flipped TRUE, the controller emits \`zsbx_stage_disks=true\`
 # job-level Meta + bypasses the controller-side workspace.img staging
-# spawn_blocking path (`crates/sandbox/src/backend/nomad_ch.rs:797`);
+# spawn_blocking path (\`crates/sandbox/src/backend/nomad_ch.rs:797\`);
 # the driver's StartTask owns lifecycle of workspace.img + user_home.img,
-# creating them fresh per StartTask. Per staging-locality ADR `bbadbe68`,
+# creating them fresh per StartTask. Per staging-locality ADR \`bbadbe68\`,
 # this eliminates the cross-alloc kernel-state retention surface that
 # the 6 prior consecutive stress regressions (r1-r6 at 1-3/60 e2e OK)
 # all chased. Decisive validation of Option C architectural pivot.
