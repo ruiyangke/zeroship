@@ -4965,6 +4965,7 @@ mod tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         };
         cfg
     }

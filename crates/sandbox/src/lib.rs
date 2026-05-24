@@ -2247,6 +2247,7 @@ mod admin_token_setter_tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 
@@ -2452,6 +2453,7 @@ mod persist_setter_tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 
@@ -2593,6 +2595,7 @@ mod field_setter_tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 

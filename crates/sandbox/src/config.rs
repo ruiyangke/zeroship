@@ -184,6 +184,37 @@ pub struct SandboxConfig {
     /// Source-of-truth: `docs/proposals/sandbox-snapshot-restore.md`
     /// virtio-blk pivot.
     pub workspace_image_size_gb: u32,
+
+    /// Option C Phase 2 (2026-05-25 staging-locality ADR): when
+    /// `true`, the controller bypasses its local `spawn_blocking`
+    /// disk-image staging block at `backend/nomad_ch.rs:777-792` and
+    /// instead emits a `zsbx_stage_disks` task-meta field in the
+    /// Nomad jobspec telling the driver to materialize the per-alloc
+    /// disk images itself BEFORE spawning Cloud Hypervisor.
+    ///
+    /// Why: /proc/locks evidence from T-8b-stress r4/r5 showed the
+    /// wedge is cross-alloc kernel-state retention (a different
+    /// alloc's deferred `struct file` blocks the new alloc's path);
+    /// per-task predicates (r4-A exitDone-wait, r5-A F_OFD_SETLK
+    /// probe) cannot fix this. Option C collapses the surface by
+    /// making the driver stage fresh images on every StartTask on
+    /// the same node the alloc lands on — eliminating the cross-fs
+    /// boundary the controller's spawn_blocking was crossing.
+    ///
+    /// Default `false` for Phase 2 (this commit lands the capability
+    /// behind the flag; cold-boot path retains the spawn_blocking
+    /// staging block when false). Phase 4 (after cluster stress
+    /// validation of the capability) will flip the default to true
+    /// and Phase 3 will delete the spawn_blocking branch entirely.
+    ///
+    /// Cold-boot only — the restore branch stages rootfs via the
+    /// existing `RootfsSource` hardlink/copy (C-7-LT-12a) and
+    /// consumes persistent WorkspaceImg / UserHomeImg from snapshot
+    /// artifacts per ADR Phase 3; this flag has no effect on the
+    /// restore branch in Phase 2.
+    ///
+    /// `SANDBOX_DRIVER_STAGES_DISK_IMAGES` (default `false`).
+    pub driver_stages_disk_images: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -785,6 +816,7 @@ impl SandboxConfig {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 
@@ -947,6 +979,12 @@ impl SandboxConfig {
             );
         }
 
+        // Option C Phase 2: opt-in driver-side staging. Default
+        // false; Phase 4 flips after stress validation. See the
+        // 2026-05-25 staging-locality ADR.
+        let driver_stages_disk_images =
+            parse_env("SANDBOX_DRIVER_STAGES_DISK_IMAGES", false)?;
+
         Ok(Self {
             port, token, backend, image, workspace_root, network,
             memory_mb, cpus, idle_timeout_secs, max_lifetime_secs, auto_pull,
@@ -959,6 +997,7 @@ impl SandboxConfig {
             snapshot_gcs_bucket,
             snapshot_root_kek_path,
             workspace_image_size_gb,
+            driver_stages_disk_images,
         })
     }
 }
