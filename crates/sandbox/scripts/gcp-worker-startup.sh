@@ -213,7 +213,7 @@ if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
   # mandatory; Nomad refuses to load plugins it doesn't see configured,
   # even with empty config. Confirmed via T-8b-smoke FAIL r1 — see
   # docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r1.md.
-  cat > /etc/nomad.d/plugin-dir.hcl <<EOF
+  cat > /etc/nomad.d/plugin-dir.hcl <<'EOF'
 plugin_dir = "/etc/zeroship/nomad-plugins"
 
 plugin "nomad-driver-ch" {
@@ -284,7 +284,7 @@ modprobe tun || true
 # internet-to-VM, so no SNAT is required.
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
-cat > /etc/sysctl.d/99-zsbx.conf <<EOF
+cat > /etc/sysctl.d/99-zsbx.conf <<'EOF'
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
@@ -318,7 +318,7 @@ done
 EOF
 chmod 0755 /usr/local/sbin/zsbx-taps-up.sh
 
-cat > /etc/systemd/system/zsbx-taps.service <<EOF
+cat > /etc/systemd/system/zsbx-taps.service <<'EOF'
 [Unit]
 Description=zsbx tap devices (idempotent)
 After=network-online.target
