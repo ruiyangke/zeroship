@@ -73,7 +73,7 @@ use std::future::Future;
 /// On thread-spawn or runtime-construction failure the future is never
 /// constructed and the error is logged at `tracing::error!` level — the
 /// operator has no other signal that the background work was lost.
-pub fn detach_isolated<MakeF, F, T>(name: impl Into<String>, make_fut: MakeF)
+pub(crate) fn detach_isolated<MakeF, F, T>(name: impl Into<String>, make_fut: MakeF)
 where
     MakeF: FnOnce() -> F + Send + 'static,
     F: Future<Output = T>,

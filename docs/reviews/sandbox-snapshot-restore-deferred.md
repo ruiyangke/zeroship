@@ -234,6 +234,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Resolution**: as part of C-7-LT PR1, extracted `crate::detach::detach_isolated` (R14-A1) and migrated all SIX production periodic-loop sites to it (sweep.rs::spawn_transient_state_takeover, sweep.rs::spawn_idle_eviction_sweep, registry.rs::start_idle_gc, lib.rs::start_health_loop, lib.rs::spawn_heartbeat_task, lib.rs::spawn_takeover_task). Each loop now runs on its own OS thread with a private compio runtime — the C-6 wedge mechanism cannot transit the runtime boundary. Test-only fixture at lib.rs `#[cfg(test)] shutdown_tests` left unchanged (exists solely to validate the shutdown-flag observation pattern in isolation, not the production topology).
 - **Status**: CLOSED at `96fa5f0f`. Cluster smoke-r12 (PR3) will exercise c=20 stress and confirm no wedge fingerprint.
 
+### [R17-API1] (CLOSED) Crate-internal-only `pub` items demoted to `pub(crate)` (MINOR, api-surface-r17)
+- **Source**: api-surface-r17 review.
+- **Files**: `crates/sandbox/src/detach.rs` (`detach_isolated`); `crates/sandbox/src/sweep.rs` (`spawn_wake_jobs_gc`, `WAKE_JOBS_GC_POLL_SECS`, `WAKE_JOBS_T_KEEP`).
+- **Symptom**: all four items have no callers outside `crates/sandbox/`; `pub` over-exposed crate internals.
+- **Resolution**: demoted to `pub(crate)`. Zero cross-crate callers verified via `grep`. `WAKE_JOBS_T_KEEP` doc comment updated to drop stale "Kept pub so smoke harnesses don't break" rationale (no external callers found). R10-API1 (`_test_build_auth_from_sealed`) closed in the same commit. Cargo build + 402 lib tests green. No behavior change.
+
 ### [R17-A5] (CLOSED 2026-05-25 at `b2965097`) CreateGuard::drop migrated to `detach_isolated` — C-6 family FULLY CLOSED
 - **Source**: 2026-05-25 architecture-r17 (`docs/reviews/sandbox-snapshot-restore-architecture-2026-05-25-r17.md`).
 - **Files**: `crates/sandbox/src/backend/nomad_ch.rs` CreateGuard::drop (was lines 1995-2002, the pre-migration `compio::runtime::spawn(...).detach()` + `catch_unwind` fallback site).
@@ -842,11 +848,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Status**: r10 confirms T9 + T10 (open since r2). Two orchestrators with literally-duplicated `ResolvedSourceVmOps` adapters.
 - **Action**: extract `crates/sandbox/src/snapshot_orchestrator.rs` per T9. Closes T9 + T10 + R10-A7 together.
 
-### [R10-API1] `_test_build_auth_from_sealed` is pub but has zero callers (MINOR, api-surface-r10)
+### [R10-API1] (CLOSED — 8-round carry) `_test_build_auth_from_sealed` gated behind `#[cfg(test)]` (MINOR, api-surface-r10)
 - **Source**: 2026-05-25 api-surface-r10
 - **File**: `crates/sandbox/src/restore.rs:613`
 - **Symptom**: orphan pub fn. Possibly stale test helper from earlier scaffolding.
-- **Action**: delete or move to `#[cfg(test)]`-gated test helper module.
+- **Resolution**: gated behind `#[cfg(test)]` and demoted to `pub(crate)`. Zero cross-crate callers verified. Cargo build + 402 lib tests green. Closed in R17-API1 visibility-tightening bundle.
 
 ### [R10-API2] (CLOSED at `af4678ac`) `ExecBody` in sandbox-agent demoted pub→pub(crate); `not_found` kept pub (bin/lib split)
 - **Source**: 2026-05-25 api-surface-r10 (4-round api-surface carry through r11/r12/r13)

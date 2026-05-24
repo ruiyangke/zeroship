@@ -609,8 +609,9 @@ fn random_hex(bytes: usize) -> Result<String, String> {
 /// Used by tests to construct a `SandboxAuth` from secret material
 /// + pg-supplied agent_url + key_fp, mirroring the path the production
 /// boot loop walks.
+#[cfg(test)]
 #[doc(hidden)]
-pub fn _test_build_auth_from_sealed(
+pub(crate) fn _test_build_auth_from_sealed(
     sealed: &SealedAuth,
     agent_url: String,
     pubkey_fp: String,

@@ -79,7 +79,7 @@ pub const TRANSIENT_TAKEOVER_POLL_SECS: u64 = 30;
 /// indexed DELETE) so the cadence floor is set by responsiveness for
 /// clients polling a wake_id around the T_KEEP boundary, not by
 /// query cost.
-pub const WAKE_JOBS_GC_POLL_SECS: u64 = 60;
+pub(crate) const WAKE_JOBS_GC_POLL_SECS: u64 = 60;
 
 /// C-7-LT-PR2: legacy hard-coded retention. The runtime value now
 /// lives on [`crate::config::WakeLifecycleConfig::wake_jobs_gc_retention_secs`]
@@ -88,13 +88,12 @@ pub const WAKE_JOBS_GC_POLL_SECS: u64 = 60;
 /// documented value (5 min per § 2.cleanup, matching the standard
 /// async-operation cleanup story — S3 multipart, GCP LRO).
 ///
-/// Kept `pub` so existing tests / cluster smoke harnesses that ref
-/// the proposal default don't break. R16-S5: the controller reads
+/// R16-S5: the controller reads
 /// `state.wake_lifecycle.wake_jobs_gc_retention_secs` at every
 /// sweep tick, not this constant — operators can shorten the value
 /// for dev / test or lengthen it for high-latency clients (the
 /// minimum is 1 s, enforced by `WakeLifecycleConfig::from_env`).
-pub const WAKE_JOBS_T_KEEP: Duration = Duration::from_secs(300);
+pub(crate) const WAKE_JOBS_T_KEEP: Duration = Duration::from_secs(300);
 
 /// Idle-eviction sweep candidates per pg call. Bounds the per-sweep
 /// pg work; if more rows are eligible they'll be picked up next
@@ -329,7 +328,7 @@ pub async fn run_wake_jobs_gc_once(state: &Arc<AppState>) -> u64 {
 ///
 /// Skipped when `state.database` is `None` — without pg there are
 /// no wake_jobs rows to GC.
-pub fn spawn_wake_jobs_gc(state: Arc<AppState>) {
+pub(crate) fn spawn_wake_jobs_gc(state: Arc<AppState>) {
     if state.database.is_none() {
         return;
     }
