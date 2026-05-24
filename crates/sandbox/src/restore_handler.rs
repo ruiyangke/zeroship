@@ -262,8 +262,34 @@ impl VmIndexRetryPolicy {
     ///
     /// **Long-term:** C-8b is defense-in-depth; the structural fix
     /// is C-7-LT (async wake response + polling, R15-A1).
-    pub fn from_host_fence_timeout(host_fence_timeout_secs: u64) -> Self {
-        const CLIENT_HEADROOM_SECS: u64 = 10;
+    ///
+    /// **C-7-LT-1 (T-8b-smoke-r12 cluster review)**: in `WakeResponseMode::Sync`
+    /// the budget is bound by both the fence-derived ceiling AND the
+    /// ntex client deadline — the tighter wins. In `WakeResponseMode::Async`
+    /// the wake state machine runs on a `detach_isolated` thread with
+    /// no client-side cancellation, so the deadline ceiling no longer
+    /// applies. The budget becomes `2 × host_fence + HEADROOM` — a
+    /// safety margin past the empirical 2× source-teardown wall-time
+    /// (smoke-r10/r11/r12 measured 60.166 s at fence=30 s; the +10 s
+    /// margin envelopes the long tail without bumping into a client
+    /// deadline that no longer exists).
+    ///
+    /// Examples by mode (post-C-7-LT-1):
+    /// - fence=30, Sync   → MIN(2*30-10, 60-10) = MIN(50, 50) = 50 s
+    ///   → 26 attempts × 2 s = 50 s budget (unchanged).
+    /// - fence=30, Async  → 2*30 + 10 = 70 s
+    ///   → 36 attempts × 2 s = 70 s budget (envelopes smoke-r12's
+    ///     60.166 s teardown with ~10 s slack).
+    /// - fence=20, Sync   → MIN(2*20-10, 50) = MIN(30, 50) = 30 s
+    ///   → 16 attempts × 2 s = 30 s.
+    /// - fence=20, Async  → 2*20 + 10 = 50 s → 26 attempts × 2 s.
+    /// - fence=120, Sync  → MIN(230, 50) = 50 s → 26 attempts × 2 s.
+    /// - fence=120, Async → 2*120 + 10 = 250 s → 126 attempts × 2 s.
+    pub fn from_host_fence_timeout(
+        host_fence_timeout_secs: u64,
+        wake_mode: crate::config::WakeResponseMode,
+    ) -> Self {
+        const HEADROOM_SECS: u64 = 10;
         const CLIENT_DEADLINE_SECS: u64 = 60;
         const INTERVAL_SECS: u64 = 2;
         const MIN_ATTEMPTS: u32 = 1;
@@ -277,18 +303,39 @@ impl VmIndexRetryPolicy {
         // fence=30 s (deferred C-8b).
         let teardown_estimate = host_fence_timeout_secs.saturating_mul(2);
 
-        // Dual ceilings:
-        //   - fence-derived is the IDEAL upper bound (matches the
-        //     observed source-teardown wall-time, post-C-8b 2× factor).
-        //   - deadline-derived is the HARD upper bound (anything past
-        //     this is silently dropped when the ntex client
-        //     disconnects — the C-7 / C-8a failure mode).
-        // Take the MIN — the tighter of the two always wins.
-        let max_budget_from_fence =
-            teardown_estimate.saturating_sub(CLIENT_HEADROOM_SECS);
-        let max_budget_from_deadline =
-            CLIENT_DEADLINE_SECS.saturating_sub(CLIENT_HEADROOM_SECS);
-        let effective_budget = max_budget_from_fence.min(max_budget_from_deadline);
+        // C-7-LT-1: branch on response mode. In sync the legacy
+        // dual-ceiling MIN protects against ntex client-disconnect
+        // cancellation; in async the wake loop runs on
+        // `detach_isolated` with no client-side cancellation, so we
+        // anchor the budget to `2×fence + HEADROOM` (a safety margin
+        // past the measured teardown wall-time).
+        let effective_budget = match wake_mode {
+            crate::config::WakeResponseMode::Sync => {
+                // Dual ceilings:
+                //   - fence-derived is the IDEAL upper bound (matches
+                //     the observed source-teardown wall-time,
+                //     post-C-8b 2× factor).
+                //   - deadline-derived is the HARD upper bound
+                //     (anything past this is silently dropped when
+                //     the ntex client disconnects — the C-7 / C-8a
+                //     failure mode).
+                // Take the MIN — the tighter of the two always wins.
+                let max_budget_from_fence =
+                    teardown_estimate.saturating_sub(HEADROOM_SECS);
+                let max_budget_from_deadline =
+                    CLIENT_DEADLINE_SECS.saturating_sub(HEADROOM_SECS);
+                max_budget_from_fence.min(max_budget_from_deadline)
+            }
+            crate::config::WakeResponseMode::Async => {
+                // No ntex client deadline binds the server-side state
+                // machine — it runs on `detach_isolated` and surfaces
+                // terminal status through `wake_jobs` polling. Budget
+                // = empirical teardown wall-time + safety margin.
+                // Smoke-r12: 60.166 s teardown at fence=30 → 70 s
+                // budget envelopes with ~10 s slack.
+                teardown_estimate.saturating_add(HEADROOM_SECS)
+            }
+        };
 
         let attempts_from_budget = (effective_budget / INTERVAL_SECS).saturating_add(1);
         let max_attempts = u32::try_from(attempts_from_budget)
@@ -1531,7 +1578,10 @@ mod unit_tests {
     fn r14a6_policy_from_cfg_respects_host_fence_timeout() {
         // 60 s host-fence (the platform default after the cad098e6
         // 30→120 bump backed off to 60 in many configs).
-        let p = VmIndexRetryPolicy::from_host_fence_timeout(60);
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            60,
+            crate::config::WakeResponseMode::Sync,
+        );
         let wall_ms = p.interval.as_millis() as u64
             * u64::from(p.max_attempts.saturating_sub(1));
         assert!(
@@ -1571,10 +1621,13 @@ mod unit_tests {
     /// smoke-r10 disproved.**
     #[test]
     fn r14a6_policy_from_cfg_short_timeout() {
-        let p = VmIndexRetryPolicy::from_host_fence_timeout(20);
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            20,
+            crate::config::WakeResponseMode::Sync,
+        );
         assert_eq!(
             p.max_attempts, 16,
-            "20 s fence post-C-8b: (2*20 - 10 headroom) / 2 s interval + 1 = 16"
+            "20 s fence post-C-8b sync: (2*20 - 10 headroom) / 2 s interval + 1 = 16"
         );
         assert_eq!(p.interval, Duration::from_secs(2));
     }
@@ -1587,7 +1640,10 @@ mod unit_tests {
     /// would skip the reserve entirely.
     #[test]
     fn r14a6_policy_from_cfg_zero_fence_still_attempts_once() {
-        let p = VmIndexRetryPolicy::from_host_fence_timeout(0);
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            0,
+            crate::config::WakeResponseMode::Sync,
+        );
         assert!(
             p.max_attempts >= 1,
             "zero fence must still attempt the reserve at least once; got {}",
@@ -1607,7 +1663,10 @@ mod unit_tests {
     /// the future on client disconnect.
     #[test]
     fn r14a6_from_cfg_caps_at_client_deadline() {
-        let p = VmIndexRetryPolicy::from_host_fence_timeout(120);
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            120,
+            crate::config::WakeResponseMode::Sync,
+        );
         let wall_ms = p.interval.as_millis() as u64
             * u64::from(p.max_attempts.saturating_sub(1));
         assert!(
@@ -1648,7 +1707,13 @@ mod unit_tests {
     #[test]
     fn c8b_default_policy_envelopes_doubled_fence() {
         // 30 s is the cluster-smoke fence (C-8 cluster config).
-        let p = VmIndexRetryPolicy::from_host_fence_timeout(30);
+        // Sync mode: the C-8b/C-8a contract holds under the
+        // dual-ceiling MIN (post-C-7-LT-1 the test names the mode
+        // explicitly).
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            30,
+            crate::config::WakeResponseMode::Sync,
+        );
         let wall_ms = p.interval.as_millis() as u64
             * u64::from(p.max_attempts.saturating_sub(1));
         assert!(
@@ -1680,6 +1745,114 @@ mod unit_tests {
             p.max_attempts, 26,
             "C-8b: 30 s fence → (2*30 - 10) / 2 + 1 = 26 attempts; got {}",
             p.max_attempts,
+        );
+    }
+
+    /// **C-7-LT-1 (T-8b-smoke-r12 cluster review)**: under
+    /// `WakeResponseMode::Async`, the ntex client deadline no longer
+    /// binds the wake retry loop (it runs on `detach_isolated` with
+    /// no client-side cancellation). The budget therefore drops the
+    /// MIN-with-deadline ceiling and uses `2×fence + HEADROOM` as a
+    /// safety margin past the empirical source-teardown wall-time.
+    ///
+    /// Smoke-r12 measured 60.166 s teardown at fence=30 s; the sync
+    /// 50 s cap surfaced as `vm_index_unavailable` 10 s before
+    /// teardown completed. Async at fence=30 = 2*30 + 10 = 70 s
+    /// budget → 36 attempts × 2 s = 70 s, enveloping the wall-time
+    /// with ~10 s slack.
+    #[test]
+    fn c7_lt_1_async_mode_fence_30_yields_70s_budget() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            30,
+            crate::config::WakeResponseMode::Async,
+        );
+        // 2*30 + 10 = 70 s; /2 + 1 = 36 attempts (35 sleeps × 2 s = 70 s).
+        assert_eq!(
+            p.max_attempts, 36,
+            "C-7-LT-1: async fence=30 must yield 36 attempts \
+             (2*30 + 10 = 70 s budget; 70/2 + 1 = 36); got {}",
+            p.max_attempts,
+        );
+        assert_eq!(p.interval, Duration::from_secs(2));
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        // The smoke-r12 empirical teardown was 60.166 s — async budget
+        // MUST envelope that.
+        assert!(
+            wall_ms >= 60_166,
+            "C-7-LT-1 async fence=30 budget must envelope the 60.166 s \
+             smoke-r12 teardown wall-time; got {} ms",
+            wall_ms,
+        );
+    }
+
+    /// **C-7-LT-1 sync-mode regression pin**: at the same fence=30,
+    /// sync mode must still cap at 26 attempts / 50 s — the C-8b
+    /// contract is unchanged by the C-7-LT-1 split. Without this
+    /// pin a future refactor could accidentally collapse the two
+    /// branches and silently regress C-8a (sync silent-cancel).
+    #[test]
+    fn c7_lt_1_sync_mode_fence_30_preserves_c8b_budget() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            30,
+            crate::config::WakeResponseMode::Sync,
+        );
+        // C-8b dual-ceiling MIN: MIN(2*30 - 10, 60 - 10) = MIN(50, 50)
+        // = 50 s → 26 attempts.
+        assert_eq!(
+            p.max_attempts, 26,
+            "C-7-LT-1 sync fence=30 must preserve C-8b: 26 attempts; got {}",
+            p.max_attempts,
+        );
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            wall_ms <= 50_000,
+            "C-7-LT-1 sync MUST NOT regress C-8a: budget must remain \
+             ≤50 s under the 60 s ntex deadline; got {} ms",
+            wall_ms,
+        );
+    }
+
+    /// **C-7-LT-1 long-fence async case**: under async mode a large
+    /// fence value (e.g. operator-conservative fence=120 s) should
+    /// scale linearly with `2*fence + HEADROOM`. Sync mode would
+    /// clamp this at the 50 s deadline ceiling; async drops the
+    /// clamp entirely.
+    ///
+    /// Pin: fence=120 async → 2*120 + 10 = 250 s → 126 attempts.
+    /// Sync mode at the same fence still caps at 26 attempts / 50 s
+    /// (separately covered by `r14a6_from_cfg_caps_at_client_deadline`).
+    #[test]
+    fn c7_lt_1_async_mode_fence_120_unbinds_deadline() {
+        let p_async = VmIndexRetryPolicy::from_host_fence_timeout(
+            120,
+            crate::config::WakeResponseMode::Async,
+        );
+        // 2*120 + 10 = 250; /2 + 1 = 126 attempts.
+        assert_eq!(
+            p_async.max_attempts, 126,
+            "C-7-LT-1: async fence=120 must yield 126 attempts \
+             (2*120 + 10 = 250 s budget); got {}",
+            p_async.max_attempts,
+        );
+
+        // And cross-check the sync companion is STILL clamped at 26
+        // (the deadline-ceil wins in sync). This pins the MODE split
+        // — a regression collapsing async back to sync would surface
+        // here as `p_async.max_attempts == p_sync.max_attempts`.
+        let p_sync = VmIndexRetryPolicy::from_host_fence_timeout(
+            120,
+            crate::config::WakeResponseMode::Sync,
+        );
+        assert_eq!(p_sync.max_attempts, 26);
+        assert!(
+            p_async.max_attempts > p_sync.max_attempts,
+            "C-7-LT-1: at fence=120 the async budget MUST exceed sync \
+             (sync clamped by deadline-ceil; async unbound). Got \
+             async={}, sync={}",
+            p_async.max_attempts,
+            p_sync.max_attempts,
         );
     }
 }
@@ -1790,6 +1963,17 @@ pub struct RealRestoreBackend {
     /// that don't construct a `NomadCHBackend` (the default trait
     /// impl returns `Ok(())` for those).
     nomad_handle: Option<Arc<crate::backend::nomad_ch::NomadCHBackend>>,
+    /// **C-7-LT-1 (T-8b-smoke-r12)**: wake response contract mode
+    /// (Sync vs. Async). Threaded into
+    /// `VmIndexRetryPolicy::from_host_fence_timeout` so the retry
+    /// budget can drop the ntex-client-deadline cap under async —
+    /// where the wake loop runs on `detach_isolated` with no
+    /// client-side cancellation. Defaults to `Sync` so existing
+    /// unit-test constructors keep the pre-C-7-LT-1 budget shape.
+    /// Production wiring (`AppState::from_config`) sets this via
+    /// [`Self::with_wake_response_mode`] from
+    /// `WakeResponseMode::from_env()`.
+    wake_response_mode: crate::config::WakeResponseMode,
 }
 
 impl std::fmt::Debug for RealRestoreBackend {
@@ -1818,7 +2002,30 @@ impl RealRestoreBackend {
             shared_allocator: None,
             reservations: Arc::new(Mutex::new(VmIndexReservations::new())),
             nomad_handle: None,
+            // C-7-LT-1 default: Sync preserves the pre-r12 budget
+            // shape for unit tests + back-compat fixture constructors
+            // that don't go through `AppState::from_config`. Production
+            // wiring sets this via `with_wake_response_mode` from
+            // `WakeResponseMode::from_env()`.
+            wake_response_mode: crate::config::WakeResponseMode::Sync,
         }
+    }
+
+    /// **C-7-LT-1 fix (T-8b-smoke-r12)**: install the wake response
+    /// contract mode. Threaded into
+    /// `VmIndexRetryPolicy::from_host_fence_timeout` so the retry
+    /// budget drops the ntex-client-deadline cap in async mode (where
+    /// the wake loop runs on `detach_isolated` with no client-side
+    /// cancellation). Pre-C-7-LT-1, the policy capped at 50 s under
+    /// async too — racing the empirical 60.166 s source-teardown
+    /// wall-time and surfacing as `vm_index_unavailable` even though
+    /// the budget was governed by a deadline that no longer applied.
+    pub fn with_wake_response_mode(
+        mut self,
+        mode: crate::config::WakeResponseMode,
+    ) -> Self {
+        self.wake_response_mode = mode;
+        self
     }
 
     /// **B18 fix**: install a shared `vm_index` allocator. The
@@ -1972,8 +2179,16 @@ impl RestoreBackend for RealRestoreBackend {
     /// [`VmIndexRetryPolicy::from_host_fence_timeout`] for the formula
     /// + the trade-off if an operator sets `host_fence_timeout_secs`
     /// past the ntex client deadline.
+    ///
+    /// **C-7-LT-1 (T-8b-smoke-r12)**: the wake response mode is
+    /// threaded in so async-mode retries are NOT capped at the
+    /// (now-vestigial) 60 s ntex client deadline — the async wake
+    /// loop runs on `detach_isolated` with no client-side cancellation.
     fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
-        VmIndexRetryPolicy::from_host_fence_timeout(self.cfg.host_fence_timeout_secs)
+        VmIndexRetryPolicy::from_host_fence_timeout(
+            self.cfg.host_fence_timeout_secs,
+            self.wake_response_mode,
+        )
     }
 
     fn derive_agent_url(&self, vm_index: i16) -> String {

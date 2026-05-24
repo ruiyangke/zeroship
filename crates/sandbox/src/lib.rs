@@ -635,6 +635,28 @@ impl AppState {
         let admin_token = load_admin_token(admin_token_path.as_deref())?
             .map(zeroize::Zeroizing::new);
 
+        // C-7-LT (PR1): resolve wake-response mode from env at boot.
+        // Resolved BEFORE the snapshot-wiring block so the value can
+        // be threaded into `RealRestoreBackend::with_wake_response_mode`
+        // — the C-7-LT-1 (smoke-r12) fix needs the mode at wake-retry-
+        // policy construction time, not just on `AppState`.
+        //
+        // R16-S4 fail-CLOSED: any unrecognised env value aborts boot
+        // instead of silently defaulting to sync. Misconfigured
+        // feature flags are config bugs, not silent-fallback hazards.
+        let wake_response_mode = crate::config::WakeResponseMode::from_env()
+            .map_err(|e| format!("WakeResponseMode::from_env: {e}"))?;
+        // R16-S5: wake lifecycle config (GC retention). Resolved at
+        // boot; propagates to `sweep::run_wake_jobs_gc_once` via
+        // `AppState::wake_lifecycle`.
+        let wake_lifecycle = crate::config::WakeLifecycleConfig::from_env()
+            .map_err(|e| format!("WakeLifecycleConfig::from_env: {e}"))?;
+        tracing::info!(
+            mode = wake_response_mode.as_str(),
+            wake_jobs_gc_retention_secs = wake_lifecycle.wake_jobs_gc_retention_secs,
+            "sandbox wake-response: contract mode + lifecycle resolved"
+        );
+
         // Phase-A snapshot/restore wiring. When `snapshot_enabled =
         // true`, construct the production trio:
         //   - LocalDiskSnapshotStore at config.snapshot_l1_root
@@ -753,7 +775,14 @@ impl AppState {
                 config.nomad_ch.clone(),
                 config.memory_mb,
                 config.cpus,
-            );
+            )
+            // C-7-LT-1 (smoke-r12): thread the wake response mode in
+            // so `VmIndexRetryPolicy::from_host_fence_timeout` drops
+            // the deadline cap under async (where the wake loop runs
+            // on `detach_isolated` with no client-side cancellation).
+            // Pre-fix the policy capped at 50 s under async too,
+            // racing the 60.166 s source-teardown wall-time.
+            .with_wake_response_mode(wake_response_mode);
             let rb_inner = match shared_allocator {
                 Some(a) => {
                     tracing::info!(
@@ -805,26 +834,6 @@ impl AppState {
         } else {
             (None, None, None)
         };
-
-        // C-7-LT (PR1): resolve wake-response mode from env at boot.
-        // PR1 only carries the flag; the wake handler still emits the
-        // legacy 200-OK shape regardless of the value here.
-        //
-        // R16-S4 fail-CLOSED: any unrecognised env value aborts boot
-        // instead of silently defaulting to sync. Misconfigured
-        // feature flags are config bugs, not silent-fallback hazards.
-        let wake_response_mode = crate::config::WakeResponseMode::from_env()
-            .map_err(|e| format!("WakeResponseMode::from_env: {e}"))?;
-        // R16-S5: wake lifecycle config (GC retention). Resolved at
-        // boot; propagates to `sweep::run_wake_jobs_gc_once` via
-        // `AppState::wake_lifecycle`.
-        let wake_lifecycle = crate::config::WakeLifecycleConfig::from_env()
-            .map_err(|e| format!("WakeLifecycleConfig::from_env: {e}"))?;
-        tracing::info!(
-            mode = wake_response_mode.as_str(),
-            wake_jobs_gc_retention_secs = wake_lifecycle.wake_jobs_gc_retention_secs,
-            "sandbox wake-response: contract mode + lifecycle resolved"
-        );
 
         let state = Arc::new(Self {
             config,
