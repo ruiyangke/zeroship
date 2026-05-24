@@ -91,8 +91,28 @@ pub fn register_model_dispatch<'s>(
                 // time. Cloned because the closure captures `schema` by
                 // move; the cache is per-isolate and lives for the
                 // isolate's lifetime (no eviction).
+                //
+                // **P7 PR 4** — stamp the `_systemFields: true` marker
+                // so the CRUD update pass can distinguish a freshly-
+                // registered (PR 2-emitted) table from a pre-migration
+                // legacy table. The marker is read by
+                // [`crate::crud::system_fields_pass::check_system_fields_marker`];
+                // its absence in the cached schema surfaces a typed
+                // `system_fields_missing` error so the SDK can guide the
+                // creator to re-register or wait for PR 6's ALTER pass.
+                // The marker is namespaced under a `_` prefix matching
+                // the `_meta` / `_indexes` skip list in
+                // [`crate::query::is_schema_metadata_key`] so the
+                // declaration-time field validators ignore it.
+                let mut cached = schema.clone();
+                if let Some(obj) = cached.as_object_mut() {
+                    obj.insert(
+                        "_systemFields".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
                 context::with_mut(|c| {
-                    c.cache_schema(&app_id_owned, &collection_owned, schema.clone());
+                    c.cache_schema(&app_id_owned, &collection_owned, cached);
                 });
                 OpResult::JsValue {
                     resolver,

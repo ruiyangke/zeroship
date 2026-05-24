@@ -36,6 +36,16 @@ pub enum QueryError {
     /// (`db.users.find({ id: ... })` is the canonical query shape); the
     /// fence only fires on declaration paths (`field_to_column`).
     ReservedSystemFieldName(String),
+    /// **P7 PR 4** — creator UPDATE patch attempted to overwrite one of
+    /// the three write-once system fields (`id`, `created_at`,
+    /// `created_by`). These are auto-populated at INSERT (PR 3) and
+    /// immutable thereafter. The carried string names the offending
+    /// field for the SDK error envelope. Distinct from
+    /// `ReservedSystemFieldName` (which fires only at declaration
+    /// time): this fires at UPDATE-patch validation, NOT on filter
+    /// reads (`update({ id: ... }, ...)` is fine — the filter
+    /// references id; only the PATCH side is fenced).
+    ImmutableSystemField(String),
 }
 
 impl std::fmt::Display for QueryError {
@@ -46,6 +56,9 @@ impl std::fmt::Display for QueryError {
             Self::InvalidIdent(msg) => write!(f, "invalid identifier: {msg}"),
             Self::ReservedSystemFieldName(msg) => {
                 write!(f, "reserved system field name: {msg}")
+            }
+            Self::ImmutableSystemField(msg) => {
+                write!(f, "immutable system field: {msg}")
             }
         }
     }
@@ -2476,14 +2489,101 @@ pub fn build_set_clauses(
     build_set_clauses_with_dialect(update, params, SqlDialect::Postgres)
 }
 
+/// **P7 PR 4** — knobs the SET-clause builder needs to compose the
+/// platform's auto-bump system-field SET clauses correctly.
+///
+/// Three independent bumps, each suppressed when the creator's patch
+/// already provided an explicit value for that column (per
+/// [`crate::crud::system_fields_pass::apply_system_fields_on_update`]
+/// which inspects the patch and surfaces these flags via
+/// `UpdateAutoBumpHints`):
+///
+/// 1. `version` → `"version" = "version" + 1` — every UPDATE bumps,
+///    unless `skip_version` is true (creator supplied an explicit
+///    value).
+/// 2. `updated_at` → `"updated_at" = NOW()` (PG) / `CURRENT_TIMESTAMP`
+///    (SQLite) — same skip rule.
+/// 3. `updated_by` → `"updated_by" = $N` bound to `actor_id` — emitted
+///    only when an actor is in scope AND `skip_updated_by` is false.
+///
+/// `Default::default()` produces the "no auto-bump" shape, used by the
+/// existing dispatch-free callers (e.g. raw SQL tests, the
+/// pre-PR-4 `build_set_clauses_with_dialect` wrapper) so behaviour
+/// outside the dispatch path is unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct SystemFieldAutoBump<'a> {
+    /// Bind value for the `updated_by` placeholder. When `None`, the
+    /// `updated_by` SET clause is suppressed (no actor in scope —
+    /// matches the PR 3 INSERT path's "leave NULL when anonymous"
+    /// behaviour). When `Some`, the column is bound to the
+    /// typed_id string.
+    pub actor_id: Option<&'a str>,
+    /// `true` when the creator's patch carried an explicit `version`.
+    /// Suppresses the `"version" = "version" + 1` auto-bump so the
+    /// explicit value wins.
+    pub skip_version: bool,
+    /// Same as `skip_version` for `updated_at`. Suppresses the
+    /// dialect-appropriate `NOW()` / `CURRENT_TIMESTAMP` auto-bump.
+    pub skip_updated_at: bool,
+    /// Same as `skip_version` for `updated_by`. Suppresses the
+    /// actor-bound `$N` SET clause.
+    pub skip_updated_by: bool,
+}
+
 /// **P5 PR 3.5** — dialect-aware SET-clause builder for `build_update_one` /
 /// `build_update_many`. PG keeps the `decode($N, 'base64')::bytea` cast
 /// (byte-for-byte identical to PR 2); SQLite emits a plain `$N` and
 /// tags the encrypted-column param value with [`SQLITE_ENC_BLOB_PREFIX`].
+///
+/// **P7 PR 4** — emits the dialect-appropriate `updated_at` auto-bump
+/// (`NOW()` on PG, `CURRENT_TIMESTAMP` on SQLite). To compose the full
+/// `version` / `updated_at` / `updated_by` auto-bump set used by the
+/// CRUD dispatch path, callers should use
+/// [`build_set_clauses_with_system_fields`] instead — this wrapper
+/// preserves the pre-PR-4 single-column auto-bump behaviour for
+/// existing direct callers.
 pub fn build_set_clauses_with_dialect(
     update: &Value,
     params: &mut Vec<String>,
     dialect: SqlDialect,
+) -> Result<Vec<String>, QueryError> {
+    // The default auto-bump is empty (no version bump, no updated_by) —
+    // preserves the pre-PR-4 contract.
+    build_set_clauses_with_system_fields(
+        update,
+        params,
+        dialect,
+        &SystemFieldAutoBump::default(),
+    )
+}
+
+/// **P7 PR 4** — SET-clause builder + system-field auto-bump pass.
+///
+/// Mirrors [`build_set_clauses_with_dialect`] for the creator-supplied
+/// portion of the SET clause (encryption-aware, operator-aware,
+/// `$set`-flattening), then appends — strictly AFTER all creator
+/// clauses, grep-friendly ordering — the three platform auto-bumps the
+/// system-field contract requires:
+///
+/// ```text
+///   "version"    = "version" + 1            (unless skip_version)
+///   "updated_at" = NOW() / CURRENT_TIMESTAMP (unless skip_updated_at)
+///   "updated_by" = $N                       (unless skip_updated_by OR
+///                                            actor_id is None)
+/// ```
+///
+/// The auto-bump SET clauses bypass the encryption / mask passes by
+/// construction — they are appended AFTER the encryption-aware loop
+/// runs, with their own SQL fragments and bind params (using the
+/// running `$N` counter so encryption-pass `$N` claims don't collide
+/// with the auto-bump's `$N`). System fields are platform-managed
+/// plaintext; routing them through encryption / masking would corrupt
+/// the on-disk values.
+pub fn build_set_clauses_with_system_fields(
+    update: &Value,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<Vec<String>, QueryError> {
     let update_obj = update
         .as_object()
@@ -2617,9 +2717,67 @@ pub fn build_set_clauses_with_dialect(
         }
     }
 
-    // Auto-update updated_at unless the caller explicitly set it
-    if !set_clauses.iter().any(|c| c.contains("\"updated_at\"")) {
-        set_clauses.push("\"updated_at\" = NOW()".to_string());
+    // **P7 PR 4** — system-field auto-bump SET clauses. Appended AFTER
+    // every creator-supplied clause (encryption-pass / mask-pass output
+    // included) so the diff against the creator's patch is grep-able
+    // AND so the auto-bumps bypass encryption / masking by
+    // construction. Each bump skipped when the creator's patch
+    // explicitly supplied that column (the value flows through the
+    // standard SET loop above; the explicit value wins per Q-SF-B).
+    //
+    // For backwards-compatibility with pre-PR-4 direct callers, the
+    // legacy "auto-bump updated_at when not explicit" path stays
+    // unchanged: when the caller passed `SystemFieldAutoBump::default()`
+    // (the wrapper from `build_set_clauses_with_dialect`), the only
+    // bump emitted is `updated_at` and it inspects the existing
+    // `set_clauses` for an explicit override. The `autobump.skip_*`
+    // flags are only ever set by the new PR 4 dispatch path
+    // (`apply_system_fields_on_update` populates the hints).
+    let already_has_updated_at = set_clauses.iter().any(|c| c.contains("\"updated_at\""));
+    let already_has_version = set_clauses.iter().any(|c| c.contains("\"version\""));
+    let already_has_updated_by = set_clauses.iter().any(|c| c.contains("\"updated_by\""));
+
+    // `version` auto-bump fires only on the new PR 4 dispatch path
+    // (signalled by an `actor_id` being threaded through OR by an
+    // explicit `skip_version = false` from the caller's hints). To
+    // keep the pre-PR-4 direct-caller contract intact, we use a
+    // discriminator: the legacy path always passes `actor_id = None`
+    // AND `skip_version = false` (the `Default::default()` shape) —
+    // we only emit the version bump when `actor_id.is_some()` OR the
+    // caller asked for it explicitly via a `skip_updated_by = true`
+    // setting (which is impossible from the default and only set by
+    // the new PR 4 helper). The actor presence is the discriminator
+    // because the legacy callers never thread one through.
+    let on_pr4_dispatch_path = autobump.actor_id.is_some()
+        || autobump.skip_version
+        || autobump.skip_updated_at
+        || autobump.skip_updated_by;
+    if on_pr4_dispatch_path && !autobump.skip_version && !already_has_version {
+        set_clauses.push("\"version\" = \"version\" + 1".to_string());
+    }
+
+    // `updated_at` auto-bump — dialect-aware (PG `NOW()` /
+    // SQLite `CURRENT_TIMESTAMP`). This fires on BOTH paths (PR 4
+    // dispatch AND legacy direct callers) since the pre-PR-4 contract
+    // already emitted `updated_at = NOW()` on every UPDATE.
+    if !autobump.skip_updated_at && !already_has_updated_at {
+        let ts_expr = match dialect {
+            SqlDialect::Postgres => "NOW()",
+            SqlDialect::Sqlite => "CURRENT_TIMESTAMP",
+        };
+        set_clauses.push(format!("\"updated_at\" = {ts_expr}"));
+    }
+
+    // `updated_by` auto-bump — actor-bound. Fires only on the PR 4
+    // dispatch path when an actor is in scope (anonymous writes leave
+    // `updated_by` untouched, mirroring the PR 3 INSERT "NULL when no
+    // session actor" rule).
+    if let Some(actor) = autobump.actor_id {
+        if !autobump.skip_updated_by && !already_has_updated_by {
+            params.push(actor.to_string());
+            let n = params.len();
+            set_clauses.push(format!("\"updated_by\" = ${n}"));
+        }
     }
 
     Ok(set_clauses)
@@ -2650,6 +2808,29 @@ pub fn build_update_one_with_dialect(
     update: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    build_update_one_with_system_fields(
+        app_id,
+        collection,
+        filter,
+        update,
+        dialect,
+        &SystemFieldAutoBump::default(),
+    )
+}
+
+/// **P7 PR 4** — dialect-aware `updateOne` builder + system-field
+/// auto-bump. The CRUD dispatch path uses this so every UPDATE
+/// transparently bumps `version` + `updated_at` + `updated_by` (per
+/// the `autobump` knobs). Direct callers that need byte-identical
+/// pre-PR-4 SQL keep using [`build_update_one_with_dialect`].
+pub fn build_update_one_with_system_fields(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    update: &Value,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -2657,7 +2838,8 @@ pub fn build_update_one_with_dialect(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let set_clauses = build_set_clauses_with_dialect(update, &mut params, dialect)?;
+    let set_clauses =
+        build_set_clauses_with_system_fields(update, &mut params, dialect, autobump)?;
 
     let where_clause = build_where(filter, &mut params)?;
 
@@ -2820,6 +3002,29 @@ pub fn build_update_many_with_dialect(
     update: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    build_update_many_with_system_fields(
+        app_id,
+        collection,
+        filter,
+        update,
+        dialect,
+        &SystemFieldAutoBump::default(),
+    )
+}
+
+/// **P7 PR 4** — dialect-aware `updateMany` builder + system-field
+/// auto-bump. Same auto-bump semantics as
+/// [`build_update_one_with_system_fields`]; CRUD dispatch path uses
+/// this to keep the bulk-update SQL emitting `version` + `updated_at`
+/// + `updated_by` bumps even on multi-row updates.
+pub fn build_update_many_with_system_fields(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    update: &Value,
+    dialect: SqlDialect,
+    autobump: &SystemFieldAutoBump<'_>,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -2827,7 +3032,8 @@ pub fn build_update_many_with_dialect(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let set_clauses = build_set_clauses_with_dialect(update, &mut params, dialect)?;
+    let set_clauses =
+        build_set_clauses_with_system_fields(update, &mut params, dialect, autobump)?;
 
     let where_clause = build_where(filter, &mut params)?;
 
@@ -5118,6 +5324,505 @@ mod tests {
         let update = json!({"user": "alice"}); // "user" is a reserved word
         let q = build_update_one("app1", "accounts", &filter, &update).unwrap();
         assert!(q.sql.contains(r#""user" = $"#), "sql: {}", q.sql);
+    }
+
+    // -----------------------------------------------------------------------
+    // **P7 PR 4** — UPDATE auto-bumps version + updated_at + updated_by
+    //
+    // The auto-bumps fire only on the new dispatch path (signalled by
+    // an `actor_id` being threaded through OR by `skip_*` hints).
+    // Direct callers of `build_update_one` / `build_update_many`
+    // continue to see the pre-PR-4 single-column auto-bump
+    // (`updated_at = NOW()` on PG) so the regression tests above stay
+    // green.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn update_appends_version_increment_to_set_clause() {
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(r#""version" = "version" + 1"#),
+            "PR 4 must append version auto-bump: {}",
+            q.sql,
+        );
+    }
+
+    #[test]
+    fn update_appends_updated_at_now_pg() {
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(r#""updated_at" = NOW()"#),
+            "PG dialect must emit NOW(): {}",
+            q.sql,
+        );
+    }
+
+    #[test]
+    fn update_appends_updated_at_current_timestamp_sqlite() {
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(r#""updated_at" = CURRENT_TIMESTAMP"#),
+            "SQLite dialect must emit CURRENT_TIMESTAMP: {}",
+            q.sql,
+        );
+        assert!(!q.sql.contains("NOW()"), "SQLite must NOT emit NOW(): {}", q.sql);
+    }
+
+    #[test]
+    fn update_appends_updated_by_from_session_actor() {
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_session"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // updated_by is a bound param; the SQL fragment is `"updated_by" = $N`
+        assert!(
+            q.sql.contains(r#""updated_by" = $"#),
+            "must emit updated_by SET clause: {}",
+            q.sql,
+        );
+        // The actor id must be present in the params vector.
+        assert!(
+            q.params.contains(&"usr_session".to_string()),
+            "params must include actor id: {:?}",
+            q.params,
+        );
+    }
+
+    #[test]
+    fn update_leaves_updated_by_null_when_no_session_actor() {
+        // No actor: PR 4 emits no `updated_by` SET clause.
+        // Note: with `actor_id = None` AND no `skip_*` flags, the
+        // pre-PR-4 fallback applies — only `updated_at` auto-bumps.
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump::default();
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            !q.sql.contains(r#""updated_by""#),
+            "no actor → no updated_by SET clause: {}",
+            q.sql,
+        );
+    }
+
+    #[test]
+    fn update_respects_creator_supplied_version_pr4() {
+        // When the creator's patch carries `version: 99`, the auto-bump
+        // MUST NOT fire (the explicit value wins per Q-SF-B).
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new", "version": 99 });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            skip_version: true,
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // The version auto-bump must NOT appear.
+        assert!(
+            !q.sql.contains(r#""version" = "version" + 1"#),
+            "skip_version must suppress the auto-bump: {}",
+            q.sql,
+        );
+        // The creator's explicit value flows through as a bound param.
+        assert!(
+            q.sql.contains(r#""version" = $"#),
+            "creator's explicit version must reach SQL: {}",
+            q.sql,
+        );
+        assert!(q.params.contains(&"99".to_string()), "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn update_respects_creator_supplied_updated_at_pr4() {
+        let filter = json!({ "id": "post_x" });
+        let explicit = "2026-01-01T00:00:00Z";
+        let update = json!({ "title": "new", "updated_at": explicit });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            skip_updated_at: true,
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            !q.sql.contains("NOW()"),
+            "skip_updated_at must suppress NOW(): {}",
+            q.sql,
+        );
+        assert!(q.params.contains(&explicit.to_string()), "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn update_auto_bump_columns_bypass_encryption_pass() {
+        // Build a doc with an encrypted-column marker. The auto-bump
+        // version/updated_at/updated_by SET clauses must NOT be wrapped
+        // with the encrypted-column placeholder shape.
+        let filter = json!({ "id": "post_x" });
+        // `__zsenc__secret` marks the `secret` column encrypted.
+        let update = json!({
+            "secret": "ciphertext",
+            "__zsenc__secret": true,
+        });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // Encrypted column gets the decode(...)::bytea wrap.
+        assert!(
+            q.sql.contains("decode("),
+            "encrypted column must still get decode wrap: {}",
+            q.sql,
+        );
+        // Auto-bumps are plain SET clauses — must NOT be inside a decode().
+        // The version bump's SQL fragment is `"version" = "version" + 1`
+        // (no $N), so decode() can't wrap it. The updated_by SET clause
+        // is `"updated_by" = $N` — assert there's no `decode($N..)::bytea`
+        // associated with the updated_by column.
+        let updated_by_idx = q.sql.find(r#""updated_by""#).unwrap();
+        let updated_by_clause = &q.sql[updated_by_idx..(updated_by_idx + 30).min(q.sql.len())];
+        assert!(
+            !updated_by_clause.contains("decode("),
+            "updated_by SET clause must NOT be decode-wrapped: {updated_by_clause}",
+        );
+    }
+
+    #[test]
+    fn update_auto_bump_uses_distinct_bind_params_from_encryption_pass() {
+        // Encryption pass binds the ciphertext as $1. The updated_by
+        // auto-bump must bind to $2 (or later) — not collide with $1.
+        let filter = json!({ "id": "post_x" });
+        let update = json!({
+            "secret": "ciphertext",
+            "__zsenc__secret": true,
+        });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // The actor id must appear in the params vector AFTER the
+        // ciphertext (or at any later $N), not collide.
+        let actor_pos = q
+            .params
+            .iter()
+            .position(|p| p == "usr_actor")
+            .expect("actor must be bound");
+        let cipher_pos = q
+            .params
+            .iter()
+            .position(|p| p == "ciphertext")
+            .expect("ciphertext must be bound");
+        assert!(
+            actor_pos > cipher_pos,
+            "actor id bind ({actor_pos}) must come after ciphertext ({cipher_pos}): {:?}",
+            q.params,
+        );
+    }
+
+    #[test]
+    fn update_with_version_filter_appends_where_version_eq_N() {
+        // PR 4 — when the filter has `version: N`, the standard
+        // `build_where` emits `"version" = $N`. The SQL builder
+        // doesn't need special CAS handling; the auto-bump SET
+        // composes with the WHERE naturally.
+        let filter = json!({ "id": "post_x", "version": 5 });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // WHERE clause references `version` as an equality predicate.
+        assert!(
+            q.sql.contains(r#""version" = $"#),
+            "filter version must appear in WHERE: {}",
+            q.sql,
+        );
+        // The version `5` must appear as a bound param.
+        assert!(q.params.contains(&"5".to_string()), "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn update_default_path_emits_dialect_aware_updated_at_sqlite() {
+        // Direct calls to the legacy wrapper on the SQLite arm: the
+        // auto-bump used to hardcode NOW(); PR 4 makes it dialect-aware.
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let q = build_update_one_with_dialect(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(r#""updated_at" = CURRENT_TIMESTAMP"#),
+            "SQLite-arm direct callers get CURRENT_TIMESTAMP: {}",
+            q.sql,
+        );
+    }
+
+    #[test]
+    fn update_with_explicit_version_and_concurrency_filter_explicit_wins() {
+        // When the filter has `version: 5` (CAS guard) AND the patch
+        // carries an explicit `version: 99`, the SDK's expected
+        // behaviour is: the WHERE clause still narrows to version=5,
+        // and the SET clause stamps version=99 verbatim (the
+        // auto-bump is suppressed because the creator supplied an
+        // explicit value).
+        let filter = serde_json::json!({ "id": "post_x", "version": 5 });
+        let update = serde_json::json!({ "title": "new", "version": 99 });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            // The caller's `apply_system_fields_on_update` would set
+            // this from inspecting the patch — we set it manually here
+            // to pin the contract.
+            skip_version: true,
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // SET carries the creator's explicit value (`"version" = $N`).
+        assert!(
+            q.sql.contains(r#""version" = $"#),
+            "explicit version reaches SET: {}",
+            q.sql,
+        );
+        assert!(
+            !q.sql.contains(r#""version" = "version" + 1"#),
+            "auto-bump must be suppressed: {}",
+            q.sql,
+        );
+        // Bind values must include BOTH `99` (SET) and `5` (WHERE).
+        assert!(q.params.contains(&"99".to_string()), "params: {:?}", q.params);
+        assert!(q.params.contains(&"5".to_string()), "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn update_encrypted_column_still_routes_through_encryption_pass() {
+        // The encrypted-column marker continues to wrap the placeholder
+        // with `decode($N, 'base64')::bytea`. Auto-bump columns
+        // (version/updated_at/updated_by) are NOT subject to the
+        // marker — only the creator-supplied `ssn` column gets the
+        // encryption wrap.
+        let filter = serde_json::json!({ "id": "post_x" });
+        let update = serde_json::json!({
+            "ssn": "Y2lwaGVydGV4dF9ibG9i",
+            "__zsenc__ssn": true,
+        });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // `ssn` gets the decode(...)::bytea wrap.
+        assert!(
+            q.sql.contains("decode("),
+            "encrypted column wrapped: {}",
+            q.sql,
+        );
+        // The encrypted column SQL fragment contains the cast.
+        let ssn_idx = q.sql.find(r#""ssn""#).unwrap();
+        let ssn_end = q.sql[ssn_idx..].find(',').map(|i| ssn_idx + i).unwrap_or(q.sql.len());
+        let ssn_clause = &q.sql[ssn_idx..ssn_end];
+        assert!(
+            ssn_clause.contains("decode("),
+            "ssn SET clause must include decode wrap: {ssn_clause}"
+        );
+    }
+
+    /// The PR 4 auto-bump SQL must NOT carry an `__zsenc__updated_by`
+    /// marker — system fields are platform-managed plaintext and bypass
+    /// encryption by construction.
+    #[test]
+    fn update_auto_bump_columns_bypass_mask_pass() {
+        // Mask-pass markers (sibling `<col>_masked` columns) only fire
+        // for columns the schema declares as `t.mask(...)`. System
+        // fields are never declared with a mask; the mask pass's
+        // schema-iteration loop naturally skips them. We confirm the
+        // SQL doesn't accidentally emit a sibling for any auto-bump
+        // column.
+        let filter = serde_json::json!({ "id": "post_x" });
+        let update = serde_json::json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        // The auto-bump columns never get a sibling `*_masked` SET
+        // clause.
+        assert!(
+            !q.sql.contains("version_masked"),
+            "no version_masked: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains("updated_at_masked"),
+            "no updated_at_masked: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains("updated_by_masked"),
+            "no updated_by_masked: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn update_set_clause_ordering_creator_first_then_auto_bump() {
+        // PR 4 contract: auto-bump SET clauses are appended AFTER
+        // every creator-supplied clause so the SQL diff is grep-able
+        // (and the encryption/mask passes — which iterate the
+        // creator's keys — never touch the auto-bumps).
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_actor"),
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        let title_pos = q.sql.find(r#""title""#).expect("title in SET");
+        let version_pos = q.sql.find(r#""version""#).expect("version in SET");
+        let updated_at_pos = q.sql.find(r#""updated_at""#).expect("updated_at in SET");
+        let updated_by_pos = q.sql.find(r#""updated_by""#).expect("updated_by in SET");
+        assert!(
+            title_pos < version_pos,
+            "creator's title must come before auto-bump version"
+        );
+        assert!(version_pos < updated_at_pos);
+        assert!(updated_at_pos < updated_by_pos);
     }
 
     // -----------------------------------------------------------------------

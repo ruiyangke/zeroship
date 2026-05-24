@@ -353,6 +353,85 @@ impl DbError {
         }
     }
 
+    /// **P7 PR 4** — optimistic-concurrency check failed. The UPDATE
+    /// filter included `version: N` but the row's current `version`
+    /// no longer matched (another writer won the race; affected-rows
+    /// came back 0).
+    ///
+    /// SDK callers branch on `e.code === "version_mismatch"`. The
+    /// retry advice in the `hint` doubles as the
+    /// `OptimisticLockError` message body in the SDK. The proposal's
+    /// Q-SF-E (§10) settled on retryable semantics — caller is
+    /// expected to re-read the row, observe the bumped `version`,
+    /// and retry with the new value.
+    pub fn version_mismatch(
+        collection: &str,
+        row_id: Option<&str>,
+        expected_version: i64,
+    ) -> Self {
+        let id_part = row_id
+            .map(|id| format!(" {id}"))
+            .unwrap_or_default();
+        DbError::ValidationFailed {
+            code: "version_mismatch",
+            message: format!(
+                "Optimistic concurrency check failed for {collection}{id_part}: \
+                 expected version {expected_version}, but the row was modified concurrently."
+            ),
+            hint: Some(
+                "Re-read the row to get the current version and retry the update.".to_string(),
+            ),
+        }
+    }
+
+    /// **P7 PR 4** — UPDATE attempted on a table whose schema lacks
+    /// the platform-managed `version` column (and by extension the
+    /// other six system fields). PR 2 prepends these to every NEW
+    /// table; PR 6 will ALTER pre-PR-2 tables in. Until PR 6 lands,
+    /// CRUD against a legacy table refuses with this typed code so
+    /// the SDK can surface a deterministic message.
+    pub fn system_fields_missing(collection: &str) -> Self {
+        DbError::ValidationFailed {
+            code: "system_fields_missing",
+            message: format!(
+                "Collection `{collection}` was created before the platform \
+                 system-fields contract (`id`, `created_at`, `updated_at`, \
+                 `created_by`, `updated_by`, `version`, `deleted_at`) was \
+                 introduced; UPDATE auto-bumps `version` and cannot proceed."
+            ),
+            hint: Some(
+                "Re-register the model via `db.registerModel(...)` after \
+                 the platform's system-fields migration (PR 6) has run, or \
+                 manually ALTER the table to add the seven system field \
+                 columns."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// **P7 PR 4** — UPDATE filter carried `version: N` but no `id`
+    /// predicate. The CAS semantics don't generalise cleanly to
+    /// multi-row UPDATEs (the affected-rows count conflates "row
+    /// missing", "version mismatched", and "filter matched but version
+    /// matched" — there's no clean per-row mismatch report). PR 4
+    /// refuses this shape eagerly with a typed code so the SDK can
+    /// guide the creator toward an explicit per-id loop.
+    pub fn multi_row_version_filter_unsupported(collection: &str) -> Self {
+        DbError::ValidationFailed {
+            code: "multi_row_version_filter_unsupported",
+            message: format!(
+                "UPDATE on `{collection}` with `version` in the filter requires \
+                 an `id` predicate; optimistic concurrency is per-row only."
+            ),
+            hint: Some(
+                "Either remove `version` from the filter (last-writer-wins \
+                 bulk update) or scope the UPDATE to a single row with \
+                 `{ id: ..., version: N }`."
+                    .to_string(),
+            ),
+        }
+    }
+
     /// Build the canonical [`DbError::Configuration`] returned when
     /// [`crate::backend::BackendHandle::as_postgres`] yields `None` —
     /// i.e. the active backend isn't the Postgres arm. Every call site
@@ -527,6 +606,21 @@ impl From<crate::query::QueryError> for DbError {
                     "System fields (id, created_at, updated_at, created_by, \
                      updated_by, version, deleted_at) are managed by the \
                      platform and cannot be overridden."
+                        .to_string(),
+                ),
+            ),
+            // **P7 PR 4** — UPDATE patch attempted to overwrite an
+            // immutable write-once system field (`id`, `created_at`,
+            // `created_by`). Distinct code so SDK consumers can branch
+            // (e.g. surface a "you can't change the id of a row"
+            // remediation) without substring-matching the message.
+            QueryError::ImmutableSystemField(m) => (
+                "immutable_system_field",
+                m,
+                Some(
+                    "Fields `id`, `created_at`, `created_by` are write-once \
+                     and set automatically on INSERT. They cannot be modified \
+                     via UPDATE."
                         .to_string(),
                 ),
             ),
@@ -964,6 +1058,96 @@ mod tests {
                 }
             }
             other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    // ---- P7 PR 4 — new typed-error helpers ------------------------
+
+    /// `ImmutableSystemField` maps to the `immutable_system_field`
+    /// code with a hint listing the three write-once names.
+    #[test]
+    fn from_query_error_immutable_system_field_carries_hint() {
+        let qe = crate::query::QueryError::ImmutableSystemField(
+            "UPDATE patch attempted to overwrite immutable system field `id`".into(),
+        );
+        let db = DbError::from(qe);
+        match db {
+            DbError::ValidationFailed { code, hint, .. } => {
+                assert_eq!(code, "immutable_system_field");
+                let hint = hint.expect("immutable-system-field must carry a hint");
+                for name in ["id", "created_at", "created_by"] {
+                    assert!(
+                        hint.contains(name),
+                        "hint must list immutable field {name:?}; got: {hint}"
+                    );
+                }
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    /// `DbError::version_mismatch` stamps the canonical
+    /// `version_mismatch` code; carries a hint advising re-read +
+    /// retry.
+    #[test]
+    fn version_mismatch_stamps_canonical_code_and_hint() {
+        let e = DbError::version_mismatch("posts", Some("post_x"), 5).to_op_error();
+        match &e.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(code, "version_mismatch");
+                let h = hint.as_deref().expect("must carry a retry hint");
+                assert!(h.to_lowercase().contains("retry"), "hint: {h}");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        // Message body includes the collection + id + expected version
+        // so SDK consumers don't have to reconstruct the context.
+        assert!(e.message.contains("posts"), "message: {}", e.message);
+        assert!(e.message.contains("post_x"), "message: {}", e.message);
+        assert!(e.message.contains("5"), "message: {}", e.message);
+    }
+
+    /// `DbError::version_mismatch` without a row id omits the id
+    /// segment from the message (used for multi-row UPDATEs whose
+    /// filter doesn't carry id).
+    #[test]
+    fn version_mismatch_message_handles_missing_id() {
+        let e = DbError::version_mismatch("posts", None, 5).to_op_error();
+        assert!(e.message.contains("posts"));
+        assert!(e.message.contains("5"));
+    }
+
+    /// `DbError::system_fields_missing` stamps the canonical
+    /// `system_fields_missing` code; carries a hint that mentions
+    /// PR 6 / registerModel.
+    #[test]
+    fn system_fields_missing_stamps_canonical_code_and_hint() {
+        let e = DbError::system_fields_missing("legacy_posts").to_op_error();
+        match &e.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(code, "system_fields_missing");
+                let h = hint.as_deref().expect("must carry a remediation hint");
+                assert!(
+                    h.contains("registerModel") || h.contains("ALTER"),
+                    "hint should mention registerModel or ALTER: {h}"
+                );
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+    }
+
+    /// `DbError::multi_row_version_filter_unsupported` stamps the
+    /// canonical code; carries a remediation hint pointing at the
+    /// per-id loop.
+    #[test]
+    fn multi_row_version_filter_unsupported_stamps_canonical_code() {
+        let e = DbError::multi_row_version_filter_unsupported("posts").to_op_error();
+        match &e.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(code, "multi_row_version_filter_unsupported");
+                assert!(hint.is_some(), "must carry a remediation hint");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
         }
     }
 }

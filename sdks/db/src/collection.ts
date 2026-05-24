@@ -5,7 +5,7 @@
  */
 import { NormalizedSchema } from "./schema.js";
 import { validateDoc, checkPartial, isValidCalendarDate, isJsonSerializable, isParseableDateString } from "./validate.js";
-import { mapNativeError, ValidationError, OptimisticLockError } from "./errors.js";
+import { mapNativeError, ValidationError, OptimisticLockError, mapVersionMismatchError } from "./errors.js";
 import {
   mapResultDoc,
   mapDocOutbound,
@@ -741,17 +741,23 @@ export class Collection<
    * on top of the user-supplied update so the bump happens atomically
    * inside the same SQL statement as the SET. We merge into any
    * existing `$inc` rather than overwriting.
+   *
+   * **P7 PR 4** — the platform now auto-bumps `version` on every UPDATE
+   * server-side (`build_update_*_with_system_fields`). To avoid
+   * double-bumping when the SDK and the runtime both add `$inc: 1`,
+   * this helper is now a no-op (kept on the class for API stability;
+   * future SDK majors can drop it). The CAS WHERE clause itself
+   * (`version: N` in the filter) is still passed through to the
+   * runtime, which uses it for the optimistic-concurrency check
+   * (`build_where` emits the standard equality predicate) and surfaces
+   * a typed `version_mismatch` error on stale-version writes — caught
+   * + rethrown as `OptimisticLockError` by `update()` / `updateMany()`.
    */
-  private _augmentUpdateWithVersion(update: PlainObject, casVersion: number | null): PlainObject {
-    if (casVersion === null) return update;
-    const result: PlainObject = { ...update };
-    const existingInc = result.$inc;
-    const inc =
-      existingInc !== null && typeof existingInc === "object" && !Array.isArray(existingInc)
-        ? { ...(existingInc as PlainObject), version: 1 }
-        : { version: 1 };
-    result.$inc = inc;
-    return result;
+  private _augmentUpdateWithVersion(update: PlainObject, _casVersion: number | null): PlainObject {
+    // PR 4: runtime owns the version bump. Pass the patch through
+    // unchanged. The CAS predicate stays in the filter for the
+    // runtime to honour via the WHERE clause + affected-rows check.
+    return update;
   }
 
   /**
@@ -1191,15 +1197,34 @@ export class Collection<
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
       // D4 — extract `version: N` from the filter when versioning is on
-      // and use it as a CAS guard. The patch is augmented with $inc:1
-      // on `version` so the increment happens atomically with the SET.
+      // and use it as a CAS guard. **P7 PR 4** — the runtime now owns
+      // the actual version bump (`build_update_*_with_system_fields`
+      // appends `version = version + 1`); the SDK keeps `version: N`
+      // in the filter so the runtime can do the CAS WHERE check and
+      // surface a typed `version_mismatch` on stale-version writes.
       const casVersion = this._extractCasVersion(filter as PlainObject);
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const result = await this._nativeCollection().updateOne(mappedFilter, mappedUpdate);
+      let result;
+      try {
+        result = await this._nativeCollection().updateOne(mappedFilter, mappedUpdate);
+      } catch (e) {
+        // **P7 PR 4** — runtime threw a typed error. Translate
+        // `version_mismatch` to `OptimisticLockError` so existing
+        // app code that branches on `instanceof OptimisticLockError`
+        // keeps working. Other typed errors flow through `toResultError`
+        // via the `_run` rail.
+        if (casVersion !== null) {
+          throw mapVersionMismatchError(e, this._name, casVersion);
+        }
+        throw e;
+      }
       if (result === null) {
         if (casVersion !== null) {
+          // Legacy path: pre-PR-4 runtimes returned `null` on stale-
+          // version writes (no typed error). Mirror the old SDK
+          // behaviour for back-compat.
           throw new OptimisticLockError(casVersion, this._name);
         }
         return null;
@@ -1233,7 +1258,18 @@ export class Collection<
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const n = await this._nativeCollection().updateMany(mappedFilter, mappedUpdate);
+      let n: number;
+      try {
+        n = await this._nativeCollection().updateMany(mappedFilter, mappedUpdate);
+      } catch (e) {
+        // **P7 PR 4** — translate runtime's `version_mismatch` typed
+        // error to `OptimisticLockError`. Other typed errors flow
+        // through the standard rail.
+        if (casVersion !== null) {
+          throw mapVersionMismatchError(e, this._name, casVersion);
+        }
+        throw e;
+      }
       if (n === 0 && casVersion !== null) {
         throw new OptimisticLockError(casVersion, this._name);
       }

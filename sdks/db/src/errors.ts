@@ -30,11 +30,25 @@ export class ValidationError extends Error {
  * but the stored `version` no longer matches N (another writer won the
  * race). The error's `code` is `"optimistic_lock_failure"` matching the
  * A2 error-code inventory; `expectedVersion` carries the caller's N.
+ *
+ * **P7 PR 4** — the platform's UPDATE auto-bump path now surfaces the
+ * same condition with the typed code `"version_mismatch"` from the
+ * Rust runtime (`DbError::version_mismatch`). The runtime-typed error
+ * carries `retryable: true` semantically (the hint advises re-read +
+ * retry). The SDK's `update()` / `updateMany()` catch the native
+ * `version_mismatch` code and rethrow as `OptimisticLockError` so
+ * existing app code that `instanceof OptimisticLockError`-checks
+ * keeps working — see [`mapVersionMismatchError`].
  */
 export class OptimisticLockError extends Error {
   name = "OptimisticLockError";
   code = "optimistic_lock_failure" as const;
   expectedVersion: number;
+  /** **P7 PR 4** — always `true` for this error class; advisory flag
+   *  the SDK consumer can branch on (`if (e.retryable) retry()`).
+   *  Mirrors the `retryable: true` semantics the Rust-side
+   *  `version_mismatch` carries in its `hint`. */
+  retryable = true as const;
 
   constructor(expectedVersion: number, collection?: string) {
     super(
@@ -43,6 +57,36 @@ export class OptimisticLockError extends Error {
     );
     this.expectedVersion = expectedVersion;
   }
+}
+
+/**
+ * **P7 PR 4** — translate a caught error from the native UPDATE
+ * dispatcher into an [`OptimisticLockError`] when it carries the
+ * `version_mismatch` code. Used by `Collection.update()` /
+ * `Collection.updateMany()` so the SDK contract surfaces a single
+ * typed error class regardless of whether the failure came from the
+ * SDK's pre-PR-4 null-result inference or the runtime's typed reject.
+ *
+ * Returns the original error unchanged for any code other than
+ * `version_mismatch`; the caller then handles it via the standard
+ * `mapNativeError` rail. The `expectedVersion` defaults to `NaN`
+ * when the SDK doesn't have the original CAS value in scope (the
+ * runtime's message body carries it but parsing free-text would
+ * be fragile — callers that need the value have it in their own
+ * filter object).
+ */
+export function mapVersionMismatchError(
+  e: unknown,
+  collection: string,
+  expectedVersion: number,
+): Error {
+  if (
+    e instanceof Error &&
+    (e as { code?: unknown }).code === "version_mismatch"
+  ) {
+    return new OptimisticLockError(expectedVersion, collection);
+  }
+  return e instanceof Error ? e : new Error(String(e));
 }
 
 /**

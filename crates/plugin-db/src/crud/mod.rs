@@ -686,6 +686,14 @@ pub(crate) fn dispatch_insert_many<'s>(
 
 /// Shared dispatch for `updateOne`. See [`dispatch_insert`] for the
 /// capability-gate contract.
+///
+/// **P7 PR 4** — every UPDATE auto-bumps `version` + `updated_at` +
+/// `updated_by` (when an actor is in scope). When the caller's filter
+/// carries `version: N`, the auto-bumped SQL still runs but the
+/// affected-rows count is checked: 0 affected → typed
+/// `version_mismatch` error. A `version` filter without an `id`
+/// predicate refuses eagerly with `multi_row_version_filter_unsupported`
+/// — the CAS semantics don't generalise to multi-row UPDATEs.
 pub(crate) fn dispatch_update_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -699,7 +707,43 @@ pub(crate) fn dispatch_update_one<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
 
+    // **P7 PR 4** — read actor at the sync boundary (same rationale as
+    // `dispatch_insert`'s actor pin: the runtime's `executing_request_id`
+    // rotates on the next pump turn).
+    let actor_id = system_fields_pass::current_actor_id(&state);
+
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // **P7 PR 4** — validate immutable system fields + check the
+        // pre-migration marker. Runs BEFORE the encryption pass so a
+        // bad patch fails fast before we round-trip to the key
+        // resolver.
+        let hints = match system_fields_pass::apply_system_fields_on_update(
+            &update,
+            &app,
+            &coll,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
+            }
+        };
+        // **P7 PR 4** — detect creator-supplied CAS version + reject
+        // the unsupported "version filter without id" shape eagerly.
+        let cas_version = system_fields_pass::extract_cas_version(&filter);
+        if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(
+                    DbError::multi_row_version_filter_unsupported(&coll).to_op_error(),
+                ),
+                request_id,
+            };
+        }
+
         let mut update = update;
         if let Err(e) = apply_encryption_on_update(&app, &coll, &filter, &mut update).await {
             return OpResult::JsValue {
@@ -708,7 +752,23 @@ pub(crate) fn dispatch_update_one<'s>(
                 request_id,
             };
         }
-        let built = query::build_update_one(&app, &coll, &filter, &update);
+        // **P7 PR 4** — auto-bump via the system-fields-aware builder.
+        // Actor flows into the `updated_by` bind; the `hints` from the
+        // pre-pass tell the builder which auto-bumps to suppress.
+        let autobump = query::SystemFieldAutoBump {
+            actor_id: actor_id.as_deref(),
+            skip_version: hints.creator_supplied_version,
+            skip_updated_at: hints.creator_supplied_updated_at,
+            skip_updated_by: hints.creator_supplied_updated_by,
+        };
+        let built = query::build_update_one_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            &update,
+            query::SqlDialect::Postgres,
+            &autobump,
+        );
         let bq = match built {
             Ok(bq) => bq,
             Err(e) => {
@@ -721,6 +781,45 @@ pub(crate) fn dispatch_update_one<'s>(
         };
         match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
+                // **P7 PR 4** — optimistic-concurrency check. When the
+                // creator supplied a `version: N` predicate AND the
+                // RETURNING set is empty, classify as a CAS failure
+                // (the row exists at a different version, or the row
+                // is missing — the SDK consumer retries either way).
+                if let Some(expected_version) = cas_version {
+                    if rows.is_empty() {
+                        let row_id = filter
+                            .as_object()
+                            .and_then(|o| o.get("id"))
+                            .and_then(|v| v.as_str());
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(
+                                DbError::version_mismatch(&coll, row_id, expected_version)
+                                    .to_op_error(),
+                            ),
+                            request_id,
+                        };
+                    }
+                    // The `id` PK ensures at most one row matches
+                    // `{ id: ..., version: N }`; a result set >1 is
+                    // a regression in the dispatcher contract.
+                    if rows.len() > 1 {
+                        tracing::error!(
+                            collection = %coll,
+                            row_count = rows.len(),
+                            "version_mismatch_unexpected_multi_row: CAS update returned >1 row"
+                        );
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(
+                                DbError::internal("version_mismatch_unexpected_multi_row")
+                                    .to_op_error(),
+                            ),
+                            request_id,
+                        };
+                    }
+                }
                 let rows = match apply_encryption_on_read(&app, &coll, rows).await {
                     Ok(r) => r,
                     Err(e) => {
@@ -761,6 +860,14 @@ pub(crate) fn dispatch_update_one<'s>(
 
 /// Shared dispatch for `updateMany`. Resolves with the count of
 /// affected rows as a JS `number`.
+///
+/// **P7 PR 4** — same auto-bump rules as `dispatch_update_one`. CAS
+/// semantics don't generalise to multi-row UPDATEs (the affected-row
+/// count conflates "row missing" / "version mismatched" / "filter
+/// didn't match"), so a `version` filter without `id` predicate
+/// refuses eagerly with `multi_row_version_filter_unsupported`. The
+/// pre-PR-4 contract that returned the affected-row count as a plain
+/// number is preserved on the success path.
 pub(crate) fn dispatch_update_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -771,19 +878,100 @@ pub(crate) fn dispatch_update_many<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_update_many(app_id, collection, &filter, &update);
     let coll = collection.to_string();
     let app = app_id.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
-        },
-        row_count_as_f64,
-    )));
+    // **P7 PR 4** — actor read at sync boundary (mirrors
+    // `dispatch_update_one`'s rationale).
+    let actor_id = system_fields_pass::current_actor_id(&state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // **P7 PR 4** — same immutable-field + marker checks as
+        // updateOne. Also refuse multi-row CAS UPDATE eagerly.
+        let hints = match system_fields_pass::apply_system_fields_on_update(
+            &update,
+            &app,
+            &coll,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
+            }
+        };
+        let cas_version = system_fields_pass::extract_cas_version(&filter);
+        if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(
+                    DbError::multi_row_version_filter_unsupported(&coll).to_op_error(),
+                ),
+                request_id,
+            };
+        }
+
+        let autobump = query::SystemFieldAutoBump {
+            actor_id: actor_id.as_deref(),
+            skip_version: hints.creator_supplied_version,
+            skip_updated_at: hints.creator_supplied_updated_at,
+            skip_updated_by: hints.creator_supplied_updated_by,
+        };
+        let built = query::build_update_many_with_system_fields(
+            &app,
+            &coll,
+            &filter,
+            &update,
+            query::SqlDialect::Postgres,
+            &autobump,
+        );
+        let bq = match built {
+            Ok(bq) => bq,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
+                    request_id,
+                };
+            }
+        };
+        match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
+            Ok(rows) => {
+                // CAS path on updateMany: with `{ id, version: N }` the
+                // RETURNING is at most one row. Same empty-check as
+                // updateOne so the SDK's CAS contract holds for both
+                // entry points.
+                if let Some(expected_version) = cas_version {
+                    if rows.is_empty() {
+                        let row_id = filter
+                            .as_object()
+                            .and_then(|o| o.get("id"))
+                            .and_then(|v| v.as_str());
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(
+                                DbError::version_mismatch(&coll, row_id, expected_version)
+                                    .to_op_error(),
+                            ),
+                            request_id,
+                        };
+                    }
+                }
+                OpResult::JsValue {
+                    resolver,
+                    value: row_count_as_f64(rows),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
 
     promise
 }

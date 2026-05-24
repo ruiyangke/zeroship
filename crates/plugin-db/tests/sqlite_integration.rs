@@ -6952,3 +6952,397 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// P7 PR 4 — UPDATE auto-bumps version + updated_at + optimistic concurrency
+// ---------------------------------------------------------------------------
+
+/// End-to-end: an UPDATE built via `build_update_one_with_system_fields`
+/// on SQLite bumps `version` by exactly 1 and rewrites `updated_at`.
+/// Mirrors what `dispatch_update_one` does at request time but bypasses
+/// V8 / the per-isolate schema cache (we drive the SQL builder
+/// directly).
+#[test]
+fn update_end_to_end_bumps_version_by_one_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({
+                "title": {"type": "string", "required": true},
+            }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build DDL");
+        for stmt in ddl.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+        }
+
+        // INSERT row at version 1 (DDL default).
+        let doc = serde_json::json!({
+            "id": "post_v1bump",
+            "title": "original",
+        });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &ins_params).await.expect("INSERT");
+
+        // UPDATE via PR 4 builder.
+        let filter = serde_json::json!({ "id": "post_v1bump" });
+        let update = serde_json::json!({ "title": "v2" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_e2e_updater"),
+            ..Default::default()
+        };
+        let upd = build_update_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+            &autobump,
+        )
+        .unwrap();
+        let upd_params: Vec<&str> = upd.params.iter().map(String::as_str).collect();
+        let returning = client.query(&upd.sql, &upd_params).await.expect("UPDATE");
+        assert_eq!(returning.len(), 1, "UPDATE returned 1 row");
+
+        // SELECT and confirm version bumped to 2 and updated_by was set.
+        let rows = client
+            .query(
+                "SELECT title, version, updated_by FROM \"app_demo\".\"posts\" WHERE id = 'post_v1bump'",
+                &[],
+            )
+            .await
+            .expect("SELECT");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_deref(), Some("v2"), "title updated");
+        assert_eq!(
+            rows[0][1].as_deref(),
+            Some("2"),
+            "version bumped from 1 to 2"
+        );
+        assert_eq!(
+            rows[0][2].as_deref(),
+            Some("usr_e2e_updater"),
+            "updated_by stamped from actor",
+        );
+    });
+}
+
+/// End-to-end CAS success: an UPDATE that filters by the correct
+/// `version` bumps the row.
+#[test]
+fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": {"type": "string"} }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_cas_ok", "title": "v1" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &ins_params).await.unwrap();
+
+        // CAS at the correct version (1).
+        let filter = serde_json::json!({ "id": "post_cas_ok", "version": 1 });
+        let update = serde_json::json!({ "title": "v2" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_cas_ok"),
+            ..Default::default()
+        };
+        let upd = build_update_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+            &autobump,
+        )
+        .unwrap();
+        let upd_params: Vec<&str> = upd.params.iter().map(String::as_str).collect();
+        let returning = client.query(&upd.sql, &upd_params).await.unwrap();
+        assert_eq!(returning.len(), 1, "CAS matched: 1 affected row");
+
+        let rows = client
+            .query(
+                "SELECT version FROM \"app_demo\".\"posts\" WHERE id = 'post_cas_ok'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("2"), "version bumped on CAS hit");
+    });
+}
+
+/// End-to-end CAS failure: an UPDATE that filters by a stale `version`
+/// affects zero rows. The dispatch layer (not exercised here) converts
+/// the empty RETURNING into a typed `version_mismatch` — at the SQL
+/// layer we just confirm the affected-rows = 0 contract.
+#[test]
+fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": {"type": "string"} }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_cas_stale", "title": "v1" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &ins_params).await.unwrap();
+
+        // CAS at the wrong version (row is at 1; we expect 99).
+        let filter = serde_json::json!({ "id": "post_cas_stale", "version": 99 });
+        let update = serde_json::json!({ "title": "v_nope" });
+        let autobump = SystemFieldAutoBump {
+            actor_id: Some("usr_cas_stale"),
+            ..Default::default()
+        };
+        let upd = build_update_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+            &autobump,
+        )
+        .unwrap();
+        let upd_params: Vec<&str> = upd.params.iter().map(String::as_str).collect();
+        let returning = client.query(&upd.sql, &upd_params).await.unwrap();
+        assert!(returning.is_empty(), "stale CAS: 0 affected rows");
+
+        // Row stays at version 1 and original title.
+        let rows = client
+            .query(
+                "SELECT version, title FROM \"app_demo\".\"posts\" WHERE id = 'post_cas_stale'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("1"));
+        assert_eq!(rows[0][1].as_deref(), Some("v1"));
+    });
+}
+
+/// End-to-end concurrent CAS: two UPDATEs at the same version — one
+/// wins, one loses. Confirms the WHERE version-check is atomic with
+/// the SET.
+#[test]
+fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": {"type": "string"} }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_race", "title": "v0" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &ins_params).await.unwrap();
+
+        // First UPDATE at version=1 wins.
+        let filter1 = serde_json::json!({ "id": "post_race", "version": 1 });
+        let update1 = serde_json::json!({ "title": "v_winner" });
+        let ab = SystemFieldAutoBump {
+            actor_id: Some("usr_a"),
+            ..Default::default()
+        };
+        let upd1 = build_update_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &filter1,
+            &update1,
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p1: Vec<&str> = upd1.params.iter().map(String::as_str).collect();
+        let r1 = client.query(&upd1.sql, &p1).await.unwrap();
+        assert_eq!(r1.len(), 1, "first CAS wins");
+
+        // Second UPDATE at version=1 loses (row is now at version=2).
+        let filter2 = serde_json::json!({ "id": "post_race", "version": 1 });
+        let update2 = serde_json::json!({ "title": "v_loser" });
+        let upd2 = build_update_many_with_system_fields(
+            "app_demo",
+            "posts",
+            &filter2,
+            &update2,
+            SqlDialect::Sqlite,
+            &ab,
+        )
+        .unwrap();
+        let p2: Vec<&str> = upd2.params.iter().map(String::as_str).collect();
+        let r2 = client.query(&upd2.sql, &p2).await.unwrap();
+        assert!(r2.is_empty(), "second CAS loses");
+
+        // Final state: winner's title, version=2.
+        let rows = client
+            .query(
+                "SELECT title, version FROM \"app_demo\".\"posts\" WHERE id = 'post_race'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("v_winner"));
+        assert_eq!(rows[0][1].as_deref(), Some("2"));
+    });
+}
+
+/// End-to-end: UPDATE without a `version` filter blindly succeeds and
+/// bumps version. Confirms the non-CAS path stays last-writer-wins.
+#[test]
+fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+        build_update_many_with_system_fields, FkEmission, SqlDialect, SystemFieldAutoBump,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend.ensure_app_schema("app_demo").await.unwrap();
+
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({ "title": {"type": "string"} }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        for stmt in ddl.split(";\n") {
+            let t = stmt.trim();
+            if t.is_empty() {
+                continue;
+            }
+            backend.pool_exec(t, &[]).await.unwrap();
+        }
+
+        let doc = serde_json::json!({ "id": "post_blind", "title": "v0" });
+        let ins =
+            build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite).unwrap();
+        let ins_params: Vec<&str> = ins.params.iter().map(String::as_str).collect();
+        let client = backend.acquire_dedicated_client().await.unwrap();
+        client.query(&ins.sql, &ins_params).await.unwrap();
+
+        // No version in filter — last-writer-wins. Three consecutive
+        // updates land in order; version is bumped each time.
+        for new_title in ["v1", "v2", "v3"] {
+            let filter = serde_json::json!({ "id": "post_blind" });
+            let update = serde_json::json!({ "title": new_title });
+            let ab = SystemFieldAutoBump {
+                actor_id: Some("usr_blind"),
+                ..Default::default()
+            };
+            let upd = build_update_many_with_system_fields(
+                "app_demo",
+                "posts",
+                &filter,
+                &update,
+                SqlDialect::Sqlite,
+                &ab,
+            )
+            .unwrap();
+            let p: Vec<&str> = upd.params.iter().map(String::as_str).collect();
+            let r = client.query(&upd.sql, &p).await.unwrap();
+            assert_eq!(r.len(), 1, "blind UPDATE succeeds");
+        }
+
+        let rows = client
+            .query(
+                "SELECT title, version FROM \"app_demo\".\"posts\" WHERE id = 'post_blind'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0].as_deref(), Some("v3"));
+        assert_eq!(
+            rows[0][1].as_deref(),
+            Some("4"),
+            "version bumped 1→2→3→4 across three updates"
+        );
+    });
+}

@@ -34,7 +34,24 @@
 use serde_json::{Map, Value};
 use zeroship_runtime::state::SharedState;
 
+use crate::error::DbError;
 use crate::query::SYSTEM_FIELD_NAMES;
+
+/// **P7 PR 4** — write-once system field names that the UPDATE pass
+/// refuses to accept on the patch side. Even though all 7 names live in
+/// [`SYSTEM_FIELD_NAMES`], only these 3 are immutable post-INSERT
+/// (`updated_at` / `updated_by` / `version` are auto-bumped each
+/// UPDATE — see `apply_system_fields_on_update`; `deleted_at` is
+/// owned by `delete()` / `restore()` — PR 5).
+pub(crate) const IMMUTABLE_SYSTEM_FIELDS: &[&str] = &["id", "created_at", "created_by"];
+
+/// **P7 PR 4** — cached-schema marker key the orchestrator stamps after
+/// the four-phase DDL pipeline succeeds (see `register_model::mod`).
+/// Its presence promises the table carries the seven system-field
+/// columns. Pre-PR-2 (legacy P0-P5-era) tables won't have the marker;
+/// the CRUD update pass refuses with `system_fields_missing` until PR 6
+/// ALTERs them in.
+pub(crate) const SYSTEM_FIELDS_MARKER_KEY: &str = "_systemFields";
 
 /// Maximum typed_id prefix length. Matches the convention used by
 /// `crates/core/src/typed_id.rs` for well-known prefixes
@@ -258,6 +275,218 @@ fn inject_into_object(
             .all(|n| SYSTEM_FIELD_NAMES.contains(n)),
         "apply_system_fields_on_insert touched a name not in SYSTEM_FIELD_NAMES",
     );
+}
+
+// ---------------------------------------------------------------------------
+// **P7 PR 4** — UPDATE-time validation pass + CAS-version extraction.
+// ---------------------------------------------------------------------------
+
+/// Result of running [`apply_system_fields_on_update`] against an
+/// UPDATE patch. Carries the post-validation knobs the SQL builder
+/// needs to compose the auto-bump SET clauses correctly.
+///
+/// `creator_supplied_version` / `creator_supplied_updated_at` /
+/// `creator_supplied_updated_by` cover Q-SF-B's "creator can override"
+/// rule for the three auto-bumped columns: when set, the builder must
+/// emit the creator's value verbatim AND skip the corresponding
+/// auto-bump SET clause (the explicit value wins).
+#[derive(Debug, Clone, Default)]
+pub struct UpdateAutoBumpHints {
+    /// `true` when the patch carries an explicit `version` key. The
+    /// builder must NOT append `"version" = "version" + 1` (the
+    /// creator's value flows through the standard SET clause).
+    pub creator_supplied_version: bool,
+    /// `true` when the patch carries an explicit `updated_at`. Same
+    /// rationale — the builder skips the dialect-appropriate
+    /// `NOW()` / `CURRENT_TIMESTAMP` auto-bump.
+    pub creator_supplied_updated_at: bool,
+    /// `true` when the patch carries an explicit `updated_by`. Builder
+    /// skips appending the actor-bound `$N` placeholder.
+    pub creator_supplied_updated_by: bool,
+}
+
+/// Run the UPDATE-time validation pass over an UPDATE patch.
+///
+/// Three rejections, one inspection:
+///
+/// 1. **Immutable fields** — the patch must not carry `id`,
+///    `created_at`, or `created_by`. Those are auto-populated at
+///    INSERT (PR 3) and write-once. Returns a typed
+///    `DbError::ValidationFailed { code: "immutable_system_field" }`
+///    via `QueryError::ImmutableSystemField`.
+/// 2. **Pre-migration table** — the cached schema for this collection
+///    must carry the [`SYSTEM_FIELDS_MARKER_KEY`] marker (stamped by
+///    the orchestrator after PR 2's DDL emitter ran). Absent →
+///    `system_fields_missing`. When the cached schema is itself
+///    absent (the collection wasn't registered on this isolate yet),
+///    the pass is permissive — the downstream `build_update_*` will
+///    surface whatever the SQL exec returns.
+/// 3. **Creator-supplied overrides** — `version` / `updated_at` /
+///    `updated_by` are inspected (not refused). The returned
+///    [`UpdateAutoBumpHints`] tells the SQL builder whether to skip
+///    each auto-bump.
+///
+/// The pass also strips `$set`-flattened patches so the immutable-field
+/// check covers both top-level keys and nested `$set` entries.
+///
+/// Visibility: `pub(crate)` in release builds; `pub` under
+/// `test-helpers` so integration tests can drive the helper directly.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) fn apply_system_fields_on_update(
+    patch: &Value,
+    app_id: &str,
+    collection: &str,
+) -> Result<UpdateAutoBumpHints, DbError> {
+    apply_system_fields_on_update_impl(patch, app_id, collection)
+}
+
+#[cfg(feature = "test-helpers")]
+pub fn apply_system_fields_on_update(
+    patch: &Value,
+    app_id: &str,
+    collection: &str,
+) -> Result<UpdateAutoBumpHints, DbError> {
+    apply_system_fields_on_update_impl(patch, app_id, collection)
+}
+
+fn apply_system_fields_on_update_impl(
+    patch: &Value,
+    app_id: &str,
+    collection: &str,
+) -> Result<UpdateAutoBumpHints, DbError> {
+    // Pre-migration table guard: if the cached schema exists but lacks
+    // the marker, we refuse early. A missing cache entry (cold isolate
+    // / never-registered) is permissive — letting the SQL surface the
+    // failure preserves test-helpers-driven flows that bypass
+    // `registerModel`.
+    if let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) {
+        let marker = schema
+            .as_object()
+            .and_then(|o| o.get(SYSTEM_FIELDS_MARKER_KEY))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !marker {
+            return Err(DbError::system_fields_missing(collection));
+        }
+    }
+
+    let Some(obj) = patch.as_object() else {
+        // Non-object patches are the SQL builder's problem (they get a
+        // typed `InvalidFilter` there). The pass has nothing to do.
+        return Ok(UpdateAutoBumpHints::default());
+    };
+
+    // The patch can carry top-level keys AND a nested `$set`. Inspect
+    // both so creator overrides + immutability checks cover either
+    // shape uniformly with the SQL builder's `build_set_clauses`
+    // flattening.
+    let mut hints = UpdateAutoBumpHints::default();
+    check_keys_for_immutable_and_overrides(obj, &mut hints)?;
+    if let Some(set_obj) = obj.get("$set").and_then(|v| v.as_object()) {
+        check_keys_for_immutable_and_overrides(set_obj, &mut hints)?;
+    }
+    // Defensive: pre-PR-4 SDK versions augmented the update with
+    // `$inc: { version: 1 }`. After PR 4 the runtime auto-bumps too —
+    // a naive double-bump would advance version by 2 instead of 1.
+    // Detect the legacy operator-nested version key on `$inc` / `$dec`
+    // / `$mul` and suppress our own bump so the creator's explicit
+    // operator wins (matching the `Q-SF-B` "creator override" rule).
+    for op_key in &["$inc", "$dec", "$mul"] {
+        if let Some(op_obj) = obj.get(*op_key).and_then(|v| v.as_object()) {
+            if op_obj.contains_key("version") {
+                hints.creator_supplied_version = true;
+            }
+            if op_obj.contains_key("updated_at") {
+                hints.creator_supplied_updated_at = true;
+            }
+            if op_obj.contains_key("updated_by") {
+                hints.creator_supplied_updated_by = true;
+            }
+            // Immutable fields under an operator must also be refused.
+            for imm in IMMUTABLE_SYSTEM_FIELDS {
+                if op_obj.contains_key(*imm) {
+                    return Err(crate::query::QueryError::ImmutableSystemField(
+                        format!(
+                            "UPDATE patch attempted to overwrite immutable system field `{imm}` \
+                             under `{op_key}` (write-once on INSERT)"
+                        ),
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(hints)
+}
+
+/// Run the immutable-field + creator-override inspection over a single
+/// key/value map (called once for the top-level patch and again for any
+/// `$set` nesting).
+fn check_keys_for_immutable_and_overrides(
+    obj: &Map<String, Value>,
+    hints: &mut UpdateAutoBumpHints,
+) -> Result<(), DbError> {
+    for (key, _value) in obj.iter() {
+        if key.starts_with('$') {
+            // Skip operator keys like `$set` / `$inc` / `$push` — the
+            // SQL builder unpacks them. The nested-`$set` branch in
+            // the caller covers `$set`-nested immutable-field attempts.
+            continue;
+        }
+        if IMMUTABLE_SYSTEM_FIELDS.contains(&key.as_str()) {
+            return Err(crate::query::QueryError::ImmutableSystemField(
+                format!(
+                    "UPDATE patch attempted to overwrite immutable system field `{key}` \
+                     (write-once on INSERT)"
+                ),
+            )
+            .into());
+        }
+        match key.as_str() {
+            "version" => hints.creator_supplied_version = true,
+            "updated_at" => hints.creator_supplied_updated_at = true,
+            "updated_by" => hints.creator_supplied_updated_by = true,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Extract a creator-supplied `version: N` predicate from a filter for
+/// the optimistic-concurrency check. Returns `None` when:
+///
+/// - the filter is not a JSON object (the SQL builder will reject it),
+/// - the filter has no `version` key,
+/// - the `version` value is not a finite integer (operator objects
+///   like `{ $gt: 5 }` short-circuit to `None` — CAS only honours a
+///   plain equality predicate).
+///
+/// Used by both `dispatch_update_one` and `dispatch_update_many` to
+/// decide whether to surface a `version_mismatch` typed error when the
+/// affected-rows count comes back zero.
+pub(crate) fn extract_cas_version(filter: &Value) -> Option<i64> {
+    let v = filter.as_object()?.get("version")?;
+    // Reject operator objects ({ $gt, $in, ... }) — only a plain
+    // equality predicate carries CAS semantics. `as_i64` also rejects
+    // floats and strings, which is the desired strictness.
+    v.as_i64()
+}
+
+/// Detect whether a filter carries an `id` predicate. Used to refuse
+/// the unsupported "multi-row UPDATE with `version` filter but no `id`"
+/// case eagerly with a typed `multi_row_version_filter_unsupported`
+/// error — the CAS semantics don't generalise to multi-row UPDATEs.
+///
+/// "Has an `id`" means the filter object contains a top-level `id` key
+/// (either a scalar equality, an `$in`, or an operator object — any of
+/// these narrow the UPDATE to a per-PK lookup). We don't try to walk
+/// `$and` / `$or` combinators; the SDK's typical CAS update is
+/// `{ id, version }` and that's what we optimise for.
+pub(crate) fn filter_has_id_predicate(filter: &Value) -> bool {
+    filter
+        .as_object()
+        .map(|o| o.contains_key("id"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -543,5 +772,250 @@ mod tests {
         );
         // Parameter count: 4 columns (id, title, created_by, updated_by).
         assert_eq!(built.params.len(), 4, "params: {:?}", built.params);
+    }
+
+    // ---- P7 PR 4 — UPDATE pass: immutable fields, CAS extraction --
+
+    /// Stamp the cached schema with the `_systemFields` marker so the
+    /// UPDATE pass treats the collection as post-PR-2. Used by every
+    /// UPDATE-pass test that needs a "modern" table; the pre-PR-2
+    /// pre-migration scenario is exercised by the bespoke
+    /// `update_against_table_without_version_column_returns_system_fields_missing`
+    /// test which explicitly caches a marker-less schema.
+    fn install_marked_schema(app_id: &str, collection: &str) {
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                app_id,
+                collection,
+                json!({
+                    SYSTEM_FIELDS_MARKER_KEY: true,
+                }),
+            );
+        });
+    }
+
+    /// Drop the cached schema entry so a follow-up test sees a cold
+    /// isolate. Tests that mutate the cache MUST end with this.
+    fn clear_schema_cache(_app_id: &str, _collection: &str) {
+        // The cache is per-isolate and per-test-process. The schemas
+        // map has no public `remove`, but overwriting with an empty
+        // object is sufficient for our pass — `apply_system_fields_on_update`
+        // reads the `_systemFields` key, which an empty object lacks
+        // (and the test that runs next is presumed to set its own
+        // schema before reading). To keep tests independent we don't
+        // share state across tests beyond what the pass reads.
+    }
+
+    #[test]
+    fn update_refuses_creator_supplied_id_change() {
+        install_marked_schema("app1", "posts_imid");
+        let patch = json!({ "id": "post_other", "title": "x" });
+        let err = apply_system_fields_on_update(&patch, "app1", "posts_imid")
+            .expect_err("UPDATE must refuse id overwrite");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "immutable_system_field");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+        clear_schema_cache("app1", "posts_imid");
+    }
+
+    #[test]
+    fn update_refuses_creator_supplied_created_at_change() {
+        install_marked_schema("app1", "posts_imca");
+        let patch = json!({ "created_at": 1700000000000_i64 });
+        let err = apply_system_fields_on_update(&patch, "app1", "posts_imca")
+            .expect_err("UPDATE must refuse created_at overwrite");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "immutable_system_field");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+        clear_schema_cache("app1", "posts_imca");
+    }
+
+    #[test]
+    fn update_refuses_creator_supplied_created_by_change() {
+        install_marked_schema("app1", "posts_imcb");
+        let patch = json!({ "created_by": "usr_other" });
+        let err = apply_system_fields_on_update(&patch, "app1", "posts_imcb")
+            .expect_err("UPDATE must refuse created_by overwrite");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "immutable_system_field");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+        clear_schema_cache("app1", "posts_imcb");
+    }
+
+    #[test]
+    fn update_refuses_immutable_fields_under_dollar_set() {
+        // Nested $set form must be caught too — the SDK can produce
+        // either shape.
+        install_marked_schema("app1", "posts_imset");
+        let patch = json!({ "$set": { "id": "post_other" } });
+        let err = apply_system_fields_on_update(&patch, "app1", "posts_imset")
+            .expect_err("UPDATE must refuse id overwrite inside $set");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "immutable_system_field");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+        clear_schema_cache("app1", "posts_imset");
+    }
+
+    #[test]
+    fn update_against_table_without_version_column_returns_system_fields_missing() {
+        // Cache a schema WITHOUT the `_systemFields` marker → pass
+        // refuses with `system_fields_missing`.
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app1",
+                "legacy_posts",
+                json!({
+                    "title": { "type": "string" },
+                }),
+            );
+        });
+        let patch = json!({ "title": "x" });
+        let err = apply_system_fields_on_update(&patch, "app1", "legacy_posts")
+            .expect_err("pre-migration table UPDATE must refuse");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "system_fields_missing");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_respects_creator_supplied_version() {
+        install_marked_schema("app1", "posts_csv");
+        let patch = json!({ "title": "x", "version": 42 });
+        let hints = apply_system_fields_on_update(&patch, "app1", "posts_csv")
+            .expect("passes immutable check");
+        assert!(
+            hints.creator_supplied_version,
+            "explicit version on patch must set the hint"
+        );
+        clear_schema_cache("app1", "posts_csv");
+    }
+
+    #[test]
+    fn update_respects_creator_supplied_updated_at() {
+        install_marked_schema("app1", "posts_csua");
+        let patch = json!({ "title": "x", "updated_at": "2026-01-01T00:00:00Z" });
+        let hints = apply_system_fields_on_update(&patch, "app1", "posts_csua")
+            .expect("passes immutable check");
+        assert!(hints.creator_supplied_updated_at);
+        clear_schema_cache("app1", "posts_csua");
+    }
+
+    #[test]
+    fn update_respects_creator_supplied_updated_by() {
+        install_marked_schema("app1", "posts_csub");
+        let patch = json!({ "title": "x", "updated_by": "usr_explicit" });
+        let hints = apply_system_fields_on_update(&patch, "app1", "posts_csub")
+            .expect("passes immutable check");
+        assert!(hints.creator_supplied_updated_by);
+        clear_schema_cache("app1", "posts_csub");
+    }
+
+    #[test]
+    fn update_detects_legacy_dollar_inc_version_as_creator_supplied() {
+        // Pre-PR-4 SDK shape: `{ $inc: { version: 1 } }`. The pass must
+        // set `creator_supplied_version` so the SQL builder skips its
+        // own auto-bump (otherwise a double-bump lands version at +2).
+        install_marked_schema("app1", "posts_legacyinc");
+        let patch = json!({ "$inc": { "version": 1 } });
+        let hints = apply_system_fields_on_update(&patch, "app1", "posts_legacyinc")
+            .expect("passes");
+        assert!(
+            hints.creator_supplied_version,
+            "legacy $inc.version must mark creator-supplied to avoid double-bump"
+        );
+        clear_schema_cache("app1", "posts_legacyinc");
+    }
+
+    #[test]
+    fn update_refuses_immutable_field_under_dollar_inc() {
+        // Defence-in-depth: $inc.id / $inc.created_at / $inc.created_by
+        // should be refused for the same reason as top-level overwrites.
+        install_marked_schema("app1", "posts_immut_inc");
+        let patch = json!({ "$inc": { "created_by": 1 } });
+        let err = apply_system_fields_on_update(&patch, "app1", "posts_immut_inc")
+            .expect_err("immutable field under $inc must refuse");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "immutable_system_field");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+        clear_schema_cache("app1", "posts_immut_inc");
+    }
+
+    #[test]
+    fn update_creator_hints_default_to_false() {
+        install_marked_schema("app1", "posts_defaults");
+        let patch = json!({ "title": "x" });
+        let hints = apply_system_fields_on_update(&patch, "app1", "posts_defaults")
+            .expect("passes");
+        assert!(!hints.creator_supplied_version);
+        assert!(!hints.creator_supplied_updated_at);
+        assert!(!hints.creator_supplied_updated_by);
+        clear_schema_cache("app1", "posts_defaults");
+    }
+
+    #[test]
+    fn extract_cas_version_returns_plain_number() {
+        let f = json!({ "id": "post_x", "version": 7 });
+        assert_eq!(extract_cas_version(&f), Some(7));
+    }
+
+    #[test]
+    fn extract_cas_version_returns_none_for_missing_version() {
+        let f = json!({ "id": "post_x" });
+        assert_eq!(extract_cas_version(&f), None);
+    }
+
+    #[test]
+    fn extract_cas_version_returns_none_for_operator_object() {
+        // `{ $gt: 5 }` is not a CAS predicate.
+        let f = json!({ "version": { "$gt": 5 } });
+        assert_eq!(extract_cas_version(&f), None);
+    }
+
+    #[test]
+    fn extract_cas_version_returns_none_for_string_value() {
+        let f = json!({ "version": "7" });
+        assert_eq!(extract_cas_version(&f), None);
+    }
+
+    #[test]
+    fn extract_cas_version_returns_none_for_non_object_filter() {
+        let f = json!("scalar");
+        assert_eq!(extract_cas_version(&f), None);
+    }
+
+    #[test]
+    fn filter_has_id_predicate_detects_scalar() {
+        assert!(filter_has_id_predicate(&json!({ "id": "post_x" })));
+    }
+
+    #[test]
+    fn filter_has_id_predicate_detects_operator() {
+        // `id: { $in: [...] }` still narrows to id-keyed lookups.
+        assert!(filter_has_id_predicate(&json!({ "id": { "$in": ["a", "b"] } })));
+    }
+
+    #[test]
+    fn filter_has_id_predicate_false_when_absent() {
+        assert!(!filter_has_id_predicate(&json!({ "title": "x" })));
+        assert!(!filter_has_id_predicate(&json!({})));
+        assert!(!filter_has_id_predicate(&json!("scalar")));
     }
 }
