@@ -89,7 +89,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox/src/restore_handler.rs` (helper + trait method + stub hooks + 4 new unit tests).
 - **Tests**: 4 new tests pin the wake-vs-teardown race semantics (`c4_wake_retries_until_source_slot_frees`, `c4_wake_fails_if_slot_never_frees_within_budget`, `c4_wake_uses_single_attempt_when_slot_free`, `c4_default_policy_envelopes_observed_teardown`). Sandbox lib: 328 → 332 passing.
 
-### [C-6] (CLOSED at `<pending>`) Wake handler silent stall — detached source-teardown starved compio runtime, blocking C-4's reserve_vm_index_with_retry sleep
+### [C-6] (CLOSED at `91ce9be5`) Wake handler silent stall — detached source-teardown starved compio runtime, blocking C-4's reserve_vm_index_with_retry sleep
 - **Source**: T-8b-smoke-r6 cluster review (initial detection) → T-8b-smoke-r7 cluster review (phase-trace localization to `pre_reserve_vm_index`, root cause analysis pointing at the detached teardown).
 - **Symptom**: CREATE OK + SNAPSHOT OK. WAKE client times out at 60060 ms. The pg row reads `status=restoring, generation=3, vm_index=1`. Phase trace (v22) reached `pre_reserve_vm_index` and then nothing for the full 60 s deadline — neither the success-after-retry log nor the exhaustion warn fired, despite the source-teardown releasing the vm_index 90 s later. The wake handler's `compio::time::sleep(2s).await` continuations never got polled.
 - **Root cause**: `POST /admin/sandboxes/{id}/snapshot` detached `teardown_source_for_snapshot` via `compio::runtime::spawn(...).detach()` on the SAME ntex-worker compio runtime where subsequent wake requests landed (1-worker test fleet → 100% collision). `stop_inner`'s first await is `http_signed_async("/shutdown")` whose underlying `ureq` call burns ~60 s on connection-timeout against the half-dead source agent. Even though the ureq call is wrapped in `compio::runtime::spawn_blocking`, the detached teardown future itself runs on the worker runtime and competes 1:1 with the wake handler's `reserve_vm_index_with_retry` sleep continuations. Net effect: wake future got dropped at the 60 s client timeout → row wedged at `restoring`. The regression existed since R6-P1 (`4c090992`) introduced the detach pattern, but was invisible until C-4 added a sleep-based retry on the wake path that competed for runtime time.
@@ -1321,7 +1321,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [C-3] CLOSED at `c890c015` — confirmed by architecture r13 as architecturally inverted but tactically working. Follow-up R13-A2 sprint will lift detach to handler layer.
 - [C-4] CLOSED at `b2892368` — wake-path bounded retry (60×2s = 120s budget). +4 tests (328→332).
 - [C-5] CLOSED at `d7740b03` — worker storage-rw scope. Half-credit per R13-S1.
-- [C-6] INVESTIGATION-IN-PROGRESS at `8e7f0b53` — phase-boundary tracing at 14 sites in `do_restore_inner` + `restore_sandbox` (tracing-only, no behaviour change; +126 LOC; 332 pass unchanged). Smoke-r7 will localize the wedge by grepping for the LAST `restore: phase=*` line before the 60 s client timeout.
+- [C-6] CLOSED at `91ce9be5` — detached `teardown_source_for_snapshot` moved off the ntex-worker compio runtime onto a dedicated OS thread + short-lived compio runtime (mirrors C-3's pattern at `snapshot_store_gcs.rs`). Phase-boundary tracing landed earlier at `8e7f0b53` localized the wedge to `pre_reserve_vm_index`; smoke-r7's analysis pointed the root cause at runtime starvation by the detached teardown's `/shutdown` await. +75 / −14 LOC. 332 pass / 0 fail unchanged. Smoke-r8 is the validation gate.
 
 ---
 
@@ -1383,4 +1383,4 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### Closures this cycle
 - [R14-API1] CLOSED at `00161cea` — with_nomad_handle + with_shared_allocator pub→pub(crate)
 - [R11-API1 expanded] CLOSED at `370fdbba` — 3 orphan #[doc(hidden)] pub fns deleted from sandbox/src/metrics.rs (path correction: were in sandbox not sandbox-agent)
-- [C-6] INVESTIGATION-IN-PROGRESS at `8e7f0b53` — phase-boundary tracing added to do_restore_inner. Smoke-r7 will localize the stall point.
+- [C-6] CLOSED at `91ce9be5` — detached teardown moved off ntex-worker compio runtime onto a dedicated OS thread + short-lived compio runtime (mirrors C-3 pattern). Root cause: runtime starvation by the detached teardown's 60s `/shutdown` ureq blocker (whose `spawn_blocking` wrap inside was insufficient — the outer future itself was on the worker runtime). +75 / −14 LOC. 332 pass unchanged.
