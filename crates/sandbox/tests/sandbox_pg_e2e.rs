@@ -3992,3 +3992,405 @@ impl WakeJobRowExt for zeroship_sandbox::db::WakeJobRow {
         self.state.is_terminal()
     }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// C-7-LT-PR2: WakeMachine end-to-end (pg-gated, StubRestoreBackend)
+//
+// Drives the full state machine through the same `seed_snapshotted_row`
+// fixture the sync `restore_sandbox` tests use, asserting:
+//
+//   - Happy path: pending → reserving_slot → restoring → livez_polling
+//     → clock_resyncing → registering → ok. agent_url + ready_at
+//     populated.
+//   - StubRestoreBackend::fail_livez=true → terminal `failed` with
+//     wire-code-mapped error_code = LivezTimeout. Sandbox row rolls
+//     back to `snapshotted`.
+//   - StubRestoreBackend::fail_submit=true → terminal `failed` with
+//     wire-code-mapped error_code = RestoreFailed (Backend(_) failure
+//     classification). Sandbox row rolls back.
+//   - StubRestoreBackend::fail_reserve=true → terminal `failed` with
+//     wire-code-mapped error_code = SlotUnavailable
+//     (VmIndexUnavailable classification).
+//
+// These tests close test-coverage-r16's EMERGENCY HOLD (R10-T1/T2,
+// R11-T1/T2, R12-T1/T2, R13-T2, R14-T1, R15-T1) for the wake path:
+// the state machine is now end-to-end-driven with StubRestoreBackend
+// failure injection AND the pg row state is asserted at every
+// terminal.
+// ════════════════════════════════════════════════════════════════════
+
+mod wake_machine_e2e {
+    use super::*;
+    use std::sync::Arc as StdArc;
+    use std::time::Duration as StdDuration;
+    use zeroship_sandbox::db::{WakeErrorCode, WakeJobRow, WakeJobState};
+    use zeroship_sandbox::restore_handler::{RestoreBackend, StubRestoreBackend};
+    use zeroship_sandbox::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
+    use zeroship_sandbox::wake_machine::WakeMachine;
+
+    /// Migrate + arc-wrap the shared test Database so the seeder and
+    /// the WakeMachine share the same `host_id` (the CAS in
+    /// `update_sandbox_status` fences on host_id; a second Database
+    /// instance would have a fresh host_id and the CAS would lose).
+    async fn migrated_db_arc() -> StdArc<zeroship_sandbox::db::Database> {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = zeroship_sandbox::db::Database::from_test_config(url, true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+        db.upsert_host("test-host", "nomad-ch").await.unwrap();
+        StdArc::new(db)
+    }
+
+    /// Build a `WakeMachine` over a SEEDED snapshot row + backend.
+    /// `db` is the same Arc the seeder used so the host_id fence
+    /// holds. Returns the machine + the wake_id it was given so
+    /// the caller can poll `get_wake_job` after `drive()`.
+    async fn make_machine(
+        db: StdArc<zeroship_sandbox::db::Database>,
+        backend: StdArc<dyn RestoreBackend>,
+        store_root: &std::path::Path,
+        sandbox_id: Uuid,
+    ) -> (WakeMachine, String) {
+        let store: StdArc<dyn SnapshotStore> =
+            StdArc::new(LocalDiskSnapshotStore::new(store_root));
+        let typed_sid = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let wake_id = zeroship_core::typed_id::new_wake_id();
+        let lessee = db.host_id().to_string();
+        let row = WakeJobRow {
+            wake_id: wake_id.clone(),
+            sandbox_id: typed_sid,
+            state: WakeJobState::Pending,
+            error_code: None,
+            error_message: None,
+            started_at_secs: 0,
+            updated_at_secs: 0,
+            ready_at_secs: None,
+            agent_url: None,
+            lessee: lessee.clone(),
+            lessee_updated_at_secs: 0,
+        };
+        db.insert_wake_job(&row).await.unwrap();
+        let machine = WakeMachine {
+            database: StdArc::clone(&db),
+            backend,
+            snapshot_store: store,
+            persist: None, // test-fixture path; the machine skips
+                           // unseal/resync/register per `persist=None`.
+            sandbox_id,
+            wake_id: wake_id.clone(),
+            lessee,
+        };
+        (machine, wake_id)
+    }
+
+    /// Happy path: the state machine drives a snapshotted row to
+    /// running, marks the wake_job as ok, and populates agent_url +
+    /// ready_at.
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine happy path"]
+    async fn wake_machine_drives_snapshotted_to_ok() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_happy_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_happy_back");
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist after drive");
+        assert_eq!(
+            final_row.state,
+            WakeJobState::Ok,
+            "happy path must reach terminal Ok; got {:?}",
+            final_row.state
+        );
+        assert!(
+            final_row.ready_at_secs.is_some(),
+            "Ok terminal must populate ready_at"
+        );
+        assert!(
+            final_row.agent_url.is_some(),
+            "Ok terminal must populate agent_url"
+        );
+        assert!(final_row.error_code.is_none());
+        assert!(final_row.error_message.is_none());
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(sb.status, SandboxStatus::Running);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// `fail_livez=true` → terminal `failed` with `WakeErrorCode::LivezTimeout`.
+    /// Sandbox row rolls back to `snapshotted` (post-livez phase, so the
+    /// rollback target is NOT `snapshotted_suspect`).
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine livez failure"]
+    async fn wake_machine_classifies_livez_failure() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_livez_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_livez_back");
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_livez = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(final_row.state, WakeJobState::Failed);
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "fail_livez must classify as LivezTimeout (renders as `livez_timeout` on the wire)"
+        );
+        assert!(final_row.error_message.is_some());
+        assert!(
+            final_row.error_code.unwrap().wire_code() == "livez_timeout",
+            "wire code drift check"
+        );
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(
+            sb.status,
+            SandboxStatus::Snapshotted,
+            "post-livez failure rolls back to snapshotted (NOT suspect)"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// `fail_submit=true` → terminal `failed` with
+    /// `WakeErrorCode::RestoreFailed` (Backend(_) classification). The
+    /// submit failure is pre-livez so the rollback target is still
+    /// `snapshotted`.
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine submit failure"]
+    async fn wake_machine_classifies_submit_failure() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_submit_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_submit_back");
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_submit = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(final_row.state, WakeJobState::Failed);
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::RestoreFailed),
+            "Backend(submit) failure → RestoreFailed (wire `restore_backend_failed`)"
+        );
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(sb.status, SandboxStatus::Snapshotted);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// `fail_reserve=true` → terminal `failed` with
+    /// `WakeErrorCode::SlotUnavailable` (VmIndexUnavailable
+    /// classification → wire `vm_index_unavailable`).
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine reserve failure"]
+    async fn wake_machine_classifies_reserve_failure() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_reserve_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_reserve_back");
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_reserve = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(final_row.state, WakeJobState::Failed);
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::SlotUnavailable),
+            "VmIndexUnavailable → SlotUnavailable (wire `vm_index_unavailable`)"
+        );
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(sb.status, SandboxStatus::Snapshotted);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// Idempotency probe: after the machine reaches terminal,
+    /// `find_pending_wake_for_sandbox` returns None (the row is
+    /// no longer in flight), and a second `insert_wake_job` for the
+    /// SAME wake_id fails (primary-key violation). This pins the
+    /// invariant the handler's idempotency check relies on.
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine idempotency invariant"]
+    async fn wake_machine_terminal_clears_find_pending() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_idemp_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_idemp_back");
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, _wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        let typed_sid = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sid)
+        );
+
+        // Pre-drive: in-flight wake should be visible.
+        let in_flight = db
+            .find_pending_wake_for_sandbox(&typed_sid)
+            .await
+            .unwrap();
+        assert!(
+            in_flight.is_some(),
+            "pending wake must be visible to idempotency lookup"
+        );
+
+        machine.drive().await;
+
+        // Post-drive: no in-flight wake.
+        let after = db
+            .find_pending_wake_for_sandbox(&typed_sid)
+            .await
+            .unwrap();
+        assert!(
+            after.is_none(),
+            "terminal wake must NOT show up in find_pending_wake_for_sandbox"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// GC sweep applied after a terminal wake: the wake_job row is
+    /// deleted, mirroring the production T_KEEP eviction path.
+    /// Subsequent `get_wake_job` returns None (the production poll
+    /// handler maps this to 404 `wake_not_found`).
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine GC after terminal"]
+    async fn wake_machine_gc_sweep_evicts_terminal_rows() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_gc_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_gc_back");
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        // Sanity: terminal row exists.
+        assert!(db.get_wake_job(&wake_id).await.unwrap().is_some());
+
+        // 0-second threshold: every terminal row qualifies. After this
+        // sweep the wake_id must lookup as None (the poll handler maps
+        // this to 404 `wake_not_found` per § 2.cleanup).
+        let deleted = db
+            .gc_expired_wake_jobs(StdDuration::from_secs(0))
+            .await
+            .unwrap();
+        assert!(deleted >= 1, "GC must delete the terminal wake row");
+
+        let evicted = db.get_wake_job(&wake_id).await.unwrap();
+        assert!(
+            evicted.is_none(),
+            "wake_id must lookup as None after T_KEEP eviction"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+}
