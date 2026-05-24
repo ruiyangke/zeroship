@@ -4148,6 +4148,173 @@ mod wake_jobs_crud {
         );
     }
 
+    /// R16-S3: agent_url column-level CHECK rejects out-of-shape
+    /// values (e.g. file:// schemes, freeform text). 0010 added the
+    /// constraint as part of the PR2-followup hardening sprint.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_agent_url_check_constraint_enforced() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_url_check", "sbx_url_check", "hst_url");
+        db.insert_wake_job(&row).await.unwrap();
+
+        // http://...:port → OK
+        db.update_wake_job_state(
+            "wak_url_check",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+
+        // https://...                       → OK
+        db.update_wake_job_state(
+            "wak_url_check",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("https://example.com/agent"),
+        )
+        .await
+        .unwrap();
+
+        // file://... must be rejected.
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        let res = client
+            .execute(
+                "UPDATE sandbox.wake_jobs SET agent_url = 'file:///etc/passwd' \
+                 WHERE wake_id = 'wak_url_check'",
+                &[],
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "file:// URL must violate the CHECK constraint"
+        );
+
+        // Freeform text → reject.
+        let res = client
+            .execute(
+                "UPDATE sandbox.wake_jobs SET agent_url = 'arbitrary text' \
+                 WHERE wake_id = 'wak_url_check'",
+                &[],
+            )
+            .await;
+        assert!(res.is_err(), "freeform text must violate CHECK");
+
+        // URL with embedded spaces → reject.
+        let res = client
+            .execute(
+                "UPDATE sandbox.wake_jobs SET agent_url = 'http://example.com/a b' \
+                 WHERE wake_id = 'wak_url_check'",
+                &[],
+            )
+            .await;
+        assert!(res.is_err(), "URL with spaces must violate CHECK");
+    }
+
+    /// R17-A2: the partial index on (lessee_updated_at) WHERE
+    /// non-terminal exists after 0010, supporting the wake-job
+    /// takeover sweep query.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_lessee_partial_index_present() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+
+        let row = client
+            .query_opt(
+                "SELECT indexdef FROM pg_indexes \
+                  WHERE schemaname = 'sandbox' \
+                    AND tablename = 'wake_jobs' \
+                    AND indexname = 'wake_jobs_lessee_idx'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .expect("wake_jobs_lessee_idx must exist after migration 0010");
+        let indexdef: &str = row.get(0);
+        assert!(
+            indexdef.contains("lessee_updated_at"),
+            "index def must mention lessee_updated_at; got {indexdef}"
+        );
+        assert!(
+            indexdef.to_lowercase().contains("where")
+                && indexdef.contains("state"),
+            "index must be partial on state; got {indexdef}"
+        );
+    }
+
+    /// R16-S1: sandbox_audit role MUST NOT have SELECT on wake_jobs
+    /// after 0010 — the 0009 grant violated 0004's role-split
+    /// invariant.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_audit_role_has_no_select() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+
+        // The role may not exist in dev pg (the migration's DO $$
+        // block tolerates that). Skip the assertion if the role
+        // doesn't exist.
+        let role_exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_audit')",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if !role_exists {
+            return;
+        }
+
+        // has_table_privilege('sandbox_audit', 'sandbox.wake_jobs', 'SELECT')
+        // must be false after 0010 revoked the 0009 grant.
+        let has_select: bool = client
+            .query_one(
+                "SELECT has_table_privilege('sandbox_audit', \
+                        'sandbox.wake_jobs', 'SELECT')",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            !has_select,
+            "sandbox_audit MUST NOT have SELECT on sandbox.wake_jobs after 0010"
+        );
+    }
+
     /// Migration target version matches the binary's
     /// LATEST_MIGRATION_VERSION (smoke check that 0009 actually
     /// applied — the CHECK constraint on `state` is the proof; an

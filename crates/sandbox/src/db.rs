@@ -89,13 +89,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "wake_jobs table (C-7-LT-PR1 async wake-response state machine)",
         sql: include_str!("../migrations/0009_wake_jobs.sql"),
     },
+    Migration {
+        version: 10,
+        description: "wake_jobs hardening: revoke audit SELECT, lessee_updated_at index, agent_url CHECK (R16-S1 + R17-A2 + R16-S3)",
+        sql: include_str!("../migrations/0010_wake_jobs_hardening.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 9;
+pub const LATEST_MIGRATION_VERSION: i64 = 10;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
