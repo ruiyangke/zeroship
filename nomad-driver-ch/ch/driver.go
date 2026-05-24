@@ -127,8 +127,17 @@ type Plugin struct {
 
 // Config is the driver-level configuration block (set once at plugin load).
 // Field names match the proposal's example Nomad agent stanza in § 8.
+//
+// C-7-LT-5 (2026-05-23): added ChRemoteBin so the operator's agent stanza
+// can configure the ch-remote path independently of cloud-hypervisor and
+// virtiofsd. The prior shape called SetBinaries(chBin, VirtiofsdBin) — a
+// signature/argument mismatch that caused the StopTask shutdown ladder
+// to shell out to virtiofsd in place of ch-remote (smoke-r15 observed
+// "SIGTERM fallback works; degraded but non-fatal" because Shutdown
+// failed silently and the SIGTERM step did the real work).
 type Config struct {
 	CloudHypervisorBin string `codec:"cloud_hypervisor_bin"`
+	ChRemoteBin        string `codec:"ch_remote_bin"`
 	VirtiofsdBin       string `codec:"virtiofsd_bin"`
 	VMIndexLockDir     string `codec:"vm_index_lockdir"`
 	RunDir             string `codec:"run_dir"`
@@ -140,6 +149,10 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	"cloud_hypervisor_bin": hclspec.NewDefault(
 		hclspec.NewAttr("cloud_hypervisor_bin", "string", false),
 		hclspec.NewLiteral(`"/usr/local/bin/cloud-hypervisor"`),
+	),
+	"ch_remote_bin": hclspec.NewDefault(
+		hclspec.NewAttr("ch_remote_bin", "string", false),
+		hclspec.NewLiteral(`"/usr/local/bin/ch-remote"`),
 	),
 	"virtiofsd_bin": hclspec.NewDefault(
 		hclspec.NewAttr("virtiofsd_bin", "string", false),
@@ -199,8 +212,13 @@ func (p *Plugin) SetConfig(cfg *base.Config) error {
 	}
 	// Best-effort binary discovery using the new config. NewClient also
 	// did this; we redo it here in case Config arrives after construction.
+	//
+	// C-7-LT-5: pass ChRemoteBin (NOT VirtiofsdBin) as the second arg —
+	// SetBinaries takes (chBin, chRemoteBin), and the pre-fix shape
+	// silently shoved the virtiofsd path into c.chRemoteBin, breaking
+	// the StopTask ch-remote shutdown step.
 	if p.chClient != nil {
-		p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.VirtiofsdBin)
+		p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.ChRemoteBin)
 	}
 	return nil
 }

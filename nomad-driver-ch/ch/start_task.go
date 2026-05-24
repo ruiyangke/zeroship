@@ -136,9 +136,10 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	// and now).
 	chBin := p.chClient.CHBin()
 	if chBin == "" {
-		// Try once more with the configured Config path.
+		// Try once more with the configured Config path. C-7-LT-5: pass
+		// ChRemoteBin (not VirtiofsdBin) — see Config struct doc.
 		if p.config != nil {
-			p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.VirtiofsdBin)
+			p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.ChRemoteBin)
 			chBin = p.chClient.CHBin()
 		}
 	}

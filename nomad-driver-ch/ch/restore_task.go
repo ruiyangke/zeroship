@@ -298,8 +298,11 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 
 	chBin := p.chClient.CHBin()
 	if chBin == "" {
+		// C-7-LT-5: pass ChRemoteBin (not VirtiofsdBin) — see Config
+		// struct doc. Pre-fix this silently aliased c.chRemoteBin to
+		// virtiofsd, breaking the StopTask shutdown step.
 		if p.config != nil {
-			p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.VirtiofsdBin)
+			p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.ChRemoteBin)
 			chBin = p.chClient.CHBin()
 		}
 	}
