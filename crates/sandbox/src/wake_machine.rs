@@ -264,7 +264,17 @@ impl WakeMachine {
         let g0 = row.generation;
 
         // Look up snapshot metadata (sha + vm_index + user_id).
-        let snap = match read_snapshot_row(self.database.as_ref(), self.sandbox_id).await {
+        // R26-I1 collapse (2026-05-25): shared with `do_restore_inner`
+        // via `crate::restore_handler::read_snapshot_row`. The unified
+        // `SnapshotRowMeta` carries an extra `artifact_path` field the
+        // wake-path does not consume; one `String` per wake is a
+        // negligible cost for the DRY win.
+        let snap = match crate::restore_handler::read_snapshot_row(
+            self.database.as_ref(),
+            self.sandbox_id,
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 return Phase::Failed {
@@ -710,63 +720,18 @@ fn sandbox_id_typed(sandbox_id: Uuid) -> String {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Snapshot row helper (mirror of restore_handler::read_snapshot_row).
+// Snapshot row reader: removed in R26-I1 (2026-05-25).
 //
-// `restore_handler::read_snapshot_row` is `async fn read_snapshot_row(
-// db: &Database, sandbox_id: Uuid) -> Result<SnapshotRowMeta,
-// RestoreHandlerError>` but the `SnapshotRowMeta` struct is `pub(super)`
-// (not exported), so we can't reuse the function directly without a
-// visibility bump that ripples through the sync path.
-//
-// We re-implement the same SELECT here against the same columns. If
-// the snapshot-row schema evolves both paths need to update; the
-// proposal § 7 phase 5 deletes the sync path entirely, after which
-// this becomes the sole reader.
+// The local `WakeSnapshotMeta` + `read_snapshot_row` were a verbatim
+// mirror of `restore_handler::read_snapshot_row` retained per the
+// async-wake proposal's § 7 "phase 5 will fix this." After three
+// rounds of carry through r22-A4 / r24-A4 / r25 / r26-I1, the bump-
+// visibility-and-share path won: `restore_handler::SnapshotRowMeta`
+// + `restore_handler::read_snapshot_row` are now `pub(crate)` and
+// callers above use the shared reader directly. The unified type
+// carries `artifact_path` (one extra `String` per wake read) — the
+// wake path does not consume it; the cost is negligible.
 // ────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct WakeSnapshotMeta {
-    sha256: [u8; 32],
-    vm_index: i16,
-    user_id: String,
-}
-
-async fn read_snapshot_row(
-    db: &Database,
-    sandbox_id: Uuid,
-) -> Result<WakeSnapshotMeta, String> {
-    let pool = db.pool_app().await.map_err(|e| format!("pool_app: {e}"))?;
-    let client = pool.get().await.map_err(|e| format!("pool_app.get: {e}"))?;
-    let sandbox_id_str = sandbox_id_typed(sandbox_id);
-    let row = client
-        .query_opt(
-            "SELECT snapshot_sha256, snapshot_vm_index, user_id \
-               FROM sandbox.sandboxes \
-              WHERE sandbox_id = $1::TEXT AND deleted_at IS NULL",
-            &[&sandbox_id_str],
-        )
-        .await
-        .map_err(|e| format!("query: {e}"))?
-        .ok_or_else(|| format!("sandbox not found: {sandbox_id_str}"))?;
-    let sha_bytes: Option<Vec<u8>> = row.try_get(0).ok();
-    let vm_index: Option<i16> = row.try_get(1).ok();
-    let user_id: Option<String> = row.try_get(2).ok();
-    let (Some(s), Some(v), Some(u)) = (sha_bytes, vm_index, user_id) else {
-        return Err(format!(
-            "snapshot row missing sha/vm_index/user_id for {sandbox_id_str}"
-        ));
-    };
-    if s.len() != 32 {
-        return Err(format!("snapshot_sha256 length={} expected 32", s.len()));
-    }
-    let mut sha = [0u8; 32];
-    sha.copy_from_slice(&s);
-    Ok(WakeSnapshotMeta {
-        sha256: sha,
-        vm_index: v,
-        user_id: u,
-    })
-}
 
 // ────────────────────────────────────────────────────────────────────
 // Error-message sanitizer (R16-S2)
