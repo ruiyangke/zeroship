@@ -52,7 +52,7 @@ use uuid::Uuid;
 // remains uncached per § 13.2 of the design (opened-on-demand, dropped
 // at end-of-request). The DSN is kept as a tiebreaker so a test
 // fixture that swaps role DSNs mid-process doesn't return a stale
-// pool — `set_role_dsns_for_test` exists for that case.
+// pool.
 //
 // Thundering-herd: compio is single-threaded per worker. Two tasks on
 // the same thread can interleave around the `Pool::connect_with_config`
@@ -514,7 +514,12 @@ impl Database {
     /// env. Persists no host_id file. Visible across the crate
     /// boundary for `tests/sandbox_pg_e2e.rs` — production callers
     /// use [`Database::from_env`].
+    ///
+    /// Gated under `cfg(any(test, feature = "test-support"))` so the
+    /// scaffolding is stripped from production rlibs (R28-API2 sweep,
+    /// mirrors the R27-API2 `_test_inject_sandbox` precedent).
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn from_test_config(
         dsn: String,
         run_migrations: bool,
@@ -543,16 +548,6 @@ impl Database {
             pool_max: 4,
         };
         Ok(Self { config })
-    }
-
-    /// Override the per-role DSNs after `from_test_config`. Used by
-    /// the role-permission integration tests to exercise the actual
-    /// `sandbox_app` / `sandbox_audit` / `sandbox_gdpr` connection
-    /// paths against a CI Postgres where each role exists.
-    #[doc(hidden)]
-    pub fn set_role_dsns_for_test(&mut self, audit: String, gdpr: String) {
-        self.config.dsn_audit = audit;
-        self.config.dsn_gdpr = gdpr;
     }
 
     /// A6b (deferred backlog): synchronous, in-crate-only constructor

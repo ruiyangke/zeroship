@@ -487,12 +487,18 @@ pub trait IdleSnapshotter: Send + Sync {
 
 /// Simplest fixture: a `Mutex<Vec<Uuid>>` that records the rows the
 /// sweep tried to snapshot. Used by the pg-gated test.
+///
+/// Gated under `cfg(any(test, feature = "test-support"))` so the
+/// scaffolding is stripped from production rlibs (R28-API2 sweep,
+/// mirrors the R27-API2 `_test_inject_sandbox` precedent).
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 pub struct RecordingIdleSnapshotter {
     pub seen: std::sync::Mutex<Vec<Uuid>>,
     pub fail: std::sync::atomic::AtomicBool,
 }
+#[cfg(any(test, feature = "test-support"))]
 impl IdleSnapshotter for RecordingIdleSnapshotter {
     fn snapshot_one<'a>(
         &'a self,

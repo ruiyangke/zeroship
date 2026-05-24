@@ -1297,7 +1297,12 @@ pub(crate) fn rewrite_config_json(
 
 /// Minimal stub for unit tests. Returns programmable success/error
 /// from each operation; records calls so tests can assert on order.
+///
+/// Gated under `cfg(any(test, feature = "test-support"))` so the
+/// scaffolding is stripped from production rlibs (R28-API2 sweep,
+/// mirrors the R27-API2 `_test_inject_sandbox` precedent).
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 pub struct StubRestoreBackend {
     pub root: PathBuf,
@@ -1322,6 +1327,7 @@ pub struct StubRestoreBackend {
     pub reserve_attempts: std::sync::atomic::AtomicU32,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StubRestoreBackend {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -1346,6 +1352,7 @@ impl StubRestoreBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl RestoreBackend for StubRestoreBackend {
     fn reserve_vm_index(&self, vm_index: i16) -> Result<(), String> {
         let n = self
