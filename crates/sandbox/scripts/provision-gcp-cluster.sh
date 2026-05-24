@@ -57,9 +57,11 @@ SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
 VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
 DATACENTER=${DATACENTER:-$PREFIX}
 # Optional extra worker metadata, comma-separated key=value pairs.
-# Appended to the worker --metadata line as-is. Empty by default.
-# Example: EXTRA_WORKER_METADATA="install-ch-plugin-driver=1"
-EXTRA_WORKER_METADATA=${EXTRA_WORKER_METADATA:-}
+# Appended to the worker --metadata line as-is. Default installs the
+# nomad-driver-ch Go plugin (required by every Phase-B+ stress run and
+# the eventual T-8b-cutover state). Override with empty string for
+# raw_exec-only worker testing.
+EXTRA_WORKER_METADATA=${EXTRA_WORKER_METADATA-install-ch-plugin-driver=1}
 
 NETWORK=${NETWORK:-${PREFIX}-net}
 SUBNET=${SUBNET:-${PREFIX}-subnet}
