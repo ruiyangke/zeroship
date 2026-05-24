@@ -605,6 +605,180 @@ func TestDestroyTask_DefensiveTapCleanup_BothFireWhenNamesDiffer(t *testing.T) {
 	}
 }
 
+// ─── T-8b-stress-r4 r4-A: DestroyTask reap-wait ─────────────────────
+//
+// Per the r4-A design (closes the rootfs.img DiskLockError window
+// observed at 5% of WAKE in stress-r4): DestroyTask must not return
+// to Nomad until the OS has REAPED the CH process. fcntl write locks
+// on rootfs.img release on reap, not on SIGKILL — so a wake post on
+// the same VMIndex that lands before the kernel finishes reap sees
+// `--restore → DiskLockError → AlreadyLocked, lock_type: Write`.
+//
+// The reap predicate is h.exitDone: superviseCH closes it after
+// runner.Wait() returns, which is by definition AFTER reap (cmd.Wait
+// wraps the underlying waitpid syscall). Tests verify:
+//
+//   1. Process reaped quickly → no poll cycles; DestroyTask returns
+//      promptly without bumping the counter.
+//   2. Process reaped after N polls → DestroyTask returns once the
+//      supervisor closes exitDone; counter stays at baseline.
+//   3. Process never reaped within budget → counter bumps by one,
+//      WARN logged, DestroyTask still returns nil (we don't want
+//      Nomad stuck in a "destroy keeps failing" loop).
+
+// TestDestroyTask_WaitsForProcessReap pins the load-bearing case for
+// r4-A: a force=true DestroyTask must not return until the supervisor
+// has observed the runner.Wait() return (= the OS has reaped the CH
+// process). Wired by closing the fake runner's waitCh AFTER the test
+// starts DestroyTask in a goroutine and verifies it's still blocked.
+//
+// Uses a real (small) sleep cadence so the poll loop has natural
+// waiting time we can observe; without a real sleep the no-op seam
+// would let the budget exhaust before we ever close the runner.
+func TestDestroyTask_WaitsForProcessReap(t *testing.T) {
+	ch.ResetDestroyTaskUnreapedForTest()
+	t.Cleanup(ch.ResetDestroyTaskUnreapedForTest)
+
+	// 50 attempts × 20 ms = 1 s wall budget. Large enough that the
+	// 100 ms "is it still blocked?" probe below doesn't race the
+	// budget exhaustion; small enough that the test wallclock stays
+	// well under a second even on a slow CI host.
+	prevA, prevI := ch.SetDestroyReapWaitForTest(50, 20*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevA, prevI) })
+
+	f := newStopFixture(t, nil)
+
+	// Move the handle into a state where DestroyTask will hit the
+	// reap-wait path. Without IsRunning() the path is skipped (the
+	// supervisor already closed exitDone for us). Run DestroyTask
+	// with force=true so the IsRunning branch runs escalateSigkill,
+	// THEN reap-wait kicks in.
+	pre := ch.DestroyTaskUnreapedTotal()
+	done := make(chan error, 1)
+	go func() {
+		done <- f.plugin.DestroyTask(f.taskCfg.ID, true)
+	}()
+
+	// DestroyTask must still be running: escalateSigkill returned
+	// without confirming reap (the fake runner's waitCh is still
+	// open), then waitForReap is polling against exitDone.
+	select {
+	case err := <-done:
+		t.Fatalf("DestroyTask returned before reap (err=%v); reap-wait did not block", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: still blocked. The poll loop has woken ~5 times
+		// (100 ms / 20 ms cadence) and seen exitDone still open.
+	}
+
+	// Now release the runner so the supervisor observes Wait()
+	// returning and closes exitDone. DestroyTask's reap-wait sees
+	// the close on the next poll iteration and unblocks.
+	f.closeRunner()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DestroyTask after reap: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("DestroyTask did not return within 2 s of supervisor reap")
+	}
+
+	// Counter must NOT have bumped — reap was observed in time.
+	if post := ch.DestroyTaskUnreapedTotal(); post != pre {
+		t.Errorf("unreaped counter spuriously bumped: pre=%d post=%d", pre, post)
+	}
+}
+
+// TestDestroyTask_TolerantOfReapTimeout pins the budget-exhaustion
+// branch: the supervisor never closes exitDone within the reap-wait
+// budget. DestroyTask still returns nil (Nomad gets a definitive
+// terminal signal), the counter bumps by one, and a WARN line is
+// emitted. Avoids Nomad-loop-destroy on a wedged kernel.
+func TestDestroyTask_TolerantOfReapTimeout(t *testing.T) {
+	ch.ResetDestroyTaskUnreapedForTest()
+	t.Cleanup(ch.ResetDestroyTaskUnreapedForTest)
+
+	// 3 polls × no-op sleep — exhausts the budget in <1 ms wall.
+	prevA, prevI := ch.SetDestroyReapWaitForTest(3, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevA, prevI) })
+	prevSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevSleep) })
+
+	f := newStopFixture(t, nil)
+
+	// Never close the runner: the supervisor never sees exit; exitDone
+	// stays open for the duration of the reap-wait budget.
+	pre := ch.DestroyTaskUnreapedTotal()
+	t0 := time.Now()
+	err := f.plugin.DestroyTask(f.taskCfg.ID, true)
+	elapsed := time.Since(t0)
+	if err != nil {
+		t.Fatalf("DestroyTask should be tolerant of reap timeout (got err=%v)", err)
+	}
+
+	// Budget exhaustion: counter must have bumped by exactly 1.
+	if post := ch.DestroyTaskUnreapedTotal(); post != pre+1 {
+		t.Errorf("unreaped counter: pre=%d post=%d, want +1", pre, post)
+	}
+
+	// Sanity: the no-op sleep + the escalateSigkill 50 ms grace cap
+	// means total should be well under a second even on a slow CI
+	// host. The cap exists so a regression that wires a real sleep
+	// here surfaces as a test timeout rather than a silent slowdown.
+	if elapsed > 5*time.Second {
+		t.Errorf("DestroyTask reap-wait exhaustion took %v; expected <5 s with no-op sleep seam", elapsed)
+	}
+
+	// Cleanup: let the supervisor observe the runner exit so its
+	// goroutine doesn't leak past the test.
+	f.closeRunner()
+}
+
+// TestDestroyTask_NoOpWhenAlreadyReaped pins the happy-path: when the
+// supervisor has already closed exitDone (CH exited cleanly, StopTask
+// ran first), DestroyTask's reap-wait observes the close on the first
+// peek and returns immediately. The counter stays at baseline.
+func TestDestroyTask_NoOpWhenAlreadyReaped(t *testing.T) {
+	ch.ResetDestroyTaskUnreapedForTest()
+	t.Cleanup(ch.ResetDestroyTaskUnreapedForTest)
+
+	prevA, prevI := ch.SetDestroyReapWaitForTest(25, 200*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevA, prevI) })
+
+	// Make the sleep seam fail the test loudly if it ever fires: the
+	// already-reaped path must NOT sleep. (We use atomic via mu so a
+	// concurrent observation is safe.)
+	sleepHit := &atomic.Int32{}
+	prevSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {
+		sleepHit.Add(1)
+	})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevSleep) })
+
+	f := newStopFixture(t, nil)
+
+	// Drive the runner to exit BEFORE DestroyTask runs; wait for the
+	// supervisor to close exitDone (mirrors the
+	// TestStopTask_ChRemoteShutdownGracefulExits idiom).
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskUnreapedTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	if got := sleepHit.Load(); got != 0 {
+		t.Errorf("reap-wait slept %d times on already-reaped path; want 0", got)
+	}
+	if post := ch.DestroyTaskUnreapedTotal(); post != pre {
+		t.Errorf("unreaped counter spuriously bumped on already-reaped: pre=%d post=%d", pre, post)
+	}
+}
+
 // atomicStringSlice is a minimal goroutine-safe accumulator the new
 // defensive-cleanup tests use to observe the ORDER of removeTapFn
 // calls (the existing fixture only stores the LAST tap). Kept local

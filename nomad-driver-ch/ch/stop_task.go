@@ -56,7 +56,38 @@ var (
 		shutdownTimeout: defaultShutdownTimeout,
 		sigtermTimeout:  defaultSigtermTimeout,
 	}
+
+	// T-8b-stress-r4 r4-A: DestroyTask reap-wait budget. The OS releases
+	// fcntl file locks (CH's rootfs.img ExclusiveWrite among them) when
+	// the process is REAPED, not when it's SIGKILL'd. Between SIGKILL and
+	// reap the kernel still attributes the locks to the now-zombie task,
+	// so the next alloc's CH `--restore` on the same rootfs.img sees
+	// `DiskLockError → AlreadyLocked` until init/runner reaps.
+	//
+	// superviseCH owns the single runner.Wait() call (production) /
+	// processAlive poll loop (recovered tasks) and closes h.exitDone
+	// AFTER Wait returns — by definition AFTER reap. So a bounded wait on
+	// h.exitDone is the reap predicate.
+	//
+	// Budget: 5 s wall at 200 ms cadence (25 attempts). Generous against
+	// the observed-in-prod gap (sub-second on a healthy host) but short
+	// enough that a stuck reap surfaces in operator logs within one
+	// stress-loop iteration. Mirrors the v15 r3-B waitForTapAbsent
+	// pattern (poll on a single observable kernel state transition).
+	destroyReapPollAttempts = 25
+	destroyReapPollInterval = 200 * time.Millisecond
 )
+
+// SetDestroyReapWaitForTest overrides the reap-wait poll budget so tests
+// don't sleep 5 s. Returns the previous (attempts, interval) pair so the
+// caller can restore them on cleanup. Mirrors SetStopTimeoutsForTest.
+func SetDestroyReapWaitForTest(attempts int, interval time.Duration) (int, time.Duration) {
+	prevA := destroyReapPollAttempts
+	prevI := destroyReapPollInterval
+	destroyReapPollAttempts = attempts
+	destroyReapPollInterval = interval
+	return prevA, prevI
+}
 
 // SetStopTimeoutsForTest overrides the per-step ladder timeouts so tests
 // don't sleep 5+3 real seconds. Returns the previous (shutdown, sigterm)
@@ -204,6 +235,77 @@ func (p *Plugin) signalHandle(h *taskHandle, sig os.Signal) error {
 	return proc.Signal(sig)
 }
 
+// sleepForReapPoll is the package-level seam tests swap so the
+// DestroyTask reap-wait loop doesn't add real wall time. Default is
+// time.Sleep — production callers block on the kernel's reap pending the
+// supervisor goroutine consuming runner.Wait()'s return.
+//
+// Mirrors the v15 r3-B sleepForTapPoll seam shape so the test ergonomics
+// are uniform across the two defense-in-depth poll loops.
+var sleepForReapPoll = func(d time.Duration) {
+	time.Sleep(d)
+}
+
+// SetSleepForReapPollForTest swaps the reap-wait sleep seam. Returns the
+// previous fn so the caller can restore it on cleanup. Tests typically
+// install a no-op so the poll loop spins through its budget instantly
+// rather than waiting real wall time.
+func SetSleepForReapPollForTest(fn func(d time.Duration)) func(d time.Duration) {
+	prev := sleepForReapPoll
+	if fn != nil {
+		sleepForReapPoll = fn
+	}
+	return prev
+}
+
+// waitForReap blocks up to `destroyReapPollAttempts × destroyReapPollInterval`
+// for the supervisor goroutine to close h.exitDone — the post-reap signal.
+// Returns true on observed reap, false on budget exhaustion.
+//
+// On budget exhaustion, bumps `nomad_driver_ch_destroy_task_unreaped_total`
+// and WARN-logs; the caller proceeds with cleanup regardless. The kernel
+// reap is asynchronous to SIGKILL: between the SIGKILL syscall and the
+// `wait()` syscall that reaps the zombie, fcntl file locks remain
+// attributed to the dead process. Locks release ONLY when the kernel
+// completes `do_exit() → exit_files() → fput()` and the parent (or init)
+// reaps the zombie via wait/waitpid. The exit_files() path drops FDs
+// during exit, but the fcntl-lock release window in stress tests has
+// shown to be on the SIGKILL-to-reap interval — keep the bounded wait
+// keyed to reap as the strongest guarantee.
+//
+// If h.exitDone is nil (legacy/test handles), returns true immediately:
+// no supervisor → no reap to wait on → no harm.
+func (p *Plugin) waitForReap(h *taskHandle, taskID string) bool {
+	if h.exitDone == nil {
+		return true
+	}
+	attempts := destroyReapPollAttempts
+	interval := destroyReapPollInterval
+	for i := 0; i < attempts; i++ {
+		select {
+		case <-h.exitDone:
+			return true
+		default:
+		}
+		if i+1 < attempts {
+			sleepForReapPoll(interval)
+		}
+	}
+	// Final peek (no sleep after the last attempt).
+	select {
+	case <-h.exitDone:
+		return true
+	default:
+	}
+	incDestroyTaskUnreaped()
+	p.logger.Warn("ch: DestroyTask: CH process not reaped within budget; rootfs.img fcntl lock may linger for the next alloc",
+		"task_id", taskID,
+		"ch_pid", h.chPid,
+		"budget", time.Duration(attempts)*interval,
+		"destroy_task_unreaped_total", DestroyTaskUnreapedTotal())
+	return false
+}
+
 // waitForExit blocks up to `d` for the handle's supervisor goroutine to
 // signal exit (closes h.exitDone). Returns true if the supervisor exited
 // within the window.
@@ -245,18 +347,25 @@ func (p *Plugin) waitForExit(h *taskHandle, d time.Duration) bool {
 //     StopTask first.
 //  3. If still running and force, SIGKILL via the StopTask ladder's last
 //     step.
-//  4. Cancel handle.ctx so any per-task supervision goroutines (TaskStats,
+//  4. **T-8b-stress-r4 r4-A**: bounded wait for the OS to REAP the CH
+//     process before declaring the task terminal to Nomad. fcntl file
+//     locks (CH's rootfs.img ExclusiveWrite among them) release on reap,
+//     not on SIGKILL — so a subsequent alloc's `--restore` on the same
+//     rootfs.img hits `DiskLockError → AlreadyLocked` until the kernel
+//     finishes reaping. waitForReap selects on h.exitDone, which
+//     superviseCH closes AFTER runner.Wait() returns (cmd.Wait reaps).
+//  5. Cancel handle.ctx so any per-task supervision goroutines (TaskStats,
 //     future WaitTask monitors) exit.
-//  5. Best-effort tap removal — failure is logged, not surfaced; the tap
+//  6. Best-effort tap removal — failure is logged, not surfaced; the tap
 //     may already be gone (CH crashed) or owned by an external systemd
 //     unit (T-3 territory). Two passes: first keyed off h.tap (the
 //     happy-path lifecycle), then a DEFENSIVE pass keyed off h.vmIndex
 //     so a half-initialised handle (h.tap == "") or an external orphan
 //     still gets cleaned (T-8b-stress-r2 driver v14 — see in-body
 //     comment for the failure modes the defensive pass covers).
-//  6. Best-effort API socket removal — file may already be gone (CH
+//  7. Best-effort API socket removal — file may already be gone (CH
 //     unlinks on clean exit).
-//  7. Delete the in-memory handle from p.tasks.
+//  8. Delete the in-memory handle from p.tasks.
 //
 // T-3 (per-VM /30 tap) and T-7 (controller-integration) extend this with
 // vm_index lock release and per-task run-dir scrubbing; this T-2 surface
@@ -277,6 +386,24 @@ func (p *Plugin) DestroyTask(taskID string, force bool) error {
 		// cleanup, so the in-memory state is consistent.
 		_ = p.escalateSigkill(h, stopTimeoutsMu.sigtermTimeout)
 	}
+
+	// T-8b-stress-r4 r4-A: bounded wait for the CH process to be REAPED
+	// before we declare the task terminal to Nomad. Without this, the next
+	// alloc on the same rootfs.img sees `DiskLockError → AlreadyLocked`
+	// (the fcntl write lock attaches to a still-zombie task that the
+	// kernel hasn't finished reaping). h.exitDone is closed by superviseCH
+	// AFTER runner.Wait() returns — for the default os/exec runner that
+	// IS the reap; for the detachedRunner (RecoverTask) it's an ESRCH on
+	// kill(pid,0), which fires only after the kernel completes reap of
+	// the orphaned-then-reparented-to-init child.
+	//
+	// Best-effort: on budget exhaustion we bump the metric, WARN-log, and
+	// proceed. Nomad needs a definitive terminal signal — surfacing an
+	// error here would leave Nomad in a "destroy keeps failing" loop that
+	// doesn't help the cluster recover. The next StartTask is what would
+	// see the residual lock; the operator's diagnostic is the metric +
+	// WARN line.
+	p.waitForReap(h, taskID)
 
 	// Stop the per-task ctx (cancels any background goroutines T-5
 	// introduces; safe even if cancelFn is a no-op).
