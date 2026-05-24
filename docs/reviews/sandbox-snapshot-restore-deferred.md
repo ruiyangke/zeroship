@@ -3,7 +3,7 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-25 r2 (deferred-backlog refresh: #24 CLOSED at `a4c481e1` — `ZSBX_SANDBOX_ID` env injection verified in tree at `nomad_ch.rs:2373` + regression tests at L4020-4069; entry was stale paperwork written before the fix landed. Prior r1 note: post critical-fix-sweep cluster smoke at v18 + rootfs v5: Phase 1 c=4 HARD FAIL 0/16 creates, NEW bug #24 — controller `Tasks[].Env` block in `nomad_ch.rs:2224-2264` missing `ZSBX_SANDBOX_ID` so the wrapper's R8-DEPLOY1 guard fires at line 153 on every cold boot, killing alloc in ~50ms with empty ch.stderr. Phase 2 c=20 NOT REACHED. Cluster fully torn down. B19 + B-SLO REMAIN UNVERIFIED at cluster on this branch HEAD. Detail: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-r1.md`).
+Last updated: 2026-05-25 r16 (round-16 r1 deferred-backlog refresh: C-8c surfaced from smoke-r11 (sync wake contract structurally out of knobs); C-7-LT design proposal READY at docs/proposals/c7-lt-async-wake.md (uncommitted); R15-S1 CLOSED at da951dd9; R15-I2 CLOSED at 64af1803; #24 CLOSED at a4c481e1; R16-I1/R16-I2/R16-A1/R15-S2 added. Prior r2 note: deferred-backlog refresh: #24 CLOSED at `a4c481e1` — `ZSBX_SANDBOX_ID` env injection verified in tree at `nomad_ch.rs:2373` + regression tests at L4020-4069; entry was stale paperwork written before the fix landed. Prior r1 note: post critical-fix-sweep cluster smoke at v18 + rootfs v5: Phase 1 c=4 HARD FAIL 0/16 creates, NEW bug #24 — controller `Tasks[].Env` block in `nomad_ch.rs:2224-2264` missing `ZSBX_SANDBOX_ID` so the wrapper's R8-DEPLOY1 guard fires at line 153 on every cold boot, killing alloc in ~50ms with empty ch.stderr. Phase 2 c=20 NOT REACHED. Cluster fully torn down. B19 + B-SLO REMAIN UNVERIFIED at cluster on this branch HEAD. Detail: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-r1.md`).
 Prior update: 2026-05-23 (cycle r7+B22-fixer: bug #22 CLOSED — root cause was CH `--restore` preserving `CLOCK_REALTIME` from snapshot-time; fix is signed `/_clock_resync` handshake on agent + controller-side call in `do_restore_inner` between `wait_for_livez` and `register_restored`. v17 controller + v4 rootfs pushed; cluster c=4 confirms POST-WAKE EXEC 7/7 = 100% (was 0/9). B19 also FULLY CLOSED. B-SLO escalation blocked on NEW bug #23 — provision script fails on SERVER_COUNT>1).
 Branch HEAD at seed: `fce3e208`.
 Branch HEAD at last update: B20 fixer cycle on `3e8bfad5` parent (B20 + Appendix D commit forthcoming). Prior commits: `4fd92bef` (S4); `0aa93a0f` (A3-partial); `15b4f9a8` (B19 in-code); `4e6c70c1` (R4-T1); `28f60d73` (R3-Q3); `2928d5ae` (A4 closed); `b4ddb98b` (B18). Lib tests at parent HEAD: **275 passed**.
@@ -121,6 +121,15 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Tests**: 337 → 338 pass / 0 fail. New test `c8b_default_policy_envelopes_doubled_fence` pins the fence=30 case at ≥21 attempts (≥40 s budget) and exactly 26 attempts post-fix. Updated `r14a6_policy_from_cfg_short_timeout` (fence=20 case: was 6 attempts / 10 s pre-C-8b → now 16 attempts / 30 s post-C-8b — fence-ceil `2*20 − 10 = 30` binds, deadline-ceil 50 doesn't). Unchanged: `r14a6_policy_from_cfg_respects_host_fence_timeout` (60 s → 26 attempts, deadline-ceil binds), `r14a6_policy_from_cfg_zero_fence_still_attempts_once` (0 s → 1 attempt, MIN_ATTEMPTS floor), `r14a6_from_cfg_caps_at_client_deadline` (120 s → 26 attempts, deadline-ceil binds).
 - **Note on `wait_for_agent_silent` framing**: the smoke-r10 review attributed the 2× factor primarily to `wait_for_agent_silent`'s 2-consecutive-misses contract. Reading the function (`crates/sandbox/src/backend/nomad_ch.rs:3205-3273`) shows it polls at 100 ms cadence, so the 2-consecutive-misses gate adds only ~200 ms once the agent really dies; the dominant contributor to the 2× ratio is the *combined* pipeline (host-fence wait + Nomad purge tail), not the silent-fence step alone. The doc comment on `from_host_fence_timeout` is written to that broader framing.
 
+### [C-8c] (OPEN — gates Phase B, architectural-only fix possible) Synchronous wake-response contract is structurally out of knobs (CRITICAL)
+- **Source**: T-8b-smoke-r11 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r11.md`).
+- **Symptom**: With C-8b's 2× fence factor applied (v26 controller, fence=30 → 50s budget × 26 attempts), smoke-r11 WAKE still 0/1. All 26 attempts logged at 2s cadence; budget exhausted at 50s; source teardown wall-time 60.166s (reproducible to ±2ms across r10/r11).
+- **Root cause**: At fence=30, both retry ceilings collapse to 50s: fence-derived (2 × 30 − 10 = 50) AND deadline-derived (CLIENT_DEADLINE − HEADROOM = 60 − 10 = 50). 10.1s deficit cannot be closed inside the sync-response contract — lowering fence keeps the HEADROOM-sized deficit, raising fence widens the deficit (deadline binds), raising CLIENT_DEADLINE_SECS violates the public 60s SLO.
+- **Architecture finding (r16-A1)**: C-8b's 2× factor is a "numeric coincidence, not a model" — the Nomad purge tail (`wait_for_job_gone`, 30s fixed timeout at `nomad_ch.rs:1051`) is independent of fence; formula is wrong for fence<30 and inert for fence≥60.
+- **Only path forward**: C-7-LT (async 202 + polling). Design proposal ready at `docs/proposals/c7-lt-async-wake.md` (uncommitted per proposal-workflow rule).
+- **Blocks**: T-8b-stress, T-8b-cutover, wrapper removal.
+- **Cluster evidence**: smoke-r10 + smoke-r11 reviews; cross-lens consensus rounds r12-r16.
+
 ### [C-7] (CLOSED at `493d6c1e`) Wake handler future dropped by ntex on client disconnect — C-4 retry budget (120 s) exceeded 60 s client deadline
 - **Source**: T-8b-smoke-r8 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r8.md` § "C-7 ROOT-CAUSE HYPOTHESIS"), corroborating concurrency-r14 R14-I1.
 - **Symptom**: WAKE wedges at IDENTICAL phase `pre_reserve_vm_index` even AFTER C-6's OS-thread fix landed at `91ce9be5`. The C-6 runtime-starvation hypothesis is falsified — the wake-path stalls with the same wire shape and last-phase log it had pre-C-6. The 60 s stress-client deadline elapses with no success/exhausted-budget log from `reserve_vm_index_with_retry`.
@@ -191,6 +200,37 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ---
 
 ## IMPORTANT (round-r3 reviewers — structural decay + T6/T7 regressions)
+
+### [C-7-LT] (DESIGN-READY 2026-05-25 r16) Async wake-response contract: 202 + polling (CRITICAL architectural sprint)
+- **Design**: `docs/proposals/c7-lt-async-wake.md` — 2490 words, 13 sections, READY FOR REVIEW.
+- **Scope**: 400-500 LOC across handlers + state machine + pg migration + worker discipline; ~450 LOC tests; 5-phase migration with feature-flag gate.
+- **Open design questions** (user input requested before implementation):
+  1. Internal caller `wake_sandbox`: sync wrapper for ergonomics, or adopt polling directly? (Proposal default: poll directly, fewer code shapes to maintain.)
+  2. Long-poll `?wait=<seconds>` v1 scope, or pure short-poll only? (Proposal default: pure short-poll v1; long-poll added in v2 if SLO data warrants.)
+  3. `wake_jobs.error_code` structured enum, or opaque message? (Proposal default: structured enum for SLO dashboards.)
+- **Implementation plan**: 3-PR sprint over 2-3 cron cycles. PR1: `detach_isolated` helper + `wake_jobs` migration. PR2: handler + state machine. PR3: tests + smoke-r12 cluster validation.
+- **Closes structurally**: C-4, C-6, C-7, C-8, C-8a, C-8b, C-8c — the entire 7-bug retry-tuning chain.
+
+### [R16-I1] (OPEN, 3-cycle propagated misclassification) Sibling-C-6 sites at sweep.rs:611 + registry.rs:870 STILL misclassified as "safe" (IMPORTANT, concurrency-r16)
+- **Location**: `crates/sandbox/src/sweep.rs:611`, `crates/sandbox/src/registry.rs:870` (per concurrency-r16; cross-check exact line via `grep -n "compio::runtime::spawn.*detach" crates/sandbox/src/`)
+- **Claim in deferred C-6 entry**: both sites have only top-of-loop `compio::time::sleep` with no bursty awaits → declared safe.
+- **Concurrency-r16 challenge**: both `.await` on teardown-class operations inline on the ntex-worker compio runtime — same C-6 wedge fingerprint. Latent at T-8b-stress c=20.
+- **Action**: re-audit both sites against the C-6 mechanism. If wedge-prone, apply the OS-thread fix (mirrors C-3/C-6 pattern) OR extract the R14-A1 `detach_isolated` helper and migrate.
+- **Blocker**: best applied alongside C-7-LT's `detach_isolated` extraction.
+
+### [R16-I2] (OPEN) C-8b 2× factor envelopes OK case but not the LEAK case (IMPORTANT, concurrency-r16)
+- **Location**: `crates/sandbox/src/backend/nomad_ch.rs::wait_for_agent_silent` (lines 3205-3273)
+- **Symptom**: smoke-r10 log line "consecutive_misses=1 at the 30s deadline" — alternating-answer pathology where the agent emits a stray response at the wrong cadence, keeping `consecutive_misses<2` until deadline. Wall-time becomes fence-bound (60s) instead of ~200ms.
+- **C-8b coverage**: only the OK case (rapid 2-miss-in-a-row → ~200ms). The LEAK case remains.
+- **Subsumed by**: C-7-LT (no client deadline pressure in async-response).
+
+### [R16-A1] (DOCUMENTED in C-8c entry) C-8b 2× factor is a numeric coincidence, not a model
+- See C-8c entry above. Architecture-r16 critical finding.
+
+### [R15-S2] (OPEN) Path-injection in wrapper rewriter (IMPORTANT, security-r15)
+- **Location**: `crates/sandbox/scripts/nomad-vm-wrapper.sh:476-498` (Python rewriter)
+- **Symptom**: Non-alloc-prefix absolute paths in `config.json` `disks[].path` pass through verbatim. With AEAD ON (post-A1-FOLLOWUP), the snapshot is authenticated — so a malicious snapshot can't substitute paths cross-tenant unless the AEAD KEK is compromised. But IF AEAD is bypassed (or under R15-S1 fail-OPEN, which is NOW closed), an attacker with bucket-write access could substitute `disks[].path = "/etc/shadow"` etc.
+- **Action**: add an allow-list / prefix-guard in the wrapper's Python rewriter that rejects any `disks[].path` not under the alloc dir.
 
 ### [R3-A1] Backend enum masquerades as trait — 4 methods return Err for 2/3 variants (IMPORTANT, arch-r3)
 - **File**: `crates/sandbox/src/backend/mod.rs:166-497`
@@ -1586,3 +1626,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [C-8 + C-8a] CLOSED at `2afbb2dd` — retry budget cap + 30s fence (NOTE: R15-I2 flags math edge case)
 - [R15-Q1] CLOSED at `7469118e` — admin_handlers byte-slice form (matches R14-Q3)
 - [C-8b] CLOSED at `64af1803` — 2× fence factor in `from_host_fence_timeout` (smoke-r10 measured 60s teardown at fence=30s; budget now 26 attempts / 50s, was 11 / 20s)
+
+---
+
+## Round-16 r1 closures (2026-05-25)
+
+- [R15-S1] CLOSED at `da951dd9` — A1-FOLLOWUP fail-CLOSED assertion at `lib.rs:472`: boot panics when `snapshot_enabled && use_gcs && !kek_present` without test-override. Gap from arch-r9 closed.
+- [R15-I2] CLOSED at `64af1803` — C-8b 2× fence factor raised budget from 20s → 50s at fence=30, subsumes the off-shape headroom concern (budget now envelopes full 2×fence teardown, not just the fence).
+- [#24] CLOSED at `a4c481e1` — B24 `ZSBX_SANDBOX_ID` env injection in controller Nomad task `Env` block; stale paperwork entry deferred-refreshed at `fb428dce`.
+- [A1-FOLLOWUP] CLOSED at `da951dd9` — see R15-S1 above.
+- **Round-16 r1 cycle summary**: 4 reviewer reports landed (arch/code-quality/concurrency r16 + security r15 catchup). A1-FOLLOWUP critical fix landed. #24 paperwork closed. C-8c surfaced from smoke-r11 (sync wake contract structurally out of knobs — see C-8c entry in CRITICAL section). C-7-LT design proposal ready at `docs/proposals/c7-lt-async-wake.md` (uncommitted per proposal-workflow rule).
