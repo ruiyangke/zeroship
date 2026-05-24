@@ -31,7 +31,7 @@
 #   - sandbox-token:      bearer token for /sandboxes/* (≥32 bytes)
 #   - sandbox-admin-token:bearer token for /admin/sandboxes/*
 #   - artifact-bucket:    gs://... bucket name (no `gs://` prefix)
-#   - controller-object:  object name in artifact-bucket (e.g. zeroship-sandbox.snapshot-v20)
+#   - controller-object:  object name in artifact-bucket (e.g. zeroship-sandbox.snapshot-v21)
 #
 # Sentinel for the provisioner: the FINAL echo at the end of the
 # script. Anything earlier means startup is still running.
