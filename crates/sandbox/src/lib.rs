@@ -18,6 +18,7 @@ pub(crate) mod error_envelope;
 pub mod files;
 pub mod handlers;
 pub mod metrics;
+pub mod metrics_export;
 pub mod persist;
 pub mod preview;
 pub mod preview_share;

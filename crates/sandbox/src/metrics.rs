@@ -347,6 +347,29 @@ pub fn takeover_mismatched_value() -> u64 {
     TAKEOVER_MISMATCHED.load(Ordering::Relaxed)
 }
 
+/// Production accessor for the takeover-unreachable counter. Consumed
+/// by the Prometheus exporter (`crate::metrics_export::render`). Was
+/// previously a test-only `#[doc(hidden)]` fn deleted at `370fdbba` as
+/// an orphan; resurrected when R26-API2 wired the exporter that is the
+/// orphan's intended caller.
+pub fn takeover_unreachable_value() -> u64 {
+    TAKEOVER_UNREACHABLE.load(Ordering::Relaxed)
+}
+
+/// Production accessor for the takeover-corrupt counter. Consumed by
+/// the Prometheus exporter (`crate::metrics_export::render`). See
+/// [`takeover_unreachable_value`] for the resurrection rationale.
+pub fn takeover_corrupt_value() -> u64 {
+    TAKEOVER_CORRUPT.load(Ordering::Relaxed)
+}
+
+/// Production accessor for the sandbox-corrupt-id counter. Consumed by
+/// the Prometheus exporter (`crate::metrics_export::render`). See
+/// [`takeover_unreachable_value`] for the resurrection rationale.
+pub fn sandbox_corrupt_id_value() -> u64 {
+    SANDBOX_CORRUPT_ID.load(Ordering::Relaxed)
+}
+
 /// Set `sandbox_ha_heartbeat_lag_seconds` to `secs`. NaN-safe; an
 /// f64 with a negative value triggers the clock-rewind detector
 /// inside the caller (the takeover task) — this setter only stores.
@@ -377,6 +400,29 @@ pub fn lost_leadership_value_for_op(op: &'static str) -> u64 {
     let map = lost_leadership_by_op();
     let Ok(g) = map.lock() else { return 0 };
     g.get(op).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
+}
+
+/// Snapshot of every observed `(op, count)` pair in the
+/// `LOST_LEADERSHIP_BY_OP` breakdown, sorted alphabetically by `op`.
+/// Production accessor — consumed by the Prometheus exporter to emit
+/// one labelled line per observed op
+/// (`sandbox_ha_lost_leadership_total{op="<op>"}`). Ops that were
+/// never incremented are absent (Prometheus convention: emit only
+/// observed series; absent series ≡ 0 at the query layer).
+///
+/// On a poisoned mutex the function returns an empty Vec rather than
+/// panicking — the metrics surface is best-effort observability,
+/// never load-bearing for control flow. The aggregate counter on
+/// `LOST_LEADERSHIP` (read via [`lost_leadership_value`]) is unaffected.
+pub fn lost_leadership_snapshot_by_op() -> Vec<(&'static str, u64)> {
+    let map = lost_leadership_by_op();
+    let Ok(g) = map.lock() else { return Vec::new() };
+    let mut out: Vec<(&'static str, u64)> = g
+        .iter()
+        .map(|(k, v)| (*k, v.load(Ordering::Relaxed)))
+        .collect();
+    out.sort_by_key(|(k, _)| *k);
+    out
 }
 
 /// Test-only accessor for the dead-hosts-observed counter.
