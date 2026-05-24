@@ -343,6 +343,36 @@ const (
 	OFDLockProbeErrorForTest = ofdLockProbeError
 )
 
+// SetStageImageOpForTest swaps the truncate+mkfs.ext4 seam in
+// stage_disks.go so tests can drive the failure paths (mkfs failure,
+// truncate failure) without engineering a real ENOSPC / missing-binary
+// scenario in t.TempDir(). Returns the previous fn so the test can
+// restore it on cleanup.
+//
+// The fn receives the absolute path + size in bytes and must return
+// nil on success or a non-nil error to drive the failure branch.
+// Tests typically replace it with a function that writes a stub file
+// of the requested size (or skips the write to simulate a missing
+// mkfs.ext4) and asserts on the StartTask error shape.
+//
+// Option C Phase 2 (2026-05-25 staging-locality ADR).
+func SetStageImageOpForTest(fn func(path string, sizeBytes int64) error) func(string, int64) error {
+	prev := stageImageOp
+	if fn != nil {
+		stageImageOp = fn
+	}
+	return prev
+}
+
+// StageDiskImagesForTest is the test entry point for the Phase 2
+// driver-side staging op. Pure function semantics modulo the
+// stageImageOp seam; tests use this to assert the per-image error
+// shape (empty path, mkdir failure, mkfs failure) without round-
+// tripping through StartTask.
+func StageDiskImagesForTest(cfg *TaskConfig) error {
+	return stageDiskImages(cfg)
+}
+
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing
 // to spawn a real CH process. Mirrors the minimal shape RecoverTask

@@ -155,6 +155,31 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		return nil, nil, fmt.Errorf("ch: StartTask: mkdir runDir %s: %w", runDir, err)
 	}
 
+	// Option C Phase 2 (2026-05-25 staging-locality ADR): when the
+	// controller signals it has DELEGATED disk-image staging to the
+	// driver, materialize workspace_img + user_home_img here BEFORE
+	// the CH spawn. The driver runs on the same node the alloc lands
+	// on, so the freshly-created sparse files + ext4 metadata write
+	// happen on the worker's local fs — collapsing the cross-alloc
+	// kernel-state retention surface (different alloc's deferred
+	// `struct file` blocking the new alloc's `rootfs.img`
+	// ExclusiveWrite) the layer-peel rounds 1-5 chased.
+	//
+	// On error: do NOT cleanup (controller-side CreateGuard owns
+	// rollback semantics, per the ADR Phase 2 plan) and return the
+	// error without spawning CH. Nomad marks the task failed; the
+	// controller's CreateGuard.drop tears down its DB-row + vm_index
+	// release. The runDir Nomad created stays — Nomad reaps per-alloc
+	// dirs on terminal alloc state.
+	//
+	// Restore branch is short-circuited above (line 117); the flag has
+	// no effect on the restore path in Phase 2 per the ADR.
+	if driverConfig.StageDiskImages {
+		if err := stageDiskImages(&driverConfig); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	apiSocket := filepath.Join(runDir, chAPISocketName)
 	serialLog := filepath.Join(runDir, chSerialLogName)
 	configPath := filepath.Join(runDir, chConfigName)
