@@ -1332,7 +1332,7 @@ impl RealRestoreBackend {
     /// surfacing as a stale-pubkey 401 on /version (cluster smoke
     /// 2026-05-24 r4; 11/16 c=4 cycles failed once slots 1-6 had
     /// been used once).
-    pub fn with_shared_allocator(
+    pub(crate) fn with_shared_allocator(
         mut self,
         allocator: Arc<Mutex<crate::backend::nomad_ch::VmIndexAllocator>>,
     ) -> Self {
@@ -1349,7 +1349,7 @@ impl RealRestoreBackend {
     /// per controller boot exhausted the allocator). Wired by
     /// `crate::AppState::from_config` from
     /// `Backend::nomad_ch_handle()`.
-    pub fn with_nomad_handle(
+    pub(crate) fn with_nomad_handle(
         mut self,
         handle: Arc<crate::backend::nomad_ch::NomadCHBackend>,
     ) -> Self {
