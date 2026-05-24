@@ -4088,6 +4088,14 @@ mod wake_jobs_crud {
     /// and `agent_url` — passing `None` for any of them preserves
     /// the existing column value. Retry/replay paths cannot silently
     /// null out a previously-recorded error record.
+    ///
+    /// Note (R20-C1): terminal rows (`ok`, `failed`) are now immutable
+    /// — `update_wake_job_state` guards against terminal-overwrite via
+    /// `AND state NOT IN ('ok', 'failed')`. This test therefore drives
+    /// the COALESCE contract through non-terminal states (`pending` →
+    /// `restoring` with metadata on successive calls, then seals with
+    /// `ok` or `failed`). The key invariant — None preserves, Some
+    /// overwrites — is identical regardless of which state is used.
     #[compio::test]
     #[ignore = "needs Postgres"]
     async fn wake_jobs_update_preserves_fields_on_none() {
@@ -4105,11 +4113,11 @@ mod wake_jobs_crud {
             "fresh insert must return Inserted"
         );
 
-        // First transition: record full failure metadata (code +
-        // message + leave agent_url as None — it was never set).
+        // First transition: drive to `restoring` and record error_code
+        // + error_message (simulates a transient annotation mid-flight).
         db.update_wake_job_state(
             "wak_preserve",
-            WakeJobState::Failed,
+            WakeJobState::Restoring,
             Some(WakeErrorCode::LivezTimeout),
             Some("agent /livez never returned 200 within 30s"),
             None,
@@ -4123,12 +4131,12 @@ mod wake_jobs_crud {
             Some("agent /livez never returned 200 within 30s")
         );
 
-        // Idempotent re-update with all-None: error_code,
-        // error_message, agent_url MUST be preserved. Pre-fix this
-        // would NULL out the metadata.
+        // Re-update with all-None while still in non-terminal state:
+        // error_code, error_message, agent_url MUST be preserved.
+        // Pre-fix this would NULL out the metadata.
         db.update_wake_job_state(
             "wak_preserve",
-            WakeJobState::Failed,
+            WakeJobState::Restoring,
             None,
             None,
             None,
@@ -4147,12 +4155,11 @@ mod wake_jobs_crud {
             "error_message must be preserved on None re-update"
         );
 
-        // Now set an agent_url, then re-update with None — also
-        // preserved (existing agent_url behavior, restated for
-        // symmetry).
+        // Set an agent_url, then re-update with None — also preserved
+        // (existing agent_url behavior, restated for symmetry).
         db.update_wake_job_state(
             "wak_preserve",
-            WakeJobState::Failed,
+            WakeJobState::LivezPolling,
             None,
             None,
             Some("http://10.0.0.1:7000"),
@@ -4161,7 +4168,7 @@ mod wake_jobs_crud {
         .unwrap();
         db.update_wake_job_state(
             "wak_preserve",
-            WakeJobState::Failed,
+            WakeJobState::LivezPolling,
             None,
             None,
             None,
@@ -4173,10 +4180,10 @@ mod wake_jobs_crud {
 
         // Explicitly providing Some(_) overwrites — the contract is
         // None=preserve, Some=overwrite. Verify by overwriting the
-        // error_code with a different variant.
+        // error_code with a different variant while still non-terminal.
         db.update_wake_job_state(
             "wak_preserve",
-            WakeJobState::Failed,
+            WakeJobState::LivezPolling,
             Some(WakeErrorCode::Internal),
             None,
             None,
@@ -4189,7 +4196,7 @@ mod wake_jobs_crud {
             Some(WakeErrorCode::Internal),
             "Some(_) overwrites the existing value"
         );
-        // error_message still preserved (None) from the previous set.
+        // error_message still preserved from the previous set.
         assert_eq!(
             fourth.error_message.as_deref(),
             Some("agent /livez never returned 200 within 30s")
@@ -4199,6 +4206,11 @@ mod wake_jobs_crud {
     /// R16-S3: agent_url column-level CHECK rejects out-of-shape
     /// values (e.g. file:// schemes, freeform text). 0010 added the
     /// constraint as part of the PR2-followup hardening sprint.
+    ///
+    /// Note (R20-C1): valid-URL checks are driven through non-terminal
+    /// states so the terminal-overwrite guard doesn't swallow the
+    /// write. The invalid-URL checks use direct SQL (no state guard
+    /// in the path) and remain structurally unchanged.
     #[compio::test]
     #[ignore = "needs Postgres"]
     async fn wake_jobs_agent_url_check_constraint_enforced() {
@@ -4216,10 +4228,10 @@ mod wake_jobs_crud {
             "fresh insert must return Inserted"
         );
 
-        // http://...:port → OK
+        // http://...:port → valid (non-terminal state so the write lands).
         db.update_wake_job_state(
             "wak_url_check",
-            WakeJobState::Ok,
+            WakeJobState::Restoring,
             None,
             None,
             Some("http://10.0.0.1:7000"),
@@ -4227,10 +4239,10 @@ mod wake_jobs_crud {
         .await
         .unwrap();
 
-        // https://...                       → OK
+        // https://... → valid.
         db.update_wake_job_state(
             "wak_url_check",
-            WakeJobState::Ok,
+            WakeJobState::LivezPolling,
             None,
             None,
             Some("https://example.com/agent"),
@@ -4900,6 +4912,156 @@ mod wake_jobs_crud {
             after.error_code,
             Some(WakeErrorCode::WakeWorkerAborted),
             "exactly one takeover writer wins"
+        );
+    }
+
+    // ─── R20-C1: terminal-overwrite guard ─────────────────────────
+    //
+    // `update_wake_job_state` now includes `AND state NOT IN
+    // ('ok', 'failed')` in the WHERE predicate. A stale write from a
+    // racing producer that arrives after the row has already reached a
+    // terminal state must silently no-op (rows_affected == 0).
+    //
+    // Two tests:
+    //   1. Transition to `ok`, then attempt `restoring` → row stays ok.
+    //   2. Transition to `failed`, then attempt `restoring` → row stays failed.
+
+    /// R20-C1: once a row is in state `ok`, a subsequent attempt to
+    /// drive it to a non-terminal state (`restoring`) must no-op.
+    /// `rows_affected == 0`; the pg row still reads `state = ok`.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn update_wake_job_state_after_ok_is_noop() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_r20_ok", "sbx_r20_ok", "hst_r20");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+
+        // Drive to terminal ok.
+        let n = db
+            .update_wake_job_state(
+                "wak_r20_ok",
+                WakeJobState::Ok,
+                None,
+                None,
+                Some("http://10.0.0.1:7000"),
+            )
+            .await
+            .expect("transition to ok");
+        assert_eq!(n, 1, "first transition must affect 1 row");
+
+        let before = db.get_wake_job("wak_r20_ok").await.unwrap().unwrap();
+        assert_eq!(before.state, WakeJobState::Ok);
+
+        // Stale write: attempt to overwrite with a non-terminal state.
+        let n_stale = db
+            .update_wake_job_state(
+                "wak_r20_ok",
+                WakeJobState::Restoring,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("stale write must not error");
+        assert_eq!(
+            n_stale, 0,
+            "stale write to terminal-ok row must no-op (rows_affected == 0)"
+        );
+
+        // pg row must still be ok — terminal state not overwritten.
+        let after = db.get_wake_job("wak_r20_ok").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Ok,
+            "state must remain ok after stale write; got {:?}",
+            after.state
+        );
+        // agent_url preserved from the original ok transition.
+        assert_eq!(after.agent_url.as_deref(), Some("http://10.0.0.1:7000"));
+    }
+
+    /// R20-C1: once a row is in state `failed`, a subsequent attempt
+    /// to drive it to a non-terminal state (`restoring`) must no-op.
+    /// `rows_affected == 0`; the pg row still reads `state = failed`
+    /// with the original error_code intact.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn update_wake_job_state_after_failed_is_noop() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_r20_failed", "sbx_r20_failed", "hst_r20");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+
+        // Drive to terminal failed.
+        let n = db
+            .update_wake_job_state(
+                "wak_r20_failed",
+                WakeJobState::Failed,
+                Some(WakeErrorCode::LivezTimeout),
+                Some("simulated livez timeout"),
+                None,
+            )
+            .await
+            .expect("transition to failed");
+        assert_eq!(n, 1, "first transition must affect 1 row");
+
+        let before = db.get_wake_job("wak_r20_failed").await.unwrap().unwrap();
+        assert_eq!(before.state, WakeJobState::Failed);
+
+        // Stale write: racing producer attempts to overwrite with a
+        // non-terminal state (the TOCTOU shape from R20-C1).
+        let n_stale = db
+            .update_wake_job_state(
+                "wak_r20_failed",
+                WakeJobState::Restoring,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("stale write must not error");
+        assert_eq!(
+            n_stale, 0,
+            "stale write to terminal-failed row must no-op (rows_affected == 0)"
+        );
+
+        // pg row must still be failed — terminal state not overwritten.
+        let after = db.get_wake_job("wak_r20_failed").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Failed,
+            "state must remain failed after stale write; got {:?}",
+            after.state
+        );
+        // Original error metadata must be preserved.
+        assert_eq!(
+            after.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "error_code must not be overwritten by stale write"
+        );
+        assert_eq!(
+            after.error_message.as_deref(),
+            Some("simulated livez timeout"),
+            "error_message must not be overwritten by stale write"
         );
     }
 }
