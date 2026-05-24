@@ -111,6 +111,15 @@ static TAKEOVER_CORRUPT: AtomicU64 = AtomicU64::new(0);
 /// and data.
 static SANDBOX_CORRUPT_ID: AtomicU64 = AtomicU64::new(0);
 
+/// `sandbox_wake_sync_uses_total`. Counter — increments each time the
+/// legacy synchronous wake path is taken (either via the
+/// `WakeResponseMode::Sync` default OR an explicit `?sync=1` override).
+/// C-7-LT-PR2 deprecation telemetry: api-surface-r16 spec gate #5 —
+/// Phase 5 of the C-7-LT migration plan ("remove `?sync=1` and the
+/// env flag entirely") gates on a minor with zero observed sync uses.
+/// This counter is the data backing that gate.
+static WAKE_SYNC_DEPRECATED: AtomicU64 = AtomicU64::new(0);
+
 // ────────────────────────────────────────────────────────────────────
 // Gauges
 // ────────────────────────────────────────────────────────────────────
@@ -198,6 +207,20 @@ pub fn inc_takeover_corrupt() {
 /// Bump `sandbox_corrupt_id_total` once. Round-2 fixer / MINOR #1.
 pub fn inc_sandbox_corrupt_id() {
     SANDBOX_CORRUPT_ID.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bump `sandbox_wake_sync_uses_total` once. C-7-LT-PR2 deprecation
+/// telemetry: increments each time the legacy synchronous wake path
+/// is taken. Backs the Phase 5 "zero sync uses for one minor"
+/// migration gate (api-surface-r16 spec gate #5).
+pub fn inc_wake_sync_deprecated() {
+    WAKE_SYNC_DEPRECATED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Test-only accessor for the wake-sync deprecation counter.
+#[doc(hidden)]
+pub fn wake_sync_deprecated_value() -> u64 {
+    WAKE_SYNC_DEPRECATED.load(Ordering::Relaxed)
 }
 
 /// Test-only accessor for the takeover-orphan counter.
@@ -331,5 +354,17 @@ mod tests {
         inc_clock_rewind();
         inc_clock_rewind();
         assert_eq!(clock_rewind_value(), pre + 2);
+    }
+
+    /// C-7-LT-PR2 deprecation telemetry: counter monotonically
+    /// increases on every `inc_wake_sync_deprecated()` call.
+    #[test]
+    fn wake_sync_deprecated_counter_monotonic() {
+        let pre = wake_sync_deprecated_value();
+        inc_wake_sync_deprecated();
+        inc_wake_sync_deprecated();
+        inc_wake_sync_deprecated();
+        let post = wake_sync_deprecated_value();
+        assert!(post >= pre + 3, "got {pre} -> {post}");
     }
 }

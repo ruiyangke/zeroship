@@ -2480,7 +2480,7 @@ fn wait_for_livez_blocking(
 /// caller (`do_restore_inner`) maps this to a `Backend(...)` error so
 /// the wake path rolls back to `Snapshotted` rather than wedging the
 /// row at `Restoring` with a broken VM.
-async fn clock_resync_post_restore(
+pub(crate) async fn clock_resync_post_restore(
     agent_url: &str,
     sandbox_id: Uuid,
     signing_key_bytes: &[u8; 32],

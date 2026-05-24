@@ -1488,6 +1488,9 @@ pub enum WakeErrorCode {
 }
 
 impl WakeErrorCode {
+    /// Internal (pg-column) string form. Stable enum names that map
+    /// 1:1 to the migration's CHECK domain. NOT the wire code — for
+    /// the HTTP poll response field, see [`Self::wire_code`].
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SlotUnavailable => "slot_unavailable",
@@ -1511,6 +1514,45 @@ impl WakeErrorCode {
             "internal" => Self::Internal,
             _ => return None,
         })
+    }
+
+    /// HTTP wire code per api-surface-r16 R16-API1 / spec gate #3:
+    /// reuse the **existing** snake_case error codes already emitted
+    /// by every other landed endpoint, do NOT invent parallel codes.
+    ///
+    /// Map:
+    ///
+    /// | internal variant         | wire code (existing)        |
+    /// |--------------------------|------------------------------|
+    /// | `SlotUnavailable`        | `vm_index_unavailable`       |
+    /// | `SourceTeardownTimeout`  | `source_teardown_timeout`    |
+    /// | `RestoreFailed`          | `restore_backend_failed`     |
+    /// | `LivezTimeout`           | `livez_timeout`              |
+    /// | `ClockResyncFailed`      | `clock_resync_failed`        |
+    /// | `RegisterFailed`         | `register_failed`            |
+    /// | `Internal`               | `internal_error`             |
+    ///
+    /// `SourceTeardownTimeout` has no sibling on the landed wire
+    /// (today's sync path surfaces this as `vm_index_unavailable` 503
+    /// from the retry-exhausted branch), so it carries its own
+    /// snake_case kind — distinct from `vm_index_unavailable` so the
+    /// SLO dashboard can tell the two failure modes apart.
+    /// `SlotUnavailable` matches the existing `admin_handlers.rs:1159`
+    /// 503 path and `RestoreFailed` matches `:1171`'s
+    /// `restore_backend_failed` 500 path. `Internal` matches the
+    /// `:1180` `internal_error` 500 path. `Database` failures inside
+    /// the state machine surface as `Internal` on the wire — the
+    /// existing `database_failed` is reserved for the sync 500 path.
+    pub fn wire_code(self) -> &'static str {
+        match self {
+            Self::SlotUnavailable => "vm_index_unavailable",
+            Self::SourceTeardownTimeout => "source_teardown_timeout",
+            Self::RestoreFailed => "restore_backend_failed",
+            Self::LivezTimeout => "livez_timeout",
+            Self::ClockResyncFailed => "clock_resync_failed",
+            Self::RegisterFailed => "register_failed",
+            Self::Internal => "internal_error",
+        }
     }
 }
 
@@ -3276,6 +3318,43 @@ mod tests {
             assert_eq!(parsed, variant, "round-trip mismatch for {s}");
         }
         assert!(WakeErrorCode::from_str_opt("not_a_code").is_none());
+    }
+
+    /// C-7-LT-PR2 / R16-API1 spec gate #3: every internal
+    /// `WakeErrorCode` variant maps to a snake_case wire code reused
+    /// from the existing landed envelope codes (no parallel codes
+    /// invented). The mapping is locked by `WakeErrorCode::wire_code`;
+    /// this test pins the table so a future variant rename or table
+    /// rewrite is forced through a test break instead of silently
+    /// drifting the wire format.
+    #[test]
+    fn wake_error_code_wire_code_uses_existing_envelope_codes() {
+        // All wire codes are snake_case (no spaces, no dashes, no
+        // camelCase) — the §10.0 convention every landed endpoint
+        // already emits.
+        let cases = [
+            (WakeErrorCode::SlotUnavailable, "vm_index_unavailable"),
+            (WakeErrorCode::SourceTeardownTimeout, "source_teardown_timeout"),
+            (WakeErrorCode::RestoreFailed, "restore_backend_failed"),
+            (WakeErrorCode::LivezTimeout, "livez_timeout"),
+            (WakeErrorCode::ClockResyncFailed, "clock_resync_failed"),
+            (WakeErrorCode::RegisterFailed, "register_failed"),
+            (WakeErrorCode::Internal, "internal_error"),
+        ];
+        for (variant, wire) in cases {
+            assert_eq!(
+                variant.wire_code(),
+                wire,
+                "wire code drifted for {:?}",
+                variant
+            );
+            for byte in wire.bytes() {
+                assert!(
+                    byte == b'_' || byte.is_ascii_lowercase() || byte.is_ascii_digit(),
+                    "wire code `{wire}` for {variant:?} must be snake_case"
+                );
+            }
+        }
     }
 
     // ─── DSN scheme validation ───────────────────────────────────

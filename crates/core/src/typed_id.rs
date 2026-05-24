@@ -152,6 +152,11 @@ pub fn from_uuid_string(prefix: &str, uuid_str: &str) -> Result<String, String> 
 pub const USER_PREFIX: &str = "usr";
 pub const APP_PREFIX: &str = "app";
 pub const SESSION_PREFIX: &str = "ses";
+/// C-7-LT-PR2: wake-job typed-id prefix. Three chars to match the
+/// global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every other entity uses
+/// (api-surface-r16 R16-API2). The pg `wake_jobs.wake_id` column
+/// stores the full typed-id string (`wak_<base62>`).
+pub const WAKE_PREFIX: &str = "wak";
 
 /// Generate a new user ID: `usr_{base62(uuidv7)}`
 pub fn new_user_id() -> String {
@@ -166,6 +171,13 @@ pub fn new_app_id() -> String {
 /// Generate a new session ID: `ses_{base62(uuidv7)}`
 pub fn new_session_id() -> String {
     generate(SESSION_PREFIX)
+}
+
+/// Generate a new wake-job ID: `wak_{base62(uuidv7)}`. Used by the
+/// C-7-LT async wake state machine to mint the polling handle handed
+/// back to the client on `POST /admin/sandboxes/{id}/wake`.
+pub fn new_wake_id() -> String {
+    generate(WAKE_PREFIX)
 }
 
 #[cfg(test)]
@@ -214,9 +226,25 @@ mod tests {
         let u = new_user_id();
         let a = new_app_id();
         let s = new_session_id();
+        let w = new_wake_id();
         assert!(u.starts_with("usr_"));
         assert!(a.starts_with("app_"));
         assert!(s.starts_with("ses_"));
+        assert!(w.starts_with("wak_"));
+    }
+
+    /// C-7-LT-PR2 / R16-API2: every typed-id prefix in this crate is
+    /// 3 chars. `wak_` (not `wake_`) keeps the global
+    /// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape dashboards/log filters key
+    /// on. Re-asserted as an invariant test so a future "looks like
+    /// 4 chars would be clearer" suggestion fails CI.
+    #[test]
+    fn wake_prefix_is_three_chars() {
+        assert_eq!(WAKE_PREFIX.len(), 3, "wake prefix must be 3 chars (R16-API2)");
+        let w = new_wake_id();
+        assert_eq!(w.len(), 26, "wak_ + 22 base62 = 26 chars");
+        let (prefix, _) = parse(&w).expect("new_wake_id must roundtrip");
+        assert_eq!(prefix, "wak");
     }
 
     #[test]

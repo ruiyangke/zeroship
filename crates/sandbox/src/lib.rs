@@ -31,6 +31,7 @@ pub mod snapshot_handler;
 pub mod snapshot_store;
 pub mod snapshot_store_gcs;
 pub mod sweep;
+pub mod wake_machine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
