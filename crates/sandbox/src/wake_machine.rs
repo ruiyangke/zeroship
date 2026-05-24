@@ -912,6 +912,39 @@ fn match_rfc1918_at(s: &[u8], i: usize) -> usize {
     j - i
 }
 
+/// Byte length of the UTF-8 codepoint that begins at `bytes[i]`.
+/// `bytes` must be the `as_bytes()` view of a valid `&str` and `i`
+/// must point at a leading byte (the strip functions only call this
+/// on the fallthrough branch where `i` was advanced by either a
+/// matched ASCII prefix length or by the previous codepoint width,
+/// so this precondition holds).
+///
+/// Used by the strip passes to advance the non-match branch by a
+/// whole codepoint rather than one byte — replacing the pre-r27-M2
+/// `out.push(bytes[i] as char)` Latin-1 cast that corrupted any byte
+/// > 0x7F. Nomad bodies are UTF-8 JSON, so the latent bug never
+/// triggered, but multi-byte glyphs in driver-quoted text (currency
+/// symbols, non-Latin scripts) would round-trip as Latin-1 codepoints
+/// instead of the intended character.
+#[inline]
+fn utf8_char_len_at(bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    if b < 0x80 {
+        1
+    } else if b < 0xC0 {
+        // Continuation byte — should not happen given the
+        // precondition; fall back to 1 so we still advance and the
+        // outer loop terminates.
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 /// Strip agent-shape URLs (`http(s)://<rfc1918>:<port>/<path>`).
 /// Path consumes anything up to whitespace or quote terminator.
 fn strip_agent_urls(msg: &str) -> String {
@@ -929,14 +962,20 @@ fn strip_agent_urls(msg: &str) -> String {
             0
         };
         if scheme_len == 0 {
-            out.push(bytes[i] as char);
-            i += 1;
+            let c_len = utf8_char_len_at(bytes, i);
+            out.push_str(&msg[i..i + c_len]);
+            i += c_len;
             continue;
         }
         let ip_len = match_rfc1918_at(bytes, i + scheme_len);
         if ip_len == 0 {
-            out.push(bytes[i] as char);
-            i += 1;
+            // Scheme matched but no IP — the scheme prefix itself
+            // is pure ASCII ("http://" / "https://"), so advancing
+            // by one byte is correct here. Use the helper anyway
+            // for symmetry / future-proofing if the matcher grows.
+            let c_len = utf8_char_len_at(bytes, i);
+            out.push_str(&msg[i..i + c_len]);
+            i += c_len;
             continue;
         }
         // Consume the optional path: any non-whitespace / non-quote
@@ -979,8 +1018,9 @@ fn strip_rfc1918(msg: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let c_len = utf8_char_len_at(bytes, i);
+        out.push_str(&msg[i..i + c_len]);
+        i += c_len;
     }
     out
 }
@@ -1036,8 +1076,9 @@ fn strip_ipv6_link_local(msg: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let c_len = utf8_char_len_at(bytes, i);
+        out.push_str(&msg[i..i + c_len]);
+        i += c_len;
     }
     out
 }
@@ -1109,8 +1150,9 @@ fn strip_filesystem_paths(msg: &str) -> String {
             }
         }
         if matched_root_len == 0 {
-            out.push(bytes[i] as char);
-            i += 1;
+            let c_len = utf8_char_len_at(bytes, i);
+            out.push_str(&msg[i..i + c_len]);
+            i += c_len;
             continue;
         }
         // Consume the path body: any non-whitespace / non-quote /
@@ -1218,8 +1260,9 @@ fn strip_typed_ids(msg: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let c_len = utf8_char_len_at(bytes, i);
+        out.push_str(&msg[i..i + c_len]);
+        i += c_len;
     }
     out
 }
@@ -1675,6 +1718,102 @@ mod tests {
             s,
             "<redacted-typed-id>: <redacted-path> on [redacted] missing"
         );
+    }
+
+    // ─── r27-M2: UTF-8 preservation in strip-pass fallthrough ────
+    //
+    // Pre-r27-M2 each strip pass advanced the non-match branch via
+    // `out.push(bytes[i] as char); i += 1`, which for any byte
+    // `> 0x7F` casts as the matching Latin-1 codepoint instead of
+    // the actual UTF-8 character. Nomad bodies are JSON (UTF-8
+    // passthrough) and driver msgs observed today are 100% ASCII so
+    // the bug never triggers in production, but r27-M2 (Aug 2026)
+    // closed the same hole on the truncation tail and the strip
+    // passes need symmetric treatment. The `€` glyph (`E2 82 AC`,
+    // 3 bytes all > 0x7F) is the canonical test — Latin-1 cast on
+    // each of its bytes would produce three distinct 1-byte
+    // codepoints (`â‚¬`) instead of the single `€`.
+
+    /// Site 1 (`strip_filesystem_paths` fallthrough) — non-match
+    /// trailing prose containing `€` must round-trip verbatim.
+    #[test]
+    fn sanitize_strips_path_preserves_unicode_suffix() {
+        let s = sanitize_error_message(
+            "open /var/zeroship/x.img failed for €",
+        );
+        assert_eq!(s, "open <redacted-path> failed for €");
+    }
+
+    /// Site 2 (`strip_typed_ids` fallthrough) — non-match suffix
+    /// after a redacted typed-ID must preserve `€`.
+    #[test]
+    fn sanitize_strips_typed_id_preserves_unicode_suffix() {
+        let s = sanitize_error_message(
+            "sbx_AbCdEfGhIjKlMnOpQrStUv €",
+        );
+        assert_eq!(s, "<redacted-typed-id> €");
+    }
+
+    /// Site 2 (hyphenated-UUID branch in `strip_typed_ids`) — non-
+    /// match suffix after a redacted UUID must preserve `€`.
+    #[test]
+    fn sanitize_strips_uuid_preserves_unicode() {
+        let s = sanitize_error_message(
+            "alloc 550e8400-e29b-41d4-a716-446655440000 €",
+        );
+        assert_eq!(s, "alloc <redacted-typed-id> €");
+    }
+
+    /// Site 3 (`strip_rfc1918` fallthrough) — non-match suffix
+    /// after a redacted 10.x.x.x address must preserve `€`.
+    #[test]
+    fn sanitize_strips_rfc1918_preserves_unicode() {
+        let s = sanitize_error_message("peer 10.0.0.7 €");
+        assert_eq!(s, "peer [redacted] €");
+    }
+
+    /// Site 4 (`strip_ipv6_link_local` fallthrough) — non-match
+    /// suffix after a redacted `fe80::` address must preserve `€`.
+    #[test]
+    fn sanitize_strips_ipv6_ll_preserves_unicode() {
+        let s = sanitize_error_message("via fe80::1 €");
+        assert_eq!(s, "via [redacted] €");
+    }
+
+    /// Sites 5+6 (`strip_agent_urls` two fallthrough branches +
+    /// every pass) — full sanitize composition must be idempotent
+    /// on a message containing `€`. Pre-r27-M2 the first pass
+    /// would corrupt `€` bytes into Latin-1 codepoints, and a
+    /// second pass over the corrupted output would either match
+    /// nothing or match unstably depending on the surrounding
+    /// pattern — either way `once != twice`. Post-fix every byte
+    /// of `€` is preserved verbatim across all strip passes and
+    /// the truncation tail, so the result is byte-identical on
+    /// re-sanitize.
+    #[test]
+    fn sanitize_idempotent_with_unicode() {
+        let inputs = [
+            "open /var/zeroship/x.img failed for €",
+            "peer 10.0.0.7:7000 € reset",
+            "via fe80::1 €",
+            "sbx_AbCdEfGhIjKlMnOpQrStUv €",
+            "alloc 550e8400-e29b-41d4-a716-446655440000 €",
+            "url http://10.0.0.7:7000/livez €",
+            "plain €/yen ¥/pound £ — multi-byte glyphs",
+        ];
+        for inp in inputs {
+            let once = sanitize_error_message(inp);
+            let twice = sanitize_error_message(&once);
+            assert_eq!(
+                once, twice,
+                "sanitize must be idempotent on unicode (input: {inp})"
+            );
+            // The `€` byte sequence `E2 82 AC` must survive.
+            assert!(
+                once.contains('€'),
+                "€ must round-trip through sanitize (input: {inp})"
+            );
+        }
     }
 
     /// Idempotency: re-sanitizing already-redacted output must be a
