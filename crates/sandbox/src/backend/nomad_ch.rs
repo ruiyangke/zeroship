@@ -3063,21 +3063,70 @@ fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
 /// emit a one-shot warning and fall back to /livez-only behaviour.
 /// Removing this fallback once the agent fleet is fully upgraded is
 /// a one-line change.
+///
+/// ## R19-I1: two-phase probe (compio-native connect gate, then ureq)
+///
+/// Previous implementation: a single `compio::runtime::spawn_blocking(||
+/// ureq::get(livez).timeout(500ms).call())` per loop iteration. That
+/// carried the *same* wedge shape C-7-LT-2-PR1 just fixed on the
+/// teardown side: ureq's `.timeout()` is a request-deadline timeout,
+/// not a connect timeout. A half-collapsed TAP route at create time
+/// (stale-tenant CH still alive, new TAP not fully wired) hangs SYN
+/// for the kernel's retransmit ceiling (~30 s on Linux defaults). Each
+/// stuck probe burns the entire intended cadence; `agent_livez_timeout`
+/// then collapses to "one probe" instead of the designed poll loop.
+///
+/// Today: a per-iteration `probe_agent_reachable_tcp(addr, 150ms)`
+/// gate (Phase 1) decides whether to issue the ureq /livez call
+/// (Phase 2). Phase 1's outer `compio::time::timeout` caps a stuck
+/// SYN at 150 ms exactly — independent of kernel SYN-retransmit. Only
+/// once the TCP layer ACKs do we spend a spawn_blocking + ureq on the
+/// /livez HTTP check; a stuck ureq there now means the agent's TCP
+/// listener is up but its HTTP server is wedged, a much rarer failure
+/// shape and one that's still bounded by `agent_livez_timeout_secs` +
+/// `CreateGuard::drop` tear-down via the fixed teardown probe.
+///
+/// Closes the second of two ureq-probe wedge sites flagged by r19-A5
+/// / R19-I1 (`docs/reviews/sandbox-snapshot-restore-concurrency-2026-05-25-r19.md`).
 async fn wait_for_agent_livez(
     base_url: &str,
     expected_fp: &str,
     signing_key: &Arc<SigningKey>,
     timeout: Duration,
 ) -> Result<(), String> {
+    const CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
     let deadline = Instant::now() + timeout;
     let livez_url = format!("{base_url}/livez");
+    // Parse host:port from the base_url ONCE — every Phase 1 probe in
+    // the loop reuses the SocketAddr. If we can't parse it the gate
+    // can't proceed; surface that immediately rather than burning
+    // budget on doomed probes (mirrors `wait_for_agent_silent`).
+    let probe_addr = match parse_agent_probe_addr(base_url) {
+        Ok(a) => a,
+        Err(e) => {
+            return Err(format!(
+                "agent at {base_url} unparseable; refusing to probe \
+                 (parse error: {e}; expected fp={expected_fp})"
+            ));
+        }
+    };
     let mut last_fp: Option<String> = None;
     let mut last_version_status: Option<u16> = None;
     while Instant::now() < deadline {
-        // 1. Cheap unsigned /livez probe — gates the more expensive
-        //    signed /version call. An agent that's not yet listening
-        //    won't even answer /livez, so we save a sign+RPC round
-        //    on every poll where the agent simply hasn't booted yet.
+        // Phase 1 (R19-I1): compio-native TCP-connect gate. Caps a
+        // stuck SYN at CONNECT_TIMEOUT (no kernel SYN-retransmit
+        // wedge). An agent that's not yet listening turns into a
+        // fast miss; we sleep the cadence and retry.
+        if !probe_agent_reachable_tcp(probe_addr, CONNECT_TIMEOUT).await {
+            // 150 ms livez poll cadence — matches the post-gate path.
+            compio::time::sleep(Duration::from_millis(150)).await;
+            continue;
+        }
+        // Phase 2: cheap unsigned /livez HTTP probe — gates the more
+        //    expensive signed /version call. TCP layer just verified
+        //    above, so a stuck ureq here is "HTTP server wedged after
+        //    socket up" — rarer than the SYN-retransmit wedge, and
+        //    still bounded by the outer deadline.
         let probe_url = livez_url.clone();
         let livez_status = compio::runtime::spawn_blocking(move || {
             ureq::get(&probe_url)
@@ -4907,6 +4956,318 @@ mod tests {
         assert!(
             err.contains(&our_fp),
             "timeout error must include expected fp for triage; got {err:?}"
+        );
+    }
+
+    // ─── R19-I1: two-phase probe (TCP-connect gate, then ureq /livez) ─
+    //
+    // wait_for_agent_livez's R19-I1 fix mirrors the C-7-LT-2-PR1
+    // pattern: a compio-native TCP-connect probe gates the ureq HTTP
+    // call so a half-collapsed TAP route doesn't burn the entire
+    // agent_livez_timeout budget on one stuck SYN. These tests pin:
+    //   1. happy path: socket up + /livez=200 + /version=200 with
+    //      matching fp → Ok (Phase 1 + Phase 2 + signed /version
+    //      compose correctly).
+    //   2. unroutable address (TEST-NET-1): Phase 1 times out
+    //      cleanly at the connect-timeout ceiling, never spending a
+    //      spawn_blocking+ureq on a doomed HTTP call; total wall-time
+    //      stays well under the kernel's SYN-retransmit ceiling.
+    //   3. socket accepts late: listener binds mid-deadline; first
+    //      few Phase 1 probes miss, subsequent ones succeed → Ok
+    //      within budget.
+    //   4. HTTP-layer wedge: socket accepts but /livez returns 500 →
+    //      Phase 2 rejects the probe; loop polls until deadline with
+    //      "never returned 200" error.
+
+    /// Variant of `spawn_mock_agent` that lets the caller control the
+    /// /livez response status (the original always answers 200). Used
+    /// by the R19-I1 "HTTP-layer wedge" test where the TCP layer is
+    /// up but the HTTP /livez handler refuses.
+    fn spawn_mock_agent_with_livez_status(
+        livez_status: u16,
+        version_body: String,
+        version_status: u16,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        let mut buf = [0u8; 1024];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("");
+                        let resp = if path == "/livez" {
+                            let status_text = match livez_status {
+                                200 => "200 OK",
+                                500 => "500 Internal Server Error",
+                                503 => "503 Service Unavailable",
+                                _ => "500 Internal Server Error",
+                            };
+                            format!(
+                                "HTTP/1.1 {}\r\nContent-Length: 16\r\n\r\n{}",
+                                status_text,
+                                "{\"status\":\"x\"}"
+                            )
+                        } else if path == "/version" {
+                            let status_text = match version_status {
+                                200 => "200 OK",
+                                401 => "401 Unauthorized",
+                                _ => "500 Internal Server Error",
+                            };
+                            format!(
+                                "HTTP/1.1 {}\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\n\r\n{}",
+                                status_text,
+                                version_body.len(),
+                                version_body,
+                            )
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, stop)
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_happy_socket_then_livez_ok() {
+        // R19-I1 happy path under the two-phase probe: TCP listener
+        // accepts (Phase 1 reachable), /livez returns 200 (Phase 2
+        // gate passes), /version returns 200 with matching fp →
+        // function returns Ok well inside the budget.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{our_fp}"}}"#
+        );
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let started = Instant::now();
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_secs(2),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(res.is_ok(), "expected Ok on happy path, got {res:?}");
+        // Loopback connect + ureq /livez + signed /version on a
+        // healthy mock should clear in well under 500 ms. If this
+        // ever takes seconds, Phase 1 is wedging — exactly what
+        // R19-I1 closes.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "R19-I1 regression: happy path took {elapsed:?}; \
+             two-phase probe should resolve in tens of ms on loopback"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_socket_never_accepts_returns_timeout_clean() {
+        // R19-I1 wedge-fix invariant: an unroutable address (RFC 5737
+        // TEST-NET-1, no host) MUST surface a clean timeout bounded
+        // by our compio-side 150 ms connect-timeout * (poll cadence),
+        // NOT by the kernel's 30-90 s SYN-retransmit ceiling.
+        //
+        // The pre-R19-I1 code spent ureq.timeout(500ms) on a request-
+        // deadline, not connect-deadline, and so could burn 30 s on a
+        // single probe. With Phase 1 in place, every iteration costs
+        // at most CONNECT_TIMEOUT + cadence; the 700 ms budget below
+        // exits cleanly with the "never returned 200" message.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let started = Instant::now();
+        let res = wait_for_agent_livez(
+            "http://192.0.2.1:7777",
+            &our_fp,
+            &sk,
+            Duration::from_millis(700),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let err = res.expect_err("must time out cleanly");
+        // The error path for "/livez never 200" surfaces this string.
+        assert!(
+            err.contains("never returned 200"),
+            "expected /livez-unreachable timeout text; got {err:?}"
+        );
+        // The load-bearing R19-I1 assertion: the deadline holds. A
+        // regression that drops Phase 1 and reverts to ureq.timeout()
+        // would burn 30+ s here. 3 s is a generous CI cap above the
+        // 700 ms budget (allowing one ~150 ms in-flight probe at
+        // deadline + spawn_blocking scheduling jitter).
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "R19-I1 regression: unroutable connect ran {elapsed:?} on \
+             a 700 ms budget — Phase 1 connect-gate is not capping the \
+             stuck SYN. Did the ureq probe come back without the TCP \
+             pre-gate?"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_socket_accepts_late_succeeds_within_budget() {
+        // R19-I1: agent comes up partway through the budget. The
+        // helper thread holds the port closed for ~250 ms, then
+        // binds + serves /livez+/version. Initial Phase 1 probes
+        // miss (kernel returns ECONNREFUSED on an unbound port,
+        // fast); once the listener is up, Phase 1 returns reachable,
+        // Phase 2 hits /livez=200, signed /version returns matching
+        // fp → Ok before the deadline. Exercises the poll-cadence
+        // loop end-to-end across an empty→up transition.
+        //
+        // Port-reservation dance: bind a listener to grab a free
+        // port, drop it, then re-bind in the helper thread after a
+        // delay. The drop-then-rebind window relies on SO_REUSEADDR
+        // semantics; if the kernel hands out the same port to a
+        // different process during the gap, the helper's bind retry
+        // loop falls through to its panic — which fails the test
+        // with a clear message rather than silently mis-asserting.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{our_fp}"}}"#
+        );
+        let probe_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let probe_port = probe_listener.local_addr().unwrap().port();
+        drop(probe_listener);
+        let body_for_thread = body.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+            use std::sync::atomic::Ordering;
+            // Retry-bind: tolerate a brief TIME_WAIT race on the
+            // dropped listener. Up to 20×25ms = 500ms — well inside
+            // the test's 2s outer budget.
+            let listener = {
+                let mut attempts = 0;
+                loop {
+                    match TcpListener::bind(format!("127.0.0.1:{probe_port}")) {
+                        Ok(l) => break l,
+                        Err(_) if attempts < 20 => {
+                            attempts += 1;
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(e) => panic!("R19-I1 late-bind fixture failed: {e}"),
+                    }
+                }
+            };
+            listener.set_nonblocking(true).ok();
+            while !stop_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        let mut buf = [0u8; 1024];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("");
+                        let resp = if path == "/livez" {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"status\":\"ok\"}"
+                                .to_string()
+                        } else if path == "/version" {
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\n\r\n{}",
+                                body_for_thread.len(),
+                                body_for_thread,
+                            )
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let url = format!("http://127.0.0.1:{probe_port}");
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_millis(2000),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            res.is_ok(),
+            "R19-I1: late-bind agent must clear inside 2000 ms \
+             budget once the socket comes up; got {res:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_socket_accepts_but_livez_500() {
+        // R19-I1 Phase 2 contract: TCP-layer up but /livez returns
+        // 500 → loop polls until deadline because Phase 2 never
+        // observes status==200. Surfaces "never returned 200" error.
+        // This is the "HTTP server wedged after socket up" failure
+        // shape; it's the rarer post-fix wedge surface noted in the
+        // R19-I1 doc.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{our_fp}"}}"#
+        );
+        let (port, stop) =
+            spawn_mock_agent_with_livez_status(500, body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_millis(600),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("must time out with /livez 500");
+        assert!(
+            err.contains("never returned 200"),
+            "expected /livez-not-200 timeout text; got {err:?}"
         );
     }
 
