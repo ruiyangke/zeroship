@@ -1075,14 +1075,19 @@ pub(crate) fn load_admin_token(
 /// Periodic backend probe. `probe()` updates the `healthy` flag
 /// that `/readyz` exposes; without this loop the flag is set once
 /// at boot and stays stale forever (e.g. true after kubectl auth
-/// has expired). Re-probes every 30s on a detached compio task.
+/// has expired). Re-probes every 30s on a dedicated OS thread with
+/// its own compio runtime (R16-I1: same C-6 wedge fingerprint as
+/// admin_handlers::teardown_source_for_snapshot — `backend.probe()`
+/// can issue a multi-second blocking HTTP call against an unhealthy
+/// agent; on the shared ntex worker runtime it would starve sibling
+/// per-request tasks).
 ///
 /// We don't wrap async calls in `catch_unwind` — `probe` is
 /// designed to return `Result`, not panic. If it does panic the
 /// task dies and re-probes stop; that's a real bug worth crashing
 /// loudly rather than papering over.
 fn start_health_loop(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    crate::detach::detach_isolated("snap-health-loop", move || async move {
         loop {
             // Round-1 fixer / IMPORTANT #8: top-of-loop shutdown
             // check. The previous iteration's sleep will have
@@ -1100,8 +1105,7 @@ fn start_health_loop(state: Arc<AppState>) {
                 tracing::warn!(error = %e, "sandbox health re-probe failed");
             }
         }
-    })
-    .detach();
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1165,7 +1169,12 @@ fn read_u64_env(name: &str, default: u64) -> u64 {
 /// hangs longer than `lease_ttl`, peers will fairly mark this host
 /// dead — which is the lease semantics by design.
 pub fn spawn_heartbeat_task(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    // R16-I1: dedicated OS thread + private compio runtime. The pg
+    // `heartbeat()` call is a single SQL UPDATE; the wedge risk here
+    // is lower than for the takeover task (which runs probes), but
+    // uniformity + decoupling from the ntex worker runtime means a
+    // pg-side stall cannot back-pressure HTTP wake handlers.
+    crate::detach::detach_isolated("snap-heartbeat", move || async move {
         let secs = read_u64_env("SANDBOX_HA_HEARTBEAT_SECS", DEFAULT_HEARTBEAT_SECS).max(1);
         let interval = Duration::from_secs(secs);
         let Some(db) = state.database.clone() else {
@@ -1200,8 +1209,7 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
                 }
             }
         }
-    })
-    .detach();
+    });
 }
 
 /// Round-1 fixer / CRITICAL #4: post-takeover registry rehydrate.
@@ -1376,7 +1384,14 @@ async fn rehydrate_after_takeover(
 /// the next deliverable to flesh out (out-of-scope for this commit
 /// to keep the takeover write atomic and tested).
 pub fn spawn_takeover_task(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    // R16-I1: dedicated OS thread + private compio runtime. This loop
+    // is the most wedge-prone of the periodic tasks — `rehydrate_after_takeover`
+    // issues per-sandbox signed `/version` probes via the backend, each of
+    // which can sit on a multi-second `ureq` timeout against a half-dead
+    // worker. On the shared ntex worker runtime that would starve every
+    // sibling wake/heartbeat task for the duration of the probe (the
+    // same C-6 fingerprint as admin_handlers::teardown_source_for_snapshot).
+    crate::detach::detach_isolated("snap-takeover", move || async move {
         let poll_secs = read_u64_env(
             "SANDBOX_HA_TAKEOVER_POLL_SECS",
             DEFAULT_TAKEOVER_POLL_SECS,
@@ -1514,8 +1529,7 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
                 }
             }
         }
-    })
-    .detach();
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────

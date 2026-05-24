@@ -826,7 +826,14 @@ mod tests {
 }
 
 pub fn start_idle_gc(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    // R16-I1 (R14-I2 sibling-C-6): dedicated OS thread + private compio
+    // runtime. The inner `state.backend.stop(id).await` issues a Nomad
+    // teardown (multi-second `/shutdown` await against a possibly
+    // half-dead agent — the same C-6 fingerprint as the snapshot teardown
+    // already migrated in admin_handlers). On the shared ntex worker
+    // runtime that starves sibling wake handlers; isolating the loop
+    // gives it its own runtime and removes the cross-task contention.
+    crate::detach::detach_isolated("snap-idle-gc", move || async move {
         let interval = Duration::from_secs(60);
         let idle = Duration::from_secs(state.config.idle_timeout_secs);
         let max_life = Duration::from_secs(state.config.max_lifetime_secs);
@@ -866,6 +873,5 @@ pub fn start_idle_gc(state: Arc<AppState>) {
                 }));
             }
         }
-    })
-    .detach();
+    });
 }

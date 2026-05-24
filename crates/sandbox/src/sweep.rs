@@ -216,15 +216,21 @@ pub async fn run_transient_takeover_once(
     (seen, recovered)
 }
 
-/// Spawn the transient-state takeover loop on the compio runtime.
-/// Detached; lives for the process lifetime, observes
+/// Spawn the transient-state takeover loop on a dedicated OS thread with
+/// its own compio runtime. Lives for the process lifetime, observes
 /// `state.shutdown_requested()` between iterations.
+///
+/// R16-I1: same C-6 wedge fingerprint as the other periodic tasks — the
+/// CAS-takeover path inside `run_transient_takeover_once` issues pg
+/// UPDATEs that can stall under contention, and on the shared ntex worker
+/// runtime that would starve sibling wake/probe tasks. Running on its
+/// own private compio runtime decouples this loop from the worker.
 pub fn spawn_transient_state_takeover(state: Arc<AppState>) {
     if state.database.is_none() {
         // pg disabled — nothing to sweep.
         return;
     }
-    compio::runtime::spawn(async move {
+    crate::detach::detach_isolated("snap-transient", move || async move {
         let interval = Duration::from_secs(TRANSIENT_TAKEOVER_POLL_SECS);
         let threshold = read_i64_env(
             "SANDBOX_TRANSIENT_STATE_TIMEOUT_SECS",
@@ -249,8 +255,7 @@ pub fn spawn_transient_state_takeover(state: Arc<AppState>) {
                 tracing::debug!(seen, recovered, "sandbox transient-takeover: tick");
             }
         }
-    })
-    .detach();
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -560,7 +565,14 @@ pub fn spawn_idle_eviction_sweep(
     if state.database.is_none() {
         return;
     }
-    compio::runtime::spawn(async move {
+    // R16-I1 (R14-C1 sibling-C-6): dedicated OS thread + private compio
+    // runtime. The idle-eviction sweep's per-iteration work issues
+    // `ChRemoteClient` snapshot calls + backend teardowns; each can stall
+    // for tens of seconds against an unhealthy agent. On the shared ntex
+    // worker runtime that starves sibling wake handlers (the exact C-6
+    // fingerprint admin_handlers::teardown_source_for_snapshot already
+    // closed at its own site).
+    crate::detach::detach_isolated("snap-idle-evict", move || async move {
         let sweep_secs = read_u64_env(
             "SANDBOX_IDLE_SNAPSHOT_SWEEP_SECS",
             DEFAULT_IDLE_SWEEP_SECS,
@@ -607,8 +619,7 @@ pub fn spawn_idle_eviction_sweep(
                 );
             }
         }
-    })
-    .detach();
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────
