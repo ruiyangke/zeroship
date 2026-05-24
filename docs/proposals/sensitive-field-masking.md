@@ -336,7 +336,7 @@ The wrap step is trivial (just attaches metadata); no key access, no decryption.
 ```
 JS:    await user.ssn.unmask({ reason: "admin view" })
         │
-        ▼  RPC: zeroship.db.unmaskField {
+        ▼  Native op: env.db.unmaskField {
         │        collection: "users",
         │        row_pk: "usr_xyz",
         │        column: "ssn",
@@ -651,7 +651,7 @@ All 6 must-have capabilities (sibling-column emission, alias SELECT, backfill, r
 
 ### PR 4 — Unmask RPC + authorization + audit (`__zeroship_audit_unmask`)
 
-- New native op `zeroship.db.unmaskField { collection, row_pk, column, actor, reason }`.
+- New native op `env.db.unmaskField { collection, row_pk, column, actor, reason }`.
 - New `crud::dispatch_unmask`:
   1. Authorization check against policy.
   2. SELECT ciphertext column for the target row.

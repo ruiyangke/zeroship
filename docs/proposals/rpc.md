@@ -15,7 +15,7 @@ zeroship apps need a server-function story that:
 3. Validates args at the gateway boundary; the worker handler never sees malformed input.
 4. Treats auth, rate-limit, idempotency, caching, metering as **declarative metadata** the gateway enforces before the worker runs.
 5. Streams without an SDK fork — modern AI SDK 5 UI message streams, NDJSON, and raw `ReadableStream` all sit on the same content-negotiated transport.
-6. Composes cleanly with the **primitives the platform already has** — native `AsyncLocalStorage`, native `Request`/`Response`/`FormData`/`Blob`/`File`, native `AbortSignal`, `#[v8_class]`/`#[v8_method(fastcall)]`, HMAC-signed `ZeroShip-User`, the `zeroship.{db,kv,storage,meter}` plugin surface.
+6. Composes cleanly with the **primitives the platform already has** — native `AsyncLocalStorage`, native `Request`/`Response`/`FormData`/`Blob`/`File`, native `AbortSignal`, `#[v8_class]`/`#[v8_method(fastcall)]`, HMAC-signed `ZeroShip-User`, the `env.{db,kv,storage,meter}` plugin surface.
 
 This proposal is the second iteration. The round-01 critique identified the v1 sketch's six structural mistakes:
 
@@ -250,7 +250,7 @@ The TS surface narrows `ctx.user`'s type based on the wrapper's `auth` policy:
 
 | Field | Type | Populated from | Notes |
 | --- | --- | --- | --- |
-| `ctx.user` | `User \| null` | Gateway-injected `ZeroShip-User` HMAC-signed header → exposed via `zeroship.auth.getUser()` (the existing kernel primitive); `ctx.user` is the const-time accessor. | `null` for `auth: "anon"`; throws `UNAUTHENTICATED` if read by an `auth: "user"`/`"admin"` procedure that didn't authenticate (defense-in-depth). |
+| `ctx.user` | `User \| null` | Gateway-injected `ZeroShip-User` HMAC-signed header → exposed via `env.auth.getUser()` (the existing kernel primitive); `ctx.user` is the const-time accessor. | `null` for `auth: "anon"`; throws `UNAUTHENTICATED` if read by an `auth: "user"`/`"admin"` procedure that didn't authenticate (defense-in-depth). |
 | `ctx.requestId` | `TypedId<"req">` | Gateway generates UUIDv7 typed_id | Echoed in `X-Request-Id` response header; matches `typed_id` invariant. |
 | `ctx.traceId` | `string` (32-char hex) | W3C `traceparent` header (gateway creates if absent) | Used for OTel correlation. |
 | `ctx.signal` | `AbortSignal` | `AbortSignal.any([clientDisconnect, gatewayDeadline, isolateEviction])` (native, `crates/runtime/src/web/dom/abort_signal.rs`) | Aborts on any of the three (see "Abort source plumbing" below). Auto-passed to `fetch`, `db.*`, `kv.*`, `storage.*`. |
@@ -261,7 +261,7 @@ The TS surface narrows `ctx.user`'s type based on the wrapper's `auth` policy:
 | `ctx.waitUntil` | `(p: Promise<unknown>) => void` | Kernel — extends the procedure's lifetime past the response without blocking it | For analytics, logging flushes, etc. |
 | `ctx.log` | `{ info, warn, error, debug }` | Kernel structured-log emitter | Each log is a JSON line tagged with `{requestId, traceId, app, procedure}`. |
 | `ctx.env` | merged `vars + secrets` | Per-app config | Read-only; immutable per request. **Merge order** (higher wins): runtime-process env vars < `defineApp.env` declarations < per-deploy secret manager values. The deploy-time `defineApp.env` is the source of truth; runtime-process env exists as a dev-mode fallback. |
-| `ctx.meter` | `{ increment(metric, delta?, tags?) }` | `zeroship.meter.*` primitive | See §12 for auto-emitted RPC metrics. |
+| `ctx.meter` | `{ increment(metric, delta?, tags?) }` | `env.meter.*` primitive | See §12 for auto-emitted RPC metrics. |
 
 ### Abort source plumbing
 
@@ -1441,7 +1441,7 @@ Mutations declare `idempotent: true` to opt in. Effect:
 
 - Wire **requires** `Idempotency-Key` header (gateway returns 400 if missing).
 - Server-side dedupe keyed by `(app_id, wireId, idempotency_key)`. Each entry stores `(input_hash, output, status, completed_at)`. Default TTL 24 h, configurable per procedure via `fn.config.idempotencyTtl: { hours: 168 }` (max 7 days).
-- Storage: `zeroship.kv` (Redis-backed in prod, in-memory in dev). Each entry costs ~200 B; quota counted against the app's KV allowance.
+- Storage: `env.kv` (Redis-backed in prod, in-memory in dev). Each entry costs ~200 B; quota counted against the app's KV allowance.
 - Mutations **without** `idempotent: true` must not include `Idempotency-Key` (gateway returns 400 — round-01 Medium-2). Future-proofs against ambiguous keys.
 
 ### Distributed lock — the missing primitive
@@ -2000,7 +2000,7 @@ Apps that need per-emit spans (e.g., to observe each LLM token-block as a span) 
 | Surface | Where |
 | --- | --- |
 | Prometheus metrics | Gateway emits per-procedure counters/histograms (the meter events double as Prometheus-scrapable values) |
-| Replay protection | Idempotency table per app, 24 h TTL default, in `zeroship.kv` |
+| Replay protection | Idempotency table per app, 24 h TTL default, in `env.kv` |
 | Audit log | Every mutation logs `{traceId, requestId, procedure, userId, idempotencyKey, status}` |
 | Method-level dashboards | Auto-generated in creator console from `manifest.artifact.procedures` — one tile per `wireId` showing `requests`, `p50/p99 duration_ms`, `error rate`, `idempotency hit rate` |
 | Per-procedure tail logs | `zeroship logs tail --procedure todos.add` |

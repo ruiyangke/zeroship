@@ -3914,7 +3914,7 @@ shipping that is a different ADR.
 
 The runtime is server-side. There's no per-end-user persistent cookie
 store (the platform's auth state is JWT-cookie + session, and creator
-code reads those via `zeroship.auth.*` primitives, not via fetch).
+code reads those via `env.auth.*` primitives, not via fetch).
 But `Cookie` IS a forbidden request header (the user can't manually
 set it on outbound fetch); they CAN read `Set-Cookie` from response
 headers (which is a Headers concern, not Fetch).

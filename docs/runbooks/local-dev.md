@@ -7,7 +7,7 @@ Get a working zeroship stack on your machine, end to end. Single-tenant first, t
 - Rust toolchain (stable, edition 2021)
 - Node.js 20+ (for the SDK packages and Vite plugin)
 - PostgreSQL 14+ running locally (`postgres://localhost:5432/zeroship` is the convention)
-- Redis 7+ (optional — only needed if your app uses `zeroship.kv`)
+- Redis 7+ (optional — only needed if your app uses `env.kv`)
 - `mkcert` if you want HTTPS locally
 
 ## First-time bootstrap

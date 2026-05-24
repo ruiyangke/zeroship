@@ -60,7 +60,7 @@ Compiled form: `crates/gateway/src/compiled.rs`. Built once at route-update time
 
 - **`rules`** are walked first-match-wins. Specificity ordering is enforced at parse time by `Manifest::validate()` (shadow detection).
 - **`assets`** is the immutable map of paths → content-addressed assets. Populated on deploy. Includes HTML shells, JS chunks, CSS, images, prerendered HTML — every static byte.
-- **`runtime_assets`** is mutable, populated by the user's server code via `zeroship.assets.put(...)`. `asset_version` bumps on each mutation; the gateway re-syncs only when it changes.
+- **`runtime_assets`** is mutable, populated by the user's server code via `env.assets.put(...)`. `asset_version` bumps on each mutation; the gateway re-syncs only when it changes.
 - **`worker`** is the JS code that runs in V8 (`entry` specifier + `modules` map of specifier → blob hash). `null` for SSG-only deploys. The hash set is distinct from any asset hashes, so an asset-only deploy doesn't bust the worker's V8 isolate.
 
 ## `Match` variants

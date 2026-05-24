@@ -2,7 +2,7 @@
 
 ## Overview
 
-The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs (fetch, crypto, console, timers), and a plugin registration API. Platform features (database, auth, storage, KV) are plugins that register native functions on the `zeroship.*` global.
+The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs (fetch, crypto, console, timers), and a plugin registration API. Platform features (database, auth, storage, KV) are plugins that register native functions as `env.*` namespaces. Creator code reaches them via `env.<namespace>.*` — `env` is the 2nd arg to `fetch(req, env, ctx)` and the `env` named export of the `zeroship` module.
 
 ## Design
 
@@ -10,7 +10,7 @@ The runtime is a kernel. Plugins are drivers. The runtime provides V8, Web APIs 
 
 ```rust
 pub trait NativePlugin: Send + Sync {
-    /// Namespace under zeroship.* (e.g., "db", "auth", "storage", "kv").
+    /// Namespace under env.* (e.g., "db", "auth", "storage", "kv").
     fn namespace(&self) -> &str;
 
     /// Human-readable name for logging.
@@ -20,7 +20,7 @@ pub trait NativePlugin: Send + Sync {
     /// (connection pools, caches). Async — can connect to databases.
     async fn init(&self, config: &Arc<WorkerConfig>);
 
-    /// Called once per V8 isolate. Register functions on zeroship.{namespace}.
+    /// Called once per V8 isolate. Register functions on env.{namespace}.
     fn register(&self, registrar: &mut NativeRegistrar);
 
     /// Called on worker shutdown. Close connections, flush buffers.
@@ -39,7 +39,7 @@ pub struct NativeRegistrar<'a, 'b> {
 }
 
 impl NativeRegistrar {
-    /// Register a native function as zeroship.{namespace}.{name}
+    /// Register a native function as env.{namespace}.{name}
     pub fn add(&mut self, name: &str, callback: v8::FunctionCallback);
 }
 ```
@@ -126,34 +126,39 @@ impl NativePlugin for DbPlugin {
 ### How the runtime uses plugins
 
 ```rust
-impl Runtime {
-    pub fn new(
-        modules: Vec<ModuleEntry>,
-        plugins: &[Box<dyn NativePlugin>],
-        // ... other args
-    ) -> Self {
-        // ... V8 setup ...
+// Sketch — see `crates/runtime/src/core/plugin.rs::build_env_object`
+// for the real implementation. Plugin namespaces are layered onto the
+// per-app `env` object that user code receives as the 2nd arg to
+// `fetch(req, env, ctx)` (and as the `env` named export of the
+// `zeroship` module).
+fn build_env_object(
+    scope: &mut v8::PinScope,
+    plugins: &[Arc<dyn NativePlugin>],
+    env_json: &str,
+) -> v8::Global<v8::Object> {
+    let env_obj = v8::Object::new(scope);
+    // ... merge `env_json` scalars (vars + secrets) onto `env_obj` ...
 
-        // Create zeroship global
-        enter_v8!(self, |scope| {
-            let global = scope.get_current_context().global(scope);
-            let zeroship = v8::Object::new(scope);
+    for plugin in plugins {
+        let mut registrar = NativeRegistrar::new();
+        plugin.register(&mut registrar);
 
-            for plugin in plugins {
-                let ns_obj = v8::Object::new(scope);
-                let mut registrar = NativeRegistrar { scope, namespace_obj: ns_obj };
-                plugin.register(&mut registrar);
+        // Plugins may ship a v8_class-backed instance via build_instance;
+        // otherwise we allocate a plain object.
+        let ns_obj = plugin
+            .build_instance(scope, app_id)
+            .unwrap_or_else(|| v8::Object::new(scope));
+        for (_name, apply_fn) in &registrar.entries {
+            apply_fn(scope, ns_obj);
+        }
 
-                freeze_object(scope, ns_obj);
-                let key = v8::String::new(scope, plugin.namespace()).unwrap();
-                zeroship.set(scope, key.into(), ns_obj.into());
-            }
-
-            freeze_object(scope, zeroship);
-            let key = v8::String::new(scope, "zeroship").unwrap();
-            global.set(scope, key.into(), zeroship.into());
-        });
+        let ns_key = v8::String::new(scope, plugin.namespace()).unwrap();
+        env_obj.set(scope, ns_key.into(), ns_obj.into());
     }
+
+    // Shallow Object.freeze on env — user code can't reassign env.db.
+    freeze(scope, env_obj);
+    v8::Global::new(scope, env_obj)
 }
 ```
 
@@ -174,15 +179,15 @@ Worker starts
   │    │                                                       │
   │    │ 3. Create V8 isolate                                  │
   │    │    register() called for each plugin                  │
-  │    │    → zeroship.db.find, .insert, ... added to global    │
-  │    │    → zeroship.auth.hash, .signJwt, ... added           │
-  │    │    → zeroship object frozen                            │
+  │    │    → env.db.find, .insert, ... added to env            │
+  │    │    → env.auth.hash, .signJwt, ... added                │
+  │    │    → env object frozen                                 │
   │    │                                                       │
   │    │   ┌─── repeats per request ──────────────────────┐    │
   │    │   │                                              │    │
   │    │   │ 4. Worker sets state.app_id = "app_abc"      │    │
   │    │   │ 5. V8 executes app code                      │    │
-  │    │   │    → zeroship.db.find() → callback             │    │
+  │    │   │    → env.db.find() → callback                │    │
   │    │   │      → reads app_id from state               │    │
   │    │   │      → reads pool from thread_local          │    │
   │    │   │      → queries Postgres                      │    │
@@ -317,7 +322,7 @@ crates/
 ├── runtime/              Kernel — V8, Web APIs, NativePlugin trait
 │   ├── src/plugin.rs     NativePlugin trait + NativeRegistrar
 │   ├── src/runtime.rs    Runtime::new() accepts &[Box<dyn NativePlugin>]
-│   └── src/init.rs       setup zeroship.* from plugins
+│   └── src/init.rs       setup env.* namespaces from plugins
 │
 ├── plugin-db/            Database
 │   ├── src/lib.rs        DbPlugin
@@ -362,13 +367,18 @@ Worker depends on all plugins it needs.
 ### Frozen namespace
 
 ```javascript
-zeroship.db.find = () => "hacked";    // TypeError: read-only
-zeroship.db.evil = () => {};           // TypeError: not extensible
-delete zeroship.db;                    // TypeError: non-configurable
-zeroship.foo = {};                     // TypeError: frozen
+env.db.find = () => "hacked";    // TypeError: read-only
+env.db.evil = () => {};           // TypeError: not extensible
+delete env.db;                    // TypeError: non-configurable
+env.foo = {};                     // TypeError: frozen
 ```
 
-`Object.freeze()` applied to `zeroship` and every namespace object. User code cannot modify, extend, or delete any primitive.
+`Object.freeze()` applied to `env` (Stage 1 of the macro-driven DB
+namespace). Namespace sub-objects (`env.db`, `env.kv`, …) remain
+unfrozen by reference, but their registered methods are attached as
+own properties at build time — replacing them requires reassigning
+through the frozen parent, which fails. User code cannot reassign or
+delete `env.db` itself, nor add `env.foo`.
 
 ### Callback safety
 
@@ -432,6 +442,6 @@ impl NativePlugin for FooPlugin {
     }
 }
 
-// JS: await zeroship.foo.bar("hello")
+// JS: await env.foo.bar("hello")           (env = 2nd arg to fetch / `env` named export of `zeroship`)
 // SDK: import { foo } from "@zeroship/foo"
 ```

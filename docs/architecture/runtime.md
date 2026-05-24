@@ -10,7 +10,7 @@ Everything that runs end-user code lives in `crates/runtime`. This is the larges
                          │                          │
    compio event loop ───►│  fetch / WebSocket /     │
    (one per worker       │  streams / WebCrypto /   │
-    thread, no tokio)    │  zeroship.* primitives   │
+    thread, no tokio)    │  env.* primitives        │
                          │                          │
                          │  user JS code            │
                          └──────────────────────────┘
@@ -36,7 +36,7 @@ server.rs         Bin entry (used by `zeroship serve`)
 modules.rs        Module loading; ModuleEntry; ModuleRegistry
 state.rs          SharedState + RuntimeState (cross-isolate cell)
 http.rs           HTTP request/response shaping (envelope, ResponseInfo, SettledResult)
-plugin.rs         NativePlugin trait, the extension point for zeroship.{db,kv,storage}.*
+plugin.rs         NativePlugin trait, the extension point for env.{db,kv,storage}.*
 storage.rs        AppStorage abstraction
 channel.rs        Compio-friendly channels (CancelFlag, etc.)
 panic_util.rs     V8-safe panic handling
@@ -65,13 +65,15 @@ Pump task = one compio task per isolate, parked on a flume receiver. See `start_
 
 If `load_polyfills_and_modules` fails (parse error, evaluation throw), the error is captured into `RuntimeInner::init_error`. `call_fetch_handler` reads it and returns 500 with the diagnostic, not a 404 "no fetch handler." Without this, a syntax error in user code looks like "no default.fetch exported" — totally misleading.
 
-## Native primitives (`zeroship.*`)
+## Native primitives (`env.*`)
 
-Registered via the `NativePlugin` trait. Each plugin owns a namespace:
+Registered via the `NativePlugin` trait. Each plugin owns a namespace on
+the `env` handler arg (the 2nd arg to `fetch(req, env, ctx)` / the `env`
+named export of the `zeroship` module):
 
-- `zeroship.db.*` → `crates/plugin-db`
-- `zeroship.kv.*` → `crates/plugin-kv`
-- `zeroship.storage.*` → `crates/plugin-storage`
+- `env.db.*` → `crates/plugin-db`
+- `env.kv.*` → `crates/plugin-kv`
+- `env.storage.*` → `crates/plugin-storage`
 
 The `#[v8_class]` proc macro (`crates/runtime-macros`) generates the V8-FFI glue. See `docs/reference/plugin-system.md`.
 

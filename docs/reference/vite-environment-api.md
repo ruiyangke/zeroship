@@ -6,7 +6,7 @@ Upgrade `@zeroship/vite-plugin` from child-process+proxy dev server to Vite's En
 
 ## Goals
 
-1. **True runtime parity** — dev code runs in the actual zeroship V8 runtime with `zeroship.*` globals
+1. **True runtime parity** — dev code runs in the actual zeroship V8 runtime with all `env.*` namespaces and the `zeroship` module available
 2. **Granular HMR** — module-level invalidation via Vite's ModuleRunner, no process restart
 3. **Standard Vite integration** — uses the official Environment API (Vite 6+), same pattern as `@cloudflare/vite-plugin`
 4. **Minimal Rust changes** — all complexity lives in JS/TypeScript; Rust only needs eval() enabled
@@ -51,7 +51,7 @@ Browser ──── HTTP ──────► │  │  "use server" transform
                           │  └─────────────────────────────────┘
                           │                                     │
                           │  compio HTTP server (:3001)          │
-                          │  V8 isolate + zeroship.* globals     │
+                          │  V8 isolate + env.* + zeroship mod    │
                           └─────────────────────────────────────┘
 ```
 
@@ -61,7 +61,7 @@ Browser ──── HTTP ──────► │  │  "use server" transform
 
 2. **Dev bootstrap module** — pre-built JS file shipped with the plugin npm package. Contains bundled `vite/module-runner`, WebSocket transport, and eval-based ModuleEvaluator. Replaces user code as the V8 entry point in dev mode.
 
-3. **Module evaluation** — ModuleRunner uses `eval()` to execute Vite-transformed code inside V8. User code runs in the real zeroship runtime with all `zeroship.*` globals available. Same pattern as Cloudflare's `__VITE_UNSAFE_EVAL__`.
+3. **Module evaluation** — ModuleRunner uses `eval()` to execute Vite-transformed code inside V8. User code runs in the real zeroship runtime with all `env.*` namespaces (and the `zeroship` named-import module) available. Same pattern as Cloudflare's `__VITE_UNSAFE_EVAL__`.
 
 4. **Request flow**: Browser → Vite middleware → HTTP proxy → zeroship runtime → dev bootstrap → ModuleRunner imports user module → calls handler → response back through proxy.
 
@@ -383,7 +383,7 @@ No other Rust changes. The runtime already provides:
    d. Sends transformed code back via WebSocket
    e. Evaluator: eval(transformed) → module loaded in V8
 7. Bootstrap calls mod.onRequest(req)
-8. User handler runs with real zeroship.* globals
+8. User handler runs with real `env.*` namespaces (and the `zeroship` named-import module) available
 9. Response flows back: V8 → Rust HTTP → proxy → Vite → browser
 ```
 

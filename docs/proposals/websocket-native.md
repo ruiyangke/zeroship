@@ -3533,10 +3533,10 @@ strict UTF-8 (D-17 — RFC 6455 §8.1).
 test the send-side conversion (USVString replaces lone surrogates with
 U+FFFD); the receive side is in `interfaces/` and the autobahn fuzzer.
 
-### XVII.10b. Per-app WebSocket metering (zeroship.meter integration)
+### XVII.10b. Per-app WebSocket metering (env.meter integration)
 
 **Picked:** v2 hooks WS bytes-in / bytes-out into the existing
-`zeroship.meter.*` primitive (per AGENTS.md "Native primitives"). Each
+`env.meter.*` primitive (per AGENTS.md "Native primitives"). Each
 WebSocket frame increments a `ws_bytes_in` / `ws_bytes_out` counter
 keyed by the app id; the gateway pump's existing per-request metering
 handles the gateway-side accounting; the worker-side

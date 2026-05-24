@@ -12,7 +12,7 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | --- | --- |
 | **Routing / dispatch / manifest** | `docs/architecture/gateway-routing.md` · `crates/gateway/src/router/dispatch.rs` · `crates/bundle/src/{manifest,rule}.rs` (`Manifest`, `Rule`, `Match`, `Action`) |
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
-| **Adding a native primitive** (`zeroship.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
+| **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
@@ -50,7 +50,7 @@ Creator Dashboard (web UI)
 ```
 End Users → Gateway          JWT, rate-limit, manifest dispatch, asset proxy, CHWBL routing
            → Auth Service    Login/signup, OAuth, consent, sessions
-           → Workers (V8)    App code · zeroship.{db,auth,kv,storage,meter} primitives
+           → Workers (V8)    App code · env.{db,auth,kv,storage,meter} primitives
 ```
 
 ### Shared
@@ -89,9 +89,9 @@ crates/
 ├── compio-redis/     Redis driver (cluster-aware, compio-native)
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── runtime-macros/   #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
-├── plugin-db/        zeroship.db.* native ops
-├── plugin-kv/        zeroship.kv.* native ops
-├── plugin-storage/   zeroship.storage.* native ops
+├── plugin-db/        env.db.* native ops
+├── plugin-kv/        env.kv.* native ops
+├── plugin-storage/   env.storage.* native ops
 │
 │ System 1 — Creator Platform
 ├── control/          Control plane (app CRUD, deploy, billing, env, route registry)
@@ -125,17 +125,20 @@ These don't change. If you're about to violate one, stop and ask.
 
 Two layers: native primitives (Rust kernel) and npm packages (JS ecosystem).
 
-### Native primitives (`zeroship.*` global)
+### Native primitives (`env.*` namespaces)
 
-Registered by Rust on every V8 isolate. The "syscalls" of the platform — small, stable, low-level:
+Registered by Rust on every V8 isolate as namespaces on the `env` object
+(the 2nd arg to `fetch(req, env, ctx)` and the `env` named export of the
+`zeroship` module). The "syscalls" of the platform — small, stable,
+low-level:
 
 ```
-zeroship.db.*       structured database operations (no raw SQL)
-zeroship.auth.*     getUser/requireUser (reads gateway-injected user context)
-zeroship.storage.*  object storage put/get/delete
-zeroship.kv.*       key-value get/set/delete
-zeroship.meter.*    billing counter increment
-zeroship.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
+env.db.*       structured database operations (no raw SQL)
+env.auth.*     getUser/requireUser (reads gateway-injected user context)
+env.storage.*  object storage put/get/delete
+env.kv.*       key-value get/set/delete
+env.meter.*    billing counter increment
+env.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
 ```
 
 Creators don't call these directly. SDK packages wrap them.
@@ -154,7 +157,7 @@ import { kv } from "@zeroship/kv";
 // Handlers then write `env.db.users.find(...)` directly.
 ```
 
-SDK packages call `zeroship.*` primitives internally. Validation, query building, error mapping, TypeScript types all live in JS. They evolve independently of the Rust runtime.
+SDK packages call the `env.*` native primitives internally. Validation, query building, error mapping, TypeScript types all live in JS. They evolve independently of the Rust runtime.
 
 ### Framework-internal: `@zeroship/bootstrap`
 
@@ -193,7 +196,7 @@ Stable contracts, live in `docs/reference/`:
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `zship.md` — `.zship` deploy artifact format (tar.zst with content-addressed blobs)
 - `websocket-design.md` — WebSocketPair, RFC 6455
-- `plugin-system.md` — how to add a `zeroship.*` namespace
+- `plugin-system.md` — how to add an `env.*` namespace
 - `node-compat.md` — Node.js module resolution in V8
 - `vite-environment-api.md` — Vite dev server inside the V8 runtime
 - `zerobench.md` — the HTTP/SSE/WS benchmark tool

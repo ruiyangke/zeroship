@@ -32,7 +32,7 @@ GET /dashboard              Reads __zs_session cookie
                             Checks app consent          
                             ├─ Valid:                    
                             │  Strips cookie             
-                            │  Injects user into ctx ──→ zeroship.auth.getUser()
+                            │  Injects user into ctx ──→ env.auth.getUser()
                             │                            → { id, email, name, avatar }
                             │
                             └─ Invalid / missing:
@@ -189,7 +189,8 @@ CREATE TABLE auth.app_consents (
 Registered by the Rust runtime on every V8 isolate:
 
 ```ts
-// zeroship.auth.* — injected into the V8 context by the gateway
+// env.auth.* — mounted on the `env` handler arg (and the `env` named
+// export of the `zeroship` module) by the gateway-injected user context.
 interface ZeroshipAuth {
     /** Returns the authenticated user, or null if not authenticated. */
     getUser(): ZeroshipAuthUser | null;

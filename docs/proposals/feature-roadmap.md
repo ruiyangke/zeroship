@@ -98,7 +98,7 @@ start?" Sets onboarding floor to something we control.
 File uploads are table stakes. Every profile, avatar, product image, or
 document requires this. 60%+ of real apps need it.
 
-- Native plugin `zeroship.storage.*` — put/get/delete/list/presignUrl
+- Native plugin `env.storage.*` — put/get/delete/list/presignUrl
 - Backend: S3 in production (MinIO for self-hosted), local filesystem in dev
 - SDK: `storage.bucket("uploads").put(key, file)` with image resize/transform
   via `imgproxy` (not Cloudinary — self-hosted)
@@ -113,7 +113,7 @@ apps with uploads without this.
 Sessions, caches, feature flags, rate-limit counters. Less critical than
 storage (creators can fake it with DB) but cheap to ship.
 
-- Native plugin `zeroship.kv.*` — get/set/delete/incr/expire/list
+- Native plugin `env.kv.*` — get/set/delete/incr/expire/list
 - Backend: Redis in prod, in-memory Map in dev
 - SDK: typed accessors `kv.get<string>("session:xyz")`
 - TTL support first-class

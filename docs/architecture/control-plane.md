@@ -103,7 +103,7 @@ End user → app.zeroship.ai/protected
   → Control: on success, sets __zs_session cookie scoped to *.zeroship.ai with HS256 JWT
   → User's browser: redirects back to app.zeroship.ai/protected
   → Gateway: validates JWT, injects ZeroShip-User header, forwards to worker
-  → Worker: zeroship.auth.getUser() reads the header, returns the user object
+  → Worker: env.auth.getUser() reads the header, returns the user object
 ```
 
 Detailed: `docs/reference/auth.md`.

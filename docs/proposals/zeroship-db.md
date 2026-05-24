@@ -684,12 +684,12 @@ await migrations.run(backfillRole, { resume: true });
 **Implementation.**
 
 - New SDK package: `@zeroship/migrations`
-- Native: a single new primitive `zeroship.db.runMigrationBatch(migrationId, cursor, batchSize, dryRun)` returning `{ processed, nextCursor, isDone, deadLetter }`
+- Native: a single new primitive `env.db.runMigrationBatch(migrationId, cursor, batchSize, dryRun)` returning `{ processed, nextCursor, isDone, deadLetter }`
 - SDK orchestrates: loop calling the batch primitive, updating `__zeroship_migrations` state, retrying with halving batchSize on failure
 - Trigger surfaces: CLI (`zeroship migrate run <name>`), post-deploy hook in `defineApp`, programmatic via SDK
 - Kill switch: `zeroship migrate cancel <name>` writes `status='cancelled'`; the next batch call notices and exits the loop. WebSocket-side workers polling cursor also see the status change.
 
-**Quota & cost.** Migrations consume database CPU. Each batch increments the app's `db_migration_cpu_ms` counter via `zeroship.meter` (see `docs/reference/billing-metering.md`); large backfills can be rate-limited via per-app quota set in the control plane.
+**Quota & cost.** Migrations consume database CPU. Each batch increments the app's `db_migration_cpu_ms` counter via `env.meter` (see `docs/reference/billing-metering.md`); large backfills can be rate-limited via per-app quota set in the control plane.
 
 **Metrics.** The B1 runtime emits:
 - `zeroship_db_migration_rows_processed_total{app, migration, result}` — result = `applied | failed | skipped`
@@ -773,7 +773,7 @@ db.posts.get({ authorId: p.data!.id });  // ✗ p.data.id is Id<"posts">, not Id
 
 **GDPR / right-to-erasure.** Platform-level users (typed_id `usr_…`) and per-app user rows live in different tables; the typed_id maps to an app-collection PK via a registration record kept in the per-app `__zeroship_subject_map` table (`subject_typed_id TEXT, collection TEXT, row_id BIGINT`). On an erasure request:
 
-1. Control plane calls `zeroship.db.eraseSubject(appId, subjectTypedId)`.
+1. Control plane calls `env.db.eraseSubject(appId, subjectTypedId)`.
 2. The primitive looks up `__zeroship_subject_map` → resolves to one or more `(collection, row_id)` pairs.
 3. The platform walks the FK graph (read from `pg_constraint`) from the resolved rows outward, computing the deletion order.
 4. Each delete is logged to `__zeroship_migrations` with `phase='audit'`, `change_kind='subject_erasure'`.
@@ -850,8 +850,8 @@ REVOKE ALL ON __zeroship_subject_map FROM PUBLIC;
   ```
 - The platform-managed tables (`__zeroship_subject_map`, `__zeroship_migrations`) are explicitly excluded from the C1 publication (see C1 step 1), so subscribers cannot observe subject mappings via the change feed.
 - Encryption at rest: rely on the underlying Postgres storage encryption (Aurora/RDS-managed key or the platform's own KMS-wrapped TDE). Per-column encryption is deferred — the table is small and the bridging risk is mitigated by access control.
-- Operational: writes to `__zeroship_subject_map` are metered via `zeroship.meter.subject_registrations` to detect anomalous registration patterns (e.g. a buggy app calling `register` in a hot loop).
-- Async erasure: large FK chains may take minutes. `zeroship.db.eraseSubject` returns an `erasure_id` and runs asynchronously; the control plane exposes `GET /api/erasures/:id` for status. Same model as AWS S3's object-versioning erasure.
+- Operational: writes to `__zeroship_subject_map` are metered via `env.meter.subject_registrations` to detect anomalous registration patterns (e.g. a buggy app calling `register` in a hot loop).
+- Async erasure: large FK chains may take minutes. `env.db.eraseSubject` returns an `erasure_id` and runs asynchronously; the control plane exposes `GET /api/erasures/:id` for status. Same model as AWS S3's object-versioning erasure.
 - Map corruption fallback: if `__zeroship_subject_map` becomes inconsistent (missing rows for a known subject), the platform falls back to scanning every FK-to-`subjects` collection — slow but exhaustive — and rebuilds the map row. The fallback is the audit safety net for legal compliance.
 
 **Upgrade path from existing `id: number` fields.** Apps shipping today use `authorId: t.number()` for FK columns (no FK constraint, no brand). The V2 migration is type-only at the storage level — the underlying column stays BIGINT — but compile-error producing if applied naively:
@@ -1374,7 +1374,7 @@ All sweepers are idempotent. Failure of a sweeper run never corrupts state; the 
 **zeroship internal:**
 - `docs/reference/db.md` — current `@zeroship/db` reference
 - `docs/proposals/rpc.md` — current RPC contract (procedure/query/mutation/stream wrappers)
-- `docs/reference/billing-metering.md` — `zeroship.meter` integration for migration quotas (B1)
+- `docs/reference/billing-metering.md` — `env.meter` integration for migration quotas (B1)
 - `AGENTS.md` — typed_id invariant referenced in B2 ID-system discussion
 - `ISSUES.md` ISS-24 — migration log requirement
 - `sdks/db/src/{db,types,schema,validate,collection,query,model}.ts` — current SDK

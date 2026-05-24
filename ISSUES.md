@@ -648,7 +648,7 @@ rather than a structured metering pipeline.
 
 Spec §9.9 calls for live charts: requests/sec, p50/p95/p99 latency,
 error rate, over 24h / 7d / 30d, filterable by route. The platform
-has the `zeroship.meter.*` primitive in `crates/plugin-*` but:
+has the `env.meter.*` primitive in `crates/plugin-*` but:
 
 - The runtime doesn't auto-emit per-request latency / status counters.
 - There's no aggregation endpoint
@@ -680,7 +680,7 @@ metering (the proper fix below) replaces this once landed.
 
 1. Auto-instrument the worker request handler to emit per-request
    `latency_ms`, `status_class`, `route` counters via
-   `zeroship.meter.*`.
+   `env.meter.*`.
 2. Pick the time-series backend and wire writes from the metering
    pipe.
 3. `crates/control/src/perf.rs` — query handler returning bucketed
@@ -900,7 +900,7 @@ spec §9.4).
 
 Spec §9.4 calls for a Media canvas where uploads land in the project's
 object store and become servable via a public URL the deployed app
-can reference. The platform has the `zeroship.storage.*` primitive
+can reference. The platform has the `env.storage.*` primitive
 and `@zeroship/storage` SDK package, but there's no dashboard-side
 upload RPC:
 

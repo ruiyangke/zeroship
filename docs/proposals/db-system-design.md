@@ -89,13 +89,13 @@ sequencing.
 ## 1. Overview & system context
 
 `plugin-db` is a single Rust crate (`crates/plugin-db/`) that registers
-the `zeroship.db.*` namespace on every worker V8 isolate, marshals JS
+the `env.db.*` namespace on every worker V8 isolate, marshals JS
 calls into typed Rust operations, and executes them against a storage
 backend. Owns: declarative-migration orchestration, CRUD execution,
 transactions, multi-tenant schema isolation, change-data capture,
 reactive-query broker, SECURITY DEFINER auth (`hardening` feature),
 per-row data audit log. User-facing surface: the `@zeroship/db` SDK, a
-thin TypeScript layer over `zeroship.db.*`. SQL never reaches creator
+thin TypeScript layer over `env.db.*`. SQL never reaches creator
 code.
 
 **Postgres = production backend.** Full feature set, real concurrency,
@@ -202,7 +202,7 @@ subscriptions + optimistic concurrency); analytics (MV); AI/RAG (vector
 
 **SDK layer** (`sdks/db/`) — schema declaration, type generation, filter
 language, query builder, subscription receiver, per-handler tx routing,
-retry wrappers. Calls native primitives through `zeroship.db.*`. Does NOT
+retry wrappers. Calls native primitives through `env.db.*`. Does NOT
 own SQL.
 
 **V8 plugin layer** (`crates/plugin-db/src/v8_classes/` + `v8_bridge.rs`) —

@@ -22,11 +22,11 @@ zeroship is two systems that share infrastructure. Reading this gives you the me
 │                                                                                    │
 │   End Users ─► Gateway ─► Worker (V8 isolate per app)                              │
 │                  │             │                                                   │
-│                  │             ├─► zeroship.db.*       ──► PostgreSQL              │
-│                  │             ├─► zeroship.storage.*  ──► Object Storage          │
-│                  │             ├─► zeroship.kv.*       ──► Redis                   │
-│                  │             ├─► zeroship.auth.*     ──► (header from gateway)   │
-│                  │             └─► zeroship.meter.*    ──► Control Plane (usage)   │
+│                  │             ├─► env.db.*       ──► PostgreSQL                   │
+│                  │             ├─► env.storage.*  ──► Object Storage               │
+│                  │             ├─► env.kv.*       ──► Redis                        │
+│                  │             ├─► env.auth.*     ──► (header from gateway)        │
+│                  │             └─► env.meter.*    ──► Control Plane (usage)        │
 │                  │                                                                 │
 │                  └────────────► Auth Service (cookie-based JWT)                    │
 └────────────────────────────────────────────────────────────────────────────────────┘
@@ -42,7 +42,7 @@ The systems are physically separate (different binaries, different processes, di
 | Gateway | `crates/gateway` | Manifest dispatch · JWT validation · rate limit · CHWBL routing · BlobStore-backed asset serving with edge LRU |
 | Worker | `crates/worker` | V8-per-thread · BlobStore-backed module fetch · LRU isolate eviction · usage reporting |
 | Runtime (lib) | `crates/runtime` | V8 + compio event loop · fetch · WebSocket · streams · WebCrypto · auth context |
-| Plugins (DB/KV/Storage) | `crates/plugin-{db,kv,storage}` | `zeroship.{db,kv,storage}.*` native ops |
+| Plugins (DB/KV/Storage) | `crates/plugin-{db,kv,storage}` | `env.{db,kv,storage}.*` native ops |
 | Postgres driver | `crates/compio-postgres` | compio-native PG driver |
 | Redis driver | `crates/compio-redis` | compio-native Redis, cluster-aware |
 | Core | `crates/core` | Shared types · typed_id · `Manifest` schema · `BlobStore` trait + `LocalDiskBlobStore` · auth utilities |
