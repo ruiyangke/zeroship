@@ -1386,6 +1386,167 @@ pub struct EventRow {
     pub data_json: String,
 }
 
+// ────────────────────────────────────────────────────────────────────
+// C-7-LT wake-job row (PR1 scaffolding — PR2 wires the state machine)
+// ────────────────────────────────────────────────────────────────────
+
+/// C-7-LT wake job row backing the async-response state machine.
+///
+/// Timestamps are stored as unix-seconds (`i64`) for consistency with
+/// the existing `SandboxRow` shape (chrono is NOT a workspace
+/// dependency; this crate uses `EXTRACT(EPOCH FROM ...)::BIGINT`).
+/// Optional timestamps are `None` when the underlying column is NULL.
+#[derive(Debug, Clone)]
+pub struct WakeJobRow {
+    pub wake_id: String,
+    pub sandbox_id: String,
+    pub state: WakeJobState,
+    pub error_code: Option<WakeErrorCode>,
+    pub error_message: Option<String>,
+    pub started_at_secs: i64,
+    pub updated_at_secs: i64,
+    pub ready_at_secs: Option<i64>,
+    pub agent_url: Option<String>,
+    pub lessee: String,
+    pub lessee_updated_at_secs: i64,
+}
+
+/// Wake-job state machine. Mirrors the 0009 migration's CHECK constraint
+/// — adding a variant here requires a migration that extends the
+/// constraint domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeJobState {
+    Pending,
+    ReservingSlot,
+    Restoring,
+    LivezPolling,
+    ClockResyncing,
+    Registering,
+    Ok,
+    Failed,
+}
+
+impl WakeJobState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::ReservingSlot => "reserving_slot",
+            Self::Restoring => "restoring",
+            Self::LivezPolling => "livez_polling",
+            Self::ClockResyncing => "clock_resyncing",
+            Self::Registering => "registering",
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        Some(match s {
+            "pending" => Self::Pending,
+            "reserving_slot" => Self::ReservingSlot,
+            "restoring" => Self::Restoring,
+            "livez_polling" => Self::LivezPolling,
+            "clock_resyncing" => Self::ClockResyncing,
+            "registering" => Self::Registering,
+            "ok" => Self::Ok,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+
+    /// True when the wake job has reached a terminal state — the
+    /// client should stop polling.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Ok | Self::Failed)
+    }
+}
+
+/// Wake-job failure mode. Structured per C-7-LT design Q3: clients can
+/// branch on the variant (retry vs. fail-hard vs. surface to user)
+/// without parsing free-form text.
+///
+/// Mirrors the 0009 migration's CHECK constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeErrorCode {
+    /// All slots on the target host are in use; retry later.
+    SlotUnavailable,
+    /// The source VM teardown didn't complete within the timeout.
+    SourceTeardownTimeout,
+    /// `ch-remote restore` failed (artifact corrupt or kernel
+    /// mismatch).
+    RestoreFailed,
+    /// /livez never returned 200 within the poll budget.
+    LivezTimeout,
+    /// Wall-clock resync to the host failed.
+    ClockResyncFailed,
+    /// pg registry write failed (transient — wake state machine will
+    /// roll back).
+    RegisterFailed,
+    /// Catch-all for unexpected failures; carries `error_message` for
+    /// triage.
+    Internal,
+}
+
+impl WakeErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SlotUnavailable => "slot_unavailable",
+            Self::SourceTeardownTimeout => "source_teardown_timeout",
+            Self::RestoreFailed => "restore_failed",
+            Self::LivezTimeout => "livez_timeout",
+            Self::ClockResyncFailed => "clock_resync_failed",
+            Self::RegisterFailed => "register_failed",
+            Self::Internal => "internal",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        Some(match s {
+            "slot_unavailable" => Self::SlotUnavailable,
+            "source_teardown_timeout" => Self::SourceTeardownTimeout,
+            "restore_failed" => Self::RestoreFailed,
+            "livez_timeout" => Self::LivezTimeout,
+            "clock_resync_failed" => Self::ClockResyncFailed,
+            "register_failed" => Self::RegisterFailed,
+            "internal" => Self::Internal,
+            _ => return None,
+        })
+    }
+}
+
+/// Map a postgres row (with the SELECT shape used by `get_wake_job` /
+/// `find_pending_wake_for_sandbox`) into a `WakeJobRow`.
+///
+/// Unknown discriminator strings round-trip as `Failed` / `Internal`
+/// (defense in depth — the CHECK constraint should keep the column
+/// in-domain, but a row inserted by a forward-incompatible binary
+/// shouldn't crash the reader).
+fn wake_job_row_from_pg(r: compio_postgres::Row) -> WakeJobRow {
+    let state_str: &str = r.get("state");
+    // Nullable columns: `try_get::<_, Option<T>>("col").ok()` returns
+    // `Option<Option<T>>` which `flatten()` collapses. Matches the
+    // pattern in `get_sandbox_row` for `started_at_opt` / `stopped_at_opt`.
+    let error_code_opt: Option<String> = r.try_get("error_code").ok().flatten();
+    let ready_at_opt: Option<i64> = r.try_get("ready_at_secs").ok().flatten();
+    let error_message_opt: Option<String> = r.try_get("error_message").ok().flatten();
+    let agent_url_opt: Option<String> = r.try_get("agent_url").ok().flatten();
+    WakeJobRow {
+        wake_id: r.get("wake_id"),
+        sandbox_id: r.get("sandbox_id"),
+        state: WakeJobState::from_str_opt(state_str).unwrap_or(WakeJobState::Failed),
+        error_code: error_code_opt
+            .as_deref()
+            .and_then(WakeErrorCode::from_str_opt),
+        error_message: error_message_opt,
+        started_at_secs: r.get("started_at_secs"),
+        updated_at_secs: r.get("updated_at_secs"),
+        ready_at_secs: ready_at_opt,
+        agent_url: agent_url_opt,
+        lessee: r.get("lessee"),
+        lessee_updated_at_secs: r.get("lessee_updated_at_secs"),
+    }
+}
+
 impl Database {
     /// Build a fresh `EventRow` with a freshly-minted typed-id for
     /// `event_id`. Caller fills `kind` + `data_json`.
@@ -2742,6 +2903,179 @@ impl Database {
         Ok(out)
     }
 
+    // ───────────────────────────────────────────────────────────────
+    // C-7-LT (PR1): wake_jobs CRUD — async wake-response state machine
+    // ───────────────────────────────────────────────────────────────
+
+    /// INSERT a new wake job row. The caller mints `wake_id` and
+    /// supplies the initial `state` (typically [`WakeJobState::Pending`]).
+    /// `lessee` is the controller host that owns the wake; PR2 will
+    /// wire the takeover-sweep that re-leases abandoned rows.
+    ///
+    /// `started_at`, `updated_at`, and `lessee_updated_at` default to
+    /// `now()` server-side; callers cannot override them on insert.
+    pub async fn insert_wake_job(&self, row: &WakeJobRow) -> Result<()> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        client
+            .execute(
+                "INSERT INTO sandbox.wake_jobs \
+                    (wake_id, sandbox_id, state, error_code, error_message, \
+                     ready_at, agent_url, lessee) \
+                 VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, $5::TEXT, \
+                         NULL, $6::TEXT, $7::TEXT)",
+                &[
+                    &row.wake_id,
+                    &row.sandbox_id,
+                    &row.state.as_str().to_string(),
+                    &row.error_code.map(|c| c.as_str().to_string()),
+                    &row.error_message,
+                    &row.agent_url,
+                    &row.lessee,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+
+    /// Lookup a wake job by id. Returns `None` if the row has been
+    /// GC'd or never existed.
+    pub async fn get_wake_job(&self, wake_id: &str) -> Result<Option<WakeJobRow>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let opt = client
+            .query_opt(
+                "SELECT wake_id, sandbox_id, state, error_code, error_message, \
+                        EXTRACT(EPOCH FROM started_at)::BIGINT  AS started_at_secs, \
+                        EXTRACT(EPOCH FROM updated_at)::BIGINT  AS updated_at_secs, \
+                        EXTRACT(EPOCH FROM ready_at)::BIGINT    AS ready_at_secs, \
+                        agent_url, lessee, \
+                        EXTRACT(EPOCH FROM lessee_updated_at)::BIGINT \
+                            AS lessee_updated_at_secs \
+                   FROM sandbox.wake_jobs \
+                  WHERE wake_id = $1::TEXT",
+                &[&wake_id.to_string()],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(opt.map(wake_job_row_from_pg))
+    }
+
+    /// Advance the wake job state. Updates `state`, optional
+    /// `error_code` / `error_message` / `agent_url`, and sets
+    /// `updated_at = NOW()`. On transition to [`WakeJobState::Ok`],
+    /// `ready_at = NOW()` is also set so the client polling for
+    /// completion knows when the wake landed.
+    ///
+    /// Returns the number of rows affected (0 if the wake_id doesn't
+    /// exist — caller can treat that as 404).
+    pub async fn update_wake_job_state(
+        &self,
+        wake_id: &str,
+        state: WakeJobState,
+        error_code: Option<WakeErrorCode>,
+        error_message: Option<&str>,
+        agent_url: Option<&str>,
+    ) -> Result<u64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let ready_at_clause = if matches!(state, WakeJobState::Ok) {
+            ", ready_at = now()"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "UPDATE sandbox.wake_jobs \
+                SET state = $1::TEXT, \
+                    error_code = $2::TEXT, \
+                    error_message = $3::TEXT, \
+                    agent_url = COALESCE($4::TEXT, agent_url), \
+                    updated_at = now() \
+                    {ready_at_clause} \
+              WHERE wake_id = $5::TEXT"
+        );
+        let n = client
+            .execute(
+                sql.as_str(),
+                &[
+                    &state.as_str().to_string(),
+                    &error_code.map(|c| c.as_str().to_string()),
+                    &error_message.map(|s| s.to_string()),
+                    &agent_url.map(|s| s.to_string()),
+                    &wake_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(n)
+    }
+
+    /// Idempotency lookup: does this sandbox already have a
+    /// non-terminal wake in flight? Returns the row if so; `None`
+    /// otherwise. PR2 calls this on every fresh wake to short-circuit
+    /// duplicate dispatches (return the existing wake_id instead of
+    /// minting a second one).
+    pub async fn find_pending_wake_for_sandbox(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Option<WakeJobRow>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        // Order by started_at DESC so if (somehow) multiple rows leak
+        // through, we return the newest one — the caller will adopt
+        // that as the live wake.
+        let opt = client
+            .query_opt(
+                "SELECT wake_id, sandbox_id, state, error_code, error_message, \
+                        EXTRACT(EPOCH FROM started_at)::BIGINT  AS started_at_secs, \
+                        EXTRACT(EPOCH FROM updated_at)::BIGINT  AS updated_at_secs, \
+                        EXTRACT(EPOCH FROM ready_at)::BIGINT    AS ready_at_secs, \
+                        agent_url, lessee, \
+                        EXTRACT(EPOCH FROM lessee_updated_at)::BIGINT \
+                            AS lessee_updated_at_secs \
+                   FROM sandbox.wake_jobs \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND state NOT IN ('ok', 'failed') \
+                  ORDER BY started_at DESC \
+                  LIMIT 1",
+                &[&sandbox_id.to_string()],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(opt.map(wake_job_row_from_pg))
+    }
+
+    /// GC sweep: delete terminal (state IN ('ok', 'failed')) rows whose
+    /// `updated_at` is older than `older_than`. Returns the number of
+    /// rows deleted.
+    ///
+    /// Non-terminal rows are NEVER deleted by this sweep — those are
+    /// handled by PR2's takeover scan (lessee_updated_at-based, like
+    /// `sandboxes.lessee_updated_at`).
+    ///
+    /// `older_than` is a Duration; the SQL converts to an interval via
+    /// `make_interval(secs => $1)` so we don't have to depend on
+    /// pg_postgres's interval type binding.
+    pub async fn gc_expired_wake_jobs(
+        &self,
+        older_than: std::time::Duration,
+    ) -> Result<u64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let secs = older_than.as_secs() as i64;
+        let n = client
+            .execute(
+                "DELETE FROM sandbox.wake_jobs \
+                  WHERE state IN ('ok', 'failed') \
+                    AND updated_at < now() - make_interval(secs => $1::BIGINT)",
+                &[&secs],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(n)
+    }
+
     /// INSERT an audit-pipe row.
     pub async fn insert_event(&self, event: &EventRow) -> Result<()> {
         let _ = zeroship_core::typed_id::parse_with_prefix(&event.event_id, "evt")
@@ -2877,6 +3211,71 @@ mod tests {
             validate_ha_env_vars()
                 .expect("defaults (60, 5) should pass");
         });
+    }
+
+    // ─── C-7-LT wake-job enum round-trips ────────────────────────
+
+    #[test]
+    fn wake_job_state_as_str_round_trip() {
+        for variant in [
+            WakeJobState::Pending,
+            WakeJobState::ReservingSlot,
+            WakeJobState::Restoring,
+            WakeJobState::LivezPolling,
+            WakeJobState::ClockResyncing,
+            WakeJobState::Registering,
+            WakeJobState::Ok,
+            WakeJobState::Failed,
+        ] {
+            let s = variant.as_str();
+            let parsed = WakeJobState::from_str_opt(s)
+                .unwrap_or_else(|| panic!("round-trip failed for {s}"));
+            assert_eq!(parsed, variant, "round-trip mismatch for {s}");
+        }
+        // Unknown strings yield None — the from_pg helper substitutes
+        // `Failed` so a reader on a forward-incompatible binary still
+        // returns a row instead of panicking.
+        assert!(WakeJobState::from_str_opt("not_a_state").is_none());
+        assert!(WakeJobState::from_str_opt("").is_none());
+    }
+
+    #[test]
+    fn wake_job_state_is_terminal_only_ok_or_failed() {
+        assert!(WakeJobState::Ok.is_terminal());
+        assert!(WakeJobState::Failed.is_terminal());
+        for non_terminal in [
+            WakeJobState::Pending,
+            WakeJobState::ReservingSlot,
+            WakeJobState::Restoring,
+            WakeJobState::LivezPolling,
+            WakeJobState::ClockResyncing,
+            WakeJobState::Registering,
+        ] {
+            assert!(
+                !non_terminal.is_terminal(),
+                "{} must NOT be terminal",
+                non_terminal.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn wake_error_code_as_str_round_trip() {
+        for variant in [
+            WakeErrorCode::SlotUnavailable,
+            WakeErrorCode::SourceTeardownTimeout,
+            WakeErrorCode::RestoreFailed,
+            WakeErrorCode::LivezTimeout,
+            WakeErrorCode::ClockResyncFailed,
+            WakeErrorCode::RegisterFailed,
+            WakeErrorCode::Internal,
+        ] {
+            let s = variant.as_str();
+            let parsed = WakeErrorCode::from_str_opt(s)
+                .unwrap_or_else(|| panic!("round-trip failed for {s}"));
+            assert_eq!(parsed, variant, "round-trip mismatch for {s}");
+        }
+        assert!(WakeErrorCode::from_str_opt("not_a_code").is_none());
     }
 
     // ─── DSN scheme validation ───────────────────────────────────

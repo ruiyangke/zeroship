@@ -3643,3 +3643,352 @@ async fn teardown_source_for_snapshot_preserves_host_dir_then_stop_reaps() {
     stop_flag.store(true, Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&host_state_dir);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// C-7-LT-PR1: wake_jobs CRUD (pg-gated)
+//
+// PR1 lands the table + CRUD; PR2 wires the state machine into the
+// wake handler. These tests pin the round-trip + transition + sweep
+// semantics so PR2 can build on them without re-verifying.
+// ════════════════════════════════════════════════════════════════════
+
+mod wake_jobs_crud {
+    use super::*;
+    use std::time::Duration as StdDuration;
+    use zeroship_sandbox::db::{
+        Database, WakeErrorCode, WakeJobRow, WakeJobState,
+    };
+
+    fn sample_row(wake_id: &str, sandbox_id: &str, lessee: &str) -> WakeJobRow {
+        WakeJobRow {
+            wake_id: wake_id.to_string(),
+            sandbox_id: sandbox_id.to_string(),
+            state: WakeJobState::Pending,
+            error_code: None,
+            error_message: None,
+            // Insert-side timestamps are server-set; these values are
+            // ignored by `insert_wake_job` so any placeholder works.
+            started_at_secs: 0,
+            updated_at_secs: 0,
+            ready_at_secs: None,
+            agent_url: None,
+            lessee: lessee.to_string(),
+            lessee_updated_at_secs: 0,
+        }
+    }
+
+    /// Round-trip: insert a row, read it back via `get_wake_job`,
+    /// check that all fields are populated and server-side timestamps
+    /// are non-zero.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_insert_and_read_round_trip() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_test_round_trip", "sbx_test_rt_sandbox", "hst_test_owner");
+        db.insert_wake_job(&row).await.expect("insert");
+
+        let loaded = db
+            .get_wake_job("wak_test_round_trip")
+            .await
+            .expect("get")
+            .expect("row must exist");
+        assert_eq!(loaded.wake_id, "wak_test_round_trip");
+        assert_eq!(loaded.sandbox_id, "sbx_test_rt_sandbox");
+        assert_eq!(loaded.state, WakeJobState::Pending);
+        assert!(loaded.error_code.is_none());
+        assert!(loaded.error_message.is_none());
+        assert!(loaded.agent_url.is_none());
+        assert!(loaded.ready_at_secs.is_none());
+        assert_eq!(loaded.lessee, "hst_test_owner");
+        assert!(
+            loaded.started_at_secs > 0,
+            "server-side started_at must populate; got {}",
+            loaded.started_at_secs
+        );
+        assert!(
+            loaded.updated_at_secs > 0,
+            "server-side updated_at must populate"
+        );
+        assert!(loaded.lessee_updated_at_secs > 0);
+
+        // Unknown wake_id → None.
+        let absent = db.get_wake_job("wak_does_not_exist").await.unwrap();
+        assert!(absent.is_none());
+    }
+
+    /// State transition: Pending → Restoring → Ok bumps updated_at,
+    /// sets ready_at on Ok, and surfaces agent_url. Failure path
+    /// surfaces error_code + error_message.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_update_state_transitions() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Happy path: pending → restoring → ok.
+        let happy = sample_row("wak_happy", "sbx_happy", "hst_owner_a");
+        db.insert_wake_job(&happy).await.unwrap();
+        let after_insert = db
+            .get_wake_job("wak_happy")
+            .await
+            .unwrap()
+            .expect("inserted");
+
+        let n = db
+            .update_wake_job_state(
+                "wak_happy",
+                WakeJobState::Restoring,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("update to restoring");
+        assert_eq!(n, 1);
+        let mid = db.get_wake_job("wak_happy").await.unwrap().unwrap();
+        assert_eq!(mid.state, WakeJobState::Restoring);
+        assert!(
+            mid.updated_at_secs >= after_insert.updated_at_secs,
+            "updated_at must move forward (or equal under low resolution)"
+        );
+        assert!(mid.ready_at_secs.is_none(), "ready_at unset until ok");
+        assert!(mid.agent_url.is_none(), "agent_url unset until provided");
+
+        let n = db
+            .update_wake_job_state(
+                "wak_happy",
+                WakeJobState::Ok,
+                None,
+                None,
+                Some("http://10.0.0.1:7000"),
+            )
+            .await
+            .expect("update to ok");
+        assert_eq!(n, 1);
+        let done = db.get_wake_job("wak_happy").await.unwrap().unwrap();
+        assert_eq!(done.state, WakeJobState::Ok);
+        assert!(done.is_state_terminal());
+        assert!(
+            done.ready_at_secs.is_some(),
+            "ready_at must be set on transition to ok"
+        );
+        assert_eq!(done.agent_url.as_deref(), Some("http://10.0.0.1:7000"));
+
+        // Fail path: separate row, pending → failed with code + message.
+        let bad = sample_row("wak_bad", "sbx_bad", "hst_owner_b");
+        db.insert_wake_job(&bad).await.unwrap();
+        let n = db
+            .update_wake_job_state(
+                "wak_bad",
+                WakeJobState::Failed,
+                Some(WakeErrorCode::LivezTimeout),
+                Some("agent /livez never returned 200 within 30s"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let dead = db.get_wake_job("wak_bad").await.unwrap().unwrap();
+        assert_eq!(dead.state, WakeJobState::Failed);
+        assert_eq!(dead.error_code, Some(WakeErrorCode::LivezTimeout));
+        assert_eq!(
+            dead.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s")
+        );
+
+        // Update of a non-existent row affects 0 rows (caller treats
+        // as 404).
+        let n = db
+            .update_wake_job_state(
+                "wak_does_not_exist",
+                WakeJobState::Ok,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// Idempotency lookup: returns the non-terminal row for a
+    /// sandbox; returns None once the row has terminated (ok or
+    /// failed).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_find_pending_for_sandbox() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let sid = "sbx_idempotency_target";
+        // No row at all → None.
+        let none = db.find_pending_wake_for_sandbox(sid).await.unwrap();
+        assert!(none.is_none());
+
+        // Insert a pending row → find returns it.
+        let row = sample_row("wak_idemp_first", sid, "hst_owner_a");
+        db.insert_wake_job(&row).await.unwrap();
+        let found = db
+            .find_pending_wake_for_sandbox(sid)
+            .await
+            .unwrap()
+            .expect("must find pending");
+        assert_eq!(found.wake_id, "wak_idemp_first");
+
+        // Advance to terminal (ok) → find no longer returns it.
+        db.update_wake_job_state(
+            "wak_idemp_first",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://1.2.3.4:7000"),
+        )
+        .await
+        .unwrap();
+        let after_ok = db.find_pending_wake_for_sandbox(sid).await.unwrap();
+        assert!(
+            after_ok.is_none(),
+            "terminal row must NOT match find_pending; got {:?}",
+            after_ok.map(|r| r.wake_id)
+        );
+
+        // Failed is also terminal.
+        let row2 = sample_row("wak_idemp_second", sid, "hst_owner_a");
+        db.insert_wake_job(&row2).await.unwrap();
+        db.update_wake_job_state(
+            "wak_idemp_second",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::Internal),
+            Some("synthesised failure"),
+            None,
+        )
+        .await
+        .unwrap();
+        let after_fail = db.find_pending_wake_for_sandbox(sid).await.unwrap();
+        assert!(after_fail.is_none());
+    }
+
+    /// GC: terminal rows older than the threshold are deleted; rows
+    /// in non-terminal states are NEVER deleted (those are handled by
+    /// PR2's takeover sweep).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_gc_expired_terminal_only() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Insert three rows: one ok, one failed, one pending.
+        for (id, sid) in [
+            ("wak_gc_ok", "sbx_gc_a"),
+            ("wak_gc_failed", "sbx_gc_b"),
+            ("wak_gc_pending", "sbx_gc_c"),
+        ] {
+            let row = sample_row(id, sid, "hst_gc_owner");
+            db.insert_wake_job(&row).await.unwrap();
+        }
+        db.update_wake_job_state(
+            "wak_gc_ok",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        db.update_wake_job_state(
+            "wak_gc_failed",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::Internal),
+            Some("synth"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // GC with a future-tense threshold (1 hour). Nothing should
+        // be old enough; the pending row is non-terminal and so
+        // safe regardless.
+        let n = db
+            .gc_expired_wake_jobs(StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "GC with 1 h threshold must not delete any fresh rows"
+        );
+
+        // GC with a 0-second threshold: every TERMINAL row qualifies.
+        // The pending row must survive.
+        let n = db
+            .gc_expired_wake_jobs(StdDuration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            n, 2,
+            "0-secs GC must delete both terminal rows (ok + failed)"
+        );
+
+        // Verify the surviving row.
+        assert!(db.get_wake_job("wak_gc_pending").await.unwrap().is_some());
+        assert!(db.get_wake_job("wak_gc_ok").await.unwrap().is_none());
+        assert!(db.get_wake_job("wak_gc_failed").await.unwrap().is_none());
+    }
+
+    /// Migration target version matches the binary's
+    /// LATEST_MIGRATION_VERSION (smoke check that 0009 actually
+    /// applied — the CHECK constraint on `state` is the proof; an
+    /// INSERT with a junk state must fail).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_state_check_constraint_enforced() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Reach into pg directly — `insert_wake_job` only accepts
+        // typed `WakeJobState`. We want to prove the SCHEMA rejects
+        // an out-of-domain literal, not the Rust enum.
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+
+        let res = client
+            .execute(
+                "INSERT INTO sandbox.wake_jobs (wake_id, sandbox_id, state, lessee) \
+                 VALUES ('wak_bad_state', 'sbx_x', 'totally_invalid', 'hst_y')",
+                &[],
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "INSERT with junk state must violate the CHECK constraint"
+        );
+    }
+}
+
+// Convenience accessor so tests can spell `row.is_state_terminal()`
+// instead of `row.state.is_terminal()` — pure ergonomics, no
+// state-machine semantics involved.
+trait WakeJobRowExt {
+    fn is_state_terminal(&self) -> bool;
+}
+
+impl WakeJobRowExt for zeroship_sandbox::db::WakeJobRow {
+    fn is_state_terminal(&self) -> bool {
+        self.state.is_terminal()
+    }
+}
