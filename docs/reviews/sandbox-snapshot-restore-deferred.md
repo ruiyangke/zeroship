@@ -1676,4 +1676,24 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R16-API1] CLOSED at `17e9f421` + `98032273` — failed-poll body uses §10.0 `error`/`message` keys (not pre-review `error_code`/`error_message`); all WakeErrorCode variants render via `wire_code()` reusing existing envelope codes (no parallel codes); idempotency replay matrix encoded in the handler (202 + replay:true for in-flight; new wake_id for terminal-evicted); `sandbox_wake_sync_uses_total` counter backs the Phase 5 migration gate.
 - [R16-API2] CLOSED at `17e9f421` — typed_id `wak_` 3-char prefix added to `crates/core/src/typed_id.rs`; roundtrip + prefix-length tests pin the global `[a-z]{3}_` invariant.
 - [R16-API3] CLOSED at `98032273` — idempotency status-code matrix encoded in `wake_sandbox_async_inner`: first POST → 202 fresh wake_id; replay in-flight → 202 same wake_id + `replay: true`; post-eviction → 202 fresh wake_id (terminal-within-T_KEEP replay surfaces through GET, not POST).
-- **PR3 (next cycle)**: cluster smoke validation under `SANDBOX_WAKE_RESPONSE_MODE=async` — c=1/c=20 stress with the polling client (snapshot_stress.py update). Smoke-r12 confirms WAKE OK 1/1 at fence=30 (the empirical scenario C-8c declared structurally out of knobs).
+
+## Round-17 PR2-FOLLOWUP closures (2026-05-25 — C-7-LT-PR2-FOLLOWUP)
+
+- [C-7-LT-PR2-FOLLOWUP] **LANDED** across 5 commits closing the 10 r17/r18 gates against PR1+PR2's surface:
+  - `96678eaa` — `sandbox/db: bump lessee_updated_at in update_wake_job_state + symmetric COALESCE (R17-A1, R17-I2)` — every state transition now renews the lease (no more stolen-mid-flight races on the wake-job takeover sweep) and `error_code` / `error_message` / `agent_url` all use `COALESCE($N, col)` symmetrically (None preserves, Some overwrites — fixes the asymmetric NULL-on-replay bug).
+  - `fa4fe63c` — `sandbox/migrations: 0010 — revoke audit SELECT + add lessee index + agent_url CHECK (R16-S1, R17-A2, R16-S3)` — REVOKES the 0009 stray grant on `sandbox_audit`, adds `wake_jobs_lessee_idx` (partial on `lessee_updated_at` filtered to non-terminal), adds column-level CHECK on `agent_url` (`^https?://[a-zA-Z0-9._:/-]+$`). `LATEST_MIGRATION_VERSION` bumped 9 → 10.
+  - `b2b6c3c9` — `sandbox/wake_machine: sanitize error_message before pg write (R16-S2)` — `sanitize_error_message` (RFC1918 IPv4 / IPv6 link-local / agent-URL stripping + 256-byte truncation; hand-rolled byte scan to keep `regex` out of the crate-graph) wraps the terminal-failed branch's pg write. Operator log still gets the unredacted message.
+  - `4ab58eac` — `sandbox/config: WakeResponseMode fail-CLOSED + retention config (R16-S4, R16-S5)` — `from_env` returns `Result<Self, String>`; unrecognised values abort boot. Adds `WakeLifecycleConfig::wake_jobs_gc_retention_secs` (env `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`, default 300 s, minimum 1 s) wired through to `sweep::run_wake_jobs_gc_once`.
+  - `c3038389` — `sandbox/lib: rename snap-health-loop → snap-health + add 15-byte name pin test (R17-I1)` — renames `snap-health-loop` (16 B, silently kernel-truncated) to `snap-health` (11 B). Adds `detach::tests::all_known_thread_names_fit_kernel_limit` pinning all current literals + format-string prefixes to ≤15 B.
+- [R17-A1] CLOSED at `96678eaa` — `update_wake_job_state` SQL bumps `lessee_updated_at = now()` on every transition.
+- [R17-A2] CLOSED at `fa4fe63c` — `wake_jobs_lessee_idx` partial index added in 0010.
+- [R17-I1] CLOSED at `c3038389` — thread name renamed; pin test added.
+- [R17-I2] CLOSED at `96678eaa` — symmetric COALESCE on `error_code`/`error_message`/`agent_url`.
+- [R16-S1] CLOSED at `fa4fe63c` — `sandbox_audit` SELECT on `wake_jobs` REVOKED in 0010.
+- [R16-S2] CLOSED at `b2b6c3c9` — `sanitize_error_message` applied at the terminal-failed pg write site.
+- [R16-S3] CLOSED at `fa4fe63c` — column-level CHECK on `agent_url` shape.
+- [R16-S4] CLOSED at `4ab58eac` — `from_env` fail-CLOSED on unrecognised values.
+- [R16-S5] CLOSED at `4ab58eac` — `wake_jobs_gc_retention_secs` env-driven through `WakeLifecycleConfig`.
+- R17-A5 is being closed in a separate fixer running against `nomad_ch.rs::CreateGuard::drop` (not touched here).
+- Sandbox lib tests: 374 → 396 (+22). All pg-gated tests still gated; build clean release.
+- **PR3 (next cycle, formerly listed at PR2): cluster smoke validation under `SANDBOX_WAKE_RESPONSE_MODE=async`** — c=1/c=20 stress with the polling client (snapshot_stress.py update). Smoke-r12 confirms WAKE OK 1/1 at fence=30 (the empirical scenario C-8c declared structurally out of knobs).
