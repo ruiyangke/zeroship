@@ -92,6 +92,58 @@ pub enum RestoreHandlerError {
     Internal(String),
 }
 
+/// C-4 fix (T-8b-smoke-r5 cluster review, 2026-05-25): bounded retry
+/// policy used by [`restore_sandbox`] when the source vm_index is
+/// momentarily held by an in-flight source-teardown.
+///
+/// The snapshot endpoint returns 200 **as soon as the artifact is on
+/// disk** and detaches `teardown_source_for_snapshot`. That detached
+/// task keeps `vm_index` reserved until the host-fence clears
+/// (`host_fence_timeout_secs`, default 30–120 s) + the Nomad job is
+/// purged (~30 s). A wake arriving in the millisecond range after the
+/// snapshot response races that detached teardown and the v1 sticky
+/// allocator (`reserve_vm_index(snap.vm_index)`) rejects.
+///
+/// Fix shape: **caller-side bounded retry**. The reserve is
+/// idempotent and cheap (a single mutex `.reserve()` call against
+/// `VmIndexAllocator`), so polling until the teardown releases the
+/// slot is correct *and* preserves the host-fence invariant (we do
+/// not race the fence — we wait for it).
+///
+/// Why caller-side retry rather than:
+/// - (a) snapshot blocks until teardown done — would push snapshot p50
+///   from ~6 s to ~50–90 s. Bad SLO.
+/// - (b) cross-slot fallback (drop sticky) — requires plumbing an
+///   `alloc()` path through the trait + breaks the v1 § 5.0/§ 5.1
+///   sticky contract callers depend on (cache warmth + `snap.vm_index`
+///   as a wire authority).
+/// - (c) decouple vm_index release from host-fence — host_fence is
+///   the *primary* FM-F defense against handing a live IP to a new
+///   tenant; releasing the slot before the fence clears reopens that
+///   race for any concurrent CREATE.
+///
+/// Default budget: 60 attempts × 2 s interval = **~120 s total**,
+/// which envelopes the worst observed teardown wall-time (90 s) plus
+/// a margin for fence p99 in busy clusters.
+#[derive(Debug, Clone, Copy)]
+pub struct VmIndexRetryPolicy {
+    /// Maximum number of reserve attempts before giving up and
+    /// returning `VmIndexUnavailable`. 1 = no retries (first attempt
+    /// is decisive).
+    pub max_attempts: u32,
+    /// Wall time slept between attempts. Fixed (not exponential) —
+    /// the slot frees on a roughly-deterministic ~90 s timeline; the
+    /// added jitter of exponential backoff would mostly miss the
+    /// release window.
+    pub interval: Duration,
+}
+
+impl Default for VmIndexRetryPolicy {
+    fn default() -> Self {
+        Self { max_attempts: 60, interval: Duration::from_secs(2) }
+    }
+}
+
 /// Pieces of the production backend the restore handler touches.
 /// Kept behind a trait so the v1 unit tests can inject a stub
 /// without dragging the entire `NomadCHBackend` into scope. The
@@ -99,9 +151,11 @@ pub enum RestoreHandlerError {
 /// `submit_nomad_job` + `wait_for_agent_livez`.
 pub trait RestoreBackend: Send + Sync {
     /// Reserve `vm_index` (the source slot) on this worker. Returns
-    /// `Ok(())` on success; `Err(_)` if the slot is already held
-    /// (cluster-fallback path; v1 doesn't try sibling workers and
-    /// surfaces this as 503 immediately).
+    /// `Ok(())` on success; `Err(_)` if the slot is already held.
+    /// C-4 fix: callers (see [`restore_sandbox`]) now retry on Err
+    /// per [`Self::vm_index_retry_policy`] before surfacing as 503,
+    /// so the source-teardown's ~90 s vm_index hold no longer races
+    /// the wake-immediately-after-snapshot client request.
     fn reserve_vm_index(&self, vm_index: i16) -> Result<(), String>;
 
     /// Release a previously-reserved vm_index. Idempotent.
@@ -185,6 +239,70 @@ pub trait RestoreBackend: Send + Sync {
     /// Silent fail-OPEN. Removing the default forces every impl
     /// (including test stubs) to provide a real URL at compile time.
     fn derive_agent_url(&self, vm_index: i16) -> String;
+
+    /// C-4 fix (T-8b-smoke-r5 cluster review): policy the wake path
+    /// uses to retry [`Self::reserve_vm_index`] while the source's
+    /// detached teardown still holds the slot. Default budget is
+    /// ~120 s, which envelopes the worst observed source-teardown
+    /// wall-time (host_fence ~60 s + Nomad purge ~30 s). Backends with
+    /// a different teardown profile (test stubs, k8s) override.
+    fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
+        VmIndexRetryPolicy::default()
+    }
+}
+
+/// C-4 fix helper: bounded-retry wrapper around
+/// [`RestoreBackend::reserve_vm_index`]. Polls the allocator on a
+/// [`VmIndexRetryPolicy`] cadence; once the source-teardown releases
+/// the slot the next attempt succeeds. Surfaces 503 with the same
+/// wire shape as before only after exhausting the budget.
+///
+/// Extracted from `do_restore_inner` so the retry loop is testable
+/// without a Postgres-backed restore flow. The DB-driven happy/sad
+/// paths cover the integration; this helper's unit tests pin the
+/// loop semantics (succeeds-after-N, exhausts cleanly, single-shot
+/// when slot is free).
+pub(crate) async fn reserve_vm_index_with_retry(
+    backend: &dyn RestoreBackend,
+    sandbox_id: Uuid,
+    vm_index: i16,
+) -> Result<(), RestoreHandlerError> {
+    let retry = backend.vm_index_retry_policy();
+    let attempts = retry.max_attempts.max(1);
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=attempts {
+        match backend.reserve_vm_index(vm_index) {
+            Ok(()) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        sandbox_id = %sandbox_id,
+                        vm_index = vm_index,
+                        attempts = attempt,
+                        "restore/wake: vm_index reserved after retry \
+                         (raced source-teardown release)"
+                    );
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < attempts {
+                    compio::time::sleep(retry.interval).await;
+                }
+            }
+        }
+    }
+    tracing::warn!(
+        sandbox_id = %sandbox_id,
+        vm_index = vm_index,
+        attempts = attempts,
+        budget_ms = %(retry.interval.as_millis() as u64
+            * u64::from(attempts.saturating_sub(1))),
+        last_error = %last_err.as_deref().unwrap_or("<unknown>"),
+        "restore/wake: vm_index reserve exhausted retry budget; \
+         source-teardown still holding the slot — surfacing 503"
+    );
+    Err(RestoreHandlerError::VmIndexUnavailable { requested: vm_index })
 }
 
 /// Restore a snapshotted sandbox. See module doc for the full flow.
@@ -385,9 +503,18 @@ async fn do_restore_inner(
     // 3 (cont). Reserve vm_index. v1: source slot only. § 5.1
     // "v1 forces vm_index = source vm_index"; cross-worker fallback
     // is documented but not implemented in v1.
-    backend
-        .reserve_vm_index(snap.vm_index)
-        .map_err(|_| RestoreHandlerError::VmIndexUnavailable { requested: snap.vm_index })?;
+    //
+    // **C-4 fix** (T-8b-smoke-r5 cluster review, 2026-05-25): the
+    // snapshot endpoint detaches `teardown_source_for_snapshot`,
+    // which holds the source slot for ~90 s (host_fence + Nomad
+    // purge). A wake arriving ms after the snapshot response used to
+    // 503 immediately (sticky alloc refused the busy slot). We now
+    // retry the reserve on a bounded budget (see
+    // [`VmIndexRetryPolicy`]); the slot frees as soon as the
+    // detached teardown's `release()` fires. Total budget defaults
+    // to ~120 s; exhaustion still surfaces as 503 with the same
+    // wire shape.
+    reserve_vm_index_with_retry(backend.as_ref(), sandbox_id, snap.vm_index).await?;
 
     let alloc_dir = backend.restore_alloc_dir(sandbox_id);
     if alloc_dir.exists() {
@@ -727,6 +854,17 @@ pub struct StubRestoreBackend {
     pub fail_reserve: bool,
     pub fail_submit: bool,
     pub fail_livez: bool,
+    /// C-4 fix: tunable retry policy. Tests that want to exercise the
+    /// retry loop (e.g. "succeeds after N attempts") configure this;
+    /// the default keeps `fail_reserve` tests fast by limiting to a
+    /// single attempt with zero sleep.
+    pub vm_index_retry_policy: VmIndexRetryPolicy,
+    /// C-4 fix: when `Some(N)`, the Nth call to `reserve_vm_index`
+    /// (1-indexed) flips from Err to Ok. Lets tests simulate the
+    /// source-teardown finally releasing the slot after a few
+    /// retries.
+    pub reserve_succeeds_on_attempt: Option<u32>,
+    pub reserve_attempts: std::sync::atomic::AtomicU32,
 }
 
 impl StubRestoreBackend {
@@ -741,12 +879,39 @@ impl StubRestoreBackend {
             fail_reserve: false,
             fail_submit: false,
             fail_livez: false,
+            // Default: single attempt, zero sleep — keeps existing
+            // tests (notably `fail_reserve = true`) fast.
+            vm_index_retry_policy: VmIndexRetryPolicy {
+                max_attempts: 1,
+                interval: Duration::from_millis(0),
+            },
+            reserve_succeeds_on_attempt: None,
+            reserve_attempts: std::sync::atomic::AtomicU32::new(0),
         }
     }
 }
 
 impl RestoreBackend for StubRestoreBackend {
     fn reserve_vm_index(&self, vm_index: i16) -> Result<(), String> {
+        let n = self
+            .reserve_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        // C-4 fix: "succeeds-after-N" override. Lets tests simulate
+        // the source-teardown releasing the slot after a few wake
+        // retries.
+        if let Some(target) = self.reserve_succeeds_on_attempt {
+            if n < target {
+                return Err(format!(
+                    "stub: reserve_vm_index({vm_index}) still held by source-teardown (attempt {n})"
+                ));
+            }
+            self.reserved
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(vm_index);
+            return Ok(());
+        }
         if self.fail_reserve {
             return Err(format!("stub: reserve_vm_index({vm_index}) cluster-exhausted"));
         }
@@ -755,6 +920,9 @@ impl RestoreBackend for StubRestoreBackend {
             .unwrap_or_else(|p| p.into_inner())
             .push(vm_index);
         Ok(())
+    }
+    fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
+        self.vm_index_retry_policy
     }
     fn release_vm_index(&self, vm_index: i16) {
         self.released
@@ -870,6 +1038,151 @@ mod unit_tests {
         assert_eq!(v["disks"][0]["path"], source_disk);
         assert_eq!(v["serial"]["file"], source_serial);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── C-4 fix (T-8b-smoke-r5 cluster review, 2026-05-25) ─────
+    //
+    // Pin the wake-vs-source-teardown race fix. The snapshot endpoint
+    // returns 200 once the artifact is on disk and detaches a teardown
+    // task that holds `vm_index` for ~90 s (host_fence + Nomad purge).
+    // Pre-fix wake arrived ms later and immediately surfaced 503; now
+    // it retries on a bounded budget. These four tests pin:
+    //   - succeeds after N retries when the slot finally frees,
+    //   - exhausts the budget cleanly when the slot never frees,
+    //   - single-shot when the slot was free from the start (cache-warm
+    //     sticky preserved),
+    //   - the default policy envelopes the observed teardown profile.
+
+    /// C-4 #1: wake retries until source slot frees.
+    /// Stub backend's `reserve_vm_index` returns Err for the first 2
+    /// attempts (simulating the detached teardown still holding the
+    /// slot) and Ok on the 3rd. The retry loop must succeed.
+    #[compio::test]
+    async fn c4_wake_retries_until_source_slot_frees() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-c4-retry-frees-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut stub = StubRestoreBackend::new(root.clone());
+        stub.vm_index_retry_policy = VmIndexRetryPolicy {
+            max_attempts: 5,
+            interval: Duration::from_millis(10),
+        };
+        stub.reserve_succeeds_on_attempt = Some(3);
+        let sid = Uuid::now_v7();
+        let started = Instant::now();
+        let res = reserve_vm_index_with_retry(&stub, sid, 4).await;
+        let elapsed = started.elapsed();
+        res.expect("wake must succeed within the retry budget");
+        // Three attempts, two sleeps of 10 ms → ≥ ~20 ms; ≤ a generous
+        // ceiling that absorbs scheduler jitter on busy CI.
+        assert!(
+            elapsed >= Duration::from_millis(15),
+            "expected at least one inter-attempt sleep; elapsed={:?}",
+            elapsed
+        );
+        assert_eq!(
+            stub.reserve_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "expected exactly 3 reserve attempts"
+        );
+        let reserved = stub.reserved.lock().unwrap().clone();
+        assert_eq!(reserved, vec![4], "slot must be reserved on success");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C-4 #2: wake fails cleanly with a 503-shaped error if the slot
+    /// never frees within the retry budget. Pins the operator-visible
+    /// surface (`VmIndexUnavailable { requested: N }`).
+    #[compio::test]
+    async fn c4_wake_fails_if_slot_never_frees_within_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-c4-exhaust-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut stub = StubRestoreBackend::new(root.clone());
+        stub.fail_reserve = true; // never succeeds
+        stub.vm_index_retry_policy = VmIndexRetryPolicy {
+            max_attempts: 4,
+            interval: Duration::from_millis(5),
+        };
+        let sid = Uuid::now_v7();
+        let res = reserve_vm_index_with_retry(&stub, sid, 9).await;
+        let err = res.expect_err("must surface 503 after exhausting budget");
+        assert!(
+            matches!(err, RestoreHandlerError::VmIndexUnavailable { requested: 9 }),
+            "expected VmIndexUnavailable{{requested:9}}, got {err:?}"
+        );
+        assert_eq!(
+            stub.reserve_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "must consume the full attempt budget before surfacing 503"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C-4 #3: wake takes a single attempt when the source slot is
+    /// already free. Pins the sticky-cache-warm fast path — no
+    /// unnecessary sleep, no extra reserve calls.
+    #[compio::test]
+    async fn c4_wake_uses_single_attempt_when_slot_free() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-c4-fastpath-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut stub = StubRestoreBackend::new(root.clone());
+        // Generous retry budget — if the slot is free we should NOT
+        // use any of it.
+        stub.vm_index_retry_policy = VmIndexRetryPolicy {
+            max_attempts: 10,
+            interval: Duration::from_millis(500),
+        };
+        let sid = Uuid::now_v7();
+        let started = Instant::now();
+        reserve_vm_index_with_retry(&stub, sid, 2)
+            .await
+            .expect("free slot must succeed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "free-slot fast path must not sleep; elapsed={:?}",
+            elapsed
+        );
+        assert_eq!(
+            stub.reserve_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one reserve attempt on a free slot"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C-4 #4: the default `VmIndexRetryPolicy` envelopes the worst
+    /// observed source-teardown wall time (host_fence ~60 s + Nomad
+    /// purge ~30 s = 90 s) reported in T-8b-smoke-r5. If somebody
+    /// shrinks the default below the observed teardown profile the
+    /// production race re-opens; this test guards the envelope.
+    #[test]
+    fn c4_default_policy_envelopes_observed_teardown() {
+        let p = VmIndexRetryPolicy::default();
+        let total_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            total_ms >= 90_000,
+            "default retry budget must envelope the 90 s teardown profile; \
+             current = {} ms (attempts={}, interval={:?})",
+            total_ms,
+            p.max_attempts,
+            p.interval
+        );
     }
 }
 
