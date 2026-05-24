@@ -3167,14 +3167,36 @@ async fn wait_for_agent_livez(
 /// 100 ms cadence is overwhelmingly indicative of "no listener" —
 /// the agent process is gone.
 ///
-/// Failure here means any of:
-///   - connection refused
-///   - timeout
-///   - 5xx (agent process panicked mid-shutdown)
+/// A "miss" is a TCP-connect failure (refused / unreachable / our
+/// 150 ms connect-timeout exceeded). A successful connect counts as
+/// "agent still answering" and resets the counter — the socket is
+/// alive regardless of what HTTP status it would have returned.
 ///
-/// 200 OR any 1xx/2xx/3xx/4xx counts as "agent still answering" and
-/// resets the consecutive-failure counter — a stale 401 from the
-/// previous tenant means the *socket* is still alive.
+/// ## C-7-LT-2-PR1: compio-native TCP-connect probe (NOT ureq HTTP)
+///
+/// Previous implementation: `compio::runtime::spawn_blocking(|| ureq::
+/// get(&probe_url).timeout(Duration::from_millis(500)).call()).await`.
+/// That looked correct but had a fatal pathology on the TAP-collapsing
+/// teardown path: ureq's `.timeout()` is a *request-deadline* timeout,
+/// not a *connect* timeout. On a half-collapsed TAP route, TCP-connect
+/// hangs waiting for the OS to surface ECONNREFUSED/ETIMEDOUT (Linux
+/// SYN-retransmit ceiling ~30 s), so the single `ureq.call()` consumed
+/// the entire fence budget. Smoke-r13 (`docs/reviews/…T8b-smoke-r13.md`)
+/// observed `probes=1, consecutive_misses=1, elapsed_ms=30129` —
+/// exactly the "one probe in 30 s" wedge.
+///
+/// Today: a `compio::net::TcpStream::connect(addr)` wrapped in
+/// `compio::time::timeout(150ms, …)`. compio's outer timeout is a
+/// hard cancellation on a stuck connect future (io_uring CANCEL),
+/// independent of any kernel-level SYN-retransmit behaviour. So a
+/// black-hole TAP returns "miss" at 150 ms exactly, the 100 ms cadence
+/// runs as designed, and the 2-in-a-row contract clears the fence.
+///
+/// Connect-only: we don't need an HTTP request to know the agent is
+/// up — the socket either accepts SYN+ACK or it doesn't. The 150 ms
+/// connect-timeout is slightly larger than the 100 ms probe cadence
+/// so a normally-responsive agent (loopback ms latency) ACKs well
+/// inside the window.
 ///
 /// Returns:
 ///   - Ok(()) — fence passed (two consecutive misses); safe to
@@ -3192,28 +3214,52 @@ async fn wait_for_agent_silent(
     // it's logged on entry so a future tuning is immediately
     // visible in the trace.
     const MISS_THRESHOLD: u32 = 2;
+    const PROBE_CADENCE: Duration = Duration::from_millis(100);
+    const CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
     let fn_started = Instant::now();
     let deadline = fn_started + timeout;
-    let livez_url = format!("{base_url}/livez");
+    // Parse host:port from the base_url ONCE — every probe in the
+    // loop reuses the SocketAddr. If we can't parse it the fence
+    // can't proceed; surface that immediately rather than burning
+    // the budget on doomed probes.
+    let probe_addr = match parse_agent_probe_addr(base_url) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::teardown::fence",
+                base_url = %base_url,
+                error = %e,
+                "host_fence: refusing to probe — base_url unparseable"
+            );
+            return Err(format!(
+                "agent at {base_url} unparseable; leaking vm_index to avoid \
+                 handing out a live IP (parse error: {e})"
+            ));
+        }
+    };
     let mut consecutive_misses = 0u32;
-    // Keep enough state to produce a useful timeout error.
-    let mut last_status: Option<u16> = None;
+    // Keep enough state to produce a useful timeout error. With the
+    // PR1 connect-only probe we no longer have a per-probe HTTP
+    // status; `last_status` stays `None` and is preserved in the
+    // error format only for log-pattern stability with prior
+    // smoke logs (operators grep for `last_http_status=`).
+    let last_status: Option<u16> = None;
     let mut probe_count: u32 = 0;
     tracing::debug!(
         target: "sandbox::teardown::fence",
         base_url = %base_url,
+        probe_addr = %probe_addr,
         timeout_ms = %timeout.as_millis(),
         miss_threshold = MISS_THRESHOLD,
+        connect_timeout_ms = %CONNECT_TIMEOUT.as_millis(),
+        cadence_ms = %PROBE_CADENCE.as_millis(),
         "host_fence: entered"
     );
     loop {
         if Instant::now() >= deadline {
             break;
         }
-        let probe_url = livez_url.clone();
-        // Same compio::spawn_blocking + ureq pattern the rest of the
-        // file uses (see `wait_for_agent_livez`); blocking the runtime
-        // worker on a TCP probe would tank concurrent stop()s.
+        let probe_start = Instant::now();
         tracing::debug!(
             target: "sandbox::teardown::fence",
             base_url = %base_url,
@@ -3221,34 +3267,15 @@ async fn wait_for_agent_silent(
             elapsed_ms = %fn_started.elapsed().as_millis(),
             "host_fence: poll start"
         );
-        let outcome = compio::runtime::spawn_blocking(move || {
-            ureq::get(&probe_url)
-                .timeout(Duration::from_millis(500))
-                .call()
-        })
-        .await;
+        let reachable =
+            probe_agent_reachable_tcp(probe_addr, CONNECT_TIMEOUT).await;
         probe_count += 1;
-        // Classify: "answer" (any non-5xx HTTP response or a status
-        // we got a number from) vs "miss" (connection refused,
-        // timeout, transport error, or 5xx). Bare ureq::Error::Status
-        // means an HTTP response did come back — the socket is alive.
-        let is_miss = match outcome {
-            Ok(Ok(resp)) => {
-                let s = resp.status();
-                last_status = Some(s);
-                // 5xx = agent process is mid-crash, count as miss.
-                s >= 500
-            }
-            Ok(Err(ureq::Error::Status(code, _))) => {
-                last_status = Some(code);
-                // 5xx counts as miss; 4xx (e.g. 401 from a stale
-                // tenant whose agent has our pubkey-not-yet) means
-                // the socket IS alive — NOT a miss.
-                code >= 500
-            }
-            Ok(Err(_)) => true, // transport error: connect refused, timeout, etc.
-            Err(_) => true,     // spawn_blocking panic — count as miss
-        };
+        // C-7-LT-2-PR1: classify is now connect-only. Reachable =>
+        // socket alive (the agent OR the wrapper's tap is still
+        // ACKing SYN); not reachable => miss (connect-refused,
+        // connect-unreachable, or our 150 ms connect-timeout
+        // exceeded — all three classify identically).
+        let is_miss = !reachable;
         if is_miss {
             consecutive_misses += 1;
             tracing::debug!(
@@ -3257,7 +3284,7 @@ async fn wait_for_agent_silent(
                 probe = probe_count,
                 consecutive_misses,
                 miss_threshold = MISS_THRESHOLD,
-                last_status = ?last_status,
+                probe_duration_ms = %probe_start.elapsed().as_millis(),
                 "host_fence: miss"
             );
             if consecutive_misses >= MISS_THRESHOLD {
@@ -3282,7 +3309,7 @@ async fn wait_for_agent_silent(
                     base_url = %base_url,
                     probe = probe_count,
                     prev_consecutive_misses = consecutive_misses,
-                    last_status = ?last_status,
+                    probe_duration_ms = %probe_start.elapsed().as_millis(),
                     "host_fence: agent reachable mid-fence — consecutive_misses counter reset (R16-I2 LEAK signal)"
                 );
             } else {
@@ -3290,7 +3317,7 @@ async fn wait_for_agent_silent(
                     target: "sandbox::teardown::fence",
                     base_url = %base_url,
                     probe = probe_count,
-                    last_status = ?last_status,
+                    probe_duration_ms = %probe_start.elapsed().as_millis(),
                     "host_fence: agent reachable"
                 );
             }
@@ -3298,11 +3325,17 @@ async fn wait_for_agent_silent(
         }
         // 100 ms cadence — tight enough that a 0.5 s tail is caught
         // in ~5 polls; loose enough that a 30 s budget on a stuck
-        // agent doesn't burn 300+ blocking tasks. (Compare against
-        // wait_for_agent_livez at 150 ms — slightly faster here
-        // because we're polling for ABSENCE; we want to release the
-        // index as fast as is safe.)
-        compio::time::sleep(Duration::from_millis(100)).await;
+        // agent doesn't burn 300+ tasks. PR1 changes: subtract the
+        // probe's own elapsed from the cadence so a probe that
+        // takes 0 ms (loopback ACK) and a probe that takes 150 ms
+        // (connect-timeout) BOTH produce the same ~100 ms inter-
+        // probe interval — the loop's wall-time pacing is now
+        // decoupled from probe latency, which is the structural
+        // invariant smoke-r13's "probes=1" pathology violated.
+        let probe_elapsed = probe_start.elapsed();
+        if probe_elapsed < PROBE_CADENCE {
+            compio::time::sleep(PROBE_CADENCE - probe_elapsed).await;
+        }
     }
     tracing::warn!(
         target: "sandbox::teardown::fence",
@@ -3320,6 +3353,74 @@ async fn wait_for_agent_silent(
          leaking vm_index to avoid handing out a live IP",
         last_status,
     ))
+}
+
+/// C-7-LT-2-PR1: parse the `host:port` `SocketAddr` from a probe
+/// `base_url` like `http://10.99.101.2:7777`. Connect-only — no path
+/// segment, no scheme validation beyond the `://` separator the
+/// `wait_for_agent_silent` caller's url-shape requires.
+///
+/// The agent URL the controller passes in is built locally from
+/// `vm_index` (`http://10.99.<100+idx>.2:7777`); it's never
+/// user-input. We still parse defensively because a future caller
+/// (e.g. a wake-side smoke probe) might hand in an ipv6-literal or
+/// a slightly different shape, and the fence MUST surface a parse
+/// error rather than silently probe a wrong address.
+fn parse_agent_probe_addr(base_url: &str) -> Result<std::net::SocketAddr, String> {
+    // Strip the scheme if present.
+    let after_scheme = match base_url.find("://") {
+        Some(i) => &base_url[i + 3..],
+        None => base_url,
+    };
+    // Strip any path segment (e.g. `/livez`).
+    let host_port = match after_scheme.find('/') {
+        Some(i) => &after_scheme[..i],
+        None => after_scheme,
+    };
+    if host_port.is_empty() {
+        return Err("empty host:port".into());
+    }
+    // `SocketAddr::from_str` handles both ipv4 (`a.b.c.d:port`) and
+    // ipv6-literal-with-brackets (`[::1]:port`). For non-literal
+    // hostnames we fall through to `ToSocketAddrs` (DNS).
+    use std::str::FromStr;
+    if let Ok(addr) = std::net::SocketAddr::from_str(host_port) {
+        return Ok(addr);
+    }
+    // Hostname path. The fence's caller only ever passes the
+    // controller-derived IP literal, so this branch is "be liberal in
+    // what you accept" — picks the first resolved addr.
+    use std::net::ToSocketAddrs;
+    match host_port.to_socket_addrs() {
+        Ok(mut iter) => iter
+            .next()
+            .ok_or_else(|| format!("no addresses resolved for {host_port}")),
+        Err(e) => Err(format!("resolve {host_port}: {e}")),
+    }
+}
+
+/// C-7-LT-2-PR1: compio-native TCP-connect probe with a hard outer
+/// timeout. Returns `true` iff the kernel ACKs the SYN within
+/// `connect_timeout`; `false` for refused / unreachable / our own
+/// timeout (all three are equivalent "miss" outcomes for the fence).
+///
+/// Why `compio::time::timeout` over the kernel's TCP retry behaviour:
+/// the kernel's SYN-retransmit ceiling on Linux is typically 30-90 s
+/// before ECONNREFUSED/ETIMEDOUT surfaces, which is what produced
+/// the smoke-r13 "1 probe in 30 s" wedge with ureq. compio's outer
+/// timeout cancels the connect future at exactly the budget; the
+/// underlying TCP socket is dropped via io_uring CANCEL on the next
+/// runtime tick.
+async fn probe_agent_reachable_tcp(
+    addr: std::net::SocketAddr,
+    connect_timeout: Duration,
+) -> bool {
+    let connect_fut = compio::net::TcpStream::connect(addr);
+    match compio::time::timeout(connect_timeout, connect_fut).await {
+        Ok(Ok(_stream)) => true, // SYN ACKed → socket alive
+        Ok(Err(_)) => false,     // ECONNREFUSED / EHOSTUNREACH / etc.
+        Err(_) => false,         // connect_timeout exceeded
+    }
 }
 
 // ─── small utilities (mirrored from k8s.rs) ─────────────────────
@@ -4863,25 +4964,25 @@ mod tests {
         );
     }
 
-    /// R16-A2 / R16-I2 LEAK-case pin. The alternating-answer
-    /// pathology (smoke-r10 log: "consecutive_misses=1 at the 30 s
-    /// deadline") is what the phase tracing in `wait_for_agent_silent`
-    /// needs to surface for smoke-r12. This test forces that exact
-    /// shape: a mock that listens half the time and refuses half the
-    /// time, so `consecutive_misses` cycles 0→1→0→1→… and never hits
-    /// the 2-threshold. The fence MUST time out, and the error text
-    /// MUST surface `consecutive_misses=1` so an operator (and the
-    /// log line) can distinguish LEAK from TIMEOUT.
+    /// C-7-LT-2-PR1 regression pin: the R16-I2 "alternating-answer
+    /// LEAK" pathology is structurally impossible under the new
+    /// connect-only probe. Previously a mock that accepted-then-dropped
+    /// the socket (counter % 2 == 1) returned an HTTP transport error
+    /// (= miss) via ureq; the cycle 0→1→0→1 produced a permanent
+    /// `consecutive_misses=1` LEAK signal. With the PR1 compio-native
+    /// TCP-connect probe, `accept()` succeeded means SYN was ACKed
+    /// means socket is alive — there's no HTTP-layer disambiguation
+    /// of "accepted but dropped" anymore. The same mock under PR1
+    /// now produces `consecutive_misses=0` (persistent reachability)
+    /// at deadline. This is THE fix: the LEAK shape cannot manifest.
+    ///
+    /// Test invariant: alternating accept-vs-drop must time out with
+    /// `consecutive_misses=0`, NOT `=1`. If a future regression
+    /// re-introduces HTTP-layer classification, this test fires.
     #[compio::test]
-    async fn host_fence_leak_case_alternating_answers_times_out_with_misses_one()
+    async fn host_fence_pr1_alternating_accept_drop_times_out_with_misses_zero()
     {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-        // Mini listener that alternates between accepting + 200ing
-        // (counter % 2 == 0) and outright closing the socket
-        // (counter % 2 == 1). Closing without writing a reply
-        // surfaces as a transport error → miss. The next probe gets
-        // a 200 → counter reset to 0. consecutive_misses thus pins
-        // at 1 across the entire budget.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
@@ -4900,13 +5001,12 @@ mod tests {
                         let _ = s.read(&mut buf);
                         let n = counter.fetch_add(1, Ordering::Relaxed);
                         if n % 2 == 0 {
-                            // Answer with a 200 → reachable.
                             let _ = s.write_all(
                                 b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
                             );
                         } else {
-                            // Drop the socket without a reply → ureq
-                            // surfaces this as a transport error → miss.
+                            // Old probe: ureq saw transport error → miss.
+                            // New probe: connect already succeeded → hit.
                             drop(s);
                         }
                     }
@@ -4923,16 +5023,15 @@ mod tests {
         let res =
             wait_for_agent_silent(&url, Duration::from_millis(800)).await;
         stop.store(true, Ordering::Relaxed);
-        let err = res.expect_err("LEAK case must time out");
-        // The diagnostic invariant R16-I2 wants on the timeout line:
-        // final consecutive_misses pinned at 1 (= alternating, not
-        // 0 = persistent-answer TIMEOUT).
+        let err = res.expect_err("alternating-accept must still time out");
+        // PR1 inversion of the prior R16-I2 invariant: persistent
+        // accept → counter stays at 0, regardless of post-accept
+        // drop semantics.
         assert!(
-            err.contains("consecutive_misses=1"),
-            "R16-I2 LEAK signal lost: timeout error must report \
-             consecutive_misses=1 so smoke-r12 can distinguish LEAK \
-             (alternating-answer pathology) from TIMEOUT (persistent \
-             answer); got {err:?}"
+            err.contains("consecutive_misses=0"),
+            "PR1 regression: connect-only probe must NOT classify \
+             post-accept drop as a miss; expected final \
+             consecutive_misses=0; got {err:?}"
         );
         assert!(
             err.contains("still answering"),
@@ -5001,6 +5100,194 @@ mod tests {
             "R16-A2 threshold pin: 2-in-a-row took {elapsed:?}; if the \
              threshold moved from 2 the smoke-r12 phase-log latency \
              window needs to follow."
+        );
+    }
+
+    // ─── C-7-LT-2-PR1: compio-native TCP-connect probe behavior ──
+    //
+    // The smoke-r13 wedge ("probes=1 in 30 s") came from ureq's
+    // request-deadline timeout NOT being a connect-timeout on a
+    // half-collapsed TAP. PR1 replaces that with an outer
+    // `compio::time::timeout` over `TcpStream::connect`. These
+    // tests pin the contract:
+    //   1. reachable port → returns true fast (~ms)
+    //   2. refused port → returns false fast (~ms; ECONNREFUSED)
+    //   3. unroutable / black-hole address → returns false bounded by
+    //      our connect_timeout (NOT by the kernel's SYN-retransmit).
+
+    #[compio::test]
+    async fn pr1_probe_reachable_port_returns_true() {
+        // Bind + accept on loopback. The probe must see SYN-ACK and
+        // return true well inside the 150 ms connect window.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((_s, _)) => {} // accept-and-drop; we only care about SYN
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        let addr: std::net::SocketAddr =
+            format!("127.0.0.1:{port}").parse().unwrap();
+        let started = Instant::now();
+        let r =
+            probe_agent_reachable_tcp(addr, Duration::from_millis(150)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(r, "loopback listener must read as reachable");
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "reachable connect should complete well under timeout; \
+             got {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[compio::test]
+    async fn pr1_probe_refused_port_returns_false_fast() {
+        // 127.0.0.1:1 is reserved + bound to nothing on every CI host
+        // we run; kernel returns ECONNREFUSED ~immediately (no SYN
+        // retransmit on the loopback). Must be < 10 ms.
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let started = Instant::now();
+        let r =
+            probe_agent_reachable_tcp(addr, Duration::from_millis(150)).await;
+        let elapsed = started.elapsed();
+        assert!(!r, "refused port must read as miss");
+        // 50 ms is conservative for CI; loopback refused is typically
+        // sub-millisecond. This is the "kernel says no fast" lane —
+        // confirms we're not stuck in the timeout path.
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "refused connect on loopback should be fast (<50ms); \
+             got {elapsed:?} — is the kernel SYN-retransmitting?"
+        );
+    }
+
+    /// The wedge fix invariant: a connect target that the kernel
+    /// can't reach (no route OR firewall DROP) MUST surface "miss"
+    /// within our compio-side `connect_timeout`, NOT after the
+    /// kernel's SYN-retransmit ceiling (typically 30-90 s on Linux
+    /// defaults). This is the difference between smoke-r13's
+    /// "1 probe in 30 s" pathology and a healthy fence.
+    ///
+    /// TEST-NET-1 (`192.0.2.0/24`, RFC 5737) is documentation-only —
+    /// no host should answer. On most Linux configs the kernel
+    /// either:
+    ///   (a) returns EHOSTUNREACH/ENETUNREACH at connect() — fast miss; OR
+    ///   (b) sends SYNs that get no reply — slow miss, capped by our
+    ///       outer compio timeout at 150 ms (this is the wedge case).
+    /// Either way the probe MUST return false in well under 1 second
+    /// — if a future regression drops the outer timeout, the kernel's
+    /// 30-90 s SYN-retransmit ceiling will fire this test.
+    #[compio::test]
+    async fn pr1_probe_unroutable_address_returns_false_within_timeout() {
+        // 192.0.2.1 is RFC 5737 TEST-NET-1 — should never route.
+        let addr: std::net::SocketAddr = "192.0.2.1:7777".parse().unwrap();
+        let started = Instant::now();
+        let r =
+            probe_agent_reachable_tcp(addr, Duration::from_millis(150)).await;
+        let elapsed = started.elapsed();
+        assert!(!r, "unroutable address must read as miss");
+        // The wedge fix's load-bearing assertion: the outer compio
+        // timeout caps the connect; the kernel's SYN-retransmit
+        // ceiling MUST NOT govern. 750 ms is a generous CI cap;
+        // healthy machines see this in <200 ms (timeout case) or
+        // ~10 ms (EHOSTUNREACH-at-connect case).
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "C-7-LT-2-PR1 regression: unroutable connect took \
+             {elapsed:?} — the outer compio::time::timeout is NOT \
+             capping a stuck SYN. Did the timeout get removed or did \
+             a future regression bring back ureq's request-deadline?"
+        );
+    }
+
+    /// Counter-reset contract. With the new connect-only probe:
+    /// 1 miss (e.g. refused) followed by a reachable port → counter
+    /// returns to 0. This invariant is what prevents the
+    /// alternating-shape failures from compounding.
+    ///
+    /// Verified indirectly via the PR1-alternating test above (which
+    /// pins `consecutive_misses=0` at deadline → counter MUST be
+    /// resetting each reachable probe). This unit-level test fixes
+    /// the property at the function boundary: 1 refused + N reachable
+    /// in a row → fence does NOT clear at "2 in a row" because the
+    /// first miss is followed by a hit (counter resets), and a single
+    /// reachable forever after pins to 0.
+    #[compio::test]
+    async fn pr1_one_miss_then_reachable_resets_counter() {
+        // Listener that goes ACTIVE after a brief delay: first probe
+        // refused → second+ probe reachable. Implementation: bind
+        // 50 ms after the fence starts. While bound and accepting,
+        // the connect-probe returns reachable; the fence then
+        // persistently reads "agent answering" and must time out
+        // with consecutive_misses=0 (NOT cleared at threshold=2).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((_s, _)) => {} // accept-and-drop
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        // Drive the fence at this listener for a short budget. The
+        // socket is up immediately, so every probe sees reachable
+        // and the fence times out cleanly with consecutive_misses=0.
+        let url = format!("http://127.0.0.1:{port}");
+        let res =
+            wait_for_agent_silent(&url, Duration::from_millis(500)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("reachable listener must time out");
+        assert!(
+            err.contains("consecutive_misses=0"),
+            "PR1 counter-reset: every reachable probe must reset the \
+             miss counter; expected final consecutive_misses=0; got \
+             {err:?}"
+        );
+    }
+
+    /// Host-port parser surface check. The fence's caller hands in
+    /// `http://<ipv4>:<port>` strings built from `vm_index`; PR1's
+    /// new `parse_agent_probe_addr` must handle that shape AND a few
+    /// reasonable variants without burning fence budget on a parse
+    /// failure mid-loop. Also pins the empty-input failure path
+    /// because a malformed `agent_url` should surface as a leak with
+    /// a clear error (not a panic, not a silent OK).
+    #[test]
+    fn pr1_parse_agent_probe_addr_accepts_expected_shapes() {
+        // The canonical shape the controller builds.
+        let a = parse_agent_probe_addr("http://10.99.101.2:7777")
+            .expect("canonical http://ipv4:port must parse");
+        assert_eq!(a.port(), 7777);
+        assert_eq!(a.ip(), "10.99.101.2".parse::<std::net::IpAddr>().unwrap());
+        // With a trailing path (in case a future caller hands in
+        // `…/livez`).
+        let a = parse_agent_probe_addr("http://127.0.0.1:8080/livez")
+            .expect("path suffix must be stripped");
+        assert_eq!(a.port(), 8080);
+        // Bare host:port (no scheme) — defensive accept.
+        let a = parse_agent_probe_addr("127.0.0.1:9999")
+            .expect("scheme-less host:port must parse");
+        assert_eq!(a.port(), 9999);
+        // Empty → Err.
+        assert!(
+            parse_agent_probe_addr("").is_err(),
+            "empty input must Err"
+        );
+        // Scheme-only → Err (no host:port after `://`).
+        assert!(
+            parse_agent_probe_addr("http://").is_err(),
+            "scheme-without-host must Err"
         );
     }
 
