@@ -3005,10 +3005,24 @@ impl Database {
     }
 
     /// Advance the wake job state. Updates `state`, optional
-    /// `error_code` / `error_message` / `agent_url`, and sets
-    /// `updated_at = NOW()`. On transition to [`WakeJobState::Ok`],
+    /// `error_code` / `error_message` / `agent_url`, sets
+    /// `updated_at = NOW()` AND `lessee_updated_at = NOW()` (R17-A1:
+    /// every state transition is a lease renewal — without this, a
+    /// wake whose mid-flight exceeds the takeover threshold gets
+    /// stolen by the takeover sweep while the original lessee is
+    /// still progressing, identical fingerprint to R14-C1 on
+    /// `sandboxes`). On transition to [`WakeJobState::Ok`],
     /// `ready_at = NOW()` is also set so the client polling for
     /// completion knows when the wake landed.
+    ///
+    /// **None-handling contract (R17-I2)**: `error_code`,
+    /// `error_message`, and `agent_url` all use `COALESCE($N, col)` —
+    /// `None` means "leave the existing column value as-is". This is
+    /// symmetric across all three optional fields so retry/replay
+    /// paths cannot silently null out a previously-recorded error
+    /// record. Callers who specifically need to *clear* a column
+    /// must pass an explicit empty string (or wait for a dedicated
+    /// `clear_wake_error` helper, not yet wired).
     ///
     /// Returns the number of rows affected (0 if the wake_id doesn't
     /// exist — caller can treat that as 404).
@@ -3030,10 +3044,11 @@ impl Database {
         let sql = format!(
             "UPDATE sandbox.wake_jobs \
                 SET state = $1::TEXT, \
-                    error_code = $2::TEXT, \
-                    error_message = $3::TEXT, \
+                    error_code = COALESCE($2::TEXT, error_code), \
+                    error_message = COALESCE($3::TEXT, error_message), \
                     agent_url = COALESCE($4::TEXT, agent_url), \
-                    updated_at = now() \
+                    updated_at = now(), \
+                    lessee_updated_at = now() \
                     {ready_at_clause} \
               WHERE wake_id = $5::TEXT"
         );

@@ -3944,6 +3944,210 @@ mod wake_jobs_crud {
         assert!(db.get_wake_job("wak_gc_failed").await.unwrap().is_none());
     }
 
+    /// R17-A1: every state transition MUST bump `lessee_updated_at`
+    /// so an in-flight wake is not stolen by the takeover sweep
+    /// while the original lessee is still progressing. Identical
+    /// fingerprint to R14-C1 on `sandboxes`.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_update_state_bumps_lessee_updated_at() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_lessee_bump", "sbx_lb", "hst_lb_owner");
+        db.insert_wake_job(&row).await.unwrap();
+        let after_insert = db
+            .get_wake_job("wak_lessee_bump")
+            .await
+            .unwrap()
+            .unwrap();
+        // Server-side `now()` resolution is 1 µs; ensure pg's clock
+        // moves by sleeping a millisecond before the transition.
+        compio::time::sleep(StdDuration::from_millis(20)).await;
+
+        db.update_wake_job_state(
+            "wak_lessee_bump",
+            WakeJobState::Restoring,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let after_advance = db
+            .get_wake_job("wak_lessee_bump")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The 1-second resolution of `EXTRACT(EPOCH FROM …)::BIGINT`
+        // means the two timestamps may be equal under a tight clock;
+        // the contract is "no regression" rather than "strict
+        // increase". The real test is that the field is NOT frozen at
+        // the insert-time value forever — over the course of a multi
+        // -second wake, `lessee_updated_at` must move forward.
+        assert!(
+            after_advance.lessee_updated_at_secs >= after_insert.lessee_updated_at_secs,
+            "lessee_updated_at must not regress on state transition"
+        );
+
+        // Stronger assertion: drive a second transition after a
+        // sub-second sleep, then read `lessee_updated_at` at the µs
+        // level via a direct pg query. This proves the column was
+        // touched (not just `updated_at`).
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(
+            &test_url(), cfg,
+        )
+        .await
+        .unwrap();
+        let client = pool.get().await.unwrap();
+        let row_before = client
+            .query_one(
+                "SELECT lessee_updated_at FROM sandbox.wake_jobs \
+                  WHERE wake_id = 'wak_lessee_bump'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let before_ts: std::time::SystemTime = row_before.get(0);
+
+        compio::time::sleep(StdDuration::from_millis(20)).await;
+        db.update_wake_job_state(
+            "wak_lessee_bump",
+            WakeJobState::LivezPolling,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row_after = client
+            .query_one(
+                "SELECT lessee_updated_at FROM sandbox.wake_jobs \
+                  WHERE wake_id = 'wak_lessee_bump'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let after_ts: std::time::SystemTime = row_after.get(0);
+        assert!(
+            after_ts > before_ts,
+            "lessee_updated_at must advance on state transition: before={before_ts:?}, after={after_ts:?}"
+        );
+    }
+
+    /// R17-I2: the None-handling contract on `update_wake_job_state`
+    /// is symmetric COALESCE across `error_code`, `error_message`,
+    /// and `agent_url` — passing `None` for any of them preserves
+    /// the existing column value. Retry/replay paths cannot silently
+    /// null out a previously-recorded error record.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_update_preserves_fields_on_none() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_preserve", "sbx_preserve", "hst_p_owner");
+        db.insert_wake_job(&row).await.unwrap();
+
+        // First transition: record full failure metadata (code +
+        // message + leave agent_url as None — it was never set).
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::LivezTimeout),
+            Some("agent /livez never returned 200 within 30s"),
+            None,
+        )
+        .await
+        .unwrap();
+        let first = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(first.error_code, Some(WakeErrorCode::LivezTimeout));
+        assert_eq!(
+            first.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s")
+        );
+
+        // Idempotent re-update with all-None: error_code,
+        // error_message, agent_url MUST be preserved. Pre-fix this
+        // would NULL out the metadata.
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::Failed,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let second = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(
+            second.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "error_code must be preserved on None re-update"
+        );
+        assert_eq!(
+            second.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s"),
+            "error_message must be preserved on None re-update"
+        );
+
+        // Now set an agent_url, then re-update with None — also
+        // preserved (existing agent_url behavior, restated for
+        // symmetry).
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::Failed,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::Failed,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let third = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(third.agent_url.as_deref(), Some("http://10.0.0.1:7000"));
+
+        // Explicitly providing Some(_) overwrites — the contract is
+        // None=preserve, Some=overwrite. Verify by overwriting the
+        // error_code with a different variant.
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::Internal),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fourth = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(
+            fourth.error_code,
+            Some(WakeErrorCode::Internal),
+            "Some(_) overwrites the existing value"
+        );
+        // error_message still preserved (None) from the previous set.
+        assert_eq!(
+            fourth.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s")
+        );
+    }
+
     /// Migration target version matches the binary's
     /// LATEST_MIGRATION_VERSION (smoke check that 0009 actually
     /// applied — the CHECK constraint on `state` is the proof; an
