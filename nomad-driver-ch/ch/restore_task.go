@@ -541,7 +541,17 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	// ARP and the controller's /livez probe gets EHOSTUNREACH.
 	if err := resumeFn(p.chClient, apiSocket); err != nil {
 		_ = runner.Signal(os.Kill)
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: resume failed: %w", err)
+		// C-7-LT-11: mirror the socket-poll-timeout stderr capture so
+		// smoke-r22 has CH diagnostic output when ch-remote resume
+		// returns an error (e.g. HTTP 500 "VM is not running").
+		tail := readStderrTail(stderrLogPath, chStderrTailBytes)
+		if len(tail) == 0 {
+			tail = runner.StderrTail(chStderrTailBytes)
+		}
+		if len(tail) > 0 {
+			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: resume failed: %w; ch_stderr_tail=%q (path=%s)", err, string(tail), stderrLogPath)
+		}
+		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: resume failed: %w (no ch stderr captured; path=%s)", err, stderrLogPath)
 	}
 
 	// Step 7: persist TaskState + register handle + start supervisor.

@@ -1379,6 +1379,70 @@ func mustContainTest(t *testing.T, label, haystack, needle string) {
 	}
 }
 
+// TestStartTaskRestoreBranch_StderrTailEmbeddedOnResumeFail (C-7-LT-11):
+// when ch-remote resume fails (e.g. HTTP 500 "VM is not running"), the
+// error message must embed the tail of CH stderr so smoke-r22 can triage
+// C-7-LT-12 without a live cluster. Mirrors the socket-timeout test above.
+func TestStartTaskRestoreBranch_StderrTailEmbeddedOnResumeFail(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	taskDir := t.TempDir()
+	runDir := filepath.Join(taskDir, "local")
+	stderrPath := filepath.Join(runDir, ch.ChStderrLogName)
+
+	// Socket poll succeeds so we reach the resume step.
+	prevPoll := ch.SetPollAPISocketForTest(func(_ *ch.Client, _ string, _, _ time.Duration) error {
+		return nil
+	})
+	t.Cleanup(func() { ch.SetPollAPISocketForTest(prevPoll) })
+
+	// Resume seam: write a marker into the stderr file then return an error
+	// that reproduces the smoke-r21 HTTP 500 "VM is not running" scenario.
+	prevResume := ch.SetResumeForTest(func(_ *ch.Client, _ string) error {
+		f, err := os.OpenFile(stderrPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
+			_, _ = f.WriteString("PANIC: synthetic CH resume-fail stderr for C-7-LT-11\n")
+			_ = f.Close()
+		}
+		return errors.New("ch-remote resume: HTTP 500: VM is not running")
+	})
+	t.Cleanup(func() { ch.SetResumeForTest(prevResume) })
+
+	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
+
+	var captured *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		captured = newFakeRunner(cmd)
+		go func(r *fakeRunner) { <-r.waitCh }(captured)
+		return captured
+	}
+	t.Cleanup(func() {
+		if captured != nil {
+			func() {
+				defer func() { recover() }()
+				close(captured.waitCh)
+			}()
+		}
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("expected resume-failure error")
+	}
+	msg := err.Error()
+	mustContainTest(t, "resume-failure error", msg, "PANIC: synthetic CH resume-fail stderr for C-7-LT-11")
+	mustContainTest(t, "resume-failure error", msg, "ch_stderr_tail=")
+	mustContainTest(t, "resume-failure error", msg, stderrPath)
+}
+
 // -- C-7-LT-6 per-field path allow-list tests ------------------------
 //
 // Smoke-r16 caught C-7-LT-4's "all paths under task_dir" invariant
