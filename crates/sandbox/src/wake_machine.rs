@@ -1438,6 +1438,61 @@ mod tests {
         );
     }
 
+    /// T5: pin the wake-machine call-site mapping. When
+    /// `verify_agent_version_post_restore` returns `Mismatch`, the
+    /// state machine must roll back with `WakeErrorCode::AgentVersionMismatch`
+    /// (which renders as wire code `agent_version_mismatch`).
+    /// Drift in either side of this mapping breaks the SLO dashboard's
+    /// ability to split rollout-skew failures from livez_timeout /
+    /// restore_backend_failed buckets.
+    ///
+    /// Structural-level test: full-fidelity exercise of the wake
+    /// machine path goes through `WakeMachine::drive`, which requires
+    /// a fake-agent on a real port. The outcome→code mapping is the
+    /// wire-contract slice; the outcome production is covered by the
+    /// `verify_agent_version_*` tests in `restore_handler::real_backend_tests`.
+    #[test]
+    fn t5_agent_version_mismatch_maps_to_distinct_wire_code() {
+        // The variant exists in WakeErrorCode and round-trips through
+        // as_str/from_str_opt.
+        assert_eq!(
+            WakeErrorCode::AgentVersionMismatch.as_str(),
+            "agent_version_mismatch"
+        );
+        assert_eq!(
+            crate::db::WakeErrorCode::from_str_opt("agent_version_mismatch"),
+            Some(WakeErrorCode::AgentVersionMismatch)
+        );
+        // Wire code reads the same operator-facing name as the
+        // internal pg form for this variant — both sides converge.
+        assert_eq!(
+            WakeErrorCode::AgentVersionMismatch.wire_code(),
+            "agent_version_mismatch"
+        );
+        // CRITICAL: must be distinct from the neighboring codes that
+        // the SLO dashboard is supposed to route AROUND this one.
+        assert_ne!(
+            WakeErrorCode::AgentVersionMismatch.wire_code(),
+            WakeErrorCode::LivezTimeout.wire_code(),
+            "T5 regression: agent_version_mismatch must NOT collide \
+             with livez_timeout — the SLO dashboard splits rollout-skew \
+             failures away from agent-never-up failures"
+        );
+        assert_ne!(
+            WakeErrorCode::AgentVersionMismatch.wire_code(),
+            WakeErrorCode::RestoreFailed.wire_code(),
+            "T5 regression: agent_version_mismatch must NOT collide \
+             with restore_backend_failed — different operator action"
+        );
+        assert_ne!(
+            WakeErrorCode::AgentVersionMismatch.wire_code(),
+            WakeErrorCode::Internal.wire_code(),
+            "T5 regression: agent_version_mismatch must be visible to \
+             clients as a distinct retryable-on-rollout-complete signal \
+             — folding into internal_error would mask the diagnostic"
+        );
+    }
+
     /// Sandbox-id typed-string helper mirrors the existing
     /// `format!("sbx_{base62}", ...)` shape every other site uses.
     #[test]

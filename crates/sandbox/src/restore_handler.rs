@@ -4160,6 +4160,250 @@ mod real_backend_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // ─── T5: signed /version fingerprint check ────────────────────
+    //
+    // `verify_agent_version_post_restore` probes the just-restored
+    // agent's signed /version and compares the reported git_commit to
+    // the controller's CONTROLLER_GIT_COMMIT. These tests pin the
+    // structured outcomes:
+    //   - Match     — same git_commit on both sides → wake proceeds.
+    //   - Mismatch  — different git_commit → wake rolls back.
+    //   - Skipped   — controller sentinel / legacy agent / transport
+    //                 error → wake proceeds with a WARN.
+    //
+    // The probe is auth-gated (signed GET); the fake-agent under test
+    // intentionally does NOT verify the Ed25519 signature — these are
+    // controller-side outcome tests, not crypto tests. The signed-auth
+    // path is covered separately by the agent crate's signature tests.
+
+    /// T5: agent returns 200 with matching git_commit → `Match`.
+    #[ntex::test]
+    async fn verify_agent_version_matches_when_git_commit_aligns() {
+        let expected = "abc123def456";
+        let body = format!(
+            r#"{{"agent_version":"0.1.0","git_commit":"{expected}","protocol_version":1,"capabilities":[]}}"#
+        );
+        let (agent_url, calls) = spawn_fake_agent(move |_, _req| (200, body.clone()));
+        let signing_key_bytes = [0x11u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            expected,
+        )
+        .await;
+        assert_eq!(outcome, VersionCheckOutcome::Match);
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            1,
+            "expected exactly one signed GET to /version"
+        );
+    }
+
+    /// T5: agent returns 200 with a DIFFERENT git_commit → `Mismatch`
+    /// carrying both sides for diagnostic text. This is the partial-
+    /// rollout scenario the check is designed to catch.
+    #[ntex::test]
+    async fn verify_agent_version_returns_mismatch_when_git_commits_differ() {
+        let controller_sha = "ctrl00000001";
+        let agent_sha = "stale0000ff02";
+        let body = format!(
+            r#"{{"agent_version":"0.1.0","git_commit":"{agent_sha}","protocol_version":1,"capabilities":[]}}"#
+        );
+        let (agent_url, _) = spawn_fake_agent(move |_, _req| (200, body.clone()));
+        let signing_key_bytes = [0x22u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            controller_sha,
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Mismatch { expected, got } => {
+                assert_eq!(expected, controller_sha);
+                assert_eq!(got, agent_sha);
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    /// T5: controller built without git SHA ("unknown" sentinel) →
+    /// `Skipped`. Probe is never even issued (sentinel short-circuits
+    /// before the HTTP call) — pinned via `calls == 0`.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_controller_sha_unknown() {
+        let (agent_url, calls) = spawn_fake_agent(|_, _req| {
+            // If the probe DID fire we'd serve a Match — but the
+            // sentinel must short-circuit before the call.
+            (200, r#"{"git_commit":"unknown"}"#.to_string())
+        });
+        let signing_key_bytes = [0x33u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "unknown",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped { reason } => {
+                assert_eq!(reason, "controller_build_sha_unknown");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            0,
+            "sentinel must short-circuit before any HTTP probe"
+        );
+    }
+
+    /// T5: agent's `/version` omits `git_commit` (legacy pre-T5 build)
+    /// → `Skipped` with reason `agent_git_commit_missing`. Closed-
+    /// fleet guarantee: the signed-auth check that just succeeded
+    /// is sufficient attestation for these agents.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_agent_omits_git_commit() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            // Pre-T5 agent shape: no git_commit field.
+            (
+                200,
+                r#"{"agent_version":"0.0.9","protocol_version":1}"#.to_string(),
+            )
+        });
+        let signing_key_bytes = [0x44u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "ctrl00000003",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped { reason } => {
+                assert_eq!(reason, "agent_git_commit_missing");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: agent built without git SHA ("unknown") → `Skipped` with
+    /// reason `agent_build_sha_unknown`. The non-git-build path
+    /// (rare in production, common in CI / vendor tarballs) must
+    /// not fail the wake.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_agent_sha_unknown() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (
+                200,
+                r#"{"agent_version":"0.1.0","git_commit":"unknown","protocol_version":1}"#
+                    .to_string(),
+            )
+        });
+        let signing_key_bytes = [0x55u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "ctrl00000004",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped { reason } => {
+                assert_eq!(reason, "agent_build_sha_unknown");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: transport error (closed port) → `Skipped` with reason
+    /// `transport_error`. The wake state machine MUST NOT fail on a
+    /// flaky GET when the underlying livez probe just succeeded —
+    /// rolling back in this case would hurt availability without
+    /// catching real version drift.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_on_transport_error() {
+        // Bind + immediately drop so the port is closed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let agent_url = format!("http://{addr}");
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &[0x66u8; 32],
+            "ctrl00000005",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped { reason } => {
+                assert_eq!(reason, "transport_error");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: agent returns non-200 (e.g., 503 during a startup race) →
+    /// `Skipped` with reason `non_200_response`. Same availability
+    /// rationale as the transport-error case.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_on_non_200_response() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (503, r#"{"error":"draining"}"#.to_string())
+        });
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &[0x77u8; 32],
+            "ctrl00000006",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped { reason } => {
+                assert_eq!(reason, "non_200_response");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: agent returns 200 but body isn't JSON → `Skipped` with
+    /// reason `body_not_json`. Defensive parse — should never happen
+    /// in production but covered for robustness.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_body_not_json() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (200, "not valid json {".to_string())
+        });
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &[0x88u8; 32],
+            "ctrl00000007",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped { reason } => {
+                assert_eq!(reason, "body_not_json");
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: `CONTROLLER_GIT_COMMIT` const is populated by build.rs.
+    /// In a git checkout it's a 12-char short hex; in vendor-tarball
+    /// builds it's the `"unknown"` sentinel. Either is acceptable;
+    /// the const must just be present (env var was set at build time).
+    #[test]
+    fn controller_git_commit_const_is_populated_by_build_rs() {
+        assert!(
+            !CONTROLLER_GIT_COMMIT.is_empty(),
+            "build.rs must inject CONTROLLER_GIT_COMMIT"
+        );
+        // Either valid short-hex (12 chars, ascii hex) or the sentinel.
+        let is_short_hex = CONTROLLER_GIT_COMMIT.len() == 12
+            && CONTROLLER_GIT_COMMIT
+                .chars()
+                .all(|c| c.is_ascii_hexdigit());
+        let is_sentinel = CONTROLLER_GIT_COMMIT == "unknown";
+        assert!(
+            is_short_hex || is_sentinel,
+            "CONTROLLER_GIT_COMMIT must be 12-char short hex or \"unknown\"; got {CONTROLLER_GIT_COMMIT:?}"
+        );
+    }
 }
 
 // ─── R12-I1 (T-8 blocker): wake-path SANDBOX_TASK_DRIVER feature
