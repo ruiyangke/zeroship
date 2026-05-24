@@ -86,6 +86,23 @@ type TaskConfig struct {
 	// (would otherwise corrupt the kernel cmdline at the whitespace tokeniser).
 	SandboxId string `codec:"sandbox_id"`
 
+	// UserId is the typed-id (`usr_…`) of the sandbox owner. Used by the
+	// restore-branch path-rewriter (C-7-LT-7) to accept disks that live
+	// under the per-user persistent home prefix
+	// `/var/zeroship/ch/users/<user_id>/` — the per-user home image
+	// (`home.img`) is shared across every sandbox a user owns, so it
+	// lives OUTSIDE the per-sandbox prefix by design and must be
+	// whitelisted separately. Cross-tenant isolation is preserved via
+	// strict equality on the path segment: a disk path that names a
+	// DIFFERENT user is rejected.
+	//
+	// Empty disables the per-user-home allow-list entry (the validator
+	// falls back to per-sandbox + task_dir + content-addressed roots
+	// only). The driver's StartTask does NOT require it for cold-boot;
+	// it only matters on the restore branch when the snapshot's
+	// config.json names a `/var/zeroship/ch/users/...` disk.
+	UserId string `codec:"user_id"`
+
 	// WorkspaceImg is the absolute host path to the workspace ext4 image
 	// (raw, attached as virtio-blk → guest /dev/vdb → /workspace). Wrapper
 	// env: ZSBX_WORKSPACE_IMG.
@@ -146,6 +163,7 @@ var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	// the schema level so existing operator configs that drive Disks/Cmdline
 	// directly still validate; StartTask enforces the cold-boot subset.
 	"sandbox_id":        hclspec.NewAttr("sandbox_id", "string", false),
+	"user_id":           hclspec.NewAttr("user_id", "string", false),
 	"workspace_img":     hclspec.NewAttr("workspace_img", "string", false),
 	"user_home_img":     hclspec.NewAttr("user_home_img", "string", false),
 	"pubkey_hex":        hclspec.NewAttr("pubkey_hex", "string", false),
