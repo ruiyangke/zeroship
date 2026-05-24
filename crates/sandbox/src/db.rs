@@ -491,20 +491,22 @@ impl Database {
 
     /// Open a transient connection pool.
     ///
-    /// **TODO (round-1 fixer / IMPORTANT #10):** every method on
-    /// `Database` calls this and drops the pool inside the same
-    /// future. That round-trips a TCP connect + auth handshake on
-    /// every call. The fix is a per-compio-thread `thread_local!`
-    /// holding a long-lived `Pool`, lazily initialized on first
-    /// use; deferred to a follow-up because `compio_postgres::Pool`
-    /// is `!Send` + `!Sync`, so a naive thread-local works in
-    /// principle but interacts subtly with ntex's worker-factory
-    /// bounds (factory must be `Send + Clone`; thread-locals
-    /// satisfy that as long as we don't try to share a `Pool`
-    /// across worker boundaries — which we don't, since each
-    /// worker thread has its own `thread_local`). Documenting
-    /// here so the next round picks it up; the current pattern is
-    /// correct, just slow on the hot path.
+    /// Per-call `Pool` creation is suboptimal — every `Database`
+    /// method opens a fresh TCP + STARTUP + auth handshake, and the
+    /// wake path pays this 5× per restore (`get_sandbox_row`,
+    /// `read_snapshot_row`, `update_sandbox_status` ×2,
+    /// `clear_snapshot_metadata`). Tracked as **R11-P1** (CRITICAL,
+    /// performance-r11) in
+    /// `docs/reviews/sandbox-snapshot-restore-deferred.md`.
+    ///
+    /// Not yet fixed because `compio_postgres::Pool` is `!Send` +
+    /// `!Sync` (per compio-postgres design), so the cache can't be
+    /// an `Arc`/`OnceLock` on `Database` — it has to be a
+    /// per-compio-worker `thread_local!`. That's a focused refactor
+    /// touching every call site; deferred to a dedicated R11-P1
+    /// sprint rather than landed mid-Phase-B cutover, where it
+    /// would risk destabilising the wake path. Current pattern is
+    /// correct, just slow.
     async fn open_pool(&self) -> Result<Pool> {
         let mut cfg = PoolConfig::default();
         cfg.max_size = self.config.pool_max.max(2);
