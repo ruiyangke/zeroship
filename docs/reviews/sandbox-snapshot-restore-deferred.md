@@ -1588,3 +1588,4 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### Closures this cycle
 - [C-8 + C-8a] CLOSED at `2afbb2dd` — retry budget cap + 30s fence (NOTE: R15-I2 flags math edge case)
 - [R15-Q1] CLOSED at `7469118e` — admin_handlers byte-slice form (matches R14-Q3)
+- [C-8b] CLOSED at `64af1803` — 2× fence factor in `from_host_fence_timeout` (smoke-r10 measured 60s teardown at fence=30s; budget now 26 attempts / 50s, was 11 / 20s)
