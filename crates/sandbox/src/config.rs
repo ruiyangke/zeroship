@@ -412,6 +412,106 @@ pub struct NomadCHConfig {
     pub subnet_second_octet: u8,
 }
 
+/// r27-S1 Guard A: reject any `nomad_addr` whose host is NOT a
+/// loopback literal. Accept-list:
+///
+/// - `localhost` (resolves to 127.0.0.1 / ::1 on every sane libc)
+/// - any IPv4 in `127.0.0.0/8` (validated via `Ipv4Addr::is_loopback`)
+/// - the IPv6 loopback `::1` (validated via `Ipv6Addr::is_loopback`)
+///
+/// **Why a hand-rolled host parse, not the `url` crate**: the
+/// sandbox crate does not depend on `url` today and the upstream
+/// `nomad_addr` shape is already validated to start with `http://`
+/// or `https://`. The host substring is everything between the
+/// scheme and the first of `:` (port), `/` (path), `?` (query),
+/// `#` (fragment), or end-of-string. IPv6 literals use the bracketed
+/// `[::1]:port` form per RFC 3986 § 3.2.2; we handle that
+/// specifically before the colon-as-port-separator rule fires so
+/// `[::1]:4646` parses as host `::1` not host `[::1` (which would
+/// fail the IP literal parse) or host `[` (which would silently
+/// match nothing).
+///
+/// `nomad_addr` MUST already have the scheme prefix validated by the
+/// caller; we treat its absence as a programmer error and refuse.
+fn validate_nomad_addr_loopback(addr: &str) -> Result<(), String> {
+    // Strip scheme. The caller has already asserted one of these
+    // prefixes is present.
+    let rest = if let Some(r) = addr.strip_prefix("http://") {
+        r
+    } else if let Some(r) = addr.strip_prefix("https://") {
+        r
+    } else {
+        return Err(format!(
+            "SANDBOX_NOMAD_ADDR missing http(s):// scheme (internal: \
+             scheme check must run before loopback check); got {addr:?}",
+        ));
+    };
+
+    // Host extraction. Two shapes per RFC 3986 § 3.2.2:
+    //   - Bracketed IPv6: `[<v6>](:port)?(/path)?`
+    //   - Everything else: `<host>(:port)?(/path)?`
+    let host: &str = if let Some(after_lb) = rest.strip_prefix('[') {
+        // Find the closing bracket; everything between is the IPv6
+        // literal. An unclosed bracket is malformed.
+        match after_lb.find(']') {
+            Some(end) => &after_lb[..end],
+            None => {
+                return Err(format!(
+                    "SANDBOX_NOMAD_ADDR has unclosed IPv6 bracket; got {addr:?}",
+                ))
+            }
+        }
+    } else {
+        // Host body ends at the first of ':' / '/' / '?' / '#' /
+        // end-of-string.
+        let end = rest
+            .find(|c: char| matches!(c, ':' | '/' | '?' | '#'))
+            .unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    if host.is_empty() {
+        return Err(format!(
+            "SANDBOX_NOMAD_ADDR missing host; got {addr:?}",
+        ));
+    }
+
+    // Cheap path: literal `localhost` is always loopback on a sane
+    // libc. We do NOT call `getaddrinfo` to follow `/etc/hosts`
+    // overrides — an operator who has mapped `localhost` to a
+    // remote in `/etc/hosts` has bigger problems than this guard.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+
+    // IP literal path: parse and let the std library check the
+    // loopback bit (covers 127.0.0.0/8 in v4 and ::1 in v6, neither
+    // of which we need to spell out octet-by-octet here).
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() {
+            return Ok(());
+        }
+        return Err(format!(
+            "SANDBOX_NOMAD_ADDR host {host:?} is not loopback; refusing to \
+             boot to prevent cross-cluster placement (r27-S1 Guard A). \
+             Accepted: localhost, 127.0.0.0/8, ::1.",
+        ));
+    }
+
+    // Non-IP, non-localhost hostname (e.g. `nomad.example.com`,
+    // `nomad`, `nomad.local`): refuse. We don't `getaddrinfo`
+    // because (a) startup-time DNS may not match runtime DNS and
+    // (b) operators with a `127.0.0.1 nomad-local` entry in
+    // `/etc/hosts` can use that name verbatim only if it resolves
+    // — but we'd rather they spell `127.0.0.1` so the config is
+    // self-documenting.
+    Err(format!(
+        "SANDBOX_NOMAD_ADDR host {host:?} is not a loopback literal; \
+         refusing to boot to prevent cross-cluster placement (r27-S1 \
+         Guard A). Accepted: localhost, 127.0.0.0/8, ::1.",
+    ))
+}
+
 impl NomadCHConfig {
     /// Validate the parsed config. Called from
     /// [`SandboxConfig::from_env`] before the backend is instantiated
@@ -470,6 +570,28 @@ impl NomadCHConfig {
                 self.nomad_addr,
             ));
         }
+        // r27-S1 Guard A (fail-CLOSED): reject any nomad_addr whose
+        // host is NOT a loopback literal. Two attack vectors this
+        // closes:
+        //
+        // 1. **Tampered local Nomad agent** returns a wrong `node_id`
+        //    on `/v1/agent/self` → r3-A controller emits a Job-level
+        //    Constraints block pinning to the wrong node → cluster-
+        //    wide CREATE/WAKE DoS until a restart.
+        // 2. **Misconfigured `NOMAD_ADDR`** points at a remote
+        //    Nomad → controller stages `workspace.img` on the LOCAL
+        //    filesystem then emits Constraints pinning to a node in a
+        //    DIFFERENT cluster → allocs land cross-cluster and the
+        //    `assert_disk_image_present` driver-stat ENOENTs (the
+        //    r3-A failure mode by another route).
+        //
+        // The fix matches r3-A's strict-equality Constraints choice
+        // (Operand = "=", refusing fallback to random placement): we
+        // refuse to boot rather than emit a Constraints block keyed
+        // off an unverifiable remote node_id. Loopback enforcement is
+        // the only check that makes the assumption "the Nomad agent
+        // returns this host's node_id" structurally true.
+        validate_nomad_addr_loopback(&self.nomad_addr)?;
         // m4: validate the wrapper script exists + is executable.
         // **Caveat:** this only catches misconfig when the
         // controller and the Nomad client share a filesystem
@@ -1338,6 +1460,115 @@ mod tests {
         cfg.nomad_addr = "127.0.0.1:4646".into();
         let err = cfg.validate().expect_err("must reject");
         assert!(err.contains("NOMAD_ADDR"), "{err}");
+    }
+
+    // ─── r27-S1 Guard A: nomad_addr loopback enforcement ──────────────
+
+    /// Canonical IPv4 loopback. The base fixture already uses this
+    /// shape, so a passing fixture implies acceptance, but pin it
+    /// explicitly so a refactor that flips the default doesn't
+    /// silently regress the boot-time gate.
+    #[test]
+    fn nomad_addr_loopback_127001_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.1:4646".into();
+        cfg.validate().expect("127.0.0.1 must be accepted");
+    }
+
+    /// Any IPv4 in 127.0.0.0/8 — operators sometimes bind agents on
+    /// alternate loopback aliases (e.g. 127.0.0.2) for multi-agent
+    /// testbeds. `is_loopback()` covers the full /8 per RFC 1122.
+    #[test]
+    fn nomad_addr_loopback_127_x_x_x_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.2:4646".into();
+        cfg.validate().expect("127.0.0.2 must be accepted (RFC 1122 /8)");
+    }
+
+    /// IPv6 loopback `::1` in bracketed form per RFC 3986 § 3.2.2.
+    #[test]
+    fn nomad_addr_loopback_ipv6_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://[::1]:4646".into();
+        cfg.validate().expect("[::1] must be accepted");
+    }
+
+    /// `localhost` is the documented operator-friendly default; we
+    /// accept it without `getaddrinfo` (see fn rustdoc for why).
+    #[test]
+    fn nomad_addr_localhost_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://localhost:4646".into();
+        cfg.validate().expect("localhost must be accepted");
+    }
+
+    /// Mixed-case `LocalHost` — operators paste from various sources;
+    /// the comparison is ASCII-case-insensitive.
+    #[test]
+    fn nomad_addr_localhost_mixed_case_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://LocalHost:4646".into();
+        cfg.validate().expect("LocalHost must be accepted");
+    }
+
+    /// Remote DNS name — the main misconfig vector. Refuse boot
+    /// rather than emit Constraints pinning to a remote node_id.
+    #[test]
+    fn nomad_addr_remote_rejected() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "https://nomad.example.com:4646".into();
+        let err = cfg.validate().expect_err("remote DNS must be rejected");
+        assert!(
+            err.contains("not a loopback") || err.contains("not loopback"),
+            "expected loopback-refusal text; got: {err}",
+        );
+        assert!(err.contains("r27-S1"), "expected r27-S1 marker; got: {err}");
+    }
+
+    /// IPv4 in private RFC1918 range but NOT loopback. A common
+    /// "I'll just point at the LAN Nomad" misconfig.
+    #[test]
+    fn nomad_addr_ipv4_non_loopback_rejected() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://10.0.0.5:4646".into();
+        let err = cfg.validate().expect_err("10.0.0.5 must be rejected");
+        assert!(
+            err.contains("not loopback") || err.contains("not a loopback"),
+            "expected loopback-refusal text; got: {err}",
+        );
+    }
+
+    /// IPv6 non-loopback (a public address with the documentation
+    /// prefix 2001:db8::/32). Bracket-stripping must extract the
+    /// host correctly so the IP parse runs against `2001:db8::1`,
+    /// not against `[2001:db8::1]:4646`.
+    #[test]
+    fn nomad_addr_ipv6_non_loopback_rejected() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://[2001:db8::1]:4646".into();
+        let err = cfg.validate().expect_err("2001:db8::1 must be rejected");
+        assert!(
+            err.contains("not loopback") || err.contains("not a loopback"),
+            "expected loopback-refusal text; got: {err}",
+        );
+    }
+
+    /// Loopback host with NO port and NO path — minimal valid shape.
+    /// Path-extraction must terminate the host at end-of-string.
+    #[test]
+    fn nomad_addr_loopback_no_port_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.1".into();
+        cfg.validate().expect("127.0.0.1 (no port) must be accepted");
+    }
+
+    /// Loopback host with a trailing path — the host body ends at
+    /// the first `/`, NOT at end-of-string.
+    #[test]
+    fn nomad_addr_loopback_with_path_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.1:4646/v1".into();
+        cfg.validate().expect("loopback + path must be accepted");
     }
 
     #[test]
