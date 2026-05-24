@@ -1285,6 +1285,43 @@ async fn no_bearer_rejected_on_metrics_with_401() {
 }
 
 #[ntex::test]
+async fn metrics_503_when_no_admin_tokens_configured() {
+    // Composite-r1 #3: symmetric with `admin_503_with_correct_bearer_when_pg_disabled`
+    // for the `/admin/*` surface. The `/metrics` endpoint's role gate is
+    // `AdminRole::ReadOnly` — which `admin_check_required` resolves to 503
+    // `admin_api_disabled` when BOTH the full and the read-only bearers
+    // are absent (a single configured bearer is enough to satisfy the
+    // gate's role; both-absent is the only "no role possible" shape).
+    //
+    // Build AppState with `admin_token: None, admin_ro_token: None`,
+    // fire GET /metrics, assert 503 with §10.0 envelope
+    // `error: "admin_api_disabled"`.
+    let state = make_state_with_admin_tokens(None, None, None);
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no admin tokens configured must 503 on /metrics (got {})",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["error"], "admin_api_disabled",
+        "§10.0 envelope error code on the 'no tokens configured' shape"
+    );
+    assert!(
+        v["message"].is_string(),
+        "§10.0 envelope must carry a message field"
+    );
+}
+
+#[ntex::test]
 async fn metrics_body_contains_all_production_counters() {
     // Every counter name promised by `crate::metrics_export::render` must
     // appear in the response body. This is the route-level mirror of the
