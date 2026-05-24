@@ -66,7 +66,7 @@ pub fn render() -> String {
     write_counter(
         &mut out,
         "sandbox_corrupt_id_total",
-        "restore encountered a pg row whose sandbox_id doesn't parse as a typed-id",
+        "decode of a stored sandbox_id as a typed-id failed at any read site",
         &[(None, metrics::sandbox_corrupt_id_value())],
     );
 
