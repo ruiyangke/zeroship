@@ -81,28 +81,51 @@
 //!
 //! ## Cleanup contract
 //!
+//! **T-8b-stress-r2 controller v34: host_dir cleanup is sweeper-owned,
+//! not per-alloc.** Stress-r2 (`docs/reviews/sandbox-snapshot-restore-
+//! cluster-2026-05-25-T8b-stress-r2.md`) showed that the per-alloc
+//! `rm -rf host_dir` in CreateGuard::drop and stop_inner's step 5 was
+//! racing with concurrent retry-`create` for the same sandbox_id: the
+//! failing alloc's DestroyTask removed `workspace.img` while the retry's
+//! StartTask was running, causing 48/60 CREATEs to fail with
+//! "workspace.img does not exist (controller must stage before spawn)".
+//! v34 moves host_dir GC out of the per-alloc hot path entirely.
+//!
+//! Lifecycle:
+//!
 //! - `create` is wrapped in a `CreateGuard` whose Drop spawns a
 //!   detached compio task that tears down partial state. The task:
 //!   (a) purges the Nomad job, (b) on confirmed-purge releases the
-//!   vm_index back to the pool, (c) on confirmed-purge `rm -rf`s the
-//!   host_dir. **The vm_index is intentionally NOT released until
-//!   the Nomad purge confirms** — releasing it earlier risks a
-//!   retry-`create` for the same user grabbing the same index and
-//!   racing the still-alive prior wrapper for `tap=zsbx-nm-<idx>`.
-//!   Same policy as the `stop` path: "release on confirmed purge;
-//!   leak otherwise; orphan-prune mops up later."
+//!   vm_index back to the pool, **(c) intentionally LEAKS the host_dir
+//!   for the sweeper to reap.** The vm_index is intentionally NOT
+//!   released until the Nomad purge confirms — releasing it earlier
+//!   risks a retry-`create` for the same user grabbing the same index
+//!   and racing the still-alive prior wrapper for `tap=zsbx-nm-<idx>`.
+//!   "release on confirmed purge; leak otherwise; orphan-prune mops
+//!   up later."
 //! - On controller crash or runtime-shutdown the cleanup task may
 //!   not run; any leaked Nomad jobs persist until
 //!   [`NomadCHBackend::cleanup_orphans_at_startup`] reclaims them at
 //!   next boot. **That cleanup defaults OFF and is opt-in via
 //!   `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP=true`** — single-
-//!   replica operators should turn it on. host_dir cleanup is best-
-//!   effort.
+//!   replica operators should turn it on. host_dir cleanup is sweeper-
+//!   owned regardless of opt-in.
 //! - `stop` is idempotent (returns Ok if the sandbox isn't in the
 //!   in-memory map). The Nomad job is purged, vm_index returned to
 //!   the pool **only on confirmed purge** (else leaked), and the
-//!   per-sandbox host_dir is `rm -rf`'d. The per-user home dir is
-//!   **never** deleted by `stop` — it's user-scoped state.
+//!   sealed-auth record is `persist.delete`d. **The per-sandbox
+//!   host_dir is LEAKED for sweeper cleanup** — see the v34 note
+//!   above. The per-user home dir is **never** deleted by `stop` —
+//!   it's user-scoped state owned by the user lifecycle, not the
+//!   sandbox lifecycle.
+//! - **host_dir GC (sweeper-owned, v34)**:
+//!   [`crate::sweep::spawn_host_dir_gc`] runs every 5 minutes,
+//!   enumerates `<host_state_dir>/<uuid>/` entries, looks each up in
+//!   the `sandboxes` table, and `rm -rf`s the dir when the sandbox is
+//!   in a terminal state (`stopped`/`lost`/`orphan`), no pending
+//!   `wake_jobs` row exists, and the directory mtime is older than
+//!   `GRACE_SECS` (default 1 hour). Operators retain on-disk artefacts
+//!   during the grace window for inspection.
 //!
 //! ## Note on rootfs init.sh
 //!
@@ -1185,51 +1208,45 @@ impl NomadCHBackend {
             );
         }
 
-        // 5. Remove per-sandbox host dir. Per-user home dir is
-        //    intentionally **not** touched. Skip the rm if the job
-        //    teardown didn't confirm OR the host fence failed —
-        //    virtiofsd may still hold the socket / share open, and
-        //    pulling the dir from under it would just produce
-        //    confusing logs.
+        // 5. host_dir — INTENTIONALLY NOT REMOVED.
         //
-        //    `remove_host_dir == false` is the snapshot-teardown path
-        //    (bug #15): callers want the per-sandbox `workspace.img`
-        //    (and the dir holding it) to survive across the snapshot
-        //    → wake gap. The next regular `stop` reaps it.
+        //    T-8b-stress-r2 controller v34: per-alloc host_dir cleanup
+        //    is the load-bearing race behind Bug 1 (`workspace.img does
+        //    not exist`). See the doc-comment block at the top of this
+        //    file ("Cleanup contract") and the matching block in
+        //    CreateGuard::drop's step-3 comment for the full diagnosis.
+        //
+        //    New invariant: host_dir is reaped EXCLUSIVELY by the
+        //    sweeper task (`crate::sweep::spawn_host_dir_gc`). Per-alloc
+        //    paths — CreateGuard rollback, stop_inner, the
+        //    restore-failure tail — leak the host_dir deliberately so
+        //    a concurrent retry's StartTask never observes a missing
+        //    workspace.img. The sweeper's 1-hour grace + terminal-state
+        //    + no-pending-wake-jobs gate ensures we don't reap data
+        //    out from under an in-flight retry or a wake.
+        //
+        //    `remove_host_dir == false` (snapshot-aware teardown, bug
+        //    #15) was the original gate; under v34 both branches behave
+        //    the same way w.r.t. host_dir — the variable now only gates
+        //    `persist.delete` below. Logging the difference so an
+        //    operator can still distinguish the two stop_inner shapes
+        //    in journalctl.
         if !remove_host_dir {
             tracing::info!(
                 sandbox_id = %sandbox_id,
                 job = %sandbox.job_id,
                 host_dir = %sandbox.host_dir.display(),
-                "sandbox/nomad-ch stop_preserving_state: skipping host_dir rm (snapshot-aware teardown; workspace.img must survive to wake)"
+                "sandbox/nomad-ch stop_preserving_state: leaking host_dir (sweeper-owned, snapshot-aware teardown)"
             );
         } else {
-            let host_dir_safe_to_rm = job_confirmed_gone && fence_passed;
-            if host_dir_safe_to_rm && sandbox.host_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
-                    errs.push(format!(
-                        "rm -rf {}: {}",
-                        sandbox.host_dir.display(),
-                        e
-                    ));
-                }
-            } else if sandbox.host_dir.exists() {
-                // Either the Nomad purge didn't confirm or the host
-                // fence failed. Either way virtiofsd may still hold
-                // the share; leaking the dir for orphan-prune is the
-                // safer choice.
-                let reason = if !job_confirmed_gone {
-                    "job not confirmed gone"
-                } else {
-                    "host_fence timeout"
-                };
-                tracing::warn!(
-                    job = %sandbox.job_id,
-                    host_dir = %sandbox.host_dir.display(),
-                    reason,
-                    "sandbox/nomad-ch stop: leaking host_dir"
-                );
-            }
+            tracing::info!(
+                sandbox_id = %sandbox_id,
+                job = %sandbox.job_id,
+                host_dir = %sandbox.host_dir.display(),
+                job_confirmed_gone,
+                fence_passed,
+                "sandbox/nomad-ch stop: leaking host_dir (sweeper-owned; v34 invariant)"
+            );
         }
 
         // Delete the sealed record (preview-URL § II.0 §4). BEST-EFFORT:
@@ -2094,50 +2111,46 @@ impl Drop for CreateGuard {
                     );
                 }
 
-                // 3. host_dir rm -rf — wrapped in spawn_blocking
-                //    because std::fs::remove_dir_all on an active
-                //    workspace tree (think 100k+ node_modules
-                //    inodes) is uncomfortable on the compio worker;
-                //    at 50 concurrent CreateGuard drops it would
-                //    serialize against every other compio task.
-                //    Skip on purge-failure for the same reason
-                //    `stop` skips: virtiofsd may still hold the
-                //    share open, and pulling the dir from under it
-                //    just produces confusing logs.
+                // 3. host_dir — INTENTIONALLY NOT REMOVED.
                 //
-                //    R17-A5: this `spawn_blocking` now runs on the
-                //    private compio runtime minted by
-                //    `detach_isolated` — it doesn't share the
-                //    ntex-worker blocking pool either, so a slow
-                //    rm -rf of a giant node_modules tree never
-                //    pressures the worker fleet.
-                if purge_ok && host_dir_created {
-                    let host_dir_clone = host_dir.clone();
-                    let blocking = compio::runtime::spawn_blocking(move || {
-                        if host_dir_clone.exists() {
-                            std::fs::remove_dir_all(&host_dir_clone).map_err(|e| {
-                                format!("rm -rf {}: {e}", host_dir_clone.display())
-                            })
-                        } else {
-                            Ok(())
-                        }
-                    })
-                    .await;
-                    match blocking {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::warn!(
-                            error = %e,
-                            "sandbox/nomad-ch guard cleanup (best-effort)"
-                        ),
-                        Err(e) => tracing::error!(
-                            panic = ?e,
-                            "sandbox/nomad-ch guard cleanup: host_dir spawn_blocking panic"
-                        ),
-                    }
-                } else if !purge_ok && host_dir_created {
-                    tracing::warn!(
+                //    T-8b-stress-r2 controller v34: the per-alloc
+                //    host_dir cleanup path is THE load-bearing race
+                //    that caused Bug 1 (48/60 CREATEs failing with
+                //    `workspace.img does not exist` — the failing
+                //    alloc's DestroyTask `rm -rf`'d the dir while a
+                //    concurrent retry's StartTask was still running).
+                //    See the stress-r2 review file and the doc-comment
+                //    block at the top of this file ("Cleanup contract")
+                //    for the full diagnosis.
+                //
+                //    New invariant: host_dir is created on-demand by
+                //    `create_ext4_image_if_missing` and reaped EXCLUSIVELY
+                //    by the sweeper task (`crate::sweep::spawn_host_dir_gc`).
+                //    Per-alloc paths — CreateGuard rollback, stop_inner,
+                //    the restore-failure tail — all LEAK the host_dir
+                //    deliberately. Retries that re-use the same
+                //    sandbox_id see workspace.img still on disk (the
+                //    `[ ! -f $WORKSPACE_IMG ]` cold-boot gate flips
+                //    to "exists, skip mkfs"); retries with a fresh
+                //    sandbox_id get a fresh host_dir mkdir'd by step
+                //    3 of try_create. Either way, no race.
+                //
+                //    Sweeper grace: 1 hour after the sandbox transitions
+                //    to a terminal state with no pending wake_jobs (cf.
+                //    `crate::sweep::spawn_host_dir_gc`'s `GRACE_SECS`).
+                //    Operators retain on-disk artefacts during the grace
+                //    window for inspection.
+                //
+                //    Note: `host_dir_created` is still tracked above for
+                //    diagnostic logging — a guard that never mkdir'd
+                //    nothing is a different failure shape from one that
+                //    successfully mkdir'd but failed on a later step.
+                if host_dir_created {
+                    tracing::info!(
                         host_dir = %host_dir.display(),
-                        "sandbox/nomad-ch guard cleanup: leaking host_dir (Nomad purge not confirmed)"
+                        purge_ok,
+                        sandbox_id = %sandbox_id,
+                        "sandbox/nomad-ch guard cleanup: leaking host_dir (sweeper will GC after 1h grace + terminal state)"
                     );
                 }
             })
@@ -2615,9 +2628,30 @@ async fn wait_for_alloc_running(
                             .as_str()
                             .unwrap_or("")
                             .to_string();
-                        return Err(format!(
-                            "nomad alloc terminal status={cs}: {desc}"
-                        ));
+                        // T-8b-stress-r2 controller v34: also harvest
+                        // the per-task TaskEvent DisplayMessage. Nomad's
+                        // alloc-level `ClientDescription` is a generic
+                        // rollup ("Failed tasks") that loses the
+                        // actionable driver-side message — operators
+                        // SSH'ing the worker to read `nomad alloc
+                        // status` is the friction this surface
+                        // removes. The driver-side msg lives at
+                        // `TaskStates[<task>].Events[].DisplayMessage`;
+                        // we collate the messages from any task with
+                        // `Failed: true` so the controller's wire
+                        // envelope carries the full chain
+                        // (`backend_create_failed: <generic>: <driver
+                        // verbatim>`).
+                        let driver_msgs = extract_failed_task_event_msgs(a);
+                        let composed = if driver_msgs.is_empty() {
+                            format!("nomad alloc terminal status={cs}: {desc}")
+                        } else {
+                            format!(
+                                "nomad alloc terminal status={cs}: {desc}: {}",
+                                driver_msgs.join(" | ")
+                            )
+                        };
+                        return Err(composed);
                     }
                     latest = Some(cs);
                 }
@@ -2681,6 +2715,87 @@ async fn wait_for_alloc_running(
         msg.push_str(&format!("; last parse error: {e}"));
     }
     Err(msg)
+}
+
+/// T-8b-stress-r2 controller v34: collate the per-task DisplayMessage
+/// strings from any TaskState marked `Failed: true` so the controller's
+/// terminal-error envelope carries the driver-side verbatim message
+/// instead of just Nomad's generic "Failed tasks" rollup.
+///
+/// Shape of the Nomad alloc JSON the function walks:
+///
+/// ```json
+/// {
+///   "ClientStatus": "failed",
+///   "TaskStates": {
+///     "ch": {
+///       "State": "dead",
+///       "Failed": true,
+///       "Events": [
+///         {"Type": "Driver Failure", "DisplayMessage": "...verbatim...", "Time": ...},
+///         ...
+///       ]
+///     }
+///   }
+/// }
+/// ```
+///
+/// Returns a deduplicated, ordered list of `"<task>=<msg>"` strings
+/// from the FIRST event of each failed task whose DisplayMessage is
+/// non-empty. Multiple failed tasks (rare — a Nomad alloc typically
+/// has one) are joined by `wait_for_alloc_running` with ` | `.
+///
+/// Empty list if the alloc has no `TaskStates` or no failed tasks.
+/// Pure function, no I/O — pinned by unit tests below.
+///
+/// `pub(crate)` so the restore-path sibling (`restore_handler.rs::
+/// wait_for_alloc_running_blocking`) reuses the same extraction. Keeping
+/// the implementations in lockstep is the whole point of the v34
+/// verbatim-msg propagation — divergence would silently re-introduce
+/// the observability gap on the wake path.
+pub(crate) fn extract_failed_task_event_msgs(alloc: &serde_json::Value) -> Vec<String> {
+    let task_states = match alloc["TaskStates"].as_object() {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::with_capacity(task_states.len());
+    for (task_name, ts) in task_states {
+        let failed = ts["Failed"].as_bool().unwrap_or(false);
+        if !failed {
+            continue;
+        }
+        // Walk events newest-last (Nomad emits in temporal order).
+        // For an alloc failure, the LAST event usually carries the
+        // most actionable message — but we surface the FIRST non-
+        // empty DisplayMessage found while walking in REVERSE so
+        // operators see the terminal cause first. If no DisplayMessage
+        // is set on any event we silently skip the task (the alloc-
+        // level ClientDescription is the fallback the caller already
+        // emits).
+        let events = match ts["Events"].as_array() {
+            Some(e) => e,
+            None => continue,
+        };
+        for ev in events.iter().rev() {
+            if let Some(msg) = ev["DisplayMessage"].as_str() {
+                let trimmed = msg.trim();
+                if !trimmed.is_empty() {
+                    // Cap each task's message at 2 KiB so a pathological
+                    // driver that emits a multi-MB error doesn't bloat
+                    // the wire envelope. Truncation is rare but bounded.
+                    const PER_TASK_CAP: usize = 2048;
+                    let bounded: String = if trimmed.len() > PER_TASK_CAP {
+                        format!("{}…(truncated)", &trimmed[..PER_TASK_CAP])
+                    } else {
+                        trimmed.to_string()
+                    };
+                    out.push(format!("{task_name}: {bounded}"));
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// True when every alloc in the array has a terminal client status.
@@ -4105,6 +4220,142 @@ mod tests {
         // additions).
         let v = vec![alloc("future-status-we-dont-know")];
         assert!(!allocs_all_terminal(Some(&v)));
+    }
+
+    // ─── T-8b-stress-r2 v34: verbatim driver-msg propagation ────
+    //
+    // `extract_failed_task_event_msgs` walks the alloc JSON's
+    // `TaskStates[<task>].Events[]` chain to harvest the per-task
+    // DisplayMessage from any task marked `Failed: true`. Pre-v34 the
+    // controller surfaced only Nomad's generic `ClientDescription`
+    // ("Failed tasks") and operators had to SSH the worker to read
+    // the actionable driver-side error. v34 threads the verbatim msg
+    // into the wire envelope.
+
+    #[test]
+    fn extract_failed_task_event_msgs_collates_driver_failure_text() {
+        // Shape mirrors the verbatim T-8b-stress-r2 review excerpt:
+        // a single failed `ch` task with a Driver Failure event
+        // carrying the `disk[1] /var/zeroship/ch/<uuid>/workspace.img
+        // does not exist (controller must stage before spawn)` text.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "ClientDescription": "Failed tasks",
+            "TaskStates": {
+                "ch": {
+                    "State": "dead",
+                    "Failed": true,
+                    "Events": [
+                        {
+                            "Type": "Driver",
+                            "DisplayMessage": "Downloading artifacts"
+                        },
+                        {
+                            "Type": "Driver Failure",
+                            "DisplayMessage": "rpc error: code = Unknown desc = ch: StartTask: disk[1] /var/zeroship/ch/019e5a6bf7e67280953fc425c2fc3487/workspace.img does not exist (controller must stage before spawn)"
+                        }
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1, "single failed task → one entry; got {msgs:?}");
+        let m = &msgs[0];
+        assert!(m.starts_with("ch: "), "task name prefix missing: {m:?}");
+        assert!(
+            m.contains("workspace.img does not exist"),
+            "verbatim driver msg lost: {m:?}"
+        );
+        assert!(
+            m.contains("controller must stage before spawn"),
+            "verbatim driver msg lost: {m:?}"
+        );
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_returns_empty_on_no_failed_tasks() {
+        // Healthy alloc: every TaskState has Failed=false. The helper
+        // returns an empty vec so the caller falls back to the
+        // ClientDescription path.
+        let alloc = serde_json::json!({
+            "ClientStatus": "running",
+            "TaskStates": {
+                "ch": {
+                    "State": "running",
+                    "Failed": false,
+                    "Events": [
+                        {"Type": "Started", "DisplayMessage": "Task started by user"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert!(msgs.is_empty(), "no failed task → empty list; got {msgs:?}");
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_returns_empty_when_taskstates_missing() {
+        // Defensive: malformed / partial alloc JSON. The helper must
+        // not panic — caller's fallback path is the ClientDescription.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "ClientDescription": "Failed tasks"
+            // no TaskStates at all
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert!(msgs.is_empty(), "missing TaskStates → empty; got {msgs:?}");
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_skips_failed_task_with_empty_display() {
+        // A failed task with no DisplayMessage on any event yields no
+        // entry (caller's fallback handles the empty-list case). This
+        // is defensive — a buggy driver could emit a Failed=true state
+        // with empty events; we don't want to surface a misleading
+        // "ch: " (just the task name with no message) in that case.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": ""}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert!(msgs.is_empty(), "empty DisplayMessage → no entry; got {msgs:?}");
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_caps_oversized_message() {
+        // A pathological driver emitting a multi-MB error must not
+        // bloat the wire envelope. The 2 KiB per-task cap kicks in
+        // with a "…(truncated)" sentinel.
+        let big = "X".repeat(10_000);
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": big}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        assert!(m.contains("…(truncated)"), "truncation sentinel missing: starts={:?}", &m[..50.min(m.len())]);
+        // Bounded: task-name prefix (~4 chars) + 2 KiB body + sentinel
+        // (~14 chars). Tolerate a small slack for the prefix.
+        assert!(
+            m.len() < 2200,
+            "truncation cap not enforced; got len={}",
+            m.len()
+        );
     }
 
     // ─── C3: HTTP error tracked in poll-loop timeout messages ──
@@ -6118,11 +6369,20 @@ mod tests {
     }
 
     #[compio::test]
-    async fn stop_for_real_removes_host_dir() {
-        // Mirror test: the existing `stop()` MUST still rm the
-        // host_dir under the same favourable conditions. This is the
-        // structural counterpart that proves the bool gate, not
-        // independent infra, is what makes the difference.
+    async fn stop_for_real_leaks_host_dir_for_sweeper() {
+        // T-8b-stress-r2 controller v34: stop() now LEAKS the
+        // host_dir on purpose so a concurrent retry-CREATE for the
+        // same sandbox_id never observes workspace.img missing mid-
+        // alloc. Sweeper-owned GC (`sweep::spawn_host_dir_gc`) is the
+        // catchall — see `crates/sandbox/src/sweep.rs::run_host_dir_gc_once`
+        // for the eligibility gates (terminal state, no pending
+        // wake_jobs row, mtime > grace).
+        //
+        // This test is the mirror of B15's
+        // `stop_preserving_state_does_not_remove_host_dir`: both stop
+        // paths now share the leak-and-defer-to-sweeper contract.
+        // Pre-v34 this test asserted `!host_dir.exists()`; flipped
+        // here to assert the NEW contract.
         let (port, stop_flag) = spawn_404_mock();
         let nomad_addr = format!("http://127.0.0.1:{port}");
 
@@ -6153,18 +6413,32 @@ mod tests {
             backend.state.read().unwrap().get(&id).is_none(),
             "stop must remove the in-memory record"
         );
-        // host_dir IS removed by the regular stop path under these
-        // favourable conditions (404-mock → job_confirmed_gone=true,
-        // fence_secs=0 → fence_passed=true).
+        // v34 invariant: host_dir survives stop() under favourable
+        // conditions (404-mock → job_confirmed_gone=true,
+        // fence_secs=0 → fence_passed=true). Pre-v34 this assertion
+        // was inverted; the v34 fix moves host_dir GC to the
+        // sweeper.
         assert!(
-            !host_dir.exists(),
-            "stop (the for-real variant) must remove host_dir when \
-             job_confirmed_gone && fence_passed; got dir still present"
+            host_dir.exists(),
+            "v34 regression: stop() removed host_dir; the per-alloc \
+             host_dir cleanup MUST leak so a concurrent retry-CREATE \
+             for the same sandbox_id never observes workspace.img \
+             missing mid-alloc. Sweeper-owned GC reaps it later."
+        );
+        assert!(
+            sentinel.exists(),
+            "v34 regression: stop() removed workspace.img"
+        );
+        let contents = std::fs::read(&sentinel).expect("read sentinel");
+        assert_eq!(
+            contents,
+            b"WIPE-ME",
+            "v34 regression: workspace.img sentinel was modified by stop()"
         );
 
         stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        // Safety net in case the assertion above changes: don't
-        // leak the dir.
+        // Cleanup our own test fixture (the sweeper isn't running
+        // here, so we manually rm the leaked dir).
         let _ = std::fs::remove_dir_all(&host_dir);
     }
 

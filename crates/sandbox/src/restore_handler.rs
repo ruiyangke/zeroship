@@ -2566,9 +2566,25 @@ fn wait_for_alloc_running_blocking(
                                     .as_str()
                                     .unwrap_or("")
                                     .to_string();
-                                return Err(format!(
-                                    "nomad alloc terminal status={cs}: {desc}"
-                                ));
+                                // T-8b-stress-r2 controller v34: harvest
+                                // per-task TaskEvent DisplayMessage too
+                                // (the actionable driver-side error;
+                                // Nomad's `ClientDescription` is a
+                                // generic "Failed tasks" rollup). Single
+                                // helper shared with `nomad_ch.rs::
+                                // wait_for_alloc_running` so cold-boot
+                                // and wake errors carry the same shape.
+                                let driver_msgs =
+                                    crate::backend::nomad_ch::extract_failed_task_event_msgs(a);
+                                let composed = if driver_msgs.is_empty() {
+                                    format!("nomad alloc terminal status={cs}: {desc}")
+                                } else {
+                                    format!(
+                                        "nomad alloc terminal status={cs}: {desc}: {}",
+                                        driver_msgs.join(" | ")
+                                    )
+                                };
+                                return Err(composed);
                             }
                             last_status = Some(cs);
                         }
