@@ -39,6 +39,20 @@
 //     controller emitted the flag) and the failure ratio (failures /
 //     total). Healthy fleet: total bumps once per cold-boot, failures
 //     trends to zero. See the 2026-05-25 staging-locality ADR.
+//   - `nomad_driver_ch_destroy_task_tap_stuck_total` — bumped when
+//     DestroyTask's synchronous tap-delete + ENODEV-verify gate
+//     exhausts its poll budget without observing the kernel evict
+//     the tap netdev. r24-A2-S2 closes the residual stress-r8
+//     `Tap zsbx-nm-N already exists` window: the existing best-
+//     effort tap removal (h.tap call + defensive VMIndex-keyed pass)
+//     was non-blocking on failure, so DestroyTask could return to
+//     Nomad with the tap still present in the kernel — the next
+//     alloc on the same VMIndex then hit EEXIST. The new gate
+//     verifies ENODEV via `ip link show` before returning. On
+//     budget exhaustion: bump this counter, WARN-log, proceed
+//     (mirrors r4-A's "never block Nomad destroy" tolerance).
+//     Operators rate-graph this; a healthy fleet trends to zero.
+//     See T-8b-stress-r8 r24-A2-S2.
 
 package ch
 
@@ -196,4 +210,46 @@ func StartTaskStageFailuresTotal() int64 {
 // pin its own baseline without depending on sibling-test ordering.
 func ResetStartTaskStageFailuresForTest() {
 	startTaskStageFailuresTotal.Store(0)
+}
+
+// destroyTaskTapStuckTotal is the process-global counter behind
+// `nomad_driver_ch_destroy_task_tap_stuck_total`. Bumped when
+// DestroyTask's synchronous tap-delete + ENODEV-verify gate exhausts
+// its poll budget without observing the kernel evict the tap netdev.
+//
+// r24-A2-S2 (T-8b-stress-r8): the existing best-effort tap removal
+// (h.tap call + defensive VMIndex-keyed pass) returned to Nomad on
+// failure without verification. Stress-r8 showed cycles 1-19 failing
+// identically with `Tap zsbx-nm-N already exists`: the kernel hadn't
+// finished evicting the netdev between DestroyTask return and the
+// next StartTask's tuntap-add. The strictly-stronger predicate is
+// to poll `ip link show <tap>` for ENODEV before returning — if the
+// netdev is still listed, the next alloc's tuntap-add will collide.
+//
+// On budget exhaustion: bump this counter, WARN-log, proceed (so
+// Nomad still gets a definitive terminal signal and doesn't loop the
+// destroy). Operators rate-graph this; a healthy fleet trends to
+// zero. A spike means kernel netdev cleanup is wedged — orthogonal
+// to the driver, but only the driver is positioned to observe it.
+var destroyTaskTapStuckTotal atomic.Int64
+
+// incDestroyTaskTapStuck bumps
+// `nomad_driver_ch_destroy_task_tap_stuck_total` by one. Goroutine-
+// safe; the atomic Int64 carries its own ordering.
+func incDestroyTaskTapStuck() {
+	destroyTaskTapStuckTotal.Add(1)
+}
+
+// DestroyTaskTapStuckTotal returns the current counter value.
+// Exported for tests (asserts the tap-delete-and-verify budget-
+// exhaustion branch fires); a future `/metrics` exporter would also
+// use this read path.
+func DestroyTaskTapStuckTotal() int64 {
+	return destroyTaskTapStuckTotal.Load()
+}
+
+// ResetDestroyTaskTapStuckForTest zeroes the counter so a test can
+// pin its own baseline without depending on sibling-test ordering.
+func ResetDestroyTaskTapStuckForTest() {
+	destroyTaskTapStuckTotal.Store(0)
 }
