@@ -182,6 +182,28 @@ pub struct ColumnInfo {
     /// sentinel CHECK comment. Stays `None` in the default-feature
     /// build because no consumer wires the field yet.
     pub encryption: Option<EncryptionMeta>,
+    /// **P5.5 PR 1** — column-mask metadata when the SDK declared the
+    /// column with `t.string().mask(...)` or `t.encrypted(...)` (the
+    /// latter auto-populating `mask = { kind: "full", classification:
+    /// "pii" }` at schema-normalisation time when no explicit `.mask()`
+    /// is chained). `None` for every existing column at HEAD.
+    ///
+    /// Path B (sibling-column-based, resolved 2026-05-24): when
+    /// `mask` is `Some(_)`, the platform emits a hidden
+    /// `<col>_masked` sibling column at CREATE TABLE time (PR 2),
+    /// reads route through `<col>_masked AS <col>` aliasing (PR 3),
+    /// and writes dual-bind both columns atomically (PR 2). The
+    /// sibling column is NEVER part of the creator-visible SDK
+    /// surface — `Row<S>` only contains the parent column wrapped
+    /// in `MaskedValue<T>`.
+    ///
+    /// Live-schema introspection on PG/SQLite does NOT yet populate
+    /// this from existing tables in PR 1; the sibling-column-existence
+    /// check + sentinel-comment parse lands in PR 2. For now `mask`
+    /// always reads as `None` from live introspection — the diff
+    /// classifier treats schema-mask vs live-no-mask as Recoverable
+    /// Additive (PR 6a backfill is safe to apply).
+    pub mask: Option<MaskMeta>,
 }
 
 impl Default for ColumnInfo {
@@ -203,6 +225,12 @@ impl Default for ColumnInfo {
             is_fts_source: false,
             is_geopoint: false,
             encryption: None,
+            // **P5.5 PR 1** — mask defaults to None. Every existing
+            // column gets `mask: None`; only NEW `.mask(...)`
+            // declarations populate `Some(_)`. PR 2 onwards populates
+            // from schema-meta introspection (PG sidecar /
+            // SQLite sentinel comment).
+            mask: None,
         }
     }
 }
@@ -244,6 +272,105 @@ pub enum WrappedType {
     String,
     Number,
     Bytes,
+}
+
+/// **P5.5 PR 1** — column-mask metadata attached to a [`ColumnInfo`]
+/// when the SDK declares the column with `.mask({ kind, classification })`
+/// or, for `t.encrypted()` columns, when the schema-normaliser
+/// auto-populates the default mask (`{ kind: "full", classification: "pii" }`).
+///
+/// Path B: when present, the platform emits a sibling `<col>_masked`
+/// physical column alongside the parent at CREATE TABLE time (PR 2),
+/// default reads pull the masked sibling and alias it back to the
+/// schema-declared name (PR 3), and writes dual-bind both columns
+/// atomically (PR 2). The sibling column is HIDDEN from the SDK
+/// surface — `Row<S>` only contains the parent column wrapped in
+/// `MaskedValue<T>`.
+///
+/// Population path (PR 2 onwards):
+/// - **PG**: from `__zeroship_meta.mask_columns` rows the DDL
+///   emitter writes alongside the table create.
+/// - **SQLite**: from a sentinel CHECK comment
+///   `/* zsmask:{kind}:{classification} */` parsed out of
+///   `sqlite_master.sql` (same regex-on-DDL pattern P4 / P5 use).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskMeta {
+    /// Mask transform applied at write time to compute the sibling
+    /// column's value from the plaintext. See [`MaskKind`].
+    pub kind: MaskKind,
+    /// Classification of the source field — drives unmask
+    /// authorization (PR 4) and audit-row tagging (PR 4).
+    pub classification: Classification,
+    /// Name of the physical sibling column emitted alongside the
+    /// parent. Always `format!("{parent}_masked")`. Stored explicitly
+    /// so the read/write passes can quote the right identifier
+    /// without re-deriving from the parent name each call.
+    pub sibling_column: String,
+}
+
+/// **P5.5 PR 1** — built-in mask transform applied at write time.
+///
+/// Mirrors the SDK's `MaskKind` union (`sdks/db/src/types.ts`).
+/// `None` is the explicit opt-out variant for encrypted columns
+/// where the creator genuinely wants plaintext-on-read; PR 2 / PR 3
+/// branch on `kind == None` to skip sibling emission and use the
+/// P5 decrypt-on-read path. Every other variant produces a
+/// pre-computed masked string stored in the sibling column.
+///
+/// **No raw user-defined JS functions for masking.** Creator-supplied
+/// mask functions are a security risk (an AI-generated `mask: v => v`
+/// defeats the purpose). Only named built-in strategies — adding a
+/// new strategy is a platform PR, not creator config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaskKind {
+    /// `"***"` — maximum redaction. Default for encrypted columns.
+    Full,
+    /// `"***-**-6789"` — last 4 visible. SSN, card numbers, phone.
+    Last4,
+    /// `"4111-****-****-****"` — first 4 visible. BIN/IIN preservation.
+    First4,
+    /// `"a****@example.com"` — preserve domain for sorting / analytics.
+    Email,
+    /// `"A. A***"` — initials. Name fields.
+    Name,
+    /// `"1985-**-**"` — preserve year. Age-bucket analytics.
+    DateYear,
+    /// `"198?-**-**"` — preserve decade. Coarser-grained analytics.
+    DateDecade,
+    /// Explicit opt-out: no sibling emission, no mask wrap on read.
+    /// Used by encrypted columns the creator wants plaintext-on-read
+    /// for (e.g. background-job-only read paths).
+    None,
+}
+
+/// **P5.5 PR 1** — taxonomy of sensitivity classes used to drive
+/// unmask authorization (PR 4) and audit-row tagging (PR 4).
+///
+/// Mirrors the SDK's `Classification` union. The taxonomy is
+/// deliberately small — six classes covering the standard regulatory
+/// boundaries (PII / SPI / PHI / PCI) plus `Public` (nothing to
+/// protect) and `Internal` (platform metadata).
+///
+/// The six default-classification names (`public`, `pii`, `spi`,
+/// `phi`, `pci`, `internal`) are RESERVED as column names by
+/// `query::validate_field_name` so creators cannot accidentally
+/// collide with the classification taxonomy in their schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Classification {
+    /// Usernames, display names, public profile data — visible to all.
+    Public,
+    /// PII — full name, email, address, phone, IP, date of birth.
+    /// Default classification for encrypted columns without explicit
+    /// `.mask(...)`.
+    Pii,
+    /// SPI — SSN, driver's license, biometric data (CPRA "sensitive PI").
+    Spi,
+    /// PHI — health records, medical IDs, diagnosis (HIPAA scope).
+    Phi,
+    /// PCI — card numbers, CVV, magnetic stripe data (PCI-DSS scope).
+    Pci,
+    /// Internal — platform-internal metadata, system field overrides.
+    Internal,
 }
 
 #[derive(Debug, Clone)]
@@ -548,6 +675,14 @@ pub fn compute_diff(
     // ----- column additions -----
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
+            // **P5.5 PR 1** — skip top-level metadata keys (`_meta`,
+            // `_indexes`). The runtime reads these out-of-band; they
+            // are NOT column declarations and must not reach the
+            // `field_name` validator (which now reserves the `_`
+            // prefix for synthetic-result columns).
+            if crate::query::is_schema_metadata_key(field) {
+                continue;
+            }
             let exists = live_cols.map(|c| c.contains_key(field)).unwrap_or(false);
             if exists {
                 continue;

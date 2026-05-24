@@ -6508,3 +6508,92 @@ async fn snapshot_uri_content_hash_round_trip() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// P5.5 PR 1 — reserved-name refusal at register_model time.
+//
+// Two PG-integration tests pin that the reserved-name validator
+// (`query::validate_field_name`) reaches the orchestrator's CREATE
+// TABLE emission path: declaring a column ending in `_masked` or
+// named after one of the six reserved classifications produces an
+// invalid-identifier error at deploy time, NOT silent acceptance.
+// ---------------------------------------------------------------------------
+
+/// A schema declaring a column whose name ends in `_masked` must be
+/// refused at `register_model` time. The reserved suffix is owned by
+/// Path B's sibling-column emission (PR 2+); creators cannot collide
+/// with it.
+#[compio::test]
+async fn p55_pr1_register_model_refuses_masked_suffix_field() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "p55_masked_suffix";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    let schema = json!({
+        "name": {"type": "string"},
+        // creator-declared `ssn_masked` would collide with the
+        // platform's sibling-column emission. Refuse at register_model.
+        "ssn_masked": {"type": "string"},
+    });
+
+    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "users",
+        &schema,
+        &serde_json::json!([]),
+        "p55_pr1_deploy_masked",
+    )
+    .await
+    .expect_err("schema with `_masked` suffix should be refused");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("reserved field name") && msg.contains("_masked"),
+        "expected reserved-suffix message, got: {msg}"
+    );
+}
+
+/// A schema declaring a column named after one of the six default
+/// classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`)
+/// must be refused at `register_model` time. These names are reserved
+/// at the column-name level so the classification taxonomy stays
+/// non-overlapping with creator-declared columns.
+#[compio::test]
+async fn p55_pr1_register_model_refuses_reserved_classification_field() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "p55_classification";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    let schema = json!({
+        "name": {"type": "string"},
+        // creator-declared `pii` would collide with the platform's
+        // classification taxonomy used by PR 4 authorization + audit.
+        "pii": {"type": "string"},
+    });
+
+    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "users",
+        &schema,
+        &serde_json::json!([]),
+        "p55_pr1_deploy_classification",
+    )
+    .await
+    .expect_err("schema with reserved classification name should be refused");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("reserved field name"),
+        "expected reserved-name message, got: {msg}"
+    );
+}

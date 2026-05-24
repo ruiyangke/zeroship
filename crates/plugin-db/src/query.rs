@@ -165,6 +165,78 @@ pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
+/// **P5.5 PR 1** — true for top-level schema keys that carry
+/// metadata rather than a field declaration (e.g. `"_meta"`,
+/// `"_indexes"`). These keys are produced by the SDK normaliser
+/// or appear in test schemas; they MUST be skipped before the
+/// schema-iteration loop reaches [`validate_field_name`] (otherwise
+/// the leading `_` would trip the reserved-prefix rule).
+///
+/// The list is intentionally narrow — only keys the runtime
+/// actually reads. Adding a new metadata key here is a deliberate
+/// platform extension, not a creator-driven decision.
+pub(crate) fn is_schema_metadata_key(key: &str) -> bool {
+    matches!(key, "_meta" | "_indexes")
+}
+
+/// **P5.5 PR 1** — taxonomy of reserved name shapes the platform
+/// enforces on creator-declared field names.
+///
+/// Three match arms cover the patterns we currently reserve:
+/// - `Exact(s)`  — refuse a field named literally `s`.
+/// - `Prefix(p)` — refuse any field name starting with `p`.
+/// - `Suffix(s)` — refuse any field name ending with `s`.
+///
+/// The `_masked` suffix is reserved for sibling columns auto-emitted
+/// by the platform's `.mask()` / `.encrypted()` machinery (Path B,
+/// PR 2 onwards). The six default classifications
+/// (`public`/`pii`/`spi`/`phi`/`pci`/`internal`) are reserved as
+/// exact names so creator schemas cannot collide with the
+/// classification taxonomy used by audit + authorization (PR 4).
+pub(crate) enum ReservedName {
+    /// Literal name match — refuse a field named exactly `&str`.
+    Exact(&'static str),
+    /// Prefix match — refuse any field starting with `&str`.
+    Prefix(&'static str),
+    /// Suffix match — refuse any field ending with `&str`.
+    Suffix(&'static str),
+}
+
+/// Platform-reserved field names. Centralised list — every new
+/// reserved prefix / suffix / exact-name lands here, exercised by
+/// both the schema-registration validator and the filter-time
+/// validator (the latter fences `db.users.find({ ssn_masked: ... })`
+/// with the same error code path).
+pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
+    // Synthetic-result columns the runtime emits (e.g. `_rank`,
+    // `_score` on FTS / vector search). Reserved so creator-declared
+    // columns can't shadow them.
+    ReservedName::Prefix("_"),
+    // Platform bookkeeping table prefixes. Mirrors the
+    // `validate_collection` reservations for table-name shape.
+    ReservedName::Prefix("__zs_"),
+    ReservedName::Prefix("__zeroship_"),
+    ReservedName::Prefix("sqlite_"),
+    // **P5.5 PR 1** — masked-column sibling suffix. The platform
+    // emits `<col>_masked` siblings (Path B); creators must not
+    // declare a column ending in `_masked` themselves. Refused at
+    // both schema-registration time (in `field_to_column`) and
+    // filter-time (so `db.users.find({ ssn_masked: ... })` is
+    // refused with the same code path).
+    ReservedName::Suffix("_masked"),
+    // **P5.5 PR 1** — six default-classification names. Reserved at
+    // the column-name level so creator schemas can't accidentally
+    // collide with the classification taxonomy (used by PR 4
+    // authorization + audit). Matches the SDK's `Classification`
+    // union.
+    ReservedName::Exact("public"),
+    ReservedName::Exact("pii"),
+    ReservedName::Exact("spi"),
+    ReservedName::Exact("phi"),
+    ReservedName::Exact("pci"),
+    ReservedName::Exact("internal"),
+];
+
 /// Validate a field (column) name used in DDL.
 ///
 /// Postgres silently truncates identifiers longer than 63 bytes (NAMEDATALEN),
@@ -175,6 +247,13 @@ pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
 /// collide on the same Postgres-truncated column if either side approached
 /// the 63-byte ceiling. Enforcing ASCII-alphanumeric + underscore prevents
 /// that whole class.
+///
+/// **P5.5 PR 1** — also refuses any field name matching the
+/// [`RESERVED_NAMES`] table (platform suffixes / prefixes / exact
+/// names). The `_masked` suffix is reserved for Path B sibling
+/// columns; the six default-classification names (`public`, `pii`,
+/// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
+/// level.
 pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidIdent(
@@ -198,6 +277,37 @@ pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
         return Err(QueryError::InvalidIdent(format!(
             "invalid field name: {name} (allowed: ASCII alphanumeric + underscore)"
         )));
+    }
+    // **P5.5 PR 1** — reserved-name check. Run after the ASCII
+    // allowlist so a name like `"café"` reports the encoding error
+    // (not a spurious reserved-name hit on a bogus suffix match).
+    for reserved in RESERVED_NAMES {
+        let matches = match reserved {
+            ReservedName::Exact(n) => name == *n,
+            ReservedName::Prefix(p) => name.starts_with(p),
+            ReservedName::Suffix(s) => name.ends_with(s),
+        };
+        if matches {
+            let hint = match reserved {
+                ReservedName::Suffix(s) => {
+                    let stem = name.strip_suffix(s).unwrap_or(name);
+                    format!(
+                        "suffix '{s}' is reserved for sibling columns generated by \
+                         .mask()/.encrypted() — try '{stem}_view' or '{stem}_display' instead"
+                    )
+                }
+                ReservedName::Prefix(p) => format!(
+                    "prefix '{p}' is reserved for platform-internal names"
+                ),
+                ReservedName::Exact(n) => format!(
+                    "name '{n}' is reserved by the platform classification taxonomy \
+                     (public/pii/spi/phi/pci/internal)"
+                ),
+            };
+            return Err(QueryError::InvalidIdent(format!(
+                "reserved field name '{name}': {hint}"
+            )));
+        }
     }
     Ok(())
 }
@@ -283,6 +393,15 @@ pub fn build_create_table_with_fks(
 
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
+            // **P5.5 PR 1** — skip top-level metadata keys (e.g.
+            // `_meta`, `_indexes`). The `_` prefix is reserved for
+            // synthetic-result columns at the field-name level
+            // (`validate_field_name`), so these keys would otherwise
+            // trip the validator; they are CRDT-like top-level
+            // schema metadata rather than column declarations.
+            if is_schema_metadata_key(field) {
+                continue;
+            }
             let col_def = field_to_column(field, def)?;
             columns.push(col_def);
 
@@ -617,6 +736,13 @@ pub fn build_create_indexes(
     let mut fts_language: Option<String> = None;
 
     for (field, def) in obj {
+        // **P5.5 PR 1** — skip top-level metadata keys (`_meta`,
+        // `_indexes`) so the `_` reserved-prefix check in
+        // `validate_field_name` (PR 1) doesn't trip on schema
+        // bookkeeping.
+        if is_schema_metadata_key(field) {
+            continue;
+        }
         // **P4 PR 3** — geoPoint fields always emit an
         // `IndexKind::Spatial` spec regardless of the `index`/`unique`
         // markers. The impl builds the `USING GIST` DDL itself; the
@@ -2702,11 +2828,18 @@ pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<St
 }
 
 /// Build a condition for a single field.
+///
+/// **P5.5 PR 1** — runs `validate_field_name` on the filter key so a
+/// query like `db.users.find({ ssn_masked: "..." })` is refused with
+/// the same `InvalidIdent` error path that DDL-time validation uses.
+/// This fences the `_masked` reserved suffix at filter time so the
+/// creator can never query against a sibling column through the SDK.
 fn build_field_condition(
     field: &str,
     value: &Value,
     params: &mut Vec<String>,
 ) -> Result<String, QueryError> {
+    validate_field_name(field)?;
     let col = quote_ident(field);
 
     match value {
@@ -5088,10 +5221,14 @@ mod tests {
     }
 
     /// ASCII allowlist must accept the same shape `validate_collection`
-    /// accepts: alphanumeric + underscore.
+    /// accepts: alphanumeric + underscore. `_private` was historically
+    /// accepted but P5.5 PR 1 reserves the `_` prefix for synthetic-
+    /// result columns (`_rank`, `_distance`); see
+    /// `validate_field_name_rejects_reserved_underscore_prefix` for the
+    /// updated rule.
     #[test]
     fn validate_field_name_accepts_ascii_allowlist() {
-        for name in &["id", "user_id", "createdAt", "v2", "_private"] {
+        for name in &["id", "user_id", "createdAt", "v2", "first_name"] {
             assert!(
                 validate_field_name(name).is_ok(),
                 "ASCII allowlist should accept {name:?}",
@@ -5106,6 +5243,109 @@ mod tests {
         let schema = serde_json::json!({ long_field: { "type": "string" } });
         let result = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline);
         assert!(result.is_err(), "expected error for 64-byte field name");
+    }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 1 — reserved-name validator
+    // -----------------------------------------------------------------
+
+    /// The `_masked` suffix is reserved for Path B sibling columns
+    /// emitted by `.mask()` / `.encrypted()`. Creator-declared fields
+    /// ending in `_masked` must be refused.
+    #[test]
+    fn validate_field_name_rejects_reserved_masked_suffix() {
+        for name in &["ssn_masked", "card_pan_masked", "email_masked", "_masked"] {
+            let err = validate_field_name(name).unwrap_err();
+            match err {
+                QueryError::InvalidIdent(msg) => {
+                    assert!(
+                        msg.contains("reserved field name") && msg.contains("_masked"),
+                        "expected reserved-suffix message, got: {msg}"
+                    );
+                }
+                other => panic!("expected InvalidIdent for {name:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The six default-classification names (`public`, `pii`, `spi`,
+    /// `phi`, `pci`, `internal`) are reserved at the column-name level
+    /// so creator schemas can't collide with the classification taxonomy.
+    #[test]
+    fn validate_field_name_rejects_reserved_classification_names() {
+        for name in &["public", "pii", "spi", "phi", "pci", "internal"] {
+            let err = validate_field_name(name).unwrap_err();
+            match err {
+                QueryError::InvalidIdent(msg) => {
+                    assert!(
+                        msg.contains("reserved field name"),
+                        "expected reserved-name message for {name:?}, got: {msg}"
+                    );
+                }
+                other => panic!("expected InvalidIdent for {name:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// The `_` prefix is reserved for synthetic-result columns
+    /// (`_rank`, `_distance`, `_score`) emitted by FTS / vector /
+    /// spatial native paths.
+    #[test]
+    fn validate_field_name_rejects_reserved_underscore_prefix() {
+        for name in &["_rank", "_distance", "_score", "_anything"] {
+            let err = validate_field_name(name).unwrap_err();
+            assert!(
+                matches!(err, QueryError::InvalidIdent(_)),
+                "expected InvalidIdent for {name:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// Reserved-name validator fires at filter time too: a query like
+    /// `db.users.find({ ssn_masked: "..." })` is refused via
+    /// `build_field_condition` calling `validate_field_name`.
+    #[test]
+    fn build_where_rejects_reserved_masked_suffix_in_filter() {
+        let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });
+        let mut params: Vec<String> = Vec::new();
+        let err = build_where(&filter, &mut params).unwrap_err();
+        match err {
+            QueryError::InvalidIdent(msg) => {
+                assert!(
+                    msg.contains("reserved field name") && msg.contains("_masked"),
+                    "expected reserved-suffix message in filter validation, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidIdent from filter, got {other:?}"),
+        }
+    }
+
+    /// `is_schema_metadata_key` lets `_meta` / `_indexes` top-level
+    /// schema keys pass through schema iteration unchanged so existing
+    /// test schemas (e.g. `{"_meta": {"strictness": "off"}, ...}`)
+    /// still register cleanly under the new reserved-prefix rule.
+    #[test]
+    fn is_schema_metadata_key_matches_meta_and_indexes() {
+        assert!(is_schema_metadata_key("_meta"));
+        assert!(is_schema_metadata_key("_indexes"));
+        assert!(!is_schema_metadata_key("_rank"));
+        assert!(!is_schema_metadata_key("ssn"));
+    }
+
+    /// CREATE TABLE on a schema containing only `_meta` produces a
+    /// table with no user columns (only the auto-injected `id`,
+    /// `created_at`, `updated_at`). Smoke test for the metadata-key
+    /// filter at the schema-iteration site.
+    #[test]
+    fn build_create_table_skips_top_level_meta_key() {
+        let schema = serde_json::json!({
+            "_meta": { "strictness": "off" },
+            "name": { "type": "string" },
+        });
+        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
+            .expect("schema with _meta + a real field should build");
+        assert!(sql.contains("\"name\""), "expected name column: {sql}");
+        assert!(!sql.contains("\"_meta\""), "_meta must NOT be emitted as a column: {sql}");
     }
 
     // -----------------------------------------------------------------

@@ -25,10 +25,25 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
 // Schema-to-TypeScript inference utilities
 // ---------------------------------------------------------------------------
 
-/** Infers the value type from a field definition built via `t.*`. */
+/**
+ * Infers the value type from a field definition built via `t.*`.
+ *
+ * **P5.5 PR 1** — when the field is masked (third `TypeBuilder` brand
+ * is a non-`"none"` mask kind), the inferred type wraps the bare
+ * primitive in `MaskedValue<T>`. The `<col>_masked` sibling column
+ * is NEVER part of `Row<S>` — only the parent column appears, with
+ * the masked-value wrapper around it.
+ */
 export type InferFieldDef<T> =
-  T extends TypeBuilder<infer U, any> ? U :
-  unknown;
+  T extends TypeBuilder<infer U, any, infer M>
+    ? M extends MaskKind
+      ? M extends "none"
+        ? U
+        : U extends string | number | Uint8Array
+          ? MaskedValue<U>
+          : U
+      : U
+    : unknown;
 
 /** Keys whose field builder was marked `.required()` (the `R` brand of
  *  `TypeBuilder<_, R>`). */
@@ -359,6 +374,230 @@ export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json
 export type EncryptionMode = "randomised" | "deterministic";
 
 /**
+ * **P5.5 PR 1** — built-in mask transform applied at write time to
+ * compute the sibling `<col>_masked` column's value from the
+ * plaintext. Mirrors `crate::diff::MaskKind` on the Rust side.
+ *
+ * - `full`        — `"***"`; maximum redaction. Default for encrypted.
+ * - `last4`       — `"***-**-6789"`; SSN / card / phone tails.
+ * - `first4`      — `"4111-****-****-****"`; BIN / IIN preservation.
+ * - `email`       — `"a****@example.com"`; preserve domain.
+ * - `name`        — `"A. A***"`; initials.
+ * - `date-year`   — `"1985-**-**"`; preserve year for age buckets.
+ * - `date-decade` — `"198?-**-**"`; preserve decade.
+ * - `none`        — explicit opt-out: no sibling, no mask wrap on
+ *                   read. Reserved for encrypted columns the creator
+ *                   wants plaintext-on-read for (background jobs
+ *                   that operate at a trust boundary).
+ *
+ * No raw user-defined JS functions for masking — they would let an
+ * AI-generated `mask: v => v` defeat the purpose. Adding a new
+ * mask kind is a platform PR, not creator config.
+ */
+export type MaskKind =
+  | "full"
+  | "last4"
+  | "first4"
+  | "email"
+  | "name"
+  | "date-year"
+  | "date-decade"
+  | "none";
+
+/**
+ * **P5.5 PR 1** — sensitivity classification used by the unmask
+ * authorization (PR 4) and audit (PR 4) machinery. Mirrors
+ * `crate::diff::Classification` on the Rust side.
+ *
+ * - `public`   — usernames, display names, public profile data.
+ * - `pii`      — full name, email, address, phone, IP, date of birth.
+ *                Default classification for encrypted columns without
+ *                explicit `.mask(...)`.
+ * - `spi`      — SSN, driver's license, biometric data (CPRA
+ *                "sensitive PI").
+ * - `phi`      — health records, medical IDs, diagnosis (HIPAA scope).
+ * - `pci`      — card numbers, CVV, magnetic stripe (PCI-DSS scope).
+ * - `internal` — platform-internal metadata, system-field overrides.
+ *
+ * The six names are also reserved as column names by
+ * `crates/plugin-db/src/query.rs::validate_field_name` so creator
+ * schemas cannot accidentally collide with the taxonomy.
+ */
+export type Classification =
+  | "public"
+  | "pii"
+  | "spi"
+  | "phi"
+  | "pci"
+  | "internal";
+
+/**
+ * **P5.5 PR 1** — options accepted by `.mask(opts)` on a `TypeBuilder`.
+ *
+ * - `kind`            — required. The mask transform; see {@link MaskKind}.
+ * - `classification`  — optional. Defaults to `"pii"` when omitted.
+ *                       Drives unmask authorization (PR 4).
+ */
+export interface MaskOpts {
+  kind: MaskKind;
+  classification?: Classification;
+}
+
+/**
+ * **P5.5 PR 1** — wire shape returned by the Rust read path for
+ * masked columns (Path B). The runtime emits this object in place
+ * of a bare value; the SDK's V8 wrapper recognises the
+ * `__zsmask__` sentinel and constructs a {@link MaskedValue}
+ * instance with `.unmask()` / `.canUnmask()` methods.
+ *
+ * Mirrors the `__zsenc_blob__` sentinel from P5 PR 3.5 — same
+ * pattern of tagging a structurally-typed wire payload so the SDK
+ * can post-process it without scanning every row.
+ *
+ * Wire shape:
+ * ```json
+ * {
+ *   "masked": "***-**-6789",
+ *   "classification": "spi",
+ *   "sentinel": "__zsmask__"
+ * }
+ * ```
+ *
+ * The sibling-column name and per-row metadata
+ * (`{ collection, row_pk, column }`) are NOT carried in this wire
+ * payload — they are reconstructed by the SDK from the calling
+ * collection + parent row. PR 3 implements the runtime emission;
+ * PR 4 wires the `.unmask()` round-trip.
+ */
+export interface MaskedValueRepr {
+  /** The masked representation. Safe to log, serialize, render. */
+  masked: string;
+  /** Classification of the source field — see {@link Classification}. */
+  classification: Classification;
+  /** Wire-shape sentinel. Always the string literal `"__zsmask__"`. */
+  sentinel: "__zsmask__";
+}
+
+/**
+ * **P5.5 PR 1** — opaque actor descriptor passed to
+ * `MaskedValue.unmask({ actor? })`. PR 4 will wire the round-trip
+ * through the unmask RPC; today the type stays minimal (any plain
+ * object) so PR 5 (`defineMaskPolicy`) can land the concrete shape.
+ */
+export type Actor = Record<string, unknown>;
+
+/**
+ * **P5.5 PR 1** — masked-value wrapper.
+ *
+ * Encapsulates the masked representation of a sensitive field
+ * along with the classification + per-row metadata needed for the
+ * `.unmask()` round-trip (PR 4). Reads of a masked column return
+ * `MaskedValue<T>` instead of a bare `T`; the only paths to
+ * plaintext are:
+ *
+ * 1. `.unmask({ reason?, actor? })` — round-trip to the platform,
+ *    authorization check, audit row emission, return plaintext
+ *    (PR 4). This PR ships only the signature; the body throws
+ *    `unmask_not_implemented`.
+ * 2. The per-query unmask hint `db.users.findOne({ id }, { unmask: ["ssn"], actor })`
+ *    — PR 7. Authorization check upfront; row returns plaintext
+ *    directly for the listed columns.
+ *
+ * Coercion: `.toString()` / `JSON.stringify()` / template-literal
+ * interpolation all yield `this.masked`, so `console.log(user)`
+ * never leaks plaintext — the wire shape that crosses the V8
+ * boundary on a default read carries the masked text only.
+ */
+export class MaskedValue<T extends string | number | Uint8Array = string> {
+  /** @internal Phantom for the plaintext type. */
+  declare readonly _plaintext: T;
+
+  /** The masked representation. Safe to log, serialize, render. */
+  readonly masked: string;
+  /** Classification of the source field. */
+  readonly classification: Classification;
+  /** @internal Per-row metadata needed to drive the unmask RPC (PR 4). */
+  readonly _meta: Readonly<{ collection: string; row_pk: string; column: string }>;
+
+  constructor(
+    repr: MaskedValueRepr,
+    meta: { collection: string; row_pk: string; column: string },
+  ) {
+    if (repr === null || typeof repr !== "object" || repr.sentinel !== "__zsmask__") {
+      throw Object.assign(
+        new Error("MaskedValue: repr must carry the `__zsmask__` sentinel"),
+        { code: "masked_value_invalid_repr" as const },
+      );
+    }
+    this.masked = repr.masked;
+    this.classification = repr.classification;
+    this._meta = Object.freeze({ ...meta });
+  }
+
+  /**
+   * Round-trip to the platform to fetch plaintext.
+   *
+   * **PR 1 stub**: signature only — throws `unmask_not_implemented`.
+   * PR 4 wires this to the `zeroship.db.unmaskField` native op,
+   * which checks the actor's role against the column's
+   * classification, emits an audit row, and returns the decrypted
+   * plaintext on success.
+   *
+   * Errors PR 4 will surface:
+   * - `unmask_not_permitted` — actor's role does not include the
+   *   column's classification per the platform's mask policy.
+   * - `unmask_not_found` — row no longer exists.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async unmask(_opts?: { actor?: Actor; reason?: string }): Promise<T> {
+    throw Object.assign(
+      new Error(
+        "MaskedValue.unmask(): not implemented in PR 1 — wired in P5.5 PR 4",
+      ),
+      { code: "unmask_not_implemented" as const },
+    );
+  }
+
+  /**
+   * Check whether `actor` (or the current request's actor) is
+   * authorized to unmask this field WITHOUT triggering the audit
+   * row write.
+   *
+   * **PR 1 stub**: signature only — throws `unmask_not_implemented`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async canUnmask(_opts?: { actor?: Actor }): Promise<boolean> {
+    throw Object.assign(
+      new Error(
+        "MaskedValue.canUnmask(): not implemented in PR 1 — wired in P5.5 PR 4",
+      ),
+      { code: "unmask_not_implemented" as const },
+    );
+  }
+
+  /** Implicit string coercion → masked representation. */
+  toString(): string {
+    return this.masked;
+  }
+
+  /** JSON serialisation → masked representation. */
+  toJSON(): string {
+    return this.masked;
+  }
+
+  /**
+   * `Symbol.toPrimitive` coercion → masked representation. Covers
+   * template-literal interpolation, numeric coercion attempts, and
+   * any other implicit-conversion path that calls
+   * `Symbol.toPrimitive` before falling back to `.toString()`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  [Symbol.toPrimitive](_hint: string): string {
+    return this.masked;
+  }
+}
+
+/**
  * **P5 PR 2** — options accepted by `t.encrypted(opts?)`.
  *
  * - `mode` — defaults to `"randomised"` (fail-safe).
@@ -576,18 +815,59 @@ export interface FieldDef {
     keyId: string;
     wraps: "string" | "number" | "bytes";
   };
+  /**
+   * **P5.5 PR 1** — column-mask metadata. Present iff the SDK declared
+   * the column with `.mask({ kind, classification? })`, OR the column
+   * is `t.encrypted(...)` without explicit `.mask(...)` and the
+   * schema-normaliser auto-populates the default mask
+   * (`{ kind: "full", classification: "pii" }`).
+   *
+   * When present (and `kind !== "none"`), the platform emits a hidden
+   * `<col>_masked` sibling column at CREATE TABLE time (PR 2),
+   * pre-computes the masked representation on every write (PR 2), and
+   * aliases the sibling back to the schema-declared name on read
+   * (PR 3). The sibling column is NEVER part of the creator-visible
+   * SDK surface — `Row<S>` only contains the parent column wrapped
+   * in `MaskedValue<T>`.
+   *
+   * `kind: "none"` is the explicit opt-out — encrypted columns where
+   * the creator genuinely wants plaintext-on-read (e.g. background-
+   * job-only read paths). PR 2 / PR 3 branch on `kind === "none"` to
+   * skip sibling emission and use the P5 decrypt-on-read path.
+   */
+  mask?: {
+    kind: MaskKind;
+    classification: Classification;
+  };
 }
 
 /**
  * Fluent builder for a single field definition.
- * Generic params: T = the inferred TS value type, R = whether required.
- * `t.string().required().min(3).max(50)` → TypeBuilder<string, true>
+ *
+ * Generic params:
+ * - `T` — the inferred TS value type (bare primitive or branded id).
+ * - `R` — `true` when the field was marked `.required()`; otherwise `false`.
+ * - `M` — **P5.5 PR 1** — the mask kind declared via `.mask({...})`,
+ *   or the default `"full"` for `t.encrypted()` columns, or
+ *   `undefined` for unmasked columns. Surfaces through
+ *   `InferFieldDef` so `Row<S>` wraps masked fields in
+ *   `MaskedValue<T>` at the type level.
+ *
+ * `t.string().required().min(3).max(50)` → `TypeBuilder<string, true>`
+ * `t.encrypted()` → `TypeBuilder<string, false, "full">`
+ * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email">`
  */
-export class TypeBuilder<T = unknown, R extends boolean = false> {
+export class TypeBuilder<
+  T = unknown,
+  R extends boolean = false,
+  M extends MaskKind | undefined = undefined,
+> {
   /** @internal Type-level brand — do not access at runtime. */
   declare readonly _type: T;
   /** @internal Type-level brand for required/optional distinction. */
   declare readonly _required: R;
+  /** @internal Type-level brand for the declared mask kind. */
+  declare readonly _mask: M;
 
   private _def: FieldDef;
 
@@ -601,9 +881,9 @@ export class TypeBuilder<T = unknown, R extends boolean = false> {
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true> {
+  required(): TypeBuilder<T, true, M> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true>;
+    return this as unknown as TypeBuilder<T, true, M>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -706,6 +986,112 @@ export class TypeBuilder<T = unknown, R extends boolean = false> {
     this._def.fts = true;
     this._def.ftsLanguage = lang;
     return this;
+  }
+
+  /**
+   * **P5.5 PR 1** — declare a column-level mask. The platform emits
+   * a pre-computed sibling `<col>_masked` column (Path B) at CREATE
+   * TABLE time (PR 2), routes default reads through that sibling
+   * (PR 3), and exposes the parent column as `MaskedValue<T>` on
+   * the SDK surface. The unmask round-trip (PR 4) is the only path
+   * to plaintext.
+   *
+   * Valid on `t.string()`, `t.number()`, `t.bytes()`, and
+   * `t.encrypted()` (the encrypted column wraps one of those
+   * primitive types). Refused on `t.ref()` with
+   * `encrypted_on_ref_unsupported` — FK columns must remain
+   * unencrypted/unmasked so the JOIN integrity check works (the
+   * mask sibling would itself participate in the FK semantics,
+   * which is incoherent).
+   *
+   * ```ts
+   * const fields = {
+   *   ssn:      t.encrypted({ mode: "randomised" }),           // → default mask = "full" + "pii"
+   *   card_pan: t.encrypted().mask({ kind: "last4" }),         // → MaskedValue<string>
+   *   email:    t.string().mask({ kind: "email" }),            // → MaskedValue<string>
+   *   notes:    t.string().mask({ kind: "full", classification: "internal" }),
+   *   opted:    t.encrypted().mask({ kind: "none" }),          // explicit no-mask
+   * };
+   * ```
+   *
+   * Defaults:
+   * - `classification` defaults to `"pii"` when omitted.
+   * - When `t.encrypted()` is declared without `.mask(...)`, the
+   *   schema-normaliser auto-populates `{ kind: "full",
+   *   classification: "pii" }` — fail-safe per §3 of the proposal.
+   */
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K> {
+    if (opts === null || typeof opts !== "object") {
+      throw Object.assign(
+        new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
+        { code: "mask_invalid_opts" as const },
+      );
+    }
+    const kind = opts.kind;
+    const VALID_KINDS: ReadonlySet<MaskKind> = new Set<MaskKind>([
+      "full",
+      "last4",
+      "first4",
+      "email",
+      "name",
+      "date-year",
+      "date-decade",
+      "none",
+    ]);
+    if (!VALID_KINDS.has(kind)) {
+      throw Object.assign(
+        new Error(
+          `.mask({ kind }): kind must be one of ${[...VALID_KINDS].join(" | ")}, got "${String(kind)}"`,
+        ),
+        { code: "mask_invalid_kind" as const },
+      );
+    }
+    const classification = opts.classification ?? "pii";
+    const VALID_CLASSIFICATIONS: ReadonlySet<Classification> = new Set<Classification>([
+      "public",
+      "pii",
+      "spi",
+      "phi",
+      "pci",
+      "internal",
+    ]);
+    if (!VALID_CLASSIFICATIONS.has(classification)) {
+      throw Object.assign(
+        new Error(
+          `.mask({ classification }): classification must be one of ${[...VALID_CLASSIFICATIONS].join(" | ")}, got "${String(classification)}"`,
+        ),
+        { code: "mask_invalid_classification" as const },
+      );
+    }
+    // `t.ref()` columns must not carry a mask — see Q-P5-I in the
+    // sensitive-field-masking proposal. The FK column is an integer
+    // typed id; masking it would defeat the JOIN integrity check
+    // and the sibling column would itself participate in the FK
+    // semantics (incoherent).
+    if (this._def.type === "ref") {
+      throw Object.assign(
+        new Error(
+          ".mask(): not supported on t.ref() fields (FK columns must stay unmasked for JOIN integrity)",
+        ),
+        { code: "encrypted_on_ref_unsupported" as const },
+      );
+    }
+    // Mask only makes sense on column types whose stored value is
+    // a single primitive (string / number / bytes). Refuse on
+    // array / object / json / vector / geoPoint / union / literal /
+    // boolean / date / calendarDate — these either have no stable
+    // textual masked form or aren't yet supported.
+    const VALID_TYPES: ReadonlySet<TypeName> = new Set<TypeName>(["string", "number", "bytes"]);
+    if (!VALID_TYPES.has(this._def.type)) {
+      throw Object.assign(
+        new Error(
+          `.mask(): only valid on string / number / bytes wrapped types, got "${this._def.type}"`,
+        ),
+        { code: "mask_on_unsupported_type" as const },
+      );
+    }
+    this._def.mask = { kind, classification };
+    return this as unknown as TypeBuilder<T, R, K>;
   }
 }
 
@@ -986,7 +1372,7 @@ export const t = {
    */
   encrypted<T extends string | number | Uint8Array = string>(
     opts?: EncryptedFieldOpts,
-  ): TypeBuilder<T> {
+  ): TypeBuilder<T, false, "full"> {
     const wrapsBuilder = opts?.wraps;
     let wrapsKind: "string" | "number" | "bytes" = "string";
     if (wrapsBuilder !== undefined) {
@@ -1032,9 +1418,19 @@ export const t = {
     // `encrypted` is present. We still carry the wrapped primitive's
     // type so validators see the right user-facing shape (e.g.
     // `validate.ts` rejects `123` for a wraps=string column).
-    return new TypeBuilder<T>({
+    //
+    // **P5.5 PR 1** — fail-safe default-mask rule (§3 of the
+    // sensitive-field-masking proposal): every `t.encrypted()` column
+    // gets `mask: { kind: "full", classification: "pii" }` at
+    // builder time when no `.mask(...)` is chained. The
+    // intentional path to plaintext-on-read is the explicit
+    // `.mask({ kind: "none" })` opt-out. Chaining `.mask({...})`
+    // after `t.encrypted()` overwrites this default via the
+    // builder's `.mask` method (assigns `_def.mask` unconditionally).
+    return new TypeBuilder<T, false, "full">({
       type: wrapsKind === "bytes" ? "bytes" : wrapsKind === "number" ? "number" : "string",
       encrypted: { mode, keyId, wraps: wrapsKind },
+      mask: { kind: "full", classification: "pii" },
     });
   },
   /**

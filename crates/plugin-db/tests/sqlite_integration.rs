@@ -4405,3 +4405,47 @@ fn restore_hash_mismatch_rejected_sqlite() {
         assert_eq!(rows[0][0].as_deref(), Some("sentinel"));
     });
 }
+
+// ---------------------------------------------------------------------------
+// P5.5 PR 1 — reserved-name validator (Path B sibling-column suffix +
+// classification taxonomy) refuses creator-declared collisions at the
+// DDL builder level on the SQLite arm. Two tests pin the same surface
+// the PG integration suite exercises so both backends agree on the
+// reserved namespace.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
+    use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+
+    let schema = serde_json::json!({
+        "name": {"type": "string"},
+        // `_masked` is reserved for Path B sibling columns.
+        "card_pan_masked": {"type": "string"},
+    });
+    let result = build_create_table_with_fks("app_demo", "cards", &schema, &FkEmission::Inline);
+    let err = result.expect_err("schema with `_masked` suffix should be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("reserved field name") && msg.contains("_masked"),
+        "expected reserved-suffix message, got: {msg}"
+    );
+}
+
+#[test]
+fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
+    use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+
+    let schema = serde_json::json!({
+        "name": {"type": "string"},
+        // `phi` collides with the platform classification taxonomy.
+        "phi": {"type": "string"},
+    });
+    let result = build_create_table_with_fks("app_demo", "patients", &schema, &FkEmission::Inline);
+    let err = result.expect_err("schema with reserved classification name should be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("reserved field name"),
+        "expected reserved-name message, got: {msg}"
+    );
+}
