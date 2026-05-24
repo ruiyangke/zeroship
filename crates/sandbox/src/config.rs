@@ -851,6 +851,136 @@ where
     }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// C-7-LT wake-response mode
+// ────────────────────────────────────────────────────────────────────
+
+/// C-7-LT: wake-response contract mode.
+///
+/// - `Sync` (default): legacy 200 OK with full wake state baked into the
+///   response. Subject to C-8c (synchronous contract structurally exhausted
+///   at empirical teardown ≥ client deadline; see smoke-r11 review). Kept
+///   default during the C-7-LT migration so PR1's scaffolding ships
+///   behind a feature flag without disturbing existing tests / smoke runs.
+/// - `Async`: 202 Accepted + polling. New shape per
+///   `docs/proposals/c7-lt-async-wake.md`. PR2 reads this flag in the wake
+///   handler; PR1 only carries the flag.
+///
+/// Env: `SANDBOX_WAKE_RESPONSE_MODE` (sync|async). Defaults to `sync`.
+/// Unrecognised values warn and default to `sync` (fail-safe — never
+/// strand a wake by silently rejecting the env).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeResponseMode {
+    /// 200 OK + full wake state baked in (legacy).
+    Sync,
+    /// 202 Accepted + polling (C-7-LT proposal).
+    Async,
+}
+
+impl WakeResponseMode {
+    /// Resolve the mode from `SANDBOX_WAKE_RESPONSE_MODE`. Empty / unset /
+    /// unrecognised → `Sync` (default). Unrecognised emits a `tracing::warn!`.
+    pub fn from_env() -> Self {
+        match std::env::var("SANDBOX_WAKE_RESPONSE_MODE").as_deref() {
+            Ok("async") => Self::Async,
+            Ok("sync") | Ok("") | Err(_) => Self::Sync,
+            Ok(other) => {
+                tracing::warn!(
+                    value = %other,
+                    "SANDBOX_WAKE_RESPONSE_MODE unrecognized; defaulting to sync"
+                );
+                Self::Sync
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::Async => "async",
+        }
+    }
+
+    pub fn is_async(self) -> bool {
+        matches!(self, Self::Async)
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod wake_response_mode_tests {
+    use super::*;
+
+    /// Test fixture: ENV mutation requires a serializing lock because
+    /// `std::env::set_var` is process-global. Reuse a local mutex.
+    /// Mirrors the `ENV_LOCK` / `with_env_clean` pattern in
+    /// `crate::db::tests` (which also relies on `#[allow(unsafe_code)]`
+    /// because `std::env::{set,remove}_var` is documented as unsafe in
+    /// the 2024-edition stdlib).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK serializes env mutation across this module's
+        // tests; no other concurrent reader of this specific key exists
+        // at test time (the flag is read only at boot by AppState).
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        // SAFETY: same as above — ENV_LOCK still held; lock guard
+        // dropped at end of function.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn default_when_unset() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", None, || {
+            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+        });
+    }
+
+    #[test]
+    fn explicit_sync() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("sync"), || {
+            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+        });
+    }
+
+    #[test]
+    fn explicit_async() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("async"), || {
+            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Async);
+            assert!(WakeResponseMode::Async.is_async());
+            assert!(!WakeResponseMode::Sync.is_async());
+            assert_eq!(WakeResponseMode::Async.as_str(), "async");
+            assert_eq!(WakeResponseMode::Sync.as_str(), "sync");
+        });
+    }
+
+    #[test]
+    fn empty_defaults_to_sync() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some(""), || {
+            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+        });
+    }
+
+    #[test]
+    fn unrecognised_warns_and_defaults_to_sync() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("polling"), || {
+            // The warn is fire-and-forget; we only assert the fallback
+            // behaviour (default sync). Capturing the warn would require
+            // a tracing-subscriber probe; not worth the dependency.
+            assert_eq!(WakeResponseMode::from_env(), WakeResponseMode::Sync);
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

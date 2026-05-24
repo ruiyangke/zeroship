@@ -160,6 +160,19 @@ pub struct AppState {
     pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
     pub(crate) ch_remote: Option<Arc<dyn ChRemoteClient>>,
     pub(crate) restore_backend: Option<Arc<dyn RestoreBackend>>,
+
+    /// C-7-LT (PR1 scaffolding): wake-response contract mode. Read once
+    /// at boot from `SANDBOX_WAKE_RESPONSE_MODE`; defaults to
+    /// [`config::WakeResponseMode::Sync`] for back-compat with the
+    /// existing wake contract. PR2 reads this flag in the wake handler
+    /// to switch between the legacy 200 OK shape and the 202 Accepted +
+    /// polling shape; PR1 only carries the flag (no handler branching
+    /// yet — existing tests stay green).
+    ///
+    /// Field is `pub` (no security sensitivity — a per-request mode flag
+    /// can't grant or weaken any privilege; it only selects the
+    /// response shape).
+    pub wake_response_mode: crate::config::WakeResponseMode,
 }
 
 impl AppState {
@@ -405,6 +418,10 @@ impl AppState {
             snapshot_store: None,
             ch_remote: None,
             restore_backend: None,
+            // C-7-LT (PR1): default to Sync in fixtures — tests that
+            // exercise the (PR2) async path will set this via field
+            // assignment on `let mut state = new_fixture(...)`.
+            wake_response_mode: crate::config::WakeResponseMode::Sync,
         }
     }
 }
@@ -781,6 +798,15 @@ impl AppState {
             (None, None, None)
         };
 
+        // C-7-LT (PR1): resolve wake-response mode from env at boot.
+        // PR1 only carries the flag; the wake handler still emits the
+        // legacy 200-OK shape regardless of the value here.
+        let wake_response_mode = crate::config::WakeResponseMode::from_env();
+        tracing::info!(
+            mode = wake_response_mode.as_str(),
+            "sandbox wake-response: contract mode resolved (PR1 carries flag; handler still legacy)"
+        );
+
         let state = Arc::new(Self {
             config,
             sandboxes: registry,
@@ -793,6 +819,7 @@ impl AppState {
             snapshot_store,
             ch_remote,
             restore_backend,
+            wake_response_mode,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
