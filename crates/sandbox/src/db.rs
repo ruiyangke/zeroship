@@ -3189,6 +3189,21 @@ impl Database {
     ///
     /// Returns the number of rows affected (0 if the wake_id doesn't
     /// exist — caller can treat that as 404).
+    ///
+    /// # Terminal-overwrite guard (R20-C1)
+    ///
+    /// The WHERE clause includes `AND state NOT IN ('ok', 'failed')`.
+    /// Once a row reaches a terminal state, no further state-machine
+    /// transitions can mutate it. A stale write from a racing producer
+    /// (e.g., a wake-machine driver whose UPDATE races the takeover
+    /// sweep's `claim_orphan_wake_for_recovery`) silently no-ops:
+    /// `rows_affected == 0`.
+    ///
+    /// Callers do not need to handle this specially — the terminal
+    /// state already reflects the correct outcome (the sweep or an
+    /// earlier writer already finished the job). The `Result<u64>`
+    /// contract is unchanged; callers that treat `0` as "row not
+    /// found / 404" will continue to do so.
     pub async fn update_wake_job_state(
         &self,
         wake_id: &str,
@@ -3213,7 +3228,8 @@ impl Database {
                     updated_at = now(), \
                     lessee_updated_at = now() \
                     {ready_at_clause} \
-              WHERE wake_id = $5::TEXT"
+              WHERE wake_id = $5::TEXT \
+                AND state NOT IN ('ok', 'failed')"
         );
         let n = client
             .execute(
