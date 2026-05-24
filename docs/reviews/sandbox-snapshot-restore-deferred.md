@@ -1527,3 +1527,54 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R14-A6 + R14-Q4] CLOSED at `c3edf968` — VmIndexRetryPolicy::from_host_fence_timeout derives from cfg + doc off-by-one fixed. +4 tests (332→336).
 - [R14-Q2 + R14-Q3 + R11-API1 expanded] verified CLOSED earlier this cycle.
 - [api-surface lowest backlog] 6→4 items. R10-API1 now longest 6-round carry.
+
+---
+
+## NEW r15 ROUND-2 FINDINGS (added by pilot cycle 2026-05-25 r15 — architecture r15, concurrency r15, performance r15)
+
+### [R15-A1] (CRITICAL, architecture-r15) Wake synchronous-response contract is shared root cause of C-4/C-6/C-7/C-8/C-8a
+- **Source**: 2026-05-25 architecture-r15
+- **Symptom**: 5 of 5 wake-path bugs share the design fault: synchronous HTTP response cannot span the ~150s (now ~60s with C-8) source-teardown window when client deadline is 60s. Every retry budget bump (C-4 / R14-A6 / C-7 / C-8 / C-8a) is a patch on the broken contract.
+- **Action**: promote **C-7-LT** (long-term) from "deferred" to next-sprint flagship. Wake returns 202 Accepted + status URL. Client polls. Decouples server-side operation duration from client deadline. Closes 5-bug pattern + R15-A5 type-system gap.
+
+### [R15-A2] (IMPORTANT, architecture-r15) Phase tracing extension still un-landed
+- **Source**: 2026-05-25 architecture-r15 (1-cycle stale R14-A4)
+- **Symptom**: restore_handler.rs has 21 phase log lines; snapshot_handler.rs / admin_handlers.rs / nomad_ch::stop_inner have 0. C-8 investigation paid the predicted tax (read Nomad audit log).
+- **Action**: extend phase tracing to the other 3 files. ~25 sites, mirrors existing pattern.
+
+### [R15-A3] (IMPORTANT, architecture-r15) restore_handler.rs is now #2 file in crate at 3444 LOC
+- **Source**: 2026-05-25 architecture-r15
+- **Symptom**: +343 since r14, +782 in 2 cycles. Passed db.rs (3303). Two consecutive >10% growth cycles.
+- **Action**: low-dependency split: extract `retry_policy` module (VmIndexRetryPolicy + tests, ~250 LOC). Subsumes part of r12-A4.
+
+### [R15-A4] (IMPORTANT, architecture-r15) Cluster-bug clustering: 6/9 on runtime+async+timing axis
+- **Source**: 2026-05-25 architecture-r15
+- **Symptom**: C-3, C-4, C-6, C-7, C-8, C-8a — all runtime/async/timing class. 4 of 8 code-side bugs catchable by R13-A1's stub-driven harness.
+- **Action**: makes R13-A1 (StubRestoreBackend integration tests) the highest-leverage backlog item. Pre-req for T-8b-stress.
+
+### [R15-A5] (MINOR, architecture-r15) Retry budget invariant not type-system enforced
+- **Source**: 2026-05-25 architecture-r15
+- **Symptom**: R14-A6 + C-8a establish "retry budget ≤ client deadline" but only via doc + 1 unit test. Future regression possible.
+- **Status**: defer if R15-A1 lands (C-7-LT removes the ceiling entirely).
+
+### [R15-I1] (IMPORTANT, concurrency-r15) host_fence_timeout config drift across 3 surfaces
+- **Source**: 2026-05-25 concurrency-r15
+- **Files**: `crates/sandbox/src/config.rs:401` defaults to 120s; `crates/sandbox/scripts/gcp-worker-startup.sh:466` overrides to 30s; `crates/sandbox/src/config.rs:1498-1499` unit-test docstring says "60 in many configs"
+- **Action**: pick one canonical default + document the cluster-override rationale.
+
+### [R15-I2] (IMPORTANT, concurrency-r15) C-8 fence-budget math has CLIENT_HEADROOM_SECS off-shape
+- **Source**: 2026-05-25 concurrency-r15
+- **Symptom**: at host_fence=30s, `from_host_fence_timeout(30) = (30-10)/2 + 1 = 11 attempts × 2s = 20s budget`. But the fence itself takes UP TO 30s by design. Wake gives up 10s BEFORE fence can possibly clear in worst case. `CLIENT_HEADROOM_SECS=10` flat subtraction was sized for the DEADLINE ceiling; when fence wins MIN, the 10s shrinks the fence envelope (wrong). Smoke-r10 may still fail when teardown lands in [20s, 30s+] window.
+- **Action**: when fence wins MIN, don't subtract CLIENT_HEADROOM (the fence is the OPERATION ceiling; we WANT to wait that long). Or: subsumed by R15-A1's C-7-LT async response.
+
+### [R15-D1] (LOW, concurrency-r15) wait_for_agent_silent has no per-poll log
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs:3205-3273`
+- **Action**: add per-poll INFO log so fence-tail distribution under c=20 is observable. Pattern from C-7's per-attempt log.
+
+### [R15-P1] (INFO, performance-r15) 30s host_fence drain analysis
+- **Source**: 2026-05-25 performance-r15
+- **Finding**: 30s sufficient for in-process linger CH guards (CH exits <500ms; fence polls /livez at 100ms with 2-in-a-row). Does NOT envelope Nomad-purge GC tail (~30s). Worst-case teardown ~60s (was ~150s). Cluster-r10 wake p50 projection: ~50% pass back-to-back c=1, ~100% with ≥30s inter-call pause.
+
+### Closures this cycle
+- [C-8 + C-8a] CLOSED at `2afbb2dd` — retry budget cap + 30s fence (NOTE: R15-I2 flags math edge case)
+- [R15-Q1] CLOSED at `7469118e` — admin_handlers byte-slice form (matches R14-Q3)
