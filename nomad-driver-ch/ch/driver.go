@@ -193,10 +193,21 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 // NewPlugin returns a drivers.DriverPlugin ready to be served via
 // plugins.Serve. Called once per plugin process by the factory in
 // cmd/nomad-driver-ch/main.go.
+//
+// Side effects:
+//   - Starts the driver-metrics file exporter goroutine
+//     (T-8b-stress-r8 r7-B). It writes a Prometheus text-format
+//     snapshot of the `nomad_driver_ch_*` counters every
+//     `driverMetricsExportInterval` (default 5 s) to
+//     `driverMetricsExportPath` (default /var/lib/zsbx/driver-metrics.prom),
+//     and stops when the per-plugin ctx is cancelled via
+//     signalShutdown. Operators wire node_exporter's textfile
+//     collector at the file's parent dir to surface the counters in
+//     `/metrics` — closes the r24-API1 gap stress-r8 review flagged.
 func NewPlugin(logger hclog.Logger) drivers.DriverPlugin {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger = logger.Named(PluginName)
-	return &Plugin{
+	p := &Plugin{
 		eventer:        eventer.NewEventer(ctx, logger),
 		config:         &Config{},
 		tasks:          newTaskStore(),
@@ -204,6 +215,16 @@ func NewPlugin(logger hclog.Logger) drivers.DriverPlugin {
 		signalShutdown: cancel,
 		logger:         logger,
 	}
+	// T-8b-stress-r8 r7-B: launch the driver-metrics file exporter.
+	// Lifetime is bound to the plugin's signalShutdown ctx so a
+	// clean shutdown writes one final snapshot before exiting.
+	// Gated by driverMetricsExportEnabled so the test suite (which
+	// calls NewPlugin many times) doesn't spawn one leaked
+	// goroutine per call — TestMain flips this to false.
+	if driverMetricsExportEnabled {
+		go runDriverMetricsExporter(ctx, logger)
+	}
+	return p
 }
 
 // PluginInfo returns the version/identity tuple Nomad logs at load time.

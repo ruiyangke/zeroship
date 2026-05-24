@@ -373,6 +373,48 @@ func StageDiskImagesForTest(cfg *TaskConfig) error {
 	return stageDiskImages(cfg)
 }
 
+// IncDestroyTaskTapStuckForTest bumps `destroy_task_tap_stuck_total`
+// by one without going through the production WARN-log path. Test-
+// only; used to drive the metrics-exporter renderer past zero so a
+// "counter increments surface in the snapshot" test can assert
+// against a non-zero sample value.
+//
+// T-8b-stress-r8 r7-B.
+func IncDestroyTaskTapStuckForTest() {
+	incDestroyTaskTapStuck()
+}
+
+// RenderDriverMetricsPromForTest is the test entry point for the
+// Prometheus text-format snapshot renderer. Pure function — no
+// I/O, no global state mutation (modulo the counter reads which
+// are inherently observe-only).
+//
+// T-8b-stress-r8 r7-B.
+func RenderDriverMetricsPromForTest() string {
+	return renderDriverMetricsProm()
+}
+
+// WriteDriverMetricsSnapshotForTest is the test entry point for the
+// atomic tmp+rename snapshot writer. Returns the underlying error
+// shape so tests can assert against missing-parent-dir / EACCES /
+// EROFS scenarios.
+//
+// T-8b-stress-r8 r7-B.
+func WriteDriverMetricsSnapshotForTest(path, content string) error {
+	return writeDriverMetricsSnapshot(path, content)
+}
+
+// RunDriverMetricsExporterForTest is the test entry point for the
+// exporter goroutine. Tests typically install a short
+// driverMetricsExportInterval + t.TempDir() destination via the
+// Set*ForTest seams, then call this in a goroutine and observe
+// the on-disk side effects.
+//
+// T-8b-stress-r8 r7-B.
+func RunDriverMetricsExporterForTest(ctx context.Context, logger hclog.Logger) {
+	runDriverMetricsExporter(ctx, logger)
+}
+
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing
 // to spawn a real CH process. Mirrors the minimal shape RecoverTask
