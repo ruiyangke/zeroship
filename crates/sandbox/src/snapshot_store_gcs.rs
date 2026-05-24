@@ -1117,18 +1117,25 @@ where
         let artifact_path = std::path::PathBuf::from(meta.artifact_path.clone());
         let ch_version_owned = ch_version.to_string();
         let sha256 = meta.sha256;
-        // Name the thread so `gdb`/`top -H` can identify a stuck
-        // L2 upload. `spawn` only fails on the very rare ENOMEM /
-        // EAGAIN — if we can't allocate a thread the controller
-        // has bigger problems; log + drop the upload (fire-and-
-        // forget contract).
-        let builder = std::thread::Builder::new().name(format!(
-            "snap-l2-upload-{}",
-            // Keep the thread name within Linux's 15-char cap by
-            // taking the trailing 8 base62 chars of the sandbox id
-            // (the entropy bits, not the prefix).
-            sandbox_id.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()
-        ));
+        // Name the thread for log/grep correlation with the upload's
+        // sandbox id. NOTE: Linux's `pr_set_name` truncates thread
+        // names at 15 bytes (TASK_COMM_LEN-1), so the tail is NOT
+        // visible in `ps`/`top -H` — only the leading
+        // `snap-l2-upload` prefix fits. The tail is preserved for
+        // the Rust-side name (which `tracing`/log lines that include
+        // `std::thread::current().name()` will pick up).
+        //
+        // `spawn` only fails on the very rare ENOMEM / EAGAIN — if
+        // we can't allocate a thread the controller has bigger
+        // problems; log + drop the upload (fire-and-forget contract).
+        //
+        // Byte-slice is ASCII-safe: sandbox_id is hex (32 chars) per
+        // B24-FOLLOWUP, so `s.len() - 8` lands on a char boundary.
+        let tail = sandbox_id
+            .get(sandbox_id.len().saturating_sub(8)..)
+            .unwrap_or(&sandbox_id);
+        let builder =
+            std::thread::Builder::new().name(format!("snap-l2-upload-{tail}"));
         let spawn_res = builder.spawn(move || {
             match l2.put(&sandbox_id, &artifact_path, &ch_version_owned) {
                 Ok(m) => {
