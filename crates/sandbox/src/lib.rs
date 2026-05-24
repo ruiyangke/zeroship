@@ -950,7 +950,12 @@ impl AppState {
             // on `detach_isolated` with no client-side cancellation).
             // Pre-fix the policy capped at 50 s under async too,
             // racing the 60.166 s source-teardown wall-time.
-            .with_wake_response_mode(wake_response_mode);
+            .with_wake_response_mode(wake_response_mode)
+            // r3-A (T-8b-stress-r3): pin restore alloc placement to
+            // THIS worker so the staged snapshot bytes match the
+            // node the driver runs on. Same shape as the cold-boot
+            // path's `NomadCHBackend::with_local_nomad_node_id`.
+            .with_local_nomad_node_id(local_nomad_node_id.clone());
             let rb_inner = match shared_allocator {
                 Some(a) => {
                     tracing::info!(

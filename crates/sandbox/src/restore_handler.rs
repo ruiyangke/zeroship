@@ -2054,6 +2054,21 @@ pub struct RealRestoreBackend {
     /// [`Self::with_wake_response_mode`] from
     /// `WakeResponseMode::from_env()`.
     wake_response_mode: crate::config::WakeResponseMode,
+    /// **r3-A (T-8b-stress-r3 fix)**: cached local Nomad node ID,
+    /// installed by `AppState::from_config` from
+    /// [`crate::backend::nomad_ch::fetch_local_nomad_node_id`]. When
+    /// `Some`, [`build_restore_nomad_job_json`] emits a `Constraints`
+    /// block pinning the restore alloc to THIS worker — closing the
+    /// wake-path half of the cross-node placement race. The
+    /// diagnostic report at the top of T-8b-stress-r3 review noted
+    /// 11/12 wake failures matched the same signature: controller
+    /// stages snapshot bytes on its local fs, Nomad schedules the
+    /// restore alloc elsewhere, driver ENOENTs.
+    ///
+    /// `None` is the disabled-by-detection-failure shape (boot-time
+    /// /v1/agent/self failed). Restore continues without the
+    /// constraint, falling back to pre-r3-A random placement.
+    local_nomad_node_id: Option<String>,
 }
 
 impl std::fmt::Debug for RealRestoreBackend {
@@ -2088,7 +2103,26 @@ impl RealRestoreBackend {
             // wiring sets this via `with_wake_response_mode` from
             // `WakeResponseMode::from_env()`.
             wake_response_mode: crate::config::WakeResponseMode::Sync,
+            // r3-A default: None. Production wiring sets this via
+            // `with_local_nomad_node_id` from `AppState::from_config`.
+            local_nomad_node_id: None,
         }
+    }
+
+    /// **r3-A (T-8b-stress-r3 fix)**: install the cached local Nomad
+    /// node ID. When set, [`build_restore_nomad_job_json`] emits a
+    /// `Constraints` block pinning the restore alloc to THIS worker.
+    /// Mirrors `NomadCHBackend::with_local_nomad_node_id` shape on
+    /// the cold-boot path; wired from `AppState::from_config`
+    /// alongside the other restore-backend builders
+    /// (`with_shared_allocator`, `with_nomad_handle`,
+    /// `with_wake_response_mode`).
+    pub(crate) fn with_local_nomad_node_id(
+        mut self,
+        node_id: Option<String>,
+    ) -> Self {
+        self.local_nomad_node_id = node_id;
+        self
     }
 
     /// **C-7-LT-1 fix (T-8b-smoke-r12)**: install the wake response
@@ -2278,6 +2312,7 @@ impl RestoreBackend for RealRestoreBackend {
             self.memory_mb,
             self.cpus,
             mode,
+            self.local_nomad_node_id.as_deref(),
         );
         let body = serde_json::to_vec(&job_json)
             .map_err(|e| {
@@ -2461,6 +2496,7 @@ fn build_restore_nomad_job_json(
     memory_mb: u32,
     cpus: f32,
     mode: crate::backend::nomad_ch::TaskDriverMode,
+    local_nomad_node_id: Option<&str>,
 ) -> serde_json::Value {
     // Phase B fix #6 (later: virtio-blk pivot, bug #11): the wrapper
     // up-front validates a 5-env block (VM_INDEX + ARTIFACT_DIR +
@@ -2614,42 +2650,56 @@ fn build_restore_nomad_job_json(
         }
     };
 
-    serde_json::json!({
-        "Job": {
-            "ID": job_id,
-            "Name": job_id,
-            "Type": "service",
-            "Datacenters": [cfg.datacenter],
-            "Meta": {
-                "zeroship.sandbox": sandbox_id.to_string(),
-                "zeroship.user": user_id,
-                "zeroship.vm_index": vm_index.to_string(),
-                "zeroship.kind": "restore",
+    let mut job = serde_json::json!({
+        "ID": job_id,
+        "Name": job_id,
+        "Type": "service",
+        "Datacenters": [cfg.datacenter],
+        "Meta": {
+            "zeroship.sandbox": sandbox_id.to_string(),
+            "zeroship.user": user_id,
+            "zeroship.vm_index": vm_index.to_string(),
+            "zeroship.kind": "restore",
+        },
+        "TaskGroups": [{
+            "Name": "vm",
+            "Count": 1,
+            "RestartPolicy": {
+                "Attempts": 0,
+                "Mode": "fail",
+                "Interval": 30_000_000_000u64,
+                "Delay":     5_000_000_000u64,
             },
-            "TaskGroups": [{
-                "Name": "vm",
-                "Count": 1,
-                "RestartPolicy": {
-                    "Attempts": 0,
-                    "Mode": "fail",
-                    "Interval": 30_000_000_000u64,
-                    "Delay":     5_000_000_000u64,
-                },
-                "ReschedulePolicy": {
-                    "Attempts": 0,
-                    "Unlimited": false,
-                },
-                "Tasks": [{
-                    "Name": "ch",
-                    "Driver": driver_name,
-                    "Config": config,
-                    "Env": env,
-                    "Resources": resources,
-                    "KillTimeout": 10_000_000_000u64,
-                }],
+            "ReschedulePolicy": {
+                "Attempts": 0,
+                "Unlimited": false,
+            },
+            "Tasks": [{
+                "Name": "ch",
+                "Driver": driver_name,
+                "Config": config,
+                "Env": env,
+                "Resources": resources,
+                "KillTimeout": 10_000_000_000u64,
             }],
-        }
-    })
+        }],
+    });
+    // r3-A (T-8b-stress-r3 fix): pin the restore alloc to THIS
+    // worker when the controller cached its local Nomad node_id at
+    // boot. Same shape as the cold-boot builder
+    // (`build_nomad_job_json_with`) — the diagnostic report flagged
+    // 11/12 wake failures with the same cross-node staging signature
+    // as cold-boot, so both emitters apply the constraint identically.
+    if let Some(node_id) = local_nomad_node_id {
+        job["Constraints"] = serde_json::json!([
+            {
+                "LTarget": "${node.unique.id}",
+                "Operand": "=",
+                "RTarget": node_id,
+            }
+        ]);
+    }
+    serde_json::json!({ "Job": job })
 }
 
 /// Sync HTTP response shape — mirrors `AgentResponse` in nomad_ch.
@@ -3931,6 +3981,7 @@ mod r12_i1_tests {
                 1024,
                 2.0,
                 mode,
+                None, // r3-A: no node pin
             );
             let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
             assert_eq!(
@@ -3976,6 +4027,7 @@ mod r12_i1_tests {
                 1024,
                 2.0,
                 mode,
+                None, // r3-A: no node pin
             );
             let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
             assert_eq!(
@@ -4007,6 +4059,7 @@ mod r12_i1_tests {
             1024,
             2.0,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         assert_eq!(
@@ -4079,6 +4132,7 @@ mod r12_i1_tests {
             1024,
             2.0,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
@@ -4122,6 +4176,7 @@ mod r12_i1_tests {
             1024,
             2.0,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         assert!(
@@ -4151,6 +4206,7 @@ mod r12_i1_tests {
             1024,
             2.0,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: no node pin
         );
         let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
         assert_eq!(task["Driver"], "ch");
@@ -4228,6 +4284,8 @@ mod r12_i1_tests {
             1024,
             2.0,
             TaskDriverMode::ChPlugin,
+            None, // r3-A: parity test omits node pin (parity check is on
+                  // Config fields, not Job-level Constraints)
         );
         let restore_config = &restore_v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
         let restore_fields: HashSet<&str> = restore_config
@@ -4268,6 +4326,170 @@ mod r12_i1_tests {
              Only {{\"rootfs_source\"}} is the documented intentional divergence.\n\
              See R22-T1 / R21-API2 for the contract history.",
         );
+    }
+
+    // ─── r3-A — restore-path node-affinity Constraints emission ──
+    //
+    // The wake path stages the snapshot bytes on THIS worker's local
+    // fs (see `restore::stage_snapshot_locally` callers); the same
+    // cross-node race the cold-boot path closed in `nomad_ch.rs`
+    // applies here. Diagnostic report flagged 11/12 wake failures
+    // with the same signature. These tests pin the Constraints
+    // emission invariants on the restore-path builder.
+
+    /// When `local_nomad_node_id` is `Some`, the restore-path jobspec
+    /// MUST carry the same Constraints shape as the cold-boot path:
+    /// LTarget=`${node.unique.id}`, Operand=`=`, RTarget=node_id.
+    #[test]
+    fn restore_jobspec_includes_node_affinity_when_node_id_set() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-r3a/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-r3a-pinned",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            TaskDriverMode::ChPlugin,
+            Some("restore-node-id-aaaa-bbbb"),
+        );
+        let constraints = &v["Job"]["Constraints"];
+        assert!(
+            constraints.is_array(),
+            "Job.Constraints must be a JSON array on restore-path, got: {constraints:?}"
+        );
+        let arr = constraints.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "r3-A emits exactly one constraint");
+        assert_eq!(arr[0]["LTarget"], "${node.unique.id}");
+        assert_eq!(arr[0]["Operand"], "=");
+        assert_eq!(arr[0]["RTarget"], "restore-node-id-aaaa-bbbb");
+    }
+
+    /// When `local_nomad_node_id` is `None` (boot-time lookup failed,
+    /// or test fixture didn't set one), the restore-path jobspec MUST
+    /// omit the Constraints block — symmetric with the cold-boot
+    /// fallback behaviour. Restore continues with random placement.
+    #[test]
+    fn restore_jobspec_omits_node_affinity_when_node_id_absent() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-r3a/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-r3a-unpinned",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            TaskDriverMode::ChPlugin,
+            None,
+        );
+        assert!(
+            v["Job"].get("Constraints").is_none(),
+            "Job.Constraints must be ABSENT on restore-path when \
+             local_nomad_node_id=None — symmetric with cold-boot \
+             fallback, got: {:?}",
+            v["Job"].get("Constraints")
+        );
+    }
+
+    /// r3-A cross-emitter parity contract: when both emitters are
+    /// invoked with the SAME `local_nomad_node_id`, they MUST produce
+    /// byte-identical `Job.Constraints` arrays. This is the
+    /// load-bearing invariant for the fix — a regression that ships
+    /// the constraint on one path but not the other would re-open
+    /// the cross-node race on whichever side it dropped (the
+    /// diagnostic report flagged the gap on both sides).
+    ///
+    /// Mirrors the spirit of `ch_plugin_config_field_list_parity`
+    /// (R22-T1) but for the Job-level Constraints field rather than
+    /// the Task.Config field set.
+    #[test]
+    fn node_affinity_constraints_parity_between_cold_boot_and_restore_emitters() {
+        let node_id = "shared-node-id-42";
+        // Cold-boot side
+        let cold_sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        let cold_v = crate::backend::nomad_ch::build_nomad_job_json_with(
+            "zsbx-r3a-parity-cold",
+            &cold_sandbox_cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/usr_alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "usr_alice",
+            "proj",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            TaskDriverMode::ChPlugin,
+            Some(node_id),
+        );
+        // Restore-path side
+        let restore_cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let restore_v = build_restore_nomad_job_json(
+            "zsbx-r3a-parity-restore",
+            &restore_cfg,
+            7,
+            Path::new("/var/zeroship/ch/snap-x/restore"),
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            TaskDriverMode::ChPlugin,
+            Some(node_id),
+        );
+        assert_eq!(
+            cold_v["Job"]["Constraints"], restore_v["Job"]["Constraints"],
+            "r3-A cross-emitter parity violated: cold-boot and \
+             restore-path emit DIFFERENT Job.Constraints for the same \
+             node_id. The fix is load-bearing on BOTH paths — a one-sided \
+             emission would re-open the cross-node race on the dropped \
+             side.\ncold:    {:?}\nrestore: {:?}",
+            cold_v["Job"]["Constraints"],
+            restore_v["Job"]["Constraints"],
+        );
+        // Both must also OMIT identically with the same input.
+        let cold_none = crate::backend::nomad_ch::build_nomad_job_json_with(
+            "zsbx-r3a-parity-cold-none",
+            &cold_sandbox_cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/usr_alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "usr_alice",
+            "proj",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            TaskDriverMode::ChPlugin,
+            None,
+        );
+        let restore_none = build_restore_nomad_job_json(
+            "zsbx-r3a-parity-restore-none",
+            &restore_cfg,
+            7,
+            Path::new("/var/zeroship/ch/snap-x/restore"),
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            TaskDriverMode::ChPlugin,
+            None,
+        );
+        assert_eq!(
+            cold_none["Job"].get("Constraints"),
+            restore_none["Job"].get("Constraints"),
+            "r3-A cross-emitter parity violated on the None path: \
+             both emitters must omit Constraints identically."
+        );
+        // Sanity: both should be None / absent.
+        assert!(cold_none["Job"].get("Constraints").is_none());
+        assert!(restore_none["Job"].get("Constraints").is_none());
     }
 }
 
