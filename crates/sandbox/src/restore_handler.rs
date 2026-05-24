@@ -122,15 +122,28 @@ pub enum RestoreHandlerError {
 ///   tenant; releasing the slot before the fence clears reopens that
 ///   race for any concurrent CREATE.
 ///
-/// Default budget: **25 attempts × 2 s interval = ~50 s total**.
+/// Default budget: **25 attempts × 2 s interval = 48 s total**
+/// (24 sleeps between 25 attempts — the first attempt does not sleep,
+/// so wall-time = `(max_attempts - 1) * interval`, not
+/// `max_attempts * interval`; R14-Q4 doc off-by-one fix).
 ///
 /// **C-7 fix (T-8b-smoke-r8 cluster review)**: the original v1 default
-/// was 60×2s=120s, sized to envelope the worst observed teardown
-/// wall-time (host_fence ~60 s + Nomad purge ~30 s ≈ 90 s). That
-/// budget exceeded the stress client's 60 s deadline. When the client
-/// disconnected at 60 s, ntex dropped the wake handler future
-/// mid-`compio::time::sleep.await`, leaving no success/exhausted log
-/// — a silent failure with the row wedged at `restoring`.
+/// was 60×2s=118s wall-time (60 attempts have 59 sleeps), sized to
+/// envelope the worst observed teardown wall-time (host_fence ~60 s
+/// + Nomad purge ~30 s ≈ 90 s). That budget exceeded the stress
+/// client's 60 s deadline. When the client disconnected at 60 s, ntex
+/// dropped the wake handler future mid-`compio::time::sleep.await`,
+/// leaving no success/exhausted log — a silent failure with the row
+/// wedged at `restoring`.
+///
+/// **R14-A6 (architecture-r14)**: production backends should derive
+/// the policy from `cfg.host_fence_timeout_secs` via
+/// [`VmIndexRetryPolicy::from_host_fence_timeout`] rather than rely on
+/// the hard-coded default — so a future fence-config bump (or a
+/// per-cluster override) scales the wake budget automatically. The
+/// `Default` impl remains at the C-7 constants (25×2s=48s) as the
+/// test contract anchor and the unit-test fallback for backends
+/// without a `cfg` handle (e.g. `StubRestoreBackend` in unit tests).
 ///
 /// Trade-off: under sustained `host_fence` races where the source
 /// slot does not vacate within 50 s, wake now surfaces a clean 503
@@ -155,10 +168,69 @@ pub struct VmIndexRetryPolicy {
 
 impl Default for VmIndexRetryPolicy {
     fn default() -> Self {
-        // C-7 fix: 25 × 2 s = 50 s budget. Keep ≥10 s headroom under
-        // the 60 s ntex/stress-client deadline so the exhausted-budget
-        // log fires before the client disconnect cancels the future.
+        // C-7 fix: 25 attempts × 2 s = 48 s wall-time budget
+        // (24 sleeps; the first attempt fires immediately). Keeps
+        // ≥10 s headroom under the 60 s ntex/stress-client deadline
+        // so the exhausted-budget log fires before the client
+        // disconnect cancels the future. Preserved as the test
+        // contract anchor (see `c7_retry_budget_default_is_under_client_deadline`)
+        // and the fallback for backends without a `cfg` handle.
+        // Production backends should call
+        // [`Self::from_host_fence_timeout`] instead — see R14-A6.
         Self { max_attempts: 25, interval: Duration::from_secs(2) }
+    }
+}
+
+impl VmIndexRetryPolicy {
+    /// **R14-A6 fix (architecture-r14)**: derive the wake-retry budget
+    /// from the operator-tuned `cfg.host_fence_timeout_secs` rather
+    /// than from a second hard-coded constant. The source vm_index
+    /// is released only after the host-fence clears + the Nomad job
+    /// purges, so the wake budget must envelope the fence timeout
+    /// (plus the ~30 s Nomad purge tail). Tying the two prevents
+    /// silent drift if a future stress run bumps `host_fence_timeout_secs`
+    /// (the way `cad098e6` already did 30 → 120) and forgets to
+    /// re-tune the wake budget separately.
+    ///
+    /// Formula: `max_attempts = (host_fence_timeout_secs.saturating_sub(CLIENT_HEADROOM_SECS)) / INTERVAL_SECS + 1`
+    /// — the `+ 1` accounts for the first (zero-sleep) attempt, so
+    /// the wall-time `(max_attempts - 1) * INTERVAL_SECS` lands
+    /// exactly at `(host_fence - HEADROOM)` seconds.
+    ///
+    /// Constants:
+    /// - `CLIENT_HEADROOM_SECS = 10` — leaves ≥10 s headroom under
+    ///   the assumed 60 s ntex client deadline when the operator
+    ///   leaves `host_fence_timeout_secs` near the default (30–120).
+    /// - `INTERVAL_SECS = 2` — matches the C-7 cadence; the slot
+    ///   frees on a ~deterministic ~90 s timeline so exponential
+    ///   backoff would mostly miss the release window.
+    /// - `MIN_ATTEMPTS = 1` — `host_fence_timeout_secs == 0`
+    ///   (operators who explicitly disabled the fence — NOT
+    ///   recommended) still gets one decisive reserve attempt.
+    ///
+    /// Examples:
+    /// - `host_fence_timeout_secs = 30` → 11 attempts × 2 s = 20 s
+    ///   budget (fits well under any sane client deadline).
+    /// - `host_fence_timeout_secs = 60` → 26 attempts × 2 s = 50 s
+    ///   budget (matches the C-7 default within 1 attempt).
+    /// - `host_fence_timeout_secs = 120` → 56 attempts × 2 s = 110 s
+    ///   budget — exceeds the 60 s ntex client deadline. Operators
+    ///   running a 120 s fence MUST switch to the async response +
+    ///   poll pattern (C-7-LT) or accept the silent-cancel failure
+    ///   mode for any wake racing a slow source teardown.
+    pub fn from_host_fence_timeout(host_fence_timeout_secs: u64) -> Self {
+        const CLIENT_HEADROOM_SECS: u64 = 10;
+        const INTERVAL_SECS: u64 = 2;
+        const MIN_ATTEMPTS: u32 = 1;
+        let effective = host_fence_timeout_secs.saturating_sub(CLIENT_HEADROOM_SECS);
+        let attempts_from_fence = (effective / INTERVAL_SECS).saturating_add(1);
+        let max_attempts = u32::try_from(attempts_from_fence)
+            .unwrap_or(u32::MAX)
+            .max(MIN_ATTEMPTS);
+        Self {
+            max_attempts,
+            interval: Duration::from_secs(INTERVAL_SECS),
+        }
     }
 }
 
@@ -261,12 +333,16 @@ pub trait RestoreBackend: Send + Sync {
     /// C-4 fix (T-8b-smoke-r5 cluster review): policy the wake path
     /// uses to retry [`Self::reserve_vm_index`] while the source's
     /// detached teardown still holds the slot. Default budget (after
-    /// the C-7 fix at T-8b-smoke-r8) is ~50 s — sized to stay strictly
-    /// below the 60 s ntex/stress-client deadline so the
-    /// exhausted-budget log fires before the client disconnect drops
-    /// the wake future. Backends with a different teardown profile
-    /// (test stubs, k8s) override. See [`VmIndexRetryPolicy`] for the
-    /// trade-off rationale.
+    /// the C-7 fix at T-8b-smoke-r8) is 48 s wall-time (25 attempts ×
+    /// 2 s interval, 24 sleeps — the first attempt does not sleep).
+    /// Sized to stay strictly below the 60 s ntex/stress-client
+    /// deadline so the exhausted-budget log fires before the client
+    /// disconnect drops the wake future. Production backends override
+    /// via [`VmIndexRetryPolicy::from_host_fence_timeout`] to keep the
+    /// budget linked to `cfg.host_fence_timeout_secs` (R14-A6). Test
+    /// stubs may override with shorter budgets to keep unit tests
+    /// fast. See [`VmIndexRetryPolicy`] for the full trade-off
+    /// rationale.
     fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
         VmIndexRetryPolicy::default()
     }
@@ -584,11 +660,15 @@ async fn do_restore_inner(
     // 503 immediately (sticky alloc refused the busy slot). We now
     // retry the reserve on a bounded budget (see
     // [`VmIndexRetryPolicy`]); the slot frees as soon as the
-    // detached teardown's `release()` fires. Total budget defaults
-    // to ~50 s post-C-7 (was ~120 s pre-C-7 — that exceeded the
-    // ntex/stress-client 60 s deadline and the wake future was
-    // canceled mid-sleep before any exhaustion log fired);
-    // exhaustion still surfaces as 503 with the same wire shape.
+    // detached teardown's `release()` fires. Total budget for
+    // production backends is derived from `cfg.host_fence_timeout_secs`
+    // via `VmIndexRetryPolicy::from_host_fence_timeout` (R14-A6); the
+    // `Default` fallback (used by test stubs without a cfg) is
+    // 48 s wall-time (25 × 2 s = 24 sleeps). Was ~118 s pre-C-7
+    // (60 × 2 s = 59 sleeps — exceeded the ntex/stress-client 60 s
+    // deadline and the wake future was canceled mid-sleep before any
+    // exhaustion log fired); exhaustion still surfaces as 503 with
+    // the same wire shape.
     tracing::info!(
         sandbox_id = %sandbox_id,
         phase = "pre_reserve_vm_index",
@@ -1371,6 +1451,78 @@ mod unit_tests {
             p.interval
         );
     }
+
+    /// **R14-A6 (architecture-r14)**: production backends derive
+    /// `VmIndexRetryPolicy` from `cfg.host_fence_timeout_secs` via
+    /// `from_host_fence_timeout`. For the platform-default fence
+    /// (60 s in many deployments), the derived budget must (a) stay
+    /// strictly below the 60 s ntex/stress-client deadline and (b)
+    /// envelope the host_fence so a wake racing a fence-clear has a
+    /// non-trivial chance of catching the release. 60 s fence →
+    /// 26×2 s = 50 s wall-time fits both constraints.
+    #[test]
+    fn r14a6_policy_from_cfg_respects_host_fence_timeout() {
+        // 60 s host-fence (the platform default after the cad098e6
+        // 30→120 bump backed off to 60 in many configs).
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(60);
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            wall_ms <= 50_000,
+            "60 s fence → derived budget should be ≤50 s; got {} ms \
+             (attempts={}, interval={:?})",
+            wall_ms,
+            p.max_attempts,
+            p.interval
+        );
+        // And not trivially small — must actually exercise the retry
+        // loop past the first reserve attempt.
+        assert!(
+            p.max_attempts > 1,
+            "60 s fence → derived policy must allow >1 attempt; got {}",
+            p.max_attempts
+        );
+        // 2 s interval is the C-7 cadence; from_host_fence_timeout
+        // anchors to it so the loop semantics match the existing
+        // observability + tests.
+        assert_eq!(
+            p.interval,
+            Duration::from_secs(2),
+            "from_host_fence_timeout must use the C-7 2 s interval"
+        );
+    }
+
+    /// **R14-A6 short-timeout case**: a 20 s host_fence (an aggressive
+    /// per-cluster override) should yield a sensible non-trivial
+    /// budget — concretely `(20 - 10) / 2 + 1 = 6` attempts × 2 s =
+    /// 10 s wall-time. Pins the formula so a future refactor can't
+    /// silently collapse the policy to `max_attempts = 1` for short
+    /// fences.
+    #[test]
+    fn r14a6_policy_from_cfg_short_timeout() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(20);
+        assert_eq!(
+            p.max_attempts, 6,
+            "20 s fence: (20 - 10 headroom) / 2 s interval + 1 = 6"
+        );
+        assert_eq!(p.interval, Duration::from_secs(2));
+    }
+
+    /// **R14-A6 zero-fence edge case**: `host_fence_timeout_secs == 0`
+    /// is the explicit "disable the fence" knob (NOT recommended in
+    /// production but valid for some test setups). The derived policy
+    /// must still produce at least one decisive reserve attempt
+    /// rather than collapsing to a degenerate 0-attempt loop that
+    /// would skip the reserve entirely.
+    #[test]
+    fn r14a6_policy_from_cfg_zero_fence_still_attempts_once() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(0);
+        assert!(
+            p.max_attempts >= 1,
+            "zero fence must still attempt the reserve at least once; got {}",
+            p.max_attempts
+        );
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1651,6 +1803,18 @@ impl RestoreBackend for RealRestoreBackend {
     ) -> Result<(), String> {
         let agent_url = self.derive_agent_url(vm_index);
         wait_for_livez_blocking(&agent_url, self.agent_livez_timeout)
+    }
+
+    /// **R14-A6 (architecture-r14)**: derive the wake-retry budget
+    /// from `cfg.host_fence_timeout_secs` instead of inheriting the
+    /// hard-coded `VmIndexRetryPolicy::default()`. The source vm_index
+    /// is released only after the host-fence clears, so the wake
+    /// budget is fundamentally a function of the fence timeout — see
+    /// [`VmIndexRetryPolicy::from_host_fence_timeout`] for the formula
+    /// + the trade-off if an operator sets `host_fence_timeout_secs`
+    /// past the ntex client deadline.
+    fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
+        VmIndexRetryPolicy::from_host_fence_timeout(self.cfg.host_fence_timeout_secs)
     }
 
     fn derive_agent_url(&self, vm_index: i16) -> String {
@@ -2935,6 +3099,55 @@ mod real_backend_tests {
             "R10-C2 regression: spawn_blocking wrap must precede the \
              teardown_restore call (got sb={sb_idx} td={td_idx})"
         );
+    }
+
+    /// **R14-A6 wake-path call site**: `RealRestoreBackend` overrides
+    /// `vm_index_retry_policy` so the wake budget tracks
+    /// `cfg.host_fence_timeout_secs` instead of inheriting the
+    /// hard-coded `Default`. Regression-pin: if a future refactor
+    /// removes the override (or accidentally restores
+    /// `VmIndexRetryPolicy::default()` here), this test catches it by
+    /// constructing two backends with different fence timeouts and
+    /// asserting their derived policies differ. The trait-method
+    /// dispatch is what the wake loop in `reserve_vm_index_with_retry`
+    /// actually consults — so this pins the production code path, not
+    /// just the formula.
+    #[test]
+    fn r14a6_real_backend_derives_policy_from_cfg_host_fence_timeout() {
+        let root = fresh_dir();
+        let mut cfg_short = base_cfg(String::from("http://127.0.0.1:1"), root.clone());
+        cfg_short.host_fence_timeout_secs = 20;
+        let backend_short = RealRestoreBackend::new(cfg_short, 1024, 2.0);
+
+        let mut cfg_long = base_cfg(String::from("http://127.0.0.1:1"), root.clone());
+        cfg_long.host_fence_timeout_secs = 120;
+        let backend_long = RealRestoreBackend::new(cfg_long, 1024, 2.0);
+
+        let p_short = backend_short.vm_index_retry_policy();
+        let p_long = backend_long.vm_index_retry_policy();
+        assert!(
+            p_long.max_attempts > p_short.max_attempts,
+            "R14-A6 regression: RealRestoreBackend must derive policy \
+             from cfg.host_fence_timeout_secs — a longer fence should \
+             yield more attempts. short=20s→{} attempts, long=120s→{} \
+             attempts. If this fails, the wake call site likely fell \
+             back to `VmIndexRetryPolicy::default()` and is no longer \
+             cfg-driven.",
+            p_short.max_attempts,
+            p_long.max_attempts
+        );
+        // Also pin: NOT the default. 20 s fence with the cfg formula
+        // is 6 attempts (≠ default 25), so a Default-only fallback
+        // would be detected here.
+        let default = VmIndexRetryPolicy::default();
+        assert_ne!(
+            p_short.max_attempts, default.max_attempts,
+            "R14-A6 regression: short-fence backend's policy must NOT \
+             match the hard-coded Default ({} attempts) — that would \
+             mean the override is missing.",
+            default.max_attempts
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
