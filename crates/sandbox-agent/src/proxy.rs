@@ -42,13 +42,11 @@
 use std::io::Read;
 use std::time::Instant;
 
-use ntex::http::header::HeaderName;
-use ntex::http::{StatusCode, Uri};
+use ntex::http::StatusCode;
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 
 use crate::handlers::AppState;
-use crate::sig::{self, CanonicalKind};
 use zeroship_core::preview_ports::{is_proxyable_port, DEFAULT_DENY};
 
 /// Hard cap on the request body for the proxy. The cap exists because
@@ -544,25 +542,10 @@ impl ProxyLogMeta {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// Compile-only references — keep imports legal where they're not
-// used elsewhere in this module.
-
-#[allow(dead_code)]
-fn _ref_imports() {
-    // sig and Uri / HeaderName aren't used in the public surface
-    // (we use string headers throughout for ureq compatibility);
-    // referenced here so a future rev that needs typed access can
-    // pull them in without re-adding the import.
-    let _ = sig::v1_1_path_query;
-    let _: Option<HeaderName> = None;
-    let _: Option<Uri> = None;
-    let _: CanonicalKind = CanonicalKind::V1_1;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sig::{self, CanonicalKind};
     use ntex::http::StatusCode;
     use ntex::web::test;
     use std::io::{Read as IoRead, Write as IoWrite};
