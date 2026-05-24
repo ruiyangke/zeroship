@@ -141,6 +141,11 @@ func WaitForCHSocketReady(sockPath string, totalBudget, perAttempt, cadence time
 	return waitForCHSocketReady(sockPath, totalBudget, perAttempt, cadence)
 }
 
+// ChStderrLogName re-exports the constant for the per-alloc CH
+// stderr capture file. Pinned for the test suite so a future rename
+// surfaces at compile time rather than at the next cluster smoke.
+const ChStderrLogName = chStderrLogName
+
 // PreflightDiskPaths is the test entry point for the C-2 pre-flight stat
 // check. Pure function; no side effects. Mirrors the wrapper's existence
 // guards at nomad-vm-wrapper.sh:270-277.

@@ -450,9 +450,20 @@ type defaultRunner struct {
 
 // defaultRunnerFactory is the production runner factory. Wraps cmd's stderr
 // in a tailBuffer so WaitTask can surface the last bytes on failure.
+//
+// C-7-LT-3-PR2 (2026-05-25): if the caller already set cmd.Stderr (the
+// restore branch sets it to a per-alloc file under runDir/ch-stderr.log
+// so CH stderr persists past the alloc's task-failure GC), we tee
+// through io.MultiWriter instead of clobbering — both the on-disk file
+// AND the in-memory tail buffer receive every byte. Preserves the
+// WaitTask exit-tail behaviour while gaining post-mortem visibility.
 func defaultRunnerFactory(cmd *exec.Cmd) processRunner {
 	tb := newTailBuffer(stderrCap)
-	cmd.Stderr = tb
+	if cmd.Stderr != nil {
+		cmd.Stderr = io.MultiWriter(cmd.Stderr, tb)
+	} else {
+		cmd.Stderr = tb
+	}
 	return &defaultRunner{cmd: cmd, stderr: tb}
 }
 

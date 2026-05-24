@@ -35,6 +35,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -53,6 +54,25 @@ const (
 	snapshotConfigFile = "config.json"
 	snapshotMemoryFile = "memory-ranges"
 )
+
+// chStderrLogName is the file the restore branch redirects CH's
+// stderr to, under the per-alloc run dir. C-7-LT-3-PR2 (smoke-r14)
+// added this so a CH that spawns and dies before its API socket
+// comes up leaves a diagnostic trail an operator can read after the
+// alloc's task-failure event. The file is opened with O_TRUNC on
+// every spawn so a re-attempt doesn't accumulate stale lines.
+//
+// The cold-boot branch can adopt the same convention later; for now
+// only restore writes here (cold-boot uses its --serial file to
+// capture in-guest output, which is a different surface from CH's
+// own stderr).
+const chStderrLogName = "ch-stderr.log"
+
+// chStderrTailBytes is the max bytes lifted from the on-disk
+// stderr log into the socket-timeout error message. 4 KiB matches
+// stderrCap (the in-memory tailBuffer) and is plenty to carry a
+// CH panic / errno trace without bloating the Nomad event log.
+const chStderrTailBytes = 4096
 
 // defaultAPISocketPollTimeout bounds the time we wait for CH's
 // --api-socket to become responsive after --restore. C-7-LT-3
@@ -355,6 +375,32 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	cmd.Dir = runDir
 	cmd.Stdout = nil
 
+	// C-7-LT-3-PR2 (smoke-r14): redirect CH stderr to a per-alloc
+	// file under the run dir so a CH that spawns and dies before
+	// its API socket comes up leaves a diagnostic trail. The
+	// defaultRunnerFactory tees through io.MultiWriter so the
+	// existing WaitTask exit-tail behaviour is preserved. O_TRUNC
+	// so a re-attempt doesn't accumulate stale output.
+	//
+	// Best-effort: a failure to open the file does NOT abort the
+	// spawn (an unwritable run dir would surface as a clearer
+	// downstream error from CH itself). The file path is recorded
+	// for the socket-timeout diagnostic below.
+	stderrLogPath := filepath.Join(runDir, chStderrLogName)
+	stderrFile, stderrErr := os.OpenFile(stderrLogPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if stderrErr == nil {
+		cmd.Stderr = stderrFile
+		// Close our handle once the runner takes ownership of the
+		// fd; the subprocess inherits via exec and keeps it open.
+		// Deferred until after Start so the subprocess inherits a
+		// valid descriptor; the explicit Close is run at function
+		// exit (any branch) to avoid leaking the host-side fd.
+		defer func() { _ = stderrFile.Close() }()
+	} else {
+		p.logger.Warn("ch: startTaskRestoreBranch: stderr-log open failed; continuing without per-alloc stderr capture",
+			"path", stderrLogPath, "err", stderrErr)
+	}
+
 	runner := p.chClient.RunnerFactory()(cmd)
 	if err := runner.Start(); err != nil {
 		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: spawn cloud-hypervisor --restore: %w", err)
@@ -369,7 +415,22 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	// C-7-LT-3) — the default budget is now 60s.
 	if err := pollAPISocketFn(p.chClient, apiSocket, defaultAPISocketPollTimeout, defaultAPISocketPollInterval); err != nil {
 		_ = runner.Signal(os.Kill)
-		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: %w", err)
+		// C-7-LT-3-PR2: embed the CH stderr tail so the next
+		// cluster smoke has visibility into whether CH crashed or
+		// was just slow. Best-effort: a missing/unreadable file
+		// produces an empty tail and the original error remains
+		// useful on its own. We prefer the on-disk file (persists
+		// past task-failure) but fall back to the runner's
+		// in-memory tail buffer if the file capture path didn't
+		// initialise (open error path above).
+		tail := readStderrTail(stderrLogPath, chStderrTailBytes)
+		if len(tail) == 0 {
+			tail = runner.StderrTail(chStderrTailBytes)
+		}
+		if len(tail) > 0 {
+			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: %w; ch_stderr_tail=%q (path=%s)", err, string(tail), stderrLogPath)
+		}
+		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: %w (no ch stderr captured; path=%s)", err, stderrLogPath)
 	}
 
 	// Step 6: ch-remote resume. THIS is what brings the VM back from
@@ -428,6 +489,54 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 		"restore_from", driverConfig.RestoreFrom)
 
 	return handle, nil, nil
+}
+
+// readStderrTail returns the last up-to-`max` bytes of the file at
+// `path`. Used by the socket-timeout error path on the restore
+// branch to embed CH stderr in the operator-facing Nomad event
+// message. Best-effort: returns nil on any open/seek/read error so
+// the caller can fall back to a different source (in-memory tail
+// buffer) without erroring on the diagnostic itself.
+//
+// Implementation notes:
+//   - Seeks from the end so a multi-GiB log doesn't pull the whole
+//     file into memory; we only need the tail.
+//   - On read partial-success we return what we got rather than
+//     erroring — a torn tail of CH stderr is still more useful
+//     than nothing.
+func readStderrTail(path string, max int) []byte {
+	if path == "" || max <= 0 {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	size := stat.Size()
+	if size == 0 {
+		return nil
+	}
+	readN := int64(max)
+	if size < readN {
+		readN = size
+	}
+	if _, err := f.Seek(-readN, io.SeekEnd); err != nil {
+		return nil
+	}
+	buf := make([]byte, readN)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		// EOF/UnexpectedEOF tolerated — return whatever we got.
+		if n == 0 {
+			return nil
+		}
+	}
+	return buf[:n]
 }
 
 // validateSnapshotDir confirms the snapshot artifact dir exists and

@@ -857,6 +857,115 @@ func TestWaitForCHSocketReady_EmptyPath(t *testing.T) {
 	mustContainTest(t, "empty-path error", err.Error(), "empty socket path")
 }
 
+// -- C-7-LT-3-PR2 stderr-capture tests -------------------------------
+
+// TestStartTaskRestoreBranch_StderrCaptured: drive a restore that
+// reaches the spawn step; assert the per-alloc stderr file is
+// created under the run dir at the expected name. Pins the
+// PR2 wire-level constant ChStderrLogName.
+//
+// The fake runner does not actually exec — but the spawn block opens
+// the stderr file BEFORE calling the runner factory, so the file's
+// existence post-StartTask is the witness.
+func TestStartTaskRestoreBranch_StderrCaptured(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+
+	// Witness the stderr-log file under runDir. The restore branch
+	// uses TaskDir().LocalDir which the helper wires to
+	// taskDir/local.
+	runDir := filepath.Join(taskDir, "local")
+	stderrPath := filepath.Join(runDir, ch.ChStderrLogName)
+	if _, err := os.Stat(stderrPath); err != nil {
+		t.Fatalf("expected ch stderr log at %s, got: %v", stderrPath, err)
+	}
+}
+
+// TestStartTaskRestoreBranch_StderrTailEmbeddedOnSocketTimeout:
+// when the API-socket probe times out, the error message must
+// embed the tail of CH stderr. The fake runner's stderr buffer
+// stands in for what CH would have written; we pre-populate the
+// on-disk stderr file directly (the spawn block opens it with
+// O_TRUNC so we can't pre-stage via the file alone — instead the
+// fake runner writes to cmd.Stderr during the test's spawn step
+// which the production io.MultiWriter tees to the file).
+//
+// Simpler witness: drive a poll-timeout, write a marker into the
+// on-disk file mid-flight, and assert the marker surfaces in the
+// returned error.
+func TestStartTaskRestoreBranch_StderrTailEmbeddedOnSocketTimeout(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	// Custom poll seam: write a marker into the stderr file then
+	// return a timeout error. This simulates CH having logged to
+	// stderr before the socket-timeout fires.
+	rec := &restoreSequenceRecorder{}
+	taskDir := t.TempDir()
+	runDir := filepath.Join(taskDir, "local")
+	stderrPath := filepath.Join(runDir, ch.ChStderrLogName)
+
+	prevPoll := ch.SetPollAPISocketForTest(func(_ *ch.Client, _ string, _, _ time.Duration) error {
+		rec.record("wait_socket")
+		// File was created by the spawn block; append a marker.
+		f, err := os.OpenFile(stderrPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return errors.New("ch: api socket not responsive (within 10ms, marker-write-failed)")
+		}
+		_, _ = f.WriteString("PANIC: synthetic CH crash output for test\n")
+		_ = f.Close()
+		return errors.New("ch: api socket not responsive at /tmp/x within 10ms (attempts=1, lastErr=connection refused)")
+	})
+	t.Cleanup(func() { ch.SetPollAPISocketForTest(prevPoll) })
+
+	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
+
+	var captured *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		captured = newFakeRunner(cmd)
+		go func(r *fakeRunner) { <-r.waitCh }(captured)
+		return captured
+	}
+	t.Cleanup(func() {
+		if captured != nil {
+			func() {
+				defer func() { recover() }()
+				close(captured.waitCh)
+			}()
+		}
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("expected socket-timeout error")
+	}
+	msg := err.Error()
+	mustContainTest(t, "socket-timeout error", msg, "PANIC: synthetic CH crash")
+	mustContainTest(t, "socket-timeout error", msg, "ch_stderr_tail=")
+	mustContainTest(t, "socket-timeout error", msg, stderrPath)
+}
+
 // mustContainTest is a local helper to keep these C-7-LT-3 tests
 // self-contained (start_task_test.go has the package-wide
 // mustContain helper but it takes a different signature shape; the
