@@ -117,9 +117,14 @@ use sha2::{Digest, Sha256};
 /// `PROTOCOL_VERSION` bump.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ResyncBody {
-    /// Sandbox UUID (string form, e.g. `019486f5-…`). Agent rejects
-    /// the request if this doesn't match its own boot-time-known
-    /// sandbox_id.
+    /// Sandbox UUID in `Uuid::simple()` form — 32 lowercase hex
+    /// chars, no hyphens (e.g. `019486f5b1d873a98b4c5e9f7a2d4c8e`).
+    /// Wire shape was fixed by B24-FOLLOWUP (`66029821`): the
+    /// controller's Nomad task env injects `ZSBX_SANDBOX_ID` in
+    /// `.simple()` form to satisfy the wrapper validator, and the
+    /// agent's `boot_sandbox_id` is parsed from that same env, so
+    /// both sides MUST use the 32-hex form. Hyphenated `to_string()`
+    /// values 401 here (mismatch against `boot_sandbox_id`).
     pub(crate) sandbox_id: String,
     /// Unix seconds the controller wants the guest's `CLOCK_REALTIME`
     /// set to. Same field name + semantics as the pre-R7-S1 body so

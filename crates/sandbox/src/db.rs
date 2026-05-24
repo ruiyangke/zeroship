@@ -2914,9 +2914,14 @@ mod tests {
                 let again = load_or_generate_host_id().expect("re-load");
                 assert_eq!(uuid, again, "host_id must be stable across calls");
             }
-            // The file itself contains the UUID (hyphenated form) —
-            // checked via std::fs::read_to_string directly so this arm
-            // does NOT route through the uid==0 gate.
+            // The file itself contains the host_id UUID in
+            // `Uuid::to_string()` form (8-4-4-4-12 hyphenated) — this
+            // is host_id, NOT sandbox_id; B24-FOLLOWUP's `.simple()`
+            // wire shape applies only to sandbox_id. host_id stays
+            // hyphenated for human-readable operator triage of the
+            // persisted state file. Checked via std::fs::read_to_string
+            // directly so this arm does NOT route through the uid==0
+            // gate.
             let on_disk = std::fs::read_to_string(&path).unwrap();
             assert_eq!(on_disk.trim(), uuid.to_string());
         });
