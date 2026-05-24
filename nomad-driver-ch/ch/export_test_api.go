@@ -126,6 +126,33 @@ func RewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet)
 }
 
+// PreflightDiskPaths is the test entry point for the C-2 pre-flight stat
+// check. Pure function; no side effects. Mirrors the wrapper's existence
+// guards at nomad-vm-wrapper.sh:270-277.
+func PreflightDiskPaths(disks []DiskSpec) error {
+	return preflightDiskPaths(disks)
+}
+
+// MaterializeRootfs is the test entry point for the C-2 rootfs-stage
+// helper that mirrors the wrapper's `cp $ARTIFACT_DIR/rootfs-slim.img
+// $RUNTIME/rootfs.img` at nomad-vm-wrapper.sh:300-305. Tests assert the
+// happy-path copy, the idempotent re-spawn no-op, and the failure modes
+// (missing source, unwritable dest).
+func MaterializeRootfs(artifactDir, dstRootfs string) error {
+	return materializeRootfs(artifactDir, dstRootfs)
+}
+
+// ChRootfsSourceName re-exports the wire-level constant for the source
+// rootfs file name. Tests pin this so a future rename to e.g.
+// "rootfs.img.zst" surfaces here at compile time rather than at the next
+// cluster smoke.
+const ChRootfsSourceName = chRootfsSourceName
+
+// ChArtifactDirEnvVar re-exports the wire-level constant for the env
+// var key the controller emits. Pinned for the same reason as
+// ChRootfsSourceName above.
+const ChArtifactDirEnvVar = chArtifactDirEnvVar
+
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing
 // to spawn a real CH process. Mirrors the minimal shape RecoverTask

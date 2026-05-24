@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,21 @@ import (
 // ${cfg.TaskDir().Dir}/rootfs.img. Same convention so any operator
 // looking at the alloc dir sees the same layout.
 const chRootfsName = "rootfs.img"
+
+// chRootfsSourceName is the file the controller stages under
+// $ZSBX_ARTIFACT_DIR/<name>. The wrapper copies it into
+// $ZSBX_RUNTIME/rootfs.img on every cold-boot (nomad-vm-wrapper.sh:300-305);
+// we mirror that copy here. The name is a wire-level constant shared
+// with the controller (crates/sandbox/src/backend/nomad_ch.rs § "The host
+// operator is responsible for pre-provisioning: ... rootfs-slim.img").
+const chRootfsSourceName = "rootfs-slim.img"
+
+// chArtifactDirEnvVar is the env-var key the controller emits on every
+// Nomad job (cold-boot and restore branches) pointing at the dir that
+// holds vmlinuz + rootfs-slim.img. The wrapper reads it as
+// $ZSBX_ARTIFACT_DIR (nomad-vm-wrapper.sh:127); the Go driver reads it
+// from cfg.Env (Nomad's plugins/drivers.TaskConfig.Env map).
+const chArtifactDirEnvVar = "ZSBX_ARTIFACT_DIR"
 
 // chAPISocketName / chSerialLogName / chConfigName are the conventional
 // file names within the per-task run dir. Match the wrapper's names for
@@ -216,19 +232,60 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	}
 
 	// Materialise the per-VM rootfs copy if it doesn't already exist.
-	// The wrapper does `cp --reflink=auto $ARTIFACT_DIR/rootfs-slim.img
-	// $DISK`. We don't have ARTIFACT_DIR here; the operator is expected
-	// to either pre-stage the rootfs at runDir/rootfs.img OR include it
-	// as the first entry of Disks. Honour Disks if non-empty; otherwise
-	// synthesise from WorkspaceImg / UserHomeImg with a rootfs we expect
-	// to already exist at rootfsPath.
+	// The wrapper does (nomad-vm-wrapper.sh:300-305):
+	//
+	//   if [ ! -f "$DISK" ]; then
+	//     cp --reflink=auto "$ZSBX_ARTIFACT_DIR/rootfs-slim.img" "$DISK"
+	//   fi
+	//
+	// where $DISK="$ZSBX_RUNTIME/rootfs.img" (l.238) and $ZSBX_RUNTIME
+	// is Nomad's NOMAD_TASK_DIR. Under ChPlugin mode the controller emits
+	// the same ZSBX_ARTIFACT_DIR env var on the job (nomad_ch.rs:2339,
+	// l.2495 "Env": env), so we can read it from cfg.Env regardless of
+	// which driver branch the controller chose.
+	//
+	// Operator-supplied Disks short-circuits this — if the operator
+	// configured the disk list explicitly, we trust them to have staged
+	// every path themselves (rootfs included).
+	//
+	// C-2 fix (2026-05-25): T-1's original implementation did NOT
+	// perform this copy; it assumed the rootfs was already at
+	// runDir/rootfs.img, which is true under the bash wrapper (because
+	// the wrapper itself does the cp) but FALSE under ChPlugin mode
+	// (the Go driver is the only thing that touches the run dir before
+	// CH spawn). The wrapper's cp step is part of the wire contract,
+	// not an implementation detail — every cold-boot needs a fresh
+	// writable rootfs per alloc so concurrent VMs don't share state.
 	disks := driverConfig.Disks
 	if len(disks) == 0 {
+		artifactDir := artifactDirFromEnv(cfg)
+		if artifactDir == "" {
+			return nil, nil, fmt.Errorf("ch: StartTask: %s env var missing — controller did not stage artifact dir (cold-boot needs vmlinuz + %s)", chArtifactDirEnvVar, chRootfsSourceName)
+		}
+		if err := materializeRootfs(artifactDir, rootfsPath); err != nil {
+			return nil, nil, fmt.Errorf("ch: StartTask: stage rootfs: %w", err)
+		}
 		disks = []DiskSpec{
 			{Path: rootfsPath, Readonly: false, Serial: "zsbx-root"},
 			{Path: driverConfig.WorkspaceImg, Readonly: false, Serial: "zsbx-work"},
 			{Path: driverConfig.UserHomeImg, Readonly: false, Serial: "zsbx-home"},
 		}
+	}
+
+	// Pre-flight stat on every disk path. The wrapper performs the
+	// equivalent guard at nomad-vm-wrapper.sh:270-277 (for the two
+	// controller-owned ext4 images); we extend it to all disks so a
+	// missing rootfs / workspace / user_home surfaces here as a clean
+	// driver error rather than the cryptic CH crash:
+	//
+	//   VmBoot(VmBoot(DeviceManager(Disk(Os{code:2, kind:NotFound, ...}))))
+	//   Cannot open disk path / No such file or directory (os error 2)
+	//
+	// Closes C-2 from T-8b-smoke-retry-r3. Every missing disk now reads
+	// like "ch: StartTask: disk[N] path /…/foo.img does not exist" in the
+	// Nomad task log.
+	if err := preflightDiskPaths(disks); err != nil {
+		return nil, nil, err
 	}
 
 	// Materialise config.json as a debugging artifact (round-trips with
@@ -517,6 +574,118 @@ func taskRunDir(cfg *drivers.TaskConfig, dcfg *Config) string {
 		return filepath.Join(cfg.AllocDir, "ch")
 	}
 	return filepath.Join(os.TempDir(), "ch-run")
+}
+
+// artifactDirFromEnv extracts ZSBX_ARTIFACT_DIR from the Nomad task's
+// Env block. The controller emits this on every cold-boot job (under
+// both raw_exec and ChPlugin driver modes — see
+// crates/sandbox/src/backend/nomad_ch.rs:2339 + l.2495 where the same
+// `env` map is attached to the Task regardless of driver). Returns "" if
+// the env var is unset (the caller decides whether that's fatal — for
+// the synthesised-disk path it is; for an operator-supplied Disks list
+// the driver bypasses this entirely).
+func artifactDirFromEnv(cfg *drivers.TaskConfig) string {
+	if cfg == nil || cfg.Env == nil {
+		return ""
+	}
+	return cfg.Env[chArtifactDirEnvVar]
+}
+
+// materializeRootfs copies $artifactDir/rootfs-slim.img to dstRootfs if
+// dstRootfs doesn't already exist. Mirrors the wrapper at
+// nomad-vm-wrapper.sh:300-305:
+//
+//	if [ ! -f "$DISK" ]; then
+//	  cp --reflink=auto "$ZSBX_ARTIFACT_DIR/rootfs-slim.img" "$DISK"
+//	fi
+//
+// Idempotent on re-create (the wrapper's belt-and-braces against re-spawn
+// after a crashed prior run). We use a stdlib copy (no reflink) — the
+// `--reflink=auto` flag is a btrfs/xfs optimisation; the file path
+// produces identical guest semantics either way.
+//
+// Permissions: 0o600 on the destination (rw owner only). The wrapper
+// inherits cp's default which is the source's mode; ours is tighter
+// because the destination contains writable guest state.
+//
+// Failure modes surfaced to the caller:
+//   - $artifactDir missing or not a directory → ENOENT/ENOTDIR
+//   - $artifactDir/rootfs-slim.img missing → ENOENT
+//   - destination dir unwritable → EACCES
+//   - disk full mid-copy → ENOSPC (we unlink the partial dest so a
+//     retry can succeed if the operator frees space)
+//
+// All of these used to manifest downstream as the CH VmBoot/NotFound
+// crash; the explicit copy here makes the failure mode legible.
+func materializeRootfs(artifactDir, dstRootfs string) error {
+	// Idempotency check: if the rootfs is already in place, leave it
+	// alone. Matches the wrapper's `[ ! -f "$DISK" ]` guard.
+	if _, err := os.Stat(dstRootfs); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat dst rootfs %s: %w", dstRootfs, err)
+	}
+	srcRootfs := filepath.Join(artifactDir, chRootfsSourceName)
+	src, err := os.Open(srcRootfs)
+	if err != nil {
+		return fmt.Errorf("open src rootfs %s: %w", srcRootfs, err)
+	}
+	defer src.Close()
+	// Create with O_EXCL so a concurrent StartTask for the same task ID
+	// (shouldn't happen — p.tasks dedupes — but defence in depth) fails
+	// loudly rather than racing on the copy.
+	dst, err := os.OpenFile(dstRootfs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create dst rootfs %s: %w", dstRootfs, err)
+	}
+	if _, copyErr := io.Copy(dst, src); copyErr != nil {
+		// Best-effort cleanup on partial copy. Don't escalate the
+		// cleanup error — the caller's interest is the copy error.
+		_ = dst.Close()
+		_ = os.Remove(dstRootfs)
+		return fmt.Errorf("copy rootfs %s → %s: %w", srcRootfs, dstRootfs, copyErr)
+	}
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(dstRootfs)
+		return fmt.Errorf("close dst rootfs %s: %w", dstRootfs, err)
+	}
+	return nil
+}
+
+// preflightDiskPaths stat-checks every disk path before CH spawn. Mirrors
+// the wrapper's `[ ! -f "$ZSBX_WORKSPACE_IMG" ]` / `[ ! -f
+// "$ZSBX_USER_HOME_IMG" ]` guards at nomad-vm-wrapper.sh:270-277 and
+// extends them to the rootfs (which the wrapper also indirectly checks
+// because the cp at l.300-305 fails on a missing source).
+//
+// Returns an error naming the FIRST missing or unreadable disk; the
+// driver fails cold-boot before reaching exec.Cmd.Start so the operator
+// sees a useful path-string instead of CH's
+//
+//	VmBoot(DeviceManager(Disk(Os{code:2, kind:NotFound, ...})))
+//
+// generic crash. Every failed cluster cycle costs $0.20 + a cluster slot;
+// surfacing the offending path in the task log saves both.
+func preflightDiskPaths(disks []DiskSpec) error {
+	for i, d := range disks {
+		if d.Path == "" {
+			return fmt.Errorf("ch: StartTask: disk[%d] has empty path", i)
+		}
+		info, err := os.Stat(d.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("ch: StartTask: disk[%d] %s does not exist (controller must stage before spawn)", i, d.Path)
+			}
+			return fmt.Errorf("ch: StartTask: disk[%d] %s: stat: %w", i, d.Path, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("ch: StartTask: disk[%d] %s is a directory (must be a file)", i, d.Path)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("ch: StartTask: disk[%d] %s is empty (size 0) — controller staged the path but never populated it", i, d.Path)
+		}
+	}
+	return nil
 }
 
 // resolveNet returns the tap name + a NetSpec derived from VMIndex /

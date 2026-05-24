@@ -31,6 +31,17 @@ import (
 // validColdBootConfig returns a TaskConfig with every cold-boot required
 // field set to a sane value. Helper used by all subtests so a per-test
 // "this is what a good config looks like" doesn't drift between cases.
+//
+// C-2: the workspace/userhome image paths default to "" here so
+// newDriversTaskConfig can rewrite them to per-test scratch paths under
+// t.TempDir() before StartTask's pre-flight stat check runs. Pure
+// BuildConfigJSON tests (which don't go through StartTask) set explicit
+// paths after calling validColdBootConfig().
+//
+// Real production paths are under /var/lib/zsbx/img/... but the driver
+// pre-flights against whatever the TaskConfig carries — the helper
+// stages a stub file at each path before StartTask runs, and a
+// per-test-tmpdir path keeps parallel test runs from racing.
 func validColdBootConfig() ch.TaskConfig {
 	return ch.TaskConfig{
 		VMIndex:         7,
@@ -578,6 +589,281 @@ func TestStartTask_DoesNotPassConfigFlag(t *testing.T) {
 	argv := captureColdBootArgv(t)
 	if containsAdjacent(argv, "--config") {
 		t.Errorf("argv unexpectedly contains --config (CH v51.1 has no such flag): %v", argv)
+	}
+}
+
+// TestStartTask_DiskPreflight_FailsOnMissingPath is the C-2 negative
+// pin: when a disk image referenced by TaskConfig doesn't exist on the
+// host at spawn time, StartTask must surface a CLEAR error naming the
+// offending path BEFORE invoking CH. Without this guard the failure
+// manifests as a generic CH crash:
+//
+//	VmBoot(VmBoot(DeviceManager(Disk(Os{code:2, kind:NotFound, ...}))))
+//
+// — which leaves the operator hunting through CH's serial log for the
+// path string. Closes C-2 from T-8b-smoke-retry-r3.
+func TestStartTask_DiskPreflight_FailsOnMissingPath(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	prev := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prev) })
+
+	cfg := validColdBootConfig()
+	// Explicit operator-supplied Disks short-circuits the rootfs-stage
+	// branch (so the rootfs failure mode doesn't mask the workspace
+	// failure mode this test wants to exercise).
+	cfg.Disks = []ch.DiskSpec{
+		{Path: "/tmp/rootfs-this-test-staged.img", Readonly: false, Serial: "zsbx-root"},
+		{Path: "/tmp/this-path-does-not-exist-pre-flight.img", Readonly: false, Serial: "zsbx-work"},
+	}
+	cfg.Net = []ch.NetSpec{{Tap: "test-tap-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}}
+
+	// Stage ONLY the first disk; leave the second deliberately missing
+	// so the pre-flight stat catches it.
+	if err := os.WriteFile(cfg.Disks[0].Path, []byte("x"), 0o600); err != nil {
+		t.Fatalf("pre-stage disk[0]: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(cfg.Disks[0].Path) })
+	// Ensure the second path is truly absent before we run.
+	_ = os.Remove(cfg.Disks[1].Path)
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		return newFakeRunner(cmd)
+	})
+
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("expected pre-flight error for missing disk, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error %q must mention 'does not exist'", err.Error())
+	}
+	if !strings.Contains(err.Error(), cfg.Disks[1].Path) {
+		t.Errorf("error %q must mention the offending path %q", err.Error(), cfg.Disks[1].Path)
+	}
+	// Operator-facing: prefix MUST be the driver tag so the Nomad task
+	// log line is greppable.
+	if !strings.Contains(err.Error(), "ch: StartTask") {
+		t.Errorf("error %q must carry the driver prefix 'ch: StartTask'", err.Error())
+	}
+}
+
+// TestStartTask_DiskPreflight_FailsOnEmptyFile is the related guard for
+// the size>0 check: a disk image present but never written
+// (controller staged the path with `truncate` but mkfs.ext4 failed
+// silently) would have CH read 0 bytes and panic. Surface it here
+// instead.
+func TestStartTask_DiskPreflight_FailsOnEmptyFile(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	prev := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prev) })
+
+	emptyDisk := filepath.Join(t.TempDir(), "empty.img")
+	if err := os.WriteFile(emptyDisk, nil, 0o600); err != nil {
+		t.Fatalf("create empty disk: %v", err)
+	}
+
+	cfg := validColdBootConfig()
+	cfg.Disks = []ch.DiskSpec{
+		{Path: emptyDisk, Readonly: false, Serial: "zsbx-root"},
+	}
+	cfg.Net = []ch.NetSpec{{Tap: "test-tap-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}}
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		return newFakeRunner(cmd)
+	})
+
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("expected pre-flight error for empty disk, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error %q must mention 'empty'", err.Error())
+	}
+}
+
+// TestStartTask_DiskPreflight_PureFn exercises PreflightDiskPaths in
+// isolation — pure-function tests don't need a Plugin scaffolding and
+// run instantly. Pins the failure shape: first offender wins, error
+// names the path + the (driver-tagged) prefix.
+func TestStartTask_DiskPreflight_PureFn(t *testing.T) {
+	good := filepath.Join(t.TempDir(), "good.img")
+	if err := os.WriteFile(good, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write good.img: %v", err)
+	}
+	missing := "/tmp/zsbx-test-missing-on-purpose.img"
+	_ = os.Remove(missing)
+
+	cases := []struct {
+		name     string
+		disks    []ch.DiskSpec
+		wantSub  []string
+		wantErr  bool
+	}{
+		{
+			name:    "all good → no error",
+			disks:   []ch.DiskSpec{{Path: good}},
+			wantErr: false,
+		},
+		{
+			name:    "empty path → error names index",
+			disks:   []ch.DiskSpec{{Path: ""}},
+			wantSub: []string{"empty path", "disk[0]"},
+			wantErr: true,
+		},
+		{
+			name:    "missing file → error names path + 'does not exist'",
+			disks:   []ch.DiskSpec{{Path: good}, {Path: missing}},
+			wantSub: []string{missing, "does not exist", "disk[1]"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ch.PreflightDiskPaths(tc.disks)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if err == nil {
+				return
+			}
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(err.Error(), sub) {
+					t.Errorf("error %q missing %q", err.Error(), sub)
+				}
+			}
+		})
+	}
+}
+
+// TestStartTask_RootfsStaged_FromArtifactDir is the happy-path C-2 test:
+// asserts that StartTask copies $ZSBX_ARTIFACT_DIR/rootfs-slim.img into
+// the run dir's rootfs.img before CH spawn, mirroring the wrapper at
+// nomad-vm-wrapper.sh:300-305. The argv-shape tests already pin the
+// disk[0] path; this test pins the on-disk effect.
+func TestStartTask_RootfsStaged_FromArtifactDir(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	prev := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prev) })
+
+	cfg := validColdBootConfig()
+	cfg.Net = []ch.NetSpec{{Tap: "test-tap-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}}
+
+	var captured *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		captured = newFakeRunner(cmd)
+		return captured
+	}
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("runner factory not invoked")
+	}
+	t.Cleanup(func() { close(captured.waitCh) })
+
+	// Recover the run dir from the --api-socket argv slot.
+	apiSocket := argvAfter(captured.argv, "--api-socket")
+	if apiSocket == "" {
+		t.Fatal("--api-socket missing from argv")
+	}
+	rootfsPath := filepath.Join(filepath.Dir(apiSocket), "rootfs.img")
+	info, err := os.Stat(rootfsPath)
+	if err != nil {
+		t.Fatalf("rootfs.img not staged at %s: %v", rootfsPath, err)
+	}
+	if info.Size() == 0 {
+		t.Errorf("rootfs.img exists but is empty — copy step likely no-op'd")
+	}
+	// The stub content the test helper writes is "stub-rootfs" (11
+	// bytes). If the size differs the copy reached into a wrong
+	// source — pin the exact length.
+	if info.Size() != int64(len("stub-rootfs")) {
+		t.Errorf("rootfs.img size = %d, want %d (content-matched copy from artifact dir)",
+			info.Size(), len("stub-rootfs"))
+	}
+}
+
+// TestStartTask_RootfsStaged_FailsWhenArtifactDirEnvMissing covers the
+// failure path: the controller MUST emit ZSBX_ARTIFACT_DIR on every
+// job (nomad_ch.rs:2339 + l.2495). If it doesn't, StartTask should
+// surface a clear error naming the missing env var.
+func TestStartTask_RootfsStaged_FailsWhenArtifactDirEnvMissing(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	prev := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prev) })
+
+	cfg := validColdBootConfig()
+	cfg.Net = []ch.NetSpec{{Tap: "test-tap-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}}
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		return newFakeRunner(cmd)
+	})
+
+	// Strip the artifact-dir env var the helper installed.
+	delete(taskCfg.Env, ch.ChArtifactDirEnvVar)
+
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("expected error when ZSBX_ARTIFACT_DIR is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), ch.ChArtifactDirEnvVar) {
+		t.Errorf("error %q must name the missing env var %q", err.Error(), ch.ChArtifactDirEnvVar)
+	}
+}
+
+// TestStartTask_RootfsStaged_Idempotent: a second StartTask attempt that
+// finds the per-task rootfs already in place must NOT re-copy. Mirrors
+// the wrapper's `[ ! -f "$DISK" ]` guard at nomad-vm-wrapper.sh:300.
+// Idempotency matters under Nomad-client restart — RecoverTask can
+// resurface a task whose run dir survived the restart.
+func TestStartTask_RootfsStaged_Idempotent(t *testing.T) {
+	// Pure unit on materializeRootfs — happy path is "src exists, dst
+	// exists, dst is left untouched".
+	artifact := t.TempDir()
+	src := filepath.Join(artifact, ch.ChRootfsSourceName)
+	if err := os.WriteFile(src, []byte("fresh"), 0o600); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	dst := filepath.Join(t.TempDir(), "rootfs.img")
+	if err := os.WriteFile(dst, []byte("preexisting"), 0o600); err != nil {
+		t.Fatalf("write dst: %v", err)
+	}
+	if err := ch.MaterializeRootfs(artifact, dst); err != nil {
+		t.Fatalf("MaterializeRootfs idempotent path: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "preexisting" {
+		t.Errorf("dst content = %q, want unchanged 'preexisting' (idempotent)", got)
+	}
+}
+
+// TestStartTask_RootfsStaged_FailsWhenSourceMissing: the artifact dir
+// exists but rootfs-slim.img inside it does not. The driver must
+// surface a clear ENOENT-with-path error before invoking CH.
+func TestStartTask_RootfsStaged_FailsWhenSourceMissing(t *testing.T) {
+	artifact := t.TempDir()
+	// Deliberately do NOT write rootfs-slim.img.
+	dst := filepath.Join(t.TempDir(), "rootfs.img")
+	err := ch.MaterializeRootfs(artifact, dst)
+	if err == nil {
+		t.Fatal("expected error for missing src rootfs, got nil")
+	}
+	if !strings.Contains(err.Error(), ch.ChRootfsSourceName) {
+		t.Errorf("error %q must name the missing file %q", err.Error(), ch.ChRootfsSourceName)
 	}
 }
 
