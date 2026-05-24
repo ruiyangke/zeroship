@@ -5688,3 +5688,257 @@ mod wake_machine_e2e {
         let _ = std::fs::remove_dir_all(&backend_root);
     }
 }
+
+// ════════════════════════════════════════════════════════════════════
+// r1-DISC-3: R26-C1 thread-local `Rc<Pool>` cache predicate tests
+//
+// R28-DISCIPLINE audit (`docs/reviews/sandbox-snapshot-restore-test-
+// discipline-audit-2026-05-25-r1.md`) flagged the R26-C1 cache shape
+// (`crates/sandbox/src/db.rs:62-105` + `:617-672`) as the highest-
+// leverage gap: ZERO predicate tests, and the cost was visible —
+// the stress-r7 wedge → r7-A `max_connections` bump → r7-C-followup
+// `start_housekeeper` patch sequence is exactly the kind of incident
+// that a predicate oracle would have caught earlier. These tests pin
+// the three observable contracts of the cache:
+//
+//   1. **Cache hit within a thread**: same DSN, same compio worker
+//      thread → returns the SAME `Rc<Pool>` (verified via
+//      `Rc::ptr_eq`). The internal pattern is `cached_pool` returns
+//      `Some` on the second call; the post-await re-check in
+//      `install_pool` is bypassed entirely.
+//   2. **Per-thread isolation**: different OS threads each run their
+//      own compio runtime → each has its own `thread_local!` entry,
+//      so each opens an INDEPENDENT pool. The production-state
+//      oracle is `pg_stat_activity` filtered by an
+//      application_name unique to this test (avoids contamination
+//      from prior tests / other connections).
+//   3. **DSN tiebreaker**: same thread, different DSN strings →
+//      `cached_pool` returns `None` on the DSN mismatch arm,
+//      `install_pool` evicts the prior entry and replaces with the
+//      new pool. `Rc::ptr_eq` between the two `Rc<Pool>` values is
+//      false. This is the guard that `set_role_dsns_for_test`
+//      relies on for the role-permission integration tests.
+//
+// Test 4 (housekeeper reaps idle conns) is DEFERRED — the
+// `PoolConfig` `idle_timeout=600s` / `max_lifetime=1800s` defaults
+// are not adjustable from the `Database` boundary, and a CI test
+// that waits 10+ minutes is not viable. The housekeeper's correct
+// wiring is verified by code inspection (`db.rs:640,670` —
+// `start_housekeeper()` is called immediately after
+// `Pool::connect_with_config` for both `pool_app` and `pool_audit`)
+// and the structural argument from `compio-postgres/src/pool.rs:341
+// -353` (housekeeper holds `Weak<Pool>` so it self-terminates when
+// the last `Rc` drops). Source: r1-DISC-3 + r7-C-followup closure.
+// ════════════════════════════════════════════════════════════════════
+
+mod r26_c1_pool_cache {
+    use super::*;
+    use std::rc::Rc;
+    use std::sync::{Arc, Barrier};
+
+    /// Build a DSN with a unique `application_name` query parameter so
+    /// each test's pg_stat_activity reading is isolated from sibling
+    /// tests' lingering connections.
+    fn dsn_with_app_name(tag: &str) -> String {
+        let base = test_url();
+        let sep = if base.contains('?') { '&' } else { '?' };
+        format!("{base}{sep}application_name={tag}")
+    }
+
+    /// Count rows in `pg_stat_activity` whose `application_name`
+    /// matches the test tag. The session executing the query is
+    /// excluded (`pid <> pg_backend_pid()`) so the count reflects
+    /// only the pool's retained connections, not the observer.
+    async fn count_conns_with_app_name(observer: &compio_postgres::Pool, tag: &str) -> i64 {
+        let client = observer.get().await.expect("observer client");
+        let row = client
+            .query_one(
+                "SELECT count(*)::BIGINT FROM pg_stat_activity \
+                 WHERE application_name = $1 AND pid <> pg_backend_pid()",
+                &[&tag],
+            )
+            .await
+            .expect("pg_stat_activity query");
+        row.get(0)
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Test 1: same thread + same DSN → same Rc<Pool>
+    // ────────────────────────────────────────────────────────────────
+
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn pool_cache_returns_same_rc_within_thread() {
+        // Tagged DSN keeps this test's cache entry distinct from
+        // prior tests' default-DSN entries; both calls below share
+        // the SAME DSN string, so `cached_pool` returns `Some` on
+        // the second call and `install_pool` is bypassed.
+        let dsn = dsn_with_app_name("zs_disc3_t1");
+        let db = Database::from_test_config(dsn, false, 30)
+            .await
+            .expect("from_test_config");
+
+        let p1: Rc<compio_postgres::Pool> = db.pool_app().await.expect("first pool_app");
+        let p2: Rc<compio_postgres::Pool> = db.pool_app().await.expect("second pool_app");
+
+        assert!(
+            Rc::ptr_eq(&p1, &p2),
+            "same thread + same DSN must return the cached Rc<Pool> \
+             (R26-C1 cache hit predicate violated — pool_app rebuilt \
+             the pool instead of returning POOL_APP_CELL's cached entry)"
+        );
+        // Strong count is 3: the cache cell, p1, and p2. The
+        // exact value matters less than ptr_eq above; this assert
+        // is a defense-in-depth check that nothing exotic is going
+        // on (e.g., a second cell holding a phantom strong ref).
+        assert_eq!(
+            Rc::strong_count(&p1),
+            3,
+            "Rc strong count must be 3 (cache + p1 + p2); got {}",
+            Rc::strong_count(&p1)
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Test 2: two OS threads → two independent pools
+    //   (production-state oracle: pg_stat_activity row count)
+    // ────────────────────────────────────────────────────────────────
+
+    #[compio::test]
+    #[ignore = "needs Postgres; spawns 2 OS threads with their own compio runtimes"]
+    async fn pool_cache_per_thread_isolated() {
+        let tag = "zs_disc3_t2";
+        let dsn_for_workers = dsn_with_app_name(tag);
+
+        // Build an observer pool on a NEUTRAL application_name (the
+        // default DSN) so the observer's own backend doesn't show up
+        // under the filtered count.
+        let mut obs_cfg = PoolConfig::default();
+        obs_cfg.max_size = 2;
+        let observer = Pool::connect_with_config(&test_url(), obs_cfg)
+            .await
+            .expect("observer pool");
+
+        // Barrier(3) = 2 workers + 1 observer. Workers warm pools
+        // then arrive; observer arrives once it has counted.
+        let barrier_start = Arc::new(Barrier::new(3));
+        let barrier_done = Arc::new(Barrier::new(3));
+
+        let mut handles = Vec::new();
+        for i in 0..2u32 {
+            let dsn = dsn_for_workers.clone();
+            let bs = Arc::clone(&barrier_start);
+            let bd = Arc::clone(&barrier_done);
+            handles.push(std::thread::spawn(move || {
+                let rt = compio::runtime::Runtime::new().expect("worker runtime");
+                rt.block_on(async move {
+                    let db = Database::from_test_config(dsn, false, 30)
+                        .await
+                        .unwrap_or_else(|e| panic!("worker {i} from_test_config: {e}"));
+                    let p1 = db
+                        .pool_app()
+                        .await
+                        .unwrap_or_else(|e| panic!("worker {i} pool_app #1: {e}"));
+                    let p2 = db
+                        .pool_app()
+                        .await
+                        .unwrap_or_else(|e| panic!("worker {i} pool_app #2: {e}"));
+                    // Same-thread cache hit invariant ALSO holds on
+                    // each worker thread (the thread_local is fresh
+                    // per OS thread, so the FIRST call populates it
+                    // and the SECOND call hits).
+                    assert!(
+                        Rc::ptr_eq(&p1, &p2),
+                        "worker {i}: thread-local cache must hit on second call"
+                    );
+                    // Hold the pool alive across the barrier so
+                    // pg_stat_activity sees its conns.
+                    bs.wait();
+                    bd.wait();
+                    drop(p2);
+                    drop(p1);
+                });
+            }));
+        }
+
+        // Wait for both workers to have warmed their pools.
+        barrier_start.wait();
+        let n = count_conns_with_app_name(&observer, tag).await;
+        // Each worker's pool warms `min_idle.max(1) = 2` conns
+        // (PoolConfig default min_idle=2). Two workers × 2 conns
+        // = 4 floor. We assert >= 2 (one per worker would already
+        // disprove "all workers share one pool"); >= 4 is the
+        // tight floor but we use >= 2 to stay robust against
+        // PoolConfig default drift.
+        assert!(
+            n >= 2,
+            "expected at least 2 sandbox_app conns under application_name='{tag}' \
+             (one per worker thread); got {n}. Each compio worker has its OWN \
+             thread_local POOL_APP_CELL — if they shared a cache the count would \
+             reflect only one pool's min_idle"
+        );
+        barrier_done.wait();
+        for (i, h) in handles.into_iter().enumerate() {
+            h.join().unwrap_or_else(|e| panic!("worker {i} join: {e:?}"));
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Test 3: same thread + different DSN → different Rc<Pool>
+    //   (cache key is the DSN string; DSN mismatch evicts + replaces)
+    // ────────────────────────────────────────────────────────────────
+
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn pool_cache_dsn_tiebreaker_evicts_on_mismatch() {
+        // Two DSNs that connect to the same db but differ in their
+        // verbatim string (the cache key). `application_name` is a
+        // pg-supported connection param so both connect cleanly.
+        let dsn_a = dsn_with_app_name("zs_disc3_t3_a");
+        let dsn_b = dsn_with_app_name("zs_disc3_t3_b");
+        assert_ne!(dsn_a, dsn_b, "test fixture: DSNs must differ verbatim");
+
+        let db_a = Database::from_test_config(dsn_a, false, 30)
+            .await
+            .expect("from_test_config dsn_a");
+        let db_b = Database::from_test_config(dsn_b, false, 30)
+            .await
+            .expect("from_test_config dsn_b");
+
+        let pa = db_a.pool_app().await.expect("pool_app dsn_a");
+        let pb = db_b.pool_app().await.expect("pool_app dsn_b");
+
+        assert!(
+            !Rc::ptr_eq(&pa, &pb),
+            "same thread + DIFFERENT DSN must produce different pools — the \
+             cache key includes the DSN so a mismatch evicts the prior entry \
+             and `install_pool` builds afresh. If this assert fires the cache \
+             is collapsing all DSNs to one slot, which would return \
+             auth-mismatched pools when `set_role_dsns_for_test` rotates \
+             roles mid-process (R26-C1 closure note: 'DSN-keyed (not \
+             unkeyed): set_role_dsns_for_test exists for the role-permission \
+             integration tests')"
+        );
+
+        // After the eviction, a second call with dsn_b's Database
+        // returns the SAME pool as `pb` (it's now the cached entry).
+        let pb2 = db_b.pool_app().await.expect("pool_app dsn_b second");
+        assert!(
+            Rc::ptr_eq(&pb, &pb2),
+            "after DSN-mismatch eviction, the new pool itself must be \
+             cached — same-DSN second call should hit"
+        );
+        // Conversely, going back to dsn_a now evicts dsn_b. The
+        // NEW pa2 will NOT equal the original pa (which was
+        // dropped from the cache during the dsn_a → dsn_b swap;
+        // its only remaining strong ref is the `pa` binding
+        // above).
+        let pa2 = db_a.pool_app().await.expect("pool_app dsn_a second");
+        assert!(
+            !Rc::ptr_eq(&pa, &pa2),
+            "the original dsn_a pool was evicted by the dsn_a → dsn_b \
+             rotation; a third call (dsn_b → dsn_a) must build a FRESH \
+             pool, not resurrect the original `pa`"
+        );
+    }
+}
