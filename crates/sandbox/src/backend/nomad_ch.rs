@@ -1914,12 +1914,23 @@ impl Drop for ReleaseCreating {
 /// the next-boot orphan prune) reclaims it indirectly by deleting
 /// the surviving job.
 ///
-/// **Limitation:** if the runtime is already shutting down (process
-/// exit, panic in main), `compio::runtime::spawn` may panic — we
-/// catch that so a tearing-down process doesn't abort, and rely on
-/// `cleanup_orphans_at_startup` (or a periodic prune) on the next
-/// controller boot to mop up. This is the same best-effort contract
-/// the prior "blocking ureq in Drop" had.
+/// **Isolation (R17-A5, C-6 family).** Dispatch goes through
+/// [`crate::detach::detach_isolated`] — a dedicated OS thread with a
+/// private compio runtime — so the cleanup tail (Nomad purge, host_dir
+/// rm -rf, vm_index release) never lands on the shared ntex-worker
+/// compio runtime where subsequent HTTP requests / wake-machine ticks
+/// run. Without this isolation, a stuck 10s `http_delete_unsigned`
+/// against a half-dead Nomad would block sibling tasks on the worker
+/// runtime; the symptom would be identical to the C-3/C-6 fingerprint
+/// the production sites already migrated. Risk here is lower because
+/// the create failed → no live agent racing concurrent work — but the
+/// detach pattern is uniform across the crate now.
+///
+/// `detach_isolated` mints its own runtime; the only failure mode is
+/// OS-thread spawn failure (ENOMEM/EAGAIN), which the helper logs at
+/// `tracing::error!`. There is no "runtime-down" branch to fall back
+/// to — the next-boot orphan prune is the recovery path, same as it
+/// was for the prior `compio::runtime::spawn` panic fallback.
 struct CreateGuard {
     vm_index_allocator: Arc<Mutex<VmIndexAllocator>>,
     nomad_addr: String,
@@ -1984,172 +1995,140 @@ impl Drop for CreateGuard {
         let vm_index_opt = self.vm_index.take();
         let sandbox_id = self.sandbox_id;
 
-        // Captures for the runtime-down (no-spawn) fallback branch
-        // below. The clones inside the spawn closure are separate
-        // from these — the closure may run on another thread and
-        // may run after this `drop` returns.
-        let job_id_for_fallback = job_id.clone();
-        let host_dir_for_fallback = host_dir.clone();
-        let vm_index_allocator_for_fallback = vm_index_allocator.clone();
-
-        // `compio::runtime::spawn` panics if there is no current
-        // runtime (e.g., this Drop fires during process teardown
-        // *after* the runtime has already stopped). Catch that so we
-        // don't turn a teardown into an abort. The work is best-
-        // effort by contract — `cleanup_orphans_at_startup` (or a
-        // periodic prune) covers leaked Nomad jobs on next boot.
-        let spawn_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compio::runtime::spawn(async move {
-                // Local equivalent of the runtime crate's
-                // `panic_util::guard` (which is pub(crate) to
-                // `zeroship-runtime` and not reachable from here
-                // without taking a heavy crate-graph edge). Wraps
-                // the body in `catch_unwind` so a panic inside the
-                // detached task doesn't get swallowed silently.
-                guard_detached("nomad_ch_create_guard_cleanup", async move {
-                    // 1. Nomad purge — gates the vm_index release.
-                    let purge_ok = if job_submitted {
-                        let url =
-                            format!("{nomad_addr}/v1/job/{job_id}?purge=true");
-                        match http_delete_unsigned(&url, Duration::from_secs(10))
-                            .await
-                        {
-                            Ok(r) if r.status == 200 || r.status == 404 => true,
-                            Ok(r) => {
-                                tracing::warn!(
-                                    job = %job_id,
-                                    status = r.status,
-                                    body = %r.body.trim(),
-                                    "sandbox/nomad-ch guard cleanup: purge non-2xx (best-effort; vm_index will be leaked)"
-                                );
-                                false
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    job = %job_id,
-                                    error = %e,
-                                    "sandbox/nomad-ch guard cleanup: purge failed (best-effort; vm_index will be leaked)"
-                                );
-                                false
-                            }
-                        }
-                    } else {
-                        // Job was never submitted, so there's
-                        // nothing on the Nomad side to race; the
-                        // vm_index is safe to release immediately.
-                        true
-                    };
-
-                    // 2. vm_index release — only on confirmed purge.
-                    //    Same policy as the `stop` path (lines
-                    //    644-649 of the file's stable doc-comment).
-                    //
-                    //    FM-B': mirror the `stop()` path's
-                    //    `vm_index: release=<n>` log line so an
-                    //    operator scanning for "where did the index
-                    //    go?" finds the cleanup-tail event. Tagged
-                    //    `reason=create-failure-cleanup` so it's
-                    //    distinguishable from the normal stop()
-                    //    path; previously the detached task did the
-                    //    release silently and a failed create looked
-                    //    like a leak.
-                    if purge_ok {
-                        if let Some(i) = vm_index_opt {
-                            vm_index_allocator
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .release(i);
-                            tracing::info!(
-                                vm_index = i,
-                                reason = "create-failure-cleanup",
-                                sandbox_id = %sandbox_id,
+        // R17-A5: dispatch through `detach_isolated` so the cleanup
+        // tail runs on a dedicated OS thread with its own private
+        // compio runtime — never on the shared ntex-worker runtime
+        // where wake/heartbeat work also runs. Thread name
+        // `create-rollbk` (13 bytes) fits under Linux's 15-byte
+        // `pr_set_name` limit (TASK_COMM_LEN-1). `detach_isolated`
+        // already logs OS-thread spawn failures internally; no
+        // caller-side fallback path is needed (the next-boot orphan
+        // prune is the recovery, same as it was for the prior
+        // `compio::runtime::spawn` panic-catch fallback).
+        crate::detach::detach_isolated("create-rollbk", move || async move {
+            // Local equivalent of the runtime crate's
+            // `panic_util::guard` (which is pub(crate) to
+            // `zeroship-runtime` and not reachable from here
+            // without taking a heavy crate-graph edge). Wraps
+            // the body in `catch_unwind` so a panic inside the
+            // detached task doesn't get swallowed silently.
+            guard_detached("nomad_ch_create_guard_cleanup", async move {
+                // 1. Nomad purge — gates the vm_index release.
+                let purge_ok = if job_submitted {
+                    let url = format!("{nomad_addr}/v1/job/{job_id}?purge=true");
+                    match http_delete_unsigned(&url, Duration::from_secs(10)).await {
+                        Ok(r) if r.status == 200 || r.status == 404 => true,
+                        Ok(r) => {
+                            tracing::warn!(
                                 job = %job_id,
-                                "sandbox/nomad-ch vm_index released"
+                                status = r.status,
+                                body = %r.body.trim(),
+                                "sandbox/nomad-ch guard cleanup: purge non-2xx (best-effort; vm_index will be leaked)"
                             );
+                            false
                         }
-                    } else if let Some(i) = vm_index_opt {
-                        tracing::warn!(
+                        Err(e) => {
+                            tracing::warn!(
+                                job = %job_id,
+                                error = %e,
+                                "sandbox/nomad-ch guard cleanup: purge failed (best-effort; vm_index will be leaked)"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    // Job was never submitted, so there's nothing on
+                    // the Nomad side to race; the vm_index is safe
+                    // to release immediately.
+                    true
+                };
+
+                // 2. vm_index release — only on confirmed purge.
+                //    Same policy as the `stop` path (lines 644-649
+                //    of the file's stable doc-comment).
+                //
+                //    FM-B': mirror the `stop()` path's
+                //    `vm_index: release=<n>` log line so an operator
+                //    scanning for "where did the index go?" finds
+                //    the cleanup-tail event. Tagged
+                //    `reason=create-failure-cleanup` so it's
+                //    distinguishable from the normal stop() path;
+                //    previously the detached task did the release
+                //    silently and a failed create looked like a
+                //    leak.
+                if purge_ok {
+                    if let Some(i) = vm_index_opt {
+                        vm_index_allocator
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .release(i);
+                        tracing::info!(
                             vm_index = i,
-                            reason = "create-failure-cleanup-purge-failed",
+                            reason = "create-failure-cleanup",
                             sandbox_id = %sandbox_id,
                             job = %job_id,
-                            "sandbox/nomad-ch vm_index leak (orphan-prune will reclaim on next boot)"
+                            "sandbox/nomad-ch vm_index released"
                         );
                     }
+                } else if let Some(i) = vm_index_opt {
+                    tracing::warn!(
+                        vm_index = i,
+                        reason = "create-failure-cleanup-purge-failed",
+                        sandbox_id = %sandbox_id,
+                        job = %job_id,
+                        "sandbox/nomad-ch vm_index leak (orphan-prune will reclaim on next boot)"
+                    );
+                }
 
-                    // 3. host_dir rm -rf — wrapped in spawn_blocking
-                    //    because std::fs::remove_dir_all on an
-                    //    active workspace tree (think 100k+
-                    //    node_modules inodes) is uncomfortable on
-                    //    the compio worker; at 50 concurrent
-                    //    CreateGuard drops it would serialize
-                    //    against every other compio task. Skip on
-                    //    purge-failure for the same reason `stop`
-                    //    skips: virtiofsd may still hold the share
-                    //    open, and pulling the dir from under it
-                    //    just produces confusing logs.
-                    if purge_ok && host_dir_created {
-                        let host_dir_clone = host_dir.clone();
-                        let blocking = compio::runtime::spawn_blocking(move || {
-                            if host_dir_clone.exists() {
-                                std::fs::remove_dir_all(&host_dir_clone)
-                                    .map_err(|e| {
-                                        format!(
-                                            "rm -rf {}: {e}",
-                                            host_dir_clone.display()
-                                        )
-                                    })
-                            } else {
-                                Ok(())
-                            }
-                        })
-                        .await;
-                        match blocking {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => tracing::warn!(
-                                error = %e,
-                                "sandbox/nomad-ch guard cleanup (best-effort)"
-                            ),
-                            Err(e) => tracing::error!(
-                                panic = ?e,
-                                "sandbox/nomad-ch guard cleanup: host_dir spawn_blocking panic"
-                            ),
+                // 3. host_dir rm -rf — wrapped in spawn_blocking
+                //    because std::fs::remove_dir_all on an active
+                //    workspace tree (think 100k+ node_modules
+                //    inodes) is uncomfortable on the compio worker;
+                //    at 50 concurrent CreateGuard drops it would
+                //    serialize against every other compio task.
+                //    Skip on purge-failure for the same reason
+                //    `stop` skips: virtiofsd may still hold the
+                //    share open, and pulling the dir from under it
+                //    just produces confusing logs.
+                //
+                //    R17-A5: this `spawn_blocking` now runs on the
+                //    private compio runtime minted by
+                //    `detach_isolated` — it doesn't share the
+                //    ntex-worker blocking pool either, so a slow
+                //    rm -rf of a giant node_modules tree never
+                //    pressures the worker fleet.
+                if purge_ok && host_dir_created {
+                    let host_dir_clone = host_dir.clone();
+                    let blocking = compio::runtime::spawn_blocking(move || {
+                        if host_dir_clone.exists() {
+                            std::fs::remove_dir_all(&host_dir_clone).map_err(|e| {
+                                format!("rm -rf {}: {e}", host_dir_clone.display())
+                            })
+                        } else {
+                            Ok(())
                         }
-                    } else if !purge_ok && host_dir_created {
-                        tracing::warn!(
-                            host_dir = %host_dir.display(),
-                            "sandbox/nomad-ch guard cleanup: leaking host_dir (Nomad purge not confirmed)"
-                        );
+                    })
+                    .await;
+                    match blocking {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::warn!(
+                            error = %e,
+                            "sandbox/nomad-ch guard cleanup (best-effort)"
+                        ),
+                        Err(e) => tracing::error!(
+                            panic = ?e,
+                            "sandbox/nomad-ch guard cleanup: host_dir spawn_blocking panic"
+                        ),
                     }
-                })
-                .await;
+                } else if !purge_ok && host_dir_created {
+                    tracing::warn!(
+                        host_dir = %host_dir.display(),
+                        "sandbox/nomad-ch guard cleanup: leaking host_dir (Nomad purge not confirmed)"
+                    );
+                }
             })
-            .detach();
-        }));
-        if spawn_res.is_err() {
-            // Best-effort sync vm_index reclaim on the runtime-down
-            // path. There's no Nomad call to gate against here —
-            // the runtime is gone, the controller is shutting down,
-            // there can't be a concurrent retry-`create` racing us.
-            if let Some(i) = vm_index_opt {
-                vm_index_allocator_for_fallback
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .release(i);
-                tracing::info!(
-                    vm_index = i,
-                    reason = "create-failure-cleanup-runtime-down",
-                    sandbox_id = %sandbox_id,
-                    job = %job_id_for_fallback,
-                    "sandbox/nomad-ch vm_index released"
-                );
-            }
-            tracing::warn!(
-                job = %job_id_for_fallback,
-                host_dir = %host_dir_for_fallback.display(),
-                "sandbox/nomad-ch guard cleanup: compio::spawn failed (no current runtime?); job and dir left for next-boot orphan prune"
-            );
-        }
+            .await;
+        });
     }
 }
 
@@ -3733,6 +3712,63 @@ mod tests {
             immediate.is_err(),
             "CreateGuard released vm_index BEFORE the Nomad purge \
              completed — that's the exact race C1 is guarding against"
+        );
+    }
+
+    /// R17-A5: post-migration to `detach_isolated`, `CreateGuard::drop`
+    /// dispatches the cleanup tail onto a dedicated OS thread with its
+    /// own private compio runtime — so Drop is callable without any
+    /// ambient compio runtime. Pre-migration, this exact construction
+    /// would have hit the `compio::runtime::spawn` panic-catch fallback
+    /// (no current runtime → panic → `catch_unwind` → sync vm_index
+    /// reclaim). Post-migration, the same cleanup tail runs to
+    /// completion on its private runtime and the vm_index reappears
+    /// in the pool.
+    ///
+    /// This is a `#[test]` (NOT `#[compio::test]`) on purpose — the
+    /// whole point is that no compio runtime is running on the
+    /// thread where Drop fires.
+    #[test]
+    fn create_guard_drop_runs_without_ambient_compio_runtime() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(42, 42)));
+        let allocated = pool.lock().unwrap().alloc().expect("first alloc");
+        assert_eq!(allocated, 42);
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        {
+            let mut g = CreateGuard::new(
+                pool.clone(),
+                "http://127.0.0.1:1".to_string(),
+                "zsbx-test-no-runtime".to_string(),
+                PathBuf::from("/tmp/zsbx-r17a5-test"),
+                Uuid::nil(),
+            );
+            g.vm_index = Some(allocated);
+            g.job_submitted = false; // skip http_delete; purge_ok = true
+            g.host_dir_created = false; // skip rm -rf
+            // Drop fires HERE on a plain std::thread (no compio
+            // runtime). `detach_isolated` mints its own runtime on a
+            // dedicated OS thread.
+        }
+
+        // Poll for the index to reappear (the detached cleanup must
+        // make it back to the pool). Bounded so a regression of
+        // "Drop did nothing" fails the test rather than hanging.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while Instant::now() < deadline {
+            if let Ok(i) = pool.lock().unwrap().alloc() {
+                assert_eq!(i, 42);
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            released,
+            "CreateGuard::drop did not release vm_index when called \
+             outside an ambient compio runtime — R17-A5 regression: \
+             `detach_isolated` should mint its own runtime"
         );
     }
 
