@@ -33,6 +33,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
+
 	"github.com/zeroship/nomad-driver-ch/ch"
 )
 
@@ -2558,4 +2560,348 @@ func TestStartTaskRestoreBranch_RootfsSource_EXDEV_FallsBackToCopy(t *testing.T)
 	if sok && ok && srcStat.Ino == dstCopyStat.Ino {
 		t.Errorf("copy fallback: want distinct inode, got shared src=%d dstCopy=%d", srcStat.Ino, dstCopyStat.Ino)
 	}
+}
+
+// -- T-8b-stress-r9-retry-4 NEXT-LAYER: per-stage restore failure --
+// enrichment + labelled counter tests.
+//
+// Pin contract: every startTaskRestoreBranch failure return must
+//
+//   (a) include `stage=<name>` in the error message (so a controller
+//       truncating the message at the wake_jobs error_message column
+//       still leaves the stage label visible);
+//   (b) include actionable detail (path / id / nested error) before
+//       any stderr tail;
+//   (c) bump the `nomad_driver_ch_start_task_restore_failures_total
+//       {stage=<name>}` counter exactly once.
+//
+// The tests below cover one stage per failure-injection seam,
+// asserting all three pin axes.
+
+// assertStageFailure is a local helper: confirm the error carries
+// `stage=<wantStage>`, contains the wantDetail substring, and that
+// the per-stage counter incremented by 1 relative to the supplied
+// baseline. Single helper keeps the per-stage tests below short.
+func assertStageFailure(t *testing.T, err error, wantStage, wantDetail string, baseline int64) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error for stage=%s, got nil", wantStage)
+	}
+	msg := err.Error()
+	mustContainTest(t, "stage label", msg, "stage="+wantStage)
+	if wantDetail != "" {
+		mustContainTest(t, "detail for stage="+wantStage, msg, wantDetail)
+	}
+	got := ch.StartTaskRestoreFailuresTotal(wantStage)
+	if got != baseline+1 {
+		t.Errorf("counter for stage=%s: got %d, want %d (baseline=%d)", wantStage, got, baseline+1, baseline)
+	}
+}
+
+// TestRestoreFailures_ValidateTaskConfigStage drives the
+// nil-TaskConfig and out-of-range VMIndex failure paths and asserts
+// the stage label + counter increment fire even for the cheapest
+// validation failures (no I/O reached). One sub-test per discrete
+// failure shape so a regression naming one cause but not another
+// surfaces at a granular level.
+func TestRestoreFailures_ValidateTaskConfigStage(t *testing.T) {
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	p := ch.NewPluginForTest(hclogNullForRestore(), nil)
+	t.Run("nil_TaskConfig", func(t *testing.T) {
+		baseline := ch.StartTaskRestoreFailuresTotal(ch.StageValidateTaskConfigForTest)
+		_, _, err := p.StartTaskRestoreBranchForTest(nil, &ch.TaskConfig{VMIndex: 1, RestoreFrom: "/tmp/x"})
+		assertStageFailure(t, err, ch.StageValidateTaskConfigForTest, "nil TaskConfig", baseline)
+	})
+	t.Run("nil_driverConfig", func(t *testing.T) {
+		baseline := ch.StartTaskRestoreFailuresTotal(ch.StageValidateTaskConfigForTest)
+		_, _, err := p.StartTaskRestoreBranchForTest(&driversTaskConfig{ID: "t", Name: "t"}, nil)
+		assertStageFailure(t, err, ch.StageValidateTaskConfigForTest, "nil driverConfig", baseline)
+	})
+	t.Run("empty_RestoreFrom", func(t *testing.T) {
+		baseline := ch.StartTaskRestoreFailuresTotal(ch.StageValidateTaskConfigForTest)
+		_, _, err := p.StartTaskRestoreBranchForTest(&driversTaskConfig{ID: "t", Name: "t"},
+			&ch.TaskConfig{VMIndex: 1})
+		assertStageFailure(t, err, ch.StageValidateTaskConfigForTest, "RestoreFrom is empty", baseline)
+	})
+	t.Run("vm_index_out_of_range", func(t *testing.T) {
+		baseline := ch.StartTaskRestoreFailuresTotal(ch.StageValidateTaskConfigForTest)
+		_, _, err := p.StartTaskRestoreBranchForTest(&driversTaskConfig{ID: "t", Name: "t"},
+			&ch.TaskConfig{VMIndex: 200, RestoreFrom: "/tmp/x"})
+		assertStageFailure(t, err, ch.StageValidateTaskConfigForTest, "out of range", baseline)
+	})
+}
+
+// TestRestoreFailures_ValidateSnapshotStage drives a RestoreFrom that
+// names a non-existent directory; the validateSnapshotDir step fails
+// and must surface as stage=validate_snapshot.
+func TestRestoreFailures_ValidateSnapshotStage(t *testing.T) {
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	p := ch.NewPluginForTest(hclogNullForRestore(), nil)
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	baseline := ch.StartTaskRestoreFailuresTotal(ch.StageValidateSnapshotForTest)
+	_, _, err := p.StartTaskRestoreBranchForTest(
+		&driversTaskConfig{ID: "t", Name: "t"},
+		&ch.TaskConfig{VMIndex: 3, RestoreFrom: missing},
+	)
+	assertStageFailure(t, err, ch.StageValidateSnapshotForTest, missing, baseline)
+}
+
+// TestRestoreFailures_RewriteConfigStage drives the rewriter into a
+// rejection (malformed config.json) and asserts stage=rewrite_config
+// labels the error.
+func TestRestoreFailures_RewriteConfigStage(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	// Stage a snapshot dir whose config.json is non-JSON garbage.
+	staged := stageSnapshotDir(t, []byte("this is not json"))
+
+	cfg := validRestoreConfig(staged)
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+
+	baseline := ch.StartTaskRestoreFailuresTotal(ch.StageRewriteConfigForTest)
+	_, _, err := p.StartTask(taskCfg)
+	assertStageFailure(t, err, ch.StageRewriteConfigForTest, "rewrite config", baseline)
+}
+
+// TestRestoreFailures_RootfsSourceMissingStage drives the
+// RootfsSource-empty case: the helper auto-populates RootfsSource
+// from the staged artifact dir when restore mode is active, so the
+// negative path explicitly sets RootfsSource to a non-empty but
+// missing-on-disk path; the os.Stat check then fires.
+func TestRestoreFailures_RootfsSourceMissingStage(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	cfg := validRestoreConfig(staged)
+	// Force the negative path — set RootfsSource to a path that does
+	// NOT exist on disk so the os.Stat check returns ENOENT. The
+	// helper leaves a non-empty RootfsSource alone.
+	missing := filepath.Join(t.TempDir(), "missing-rootfs.img")
+	cfg.RootfsSource = missing
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+
+	baseline := ch.StartTaskRestoreFailuresTotal(ch.StageRootfsSourceMissingForTest)
+	_, _, err := p.StartTask(taskCfg)
+	assertStageFailure(t, err, ch.StageRootfsSourceMissingForTest, missing, baseline)
+}
+
+// TestRestoreFailures_LivezProbeStage drives the API-socket-readiness
+// probe to fail. The fake CH never binds the socket; the poll seam
+// returns a timeout. Asserts stage=livez_probe label + stderr-tail
+// embedded + counter increment.
+func TestRestoreFailures_LivezProbeStage(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+	taskDir := t.TempDir()
+	runDir := filepath.Join(taskDir, "local")
+	stderrPath := filepath.Join(runDir, ch.ChStderrLogName)
+
+	// Custom poll seam — write a stderr marker then timeout.
+	prevPoll := ch.SetPollAPISocketForTest(func(_ *ch.Client, _ string, _, _ time.Duration) error {
+		f, err := os.OpenFile(stderrPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
+			_, _ = f.WriteString("LIVEZ_MARKER: synthetic CH crash during memory deserialise\n")
+			_ = f.Close()
+		}
+		return errors.New("ch: api socket not responsive (test injection)")
+	})
+	t.Cleanup(func() { ch.SetPollAPISocketForTest(prevPoll) })
+
+	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
+
+	var captured *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		captured = newFakeRunner(cmd)
+		go func(r *fakeRunner) { <-r.waitCh }(captured)
+		return captured
+	}
+	t.Cleanup(func() {
+		if captured != nil {
+			func() {
+				defer func() { recover() }()
+				close(captured.waitCh)
+			}()
+		}
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	baseline := ch.StartTaskRestoreFailuresTotal(ch.StageLivezProbeForTest)
+	_, _, err := p.StartTask(taskCfg)
+	assertStageFailure(t, err, ch.StageLivezProbeForTest, "LIVEZ_MARKER", baseline)
+	// stderr-tail conventions (existing PR2 contract): the embed
+	// token and the path must surface verbatim.
+	msg := err.Error()
+	mustContainTest(t, "livez_probe", msg, "ch_stderr_tail=")
+	mustContainTest(t, "livez_probe", msg, stderrPath)
+}
+
+// TestRestoreFailures_ResumeStage drives ch-remote resume into an
+// error. Asserts stage=resume label + stderr-tail embedded + counter
+// increment. Complements the C-7-LT-11 stderr-capture pin above by
+// also pinning the stage-label + counter increment surface.
+func TestRestoreFailures_ResumeStage(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+	taskDir := t.TempDir()
+	runDir := filepath.Join(taskDir, "local")
+	stderrPath := filepath.Join(runDir, ch.ChStderrLogName)
+
+	// Poll succeeds so we reach the resume step.
+	prevPoll := ch.SetPollAPISocketForTest(func(_ *ch.Client, _ string, _, _ time.Duration) error {
+		return nil
+	})
+	t.Cleanup(func() { ch.SetPollAPISocketForTest(prevPoll) })
+
+	prevResume := ch.SetResumeForTest(func(_ *ch.Client, _ string) error {
+		f, err := os.OpenFile(stderrPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
+			_, _ = f.WriteString("RESUME_MARKER: synthetic CH resume-fail stderr\n")
+			_ = f.Close()
+		}
+		return errors.New("ch-remote resume: HTTP 500: VM is not running")
+	})
+	t.Cleanup(func() { ch.SetResumeForTest(prevResume) })
+
+	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
+
+	var captured *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		captured = newFakeRunner(cmd)
+		go func(r *fakeRunner) { <-r.waitCh }(captured)
+		return captured
+	}
+	t.Cleanup(func() {
+		if captured != nil {
+			func() {
+				defer func() { recover() }()
+				close(captured.waitCh)
+			}()
+		}
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	baseline := ch.StartTaskRestoreFailuresTotal(ch.StageResumeForTest)
+	_, _, err := p.StartTask(taskCfg)
+	assertStageFailure(t, err, ch.StageResumeForTest, "VM is not running", baseline)
+	msg := err.Error()
+	mustContainTest(t, "resume", msg, "RESUME_MARKER")
+	mustContainTest(t, "resume", msg, "ch_stderr_tail=")
+	mustContainTest(t, "resume", msg, stderrPath)
+}
+
+// TestRestoreFailures_CounterSnapshotShape exercises the
+// StartTaskRestoreFailuresSnapshot accessor: drive failures across two
+// distinct stages, assert the snapshot map carries one entry per
+// observed stage with the expected count, and that an un-observed
+// stage returns 0 from the singular accessor.
+func TestRestoreFailures_CounterSnapshotShape(t *testing.T) {
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	// Drive 2 validate_taskconfig failures and 1 validate_snapshot.
+	p := ch.NewPluginForTest(hclogNullForRestore(), nil)
+	_, _, _ = p.StartTaskRestoreBranchForTest(nil, nil)
+	_, _, _ = p.StartTaskRestoreBranchForTest(nil, &ch.TaskConfig{VMIndex: 1, RestoreFrom: "/tmp/x"})
+
+	missing := filepath.Join(t.TempDir(), "nope")
+	_, _, _ = p.StartTaskRestoreBranchForTest(
+		&driversTaskConfig{ID: "t", Name: "t"},
+		&ch.TaskConfig{VMIndex: 3, RestoreFrom: missing},
+	)
+
+	snap := ch.StartTaskRestoreFailuresSnapshot()
+	if snap[ch.StageValidateTaskConfigForTest] != 2 {
+		t.Errorf("snapshot[validate_taskconfig] = %d, want 2", snap[ch.StageValidateTaskConfigForTest])
+	}
+	if snap[ch.StageValidateSnapshotForTest] != 1 {
+		t.Errorf("snapshot[validate_snapshot] = %d, want 1", snap[ch.StageValidateSnapshotForTest])
+	}
+	// Un-observed stages: not in the snapshot AND accessor returns 0.
+	if _, ok := snap[ch.StageResumeForTest]; ok {
+		t.Errorf("snapshot should not carry un-observed stage=resume, got entry")
+	}
+	if v := ch.StartTaskRestoreFailuresTotal(ch.StageResumeForTest); v != 0 {
+		t.Errorf("un-observed stage=resume accessor: got %d, want 0", v)
+	}
+}
+
+// TestRestoreFailures_PromExporterRendersStages confirms the
+// Prometheus textfile renderer carries the labelled counter family
+// with one sample per observed stage. Pins the wire-level contract:
+// metric name, label name, and sorted-by-stage ordering.
+func TestRestoreFailures_PromExporterRendersStages(t *testing.T) {
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	// Inject two stages with distinct counts so the renderer is
+	// exercised non-trivially.
+	p := ch.NewPluginForTest(hclogNullForRestore(), nil)
+	_, _, _ = p.StartTaskRestoreBranchForTest(nil, nil)               // validate_taskconfig=1
+	_, _, _ = p.StartTaskRestoreBranchForTest(nil, nil)               // validate_taskconfig=2
+	missing := filepath.Join(t.TempDir(), "nope")
+	_, _, _ = p.StartTaskRestoreBranchForTest(
+		&driversTaskConfig{ID: "t", Name: "t"},
+		&ch.TaskConfig{VMIndex: 3, RestoreFrom: missing},
+	) // validate_snapshot=1
+
+	out := ch.RenderDriverMetricsPromForTest()
+	mustContainTest(t, "prom render", out,
+		"# TYPE nomad_driver_ch_start_task_restore_failures_total counter")
+	mustContainTest(t, "prom render", out,
+		`nomad_driver_ch_start_task_restore_failures_total{stage="validate_snapshot"} 1`)
+	mustContainTest(t, "prom render", out,
+		`nomad_driver_ch_start_task_restore_failures_total{stage="validate_taskconfig"} 2`)
+	// Sort order: validate_snapshot must precede validate_taskconfig
+	// alphabetically. The renderer sorts stages so a textfile diff is
+	// stable across exporter ticks.
+	idxSnap := strings.Index(out, `stage="validate_snapshot"`)
+	idxCfg := strings.Index(out, `stage="validate_taskconfig"`)
+	if idxSnap < 0 || idxCfg < 0 || idxSnap >= idxCfg {
+		t.Errorf("expected validate_snapshot before validate_taskconfig in sorted render; idxSnap=%d idxCfg=%d", idxSnap, idxCfg)
+	}
+}
+
+// hclogNullForRestore is a small helper so the few tests that
+// construct a plugin without a runner factory (the validate-stage
+// tests, which never reach spawn) don't have to re-import
+// hclog at every call site.
+func hclogNullForRestore() hclog.Logger {
+	return hclog.NewNullLogger()
 }
