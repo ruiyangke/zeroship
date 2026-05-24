@@ -21,6 +21,23 @@
 // — non-string values are passed through verbatim, so a hand-edited
 // config.json that put e.g. a number where CH expects a path cannot
 // be silently mis-substituted.
+//
+// C-7-LT-4 (2026-05-23): the bash wrapper's R15-S2 allow-list is
+// ported here. After rewriting, every path-bearing field MUST resolve
+// to a path under `taskDir` (the alloc's NOMAD_TASK_DIR). A snapshot
+// whose `disks[].path` is something the rewriter could not anchor
+// (e.g. an attacker-supplied `/etc/shadow`, or a path containing `..`
+// components, or a relative path) is REJECTED with a clear error
+// rather than silently passing through to CH. Mirrors
+// `assert_under_task_dir` in nomad-vm-wrapper.sh:537-583.
+//
+// This was the C-7-LT-4 wedge: smoke-r15 caught CH's `--restore`
+// aborting at +3ms with `CreateConsoleDevice(ENOENT)` because the
+// driver bypasses the bash wrapper and was not enforcing the path
+// rewrite at all. Pre-C-7-LT-4 the rewriter was permissive on
+// "unmatched" paths (passed them through verbatim); post-C-7-LT-4 an
+// unmatched path is a hard failure with a precise error pointing at
+// both the offending field and the expected prefix.
 
 package ch
 
@@ -28,7 +45,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // allocPrefixRe matches the anchored Nomad per-task local-dir layout
@@ -59,6 +78,69 @@ func rewriteSnapshotPath(value, taskDir string) string {
 	}
 	remainder := value[loc[1]:]
 	return taskDir + sep + remainder
+}
+
+// rewriteAndAssertUnderTaskDir is the rewrite-plus-allow-list pipeline
+// for a single path-bearing field. It mirrors the bash wrapper's
+// `rewrite(value)` followed by `assert_under_task_dir(field, value)`
+// pair at nomad-vm-wrapper.sh:493-583.
+//
+// Algorithm:
+//  1. If the input is the empty string, reject (an empty path is
+//     never a thing CH should open; this defends against a hand-edited
+//     config.json that wiped a path field).
+//  2. Apply the alloc-prefix rewrite (rewriteSnapshotPath above). On a
+//     match, the rewritten value is `taskDir + sep + remainder` and is
+//     guaranteed to live under taskDir by construction.
+//  3. R15-S2 allow-list — independently of (2), the post-rewrite path
+//     MUST:
+//     a. be absolute (start with `/`),
+//     b. contain no `..` components,
+//     c. live under `taskDir` (i.e. equal taskDir or have `taskDir/`
+//        as its filepath.Clean'd prefix).
+//
+// We deliberately do NOT call os.Stat / filepath.EvalSymlinks here:
+// the bash wrapper uses os.path.realpath which evaluates symlinks
+// against the live filesystem, but Go's filesystem state at rewrite
+// time may differ from CH's at open time (e.g. taskDir not yet
+// populated). A symlink-followed check belongs to the operator's
+// alloc-dir hygiene policy; the rewriter's job is to reject obvious
+// out-of-tree paths and traversal attempts before they reach CH. If
+// future hardening demands the realpath check, add it as a separate
+// layer with an explicit os.Stat seam tests can swap.
+//
+// Returns the rewritten value on success, or an error naming the
+// field, the offending value, and the expected prefix.
+func rewriteAndAssertUnderTaskDir(fieldName, value, taskDir string) (string, error) {
+	if value == "" {
+		return "", fmt.Errorf("ch: rewriteConfigJSON: %s is empty; expected absolute path under %s", fieldName, taskDir)
+	}
+	rewritten := rewriteSnapshotPath(value, taskDir)
+
+	if !strings.HasPrefix(rewritten, "/") {
+		return "", fmt.Errorf("ch: rewriteConfigJSON: %s = %q is not absolute (expected a path under %s)", fieldName, value, taskDir)
+	}
+	// Path-component traversal defence: reject `..` as any component
+	// of the post-rewrite value. The controller's rewriter never emits
+	// one and CH never needs them; their presence is the red flag the
+	// bash wrapper rejects too. Mirrors the explicit component scan
+	// in assert_under_task_dir at nomad-vm-wrapper.sh:559-567.
+	for _, part := range strings.Split(rewritten, "/") {
+		if part == ".." {
+			return "", fmt.Errorf("ch: rewriteConfigJSON: %s = %q contains a `..` component (path-traversal defence; expected a path under %s)", fieldName, value, taskDir)
+		}
+	}
+	// Containment check. filepath.Clean collapses `.` segments and
+	// repeated separators so a value like `<taskDir>/./x` and
+	// `<taskDir>//x` both normalise to `<taskDir>/x`. We compare the
+	// cleaned form so the prefix check is robust against benign-but-
+	// surprising input shapes.
+	cleaned := filepath.Clean(rewritten)
+	cleanedTaskDir := filepath.Clean(taskDir)
+	if cleaned != cleanedTaskDir && !strings.HasPrefix(cleaned, cleanedTaskDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("ch: rewriteConfigJSON: %s = %q resolves to %q, NOT under expected prefix %q (task_dir); possible malicious snapshot or misrouted restore", fieldName, value, cleaned, cleanedTaskDir)
+	}
+	return rewritten, nil
 }
 
 // rewriteConfigJSON path-rewrites the snapshot's config.json so disk
@@ -124,7 +206,11 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 			}
 			if pv, ok := dm["path"]; ok {
 				if ps, ok := pv.(string); ok {
-					dm["path"] = rewriteSnapshotPath(ps, taskDir)
+					rew, err := rewriteAndAssertUnderTaskDir(fmt.Sprintf("disks[%d].path", i), ps, taskDir)
+					if err != nil {
+						return nil, err
+					}
+					dm["path"] = rew
 				}
 			}
 			disks[i] = dm
@@ -137,7 +223,11 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 		if sm, ok := rawSerial.(map[string]any); ok {
 			if fv, ok := sm["file"]; ok {
 				if fs, ok := fv.(string); ok {
-					sm["file"] = rewriteSnapshotPath(fs, taskDir)
+					rew, err := rewriteAndAssertUnderTaskDir("serial.file", fs, taskDir)
+					if err != nil {
+						return nil, err
+					}
+					sm["file"] = rew
 				}
 			}
 			doc["serial"] = sm
@@ -149,7 +239,11 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 		if cm, ok := rawConsole.(map[string]any); ok {
 			if fv, ok := cm["file"]; ok {
 				if fs, ok := fv.(string); ok {
-					cm["file"] = rewriteSnapshotPath(fs, taskDir)
+					rew, err := rewriteAndAssertUnderTaskDir("console.file", fs, taskDir)
+					if err != nil {
+						return nil, err
+					}
+					cm["file"] = rew
 				}
 			}
 			doc["console"] = cm
@@ -181,7 +275,9 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 
 	// fs[].socket — legacy virtio-fs sockets. Rewritten for diagnostic
 	// clarity; restore will still fail at CH level when virtiofsd
-	// isn't backing the socket.
+	// isn't backing the socket. The allow-list applies here too: a
+	// snapshot whose fs[i].socket points outside the alloc dir is a
+	// security red flag regardless of the legacy status.
 	if rawFs, ok := doc["fs"]; ok && rawFs != nil {
 		if fsEntries, ok := rawFs.([]any); ok {
 			for i, e := range fsEntries {
@@ -191,7 +287,11 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 				}
 				if sv, ok := em["socket"]; ok {
 					if ss, ok := sv.(string); ok {
-						em["socket"] = rewriteSnapshotPath(ss, taskDir)
+						rew, err := rewriteAndAssertUnderTaskDir(fmt.Sprintf("fs[%d].socket", i), ss, taskDir)
+						if err != nil {
+							return nil, err
+						}
+						em["socket"] = rew
 					}
 				}
 				fsEntries[i] = em

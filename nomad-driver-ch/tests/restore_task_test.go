@@ -282,6 +282,396 @@ func TestRewriteConfigJSON_RejectsMalformedInput(t *testing.T) {
 	}
 }
 
+// -- C-7-LT-4 R15-S2 allow-list tests --------------------------------
+//
+// Mirrors the bash wrapper's assert_under_task_dir guard at
+// nomad-vm-wrapper.sh:537-583. Each test exercises ONE security
+// invariant; failures must surface a clear operator-facing error that
+// names both the offending field and the expected prefix.
+
+// TestRewriteRestoreConfigPaths_AllPathFieldsRewritten is the happy-
+// path witness: a snapshot whose disks[].path / serial.file /
+// console.file / fs[].socket all sit under the source-alloc prefix
+// rewrites cleanly, and EVERY post-rewrite value lives under the new
+// task dir. Pins the wrapper-parity contract: any path-bearing field
+// the bash wrapper rewrites, the Go port must also rewrite.
+func TestRewriteRestoreConfigPaths_AllPathFieldsRewritten(t *testing.T) {
+	src := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	doc := map[string]any{
+		"disks": []any{
+			map[string]any{"path": src + "/rootfs.img"},
+			map[string]any{"path": src + "/workspace.img"},
+		},
+		"serial":  map[string]any{"file": src + "/serial.log"},
+		"console": map[string]any{"file": src + "/console.log"},
+		"fs": []any{
+			map[string]any{"socket": src + "/vfs.sock"},
+		},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 7, 99)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	disks := got["disks"].([]any)
+	wantDisk0 := newTaskDir + "/rootfs.img"
+	if d0 := disks[0].(map[string]any); d0["path"] != wantDisk0 {
+		t.Errorf("disks[0].path = %v, want %v", d0["path"], wantDisk0)
+	}
+	wantDisk1 := newTaskDir + "/workspace.img"
+	if d1 := disks[1].(map[string]any); d1["path"] != wantDisk1 {
+		t.Errorf("disks[1].path = %v, want %v", d1["path"], wantDisk1)
+	}
+	wantSerial := newTaskDir + "/serial.log"
+	if s := got["serial"].(map[string]any); s["file"] != wantSerial {
+		t.Errorf("serial.file = %v, want %v", s["file"], wantSerial)
+	}
+	wantConsole := newTaskDir + "/console.log"
+	if c := got["console"].(map[string]any); c["file"] != wantConsole {
+		t.Errorf("console.file = %v, want %v", c["file"], wantConsole)
+	}
+	fs := got["fs"].([]any)
+	wantSock := newTaskDir + "/vfs.sock"
+	if f0 := fs[0].(map[string]any); f0["socket"] != wantSock {
+		t.Errorf("fs[0].socket = %v, want %v", f0["socket"], wantSock)
+	}
+}
+
+// TestRewriteRestoreConfigPaths_PreservesNonPathFields is the
+// witness for the "rewrite touches only known path fields" contract:
+// memory, cpus, payload (kernel + cmdline), and any operator-supplied
+// metadata round-trip byte-equal under the JSON map.
+func TestRewriteRestoreConfigPaths_PreservesNonPathFields(t *testing.T) {
+	src := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	doc := map[string]any{
+		"cpus":   map[string]any{"boot_vcpus": float64(2), "max_vcpus": float64(4)},
+		"memory": map[string]any{"size": float64(536870912), "shared": true},
+		"payload": map[string]any{
+			"kernel":  "/opt/zsbx/vmlinuz",
+			"cmdline": "console=ttyS0 root=/dev/vda ro",
+		},
+		"disks": []any{
+			map[string]any{"path": src + "/rootfs.img"},
+		},
+		"sandbox_metadata": map[string]any{
+			"taken_at":   "2026-05-23T12:00:00Z",
+			"created_by": "controller-v6",
+		},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	cpus := got["cpus"].(map[string]any)
+	if cpus["boot_vcpus"].(float64) != 2 || cpus["max_vcpus"].(float64) != 4 {
+		t.Errorf("cpus clobbered: %v", cpus)
+	}
+	mem := got["memory"].(map[string]any)
+	if mem["size"].(float64) != 536870912 || mem["shared"].(bool) != true {
+		t.Errorf("memory clobbered: %v", mem)
+	}
+	payload := got["payload"].(map[string]any)
+	if payload["kernel"] != "/opt/zsbx/vmlinuz" {
+		t.Errorf("payload.kernel clobbered: %v", payload["kernel"])
+	}
+	if payload["cmdline"] != "console=ttyS0 root=/dev/vda ro" {
+		t.Errorf("payload.cmdline clobbered: %v", payload["cmdline"])
+	}
+	meta := got["sandbox_metadata"].(map[string]any)
+	if meta["taken_at"] != "2026-05-23T12:00:00Z" || meta["created_by"] != "controller-v6" {
+		t.Errorf("sandbox_metadata clobbered: %v", meta)
+	}
+}
+
+// TestRewriteRestoreConfigPaths_RejectsPathOutsideAllocPrefix is the
+// R15-S2 security pin: a snapshot whose disks[].path points at
+// `/etc/shadow` (or any other path that doesn't match the alloc
+// prefix) is REJECTED. Pre-C-7-LT-4 the rewriter silently passed
+// such values through; CH would then have opened them verbatim.
+func TestRewriteRestoreConfigPaths_RejectsPathOutsideAllocPrefix(t *testing.T) {
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+
+	cases := []struct {
+		name       string
+		field      string
+		buildDoc   func() map[string]any
+		wantField  string
+		wantOffend string
+	}{
+		{
+			name:  "disks[0].path /etc/shadow",
+			field: "disks[0].path",
+			buildDoc: func() map[string]any {
+				return map[string]any{
+					"disks": []any{map[string]any{"path": "/etc/shadow"}},
+				}
+			},
+			wantField:  "disks[0].path",
+			wantOffend: "/etc/shadow",
+		},
+		{
+			name:  "serial.file /etc/passwd",
+			field: "serial.file",
+			buildDoc: func() map[string]any {
+				return map[string]any{
+					"serial": map[string]any{"file": "/etc/passwd"},
+				}
+			},
+			wantField:  "serial.file",
+			wantOffend: "/etc/passwd",
+		},
+		{
+			name:  "console.file outside alloc",
+			field: "console.file",
+			buildDoc: func() map[string]any {
+				return map[string]any{
+					"console": map[string]any{"file": "/var/log/wtmp"},
+				}
+			},
+			wantField:  "console.file",
+			wantOffend: "/var/log/wtmp",
+		},
+		{
+			name:  "fs[0].socket outside alloc",
+			field: "fs[0].socket",
+			buildDoc: func() map[string]any {
+				return map[string]any{
+					"fs": []any{map[string]any{"socket": "/run/attacker.sock"}},
+				}
+			},
+			wantField:  "fs[0].socket",
+			wantOffend: "/run/attacker.sock",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in, err := json.Marshal(tc.buildDoc())
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+			if err == nil {
+				t.Fatalf("expected RewriteConfigJSON to reject %s, got nil error", tc.name)
+			}
+			msg := err.Error()
+			mustContainTest(t, "reject message", msg, tc.wantField)
+			mustContainTest(t, "reject message", msg, tc.wantOffend)
+			mustContainTest(t, "reject message", msg, newTaskDir)
+		})
+	}
+}
+
+// TestRewriteRestoreConfigPaths_RejectsParentTraversal is the
+// path-traversal defence: any path containing a `..` component (even
+// one anchored under the alloc prefix) is rejected before the
+// containment check runs.
+func TestRewriteRestoreConfigPaths_RejectsParentTraversal(t *testing.T) {
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	src := "/opt/nomad/data/alloc/AAAA-source/task/local"
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		// `..` from inside the source alloc that would escape the
+		// rewritten taskDir. The wrapper rejects these BEFORE realpath
+		// because the explicit component scan is faster and louder.
+		{"escapes via .. after alloc prefix", src + "/../../../etc/shadow"},
+		// Raw `..` even when the rest is benign-looking.
+		{"intra-alloc ..", src + "/../sibling-alloc/local/rootfs.img"},
+		// Relative path with `..` (not absolute, rejected at the
+		// absolute-path guard, but documented here for completeness).
+		{"relative with ..", "../escape"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := map[string]any{
+				"disks": []any{map[string]any{"path": tc.path}},
+			}
+			in, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+			if err == nil {
+				t.Fatalf("expected RewriteConfigJSON to reject path %q, got nil", tc.path)
+			}
+			msg := err.Error()
+			mustContainTest(t, "traversal-reject message", msg, "disks[0].path")
+		})
+	}
+}
+
+// TestRewriteRestoreConfigPaths_HandlesMissingOptionalFields confirms
+// that snapshots without one or more of the optional path-bearing
+// fields (no serial, no console, no fs) do NOT error — the rewriter
+// must touch only what's present and pass everything else through.
+func TestRewriteRestoreConfigPaths_HandlesMissingOptionalFields(t *testing.T) {
+	src := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	// Only disks present; no serial, no console, no fs.
+	doc := map[string]any{
+		"disks": []any{map[string]any{"path": src + "/rootfs.img"}},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON (missing-optional-fields): %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	disks := got["disks"].([]any)
+	d0 := disks[0].(map[string]any)
+	if d0["path"] != newTaskDir+"/rootfs.img" {
+		t.Errorf("disks[0].path = %v, want rewrite", d0["path"])
+	}
+	// serial / console / fs must remain absent.
+	if _, ok := got["serial"]; ok {
+		t.Errorf("serial unexpectedly present in output: %v", got["serial"])
+	}
+	if _, ok := got["console"]; ok {
+		t.Errorf("console unexpectedly present in output: %v", got["console"])
+	}
+	if _, ok := got["fs"]; ok {
+		t.Errorf("fs unexpectedly present in output: %v", got["fs"])
+	}
+}
+
+// TestStartTaskRestore_RewritesConfigBeforeCHSpawn is the integration
+// witness for C-7-LT-4: the rewritten config.json on disk after
+// StartTask returns MUST point at the NEW alloc's task_dir and MUST
+// NOT contain the source-alloc path. This is the call-site pin —
+// confirms restore_task.go invokes the rewriter BEFORE handing the
+// config off to CH.
+func TestStartTaskRestore_RewritesConfigBeforeCHSpawn(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+
+	// runDir is taskDir/local — same convention as the existing
+	// TestStartTaskRestore_FullSequencePinning above.
+	runDir := filepath.Join(taskDir, "local")
+	rewritten, err := os.ReadFile(filepath.Join(runDir, "config.json"))
+	if err != nil {
+		t.Fatalf("rewritten config.json missing under runDir %s: %v", runDir, err)
+	}
+	rewrittenStr := string(rewritten)
+	// Pin 1: source-alloc path must NOT appear in the rewritten doc.
+	if strings.Contains(rewrittenStr, srcAlloc) {
+		t.Errorf("rewritten config still references source alloc %q", srcAlloc)
+	}
+	// Pin 2: rewritten disk paths land under runDir. The fixture
+	// declares two disks (rootfs.img, workspace.img) — both must
+	// resolve to runDir-prefixed paths.
+	var doc map[string]any
+	if err := json.Unmarshal(rewritten, &doc); err != nil {
+		t.Fatalf("rewritten config.json not valid JSON: %v", err)
+	}
+	disks, ok := doc["disks"].([]any)
+	if !ok || len(disks) == 0 {
+		t.Fatalf("disks missing from rewritten config: %v", doc)
+	}
+	for i, d := range disks {
+		dm := d.(map[string]any)
+		p, _ := dm["path"].(string)
+		if !strings.HasPrefix(p, runDir) {
+			t.Errorf("disks[%d].path = %q does not have runDir prefix %q", i, p, runDir)
+		}
+	}
+}
+
+// TestStartTaskRestore_RejectsMaliciousSnapshotBeforeCHSpawn is the
+// integration witness for the R15-S2 reject path at the call site:
+// a snapshot config.json whose disks[].path is `/etc/shadow` (or any
+// out-of-alloc path) must abort StartTask BEFORE CH spawns. The
+// witness: the runner factory is NEVER invoked (no spawn(--restore)
+// recorded) and the returned error names both the offending field
+// and the malicious value.
+func TestStartTaskRestore_RejectsMaliciousSnapshotBeforeCHSpawn(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	// Build a malicious snapshot dir: config.json carries an absolute
+	// path outside the alloc-prefix.
+	maliciousDoc := map[string]any{
+		"cpus":   map[string]any{"boot_vcpus": 2, "max_vcpus": 2},
+		"memory": map[string]any{"size": 268435456},
+		"disks": []any{
+			map[string]any{"path": "/etc/shadow"},
+		},
+	}
+	cfgBytes, err := json.Marshal(maliciousDoc)
+	if err != nil {
+		t.Fatalf("marshal malicious doc: %v", err)
+	}
+	staged := stageSnapshotDir(t, cfgBytes)
+
+	rec := &restoreSequenceRecorder{}
+	capturedPtr, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+
+	_, _, err = p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("expected StartTask to reject malicious snapshot, got nil error")
+	}
+	msg := err.Error()
+	mustContainTest(t, "malicious-snapshot reject", msg, "disks[0].path")
+	mustContainTest(t, "malicious-snapshot reject", msg, "/etc/shadow")
+
+	// Runner factory must NOT have been invoked — abort happens before
+	// CH spawns.
+	if captured := *capturedPtr; captured != nil {
+		t.Errorf("runner factory invoked despite reject: captured.argv=%v", captured.argv)
+	}
+	// And no spawn(--restore) step recorded.
+	for _, step := range rec.snapshot() {
+		if step == "spawn(--restore)" {
+			t.Errorf("spawn(--restore) fired despite reject; steps=%v", rec.snapshot())
+		}
+	}
+}
+
 // -- restoreSequenceRecorder -----------------------------------------
 
 // restoreSequenceRecorder captures the ordered list of wake-path
