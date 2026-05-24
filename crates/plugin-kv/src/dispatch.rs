@@ -57,7 +57,8 @@ fn runtime_state(scope: &mut v8::PinScope<'_, '_>) -> SharedState {
 /// `f64`, else as a `BigInt`.
 #[allow(clippy::cast_precision_loss)]
 fn incr_resolve(n: i64) -> ResolveValue {
-    if n.abs() <= MAX_SAFE_INTEGER {
+    // `unsigned_abs` (not `abs`) so `i64::MIN` can't overflow-panic.
+    if n.unsigned_abs() <= MAX_SAFE_INTEGER as u64 {
         ResolveValue::F64(n as f64)
     } else {
         ResolveValue::BigInt(n)
