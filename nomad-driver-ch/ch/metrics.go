@@ -31,6 +31,14 @@
 //     next alloc's CH `--restore` then hits `DiskLockError →
 //     AlreadyLocked`. Operators rate-graph this; a healthy fleet trends
 //     to zero. See T-8b-stress-r5 r5-A.
+//   - `nomad_driver_ch_start_task_stage_total` /
+//     `nomad_driver_ch_start_task_stage_failures_total` — bumped on
+//     every cold-boot StartTask where TaskConfig.StageDiskImages=true
+//     (Option C Phase 2 driver-side staging). The pair lets operators
+//     observe the staging surface engaging (total > 0 confirms the
+//     controller emitted the flag) and the failure ratio (failures /
+//     total). Healthy fleet: total bumps once per cold-boot, failures
+//     trends to zero. See the 2026-05-25 staging-locality ADR.
 
 package ch
 
@@ -123,4 +131,69 @@ func DestroyTaskLockHeldTotal() int64 {
 // its own baseline without depending on sibling-test ordering.
 func ResetDestroyTaskLockHeldForTest() {
 	destroyTaskLockHeldTotal.Store(0)
+}
+
+// startTaskStageTotal is the process-global counter behind
+// `nomad_driver_ch_start_task_stage_total`. Bumped on every cold-boot
+// StartTask that runs the driver-side staging op (TaskConfig.StageDiskImages
+// = true). Counts BOTH success and failure invocations — paired with
+// `nomad_driver_ch_start_task_stage_failures_total` an operator can
+// compute the failure ratio without subtracting two counters with
+// different sample windows.
+//
+// Operators rate-graph this against alloc count to confirm the driver-
+// side staging surface is engaged: under Option C Phase 4 (when the
+// controller flips its `driver_stages_disk_images` flag to true) every
+// cold-boot alloc should bump this exactly once.
+var startTaskStageTotal atomic.Int64
+
+// incStartTaskStage bumps `nomad_driver_ch_start_task_stage_total` by
+// one. Goroutine-safe; the atomic Int64 carries its own ordering.
+func incStartTaskStage() {
+	startTaskStageTotal.Add(1)
+}
+
+// StartTaskStageTotal returns the current counter value. Exported for
+// tests (asserts the staging branch fires); a future `/metrics`
+// exporter would also use this read path.
+func StartTaskStageTotal() int64 {
+	return startTaskStageTotal.Load()
+}
+
+// ResetStartTaskStageForTest zeroes the counter so a test can pin its
+// own baseline without depending on sibling-test ordering.
+func ResetStartTaskStageForTest() {
+	startTaskStageTotal.Store(0)
+}
+
+// startTaskStageFailuresTotal is the process-global counter behind
+// `nomad_driver_ch_start_task_stage_failures_total`. Bumped when the
+// driver-side staging op (cold-boot, StageDiskImages=true) returns a
+// non-nil error. Paired with `start_task_stage_total` to compute the
+// failure ratio.
+//
+// A spike here means truncate(1) or mkfs.ext4(8) is failing on the
+// worker — typical causes: disk-full (ENOSPC), missing binaries, or a
+// quota cap. Triage hint: tail the next NOMAD task log for the typed
+// staging error (the wrapper-equivalent error mentions the offending
+// disk path).
+var startTaskStageFailuresTotal atomic.Int64
+
+// incStartTaskStageFailures bumps
+// `nomad_driver_ch_start_task_stage_failures_total` by one.
+// Goroutine-safe; the atomic Int64 carries its own ordering.
+func incStartTaskStageFailures() {
+	startTaskStageFailuresTotal.Add(1)
+}
+
+// StartTaskStageFailuresTotal returns the current counter value. Exported
+// for tests; a future `/metrics` exporter would also use this read path.
+func StartTaskStageFailuresTotal() int64 {
+	return startTaskStageFailuresTotal.Load()
+}
+
+// ResetStartTaskStageFailuresForTest zeroes the counter so a test can
+// pin its own baseline without depending on sibling-test ordering.
+func ResetStartTaskStageFailuresForTest() {
+	startTaskStageFailuresTotal.Store(0)
 }
