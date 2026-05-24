@@ -1241,3 +1241,73 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R10-API6] CLOSED at `8ed9aa90` — db.rs:2917 comment clarified: refers to host_id (genuinely hyphenated, distinct from sandbox_id which uses .simple()).
 - [R13-Q1 / R13-C1] CLOSED at `c5b9cb9d` — TASK_DRIVER_ENV_LOCK unified across nomad_ch + restore_handler. Reduced 3 ENV_LOCK statics to 2; db.rs::ENV_LOCK still separate (R12-S1 carry).
 - [R12-API2] CLOSED at `8ed9aa90` — same db.rs:2917 stale comment fix.
+
+---
+
+## NEW r13/r14 ROUND FINDINGS (added by pilot cycle 2026-05-25 r11 — architecture r13, security r13, api-surface r14)
+
+### [R13-A1] (CRITICAL, architecture-r13, structural elevation of R13-T2) StubRestoreBackend configured but never drives restore_sandbox
+- **Source**: 2026-05-25 architecture-r13
+- **Files**: `crates/sandbox/src/restore_handler.rs::StubRestoreBackend` (defined ~line 862), consumed only by 2 setter tests at `lib.rs:2107-2129`
+- **Symptom**: Every C-1 through C-4 cluster bug would have been caught by a 30-LOC end-to-end stub test driving `restore_sandbox`. The C-4 fix's `reserve_succeeds_on_attempt` stub field is added but NO test uses it through `restore_sandbox`. 5 cluster cycles, ~$1.45 spent, 4 distinct bugs found — all preventable.
+- **Action**: dedicated sprint — `restore_handler::tests::driven` module (~250 LOC) that constructs a fake compio runtime, drives `restore_sandbox` with `StubRestoreBackend` configured to fail at each step (submit, livez, clock_resync, unseal, register_restored, CAS), and asserts the expected error envelope + state. Closes R13-T2 (5-round) + R10-T1/R11-T1/R12-T1 + R12-T2/R10-T2/R11-T2.
+
+### [R13-A2] (IMPORTANT, architecture-r13) C-3 fix is layering inversion — Tiered::put spawns OS thread inside sync trait impl
+- **Source**: 2026-05-25 architecture-r13
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:1132` (C-3 fix at c890c015)
+- **Symptom**: `Tiered::put` is sync per trait contract (snapshot_store.rs:91-96). Handler at `snapshot_handler.rs:392-407` already wraps `store.put` in `spawn_blocking`. C-3 fix added an UNTRACKED `std::thread::Builder::spawn` for L2 detach inside the trait impl — wrong layer. Architectural fingerprint matches R3-A1/R3-A2 (traits as boundaries; impls reach past them).
+- **Action**: move L2 detach to handler layer (mirror `admin_handlers.rs:1311-1324`). Net -25 LOC. Alternatively: add `fn l2_handle()` trait method to surface fire-and-forget intent at the right layer.
+
+### [R13-A3] (IMPORTANT, architecture-r13) R13-Q1 closed env-mutex but R12-A1 dual-builder duplication remains
+- **Source**: 2026-05-25 architecture-r13
+- **Symptom**: build_nomad_job_json (cold-boot) and build_restore_nomad_job_json (wake) remain byte-for-byte duplicates with 1-arg difference. Architecture-r13 sketched a `JobspecRequest` value-object diff: +210 LOC new helper, -671 LOC across 3 files = **net -461 LOC**.
+- **Sub-finding**: there's a LATENT inconsistency — `zeroship.sandbox` Meta key uses `.simple()` form in cold-boot but hyphenated `Uuid::to_string()` in wake-path. Get fixed for free under consolidation.
+- **Action**: PR ready. Subsumes R10-A4 nomad_ch.rs split partially.
+
+### [R13-A4] (IMPORTANT, architecture-r13) C-3 fix's layering inversion = same structural fingerprint as R3-A1/R3-A2
+- **Source**: 2026-05-25 architecture-r13
+- **Action**: subsumed by R13-A2's structural fix.
+
+### [R13-A5] (MINOR, architecture-r13) C-4 fix adds 9th RestoreBackend method — 3 are 1-line delegations
+- **Source**: 2026-05-25 architecture-r13
+- **Action**: trait surface continues to grow without R10-A2 consolidation. The 3 delegations would collapse under R10-A2 merge with SnapshotCapableBackend.
+
+### [R13-A6] (MINOR, architecture-r13) R12-A3 (TaskDriverMode as backend struct field) now mechanically cheaper
+- **Source**: 2026-05-25 architecture-r13
+- **Action**: post-R13-Q1's lock unify, 3-line sub-PR. Land ahead of R12-A1.
+
+### [R13-S1] (IMPORTANT, security-r13) C-5 fix is half-credit — worker still has project-wide editor IAM
+- **Source**: 2026-05-25 security-r13
+- **File**: `crates/sandbox/scripts/provision-gcp-cluster.sh:286` (worker create) — no `--service-account` flag.
+- **Symptom**: workers run as default Compute Engine SA which carries `roles/editor` project-wide. `storage-rw` scope narrows OAuth API surface, NOT resource scope. A worker compromise grants read+write on every bucket in the GCP project.
+- **Action**: create dedicated `zsbx-worker@<project>.iam.gserviceaccount.com` SA with `roles/storage.objectAdmin` bound ONLY to `$ARTIFACT_BUCKET` + `$SNAPSHOT_BUCKET`. Pass via `--service-account` in `gcloud compute instances create`.
+
+### [R13-S2] (MINOR posture, security-r13) Post-C-3 vm_index exhaustion DoS newly reachable
+- **Source**: 2026-05-25 security-r13
+- **Symptom**: at 12 slots × ~90s teardown hold and no per-bearer rate-limit on snapshot/wake, an attacker can drive ~0.13 wakes/s/worker to saturate slots cluster-wide. Bounded-bad (no exfiltration, no auth bypass). SLO-class.
+- **Action**: per-bearer token-bucket on `POST /sandboxes/*/snapshot` + `POST /sandboxes/*/restore`. Pattern from existing `MintRateLimiter`.
+
+### [R13-S — R12-S1 update]: c5b9cb9d is a PARTIAL close
+- **Files**: 2 remaining locks (`db.rs::ENV_LOCK` for 9 keys vs `nomad_ch::test_env_lock::TASK_DRIVER_ENV_LOCK` for 1 key)
+- **Symptom**: cross-module disjoint-key env-mutation UB per Rust 2024 still possible. Full close: single crate-wide static.
+
+### [R14-API1] (MINOR, api-surface-r14) RealRestoreBackend::with_nomad_handle / with_shared_allocator over-pub
+- **Source**: 2026-05-25 api-surface-r14
+- **Files**: `crates/sandbox/src/restore_handler.rs:1022, 1039`
+- **Symptom**: pub fn consumed only by `lib.rs::AppState::from_config` + same-file tests. Zero out-of-crate prod callers.
+- **Action**: pub→pub(crate).
+
+### [R14-API2] (MINOR, api-surface-r14) Retry-After header docstring vs response builder drift
+- **Source**: 2026-05-25 api-surface-r14
+- **Files**: docstring at `restore_handler.rs:58` documents `(Retry-After)` on 503 vm_index_unavailable; builder at `admin_handlers.rs:1157-1163` doesn't emit it.
+- **Action**: either emit the header (~5-line change) or fix the docstring. With C-4 in production, clients reading the docstring will believe they can drive backoff off the header.
+
+### [R11-API1] expansion: 3 orphan metrics.rs test accessors (was 2)
+- **New site**: `crates/sandbox-agent/src/metrics.rs:217` `takeover_unreachable_value`
+- **Action**: bundle all 3 (with `takeover_corrupt_value` + `sandbox_corrupt_id_value`) into a single mechanical fix.
+
+### Closures this cycle (1 fixer + cluster-side):
+- [R13-API1 + R10-API2] CLOSED at `af4678ac` — ExecBody pub→pub(crate) in both sandbox + sandbox-agent. Sandbox-side required refactoring `exec` to take `Bytes` + parse internally (private-in-public rule).
+- [C-3] CLOSED at `c890c015` — confirmed by architecture r13 as architecturally inverted but tactically working. Follow-up R13-A2 sprint will lift detach to handler layer.
+- [C-4] CLOSED at `b2892368` — wake-path bounded retry (60×2s = 120s budget). +4 tests (328→332).
+- [C-5] CLOSED at `d7740b03` — worker storage-rw scope. Half-credit per R13-S1.
