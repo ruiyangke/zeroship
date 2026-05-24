@@ -242,6 +242,50 @@ Exit criterion: driver-side `stageDiskImages` runs on every alloc, emits
 counters, no failure mode introduced (smoke + stress at the existing
 baseline).
 
+#### Phase 2 progress (2026-05-25 evening — capability landed, default off)
+
+Capability shipped behind a feature flag. The wire schema, driver
+primitive, controller emission, and cross-emitter parity tests all
+landed in the same sprint that authored this ADR:
+
+| Commit ledger | Worktree | What landed |
+| --- | --- | --- |
+| `42a37265` | `nomad-driver-ch` | `TaskConfig.StageDiskImages` bool field + `stage_disk_images` HCL attr |
+| `032da940` | `nomad-driver-ch` | `start_task_stage_total` + `start_task_stage_failures_total` counters |
+| `b3b1fe59` | `nomad-driver-ch` | `stageDiskImages(taskConfig)` op in `ch/stage_disks.go` + `StartTask` cold-boot gating + 6 tests |
+| `2226de7a` | `sandbox-snapshot-restore` | `SandboxConfig.driver_stages_disk_images` flag (default false, env `SANDBOX_DRIVER_STAGES_DISK_IMAGES`) |
+| `6e928a25` | `sandbox-snapshot-restore` | controller emission: `stage_disk_images` Config + `zsbx_stage_disks` Meta on cold-boot, bypass `spawn_blocking` when flag set, restore-path emitter emits `false` for parity; 4 cross-emitter parity tests |
+
+Phase 2 deltas:
+
+- Driver test count: `tests/` 182 → 188 subtests (+6 staging tests
+  per the r4-A / r5-A pattern: happy-path + back-compat + error-no-spawn
+  + empty-path field validation).
+- Controller test count: `crates/sandbox/src/` lib tests 512 → 522
+  (+4 new staging-flag emission tests + +6 from the parity test
+  field-list assertions widening to recognise the new field on both
+  branches).
+- Default flag value: **false**. Phase 4 (cluster stress validation)
+  flips the default after measuring that driver-side staging collapses
+  the cross-alloc kernel-state retention surface. Phase 3 (state-
+  machine cutover) deletes the `spawn_blocking` branch entirely.
+
+Wire-format addendum:
+
+- `Task.Config.stage_disk_images` (bool) — new ChPlugin-only Config
+  field. Emitted on BOTH cold-boot and restore branches for ChPlugin
+  Config field-list parity (R22-T1 contract); restore-side always
+  false per ADR Phase 2.
+- `Job.Meta.zsbx_stage_disks` (string "true"|"false") — operator-
+  facing signal via `nomad job inspect`. Mirrors the Config field
+  on the cold-boot emitter; the restore-path Meta block keeps its
+  prior shape (no zsbx_stage_disks key — restore is hard-coded false).
+
+Cycle-6 RED trigger closed: this commit ledger lands the architectural
+pivot the 5-cycle layer-peel (r1-r5, all RED at the same ~5% e2e rate)
+identified as the structural alternative. Phase 4 cluster validation
+is the next gate.
+
 ### Phase 3 — Controller cutover (`RealRestoreBackend::try_create` → no-op)
 
 Migrate `create_ext4_image_if_missing` (cold-boot path) and
