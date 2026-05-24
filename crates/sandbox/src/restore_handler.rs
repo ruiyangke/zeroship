@@ -199,8 +199,10 @@ impl VmIndexRetryPolicy {
     ///
     /// Constants:
     /// - `CLIENT_HEADROOM_SECS = 10` — leaves ≥10 s headroom under
-    ///   the assumed 60 s ntex client deadline when the operator
-    ///   leaves `host_fence_timeout_secs` near the default (30–120).
+    ///   the 60 s ntex client deadline.
+    /// - `CLIENT_DEADLINE_SECS = 60` — the ntex/stress-client wall
+    ///   deadline we cannot exceed. Caps the budget regardless of how
+    ///   conservative `host_fence_timeout_secs` is set.
     /// - `INTERVAL_SECS = 2` — matches the C-7 cadence; the slot
     ///   frees on a ~deterministic ~90 s timeline so exponential
     ///   backoff would mostly miss the release window.
@@ -208,23 +210,54 @@ impl VmIndexRetryPolicy {
     ///   (operators who explicitly disabled the fence — NOT
     ///   recommended) still gets one decisive reserve attempt.
     ///
+    /// **C-8a fix (T-8b-smoke-r9 cluster review)**: the prior
+    /// derivation took only the fence into account, so a production
+    /// `host_fence_timeout_secs=120` produced a 110 s budget — 50 s
+    /// past the 60 s ntex client deadline, re-introducing the
+    /// C-7-class silent cancellation. We now compute TWO ceilings
+    /// and take the MIN:
+    ///   - fence-derived: `host_fence_timeout_secs - HEADROOM` —
+    ///     the IDEAL ceiling (envelopes the worst observed source
+    ///     teardown so a wake racing a fence-clear has a non-trivial
+    ///     chance of catching the release).
+    ///   - deadline-derived: `CLIENT_DEADLINE - HEADROOM = 50 s` —
+    ///     the HARD ceiling (anything past this is silently dropped
+    ///     by ntex when the client disconnects).
+    /// The hard ceiling wins when the operator runs a conservative
+    /// fence; the ideal ceiling wins for tight per-cluster overrides
+    /// (e.g. cluster-smoke at 30 s).
+    ///
     /// Examples:
-    /// - `host_fence_timeout_secs = 30` → 11 attempts × 2 s = 20 s
-    ///   budget (fits well under any sane client deadline).
-    /// - `host_fence_timeout_secs = 60` → 26 attempts × 2 s = 50 s
-    ///   budget (matches the C-7 default within 1 attempt).
-    /// - `host_fence_timeout_secs = 120` → 56 attempts × 2 s = 110 s
-    ///   budget — exceeds the 60 s ntex client deadline. Operators
-    ///   running a 120 s fence MUST switch to the async response +
-    ///   poll pattern (C-7-LT) or accept the silent-cancel failure
-    ///   mode for any wake racing a slow source teardown.
+    /// - `host_fence_timeout_secs = 30` → fence=20 s, deadline=50 s,
+    ///   MIN=20 s → 11 attempts × 2 s = 20 s budget.
+    /// - `host_fence_timeout_secs = 60` → fence=50 s, deadline=50 s,
+    ///   MIN=50 s → 26 attempts × 2 s = 50 s budget.
+    /// - `host_fence_timeout_secs = 120` → fence=110 s, deadline=50 s,
+    ///   MIN=50 s → 26 attempts × 2 s = 50 s budget (CAPPED — the
+    ///   pre-C-8a derivation gave 110 s here, silent-cancelling at
+    ///   60 s; the cap forces a clean 503 inside the deadline so the
+    ///   exhausted-budget log fires before client disconnect).
     pub fn from_host_fence_timeout(host_fence_timeout_secs: u64) -> Self {
         const CLIENT_HEADROOM_SECS: u64 = 10;
+        const CLIENT_DEADLINE_SECS: u64 = 60;
         const INTERVAL_SECS: u64 = 2;
         const MIN_ATTEMPTS: u32 = 1;
-        let effective = host_fence_timeout_secs.saturating_sub(CLIENT_HEADROOM_SECS);
-        let attempts_from_fence = (effective / INTERVAL_SECS).saturating_add(1);
-        let max_attempts = u32::try_from(attempts_from_fence)
+
+        // Dual ceilings:
+        //   - fence-derived is the IDEAL upper bound (matches the
+        //     observed source-teardown wall-time).
+        //   - deadline-derived is the HARD upper bound (anything past
+        //     this is silently dropped when the ntex client
+        //     disconnects — the C-7 / C-8a failure mode).
+        // Take the MIN — the tighter of the two always wins.
+        let max_budget_from_fence =
+            host_fence_timeout_secs.saturating_sub(CLIENT_HEADROOM_SECS);
+        let max_budget_from_deadline =
+            CLIENT_DEADLINE_SECS.saturating_sub(CLIENT_HEADROOM_SECS);
+        let effective_budget = max_budget_from_fence.min(max_budget_from_deadline);
+
+        let attempts_from_budget = (effective_budget / INTERVAL_SECS).saturating_add(1);
+        let max_attempts = u32::try_from(attempts_from_budget)
             .unwrap_or(u32::MAX)
             .max(MIN_ATTEMPTS);
         Self {
@@ -1522,6 +1555,42 @@ mod unit_tests {
             "zero fence must still attempt the reserve at least once; got {}",
             p.max_attempts
         );
+    }
+
+    /// **C-8a (T-8b-smoke-r9 cluster review)**: the deadline-cap MUST
+    /// override a conservative `host_fence_timeout_secs`. The pre-C-8a
+    /// derivation took only the fence into account, so a production
+    /// fence of 120 s produced a 110 s budget — 50 s past the 60 s ntex
+    /// client deadline, re-introducing C-7-class silent cancellation.
+    ///
+    /// This test pins the new behaviour: for any fence ≥ 60 s the
+    /// budget caps at `CLIENT_DEADLINE - CLIENT_HEADROOM = 50 s`,
+    /// guaranteeing the exhausted-budget log fires before ntex drops
+    /// the future on client disconnect.
+    #[test]
+    fn r14a6_from_cfg_caps_at_client_deadline() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(120);
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            wall_ms <= 50_000,
+            "120 s fence MUST cap at CLIENT_DEADLINE - HEADROOM = 50 s; \
+             got {} ms (attempts={}, interval={:?}). C-8a regression — \
+             see docs/reviews/sandbox-snapshot-restore-deferred.md.",
+            wall_ms,
+            p.max_attempts,
+            p.interval
+        );
+        // The cap is the HARD ceiling — exactly 26×2=52 ms… no, 26
+        // attempts with 25 sleeps × 2 s = 50 s wall-time. Pin the
+        // attempt count so a future regression that loosens the cap
+        // (e.g. lifts the headroom to 5 s) fails loudly here.
+        assert_eq!(
+            p.max_attempts, 26,
+            "120 s fence with deadline-cap: (60 - 10) / 2 + 1 = 26 attempts; got {}",
+            p.max_attempts
+        );
+        assert_eq!(p.interval, Duration::from_secs(2));
     }
 }
 

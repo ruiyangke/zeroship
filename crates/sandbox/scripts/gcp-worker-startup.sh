@@ -455,6 +455,17 @@ Environment=SANDBOX_NOMAD_CH_USER_HOME_ROOT=/var/zeroship/ch/users
 Environment=SANDBOX_NOMAD_CH_VM_INDEX_FLOOR=1
 Environment=SANDBOX_NOMAD_CH_VM_INDEX_CEIL=$VM_INDEX_CEIL
 Environment=SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET=99
+# C-8 fix (T-8b-smoke-r9 cluster review): the Rust default fence is
+# 120 s — over-conservative for the cluster-smoke workload, where the
+# observed source-teardown completes well under 30 s. Smoke-r9
+# confirmed C-7's 48 s wake retry budget but exposed that a 150 s
+# source-teardown wall-time (host_fence 120 s + Nomad purge 30 s)
+# exceeds it, surfacing as a clean 503 vm_index_unavailable. Capping
+# the fence at 30 s here reduces source teardown to ~60 s total,
+# fitting inside the 48 s retry budget with ~12 s residual headroom.
+# Production deployments needing the conservative 120 s default can
+# override via metadata; this is the cluster-smoke baseline.
+Environment=SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS=30
 
 # Wrapper inputs: point at the artifact dir holding vmlinuz + rootfs-slim.img.
 # The wrapper reads ZSBX_ARTIFACT_DIR from its Nomad task env; the
