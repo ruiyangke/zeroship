@@ -2042,6 +2042,52 @@ impl RestoreBackend for RealRestoreBackend {
         // removed in T-8b-cutover, every wake fails. Reading the env
         // once here mirrors `build_nomad_job_json`'s call site.
         let mode = crate::backend::nomad_ch::task_driver_mode_from_env();
+
+        // T-8b-stress Bug 1 fix: before submitting the restore job,
+        // assert that the disk images the driver's preflight will
+        // stat are actually on disk. The wake path expects
+        // `stop_preserving_state` (snapshot's source teardown) to
+        // have left `workspace.img` in place, and the per-user
+        // `home.img` to have been mkfs'd by the source sandbox's
+        // create() — but neither is re-asserted at the wake's submit
+        // site. A missing image surfaces at the driver as a generic
+        // "Failed tasks" alloc rollup; surfacing it HERE turns it
+        // into a clean controller-side error with the offending path
+        // string, preserving the observability symmetry with the
+        // cold-boot path's post-stage assertion in
+        // `create_ext4_image_if_missing`. Mirrors the driver's
+        // `preflightDiskPaths` discipline (3-strike pattern: user_id,
+        // rootfs_source, now workspace.img + home.img).
+        let host_dir = self
+            .cfg
+            .host_state_dir
+            .join(sandbox_id.simple().to_string());
+        let workspace_img = host_dir.join("workspace.img");
+        let user_home_img = self
+            .cfg
+            .user_home_dir_root
+            .join(user_id)
+            .join("home.img");
+        crate::backend::nomad_ch::assert_disk_image_present(&workspace_img).map_err(|e| {
+            format!(
+                "restore submit: workspace.img missing for sandbox {} \
+                 (snapshot teardown should have preserved it via \
+                 stop_preserving_state; controller will not submit \
+                 restore job that the driver's preflight would reject \
+                 with a generic Failed-tasks rollup): {e}",
+                sandbox_id
+            )
+        })?;
+        crate::backend::nomad_ch::assert_disk_image_present(&user_home_img).map_err(|e| {
+            format!(
+                "restore submit: user_home.img missing for sandbox {} \
+                 user {} (per-user image should persist across the user's \
+                 sandboxes — source create() mkfs'd it; only host disk \
+                 corruption or out-of-band rm would explain this): {e}",
+                sandbox_id, user_id
+            )
+        })?;
+
         let job_json = build_restore_nomad_job_json(
             &job_id,
             &self.cfg,
@@ -2756,13 +2802,21 @@ mod real_backend_tests {
     }
 
     fn base_cfg(nomad_addr: String, host_state: PathBuf) -> NomadCHConfig {
+        // T-8b-stress Bug 1: route user_home_dir_root under the
+        // per-test host_state dir so `stage_disk_image_preconditions`
+        // can write to it without needing /var/zeroship/ch/users
+        // (which doesn't exist in CI). Production points both at the
+        // real layout (HOST_STATE_DIR=/var/zeroship/ch,
+        // USER_HOME_ROOT=/var/zeroship/ch/users); the relative layout
+        // is preserved.
+        let user_home_dir_root = host_state.join("users");
         NomadCHConfig {
             nomad_addr,
             datacenter: "dc1".into(),
             wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
             runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
             host_state_dir: host_state,
-            user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
+            user_home_dir_root,
             vm_index_floor: 1,
             vm_index_ceil: 155,
             alloc_running_timeout_secs: 1,
@@ -2810,6 +2864,32 @@ mod real_backend_tests {
         (format!("http://{addr}"), counter)
     }
 
+    /// T-8b-stress Bug 1 helper: stage the workspace.img + home.img
+    /// preconditions that `submit_restore_job` now asserts before it
+    /// even submits the Nomad job. Mirrors the on-disk state that
+    /// `stop_preserving_state` (snapshot teardown) + `create()` (source
+    /// mkfs) leave behind in production. Tests that drive
+    /// `submit_restore_job` directly need this; the full happy-path
+    /// (via `restore_sandbox`) goes through `store.get` first, which
+    /// implicitly stages a real artifact tree.
+    fn stage_disk_image_preconditions(
+        cfg: &crate::config::NomadCHConfig,
+        sandbox_id: Uuid,
+        user_id: &str,
+    ) {
+        let host_dir = cfg
+            .host_state_dir
+            .join(sandbox_id.simple().to_string());
+        std::fs::create_dir_all(&host_dir).unwrap();
+        // Non-empty content so the post-stage `assert_disk_image_present`
+        // check (size > 0) passes.
+        std::fs::write(host_dir.join("workspace.img"), b"fake-workspace").unwrap();
+
+        let user_home_dir = cfg.user_home_dir_root.join(user_id);
+        std::fs::create_dir_all(&user_home_dir).unwrap();
+        std::fs::write(user_home_dir.join("home.img"), b"fake-home").unwrap();
+    }
+
     /// Submit + alloc-running succeeds when Nomad returns 200 then a
     /// running alloc.
     #[test]
@@ -2823,10 +2903,14 @@ mod real_backend_tests {
             ),
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
+        // T-8b-stress Bug 1: submit_restore_job now asserts the disk
+        // images are present before submitting (cold-boot/restore
+        // parity check). Stage the source-create's residual files.
+        stage_disk_image_preconditions(&cfg, sid, "usr_test");
 
         backend
             .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
@@ -2848,10 +2932,13 @@ mod real_backend_tests {
             (500, r#"{"error":"nomad: backend down"}"#.to_string())
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
+        // T-8b-stress Bug 1: stage disk-image preconditions so the
+        // preflight assertion lets us actually reach the Nomad POST.
+        stage_disk_image_preconditions(&cfg, sid, "usr_test");
 
         let err = backend
             .submit_restore_job(sid, 8, &alloc_dir, "usr_test")
@@ -2961,10 +3048,14 @@ mod real_backend_tests {
             ),
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
+        // T-8b-stress Bug 1: stage disk-image preconditions so the
+        // preflight assertion lets us actually reach the
+        // wait_for_alloc_running poll loop that this test exercises.
+        stage_disk_image_preconditions(&cfg, sid, "usr_test");
 
         let err = backend
             .submit_restore_job(sid, 9, &alloc_dir, "usr_test")
@@ -2972,6 +3063,82 @@ mod real_backend_tests {
         assert!(
             err.contains("never reached running"),
             "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// T-8b-stress Bug 1 (positive parity test for the restore path):
+    /// `submit_restore_job` MUST refuse to submit a Nomad job when
+    /// workspace.img is missing — the preflight assertion catches it
+    /// at the controller side with a clear path-named error, instead
+    /// of letting the driver surface a generic "Failed tasks" alloc
+    /// rollup. Mirrors the cold-boot path's post-stage assertion in
+    /// `create_ext4_image_if_missing`.
+    #[test]
+    fn submit_restore_job_rejects_missing_workspace_img() {
+        let host_state = fresh_dir();
+        // Nomad shouldn't even be contacted — but spawn a server that
+        // counts hits so we can assert zero submit calls.
+        let (nomad_addr, calls) = spawn_fake_nomad(|_| {
+            (200, r#"[{"ClientStatus":"running"}]"#.to_string())
+        });
+        let cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let sid = Uuid::now_v7();
+        let alloc_dir = backend.restore_alloc_dir(sid);
+        std::fs::create_dir_all(&alloc_dir).unwrap();
+        // INTENTIONALLY do NOT stage workspace.img/home.img.
+
+        let err = backend
+            .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
+            .expect_err("missing workspace.img must reject before submit");
+        assert!(
+            err.contains("workspace.img missing"),
+            "err must name the missing precondition; got: {err}"
+        );
+        // Crucially, no submit RPC fired.
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            0,
+            "expected zero Nomad calls when controller-side preflight rejects",
+        );
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// T-8b-stress Bug 1: `submit_restore_job` MUST also catch
+    /// missing user_home.img (the second per-user disk). Both
+    /// preconditions must fire — the error path for the second
+    /// surfaces a different message (workspace was OK, user_home
+    /// was the gap), so an operator triaging logs can disambiguate.
+    #[test]
+    fn submit_restore_job_rejects_missing_user_home_img() {
+        let host_state = fresh_dir();
+        let (nomad_addr, calls) = spawn_fake_nomad(|_| {
+            (200, r#"[{"ClientStatus":"running"}]"#.to_string())
+        });
+        let cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
+        let sid = Uuid::now_v7();
+        let alloc_dir = backend.restore_alloc_dir(sid);
+        std::fs::create_dir_all(&alloc_dir).unwrap();
+        // Stage ONLY workspace.img, not home.img.
+        let host_dir = cfg
+            .host_state_dir
+            .join(sid.simple().to_string());
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("workspace.img"), b"fake-workspace").unwrap();
+
+        let err = backend
+            .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
+            .expect_err("missing user_home.img must reject before submit");
+        assert!(
+            err.contains("user_home.img missing"),
+            "err must name the missing precondition; got: {err}"
+        );
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            0,
+            "expected zero Nomad calls when controller-side preflight rejects",
         );
         let _ = std::fs::remove_dir_all(&host_state);
     }

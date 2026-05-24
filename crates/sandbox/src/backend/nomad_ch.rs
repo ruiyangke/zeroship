@@ -3522,6 +3522,18 @@ pub(crate) fn workspace_image_path(host_dir: &Path) -> PathBuf {
 /// The `-F` flag on mkfs.ext4 is required to format a regular file
 /// that isn't a block device; without it mkfs prompts and aborts.
 ///
+/// **Post-condition (T-8b-stress Bug 1 fix):** after either branch
+/// (skip-because-exists OR truncate+mkfs), the function asserts that
+/// `path` exists, is a file, and has non-zero size via [`assert_disk_image_present`]
+/// before returning Ok. This catches a silent-staging-failure mode
+/// (e.g., a future refactor that no-op's the truncate step would
+/// otherwise return Ok and let the driver's preflight surface the
+/// confusing "disk[N] /…/<img> does not exist" error far from the
+/// real fault). The parent directory is fsync'd so the dirent is
+/// visible to a peer process (the Nomad client) that may stat the
+/// path on a different mount-namespace or before the kernel's lazy
+/// dirent commit.
+///
 /// Returns `Err` with a String describing which subprocess failed.
 /// The caller maps that into a controller-side error log; the
 /// `CreateGuard` Drop on the calling path tears down the partial
@@ -3531,7 +3543,10 @@ pub(crate) fn create_ext4_image_if_missing(
     size_gb: u32,
 ) -> Result<(), String> {
     if path.exists() {
-        return Ok(());
+        // Idempotent skip path. Still re-assert the post-condition so
+        // a stale dirent or zero-byte sentinel surfaces here at the
+        // controller, not later at the driver's preflight stat.
+        return assert_disk_image_present(path);
     }
     // truncate(1) is universally present on debian + bash; using it
     // (rather than `std::fs::File::set_len`) keeps the path-and-size
@@ -3565,6 +3580,94 @@ pub(crate) fn create_ext4_image_if_missing(
             mkfs_status,
         ));
     }
+    // Fsync the parent directory so the new dirent is durable AND
+    // visible to a peer process statting the path before the kernel
+    // would otherwise commit. Best-effort: a failure here is logged
+    // by the caller via the returned Err but doesn't unwind the
+    // mkfs; the file is still on disk (just not necessarily
+    // crash-safe). See T-8b-stress Bug 1: 49/60 CREATEs failed with
+    // the driver reporting "workspace.img does not exist" despite
+    // the controller having just staged it — the staging-and-submit
+    // window is tight enough that a missing fsync is plausible.
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fsync_dir(parent) {
+            return Err(format!(
+                "fsync parent of {}: {e}",
+                path.display()
+            ));
+        }
+    }
+    assert_disk_image_present(path)
+}
+
+/// Post-condition assertion for [`create_ext4_image_if_missing`] and
+/// any sibling staging path that needs to guarantee a disk image is
+/// on disk before the controller hands the path off to Nomad.
+///
+/// Mirrors the driver-side `preflightDiskPaths` check
+/// (`nomad-driver-ch/ch/start_task.go::preflightDiskPaths`) so a
+/// missing-or-empty image is surfaced at the CONTROLLER's submit
+/// site, not buried in an alloc-failure rollup. Same three checks:
+///
+///   1. `path` exists (otherwise: dirent never landed).
+///   2. `path` is a regular file (otherwise: a directory at the same
+///      name, structural surprise).
+///   3. `path`'s size > 0 (otherwise: `truncate` produced a sparse
+///      file but `mkfs.ext4` was skipped, or a half-written image
+///      lingered after a prior failure).
+///
+/// T-8b-stress Bug 1 trace: the driver's preflight reported "disk[1]
+/// <path> does not exist" in 49/60 cold-boot creates. This helper
+/// makes that observation symmetrical on the controller side so a
+/// repeat of the bug surfaces at the staging step (where the
+/// CreateGuard's host_dir teardown can fire cleanly) instead of mid-
+/// alloc (where the failure is generic "Failed tasks").
+pub(crate) fn assert_disk_image_present(path: &Path) -> Result<(), String> {
+    let md = std::fs::metadata(path).map_err(|e| {
+        format!(
+            "disk image post-stage stat failed: {} ({e}); \
+             controller-side parity check for driver preflight",
+            path.display()
+        )
+    })?;
+    if md.is_dir() {
+        return Err(format!(
+            "disk image post-stage check: {} is a directory \
+             (must be a file)",
+            path.display()
+        ));
+    }
+    if md.len() == 0 {
+        return Err(format!(
+            "disk image post-stage check: {} is empty (size 0); \
+             truncate likely succeeded but mkfs.ext4 was skipped \
+             or the image was overwritten by an empty file",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Fsync a directory inode so dirent changes (file creates, renames,
+/// deletes) are durable AND visible to peer processes that stat the
+/// directory's contents before the kernel's lazy dirent commit. Used
+/// after [`create_ext4_image_if_missing`] stages a new disk image so
+/// the Nomad client's driver-side stat sees the inode immediately
+/// rather than a brief NotFound window.
+///
+/// Implemented via [`std::fs::File::sync_all`] on a `File::open`-ed
+/// directory handle. On Linux this issues `fsync(dirfd)` (the kernel
+/// accepts fsync on directory fds since forever — it's the
+/// canonical way to flush dirent changes on ext4 / xfs / btrfs).
+///
+/// Best-effort error semantics: the caller treats failure as a
+/// staging error (returns Err), since a non-durable dirent is the
+/// exact failure mode T-8b-stress Bug 1 produced.
+fn fsync_dir(dir: &Path) -> Result<(), String> {
+    let f = std::fs::File::open(dir)
+        .map_err(|e| format!("open {}: {e}", dir.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("fsync {}: {e}", dir.display()))?;
     Ok(())
 }
 
@@ -4718,6 +4821,121 @@ mod tests {
             std::fs::read(&img).unwrap(),
             sentinel,
             "contents must survive the idempotent call",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #1:
+    /// `create_ext4_image_if_missing`'s idempotent skip-because-exists
+    /// branch MUST re-assert the post-condition (file present, > 0
+    /// bytes). Without this, a zero-byte sentinel left at the path
+    /// (e.g., a `truncate` that partially succeeded then was
+    /// interrupted) would slip through as Ok, and the driver's
+    /// preflight stat would catch it far later with a generic
+    /// "Failed tasks" rollup. This test pins the "skip path must
+    /// still validate" invariant.
+    #[test]
+    fn create_ext4_image_if_missing_skip_path_rejects_zero_byte_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-img-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("workspace.img");
+
+        // Touch a zero-byte sentinel. `path.exists()` returns true →
+        // skip-because-exists branch fires → post-condition assertion
+        // catches the size==0 case.
+        std::fs::write(&img, b"").unwrap();
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 0);
+
+        let err = create_ext4_image_if_missing(&img, 20)
+            .expect_err("zero-byte file must be rejected by the post-condition");
+        assert!(
+            err.contains("empty (size 0)"),
+            "err must mention empty/size; got: {err}"
+        );
+        assert!(
+            err.contains("workspace.img"),
+            "err must name the path; got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #2:
+    /// `assert_disk_image_present` returns Ok for a normal file with
+    /// > 0 bytes. Direct test of the post-condition helper so the
+    /// CI signal is precise.
+    #[test]
+    fn assert_disk_image_present_accepts_normal_nonempty_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-assert-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("workspace.img");
+        std::fs::write(&img, b"non-empty").unwrap();
+
+        assert_disk_image_present(&img).expect("normal non-empty file must pass");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #3:
+    /// `assert_disk_image_present` rejects a missing path with an
+    /// error message that names the path (so an operator can grep
+    /// for it in the controller log). Pins the "controller catches
+    /// missing image at submit time, not after the alloc burns its
+    /// $0.20" contract.
+    #[test]
+    fn assert_disk_image_present_rejects_missing_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-assert-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("nope.img"); // do not create
+
+        let err = assert_disk_image_present(&img)
+            .expect_err("missing path must be rejected");
+        assert!(
+            err.contains("nope.img"),
+            "err must name the path; got: {err}"
+        );
+        assert!(
+            err.contains("post-stage stat failed"),
+            "err must say what step failed; got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #4:
+    /// `assert_disk_image_present` rejects a directory at the same
+    /// name (the structural-surprise case). Catches a future bug
+    /// where some staging path mkdir's where it should be touching a
+    /// file.
+    #[test]
+    fn assert_disk_image_present_rejects_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-assert-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img_as_dir = dir.join("workspace.img");
+        std::fs::create_dir(&img_as_dir).unwrap();
+
+        let err = assert_disk_image_present(&img_as_dir)
+            .expect_err("directory at image path must be rejected");
+        assert!(
+            err.contains("is a directory"),
+            "err must say 'directory'; got: {err}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
