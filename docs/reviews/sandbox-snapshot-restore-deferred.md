@@ -1006,8 +1006,9 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: emits `{"status":"backend-unhealthy"}` on 503 — only `HttpResponse::ServiceUnavailable` site bypassing `error_envelope`. Cluster with R10-API4 (controller-side `readyz`) for single decision.
 - **Action**: either bring both to §10.0 envelope OR document the probe-shape carve-out with invariant tests.
 
-### [R12-API2] (TRIVIAL, api-surface-r12) stale `db.rs` "hyphenated form" comment shifted to line 2859 (was 2839)
+### [R12-API2] (CLOSED with R10-API6) stale `db.rs` "hyphenated form" comment shifted to line 2859 (was 2839)
 - **Action**: 30-char edit. 4th-round carry.
+- **Closed at**: `8ed9aa90` (same fix as R10-API6 below). On investigation the comment was actually accurate (the file IS hyphenated by design — `uuid.to_string()` at `write_host_id_file`). Rewrote to call out explicitly that this is `host_id` (operator-readable persisted state), distinct from `sandbox_id`'s `.simple()` wire form per B24-FOLLOWUP. Should stop future api-surface reviewers from re-flagging it.
 
 ### Closed this cycle:
 - [R11-T3] CLOSED at `eb26db31` — capability presence pins for proxy.ws-v1 + auth.ed25519-v1.1
@@ -1151,3 +1152,15 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### Closures this cycle
 - [R12-P1] CLOSED at `94a8a043` — BufReader on download_to_disk READ side; symmetric to R11-P2 write-side
 - [R10-API3 partial] CLOSED at `f50c95da` — 3 of 5 persist:: fns pub→pub(crate) (seal, unseal_dir, seal_filename_for_str); kept pub: unseal_one + seal_filename_for (e2e test consumers)
+
+### [C-3] (CLOSED at `c890c015`) `TieredSnapshotStore::put` panic — `compio::runtime::spawn_blocking` called from a non-compio thread
+- **Source**: T-8b-smoke-r4 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r4.md`). 1-worker fleet at controller v18 + driver v4 (C-2 fix). CREATE PASS, SNAPSHOT FAIL on every cycle.
+- **Symptom**: `thread '<unnamed>' panicked at compio-runtime-0.11.0/src/runtime/mod.rs:119:13: not in a compio runtime` — handler-side, wrapped as `snapshot store: snapshot I/O error: spawn_blocking panic`. Snapshot row stays in `snapshotting` until the lease-takeover sweep mops up; user-visible failure on every snapshot RPC.
+- **Root cause**: `crates/sandbox/src/snapshot_store_gcs.rs:1096` (now lifted) launched the fire-and-forget L2 upload via `compio::runtime::spawn_blocking(...).detach()`. But `Tiered::put` itself runs sync, and the handler at `snapshot_handler.rs:397` already wraps `store.put` in spawn_blocking — so the body of `Tiered::put` is on a spawn_blocking worker thread with no compio runtime in TLS. The inner `spawn_blocking` panics at `Runtime::with_current` (line 119: "not in a compio runtime").
+- **Fix** (Pattern A): swap `compio::runtime::spawn_blocking(...).detach()` for `std::thread::Builder::new().name("snap-l2-upload-…").spawn(...)`. The L2 upload itself is pure sync (`ureq` + `std::fs`), needs no compio runtime; `Tiered::put` is now context-agnostic (callable from compio task, spawn_blocking worker, or plain OS thread). LOC: +94/-3 (most of the delta is doc + regression test).
+- **Why local tests missed it**: every existing `TieredSnapshotStore::put` test ran under `#[compio::test]`, so the inline `compio::runtime::spawn_blocking` resolved against the test harness's compio runtime. Cluster smoke is the FIRST context that calls `put` from a spawn_blocking worker — production parity.
+- **Regression test**: `snapshot_store_gcs::tests::c3_put_callable_from_non_compio_thread` — invokes `Tiered::put` from a plain `std::thread::spawn` (NOT a compio task and NOT a compio spawn_blocking worker), exactly mirroring the production failure shape. Verified that pre-fix this test panics with "not in a compio runtime"; post-fix it passes.
+- **Tests**: sandbox lib 327 → 328 PASS. go vet clean (driver-side unaffected).
+- **Sibling audit**: walked every other `spawn_blocking` site in `crates/sandbox/src/` (`snapshot_handler.rs`, `restore_handler.rs`, `persist.rs`, `backend/{nomad_ch,k8s,docker}.rs`, `preview.rs`). All closures use pure-sync APIs only (`ureq`, `std::process::Command`, `std::fs`, AEAD); no other site reaches into compio internals. C-3 was unique to the L2 detach.
+- **Files changed**: `crates/sandbox/src/snapshot_store_gcs.rs`.
+- **Next**: T-8b-smoke-retry-r5 with controller built off `c890c015` (driver v4 unchanged — C-3 is controller-side). r4 review flagged WAKE/RESTORE/STOP as the next likely failure surfaces.
