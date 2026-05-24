@@ -32,8 +32,10 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## Up next
 
-- T-8b: Live cluster cutover. With T-8a artifacts staged:
-  1. Operator runs `scripts/upload-to-gcs.sh v1` output manually to push `nomad-driver-ch.v1` to `gs://suger-dev-zsbx-artifacts/`.
-  2. Provision a worker fleet with `INSTALL_CH_PLUGIN_DRIVER=1` (env var consumed by the sandbox-side `gcp-worker-startup.sh` patch landed in this sprint) — pulls the binary, drops a plugin-dir HCL stanza, sets `SANDBOX_TASK_DRIVER=ch_plugin` on `zsbx-ctl.service`, restarts nomad + controller.
-  3. Run smoke (full snap/wake cycle) end-to-end through the Go plugin.
-  4. On green: drop `nomad-vm-wrapper.sh` from the sandbox crate's scripts and remove the `raw_exec` branch from `nomad_ch.rs::build_nomad_job_json`.
+- T-8b-smoke (2026-05-25): **FAIL — NO-GO for T-8b-stress.** Single 1-server+1-worker cluster came up cleanly in 105s; binary `nomad-driver-ch.v1` (sha `df2b117511e9f218ca20ccd3ce74e1c2d37c65cfb8deeeca4b9b70d9621a25f8`, gitSHA `ce118450`) uploaded and deployed to `/etc/zeroship/nomad-plugins/`; `zsbx-ctl` Environment contains `SANDBOX_TASK_DRIVER=ch_plugin`. But the snap/wake cycle failed at CREATE with `nomad alloc terminal status=failed: Failed tasks`. Two independent issues uncovered: (a) Nomad refused to load the plugin — `plugin not referenced in the agent configuration file, loading skipped` — `/etc/nomad.d/plugin-dir.hcl` needs a `plugin "nomad-driver-ch" { config {} }` stanza, not just `plugin_dir`; (b) the controller pin `zeroship-sandbox.snapshot-v6` predates `a4c481e1` (B24 `ZSBX_SANDBOX_ID` injection) and `5fe36805` (T-7 jobspec switch), so the controller (i) silently ignored `SANDBOX_TASK_DRIVER` and emitted raw_exec jobs and (ii) killed every alloc via the wrapper's R8-DEPLOY1 guard. The Go driver was never reached. Teardown clean (0 residual). Cost ≈ $0.25. Full report: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r1.md` in the sandbox worktree.
+
+- T-8b retry (blocked on): (1) bake & upload a fresh controller binary including `a4c481e1` + `5fe36805`, bump `CONTROLLER_OBJECT` default in `provision-gcp-cluster.sh`; (2) add `plugin "nomad-driver-ch" { config {} }` stanza to `gcp-worker-startup.sh:185-188`. Both pre-reqs live in the sandbox worktree.
+
+- T-8b-stress: gated on a clean T-8b-smoke. Out of scope until smoke passes.
+
+- T-8b-cutover (wrapper removal): gated on T-8b-stress. Out of reach.
