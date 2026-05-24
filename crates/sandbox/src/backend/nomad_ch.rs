@@ -2891,9 +2891,26 @@ pub(crate) fn extract_failed_task_event_msgs(alloc: &serde_json::Value) -> Vec<S
             // Cap each task's message at 2 KiB so a pathological
             // driver that emits a multi-MB error doesn't bloat
             // the wire envelope. Truncation is rare but bounded.
+            //
+            // r27-M2: byte-indexing `&trimmed[..PER_TASK_CAP]` would
+            // panic if the boundary lands mid-UTF-8 codepoint (e.g. a
+            // driver-emitted error containing a multi-byte char that
+            // straddles byte 2048). Mirror the canonical char-boundary
+            // decrement pattern from `wake_machine::sanitize_error_message`
+            // (the `is_char_boundary` loop at `wake_machine.rs:811`)
+            // so any input — including ones engineered to land a
+            // multi-byte char on the cap boundary — produces a valid
+            // `&str` slice. Cost: a handful of byte comparisons per
+            // truncation event (truncations are rare; the
+            // `extract_failed_task_event_msgs_caps_oversized_message`
+            // test is the only fixture that hits this path today).
             const PER_TASK_CAP: usize = 2048;
             let bounded: String = if trimmed.len() > PER_TASK_CAP {
-                format!("{}…(truncated)", &trimmed[..PER_TASK_CAP])
+                let mut end = PER_TASK_CAP;
+                while end > 0 && !trimmed.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…(truncated)", &trimmed[..end])
             } else {
                 trimmed.to_string()
             };
@@ -4572,7 +4589,80 @@ mod tests {
         );
     }
 
-    // ─── T-8b-stress-r3: Driver Failure preferred over Alloc Unhealthy ──
+    /// r27-M2: a driver-emitted error containing a multi-byte UTF-8
+    /// character that straddles the PER_TASK_CAP byte boundary must
+    /// NOT panic. Pre-fix, `&trimmed[..PER_TASK_CAP]` byte-indexed
+    /// without a char-boundary check; if the boundary landed
+    /// mid-codepoint the slice constructor would panic. The fix
+    /// mirrors `sanitize_error_message`'s `is_char_boundary`
+    /// decrement loop: walk down byte-by-byte until the boundary
+    /// lands on a valid char.
+    ///
+    /// Construction: build a body whose total byte length crosses
+    /// 2048 AND whose 2048th byte is the middle of a 3-byte UTF-8
+    /// codepoint (`€` = `\xE2\x82\xAC`). Specifically: 2047 ASCII
+    /// `X`s + `€` + filler. Byte 2048 is the SECOND byte of `€`'s
+    /// 3-byte encoding, which is NOT a char boundary. The cap must
+    /// decrement to 2047 (the start of `€`) and slice there.
+    #[test]
+    fn extract_failed_task_event_msgs_truncate_handles_multibyte_at_boundary() {
+        // 2047 ASCII filler so the next codepoint starts at byte 2047.
+        // Then `€` (3 bytes: E2 82 AC) occupies bytes 2047-2049, so
+        // byte 2048 lands MID-codepoint. Append enough trailing
+        // bytes to push total length well past PER_TASK_CAP so the
+        // truncation branch fires.
+        let mut body = "X".repeat(2047);
+        body.push('€'); // bytes 2047-2049
+        body.push_str(&"Y".repeat(1000)); // pad past the cap
+        // Sanity check the fixture: the boundary IS mid-codepoint.
+        assert!(
+            !body.is_char_boundary(2048),
+            "fixture must put a non-boundary at byte 2048; \
+             otherwise the test doesn't exercise the fix",
+        );
+        assert!(
+            body.len() > 2048,
+            "fixture must exceed PER_TASK_CAP so truncation fires",
+        );
+
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": body}
+                    ]
+                }
+            }
+        });
+        // The whole call would panic pre-fix at the `&trimmed[..2048]`
+        // line because byte 2048 is not a char boundary. Post-fix it
+        // succeeds and the slice ends at byte 2047 (the start of `€`).
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        // The output must contain the truncation sentinel.
+        assert!(
+            m.contains("…(truncated)"),
+            "expected truncation sentinel; got starts={:?}",
+            &m[..50.min(m.len())],
+        );
+        // The truncated body ends just before `€` (byte 2047), so the
+        // last non-sentinel character of the body is the ASCII `X`,
+        // never a partial codepoint. Confirm `€` is NOT in the
+        // pre-sentinel slice — if char-boundary decrement worked,
+        // the body cut at 2047 (well below 2049 where `€` ends).
+        let sentinel_at = m
+            .rfind("…(truncated)")
+            .expect("sentinel must be present");
+        let body_slice = &m[..sentinel_at];
+        // Body slice = "ch: " + 2047 X's. No `€` in there.
+        assert!(
+            !body_slice.contains('€'),
+            "decrement must have cut at 2047 (before €); got body containing €",
+        );
+    }
     //
     // The r3 regression: 47/47 CREATE failures surfaced as the generic
     // "Unhealthy because of failed task" envelope despite the v34 commit
