@@ -43,6 +43,31 @@
 // NOT under any allow-list prefix`; the rewriter failed-fast on
 // `disks[1]` (workspace) in r16, then on `disks[2]` (home) in r17.
 //
+// C-7-LT-9 (2026-05-23): smoke-r19 surfaced CH `--restore` aborting
+// at `CreateConsoleDevice(Os { code: 2, kind: NotFound, ... })`
+// because CH opens `serial.file` / `console.file` without `O_CREAT`.
+// The rewriter ALREADY retargets those fields from OLD alloc dir to
+// NEW task_dir (via rewriteSnapshotPath); the missing piece is that
+// the file does not yet exist in the NEW task_dir (it's freshly
+// created — the controller only stages snapshot artifacts there).
+//
+// Fix shape: rewriteConfigJSON now ALSO returns the list of post-
+// rewrite paths whose underlying file must exist before CH spawns
+// (PathFieldRuntimeFile kind only; the FsSocket is created at
+// runtime by virtiofsd and MUST NOT be pre-touched). The restore
+// branch then `touch`-creates each path with mode 0o640 before
+// spawning CH, mirroring the implicit guarantee the cold-boot path
+// relies on (CH's own `--serial file=...` flag opens with O_CREAT
+// on cold boot; the same path on restore is opened from the
+// snapshot's recorded config WITHOUT O_CREAT — see CH source
+// vmm/src/device_manager.rs CreateConsoleDevice).
+//
+// The bash wrapper at nomad-vm-wrapper.sh shares the same latent bug
+// (it never touches serial.log either) but happens to "work" today
+// because no cross-alloc restore is currently exercised through
+// the wrapper in CI; the Go driver path is the one smoke-r19
+// hit in production.
+//
 // Fix shape: a per-field allow-list keyed by the JSON field's *kind*:
 //
 //   - PathFieldRuntimeFile (serial.file, console.file): runtime files
@@ -386,6 +411,15 @@ func rewriteAndValidatePath(
 // Output:
 //   - rewritten bytes (json.Marshal output; compact, no trailing
 //     newline) on success.
+//   - runtimeFiles: post-rewrite absolute paths of `serial.file` /
+//     `console.file` (PathFieldRuntimeFile kind only). The caller
+//     MUST `touch`-create each path with mode 0o640 BEFORE spawning
+//     CH `--restore`; otherwise CH's CreateConsoleDevice call opens
+//     without O_CREAT and aborts with ENOENT (smoke-r19, C-7-LT-9).
+//     fs[*].socket paths are deliberately NOT returned — they're
+//     created at runtime by virtiofsd.
+//     The slice is nil/empty when the snapshot's config has no
+//     serial.file or console.file entries.
 //   - Err on malformed input (non-JSON, unexpected types at known
 //     keys) OR on any path that fails the per-field allow-list.
 func rewriteConfigJSON(
@@ -395,20 +429,25 @@ func rewriteConfigJSON(
 	subnetBaseOctet uint8,
 	sandboxID, userID string,
 	contentAddressedRoots []string,
-) ([]byte, error) {
+) ([]byte, []string, error) {
 	if len(orig) == 0 {
-		return nil, errors.New("ch: rewriteConfigJSON: empty input")
+		return nil, nil, errors.New("ch: rewriteConfigJSON: empty input")
 	}
 	if taskDir == "" {
-		return nil, errors.New("ch: rewriteConfigJSON: empty taskDir")
+		return nil, nil, errors.New("ch: rewriteConfigJSON: empty taskDir")
 	}
 
 	// We deliberately keep the document a generic map[string]any so
 	// any extra CH fields we don't care about round-trip unchanged.
 	var doc map[string]any
 	if err := json.Unmarshal(orig, &doc); err != nil {
-		return nil, fmt.Errorf("ch: rewriteConfigJSON: parse: %w", err)
+		return nil, nil, fmt.Errorf("ch: rewriteConfigJSON: parse: %w", err)
 	}
+
+	// runtimeFiles collects the post-rewrite paths the caller MUST
+	// pre-create before spawning CH `--restore`. See function-level
+	// comment (Output bullet) for the rationale.
+	var runtimeFiles []string
 
 	// disks: []map[string]any. Each entry MAY have a "path" string.
 	// C-7-LT-6 + C-7-LT-7: validated as PathFieldDisk (allow-list:
@@ -417,7 +456,7 @@ func rewriteConfigJSON(
 	if rawDisks, ok := doc["disks"]; ok && rawDisks != nil {
 		disks, ok := rawDisks.([]any)
 		if !ok {
-			return nil, fmt.Errorf("ch: rewriteConfigJSON: 'disks' is %T, want []any", rawDisks)
+			return nil, nil, fmt.Errorf("ch: rewriteConfigJSON: 'disks' is %T, want []any", rawDisks)
 		}
 		for i, d := range disks {
 			dm, ok := d.(map[string]any)
@@ -432,7 +471,7 @@ func rewriteConfigJSON(
 						ps, taskDir, sandboxID, userID, contentAddressedRoots,
 					)
 					if err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 					dm["path"] = rew
 				}
@@ -444,6 +483,10 @@ func rewriteConfigJSON(
 
 	// serial: map[string]any with optional "file" string. Always
 	// under task_dir (CH writes the in-guest console log there).
+	// C-7-LT-9: post-rewrite path is collected for pre-creation —
+	// CH `--restore` opens this path without O_CREAT and ENOENT-
+	// aborts on a NEW alloc's task_dir (which has never seen a
+	// cold-boot and therefore has no pre-existing serial.log).
 	if rawSerial, ok := doc["serial"]; ok && rawSerial != nil {
 		if sm, ok := rawSerial.(map[string]any); ok {
 			if fv, ok := sm["file"]; ok {
@@ -454,16 +497,19 @@ func rewriteConfigJSON(
 						fs, taskDir, sandboxID, userID, contentAddressedRoots,
 					)
 					if err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 					sm["file"] = rew
+					runtimeFiles = append(runtimeFiles, rew)
 				}
 			}
 			doc["serial"] = sm
 		}
 	}
 
-	// console: same shape as serial.
+	// console: same shape as serial. C-7-LT-9: same pre-creation
+	// contract as serial.file — CH's CreateConsoleDevice opens
+	// without O_CREAT on restore.
 	if rawConsole, ok := doc["console"]; ok && rawConsole != nil {
 		if cm, ok := rawConsole.(map[string]any); ok {
 			if fv, ok := cm["file"]; ok {
@@ -474,9 +520,10 @@ func rewriteConfigJSON(
 						fs, taskDir, sandboxID, userID, contentAddressedRoots,
 					)
 					if err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 					cm["file"] = rew
+					runtimeFiles = append(runtimeFiles, rew)
 				}
 			}
 			doc["console"] = cm
@@ -490,7 +537,7 @@ func rewriteConfigJSON(
 	if rawNet, ok := doc["net"]; ok && rawNet != nil {
 		nets, ok := rawNet.([]any)
 		if !ok {
-			return nil, fmt.Errorf("ch: rewriteConfigJSON: 'net' is %T, want []any", rawNet)
+			return nil, nil, fmt.Errorf("ch: rewriteConfigJSON: 'net' is %T, want []any", rawNet)
 		}
 		newTap := fmt.Sprintf("zsbx-nm-%d", vmIndex)
 		for i, n := range nets {
@@ -511,6 +558,13 @@ func rewriteConfigJSON(
 	// isn't backing the socket. Validated under task_dir (the only
 	// place a virtio-fs socket would legitimately live in a CH
 	// alloc).
+	//
+	// C-7-LT-9: deliberately NOT collected into runtimeFiles —
+	// virtiofsd owns the socket lifecycle and will create the path
+	// itself at bind() time. A pre-existing regular file would in
+	// fact REGRESS the wake (bind on an existing non-socket fails),
+	// so leaving fs[*].socket out of the pre-create list is the
+	// correct behaviour, not an oversight.
 	if rawFs, ok := doc["fs"]; ok && rawFs != nil {
 		if fsEntries, ok := rawFs.([]any); ok {
 			for i, e := range fsEntries {
@@ -526,7 +580,7 @@ func rewriteConfigJSON(
 							ss, taskDir, sandboxID, userID, contentAddressedRoots,
 						)
 						if err != nil {
-							return nil, err
+							return nil, nil, err
 						}
 						em["socket"] = rew
 					}
@@ -544,7 +598,7 @@ func rewriteConfigJSON(
 
 	out, err := json.Marshal(doc)
 	if err != nil {
-		return nil, fmt.Errorf("ch: rewriteConfigJSON: marshal: %w", err)
+		return nil, nil, fmt.Errorf("ch: rewriteConfigJSON: marshal: %w", err)
 	}
-	return out, nil
+	return out, runtimeFiles, nil
 }

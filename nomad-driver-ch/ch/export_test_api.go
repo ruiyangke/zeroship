@@ -132,6 +132,14 @@ func CallRealTeardownTap(tapName string) error {
 // C-7-LT-7 signature: adds userID to drive the per-user-home allow-
 // list entry. Pass "" to disable that slot (mismatches a user-home
 // path → rejected, just like pre-C-7-LT-7 behaviour).
+//
+// C-7-LT-9 signature: now returns a second value, runtimeFiles —
+// the post-rewrite absolute paths of `serial.file` / `console.file`
+// that the restore branch MUST pre-create before spawning CH.
+// Tests that only care about the rewritten bytes can ignore the
+// second return value; the new
+// TestRewriteRestoreConfigPaths_RuntimeFilesCollected tests
+// exercise the contract.
 func RewriteConfigJSON(
 	orig []byte,
 	taskDir string,
@@ -139,7 +147,7 @@ func RewriteConfigJSON(
 	subnetBaseOctet uint8,
 	sandboxID, userID string,
 	contentAddressedRoots []string,
-) ([]byte, error) {
+) ([]byte, []string, error) {
 	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet, sandboxID, userID, contentAddressedRoots)
 }
 

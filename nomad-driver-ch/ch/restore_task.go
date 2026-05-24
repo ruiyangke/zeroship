@@ -353,12 +353,45 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	if p.config != nil {
 		contentRoots = p.config.ContentAddressedRootfsRoots
 	}
-	rewritten, err := rewriteConfigJSON(origConfig, runDir, driverConfig.VMIndex, base, driverConfig.SandboxId, driverConfig.UserId, contentRoots)
+	rewritten, runtimeFiles, err := rewriteConfigJSON(origConfig, runDir, driverConfig.VMIndex, base, driverConfig.SandboxId, driverConfig.UserId, contentRoots)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: rewrite config: %w", err)
 	}
 	if err := os.WriteFile(rewrittenConfigPath, rewritten, 0o600); err != nil {
 		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: write rewritten config %s: %w", rewrittenConfigPath, err)
+	}
+
+	// C-7-LT-9 (smoke-r19): pre-create each runtime file the rewriter
+	// flagged. CH `--restore` opens `serial.file` / `console.file`
+	// without `O_CREAT`; on a NEW alloc those paths point at the
+	// freshly-created NEW task_dir where the file does not yet exist
+	// (the prior alloc's serial.log lived at the OLD task_dir, which
+	// is unreachable). Without this step CH aborts at
+	// CreateConsoleDevices(... NotFound ...) before VmBoot — the
+	// smoke-r19 stderr the diagnostic loop captured.
+	//
+	// Mode 0o640: owner read/write, group read, world none. Matches
+	// the bash wrapper's umask defaults (its `--serial file=...`
+	// argument creates the same mode through CH on cold-boot). The
+	// file ownership is whatever uid/gid the driver runs as
+	// (typically root in production); the in-guest serial sink
+	// inherits that on open.
+	//
+	// Best-effort fsync NOT required: the file just needs to exist
+	// at CH's open() call; durability across host crash mid-restore
+	// is irrelevant (restore re-runs from the snapshot artifact).
+	//
+	// O_TRUNC included so a re-attempt of a previously-failed restore
+	// starts with an empty log rather than appending to whatever
+	// half-written content a prior failed spawn dribbled in.
+	for _, path := range runtimeFiles {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: pre-create runtime file %s: %w", path, err)
+		}
+		if err := f.Close(); err != nil {
+			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: close runtime file %s: %w", path, err)
+		}
 	}
 
 	// Step 3: tap setup. Same per-VM /30 plumbing as cold-boot. The

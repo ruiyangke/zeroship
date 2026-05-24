@@ -133,7 +133,7 @@ func TestRewriteConfigJSON_RewritesDiskPaths(t *testing.T) {
 	input := snapshotConfigFixture(srcAllocDir)
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
 
-	out, err := ch.RewriteConfigJSON(input, newTaskDir, 7, 99, "", "", nil)
+	out, _, err := ch.RewriteConfigJSON(input, newTaskDir, 7, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRewriteConfigJSON_RewritesNetTap(t *testing.T) {
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
 	newVMIndex := uint16(42)
 
-	out, err := ch.RewriteConfigJSON(input, newTaskDir, newVMIndex, 99, "", "", nil)
+	out, _, err := ch.RewriteConfigJSON(input, newTaskDir, newVMIndex, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestRewriteConfigJSON_PreservesMemoryRangesRef(t *testing.T) {
 	}
 
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
-	out, err := ch.RewriteConfigJSON(seeded, newTaskDir, 7, 99, "", "", nil)
+	out, _, err := ch.RewriteConfigJSON(seeded, newTaskDir, 7, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestRewriteConfigJSON_RejectsMalformedInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ch.RewriteConfigJSON(tc.in, "/opt/nomad/data/alloc/x/y/local", 1, 99, "", "", nil)
+			_, _, err := ch.RewriteConfigJSON(tc.in, "/opt/nomad/data/alloc/x/y/local", 1, 99, "", "", nil)
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -314,7 +314,7 @@ func TestRewriteRestoreConfigPaths_AllPathFieldsRewritten(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 7, 99, "", "", nil)
+	out, _, err := ch.RewriteConfigJSON(in, newTaskDir, 7, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestRewriteRestoreConfigPaths_PreservesNonPathFields(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+	out, _, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestRewriteRestoreConfigPaths_RejectsPathOutsideAllocPrefix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+			_, _, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 			if err == nil {
 				t.Fatalf("expected RewriteConfigJSON to reject %s, got nil error", tc.name)
 			}
@@ -513,7 +513,7 @@ func TestRewriteRestoreConfigPaths_RejectsParentTraversal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+			_, _, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 			if err == nil {
 				t.Fatalf("expected RewriteConfigJSON to reject path %q, got nil", tc.path)
 			}
@@ -538,7 +538,7 @@ func TestRewriteRestoreConfigPaths_HandlesMissingOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+	out, _, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON (missing-optional-fields): %v", err)
 	}
@@ -1528,7 +1528,7 @@ func TestRewriteRestoreConfigPaths_PreservesPersistentWorkspace(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
+	out, _, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -1573,7 +1573,7 @@ func TestRewriteRestoreConfigPaths_DifferentiatesDiskFromSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
+	out, _, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
 	if err != nil {
 		t.Fatalf("disk-under-prefix + serial-under-task_dir should pass: %v", err)
 	}
@@ -1595,7 +1595,7 @@ func TestRewriteRestoreConfigPaths_DifferentiatesDiskFromSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
+	_, _, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
 	if err == nil {
 		t.Fatal("serial.file under per-sandbox prefix accepted; runtime-file kind not enforced")
 	}
@@ -1724,7 +1724,7 @@ func TestRewriteRestoreConfigPaths_AcceptsUserHomeAndSandboxAndTaskDir(t *testin
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, userID, nil)
+	out, _, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, userID, nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -1760,6 +1760,264 @@ func TestUserHomePrefixForTest(t *testing.T) {
 	}
 	if got := ch.UserHomePrefixForTest(""); got != "" {
 		t.Errorf("UserHomePrefixForTest(\"\") = %q, want empty (signals per-user slot disabled)", got)
+	}
+}
+
+// -- C-7-LT-9 runtime-file retarget + pre-create tests ---------------
+//
+// Smoke-r19 caught CH `--restore` aborting at
+// `CreateConsoleDevices(... NotFound ...)`: the snapshot's
+// serial.file pointed at the OLD alloc's task_dir (because the
+// snapshot was captured during a prior alloc's lifetime), the
+// rewriter retargeted it to the NEW task_dir, but the NEW task_dir
+// is freshly created and has no serial.log yet — CH opens without
+// O_CREAT, ENOENT, abort. Fix: rewriter ALSO returns the list of
+// runtime-file paths the caller must pre-create, restore branch
+// touches them before spawning CH.
+
+// TestRewriteRestoreConfigPaths_RetargetsSerialFile pins that
+// `serial.file` is rewritten from the OLD alloc dir to the NEW
+// task_dir. The rewriter ALREADY did this pre-C-7-LT-9 (the bug
+// was missing pre-create, not missing retarget); this test is a
+// regression pin so a future refactor that drops the retarget
+// surfaces here at test time rather than at the next cluster smoke.
+func TestRewriteRestoreConfigPaths_RetargetsSerialFile(t *testing.T) {
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	doc := map[string]any{
+		"serial": map[string]any{"file": srcAlloc + "/serial.log"},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+
+	out, runtimeFiles, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantSerial := newTaskDir + "/serial.log"
+	if s := got["serial"].(map[string]any); s["file"] != wantSerial {
+		t.Errorf("serial.file = %v, want %v (retarget from %s)", s["file"], wantSerial, srcAlloc)
+	}
+	// And the rewritten serial path must appear in runtimeFiles so the
+	// caller knows to pre-create it.
+	if !containsString(runtimeFiles, wantSerial) {
+		t.Errorf("runtimeFiles = %v, want to contain %q (C-7-LT-9 pre-create signal)", runtimeFiles, wantSerial)
+	}
+}
+
+// TestRewriteRestoreConfigPaths_RetargetsConsoleFile is the symmetric
+// pin for console.file. Same retarget contract as serial.file; same
+// pre-create requirement (CH's CreateConsoleDevice opens both without
+// O_CREAT on restore).
+func TestRewriteRestoreConfigPaths_RetargetsConsoleFile(t *testing.T) {
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	doc := map[string]any{
+		"console": map[string]any{"file": srcAlloc + "/console.log"},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+
+	out, runtimeFiles, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantConsole := newTaskDir + "/console.log"
+	if c := got["console"].(map[string]any); c["file"] != wantConsole {
+		t.Errorf("console.file = %v, want %v (retarget from %s)", c["file"], wantConsole, srcAlloc)
+	}
+	if !containsString(runtimeFiles, wantConsole) {
+		t.Errorf("runtimeFiles = %v, want to contain %q (C-7-LT-9 pre-create signal)", runtimeFiles, wantConsole)
+	}
+}
+
+// TestRewriteRestoreConfigPaths_FsSocketRetargeted_NotPreCreated pins
+// the per-kind asymmetry: fs[*].socket IS retargeted to the new
+// task_dir (so post-rewrite paths are alloc-scoped) but is NOT
+// returned in runtimeFiles. Pre-creating a virtio-fs socket as a
+// regular file would in fact REGRESS the wake (virtiofsd's bind()
+// on an existing non-socket inode fails with EADDRINUSE), so this
+// asymmetry is the correct behaviour, not an oversight.
+func TestRewriteRestoreConfigPaths_FsSocketRetargeted_NotPreCreated(t *testing.T) {
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	doc := map[string]any{
+		"fs": []any{
+			map[string]any{"socket": srcAlloc + "/vfs.sock"},
+		},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+
+	out, runtimeFiles, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantSock := newTaskDir + "/vfs.sock"
+	fs := got["fs"].([]any)
+	if f0 := fs[0].(map[string]any); f0["socket"] != wantSock {
+		t.Errorf("fs[0].socket = %v, want %v (retarget)", f0["socket"], wantSock)
+	}
+	// And critically: fs[*].socket MUST NOT appear in runtimeFiles —
+	// virtiofsd owns the socket lifecycle, pre-creating as a regular
+	// file would regress the wake.
+	if containsString(runtimeFiles, wantSock) {
+		t.Errorf("runtimeFiles = %v unexpectedly contains fs socket %q; virtiofsd owns the socket, driver must NOT pre-create", runtimeFiles, wantSock)
+	}
+}
+
+// TestRewriteRestoreConfigPaths_RuntimeFilesEmptyWhenNoLogs is the
+// negative pin: a snapshot config with neither serial.file nor
+// console.file (e.g. a hypothetical headless guest) returns an
+// empty/nil runtimeFiles slice. The restore branch's pre-create
+// loop is then a no-op, which is the correct behaviour.
+func TestRewriteRestoreConfigPaths_RuntimeFilesEmptyWhenNoLogs(t *testing.T) {
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	// Just disks; no serial, no console.
+	doc := map[string]any{
+		"disks": []any{map[string]any{"path": srcAlloc + "/rootfs.img"}},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	_, runtimeFiles, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	if len(runtimeFiles) != 0 {
+		t.Errorf("runtimeFiles = %v, want empty when no serial/console present", runtimeFiles)
+	}
+}
+
+// TestStartTaskRestoreBranch_PreCreatesSerialLog is the integration
+// witness for C-7-LT-9 at the call site: after StartTask returns on
+// the restore branch, the rewritten serial.file path MUST exist on
+// disk under the new task_dir. Pre-C-7-LT-9 the file did not exist
+// and CH `--restore` ENOENT-aborted at CreateConsoleDevices; the
+// pin guards against a future regression that drops the pre-create
+// step.
+func TestStartTaskRestoreBranch_PreCreatesSerialLog(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+
+	// runDir is taskDir/local (same convention as
+	// TestStartTaskRestore_RewritesConfigBeforeCHSpawn). The fixture's
+	// serial.file post-rewrite must point at runDir/serial.log AND that
+	// file must exist on disk pre-CH-spawn.
+	runDir := filepath.Join(taskDir, "local")
+	serialPath := filepath.Join(runDir, "serial.log")
+	st, err := os.Stat(serialPath)
+	if err != nil {
+		t.Fatalf("serial.log not pre-created at %s: %v (C-7-LT-9 pre-create missing)", serialPath, err)
+	}
+	if st.IsDir() {
+		t.Errorf("serial.log at %s is a dir, want regular file", serialPath)
+	}
+	// Mode 0o640: owner rw, group r, world none. Pin so a future
+	// loosen-the-mode change surfaces here.
+	if mode := st.Mode().Perm(); mode != 0o640 {
+		t.Errorf("serial.log mode = %#o, want %#o", mode, 0o640)
+	}
+}
+
+// TestStartTaskRestoreBranch_PreCreatesConsoleLog is the symmetric
+// integration witness for console.file pre-creation. The snapshot
+// fixture in this file uses `console: {mode: Off}` (no file), so we
+// build a tailored fixture that DOES carry console.file, stage it
+// fresh, and assert the post-StartTask filesystem state.
+func TestStartTaskRestoreBranch_PreCreatesConsoleLog(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	// Build a fixture with BOTH serial.file and console.file so we
+	// can witness both pre-create branches in one shot, then narrow
+	// the assertion to console.log here.
+	docMap := map[string]any{
+		"cpus":   map[string]any{"boot_vcpus": 2, "max_vcpus": 2},
+		"memory": map[string]any{"size": 268435456, "shared": true},
+		"payload": map[string]any{
+			"kernel":  "/opt/zsbx/vmlinuz",
+			"cmdline": "console=ttyS0 root=/dev/vda",
+		},
+		"disks": []any{
+			map[string]any{"path": srcAlloc + "/rootfs.img"},
+		},
+		"net": []any{
+			map[string]any{"tap": "zsbx-nm-3", "mac": "12:34:56:78:9b:03"},
+		},
+		"serial":  map[string]any{"mode": "File", "file": srcAlloc + "/serial.log"},
+		"console": map[string]any{"mode": "File", "file": srcAlloc + "/console.log"},
+	}
+	cfgBytes, err := json.Marshal(docMap)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	staged := stageSnapshotDir(t, cfgBytes)
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+
+	runDir := filepath.Join(taskDir, "local")
+	consolePath := filepath.Join(runDir, "console.log")
+	st, err := os.Stat(consolePath)
+	if err != nil {
+		t.Fatalf("console.log not pre-created at %s: %v (C-7-LT-9 pre-create missing)", consolePath, err)
+	}
+	if st.IsDir() {
+		t.Errorf("console.log at %s is a dir, want regular file", consolePath)
+	}
+	if mode := st.Mode().Perm(); mode != 0o640 {
+		t.Errorf("console.log mode = %#o, want %#o", mode, 0o640)
+	}
+	// Serial must ALSO be pre-created in the same call (defence-in-depth
+	// against a future bug where the pre-create loop bails after the
+	// first entry).
+	serialPath := filepath.Join(runDir, "serial.log")
+	if _, err := os.Stat(serialPath); err != nil {
+		t.Errorf("serial.log not pre-created alongside console.log at %s: %v", serialPath, err)
 	}
 }
 
