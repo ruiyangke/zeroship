@@ -1436,10 +1436,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Action**: pub→pub(crate).
 - **Resolution**: 00161cea — 2-token demotion `pub fn` → `pub(crate) fn` on both builders. Cargo check clean; tests 332/332.
 
-### [R14-API2] (MINOR, api-surface-r14) Retry-After header docstring vs response builder drift
+### [R14-API2] (MINOR, api-surface-r14) Retry-After header docstring vs response builder drift — **CLOSED**
 - **Source**: 2026-05-25 api-surface-r14
 - **Files**: docstring at `restore_handler.rs:58` documents `(Retry-After)` on 503 vm_index_unavailable; builder at `admin_handlers.rs:1157-1163` doesn't emit it.
 - **Action**: either emit the header (~5-line change) or fix the docstring. With C-4 in production, clients reading the docstring will believe they can drive backoff off the header.
+- **Resolution**: docstring updated to reflect async-wake contract — parenthetical changed to "no Retry-After under async-wake contract; clients poll `GET /wake/{id}`". 6-round carry resolved.
 
 ### [R11-API1] expansion: 3 orphan metrics.rs test accessors (was 2) (CLOSED at `370fdbba`)
 - **New site**: `crates/sandbox/src/metrics.rs:217` `takeover_unreachable_value` (note: original entry said sandbox-agent, actual path is sandbox)
@@ -1744,3 +1745,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ## Round-18 R18-I1 closure (2026-05-25 — fresh-insert fixture assertions)
 
 - [R18-I1] **CLOSED at `531db5c3`** — 10 call sites in `crates/sandbox/tests/sandbox_pg_e2e.rs` that called `insert_wake_job` and silently discarded the `InsertWakeJobOutcome` return value are now wrapped in `assert!(matches!(..., InsertWakeJobOutcome::Inserted))`. The `make_machine` test fixture (the primary reported site) gets the most detailed assertion message so a `Replay(...)` result (indicating a stale non-terminal row from a prior test leaked into the schema) surfaces as an explicit test failure instead of silently driving the wrong `wake_id`. Added `InsertWakeJobOutcome` to the `use zeroship_sandbox::db::...` import in `wake_machine_e2e` sub-module (was missing). No intentional Replay-path fixture exists; all 10 sites expect `Inserted`. Cargo build clean; 81 pg-gated tests compile and run as `ignored` (no local pg).
+
+## Round-18/19 doc+visibility fixer (2026-05-25 — R14-API2/R18-API2/r19-A4)
+
+- [R18-API2] **CLOSED** — `RealRestoreBackend::with_wake_response_mode` demoted from `pub` to `pub(crate)` to match sibling `with_shared_allocator`. Both callers (`restore_handler.rs` doc-reference comments + `lib.rs:785`) are in-crate. Cargo build clean; 414/414 lib tests unchanged.
+
+- [r19-A4] **CLOSED** — `VmIndexRetryPolicy::from_host_fence_timeout` C-8b doc block (lines ~231-246) replaced with NON-NORMATIVE annotation and the empirically correct teardown model from the smoke-r13 retrospective: two distinct paths (agent-dies → 2 connect-misses → slot released promptly; agent-hangs → `host_fence_timeout` expires → slot released or leaked) replace the incorrect "Nomad purge tail ~fence-shaped" composition model. The 2× factor is retained as a conservative safety margin, not a model. The hard-coded 30 s fence in `nomad_ch.rs` is noted. No behavior change; 414/414 tests unchanged.
+
+- [R14-API2] **CLOSED** (6-round carry) — see entry above at the r14-round section.

@@ -55,7 +55,7 @@ pub struct RestoreOutcome {
 ///
 /// - `StateMismatch`        → 409 `state_mismatch`
 /// - `FeatureDisabled`      → 501 `feature_disabled`
-/// - `VmIndexUnavailable`   → 503 `vm_index_unavailable` (Retry-After)
+/// - `VmIndexUnavailable`   → 503 `vm_index_unavailable` (no Retry-After under async-wake contract; clients poll `GET /wake/{id}`)
 /// - `SnapshotCorrupt`      → 500 `snapshot_corrupt` (CAS to suspect)
 /// - `Backend` / `Database` → 500 (controller-internal)
 /// - `NotFound`             → 404
@@ -232,16 +232,24 @@ impl VmIndexRetryPolicy {
     /// ceiling originally used `host_fence_timeout_secs` directly,
     /// implicitly assuming `teardown_wall_time ≈ fence_timeout`. Smoke-r10
     /// empirically measured the *full* `stop()` pipeline at
-    /// **60.164 s for `host_fence=30 s`** — exactly 2× the fence. The
-    /// stop path is: agent `/shutdown` → host-fence wait (`wait_for_agent_silent`,
-    /// up to `fence_timeout`, often timing out because the agent's HTTP
-    /// listener takes >fence to actually close) → Nomad job purge tail
-    /// (~`fence_timeout`-shaped) → cleanup → `stop: complete`. The
-    /// `wait_for_agent_silent` 2-consecutive-misses contract is one
-    /// contributor; the Nomad purge tail is the other. Empirically the
-    /// two compose to a 2× ratio at the fence values we run in
-    /// production. We therefore baseline the fence-derived ceiling on
-    /// `teardown_estimate = 2 * host_fence_timeout_secs`. The MIN-of-two
+    /// **60.164 s for `host_fence=30 s`** — exactly 2× the fence.
+    ///
+    /// **NON-NORMATIVE teardown model (see smoke-r13 retrospective for
+    /// empirical ground truth)**: the 2× ratio at fence=30 s turned out
+    /// to be a numeric coincidence, not a compositional model. The actual
+    /// teardown semantics have two distinct paths:
+    ///   - **Agent-dies path**: agent socket closes → `wait_for_agent_silent`
+    ///     fires on 2 consecutive connect-misses (fast) → `fence_passed=true`
+    ///     → slot released promptly.
+    ///   - **Agent-hangs path**: `wait_for_agent_silent` probes time out
+    ///     for the full `host_fence_timeout` (hard-coded 30 s at
+    ///     `nomad_ch.rs`) → `fence_passed=true` → slot released; any
+    ///     residual hang past that leaks the slot (now tracked via
+    ///     `sandbox_vm_index_leaks_total`).
+    /// The Nomad purge tail is NOT a significant second contributor at
+    /// production fence values; the 2× factor was a coincidence. We
+    /// retain `teardown_estimate = 2 * host_fence_timeout_secs` as a
+    /// conservative safety margin, not as a model. The MIN-of-two
     /// design from C-8a still structurally prevents the C-7 silent
     /// cancellation regardless of how this estimate is tuned.
     ///
@@ -2020,7 +2028,7 @@ impl RealRestoreBackend {
     /// async too — racing the empirical 60.166 s source-teardown
     /// wall-time and surfacing as `vm_index_unavailable` even though
     /// the budget was governed by a deadline that no longer applied.
-    pub fn with_wake_response_mode(
+    pub(crate) fn with_wake_response_mode(
         mut self,
         mode: crate::config::WakeResponseMode,
     ) -> Self {
