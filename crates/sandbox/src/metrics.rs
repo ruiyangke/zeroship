@@ -120,6 +120,24 @@ static SANDBOX_CORRUPT_ID: AtomicU64 = AtomicU64::new(0);
 /// This counter is the data backing that gate.
 static WAKE_SYNC_DEPRECATED: AtomicU64 = AtomicU64::new(0);
 
+/// `sandbox_vm_index_leaks_total{reason="host_fence_timeout"}`. Counter
+/// — increments each time `stop_inner` leaks a `vm_index` because the
+/// host-fence (`wait_for_agent_silent`) failed to clear within the
+/// configured `host_fence_timeout_secs` budget. C-7-LT-2-PR2: the
+/// upstream probe wedge in `wait_for_agent_silent` is fixed in PR1; this
+/// counter is the defense-in-depth observability surface so an operator
+/// can `rate(...)` slot-leak events and alert if the rate exceeds the
+/// baseline (a healthy cluster should see this counter near zero).
+///
+/// Reasons currently emitted:
+/// - `host_fence_timeout` — `wait_for_agent_silent` returned `Err` at
+///   the deadline (`job_confirmed_gone=true && fence_passed=false`).
+/// - `wait_failed` — `wait_for_job_gone` failed (Nomad purge didn't
+///   complete); the slot is leaked because we can't prove the job is
+///   gone, so reusing the tap would risk a live-IP collision.
+static VM_INDEX_LEAKS_HOST_FENCE_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+static VM_INDEX_LEAKS_WAIT_FAILED: AtomicU64 = AtomicU64::new(0);
+
 // ────────────────────────────────────────────────────────────────────
 // Gauges
 // ────────────────────────────────────────────────────────────────────
@@ -221,6 +239,46 @@ pub fn inc_wake_sync_deprecated() {
 #[doc(hidden)]
 pub fn wake_sync_deprecated_value() -> u64 {
     WAKE_SYNC_DEPRECATED.load(Ordering::Relaxed)
+}
+
+/// Bump `sandbox_vm_index_leaks_total{reason}` once. C-7-LT-2-PR2
+/// defense-in-depth observability for slot-leak events. `reason` MUST
+/// be one of the documented variants (`"host_fence_timeout"` or
+/// `"wait_failed"`); any other string is silently coerced to the
+/// `host_fence_timeout` bucket to avoid an unlabelled drop, and a
+/// WARN log fires on the unrecognised label so call-sites that
+/// invented a new reason without updating this map surface
+/// immediately.
+pub fn inc_vm_index_leak(reason: &'static str) {
+    match reason {
+        "host_fence_timeout" => {
+            VM_INDEX_LEAKS_HOST_FENCE_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+        }
+        "wait_failed" => {
+            VM_INDEX_LEAKS_WAIT_FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+        other => {
+            tracing::warn!(
+                target: "sandbox::teardown::leak",
+                reason = other,
+                "inc_vm_index_leak: unknown reason label; bucketing into host_fence_timeout"
+            );
+            VM_INDEX_LEAKS_HOST_FENCE_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Test-only accessor for the per-reason vm_index leak counter.
+/// Unknown labels return 0.
+#[doc(hidden)]
+pub fn vm_index_leak_value(reason: &'static str) -> u64 {
+    match reason {
+        "host_fence_timeout" => {
+            VM_INDEX_LEAKS_HOST_FENCE_TIMEOUT.load(Ordering::Relaxed)
+        }
+        "wait_failed" => VM_INDEX_LEAKS_WAIT_FAILED.load(Ordering::Relaxed),
+        _ => 0,
+    }
 }
 
 /// Test-only accessor for the takeover-orphan counter.
@@ -354,6 +412,41 @@ mod tests {
         inc_clock_rewind();
         inc_clock_rewind();
         assert_eq!(clock_rewind_value(), pre + 2);
+    }
+
+    /// C-7-LT-2-PR2 leak telemetry: per-reason counter monotonically
+    /// increases and the unknown-label fallback bucket logs + folds
+    /// into `host_fence_timeout` rather than silently dropping.
+    #[test]
+    fn vm_index_leak_counter_per_reason_monotonic() {
+        let pre_fence = vm_index_leak_value("host_fence_timeout");
+        let pre_wait = vm_index_leak_value("wait_failed");
+        inc_vm_index_leak("host_fence_timeout");
+        inc_vm_index_leak("host_fence_timeout");
+        inc_vm_index_leak("wait_failed");
+        assert!(
+            vm_index_leak_value("host_fence_timeout") >= pre_fence + 2,
+            "host_fence_timeout bucket must bump by 2"
+        );
+        assert!(
+            vm_index_leak_value("wait_failed") >= pre_wait + 1,
+            "wait_failed bucket must bump by 1"
+        );
+        // Unknown label folds into host_fence_timeout (operator-safe
+        // fallback) — guards against a future call-site adding a
+        // typo'd reason and silently dropping the bump.
+        let pre_unk = vm_index_leak_value("host_fence_timeout");
+        inc_vm_index_leak("a_made_up_reason_label");
+        assert!(
+            vm_index_leak_value("host_fence_timeout") >= pre_unk + 1,
+            "unknown reason must fold into host_fence_timeout"
+        );
+        // Unknown-label readback is always 0.
+        assert_eq!(
+            vm_index_leak_value("another_made_up_reason"),
+            0,
+            "unknown reason read must return 0"
+        );
     }
 
     /// C-7-LT-PR2 deprecation telemetry: counter monotonically

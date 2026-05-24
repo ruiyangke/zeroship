@@ -1142,7 +1142,13 @@ impl NomadCHBackend {
                 "sandbox/nomad-ch vm_index released"
             );
         } else if !job_confirmed_gone {
+            // C-7-LT-2-PR2 defense-in-depth: bump the per-reason leak
+            // counter so operators can `rate(sandbox_vm_index_leaks_total{
+            // reason="wait_failed"})` and alert on a slot-leak storm
+            // independently of the host_fence_timeout bucket.
+            crate::metrics::inc_vm_index_leak("wait_failed");
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 vm_index = sandbox.vm_index,
                 reason = "wait_failed",
                 sandbox_id = %sandbox_id,
@@ -1150,13 +1156,20 @@ impl NomadCHBackend {
                 "sandbox/nomad-ch vm_index leak"
             );
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 job = %sandbox.job_id,
                 vm_index = sandbox.vm_index,
                 "sandbox/nomad-ch stop: wait_for_job_gone failed; leaking vm_index to avoid tap collision (orphan-prune will reclaim on next boot)"
             );
         } else {
             // job_confirmed_gone but fence_err is Some.
+            // C-7-LT-2-PR2 defense-in-depth: bump the per-reason leak
+            // counter so smoke-r14 has a quantitative signal even when
+            // logs are sampled. A healthy cluster's rate(…{
+            // reason="host_fence_timeout"}) is near zero post-PR1.
+            crate::metrics::inc_vm_index_leak("host_fence_timeout");
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 vm_index = sandbox.vm_index,
                 reason = "host_fence_timeout",
                 sandbox_id = %sandbox_id,
@@ -1164,6 +1177,7 @@ impl NomadCHBackend {
                 "sandbox/nomad-ch vm_index leak"
             );
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 job = %sandbox.job_id,
                 vm_index = sandbox.vm_index,
                 error = %fence_err.as_deref().unwrap_or("<unknown>"),
