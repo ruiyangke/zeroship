@@ -1358,11 +1358,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: chars/rev/take/rev dance for last-8-chars + Linux `pr_set_name` truncates at 15 chars (the tail is invisible anyway). Doc comment misleads.
 - **Fix**: replaced the 4-pass char-walk + 2 fresh `String` allocs with `&s[s.len().saturating_sub(8)..]` (ASCII-safe — sandbox_id is hex per B24-FOLLOWUP). Doc comment now explicitly notes the 15-char `pr_set_name` truncation: the tail is grep-correlatable in logs but NOT visible in `ps`/`top -H`. 332/332 tests unchanged.
 
-### [R14-Q4] (MINOR) C-4 `VmIndexRetryPolicy::default` doc off-by-one
+### [R14-Q4] (CLOSED at `c3edf968`, MINOR) C-4 `VmIndexRetryPolicy::default` doc off-by-one
 - **Source**: 2026-05-25 code-quality-r14
 - **File**: `crates/sandbox/src/restore_handler.rs::VmIndexRetryPolicy::default`
-- **Symptom**: doc says "60 × 2 s = ~120 s" but actual sleep budget is `(60-1) × 2 s = 118 s` (first attempt has no sleep before it).
-- **Action**: 1-line doc-fix.
+- **Symptom**: doc said "60 × 2 s = ~120 s" but actual sleep budget is `(60-1) × 2 s = 118 s` (first attempt has no sleep before it). C-7 fix preserved the off-by-one in the new "25×2=~50 s" wording (actual: `(25-1) × 2 s = 48 s`).
+- **Fix**: doc comments now state 48 s (not 50 s) for the default budget and 118 s (not 120 s) for the pre-C-7 60-attempt budget. Affects the VmIndexRetryPolicy doc block, the Default impl doc, the trait-method doc, and the in-function comment at the wake call site. Closed in the same commit as R14-A6.
 
 ### [R14-P1] (INFO, performance-r14) C-4 wake-path tail latency
 - **Source**: 2026-05-25 performance-r14
@@ -1398,6 +1398,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R11-API1 expanded] CLOSED at `370fdbba` — 3 orphan #[doc(hidden)] pub fns deleted from sandbox/src/metrics.rs (path correction: were in sandbox not sandbox-agent)
 - [C-6] CLOSED at `91ce9be5` — detached teardown moved off ntex-worker compio runtime onto a dedicated OS thread + short-lived compio runtime (mirrors C-3 pattern). Root cause: runtime starvation by the detached teardown's 60s `/shutdown` ureq blocker (whose `spawn_blocking` wrap inside was insufficient — the outer future itself was on the worker runtime). +75 / −14 LOC. 332 pass unchanged.
 - [R14-Q3 + R14-P2] CLOSED at `9afd0986` — snap-l2-upload thread-name builder simplified from 4-pass char-walk + 2 String allocs to single byte-slice (`&s[s.len().saturating_sub(8)..]`, ASCII-safe per B24-FOLLOWUP). Doc comment now calls out the 15-char `pr_set_name` truncation explicitly (tail is grep-correlatable in logs but NOT visible in `ps`/`top -H`). +19 / −12 LOC. 332 pass unchanged.
+- [R14-A6 + R14-Q4] CLOSED at `c3edf968` — `VmIndexRetryPolicy::from_host_fence_timeout(secs)` added; `RealRestoreBackend` overrides `vm_index_retry_policy` to call it. Wake budget now derived from `cfg.host_fence_timeout_secs - 10 s headroom` (no more second hard-coded constant). `Default` preserved at 25×2s=48s as the C-7 test-contract anchor + stub fallback. Doc off-by-one swept (48 s not 50 s, 118 s not 120 s). +4 tests including a regression-pin on the wake call site. 332 → 336 pass. +234 / −21 LOC.
 
 ---
 
@@ -1427,9 +1428,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `restore_handler.rs:568, 574, 638, 923, 954` + `snapshot_handler.rs:355`
 - **Symptom**: Same C-6 shape (sync I/O on shared runtime), smaller amplitude. Audit + wrap in spawn_blocking where appropriate.
 
-### [R14-A6] (MINOR, architecture-r14) VmIndexRetryPolicy::default magic 60×2s
+### [R14-A6] (CLOSED at `c3edf968`, MINOR, architecture-r14) VmIndexRetryPolicy::default magic 60×2s
 - **Source**: 2026-05-25 architecture-r14
-- **Action**: derive from `cfg.host_fence_timeout_secs` instead of hard-coded constants. Also closes R14-Q4 doc off-by-one.
+- **Symptom**: C-7 hard-coded `max_attempts=25, interval=2s` for the wake-retry budget. A future bump to `cfg.host_fence_timeout_secs` (the way cad098e6 already did 30→120) would silently desync the two constants — wake budget no longer envelopes the fence-clear window.
+- **Fix**: added `VmIndexRetryPolicy::from_host_fence_timeout(secs)` that derives `max_attempts = (secs.saturating_sub(10)) / 2 + 1` (10 s client-deadline headroom, 2 s C-7 interval; +1 accounts for the zero-sleep first attempt). `RealRestoreBackend` overrides `vm_index_retry_policy` to call this, so the production wake path picks up any future fence-config bump automatically. `Default` preserved at 25×2s=48 s as the test contract anchor + fallback for stubs without a cfg. Also closes R14-Q4 doc off-by-one (48 s, not 50 s).
+- **Tests**: +4 (`r14a6_policy_from_cfg_respects_host_fence_timeout`, `r14a6_policy_from_cfg_short_timeout`, `r14a6_policy_from_cfg_zero_fence_still_attempts_once`, `r14a6_real_backend_derives_policy_from_cfg_host_fence_timeout` — the last is a regression-pin on the wake call site that catches an accidental fallback to `Default`). 332→336 pass.
 
 ### [R14-C1] (CRITICAL, concurrency-r14) sweep.rs:563 idle-eviction is sibling-C-6 site (commit-message MISLABELED safe)
 - **Source**: 2026-05-25 concurrency-r14
