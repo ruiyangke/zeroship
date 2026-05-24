@@ -36,7 +36,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::crud::dispatch_unmask_field;
+use crate::crud::{dispatch_set_mask_policy_field, dispatch_unmask_field};
 use crate::orchestrator::register_model::register_model_dispatch;
 use crate::orchestrator::transaction::begin_transaction_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
@@ -264,13 +264,41 @@ impl Db {
         start_replication_consumer_dispatch(scope, app_id).into()
     }
 
+    /// `db.setMaskPolicy(policy)` — **P5.5 PR 5**. Persist the per-app
+    /// mask policy declared via `defineMaskPolicy()` and refresh the
+    /// in-process cache write-through. The flushed policy is the
+    /// authoritative source for the unmask authorization path
+    /// (`crud::unmask::check_unmask_authorization`); without it, the
+    /// PR 4 default-deny stub applies (`auto` actor allowed; everyone
+    /// else denied).
+    ///
+    /// `policy` is the canonical wire shape produced by
+    /// `defineMaskPolicy()`: `{ "<role>": ["<classification>", ...], … }`.
+    /// Validated structurally + against the six-classification
+    /// taxonomy in [`crate::crud::mask_policy::MaskPolicy::from_json`].
+    ///
+    /// Resolves with `{}` on success; rejects with the typed
+    /// `invalid_mask_policy_shape` / `invalid_mask_classification` /
+    /// `backend_unsupported` codes on failure.
+    #[v8_method]
+    #[v8_name = "setMaskPolicy"]
+    fn set_mask_policy<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        policy: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let policy_v = read_json_arg(scope, Some(policy));
+        Ok(dispatch_set_mask_policy_field(scope, &self.app_id, policy_v).into())
+    }
+
     /// `db.unmaskField(args)` — **P5.5 PR 4**. Round-trip a single
     /// `MaskedValue.unmask()` request through the platform: look up
     /// the column's mask + encryption metadata in the cached schema,
-    /// authorise the actor against the column's classification (PR 4
-    /// stub: default-deny outside `kind: "auto"`), SELECT + decrypt
-    /// (or SELECT plaintext for mask-only columns), emit a
-    /// per-app audit row, and return `{ plaintext }`.
+    /// authorise the actor against the column's classification (P5.5
+    /// PR 5: per-app policy lookup, falling back to PR 4's default
+    /// deny when no policy is declared), SELECT + decrypt (or SELECT
+    /// plaintext for mask-only columns), emit a per-app audit row,
+    /// and return `{ plaintext }`.
     ///
     /// `args` shape (validated by `crud::unmask::parse_args`):
     /// ```js

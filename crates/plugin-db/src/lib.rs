@@ -383,6 +383,18 @@ pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json
     ctx_mut(|c| c.cache_schema(app_id, collection, schema));
 }
 
+/// **P5.5 PR 5 test helper**: clear the per-isolate mask-policy cache
+/// entry for `app_id`. Used by `tests/sqlite_integration.rs` to
+/// guarantee a clean slate between policy-driven unmask tests — the
+/// per-isolate thread-local cache is process-wide and would otherwise
+/// bleed state across test functions running on the same OS thread
+/// (the `--test-threads=1` scenario, and also single-runtime tests).
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
+    ctx_mut(|c| c.set_mask_policy_for_app(app_id, None));
+}
+
 /// **Test-only**: clear [`crate::context::IsolateDbContext::mig_lock`]
 /// for the current thread. Safe across test boundaries when an earlier
 /// test left the lock held.

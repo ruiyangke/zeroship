@@ -197,6 +197,19 @@ impl SqliteBackend {
     /// Switching to a bounded + overflow-to-resync channel is a PR 3+
     /// concern if production traffic surfaces the need (plan §10
     /// Q-P2-A).
+    /// **P5.5 PR 5** — accessor for the backend's filesystem root.
+    /// The mask-policy sidecar file (`mask_policies.json`) lives at
+    /// `<db_dir>/mask_policies.json`; the file's path is constructed
+    /// from this accessor by `crate::crud::mask_policy::persist_sqlite`
+    /// + `load_sqlite`.
+    ///
+    /// Exposed `pub(crate)` (NOT `pub`) so only the mask-policy module
+    /// reaches into the backend's filesystem layout — production
+    /// consumers route through `BackendHandle::Sqlite`.
+    pub(crate) fn db_dir(&self) -> &std::path::Path {
+        &self.db_dir
+    }
+
     /// **Test helper** (P2 PR 4) — open a [`crate::backend::BrokerPauseGuard`]
     /// for `app_id`. While the returned guard is bound, the SQLite CDC
     /// publisher drops every packet whose `app_id` matches; on drop

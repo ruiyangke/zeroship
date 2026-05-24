@@ -6,6 +6,10 @@ export { ValidationError, OptimisticLockError } from "./errors.js";
 export { withRetry, isOptimisticLockError } from "./with-retry.js";
 export type { WithRetryOptions } from "./with-retry.js";
 
+// P5.5 PR 5 — defineMaskPolicy(): per-app actor-role → classifications map.
+export { defineMaskPolicy } from "./policy.js";
+export type { MaskPolicy } from "./policy.js";
+
 // C1 / P8a — reactive queries (in-process broker)
 export { subscribe } from "./subscribe.js";
 export type { Subscription, SubscriptionEvent } from "./subscribe.js";

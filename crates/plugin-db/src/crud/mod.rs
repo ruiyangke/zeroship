@@ -64,6 +64,16 @@ pub(crate) mod unmask;
 #[cfg(feature = "test-helpers")]
 pub mod unmask;
 
+// **P5.5 PR 5** — `defineMaskPolicy()` storage + dispatcher + cache.
+// Same visibility pattern: integration tests reach into the helpers
+// via the `test-helpers` gate to drive `dispatch_set_mask_policy`
+// directly without standing up V8.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod mask_policy;
+#[cfg(feature = "test-helpers")]
+pub mod mask_policy;
+
+pub(crate) use mask_policy::dispatch_set_mask_policy_field;
 pub(crate) use unmask::dispatch_unmask_field;
 
 // ---------------------------------------------------------------------------

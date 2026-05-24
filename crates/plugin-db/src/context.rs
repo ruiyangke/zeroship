@@ -201,6 +201,22 @@ pub struct IsolateDbContext {
     /// is the raw schema JSON the SDK declared.
     schemas: HashMap<String, serde_json::Value>,
 
+    /// **P5.5 PR 5** — per-isolate, per-app mask-policy cache. Seeded
+    /// on first unmask attempt by reading durable storage (PG admin
+    /// schema or SQLite sidecar file); refreshed write-through by the
+    /// `setMaskPolicy` op when the SDK's `defineMaskPolicy()` flushes.
+    ///
+    /// `Some(policy)` — the app declared a policy; the unmask
+    /// authorisation path honours it.
+    /// `None` (entry missing) — no policy in scope on this isolate
+    /// yet. The unmask path then falls through to PR 4's default-deny
+    /// stub (`auto` actor allowed; everyone else denied).
+    ///
+    /// Keyed by `app_id`. The entry is never proactively evicted —
+    /// isolate lifetime is bounded by the LRU worker cache, so the
+    /// policy lives as long as the app is hot.
+    mask_policies: HashMap<String, crate::crud::mask_policy::MaskPolicy>,
+
     /// Backend handle wrapping the pool — Stage 8e-R2; promoted to
     /// the typed [`BackendHandle`] enum in P0 PR 5 (round-3 critic
     /// CRITICAL #3 closure; see `docs/proposals/db-system-design.md`
@@ -240,6 +256,7 @@ impl IsolateDbContext {
             mig_lock: None,
             running_consumers: HashSet::new(),
             schemas: HashMap::new(),
+            mask_policies: HashMap::new(),
             backend: None,
         }
     }
@@ -366,6 +383,44 @@ impl IsolateDbContext {
     ) -> Option<serde_json::Value> {
         let key = format!("{app_id}:{collection}");
         self.schemas.get(&key).cloned()
+    }
+
+    // ----- MASK_POLICIES (P5.5 PR 5) ---------------------------------
+
+    /// **P5.5 PR 5** — fetch the cached mask policy for `app_id`.
+    /// Returns `None` when the cache holds no entry for the app
+    /// (caller falls through to durable-storage load + cache install,
+    /// or to PR 4's default-deny stub on a miss).
+    pub(crate) fn mask_policy_for(
+        &self,
+        app_id: &str,
+    ) -> Option<crate::crud::mask_policy::MaskPolicy> {
+        self.mask_policies.get(app_id).cloned()
+    }
+
+    /// **P5.5 PR 5** — write-through cache install. `Some(policy)`
+    /// upserts; `None` clears the entry (used by tests + the
+    /// "no-policy-declared" path).
+    pub(crate) fn set_mask_policy_for_app(
+        &mut self,
+        app_id: &str,
+        policy: Option<crate::crud::mask_policy::MaskPolicy>,
+    ) {
+        match policy {
+            Some(p) => {
+                self.mask_policies.insert(app_id.to_string(), p);
+            }
+            None => {
+                self.mask_policies.remove(app_id);
+            }
+        }
+    }
+
+    /// **P5.5 PR 5** — `true` iff a mask-policy entry is cached for
+    /// `app_id`. Cheaper than `mask_policy_for` when callers only need
+    /// to gate the durable-storage load.
+    pub(crate) fn has_mask_policy(&self, app_id: &str) -> bool {
+        self.mask_policies.contains_key(app_id)
     }
 
     // ----- TX_CONN / TX_TOKEN / TX_TOKEN_COUNTER / AUTO_TX_OWNED ------

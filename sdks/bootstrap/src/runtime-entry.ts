@@ -78,6 +78,42 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
         );
         throw e;
       }
+
+      // **P5.5 PR 5** — flush the pending mask policy (declared via
+      // `defineMaskPolicy()` at app top-level) through the native
+      // `setMaskPolicy` op. Single shot at boot — re-declares after
+      // this point do not propagate to the platform until the next
+      // worker cold start. A failure here surfaces as a rejected
+      // module evaluation (same shape as the schema DDL failure
+      // above) so a creator's typo in `defineMaskPolicy({...})` is
+      // loud, not silent.
+      try {
+        const policyMod = await import("@zeroship/db/internal") as {
+          _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
+        };
+        const pending = typeof policyMod._flushPendingMaskPolicy === "function"
+          ? policyMod._flushPendingMaskPolicy()
+          : null;
+        if (pending) {
+          const setMaskPolicy = (envDb as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
+          if (typeof setMaskPolicy === "function") {
+            // Call via `.call(envDb, ...)` so the v8_class brand
+            // check sees the right receiver (mirrors the
+            // `registerModel` pattern in `installSchema`).
+            await (setMaskPolicy as (
+              this: typeof envDb,
+              p: Record<string, readonly string[]>,
+            ) => Promise<unknown>).call(envDb, pending);
+          }
+        }
+      } catch (e) {
+        const err = e as { message?: string };
+        console.error(
+          "[zeroship] mask policy flush failed:",
+          (err && err.message) ? err.message : String(e),
+        );
+        throw e;
+      }
     }
   }
 }

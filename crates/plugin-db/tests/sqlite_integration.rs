@@ -5078,3 +5078,336 @@ fn unmask_writes_audit_row_with_correct_classification() {
         );
     });
 }
+
+// ===========================================================================
+// P5.5 PR 5 — defineMaskPolicy + per-app policy storage + real authorization
+// ===========================================================================
+//
+// These tests exercise the policy-driven authorization path that replaces
+// PR 4's default-deny stub:
+//
+//   - `setMaskPolicy` persists to `<db_dir>/mask_policies.json` (atomic
+//     write through `mask_policies.json.tmp + rename`).
+//   - The per-isolate cache picks the policy up write-through.
+//   - A subsequent `unmask` honours the policy: listed roles get their
+//     listed classifications; unlisted roles are denied.
+//   - When no policy is declared, PR 4's default-deny stub still applies
+//     (`auto` allowed; everyone else denied) — regression guard.
+//   - Invalid classifications surface as
+//     `invalid_mask_classification` at the Rust validator (belt-and-
+//     braces with the SDK validator).
+//   - A live `setMaskPolicy` mid-test propagates to the in-process cache,
+//     and a subsequent unmask honours the new policy.
+
+use zeroship_plugin_db::crud::mask_policy;
+
+/// Helper — install backend + schema + clean any pre-existing cached
+/// policy for the app. Returns the backend (kept alive via Rc) and the
+/// TempDir guard. Drains the cache so the test starts from
+/// "no-policy-declared".
+async fn policy_setup(
+    app_id: &str,
+    collection: &str,
+    schema: serde_json::Value,
+) -> (Rc<SqliteBackend>, tempfile::TempDir) {
+    let (backend, dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+    (backend, dir)
+}
+
+/// **P5.5 PR 5 — gate #1**: a policy granting `user` access to `pii`
+/// allows a user-role actor to unmask a pii-classified column.
+#[test]
+fn unmask_with_user_role_in_policy_returns_plaintext() {
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P55_PR5_GRANT", &"c".repeat(64));
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "email": {
+            "type": "string",
+            "encrypted": {
+                "mode": "randomised",
+                "keyId": "p55_pr5_grant",
+                "wraps": "string",
+            },
+            "mask": { "kind": "email", "classification": "pii" },
+        },
+    });
+    let app_id = "app_unmask_policy_grant";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = policy_setup(app_id, collection, schema.clone()).await;
+
+        // Define the policy: `user` can unmask `pii`.
+        let policy_v = serde_json::json!({
+            "user": ["public", "pii"],
+        });
+        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+            .await
+            .expect("set_mask_policy must succeed");
+
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_unmask_policy_grant\".\"users\" (\
+                     id    TEXT PRIMARY KEY, \
+                     email BLOB, \
+                     email_masked TEXT NOT NULL DEFAULT 'x***@***'\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+
+        // Encrypt + insert one row.
+        use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
+        use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+        let row_pk = "usr_grant_01";
+        let plaintext = "alice@example.com";
+        let mut doc = serde_json::json!({
+            "id": row_pk,
+            "email": plaintext,
+            "email_masked": "a****@example.com",
+        });
+        encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
+            .await
+            .expect("encrypt_row_on_write");
+        let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
+            .expect("build_insert_with_dialect");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+
+        // Unmask with `user` actor — must succeed via the policy.
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: row_pk.to_string(),
+            column: "email".to_string(),
+            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            reason: Some("user requested own data".to_string()),
+        };
+        let result = unmask::dispatch_unmask(app_id, args)
+            .await
+            .expect("policy grants user → pii; unmask must succeed");
+        assert_eq!(result.plaintext, plaintext);
+
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "granted", "outcome must be granted");
+        assert_eq!(audit[0].1, "user");
+        assert_eq!(audit[0].2, "pii");
+    });
+}
+
+/// **P5.5 PR 5 — gate #2**: a policy granting `user` only `public` denies
+/// a user-role attempt to unmask a `pii`-classified column. The denied
+/// path emits an audit row.
+#[test]
+fn unmask_with_user_role_not_in_policy_denied() {
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "pii" },
+        },
+    });
+    let app_id = "app_unmask_policy_deny";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = policy_setup(app_id, collection, schema.clone()).await;
+
+        // Policy: `user` can only unmask `public`.
+        let policy_v = serde_json::json!({
+            "user": ["public"],
+        });
+        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+            .await
+            .expect("set_mask_policy must succeed");
+
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: "usr_anywhere".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            reason: None,
+        };
+        let err = unmask::dispatch_unmask(app_id, args)
+            .await
+            .expect_err("policy does not allow user → pii; must refuse");
+        match err {
+            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+                assert_eq!(code, "unmask_not_permitted");
+            }
+            other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
+        }
+
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "denied");
+        assert_eq!(audit[0].1, "user");
+        assert_eq!(audit[0].2, "pii");
+    });
+}
+
+/// **P5.5 PR 5 — gate #3**: regression guard for the no-policy case.
+/// The default-deny stub from PR 4 still applies — `auto` allowed,
+/// everyone else denied. Closes the "did we accidentally start
+/// allowing everything when no policy is declared" hole.
+#[test]
+fn unmask_default_deny_when_no_policy() {
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "name": {
+            "type": "string",
+            "mask": { "kind": "name", "classification": "public" },
+        },
+    });
+    let app_id = "app_unmask_policy_default_deny";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = policy_setup(app_id, collection, schema).await;
+        // NO setMaskPolicy call — exercise the default-deny stub.
+
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: "usr_anywhere".to_string(),
+            column: "name".to_string(),
+            actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
+            reason: None,
+        };
+        let err = unmask::dispatch_unmask(app_id, args)
+            .await
+            .expect_err("no policy + non-auto actor → default-deny");
+        match err {
+            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+                assert_eq!(code, "unmask_not_permitted");
+            }
+            other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
+        }
+        // Audit row written on the denied path.
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "denied");
+    });
+}
+
+/// **P5.5 PR 5 — gate #4**: invalid classification at the Rust validator.
+/// The SDK's `defineMaskPolicy()` rejects at declare-time; the Rust
+/// validator catches anything that bypasses the SDK (forged RPC,
+/// untrusted client, future SDK drift). Both layers refuse with
+/// `invalid_mask_classification`.
+#[test]
+fn unmask_invalid_classification_rejected_at_dispatch_time() {
+    let schema = serde_json::json!({ "id": { "type": "string" } });
+    let app_id = "app_unmask_invalid_classification";
+    let collection = "users";
+
+    run(async {
+        let (_backend, _dir) = policy_setup(app_id, collection, schema).await;
+
+        let bad_policy = serde_json::json!({
+            "admin": ["public", "badclass"],
+        });
+        let err = mask_policy::dispatch_set_mask_policy(app_id, bad_policy)
+            .await
+            .expect_err("rust validator must refuse unknown classification");
+        match err {
+            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "invalid_mask_classification");
+            }
+            other => panic!("expected ValidationFailed::invalid_mask_classification, got {other:?}"),
+        }
+    });
+}
+
+/// **P5.5 PR 5 — gate #5**: a `setMaskPolicy` at runtime propagates to
+/// the in-process cache; a subsequent `unmask` honours the new policy.
+/// Pins the write-through semantics.
+#[test]
+fn policy_refresh_after_set_mask_policy_op_takes_effect() {
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "data": {
+            "type": "string",
+            "mask": { "kind": "full", "classification": "internal" },
+        },
+    });
+    let app_id = "app_unmask_policy_refresh";
+    let collection = "items";
+
+    run(async {
+        let (backend, _dir) = policy_setup(app_id, collection, schema).await;
+
+        // The table must exist so the post-policy attempt reaches the
+        // SELECT path. Empty table → `unmask_not_found` (auth passes;
+        // no row matches) is the assertion we want.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_unmask_policy_refresh\".\"items\" (\
+                     id   TEXT PRIMARY KEY, \
+                     data TEXT, \
+                     data_masked TEXT NOT NULL DEFAULT '***'\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+
+        // Step 1 — without a policy, a `support` actor is denied.
+        let args1 = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: "any".to_string(),
+            column: "data".to_string(),
+            actor: Some(serde_json::json!({ "kind": "support", "id": "sup_1" })),
+            reason: None,
+        };
+        let err = unmask::dispatch_unmask(app_id, args1.clone())
+            .await
+            .expect_err("no policy → default deny for support");
+        match err {
+            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+                assert_eq!(code, "unmask_not_permitted");
+            }
+            other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
+        }
+
+        // Step 2 — install a policy granting support → internal.
+        let policy_v = serde_json::json!({
+            "support": ["internal"],
+        });
+        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+            .await
+            .expect("set_mask_policy");
+
+        // Step 3 — now the same support actor passes authorization.
+        // We still get `unmask_not_found` because no row exists, but
+        // that's the path AFTER the auth check — the absence of
+        // `unmask_not_permitted` is the pin.
+        let err = unmask::dispatch_unmask(app_id, args1)
+            .await
+            .expect_err("auth passes; SELECT misses");
+        match err {
+            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+                assert_eq!(
+                    code, "unmask_not_found",
+                    "support → internal must pass authz; failure is now the SELECT miss"
+                );
+            }
+            other => panic!("expected ValidationFailed::unmask_not_found, got {other:?}"),
+        }
+
+        // Audit table observes both attempts — the first denied, the
+        // second granted-then-not-found never made it to the audit
+        // write (the audit row only fires on successful + denied
+        // outcomes; SELECT misses fall through the typed error rail).
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert!(
+            audit.iter().any(|r| r.0 == "denied"),
+            "first attempt must have audited as denied: {audit:?}"
+        );
+    });
+}

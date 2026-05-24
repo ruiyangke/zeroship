@@ -53,6 +53,11 @@ pub struct BootstrapOutcome {
     /// the actual WAL recovery is performed out-of-band via
     /// `recovery.conf` (P5 ships the API surface only).
     pub created_pitr_targets_table: bool,
+    /// **P5.5 PR 5** — created the `__zeroship_admin.mask_policies`
+    /// table that stores per-app actor-role → classifications maps.
+    /// Read only via the SECURITY DEFINER `get_mask_policy` function;
+    /// written via the SECURITY DEFINER `set_mask_policy` function.
+    pub created_mask_policies_table: bool,
     /// True if the bootstrap function had to insert an initial HMAC
     /// key (no `current` key existed at boot time).
     pub minted_initial_hmac_key: bool,
@@ -69,6 +74,7 @@ impl BootstrapOutcome {
             "createdSessionCtxTable":   self.created_session_ctx_table,
             "createdColumnKeysTable":   self.created_column_keys_table,
             "createdPitrTargetsTable":  self.created_pitr_targets_table,
+            "createdMaskPoliciesTable": self.created_mask_policies_table,
             "mintedInitialHmacKey":     self.minted_initial_hmac_key,
         })
         .to_string()
@@ -177,6 +183,10 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     // actual WAL recovery is operator-driven via `recovery.conf`.
     // P5 ships the API surface only.
     out.created_pitr_targets_table = ensure_pitr_targets_table(pool).await?;
+    // **P5.5 PR 5** — per-app mask policy table. Drives
+    // `defineMaskPolicy()` durable storage. SECURITY DEFINER
+    // get/set wrappers mediate access from app code.
+    out.created_mask_policies_table = ensure_mask_policies_table(pool).await?;
 
     // ---- functions ----
     install_const_eq_function(pool).await?;
@@ -189,6 +199,9 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     // **P5 PR 2** — the SECURITY DEFINER getter the
     // `KeySource::PgAdminTable` resolver calls.
     install_get_column_key_function(pool).await?;
+    // **P5.5 PR 5** — the SECURITY DEFINER get/set wrappers around
+    // the mask-policy table.
+    install_mask_policy_functions(pool).await?;
 
     // Mint the first HMAC key if none exists. We do this in the
     // function (instead of unconditional INSERT) so re-running
@@ -444,6 +457,127 @@ async fn ensure_pitr_targets_table(pool: &Pool) -> Result<bool, DbError> {
     .await
     .map_err(|e| coded_sql("GRANT pitr_targets", e))?;
     Ok(true)
+}
+
+/// **P5.5 PR 5** — `__zeroship_admin.mask_policies` (app_id text PK,
+/// policy jsonb, updated_at timestamptz). One row per app; the SDK's
+/// `defineMaskPolicy()` round-trips through the
+/// `__zeroship_admin.set_mask_policy` SECURITY DEFINER wrapper, and
+/// the runtime's per-isolate cache loads via
+/// `__zeroship_admin.get_mask_policy`.
+///
+/// REVOKEd from PUBLIC at the table level; only the wrapper functions
+/// (granted to PUBLIC for EXECUTE) reach the rows. Mirrors the
+/// `column_keys` / `pitr_targets` pattern.
+async fn ensure_mask_policies_table(pool: &Pool) -> Result<bool, DbError> {
+    let exists: bool = !pool
+        .query_text_params(
+            "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'mask_policies'",
+            &[&ADMIN_SCHEMA],
+        )
+        .await
+        .map_err(|e| coded_sql("probe mask_policies", e))?
+        .is_empty();
+    if exists {
+        return Ok(false);
+    }
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{ADMIN_SCHEMA}".mask_policies (
+                app_id     TEXT PRIMARY KEY,
+                policy     JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("CREATE TABLE mask_policies", e))?;
+    pool.execute(
+        &format!(r#"REVOKE ALL ON "{ADMIN_SCHEMA}".mask_policies FROM PUBLIC"#),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("REVOKE mask_policies", e))?;
+    Ok(true)
+}
+
+/// **P5.5 PR 5** — SECURITY DEFINER get/set wrappers around
+/// `mask_policies`.
+///
+/// - `get_mask_policy(app_id)` → JSONB. Returns the policy or NULL.
+/// - `set_mask_policy(app_id, policy JSONB)` → VOID. UPSERT on the PK.
+///
+/// EXECUTE granted to PUBLIC — the table itself is REVOKEd (above) so
+/// app code never reaches the rows except through these wrappers. The
+/// boundary moves the privilege check from the caller to the function
+/// owner (`__zeroship_platform_role`). Mirrors the `get_column_key`
+/// pattern from P5 PR 2.
+async fn install_mask_policy_functions(pool: &Pool) -> Result<(), DbError> {
+    // get_mask_policy: STABLE SQL function — same shape as get_column_key.
+    let sql_get = format!(
+        r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".get_mask_policy(p_app_id TEXT)
+           RETURNS JSONB
+           LANGUAGE sql STABLE SECURITY DEFINER
+           SET search_path = pg_catalog, "{ADMIN_SCHEMA}"
+           AS $$
+             SELECT policy FROM "{ADMIN_SCHEMA}".mask_policies
+              WHERE app_id = p_app_id
+           $$"#
+    );
+    pool.execute(&sql_get, &[])
+        .await
+        .map_err(|e| coded_sql("CREATE get_mask_policy", e))?;
+    pool.execute(
+        &format!(
+            r#"GRANT EXECUTE ON FUNCTION
+               "{ADMIN_SCHEMA}".get_mask_policy(TEXT) TO PUBLIC"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("GRANT get_mask_policy", e))?;
+
+    // set_mask_policy: plpgsql function performing the UPSERT.
+    let sql_set = format!(
+        r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".set_mask_policy(
+              p_app_id TEXT, p_policy JSONB
+           ) RETURNS VOID
+           LANGUAGE plpgsql SECURITY DEFINER
+           SET search_path = pg_catalog, "{ADMIN_SCHEMA}"
+           AS $$
+           BEGIN
+             IF p_app_id IS NULL OR p_app_id = '' THEN
+               RAISE EXCEPTION 'invalid app_id'
+                 USING ERRCODE = 'P0001',
+                       DETAIL  = 'invalid_app_id';
+             END IF;
+             IF jsonb_typeof(p_policy) <> 'object' THEN
+               RAISE EXCEPTION 'mask policy must be a JSON object'
+                 USING ERRCODE = 'P0001',
+                       DETAIL  = 'invalid_mask_policy_shape';
+             END IF;
+             INSERT INTO "{ADMIN_SCHEMA}".mask_policies (app_id, policy)
+               VALUES (p_app_id, p_policy)
+             ON CONFLICT (app_id) DO UPDATE
+               SET policy     = EXCLUDED.policy,
+                   updated_at = NOW();
+           END $$"#
+    );
+    pool.execute(&sql_set, &[])
+        .await
+        .map_err(|e| coded_sql("CREATE set_mask_policy", e))?;
+    pool.execute(
+        &format!(
+            r#"GRANT EXECUTE ON FUNCTION
+               "{ADMIN_SCHEMA}".set_mask_policy(TEXT, JSONB) TO PUBLIC"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("GRANT set_mask_policy", e))?;
+
+    Ok(())
 }
 
 /// **P5 PR 2** — SECURITY DEFINER getter for column root keys.
@@ -1231,6 +1365,7 @@ mod tests {
             created_session_ctx_table: true,
             created_column_keys_table: true,
             created_pitr_targets_table: true,
+            created_mask_policies_table: true,
             minted_initial_hmac_key: true,
         };
         let v: serde_json::Value = serde_json::from_str(&o.to_json()).unwrap();
@@ -1242,6 +1377,7 @@ mod tests {
         assert_eq!(v["createdSessionCtxTable"], true);
         assert_eq!(v["createdColumnKeysTable"], true);
         assert_eq!(v["createdPitrTargetsTable"], true);
+        assert_eq!(v["createdMaskPoliciesTable"], true);
         assert_eq!(v["mintedInitialHmacKey"], true);
     }
 

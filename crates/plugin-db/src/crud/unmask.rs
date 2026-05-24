@@ -190,31 +190,94 @@ fn lookup_encryption_meta(
 }
 
 // ---------------------------------------------------------------------------
-// Authorization stub
+// Authorization (P5.5 PR 5 — per-app policy lookup)
 // ---------------------------------------------------------------------------
 
-/// **PR 4 stub** — default-deny authorization for the unmask path.
+/// **P5.5 PR 5** — real authorization for the unmask path.
 ///
-/// PR 5 will replace this with a per-app policy lookup driven by
-/// `defineMaskPolicy()`. Until then, the rule is intentionally strict:
+/// Replaces PR 4's default-deny stub. Resolution rules:
 ///
-/// - **`actor.kind == "auto"`** (system / migrations / background jobs)
-///   may unmask any classification.
-/// - **Anyone else** — including authenticated end users, the
-///   AI-builder console, and operator-shaped actors — is denied.
-/// - **`actor = None`** (unauthenticated caller) is also denied.
+/// 1. **Unauthenticated** (`actor = None` or `actor.kind` missing) →
+///    deny. The denied path still writes an audit row.
 ///
-/// The denied path still writes an audit row (`outcome = "denied"`) so
-/// operators can observe attempted access via the per-app audit table.
+/// 2. **Cached per-app policy present** → consult
+///    [`crate::crud::mask_policy::MaskPolicy::allows`]. That helper
+///    enforces the `auto`-actor fallback rule (system actor allowed
+///    by default unless the policy explicitly restricts it).
+///
+/// 3. **No cached policy + sync caller** → fall back to PR 4's
+///    default-deny stub (`auto` allowed; everyone else denied). The
+///    real first-use load happens inside [`dispatch_unmask`] before
+///    this helper runs — that load is async, so cannot live here.
+///
+/// **Sync entry point**: this function does not perform I/O. The
+/// per-app policy MUST be cached (via [`ensure_mask_policy_cached`])
+/// before [`dispatch_unmask`] reaches the auth check.
 pub(crate) fn check_unmask_authorization(
+    app_id: &str,
     actor: &Option<Value>,
-    _classification: &str,
+    classification: &str,
 ) -> Result<bool, DbError> {
     let Some(actor_obj) = actor.as_ref().and_then(|v| v.as_object()) else {
         return Ok(false); // unauthenticated → denied
     };
     let kind = actor_obj.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    Ok(kind == "auto")
+    let policy = crate::context::with(|c| c.mask_policy_for(app_id));
+    match policy {
+        Some(p) => Ok(p.allows(kind, classification)),
+        None => {
+            // PR 4 default-deny stub: only `auto` allowed when the app
+            // has not declared a policy.
+            Ok(kind == "auto")
+        }
+    }
+}
+
+/// **P5.5 PR 5** — best-effort lazy load of the durable policy for
+/// `app_id` into the per-isolate cache. Called by [`dispatch_unmask`]
+/// before the auth check. A storage miss is a no-op (cache stays
+/// empty, default-deny stub applies on the auth path); a storage hit
+/// installs the loaded policy via
+/// [`crate::context::IsolateDbContext::set_mask_policy_for_app`].
+///
+/// Errors propagate (a corrupt sidecar JSON or PG SQL failure surfaces
+/// as `DbError`); the unmask flow then rejects with the typed error
+/// instead of silently default-denying — operators see the real fault.
+async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
+    if crate::context::with(|c| c.has_mask_policy(app_id)) {
+        return Ok(());
+    }
+    let backend = match crate::context::with(|c| c.backend()) {
+        Some(b) => b,
+        None => return Ok(()), // backend not initialised — auth path's default-deny stub handles it
+    };
+
+    // ---- PG arm ----
+    #[cfg(all(feature = "pg", feature = "hardening"))]
+    {
+        if let Some(pg) = backend.as_postgres() {
+            let loaded = crate::crud::mask_policy::load_pg(pg, app_id).await?;
+            if let Some(p) = loaded {
+                crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
+            }
+            return Ok(());
+        }
+    }
+
+    // ---- SQLite arm ----
+    #[cfg(feature = "sqlite")]
+    {
+        if let Some(sq) = backend.as_sqlite() {
+            let loaded = crate::crud::mask_policy::load_sqlite(sq, app_id)?;
+            if let Some(p) = loaded {
+                crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
+            }
+            return Ok(());
+        }
+    }
+
+    let _ = backend; // silence unused under non-canonical feature combos
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -252,9 +315,12 @@ pub async fn dispatch_unmask(
             ),
         })?;
 
-    // Step 2 — authorization. PR 5 will swap the stub for a per-app
-    // policy lookup; PR 4 ships default-deny for non-`auto` actors.
-    let allowed = check_unmask_authorization(&args.actor, &mask_meta.classification)?;
+    // Step 2 — authorization. **P5.5 PR 5**: load the per-app policy
+    // into the cache (best-effort) THEN consult `check_unmask_authorization`,
+    // which honours the cached policy or falls back to PR 4's
+    // default-deny stub on a miss.
+    ensure_mask_policy_cached(app_id).await?;
+    let allowed = check_unmask_authorization(app_id, &args.actor, &mask_meta.classification)?;
     if !allowed {
         // Audit-then-refuse. The audit row carries `outcome = "denied"`
         // so operators see every attempted access — including the
@@ -950,28 +1016,41 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // ---------------------------------------------------------------
+    // PR 4 default-deny stub — exercised by passing an `app_id` that
+    // has no policy cached. **P5.5 PR 5** kept the stub behaviour
+    // intact for the no-policy fallthrough path; these tests pin that
+    // fallthrough.
+    //
+    // Unit tests reach the per-isolate ISOLATE_CTX (which the
+    // `check_unmask_authorization` body uses to look up the cached
+    // policy). Each test uses a unique app_id so the global
+    // thread-local cache state doesn't bleed between tests.
+    // ---------------------------------------------------------------
+
     #[test]
     fn authz_stub_grants_auto_actor() {
         let actor = Some(json!({ "kind": "auto", "id": null }));
-        assert!(check_unmask_authorization(&actor, "spi").unwrap());
+        assert!(check_unmask_authorization("authz_stub_grants_auto_1", &actor, "spi").unwrap());
         let actor = Some(json!({ "kind": "auto", "id": "system" }));
-        assert!(check_unmask_authorization(&actor, "pii").unwrap());
+        assert!(check_unmask_authorization("authz_stub_grants_auto_2", &actor, "pii").unwrap());
     }
 
     #[test]
     fn authz_stub_denies_user_actor() {
         let actor = Some(json!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(!check_unmask_authorization(&actor, "spi").unwrap());
+        assert!(!check_unmask_authorization("authz_stub_denies_user_1", &actor, "spi").unwrap());
         let actor = Some(json!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(!check_unmask_authorization(&actor, "pii").unwrap());
+        assert!(!check_unmask_authorization("authz_stub_denies_user_2", &actor, "pii").unwrap());
     }
 
     #[test]
     fn authz_stub_denies_other_kinds() {
         for kind in ["operator", "ai-builder", "anonymous", "service", ""] {
             let actor = Some(json!({ "kind": kind }));
+            let app_id = format!("authz_stub_denies_other_{kind}");
             assert!(
-                !check_unmask_authorization(&actor, "pii").unwrap(),
+                !check_unmask_authorization(&app_id, &actor, "pii").unwrap(),
                 "kind={kind} must be denied by the PR 4 stub"
             );
         }
@@ -979,13 +1058,104 @@ mod tests {
 
     #[test]
     fn authz_stub_denies_unauthenticated() {
-        assert!(!check_unmask_authorization(&None, "pii").unwrap());
+        assert!(!check_unmask_authorization("authz_stub_unauth_1", &None, "pii").unwrap());
         // Empty object — no `kind` field — also denied.
         let actor = Some(json!({}));
-        assert!(!check_unmask_authorization(&actor, "pii").unwrap());
+        assert!(!check_unmask_authorization("authz_stub_unauth_2", &actor, "pii").unwrap());
         // Actor that isn't an object (e.g. JS passed a string) — denied.
         let actor = Some(json!("auto"));
-        assert!(!check_unmask_authorization(&actor, "pii").unwrap());
+        assert!(!check_unmask_authorization("authz_stub_unauth_3", &actor, "pii").unwrap());
+    }
+
+    // ---------------------------------------------------------------
+    // P5.5 PR 5 — per-app policy lookup
+    // ---------------------------------------------------------------
+
+    /// Helper: install a [`MaskPolicy`] for `app_id` on the current
+    /// isolate's context cache, then immediately remove it on drop.
+    /// Keeps the thread-local cache hygiene clean across tests.
+    struct PolicyGuard(String);
+    impl PolicyGuard {
+        fn install(
+            app_id: &str,
+            policy: crate::crud::mask_policy::MaskPolicy,
+        ) -> Self {
+            crate::context::with_mut(|c| {
+                c.set_mask_policy_for_app(app_id, Some(policy));
+            });
+            Self(app_id.to_string())
+        }
+    }
+    impl Drop for PolicyGuard {
+        fn drop(&mut self) {
+            crate::context::with_mut(|c| {
+                c.set_mask_policy_for_app(&self.0, None);
+            });
+        }
+    }
+
+    #[test]
+    fn pr5_policy_grants_role_with_classification() {
+        use crate::crud::mask_policy::MaskPolicy;
+        let app_id = "pr5_grants_role_classification";
+        let policy = MaskPolicy::from_json(&json!({
+            "user": ["public", "pii"],
+        }))
+        .unwrap();
+        let _g = PolicyGuard::install(app_id, policy);
+
+        let actor = Some(json!({ "kind": "user", "id": "usr_x" }));
+        assert!(check_unmask_authorization(app_id, &actor, "pii").unwrap());
+        assert!(check_unmask_authorization(app_id, &actor, "public").unwrap());
+        assert!(!check_unmask_authorization(app_id, &actor, "spi").unwrap());
+    }
+
+    #[test]
+    fn pr5_policy_unknown_role_denied() {
+        use crate::crud::mask_policy::MaskPolicy;
+        let app_id = "pr5_unknown_role_denied";
+        let policy = MaskPolicy::from_json(&json!({
+            "user": ["public"],
+        }))
+        .unwrap();
+        let _g = PolicyGuard::install(app_id, policy);
+
+        let actor = Some(json!({ "kind": "operator", "id": "op_1" }));
+        assert!(!check_unmask_authorization(app_id, &actor, "public").unwrap());
+    }
+
+    #[test]
+    fn pr5_auto_fallback_when_not_in_policy() {
+        use crate::crud::mask_policy::MaskPolicy;
+        let app_id = "pr5_auto_fallback";
+        // Policy DOES list `user`, but NOT `auto` — the system actor
+        // retains its uniform access via the fallback rule.
+        let policy = MaskPolicy::from_json(&json!({
+            "user": ["public"],
+        }))
+        .unwrap();
+        let _g = PolicyGuard::install(app_id, policy);
+
+        let actor = Some(json!({ "kind": "auto" }));
+        assert!(check_unmask_authorization(app_id, &actor, "pii").unwrap());
+        assert!(check_unmask_authorization(app_id, &actor, "spi").unwrap());
+        assert!(check_unmask_authorization(app_id, &actor, "internal").unwrap());
+    }
+
+    #[test]
+    fn pr5_auto_explicit_restriction_honoured() {
+        use crate::crud::mask_policy::MaskPolicy;
+        let app_id = "pr5_auto_explicit_restriction";
+        let policy = MaskPolicy::from_json(&json!({
+            "auto": ["public"],
+        }))
+        .unwrap();
+        let _g = PolicyGuard::install(app_id, policy);
+
+        let actor = Some(json!({ "kind": "auto" }));
+        assert!(check_unmask_authorization(app_id, &actor, "public").unwrap());
+        assert!(!check_unmask_authorization(app_id, &actor, "pii").unwrap());
+        assert!(!check_unmask_authorization(app_id, &actor, "spi").unwrap());
     }
 
     #[test]

@@ -60,3 +60,9 @@ export { validateDoc, checkPartial } from "./validate.js";
 // Aggregate-pipeline translator — used by warned-acc-shapes-cap to
 // drive the dedup state the matching internal getter inspects.
 export { translateAggregatePipeline } from "./utils.js";
+
+// P5.5 PR 5 — defineMaskPolicy() pending-slot drain. The bootstrap
+// runtime-entry calls `_flushPendingMaskPolicy()` once at app init and
+// flushes the returned policy through `zeroship.db.setMaskPolicy`.
+export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy.js";
+export type { MaskPolicy } from "./policy.js";
