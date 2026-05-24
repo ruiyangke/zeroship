@@ -707,6 +707,29 @@ pub enum ResolveValue {
     /// `v8::Global<Value>` (which would require carrying a V8 scope
     /// across the spawned async op).
     Json(String),
+    /// **P9 PR 2** — resolve with `JSON.parse(<this>)` and then run
+    /// `transform` over the parsed value to mint plugin-supplied v8_class
+    /// instances (today: `MaskedValue` for `__zsmask__`-tagged sentinels
+    /// emitted by `crud::mask_pass::wrap_row_on_read`).
+    ///
+    /// `transform` is a `fn` (not a closure) so the variant stays `Send`
+    /// across the spawned-op future boundary. The pump invokes it inside
+    /// the V8 scope where the parsed value is live; the function may
+    /// recursively walk the value and replace sub-objects with
+    /// v8_class-backed instances. A `None` return means "leave the value
+    /// unchanged" — the pump still resolves with the post-parse Local.
+    ///
+    /// Plugin-db is the only producer; the runtime itself has no
+    /// knowledge of which sentinels exist — that lives in the supplied
+    /// `transform` function pointer.
+    JsonWithRehydration {
+        json: String,
+        transform:
+            for<'s, 'a> fn(
+                &mut v8::PinScope<'s, 'a>,
+                v8::Local<'s, v8::Value>,
+            ) -> Option<v8::Local<'s, v8::Value>>,
+    },
     /// Resolve with a JS Boolean.
     Bool(bool),
     /// Resolve with a JS Number from an unsigned 32-bit integer.

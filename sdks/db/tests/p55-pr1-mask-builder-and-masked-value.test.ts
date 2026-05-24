@@ -1,8 +1,8 @@
 /**
  * **P5.5 PR 1** — masking foundation: `t.string().mask(...)` /
  * `t.encrypted().mask(...)` DSL modifier + default-mask rule for
- * encrypted columns + `MaskedValue<T>` wrapper class + TypeScript
- * `Row<S>` inference wrapping masked fields.
+ * encrypted columns + TypeScript `Row<S>` inference wrapping masked
+ * fields.
  *
  * These tests pin behaviour the runtime side cannot enforce:
  *
@@ -18,19 +18,27 @@
  *   5. `.mask()` on `t.ref()` refuses with
  *      `encrypted_on_ref_unsupported`.
  *   6. Invalid `kind` / `classification` are refused.
- *   7. `MaskedValue` coercions (`toString` / `toJSON` /
- *      `Symbol.toPrimitive`) all yield the masked representation,
- *      never the plaintext.
- *   8. `MaskedValue.unmask()` / `.canUnmask()` throw
- *      `unmask_not_implemented` in PR 1 (PR 4 wires them).
- *   9. TypeScript `Row<S>` inference wraps masked fields in
- *      `MaskedValue<T>` (smoke test).
+ *   7. TypeScript `Row<S>` inference wraps masked fields in
+ *      `MaskedValue<T>` (compile-time assertion).
+ *
+ * **P9 PR 2** — the `MaskedValue` coercion / `unmask` / `canUnmask`
+ * runtime tests that used to live here were removed: `MaskedValue` is
+ * now a native v8_class minted Rust-side (the SDK export is a type-only
+ * `declare class`), so those invariants are pinned by the Rust unit
+ * tests in `masked_value.rs` + the `p9-pr2-masked-value-v8-class`
+ * suite, not by `new MaskedValue(...)` in JS.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t, MaskedValue } from "@zeroship/db";
-import type { Row, MaskedValueRepr } from "@zeroship/db";
+import { t } from "@zeroship/db";
+// **P9 PR 2** — `MaskedValue` is now a native v8_class; the SDK export
+// is a type-only `declare class`. It can only be imported as a type
+// (no runtime constructor). Its runtime behaviour (coercion, unmask,
+// brand check) is covered by the Rust unit tests in
+// `crates/plugin-db/src/v8_classes/masked_value.rs` and the
+// `p9-pr2-masked-value-v8-class` suite.
+import type { Row, MaskedValueRepr, MaskedValue } from "@zeroship/db";
 
 describe("P5.5 PR 1 — t.encrypted() default-mask rule", () => {
   test("bare t.encrypted() auto-populates mask = { kind: 'full', classification: 'pii' }", () => {
@@ -144,72 +152,14 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
   });
 });
 
-describe("P5.5 PR 1 — MaskedValue<T> wrapper", () => {
-  function makeRepr(masked = "***-**-6789", classification: "pii" | "spi" = "spi"): MaskedValueRepr {
-    return { masked, classification, sentinel: "__zsmask__" };
-  }
-  const meta = { collection: "users", row_pk: "usr_xyz", column: "ssn" };
-
-  test("constructor stores masked + classification + meta", () => {
-    const v = new MaskedValue<string>(makeRepr(), meta);
-    assert.equal(v.masked, "***-**-6789");
-    assert.equal(v.classification, "spi");
-    assert.equal(v._meta.collection, "users");
-    assert.equal(v._meta.row_pk, "usr_xyz");
-    assert.equal(v._meta.column, "ssn");
-  });
-
-  test("constructor rejects repr without the __zsmask__ sentinel", () => {
-    assert.throws(
-      () =>
-        new MaskedValue<string>(
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          { masked: "x", classification: "pii" } as any,
-          meta,
-        ),
-      (e: Error & { code?: string }) => e.code === "masked_value_invalid_repr",
-    );
-  });
-
-  test("toString() returns the masked representation, never plaintext", () => {
-    const v = new MaskedValue<string>(makeRepr(), meta);
-    assert.equal(v.toString(), "***-**-6789");
-    assert.equal(`${v}`, "***-**-6789");
-    assert.equal(String(v), "***-**-6789");
-  });
-
-  test("toJSON() yields the masked representation so JSON.stringify is safe", () => {
-    const v = new MaskedValue<string>(makeRepr(), meta);
-    assert.equal(v.toJSON(), "***-**-6789");
-    assert.equal(JSON.stringify(v), '"***-**-6789"');
-  });
-
-  test("template-literal interpolation calls Symbol.toPrimitive → masked repr", () => {
-    const v = new MaskedValue<string>(makeRepr(), meta);
-    assert.equal(`SSN: ${v}`, "SSN: ***-**-6789");
-  });
-
-  test("unmask() throws unmask_not_implemented in PR 1", async () => {
-    const v = new MaskedValue<string>(makeRepr(), meta);
-    await assert.rejects(
-      () => v.unmask({ reason: "test" }),
-      (e: Error & { code?: string }) => e.code === "unmask_not_implemented",
-    );
-  });
-
-  test("canUnmask() throws unmask_not_implemented in PR 1", async () => {
-    const v = new MaskedValue<string>(makeRepr(), meta);
-    await assert.rejects(
-      () => v.canUnmask(),
-      (e: Error & { code?: string }) => e.code === "unmask_not_implemented",
-    );
-  });
-});
-
 describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
-  // These tests live at the type layer; the runtime assertions are
-  // soft (`Row<S>` resolves to the inferred shape per the type
-  // system). A successful `tsc` build is the load-bearing assertion.
+  // **P9 PR 2** — `MaskedValue` is a type-only `declare class`, so the
+  // masked-column slots below use `as unknown as MaskedValue<string>`
+  // casts rather than `new MaskedValue(...)`. The load-bearing
+  // assertion is that `tsc` accepts these assignments — i.e. `Row<S>`
+  // still infers the masked column as `MaskedValue<T>`, not bare `T`.
+  // (A `MaskedValueRepr`-typed value is used to keep the import live and
+  // double as documentation of the wire shape.)
 
   test("masked encrypted field is wrapped in MaskedValue<string>", () => {
     const fields = {
@@ -217,19 +167,23 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
       name: t.string(),
     };
     type R = Row<typeof fields>;
-    // Type-level assertion: `ssn` is MaskedValue<string>, `name` is string | undefined.
-    // The lines below would fail to compile if the inference broke.
+    // Type-level assertion: `ssn` is MaskedValue<string>, `name` is
+    // string | undefined. The line below would fail to compile if the
+    // inference broke (e.g. a bare string assigned to `ssn`).
+    const repr: MaskedValueRepr = {
+      masked: "***",
+      classification: "pii",
+      sentinel: "__zsmask__",
+    };
     const sample: R = {
       id: 1,
       createdAt: 0,
       updatedAt: 0,
-      ssn: new MaskedValue<string>(
-        { masked: "***", classification: "pii", sentinel: "__zsmask__" },
-        { collection: "users", row_pk: "usr_xyz", column: "ssn" },
-      ),
+      ssn: repr as unknown as MaskedValue<string>,
     };
-    assert.ok(sample.ssn instanceof MaskedValue);
-    // `name` is optional + bare string when present
+    // Runtime sanity: the cast value's masked field is reachable.
+    assert.equal((sample.ssn as unknown as MaskedValueRepr).masked, "***");
+    // `name` is optional + bare string when present.
     assert.equal(sample.name, undefined);
   });
 
@@ -256,11 +210,10 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
       id: 1,
       createdAt: 0,
       updatedAt: 0,
-      email: new MaskedValue<string>(
-        { masked: "a****@example.com", classification: "pii", sentinel: "__zsmask__" },
-        { collection: "users", row_pk: "usr_xyz", column: "email" },
-      ),
+      email: "a****@example.com" as unknown as MaskedValue<string>,
     };
-    assert.equal(sample.email.toString(), "a****@example.com");
+    // The slot types as MaskedValue<string>; tsc would reject a bare
+    // string here without the cast — that's the compile-time invariant.
+    assert.equal(sample.email as unknown as string, "a****@example.com");
   });
 });

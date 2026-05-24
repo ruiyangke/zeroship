@@ -1006,19 +1006,20 @@ export class Collection<
     opts: { actor: Actor; reason?: string },
   ): Promise<Result<Map<string, Record<string, unknown>>>> {
     return this._run(async () => {
-      const dbAny = this._native as unknown as {
-        bulkUnmaskFields?: (args: {
-          collection: string;
-          items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
-          actor?: unknown;
-          reason?: string;
-        }) => Promise<{ results: Record<string, Record<string, unknown>> }>;
+      // **P9 PR 2** — route through the native `Collection.bulkUnmask`
+      // (collection inherited from the receiver), not the removed
+      // `Db.bulkUnmaskFields`.
+      const colAny = this._nativeCollection() as unknown as {
+        bulkUnmask?: (
+          items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>,
+          opts: { actor?: unknown; reason?: string },
+        ) => Promise<{ results: Record<string, Record<string, unknown>> }>;
       };
-      if (typeof dbAny.bulkUnmaskFields !== "function") {
+      if (typeof colAny.bulkUnmask !== "function") {
         throw Object.assign(
           new Error(
-            "@zeroship/db: env.db.bulkUnmaskFields not available — " +
-              "runtime is missing the P5.5 PR 7 bulk unmask surface.",
+            "@zeroship/db: Collection.bulkUnmask not available — " +
+              "runtime is missing the P9 PR 2 bulk unmask surface.",
           ),
           { code: "bulk_unmask_not_available" as const },
         );
@@ -1027,9 +1028,7 @@ export class Collection<
         rowPk: String(it.id),
         columns: it.columns.map((c) => this._toColumn(c as string)),
       }));
-      const result = await dbAny.bulkUnmaskFields({
-        collection: this._name,
-        items: wireItems,
+      const result = await colAny.bulkUnmask(wireItems, {
         actor: opts.actor,
         reason: opts.reason,
       });

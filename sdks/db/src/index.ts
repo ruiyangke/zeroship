@@ -1,7 +1,7 @@
 "use server";
 
 // Primary API — schema declarators
-export { t, naming, schema, MaskedValue } from "./types.js";
+export { t, naming, schema } from "./types.js";
 export {
   ValidationError,
   OptimisticLockError,
@@ -29,5 +29,5 @@ export type { LiveQuery, LiveOptions } from "./live.js";
 // the public type surface stayed here so user code keeps importing from
 // @zeroship/db.
 export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput } from "./db.js";
-export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, Infer, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, Actor } from "./types.js";
+export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, Infer, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor } from "./types.js";
 export type { NormalizedSchema } from "./schema.js";

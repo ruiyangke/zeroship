@@ -36,9 +36,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::crud::{
-    dispatch_bulk_unmask_field, dispatch_set_mask_policy_field, dispatch_unmask_field,
-};
+use crate::crud::dispatch_set_mask_policy_field;
 use crate::orchestrator::register_model::register_model_dispatch;
 use crate::orchestrator::transaction::begin_transaction_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
@@ -261,84 +259,13 @@ impl Db {
         Ok(dispatch_set_mask_policy_field(scope, &self.app_id, policy_v).into())
     }
 
-    /// `db.unmaskField(args)` — **P5.5 PR 4**. Round-trip a single
-    /// `MaskedValue.unmask()` request through the platform: look up
-    /// the column's mask + encryption metadata in the cached schema,
-    /// authorise the actor against the column's classification (P5.5
-    /// PR 5: per-app policy lookup, falling back to PR 4's default
-    /// deny when no policy is declared), SELECT + decrypt (or SELECT
-    /// plaintext for mask-only columns), emit a per-app audit row,
-    /// and return `{ plaintext }`.
-    ///
-    /// `args` shape (validated by `crud::unmask::parse_args`):
-    /// ```js
-    /// {
-    ///   collection: string,
-    ///   row_pk:     string,        // non-empty
-    ///   column:     string,
-    ///   actor?:     { kind, id, ... } | null,
-    ///   reason?:    string,
-    /// }
-    /// ```
-    ///
-    /// Resolves with `{ plaintext: string }` on success; rejects with
-    /// `unmask_not_permitted` (denied), `unmask_column_not_masked`
-    /// (no mask declaration on that column), `unmask_not_found`
-    /// (row PK missing), or one of the typed SQL / config errors on
-    /// failure. Every dispatch — granted OR denied — writes one row
-    /// to `<app>.__zeroship_audit_unmask`.
-    #[v8_method]
-    #[v8_name = "unmaskField"]
-    fn unmask_field<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        args: v8::Local<v8::Value>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let args_v = read_json_arg(scope, Some(args));
-        Ok(dispatch_unmask_field(scope, &self.app_id, args_v).into())
-    }
-
-    /// `db.bulkUnmaskFields(args)` — **P5.5 PR 7**. Round-trip a
-    /// many-row, many-column unmask request through the platform in
-    /// one V8↔Rust hop.
-    ///
-    /// `args` shape (validated by `crud::unmask::parse_bulk_args`):
-    /// ```js
-    /// {
-    ///   collection: string,
-    ///   items: [{ rowPk: string, columns: string[] }, ...],
-    ///   actor?:  { kind, id, ... } | null,
-    ///   reason?: string,
-    /// }
-    /// ```
-    ///
-    /// **Atomic authorisation** (Q-MASK-F): BEFORE any decrypt fires,
-    /// every `(rowPk, column)` pair is checked against the per-app
-    /// mask policy. A single denied pair refuses the WHOLE call with
-    /// `bulk_unmask_partial_unauthorized` — the authorised pairs are
-    /// NOT returned. Atomic refusal prevents inferring authorisation
-    /// state through "which columns came back populated".
-    ///
-    /// **Audit**: ONE row is written to `<app>.__zeroship_audit_unmask`
-    /// per call (not per pair), with `column` carrying the
-    /// comma-joined column list, `row_pk` carrying the comma-joined
-    /// row-PK list, and `reason` prefixed with `[bulk_unmask]` so
-    /// operators can filter by dispatch shape.
-    ///
-    /// Resolves with `{ results: { <rowPk>: { <col>: <plaintext> } } }`
-    /// on success. Rejects with `bulk_unmask_partial_unauthorized`,
-    /// `unmask_column_not_masked`, `unmask_not_found`,
-    /// `unmask_value_null`, or one of the typed SQL / config errors.
-    #[v8_method]
-    #[v8_name = "bulkUnmaskFields"]
-    fn bulk_unmask_fields<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        args: v8::Local<v8::Value>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let args_v = read_json_arg(scope, Some(args));
-        Ok(dispatch_bulk_unmask_field(scope, &self.app_id, args_v).into())
-    }
+    // **P9 PR 2** — `db.unmaskField` and `db.bulkUnmaskFields` were
+    // removed. The unmask round-trip is now collection-scoped:
+    // `Collection.unmaskField(rowPk, col, opts)` and
+    // `Collection.bulkUnmask(items, opts)` (the collection name is
+    // inherited from the receiver, so it can't be spoofed by an
+    // args-shape mismatch). `MaskedValue.unmask(...)` dispatches
+    // natively from the v8_class instance using its own bound `_meta`.
 
     /// `db.replication` — returns the [`super::replication::Replication`]
     /// namespace wrapper exposing `setup` / `watchdog` / `dropAbandoned`

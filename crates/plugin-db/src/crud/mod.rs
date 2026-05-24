@@ -178,6 +178,16 @@ fn first_row_or_null(rows: Vec<Value>) -> ResolveValue {
     ResolveValue::Json(value)
 }
 
+/// **P9 PR 2** — `first_row_or_null` variant that, when `has_masked` is
+/// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
+/// walks the parsed value and replaces `__zsmask__` sentinels with
+/// native `MaskedValue` instances. When `has_masked` is `false` this is
+/// identical to `first_row_or_null` (plain `JSON.parse`, no walk).
+fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
+    let value = rows.into_iter().next().unwrap_or(Value::Null).to_string();
+    maybe_rehydrate(value, has_masked)
+}
+
 /// Lower a `Vec<Value>` result to the row count, as a JS `number`.
 /// Used by `updateMany` / `deleteMany` (resolves to the affected-row
 /// count).
@@ -193,6 +203,29 @@ fn row_count_as_f64(rows: Vec<Value>) -> ResolveValue {
 /// re-stringify it" round-trip.
 fn rows_as_json_array(rows: Vec<Value>) -> ResolveValue {
     ResolveValue::Json(Value::Array(rows).to_string())
+}
+
+/// **P9 PR 2** — `rows_as_json_array` variant that resolves via
+/// [`ResolveValue::JsonWithRehydration`] when `has_masked` is set. See
+/// [`first_row_or_null_masked`].
+fn rows_as_json_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
+    let value = Value::Array(rows).to_string();
+    maybe_rehydrate(value, has_masked)
+}
+
+/// **P9 PR 2** — pick `ResolveValue::JsonWithRehydration` (walk the
+/// parsed value, mint `MaskedValue` for `__zsmask__` sentinels) when the
+/// result is known to carry masked columns; otherwise the plain
+/// `ResolveValue::Json` fast path (bulk `JSON.parse`, no walk).
+fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
+    if has_masked {
+        ResolveValue::JsonWithRehydration {
+            json,
+            transform: crate::v8_classes::masked_value::rehydrate_masked_values,
+        }
+    } else {
+        ResolveValue::Json(json)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +354,7 @@ pub(crate) fn dispatch_find<'s>(
                 };
                 // **P5.5 PR 3** — wrap masked columns in the
                 // `__zsmask__`-tagged wire shape.
-                let mut rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
+                let (mut rows, has_masked) = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -364,7 +397,7 @@ pub(crate) fn dispatch_find<'s>(
                 }
                 OpResult::JsValue {
                     resolver,
-                    value: rows_as_json_array(rows),
+                    value: rows_as_json_array_masked(rows, has_masked),
                     request_id,
                 }
             }
@@ -456,7 +489,7 @@ pub(crate) fn dispatch_insert<'s>(
                 // **P5.5 PR 3** — wrap masked columns from RETURNING *
                 // so the SDK sees `MaskedValue<T>`, not the raw
                 // ciphertext / plaintext parent slot.
-                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
+                let (rows, has_masked) = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -468,7 +501,7 @@ pub(crate) fn dispatch_insert<'s>(
                 };
                 OpResult::JsValue {
                     resolver,
-                    value: first_row_or_null(rows),
+                    value: first_row_or_null_masked(rows, has_masked),
                     request_id,
                 }
             }
@@ -676,7 +709,7 @@ pub(crate) fn dispatch_update_one<'s>(
                     }
                 };
                 // **P5.5 PR 3** — wrap masked columns from RETURNING *.
-                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
+                let (rows, has_masked) = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -688,7 +721,7 @@ pub(crate) fn dispatch_update_one<'s>(
                 };
                 OpResult::JsValue {
                     resolver,
-                    value: first_row_or_null(rows),
+                    value: first_row_or_null_masked(rows, has_masked),
                     request_id,
                 }
             }
@@ -2076,21 +2109,29 @@ fn schema_has_encrypted_columns(schema: &Value) -> bool {
 ///    the parent (ciphertext / plaintext) AND the sibling. The wrap
 ///    prefers the sibling's value, drops the sibling key, and wraps
 ///    the parent slot.
+///
+/// **P9 PR 2** — returns `(rows, has_masked)`. The `has_masked` flag is
+/// `true` iff the schema declared at least one masked column (i.e. the
+/// wrap pass ran and the rows may carry `__zsmask__` sentinels). The
+/// caller threads this into the lowering helper so the result resolves
+/// via `ResolveValue::JsonWithRehydration` — `JSON.parse` then a Rust
+/// walk that mints native `MaskedValue` instances. When `false`, the
+/// caller keeps the plain `ResolveValue::Json` path (no walk overhead).
 fn apply_mask_wrap_on_read(
     app_id: &str,
     collection: &str,
     mut rows: Vec<Value>,
-) -> Result<Vec<Value>, DbError> {
+) -> Result<(Vec<Value>, bool), DbError> {
     let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(rows);
+        return Ok((rows, false));
     };
     if !schema_has_masked_columns(&schema) {
-        return Ok(rows);
+        return Ok((rows, false));
     }
     for row in rows.iter_mut() {
         crate::crud::mask_pass::wrap_row_on_read(&schema, collection, row)?;
     }
-    Ok(rows)
+    Ok((rows, true))
 }
 
 /// **P5.5 PR 2** — cheap walk: does any field def on `schema` carry a

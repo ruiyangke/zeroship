@@ -4,99 +4,31 @@
  * All field↔column mapping is driven by the NamingStrategy passed from Collection.
  * Contains aggregate pipeline translation (MongoDB → native format).
  */
-import { PlainObject, MaskedValue, type MaskedValueRepr, type Classification } from "./types.js";
+import { PlainObject } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Document mapping (native → user)
 // ---------------------------------------------------------------------------
-
-/**
- * **P5.5 PR 3** — wire-shape predicate for the `__zsmask__` sentinel.
- *
- * The Rust read-side flip (`mask_pass::wrap_row_on_read`) replaces every
- * masked column on a returning row with `{ sentinel: "__zsmask__",
- * masked, classification, _meta: { collection, row_pk, column } }`. The
- * SDK side recognises that shape and constructs a `MaskedValue<T>`
- * instance — the SDK surface never sees raw ciphertext on a default
- * read.
- */
-function isMaskedRepr(v: unknown): v is MaskedValueRepr & { _meta: { collection: string; row_pk: string; column: string } } {
-  return (
-    v !== null &&
-    typeof v === "object" &&
-    !Array.isArray(v) &&
-    (v as Record<string, unknown>).sentinel === "__zsmask__"
-  );
-}
-
-/**
- * **P5.5 PR 3** — rehydrate `__zsmask__`-tagged wire payloads into
- * `MaskedValue<T>` instances.
- *
- * Walks every value on `doc`; when a value carries the `sentinel:
- * "__zsmask__"` discriminator, constructs a `MaskedValue<T>` from it
- * (PR 1 ships `MaskedValue.constructor` accepting `(repr, meta)`).
- * Non-tagged values pass through unchanged.
- *
- * Returns a NEW object; the native side hands back JS objects the
- * runtime keeps a reference to (see commit 9393287), so mutating in
- * place would leak the rehydration to any caller still holding the
- * original.
- */
-export function rehydrateMaskedValues(doc: PlainObject): PlainObject {
-  const out: PlainObject = {};
-  for (const key of Object.keys(doc)) {
-    const v = doc[key];
-    if (isMaskedRepr(v)) {
-      const meta = ((v as unknown as Record<string, unknown>)._meta ?? {
-        collection: "",
-        row_pk: "",
-        column: key,
-      }) as { collection: string; row_pk: string; column: string };
-      const repr: MaskedValueRepr = {
-        sentinel: "__zsmask__",
-        masked: v.masked,
-        classification: v.classification as Classification,
-      };
-      out[key] = new MaskedValue(repr, meta);
-    } else {
-      out[key] = v;
-    }
-  }
-  return out;
-}
 
 /** @internal Convert column names to JS field names. Returns a new object;
  *  the native side hands back real JS objects we don't own (see commit
  *  9393287), so mutating in place would leak rename side-effects to any
  *  other reference the runtime keeps.
  *
- *  **P5.5 PR 3** — also rehydrates `__zsmask__`-tagged wire payloads
- *  into `MaskedValue<T>` instances. See [`rehydrateMaskedValues`].
- *  Every Collection read method funnels through `mapResultDoc`, so the
- *  rehydration is applied once at the boundary regardless of the call
- *  site (find / insert RETURNING / update RETURNING / ...).
+ *  **P9 PR 2** — the `__zsmask__`-sentinel rehydration that used to live
+ *  here is gone. Masked columns are now rehydrated Rust-side at
+ *  `JSON.parse` time (`ResolveValue::JsonWithRehydration` →
+ *  `masked_value::rehydrate_masked_values`): the native row already
+ *  carries real `MaskedValue` v8_class instances by the time it reaches
+ *  the SDK, so `mapResultDoc` only needs to rename keys. Encrypted
+ *  columns are likewise decrypted Rust-side (`apply_encryption_on_read`)
+ *  before the row crosses the boundary, so there is no SDK-side
+ *  ciphertext arm either.
  */
 export function mapResultDoc(doc: PlainObject, toField: (s: string) => string): PlainObject {
   const out: PlainObject = {};
   for (const key of Object.keys(doc)) {
-    const v = doc[key];
-    const renamedKey = toField(key);
-    if (isMaskedRepr(v)) {
-      const meta = ((v as unknown as Record<string, unknown>)._meta ?? {
-        collection: "",
-        row_pk: "",
-        column: renamedKey,
-      }) as { collection: string; row_pk: string; column: string };
-      const repr: MaskedValueRepr = {
-        sentinel: "__zsmask__",
-        masked: v.masked,
-        classification: v.classification as Classification,
-      };
-      out[renamedKey] = new MaskedValue(repr, meta);
-    } else {
-      out[renamedKey] = v;
-    }
+    out[toField(key)] = doc[key];
   }
   return out;
 }

@@ -514,30 +514,27 @@ export interface MaskOpts {
 }
 
 /**
- * **P5.5 PR 1** — wire shape returned by the Rust read path for
- * masked columns (Path B). The runtime emits this object in place
- * of a bare value; the SDK's V8 wrapper recognises the
- * `__zsmask__` sentinel and constructs a {@link MaskedValue}
- * instance with `.unmask()` / `.canUnmask()` methods.
+ * **P5.5 PR 1** — wire shape the Rust read path emits for masked
+ * columns (the `__zsmask__` sentinel object).
  *
- * Mirrors the `__zsenc_blob__` sentinel from P5 PR 3.5 — same
- * pattern of tagging a structurally-typed wire payload so the SDK
- * can post-process it without scanning every row.
+ * **P9 PR 2** — this wire shape is now consumed entirely Rust-side:
+ * the row serializer emits the sentinel into the JSON string, and the
+ * runtime's rehydration pass (`masked_value::rehydrate_masked_values`)
+ * replaces it with a native {@link MaskedValue} v8_class instance at
+ * `JSON.parse` time. The SDK never observes the raw sentinel and never
+ * constructs `MaskedValue`; this type is retained as documentation of
+ * the wire contract (and is still used by the test harness to
+ * synthesise sentinel payloads).
  *
  * Wire shape:
  * ```json
  * {
+ *   "sentinel": "__zsmask__",
  *   "masked": "***-**-6789",
  *   "classification": "spi",
- *   "sentinel": "__zsmask__"
+ *   "_meta": { "collection": "users", "row_pk": "usr_…", "column": "ssn" }
  * }
  * ```
- *
- * The sibling-column name and per-row metadata
- * (`{ collection, row_pk, column }`) are NOT carried in this wire
- * payload — they are reconstructed by the SDK from the calling
- * collection + parent row. PR 3 implements the runtime emission;
- * PR 4 wires the `.unmask()` round-trip.
  */
 export interface MaskedValueRepr {
   /** The masked representation. Safe to log, serialize, render. */
@@ -557,263 +554,93 @@ export interface MaskedValueRepr {
 export type Actor = Record<string, unknown>;
 
 /**
- * **P5.5 PR 4** — resolve the native `env.db.unmaskField` callable.
+ * **P9 PR 2** — masked-value wrapper, now a NATIVE v8_class.
  *
- * Throws `unmask_not_available` with a remediation `hint` when the
- * runtime hasn't exposed `env.db.unmaskField`. This shape mirrors
- * `Collection._nativeCollection()`'s "missing native surface" error:
- * the SDK can surface a typed code to consumers without leaking the
- * raw `undefined` access.
+ * `MaskedValue` instances are minted Rust-side by the row serializer's
+ * rehydration pass (`crates/plugin-db/src/v8_classes/masked_value.rs`)
+ * when a masked column flows back across the V8 boundary. The SDK no
+ * longer constructs them — this is a TYPE-ONLY `declare class` that
+ * describes the native instance's shape. There is no JS runtime body;
+ * `new MaskedValue(...)` from user code throws `Illegal constructor`
+ * (the native constructor rejects).
  *
- * Resolved lazily on every `.unmask()` call so:
- *
- * - Test harnesses that monkey-patch `env.db.unmaskField` later in the
- *   process pick up the patched function on subsequent calls.
- * - Modules imported before the runtime finishes wiring `env` (rare,
- *   but possible during `installSchema`'s plant phase) don't bake a
- *   stale `undefined` into the closure.
- *
- * The lookup is O(1) (two property accesses) so the per-call overhead
- * is negligible compared to the V8↔Rust round-trip that follows.
- */
-function resolveUnmaskField(): (args: {
-  collection: string;
-  row_pk: string;
-  column: string;
-  actor?: unknown;
-  reason?: string;
-}) => Promise<unknown> {
-  const envAny = (globalThis as { env?: { db?: { unmaskField?: unknown } } }).env;
-  const fn = envAny?.db?.unmaskField;
-  if (typeof fn !== "function") {
-    throw Object.assign(
-      new Error(
-        "MaskedValue.unmask(): env.db.unmaskField not available — " +
-          "runtime is missing the P5.5 PR 4 unmask RPC surface.",
-      ),
-      { code: "unmask_not_available" as const },
-    );
-  }
-  return fn as (args: {
-    collection: string;
-    row_pk: string;
-    column: string;
-    actor?: unknown;
-    reason?: string;
-  }) => Promise<unknown>;
-}
-
-/**
- * **P5.5 PR 7** — resolve the native `env.db.bulkUnmaskFields`
- * callable. Same lazy-resolution rationale as
- * `resolveUnmaskField()` — test harnesses that monkey-patch the
- * native after import-time wiring pick up the patched function on
- * subsequent calls.
- */
-function resolveBulkUnmaskFields(): (args: {
-  collection: string;
-  items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
-  actor?: unknown;
-  reason?: string;
-}) => Promise<unknown> {
-  const envAny = (globalThis as {
-    env?: { db?: { bulkUnmaskFields?: unknown } };
-  }).env;
-  const fn = envAny?.db?.bulkUnmaskFields;
-  if (typeof fn !== "function") {
-    throw Object.assign(
-      new Error(
-        "MaskedValue.unmask(columns): env.db.bulkUnmaskFields not available — " +
-          "runtime is missing the P5.5 PR 7 bulk unmask RPC surface.",
-      ),
-      { code: "bulk_unmask_not_available" as const },
-    );
-  }
-  return fn as (args: {
-    collection: string;
-    items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
-    actor?: unknown;
-    reason?: string;
-  }) => Promise<unknown>;
-}
-
-/**
- * **P5.5 PR 1** — masked-value wrapper.
- *
- * Encapsulates the masked representation of a sensitive field
- * along with the classification + per-row metadata needed for the
- * `.unmask()` round-trip (PR 4). Reads of a masked column return
- * `MaskedValue<T>` instead of a bare `T`; the only paths to
+ * Encapsulates the masked representation of a sensitive field along
+ * with its classification + per-row `_meta`. Reads of a masked column
+ * return `MaskedValue<T>` instead of a bare `T`; the only paths to
  * plaintext are:
  *
- * 1. `.unmask({ reason?, actor? })` — round-trip to the platform,
- *    authorization check, audit row emission, return plaintext
- *    (PR 4). This PR ships only the signature; the body throws
- *    `unmask_not_implemented`.
- * 2. The per-query unmask hint `db.users.find({ id }, { unmask: ["ssn"], actor }).first()`
- *    — PR 7. Authorization check upfront; row returns plaintext
- *    directly for the listed columns.
+ * 1. `.unmask({ reason?, actor? })` — native round-trip: authorization
+ *    check, audit-row emission, decrypt, returns the bare plaintext.
+ * 2. `.unmask(columns, opts)` — native multi-column fan-out pinned to
+ *    this row; resolves with `Record<col, plaintext>`. Atomic auth.
+ * 3. The per-query unmask hint
+ *    `db.users.find({ id }, { unmask: ["ssn"], actor }).first()` — the
+ *    listed columns come back as bare plaintext, not wrapped.
  *
  * Coercion: `.toString()` / `JSON.stringify()` / template-literal
- * interpolation all yield `this.masked`, so `console.log(user)`
- * never leaks plaintext — the wire shape that crosses the V8
- * boundary on a default read carries the masked text only.
+ * interpolation all yield the masked string, so `console.log(user)`
+ * never leaks plaintext.
  */
-export class MaskedValue<T extends string | number | Uint8Array = string> {
-  /** @internal Phantom for the plaintext type. */
-  declare readonly _plaintext: T;
+export declare class MaskedValue<T extends string | number | Uint8Array = string> {
+  /** @internal Phantom for the plaintext type. Erased at runtime. */
+  readonly _plaintext: T;
 
   /** The masked representation. Safe to log, serialize, render. */
   readonly masked: string;
-  /** Classification of the source field. */
-  readonly classification: Classification;
-  /** @internal Per-row metadata needed to drive the unmask RPC (PR 4). */
-  readonly _meta: Readonly<{ collection: string; row_pk: string; column: string }>;
 
-  constructor(
-    repr: MaskedValueRepr,
-    meta: { collection: string; row_pk: string; column: string },
-  ) {
-    if (repr === null || typeof repr !== "object" || repr.sentinel !== "__zsmask__") {
-      throw Object.assign(
-        new Error("MaskedValue: repr must carry the `__zsmask__` sentinel"),
-        { code: "masked_value_invalid_repr" as const },
-      );
-    }
-    this.masked = repr.masked;
-    this.classification = repr.classification;
-    this._meta = Object.freeze({ ...meta });
-  }
+  /** Classification of the source field — see {@link Classification}. */
+  readonly classification: Classification;
+
+  /** @internal Frozen per-row coordinates the native `unmask` round-trip
+   *  uses. Re-nested from the native instance's flat internal fields. */
+  readonly _meta: Readonly<{ collection: string; row_pk: string; column: string }>;
 
   /**
    * Round-trip to the platform to fetch plaintext.
    *
-   * **PR 4**: wired to the `env.db.unmaskField` native op (registered
-   * by `crates/plugin-db` as a `#[v8_method]` on the `Db` v8_class).
-   * The native dispatcher:
-   *
-   * 1. Looks up the column's mask + encryption metadata from the
-   *    cached schema (must match the `_meta.column` on this instance).
+   * The native dispatcher (bound to this instance's `_meta`):
+   * 1. Looks up the column's mask + encryption metadata.
    * 2. Authorises the actor against the column's classification.
-   *    PR 4 ships a strict default-deny stub: only `kind: "auto"`
-   *    actors are granted access; PR 5 will swap the stub for a
-   *    per-app `defineMaskPolicy()` lookup.
-   * 3. SELECTs the row, decrypts the ciphertext (if encrypted) or
-   *    reads the parent column directly (mask-only).
-   * 4. Writes one row to `<app>.__zeroship_audit_unmask`. Both
-   *    granted AND denied paths emit an audit row per the design
-   *    Q-MASK-C contract.
-   * 5. Returns `{ plaintext }` on success; throws a coded error
-   *    otherwise.
+   * 3. SELECTs the row, decrypts (encrypted) or reads the parent
+   *    column directly (mask-only).
+   * 4. Writes one row to `<app>.__zeroship_audit_unmask` (granted AND
+   *    denied paths both audit, per Q-MASK-C).
+   * 5. Resolves with the bare plaintext on success; rejects with a
+   *    coded error otherwise.
    *
-   * Errors surfaced:
-   * - `unmask_not_permitted` — actor's role does not include the
-   *   column's classification per the platform's mask policy.
-   * - `unmask_column_not_masked` — the named column has no mask
-   *   declaration on the cached schema; cannot unmask.
-   * - `unmask_not_found` — row PK no longer matches a row in the
-   *   collection.
-   * - `unmask_value_null` — the parent column is NULL; there's
-   *   no plaintext to recover.
+   * Errors: `unmask_not_permitted`, `unmask_column_not_masked`,
+   * `unmask_not_found`, `unmask_value_null`.
    *
-   * **P5.5 PR 7** — the overload accepting a `columns` array
-   * fans-out to the `bulkUnmaskFields` native op, returning a
-   * `Record<columnName, T>` for every requested column ON THE SAME
-   * row as this MaskedValue. Atomic authorization: one denied
-   * column rejects the whole fan-out with
+   * The `columns` overload fans out to a native bulk unmask pinned to
+   * this MaskedValue's row, returning `Record<col, T>`. Atomic
+   * authorization: one denied column rejects the whole fan-out with
    * `bulk_unmask_partial_unauthorized`.
+   *
+   * For `wraps = bytes` the plaintext arrives base64-encoded (caller
+   * decodes with `Uint8Array.from(atob(pt), c => c.charCodeAt(0))`); for
+   * `wraps = number` it arrives as a stringified f64.
    */
-  async unmask(opts?: { actor?: Actor; reason?: string }): Promise<T>;
-  async unmask(
+  unmask(opts?: { actor?: Actor; reason?: string }): Promise<T>;
+  unmask(
     columns: readonly string[],
     opts: { actor: Actor; reason?: string },
   ): Promise<Record<string, T>>;
-  async unmask(
-    optsOrColumns?: { actor?: Actor; reason?: string } | readonly string[],
-    maybeOpts?: { actor: Actor; reason?: string },
-  ): Promise<T | Record<string, T>> {
-    // Multi-column overload — fan out to `env.db.bulkUnmaskFields`
-    // pinned to this MaskedValue's row.
-    if (Array.isArray(optsOrColumns)) {
-      const columns = optsOrColumns as readonly string[];
-      const opts = maybeOpts ?? ({} as { actor: Actor; reason?: string });
-      const native = resolveBulkUnmaskFields();
-      const result = (await native({
-        collection: this._meta.collection,
-        items: [{ rowPk: this._meta.row_pk, columns: [...columns] }],
-        actor: opts?.actor,
-        reason: opts?.reason,
-      })) as { results: Record<string, Record<string, string>> };
-      const rowResult = result.results?.[this._meta.row_pk] ?? {};
-      return rowResult as unknown as Record<string, T>;
-    }
-    // Single-column path — unchanged from PR 4.
-    const opts = (optsOrColumns ?? undefined) as
-      | { actor?: Actor; reason?: string }
-      | undefined;
-    const native = resolveUnmaskField();
-    const result = (await native({
-      collection: this._meta.collection,
-      row_pk: this._meta.row_pk,
-      column: this._meta.column,
-      actor: opts?.actor,
-      reason: opts?.reason,
-    })) as { plaintext: string };
-    // The native dispatcher returns a JSON-string plaintext regardless
-    // of the column's `wraps` declaration:
-    //   - wraps=string → UTF-8 string body.
-    //   - wraps=number → stringified f64 (caller may `Number(...)` it).
-    //   - wraps=bytes  → base64-encoded raw bytes (caller may
-    //                    `Uint8Array.from(atob(...), c => c.charCodeAt(0))`).
-    // We return the string verbatim as `T` — the SDK's type parameter
-    // is informational; the call site knows the wrap kind from the
-    // schema and decodes accordingly.
-    return result.plaintext as unknown as T;
-  }
 
   /**
    * Check whether `actor` (or the current request's actor) is
-   * authorized to unmask this field.
-   *
-   * **PR 4 contract**: implemented as a "dry-run unmask" — issues a
-   * real `unmask()` call with reason `"permission probe"` and treats
-   * `unmask_not_permitted` as a `false` answer; any other error
-   * rethrows. Per the design Q-MASK-C contract, the probe DOES write
-   * an audit row (with whichever outcome the authorisation returned).
-   * If you want a no-audit probe, that's a separate `dry_run: true`
-   * flag deferred to PR 5+.
+   * authorized to unmask this field. Implemented native-side as a
+   * dry-run unmask: issues a real unmask with reason
+   * `"permission probe"`, treats `unmask_not_permitted` as `false`, and
+   * rethrows every other error. Per Q-MASK-C the probe DOES write an
+   * audit row.
    */
-  async canUnmask(opts?: { actor?: Actor }): Promise<boolean> {
-    try {
-      await this.unmask({ actor: opts?.actor, reason: "permission probe" });
-      return true;
-    } catch (e: unknown) {
-      const code = (e as { code?: string } | null | undefined)?.code;
-      if (code === "unmask_not_permitted") return false;
-      throw e;
-    }
-  }
+  canUnmask(opts?: { actor?: Actor }): Promise<boolean>;
 
   /** Implicit string coercion → masked representation. */
-  toString(): string {
-    return this.masked;
-  }
+  toString(): string;
 
   /** JSON serialisation → masked representation. */
-  toJSON(): string {
-    return this.masked;
-  }
-
-  /**
-   * `Symbol.toPrimitive` coercion → masked representation. Covers
-   * template-literal interpolation, numeric coercion attempts, and
-   * any other implicit-conversion path that calls
-   * `Symbol.toPrimitive` before falling back to `.toString()`.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  [Symbol.toPrimitive](_hint: string): string {
-    return this.masked;
-  }
+  toJSON(): string;
 }
 
 /**

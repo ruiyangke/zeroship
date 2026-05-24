@@ -14,10 +14,11 @@ use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
 use crate::crud::{
-    dispatch_aggregate, dispatch_count, dispatch_delete_many, dispatch_delete_one,
-    dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many, dispatch_near,
-    dispatch_purge_many, dispatch_purge_one, dispatch_restore_many, dispatch_restore_one,
-    dispatch_search, dispatch_update_many, dispatch_update_one, dispatch_upsert,
+    dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
+    dispatch_delete_one, dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many,
+    dispatch_near, dispatch_purge_many, dispatch_purge_one, dispatch_restore_many,
+    dispatch_restore_one, dispatch_search, dispatch_unmask_field, dispatch_update_many,
+    dispatch_update_one, dispatch_upsert,
 };
 use crate::v8_bridge::{read_json_arg, refuse_if_query_capability};
 
@@ -381,6 +382,81 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let args_v = read_json_arg(scope, Some(args));
         dispatch_near(scope, &self.app_id, &self.name, args_v).into()
+    }
+
+    /// `collection.unmaskField(rowPk, column, opts?)` — **P9 PR 2**.
+    /// Single-cell unmask round-trip for the ad-hoc "no MaskedValue in
+    /// hand" case (e.g. unmask a known `(rowPk, column)` without first
+    /// reading the row). Moved off `Db` so the collection name is
+    /// inherited from the receiver and cannot be spoofed via the args
+    /// shape.
+    ///
+    /// `opts` (optional): `{ actor?: {...} | null, reason?: string }`.
+    ///
+    /// Resolves with the bare plaintext string on success; rejects with
+    /// `unmask_not_permitted` / `unmask_column_not_masked` /
+    /// `unmask_not_found` / `unmask_value_null` or a typed SQL / config
+    /// error. Every dispatch — granted OR denied — writes one row to
+    /// `<app>.__zeroship_audit_unmask`.
+    ///
+    /// Builds the `{ collection, row_pk, column, actor?, reason? }` args
+    /// object (stamping `collection` from `self.name`) and routes through
+    /// the shared [`dispatch_unmask_field`] validation + dispatch path.
+    #[v8_method]
+    #[v8_name = "unmaskField"]
+    fn unmask_field<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        row_pk: v8::Local<v8::Value>,
+        column: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        let row_pk_v = read_json_arg(scope, Some(row_pk));
+        let column_v = read_json_arg(scope, Some(column));
+        let opts_v = read_json_arg(scope, Some(opts));
+        let mut args = match opts_v {
+            Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        args.insert("collection".to_string(), Value::String(self.name.clone()));
+        args.insert("row_pk".to_string(), row_pk_v);
+        args.insert("column".to_string(), column_v);
+        dispatch_unmask_field(scope, &self.app_id, Value::Object(args)).into()
+    }
+
+    /// `collection.bulkUnmask(items, opts?)` — **P9 PR 2**. Bulk,
+    /// many-row / many-column unmask in one V8↔Rust hop. Moved off
+    /// `Db.bulkUnmaskFields`; the collection name is inherited from the
+    /// receiver.
+    ///
+    /// `items`: `[{ rowPk: string, columns: string[] }, ...]`.
+    /// `opts` (optional): `{ actor?: {...} | null, reason?: string }`.
+    ///
+    /// **Atomic authorisation** (Q-MASK-F): every `(rowPk, column)` pair
+    /// is checked BEFORE any decrypt; a single denied pair refuses the
+    /// whole call with `bulk_unmask_partial_unauthorized`. Resolves with
+    /// `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
+    ///
+    /// Builds the `{ collection, items, actor?, reason? }` args object
+    /// (stamping `collection` from `self.name`) and routes through the
+    /// shared [`dispatch_bulk_unmask_field`] validation + dispatch path.
+    #[v8_method]
+    #[v8_name = "bulkUnmask"]
+    fn bulk_unmask<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        items: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        let items_v = read_json_arg(scope, Some(items));
+        let opts_v = read_json_arg(scope, Some(opts));
+        let mut args = match opts_v {
+            Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        args.insert("collection".to_string(), Value::String(self.name.clone()));
+        args.insert("items".to_string(), items_v);
+        dispatch_bulk_unmask_field(scope, &self.app_id, Value::Object(args)).into()
     }
 
     /// `collection.openSubscription()` — returns a

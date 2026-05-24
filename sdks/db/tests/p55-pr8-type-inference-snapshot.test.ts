@@ -27,8 +27,12 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t, MaskedValue } from "@zeroship/db";
-import type { Row, RowInput } from "@zeroship/db";
+import { t } from "@zeroship/db";
+// **P9 PR 2** — `MaskedValue` is a type-only `declare class` (native
+// v8_class minted Rust-side). Masked-column slots below are filled with
+// `as unknown as MaskedValue<string>` casts; the load-bearing check is
+// that `tsc` accepts them (i.e. `Row<S>` infers `MaskedValue<T>`).
+import type { Row, RowInput, MaskedValue } from "@zeroship/db";
 
 // Helper: compile-time assertion that `T` matches the actual value's
 // type. The body is a no-op at runtime; the win is `tsc` rejecting
@@ -54,18 +58,14 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     const row: UsersRow = {
       id: 1,
       name: "Alice",
-      ssn: new MaskedValue({
-        masked: "***-**-6789",
-        classification: "spi",
-        sentinel: "__zsmask__",
-      }),
+      ssn: "***-**-6789" as unknown as MaskedValue<string>,
       createdAt: 0,
       updatedAt: 0,
     };
     assertType<MaskedValue<string>>(row.ssn);
     assertType<string>(row.name);
     assert.equal(row.name, "Alice");
-    assert.equal(row.ssn.toString(), "***-**-6789");
+    assert.equal(row.ssn as unknown as string, "***-**-6789");
   });
 
   test("ssn_masked sibling column is NOT part of Row<S>", () => {
@@ -105,16 +105,12 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     // still wraps in MaskedValue<T>.
     const row: UsersRow = {
       id: 1,
-      email: new MaskedValue({
-        masked: "***************",
-        classification: "pii",
-        sentinel: "__zsmask__",
-      }),
+      email: "***************" as unknown as MaskedValue<string>,
       createdAt: 0,
       updatedAt: 0,
     };
     assertType<MaskedValue<string>>(row.email);
-    assert.equal(row.email.toString(), "***************");
+    assert.equal(row.email as unknown as string, "***************");
   });
 
   test("mask kind 'none' opts out and infers as bare T", () => {

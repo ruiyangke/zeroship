@@ -321,6 +321,30 @@ interface ZeroshipCollection {
 
   /** Open a subscription bound to this collection. */
   openSubscription(): ZeroshipSubscription;
+
+  /**
+   * **P9 PR 2** — single-cell unmask round-trip. The collection name
+   * is inherited from this receiver (not passed in args). Reachable
+   * from `Collection.unmaskField`; resolves with the bare plaintext
+   * string. Granted AND denied dispatches both write an audit row.
+   */
+  unmaskField(
+    rowPk: string,
+    column: string,
+    opts?: { actor?: Record<string, unknown> | null; reason?: string },
+  ): Promise<string>;
+
+  /**
+   * **P9 PR 2** — bulk unmask round-trip (collection inherited from
+   * this receiver). Authorisation is atomic: a single denied
+   * (rowPk, column) pair refuses the whole call with
+   * `bulk_unmask_partial_unauthorized`. Reachable from
+   * `Collection.bulkUnmask`.
+   */
+  bulkUnmask(
+    items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>,
+    opts?: { actor?: Record<string, unknown> | null; reason?: string },
+  ): Promise<{ results: Record<string, Record<string, string>> }>;
 }
 
 /**
@@ -526,31 +550,10 @@ interface ZeroshipDb {
     indexes?: ZeroshipDbNamedIndex[],
   ): Promise<void>;
 
-  /**
-   * **P5.5 PR 4** — single-cell unmask round-trip. Reachable from
-   * `MaskedValue.unmask()`; not part of the creator-facing SDK
-   * surface.
-   */
-  unmaskField(args: {
-    collection: string;
-    row_pk: string;
-    column: string;
-    actor?: Record<string, unknown> | null;
-    reason?: string;
-  }): Promise<{ plaintext: string }>;
-
-  /**
-   * **P5.5 PR 7** — bulk unmask round-trip. Authorisation is atomic:
-   * a single denied (rowPk, column) pair refuses the whole call with
-   * `bulk_unmask_partial_unauthorized`. Reachable from
-   * `Collection.bulkUnmask` and `MaskedValue.unmask(columns, opts)`.
-   */
-  bulkUnmaskFields(args: {
-    collection: string;
-    items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
-    actor?: Record<string, unknown> | null;
-    reason?: string;
-  }): Promise<{ results: Record<string, Record<string, string>> }>;
+  // **P9 PR 2** — `unmaskField` / `bulkUnmaskFields` moved off `Db` to
+  // `Collection` (collection name inherited from the receiver). See
+  // `ZeroshipCollection.unmaskField` / `.bulkUnmask`. `MaskedValue`
+  // instances dispatch unmask natively from their own bound `_meta`.
 
   /**
    * **P5.5 PR 5** — install the per-app mask policy. Called once at

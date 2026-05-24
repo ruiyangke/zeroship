@@ -32,6 +32,7 @@
 
 pub mod collection;
 pub mod db;
+pub mod masked_value;
 pub mod migration;
 pub mod migrations;
 pub mod replication;
