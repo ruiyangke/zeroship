@@ -723,11 +723,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: orphan pub fn. Possibly stale test helper from earlier scaffolding.
 - **Action**: delete or move to `#[cfg(test)]`-gated test helper module.
 
-### [R10-API2] `ExecBody` + `not_found` in sandbox-agent are over-pub'd (MINOR, api-surface-r10)
-- **Source**: 2026-05-25 api-surface-r10
-- **Files**: `crates/sandbox-agent/src/handlers.rs` (locate via grep `pub struct ExecBody\|pub fn not_found`)
-- **Symptom**: zero cross-crate consumers; same anti-pattern R8-API1 closed.
-- **Action**: pub→pub(crate). Mechanical.
+### [R10-API2] (CLOSED at `af4678ac`) `ExecBody` in sandbox-agent demoted pub→pub(crate); `not_found` kept pub (bin/lib split)
+- **Source**: 2026-05-25 api-surface-r10 (4-round api-surface carry through r11/r12/r13)
+- **Files**: `crates/sandbox-agent/src/handlers.rs:568`
+- **Fix (af4678ac)**: `pub struct ExecBody` → `pub(crate) struct ExecBody`. One-token edit — the handler already parses via `serde_json::from_slice(&body)` internally, so the type never appeared in a `pub fn` signature. Bundled with R13-API1 (sibling case in sandbox crate). Verified via `grep -rn 'ExecBody' crates/sandbox/src/ crates/sandbox/tests/ crates/sandbox-agent/src/` — only intra-file references remain.
+- **Out of scope**: `pub fn not_found` (handlers.rs:264) STAYS `pub` — consumed by `crates/sandbox-agent/src/main.rs:229` across the bin/lib split (the lib's `error_envelope` is `pub(crate)`, so the bin needs a wrapper). The R10 review note already covers this: "close that half with a docstring; `ExecBody` is the actionable half." Existing docstring at handlers.rs:255-263 explicitly cites the bin/lib split rationale.
+- **Verification**: `cargo check -p zeroship-sandbox-agent` clean. `cargo test -p zeroship-sandbox-agent --lib` → 242 passed / 0 failed / 0 ignored (unchanged).
 
 ### [R10-API3] (CLOSED at `f50c95da`, partial) persist.rs had 5 module-level `pub fn`s with only in-crate callers (MINOR, api-surface-r10)
 - **Source**: 2026-05-25 api-surface-r10 (4-round api-surface carry through r11/r12)
@@ -1144,11 +1145,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: 5× `0o400` + 1× `0o600` across the 6 mode-check sites
 - **Action**: const SECRET_FILE_MODE_400: u32 = 0o400; SECRET_FILE_MODE_600: u32 = 0o600. Pairs with R11-A1 helper extract.
 
-### [R13-API1] (MINOR, api-surface-r13) handlers.rs:797 ExecBody over-pub — sibling of R10-API2
+### [R13-API1] (CLOSED at `af4678ac`) handlers.rs:797 ExecBody over-pub — sibling of R10-API2
 - **Source**: 2026-05-25 api-surface-r13
 - **File**: `crates/sandbox/src/handlers.rs:797` (sandbox crate's ExecBody — separate from sandbox-agent's at R10-API2)
-- **Symptom**: zero external callers. Same anti-pattern as R10-API2.
-- **Action**: pub→pub(crate). Cluster with R10-API2 as 2-site fix.
+- **Fix (af4678ac)**: `pub struct ExecBody` → `pub(crate) struct ExecBody`. Required a 5-line refactor of `exec` to take `body: Bytes` and parse via `serde_json::from_slice` internally (returning `err(400, "invalid_input", ...)` on parse failure), rather than the prior `web::types::Json<ExecBody>` signature — without it the `pub(crate)` type would have appeared in a `pub fn` signature (E0446-style "private type in public interface"). The new shape mirrors sandbox-agent's `exec_cmd` (`handlers.rs:574-593`). Bundled with R10-API2 as the planned 2-site fix.
+- **Verification**: `cargo check -p zeroship-sandbox` clean. `cargo test -p zeroship-sandbox --lib` → 328 passed / 0 failed / 1 ignored (unchanged). Grep audit: `ExecBody` referenced only intra-file in both `crates/sandbox/src/handlers.rs` and `crates/sandbox-agent/src/handlers.rs`.
 
 ### [R13-V1] (VERIFICATION) `do_restore_inner` await count: 7 (unchanged through r10-r13)
 
@@ -1162,6 +1163,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R10-API5] CLOSED at `8ed9aa90` — sig.rs:120 `ResyncBody.sandbox_id` doc example updated from hyphenated UUID to `Uuid::simple()` 32-hex form; added B24-FOLLOWUP (`66029821`) back-reference for wire-shape rationale
 - [R10-API6] CLOSED at `8ed9aa90` — db.rs:2917 `host_id` file-contents test comment clarified: the file IS hyphenated by design (operator-readable persisted state), the `.simple()` wire form applies only to sandbox_id (B24-FOLLOWUP). Eliminates the recurring reviewer misidentification of this comment as stale (was a 5-round carry)
 - [R13-Q1 / R13-C1] CLOSED at `c5b9cb9d` — Unified the SANDBOX_TASK_DRIVER env-mutex. The duplicate `R12_I1_ENV_LOCK` in `restore_handler.rs` is gone; both modules now serialise via `crate::backend::nomad_ch::test_env_lock::TASK_DRIVER_ENV_LOCK` (a `pub(crate)` `#[cfg(test)]` sibling of `nomad_ch::tests`). Renamed from `T7_ENV_LOCK` since the lock is no longer T7-specific. Approach A (lift the existing lock) chosen over a fresh `src/tests/env_lock.rs` module — keeps the lock co-located with `task_driver_mode_from_env()` (the canonical reader) and avoids adding a new top-level test module. Lib tests 328/328; 3 back-to-back targeted runs (nomad_ch::tests + r12_i1_tests) + 2 full lib runs confirmed no flake.
+- [R10-API2 + R13-API1] CLOSED at `af4678ac` — `ExecBody` pub→pub(crate) in both sandbox-agent (`handlers.rs:568`, one-token edit) and sandbox (`handlers.rs:797`, demote + 5-line `Json<ExecBody>`→`Bytes`+parse refactor on `exec` so the now-private type doesn't appear in a `pub fn` signature). `not_found` stays pub (bin/lib split — already documented). Sandbox lib 328/328, sandbox-agent lib 242/242. Closes the 4-round api-surface carry on R10-API2 and the new R13-API1 sibling.
 
 ### [C-3] (CLOSED at `c890c015`) `TieredSnapshotStore::put` panic — `compio::runtime::spawn_blocking` called from a non-compio thread
 - **Source**: T-8b-smoke-r4 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r4.md`). 1-worker fleet at controller v18 + driver v4 (C-2 fix). CREATE PASS, SNAPSHOT FAIL on every cycle.
