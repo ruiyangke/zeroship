@@ -1333,7 +1333,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: C-1 through C-6 cluster bugs (5 of 6 smoke cycles found new bugs) all preventable by a ~80-LOC integration test using StubRestoreBackend. Cluster smoke-r6 halt-rule fired.
 - **Action**: dedicated R13-A1 integration sprint — `crates/sandbox/src/restore_handler.rs::tests::driven` module that constructs a fake compio runtime + drives `restore_sandbox` with `StubRestoreBackend` configured to fail at each step. Closes 6+ rounds of testing carry-forwards.
 
-### [R14-Q2] (CLOSED at `<pending>`) `seal_filename_for_str` dead_code warning emits on default cargo build
+### [R14-Q2] (CLOSED at `79b4d258`) `seal_filename_for_str` dead_code warning emits on default cargo build
 - **Source**: 2026-05-25 code-quality-r14
 - **File**: `crates/sandbox/src/persist.rs:281` (was demoted to pub(crate) at f50c95da R10-API3 partial)
 - **Symptom**: all 3 callers are `#[cfg(test)]`. R10-API3 demoted to pub(crate) but never followed through to either delete or `#[cfg(test)]`-gate. `cargo build` (default profile) emits `warning: function seal_filename_for_str is never used`.
