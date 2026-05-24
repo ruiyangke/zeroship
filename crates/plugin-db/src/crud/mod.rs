@@ -74,7 +74,7 @@ pub(crate) mod mask_policy;
 pub mod mask_policy;
 
 pub(crate) use mask_policy::dispatch_set_mask_policy_field;
-pub(crate) use unmask::dispatch_unmask_field;
+pub(crate) use unmask::{dispatch_bulk_unmask_field, dispatch_unmask_field};
 
 // **P5.5 PR 6** — mask backfill / rewrite / removal jobs driven by the
 // register-model apply pipeline. Same visibility pattern: `pub` under
@@ -84,6 +84,15 @@ pub(crate) use unmask::dispatch_unmask_field;
 pub(crate) mod mask_backfill;
 #[cfg(feature = "test-helpers")]
 pub mod mask_backfill;
+
+// **P5.5 PR 7** — drift detection: sample masked-column siblings vs.
+// recomputed mask of decrypt(parent). Same visibility pattern so the
+// SQLite + PG integration suites can drive `run_drift_check_*`
+// directly via the `test-helpers` gate.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod mask_drift;
+#[cfg(feature = "test-helpers")]
+pub mod mask_drift;
 
 // ---------------------------------------------------------------------------
 // dispatch_op template
@@ -188,6 +197,14 @@ fn rows_as_json_array(rows: Vec<Value>) -> ResolveValue {
 /// Resolves with the row as a real JS object or real JS `null` if no
 /// row matched (via `ResolveValue::Json`); on error rejects with a
 /// coded `OpError`.
+///
+/// **P5.5 PR 7** — `opts.unmask`: optional `string[]` of columns to
+/// promote from `MaskedValue<T>` to plaintext. Authorisation is
+/// checked UPFRONT (before any SQL); a single unauthorised column
+/// refuses the whole find with `unmask_not_permitted`. The auth
+/// surface uses the same per-app `MaskPolicy` as the standalone
+/// unmask RPC. `opts.actor` carries the actor descriptor consumed by
+/// the policy check.
 pub(crate) fn dispatch_find_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -202,18 +219,45 @@ pub(crate) fn dispatch_find_one<'s>(
 
     let order_by = opts.get("orderBy").cloned();
     let select = opts.get("select").cloned();
+    let unmask_columns = parse_unmask_opt(opts.get("unmask"));
+    let unmask_actor = opts.get("actor").cloned().filter(|v| !v.is_null());
+    let unmask_reason = opts
+        .get("unmaskReason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let app = app_id.to_string();
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // **P5.5 PR 7** — upfront auth fence for the unmask hint.
+        // Fail the find entirely on any unauthorised column rather
+        // than silently degrading to masked-only.
+        if !unmask_columns.is_empty() {
+            if let Err(e) = crate::crud::unmask::authorize_query_hint(
+                &app,
+                &coll,
+                &unmask_columns,
+                &unmask_actor,
+                &unmask_reason,
+            )
+            .await
+            {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
+            }
+        }
+
         // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
         // When the schema declares masked columns, the SELECT clause
         // emits `"<col>_masked" AS "<col>"` so the ciphertext column
         // never leaves Postgres on a default read.
         let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
-        let built = query::build_find_with_schema(
+        let built = query::build_find_with_schema_and_unmask(
             &app,
             &coll,
             &filter,
@@ -222,6 +266,7 @@ pub(crate) fn dispatch_find_one<'s>(
             order_by.as_ref(),
             select.as_ref(),
             schema_hint.as_ref(),
+            &unmask_columns,
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -254,7 +299,7 @@ pub(crate) fn dispatch_find_one<'s>(
                 // **P5.5 PR 3** — wrap masked-column values in the
                 // `__zsmask__`-tagged wire shape so the SDK can
                 // construct `MaskedValue<T>`.
-                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
+                let mut rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -264,6 +309,41 @@ pub(crate) fn dispatch_find_one<'s>(
                         };
                     }
                 };
+                // **P5.5 PR 7** — promote `MaskedValue<T>` → plaintext
+                // for every column on `opts.unmask`. The wrap pass
+                // above already attached the sentinel; this overwrites
+                // the listed columns in place with bare strings.
+                if !unmask_columns.is_empty() {
+                    if let Err(e) = crate::crud::unmask::dispatch_unmask_for_query(
+                        &app,
+                        &coll,
+                        &unmask_columns,
+                        &mut rows,
+                    )
+                    .await
+                    {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                    if let Err(e) = crate::crud::unmask::audit_query_hint_granted(
+                        &app,
+                        &coll,
+                        &unmask_columns,
+                        &unmask_actor,
+                        &unmask_reason,
+                    )
+                    .await
+                    {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                }
                 OpResult::JsValue {
                     resolver,
                     value: first_row_or_null(rows),
@@ -281,8 +361,24 @@ pub(crate) fn dispatch_find_one<'s>(
     promise
 }
 
+/// **P5.5 PR 7** — extract `opts.unmask` into a `Vec<String>`. Returns
+/// empty when the field is absent, null, or not an array of strings —
+/// per the proposal, malformed `unmask` shapes are tolerated as
+/// "no hint" rather than an error so a stale SDK build doesn't bring
+/// down the find path.
+fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
+    let Some(Value::Array(arr)) = opt else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
 /// Shared dispatch for `find` — see [`dispatch_find_one`] for the
-/// rationale. Reads `limit`/`offset`/`orderBy`/`select` out of `opts`.
+/// rationale. Reads `limit`/`offset`/`orderBy`/`select`/`unmask`/`actor`
+/// out of `opts`. The per-query unmask hint (PR 7) honours the same
+/// authorisation fence as `dispatch_find_one`.
 pub(crate) fn dispatch_find<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -299,16 +395,41 @@ pub(crate) fn dispatch_find<'s>(
     let offset = opts.get("offset").and_then(Value::as_i64);
     let order_by = opts.get("orderBy").cloned();
     let select = opts.get("select").cloned();
+    let unmask_columns = parse_unmask_opt(opts.get("unmask"));
+    let unmask_actor = opts.get("actor").cloned().filter(|v| !v.is_null());
+    let unmask_reason = opts
+        .get("unmaskReason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let app = app_id.to_string();
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // **P5.5 PR 7** — upfront auth fence for the unmask hint.
+        if !unmask_columns.is_empty() {
+            if let Err(e) = crate::crud::unmask::authorize_query_hint(
+                &app,
+                &coll,
+                &unmask_columns,
+                &unmask_actor,
+                &unmask_reason,
+            )
+            .await
+            {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
+            }
+        }
+
         // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
         // See `dispatch_find_one` for the rationale.
         let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
-        let built = query::build_find_with_schema(
+        let built = query::build_find_with_schema_and_unmask(
             &app,
             &coll,
             &filter,
@@ -317,6 +438,7 @@ pub(crate) fn dispatch_find<'s>(
             order_by.as_ref(),
             select.as_ref(),
             schema_hint.as_ref(),
+            &unmask_columns,
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -344,7 +466,7 @@ pub(crate) fn dispatch_find<'s>(
                 };
                 // **P5.5 PR 3** — wrap masked columns in the
                 // `__zsmask__`-tagged wire shape.
-                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
+                let mut rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -354,6 +476,37 @@ pub(crate) fn dispatch_find<'s>(
                         };
                     }
                 };
+                if !unmask_columns.is_empty() {
+                    if let Err(e) = crate::crud::unmask::dispatch_unmask_for_query(
+                        &app,
+                        &coll,
+                        &unmask_columns,
+                        &mut rows,
+                    )
+                    .await
+                    {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                    if let Err(e) = crate::crud::unmask::audit_query_hint_granted(
+                        &app,
+                        &coll,
+                        &unmask_columns,
+                        &unmask_actor,
+                        &unmask_reason,
+                    )
+                    .await
+                    {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                }
                 OpResult::JsValue {
                     resolver,
                     value: rows_as_json_array(rows),

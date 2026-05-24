@@ -534,6 +534,40 @@ function resolveUnmaskField(): (args: {
 }
 
 /**
+ * **P5.5 PR 7** — resolve the native `env.db.bulkUnmaskFields`
+ * callable. Same lazy-resolution rationale as
+ * `resolveUnmaskField()` — test harnesses that monkey-patch the
+ * native after import-time wiring pick up the patched function on
+ * subsequent calls.
+ */
+function resolveBulkUnmaskFields(): (args: {
+  collection: string;
+  items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
+  actor?: unknown;
+  reason?: string;
+}) => Promise<unknown> {
+  const envAny = (globalThis as {
+    env?: { db?: { bulkUnmaskFields?: unknown } };
+  }).env;
+  const fn = envAny?.db?.bulkUnmaskFields;
+  if (typeof fn !== "function") {
+    throw Object.assign(
+      new Error(
+        "MaskedValue.unmask(columns): env.db.bulkUnmaskFields not available — " +
+          "runtime is missing the P5.5 PR 7 bulk unmask RPC surface.",
+      ),
+      { code: "bulk_unmask_not_available" as const },
+    );
+  }
+  return fn as (args: {
+    collection: string;
+    items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
+    actor?: unknown;
+    reason?: string;
+  }) => Promise<unknown>;
+}
+
+/**
  * **P5.5 PR 1** — masked-value wrapper.
  *
  * Encapsulates the masked representation of a sensitive field
@@ -611,8 +645,42 @@ export class MaskedValue<T extends string | number | Uint8Array = string> {
    *   collection.
    * - `unmask_value_null` — the parent column is NULL; there's
    *   no plaintext to recover.
+   *
+   * **P5.5 PR 7** — the overload accepting a `columns` array
+   * fans-out to the `bulkUnmaskFields` native op, returning a
+   * `Record<columnName, T>` for every requested column ON THE SAME
+   * row as this MaskedValue. Atomic authorization: one denied
+   * column rejects the whole fan-out with
+   * `bulk_unmask_partial_unauthorized`.
    */
-  async unmask(opts?: { actor?: Actor; reason?: string }): Promise<T> {
+  async unmask(opts?: { actor?: Actor; reason?: string }): Promise<T>;
+  async unmask(
+    columns: readonly string[],
+    opts: { actor: Actor; reason?: string },
+  ): Promise<Record<string, T>>;
+  async unmask(
+    optsOrColumns?: { actor?: Actor; reason?: string } | readonly string[],
+    maybeOpts?: { actor: Actor; reason?: string },
+  ): Promise<T | Record<string, T>> {
+    // Multi-column overload — fan out to `env.db.bulkUnmaskFields`
+    // pinned to this MaskedValue's row.
+    if (Array.isArray(optsOrColumns)) {
+      const columns = optsOrColumns as readonly string[];
+      const opts = maybeOpts ?? ({} as { actor: Actor; reason?: string });
+      const native = resolveBulkUnmaskFields();
+      const result = (await native({
+        collection: this._meta.collection,
+        items: [{ rowPk: this._meta.row_pk, columns: [...columns] }],
+        actor: opts?.actor,
+        reason: opts?.reason,
+      })) as { results: Record<string, Record<string, string>> };
+      const rowResult = result.results?.[this._meta.row_pk] ?? {};
+      return rowResult as unknown as Record<string, T>;
+    }
+    // Single-column path — unchanged from PR 4.
+    const opts = (optsOrColumns ?? undefined) as
+      | { actor?: Actor; reason?: string }
+      | undefined;
     const native = resolveUnmaskField();
     const result = (await native({
       collection: this._meta.collection,

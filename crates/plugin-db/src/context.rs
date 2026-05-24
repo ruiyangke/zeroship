@@ -385,6 +385,29 @@ impl IsolateDbContext {
         self.schemas.get(&key).cloned()
     }
 
+    /// **P5.5 PR 7** — enumerate every `(collection, schema)` pair the
+    /// per-isolate cache holds for `app_id`. Drift-check sweep uses
+    /// this to iterate every registered collection without having to
+    /// re-introspect the catalog. Returns an empty `Vec` when the
+    /// isolate has registered no collections for the app yet.
+    ///
+    /// Key shape: `<app_id>:<collection>` (the same format
+    /// [`Self::cache_schema`] writes); we filter on the `<app_id>:`
+    /// prefix and reconstruct the collection name from the suffix.
+    pub(crate) fn cached_schemas_for_app(
+        &self,
+        app_id: &str,
+    ) -> Vec<(String, serde_json::Value)> {
+        let prefix = format!("{app_id}:");
+        self.schemas
+            .iter()
+            .filter_map(|(k, v)| {
+                k.strip_prefix(&prefix)
+                    .map(|coll| (coll.to_string(), v.clone()))
+            })
+            .collect()
+    }
+
     // ----- MASK_POLICIES (P5.5 PR 5) ---------------------------------
 
     /// **P5.5 PR 5** — fetch the cached mask policy for `app_id`.

@@ -66,6 +66,22 @@ interface ZeroshipDbFindOpts {
   offset?: number;
   orderBy?: Record<string, 1 | -1>;
   select?: string[];
+  /**
+   * **P5.5 PR 7** — per-query unmask hint. Each column name in this
+   * array is promoted from `MaskedValue<T>` to bare plaintext on the
+   * returned row(s). Authorisation is checked upfront against the
+   * per-app mask policy; a single unauthorised column rejects the
+   * whole find with `unmask_not_permitted`.
+   *
+   * Pass `actor` alongside `unmask` to identify the role the policy
+   * lookup should consult. The optional `unmaskReason` flows into
+   * the `__zeroship_audit_unmask.reason` column (prefixed with
+   * `[query_hint]`) so audit-log readers can correlate hint
+   * dispatches with their business context.
+   */
+  unmask?: string[];
+  actor?: Record<string, unknown>;
+  unmaskReason?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +483,38 @@ interface ZeroshipDb {
     schema: ZeroshipDbSchema,
     indexes?: ZeroshipDbNamedIndex[],
   ): Promise<void>;
+
+  /**
+   * **P5.5 PR 4** — single-cell unmask round-trip. Reachable from
+   * `MaskedValue.unmask()`; not part of the creator-facing SDK
+   * surface.
+   */
+  unmaskField(args: {
+    collection: string;
+    row_pk: string;
+    column: string;
+    actor?: Record<string, unknown> | null;
+    reason?: string;
+  }): Promise<{ plaintext: string }>;
+
+  /**
+   * **P5.5 PR 7** — bulk unmask round-trip. Authorisation is atomic:
+   * a single denied (rowPk, column) pair refuses the whole call with
+   * `bulk_unmask_partial_unauthorized`. Reachable from
+   * `Collection.bulkUnmask` and `MaskedValue.unmask(columns, opts)`.
+   */
+  bulkUnmaskFields(args: {
+    collection: string;
+    items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
+    actor?: Record<string, unknown> | null;
+    reason?: string;
+  }): Promise<{ results: Record<string, Record<string, string>> }>;
+
+  /**
+   * **P5.5 PR 5** — install the per-app mask policy. Called once at
+   * app boot from `defineMaskPolicy()`'s pending-slot drain.
+   */
+  setMaskPolicy(policy: Record<string, string[]>): Promise<Record<string, never>>;
 
   /**
    * Mint (or return the cached) Collection wrapper for `name`. Identity

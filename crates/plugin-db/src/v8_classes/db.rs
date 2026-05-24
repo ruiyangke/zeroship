@@ -36,7 +36,9 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::crud::{dispatch_set_mask_policy_field, dispatch_unmask_field};
+use crate::crud::{
+    dispatch_bulk_unmask_field, dispatch_set_mask_policy_field, dispatch_unmask_field,
+};
 use crate::orchestrator::register_model::register_model_dispatch;
 use crate::orchestrator::transaction::begin_transaction_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
@@ -326,6 +328,48 @@ impl Db {
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let args_v = read_json_arg(scope, Some(args));
         Ok(dispatch_unmask_field(scope, &self.app_id, args_v).into())
+    }
+
+    /// `db.bulkUnmaskFields(args)` — **P5.5 PR 7**. Round-trip a
+    /// many-row, many-column unmask request through the platform in
+    /// one V8↔Rust hop.
+    ///
+    /// `args` shape (validated by `crud::unmask::parse_bulk_args`):
+    /// ```js
+    /// {
+    ///   collection: string,
+    ///   items: [{ rowPk: string, columns: string[] }, ...],
+    ///   actor?:  { kind, id, ... } | null,
+    ///   reason?: string,
+    /// }
+    /// ```
+    ///
+    /// **Atomic authorisation** (Q-MASK-F): BEFORE any decrypt fires,
+    /// every `(rowPk, column)` pair is checked against the per-app
+    /// mask policy. A single denied pair refuses the WHOLE call with
+    /// `bulk_unmask_partial_unauthorized` — the authorised pairs are
+    /// NOT returned. Atomic refusal prevents inferring authorisation
+    /// state through "which columns came back populated".
+    ///
+    /// **Audit**: ONE row is written to `<app>.__zeroship_audit_unmask`
+    /// per call (not per pair), with `column` carrying the
+    /// comma-joined column list, `row_pk` carrying the comma-joined
+    /// row-PK list, and `reason` prefixed with `[bulk_unmask]` so
+    /// operators can filter by dispatch shape.
+    ///
+    /// Resolves with `{ results: { <rowPk>: { <col>: <plaintext> } } }`
+    /// on success. Rejects with `bulk_unmask_partial_unauthorized`,
+    /// `unmask_column_not_masked`, `unmask_not_found`,
+    /// `unmask_value_null`, or one of the typed SQL / config errors.
+    #[v8_method]
+    #[v8_name = "bulkUnmaskFields"]
+    fn bulk_unmask_fields<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        args: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let args_v = read_json_arg(scope, Some(args));
+        Ok(dispatch_bulk_unmask_field(scope, &self.app_id, args_v).into())
     }
 
     /// `db.replication` — returns the [`super::replication::Replication`]

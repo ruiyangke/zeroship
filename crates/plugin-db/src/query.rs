@@ -1815,6 +1815,62 @@ pub fn build_find_with_schema(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
+    build_find_with_schema_and_unmask(
+        app_id,
+        collection,
+        filter,
+        limit,
+        offset,
+        order_by,
+        select,
+        schema_hint,
+        &[],
+    )
+}
+
+/// **P5.5 PR 7** — schema-aware SELECT builder with per-query unmask
+/// hint support.
+///
+/// Same shape as [`build_find_with_schema`], plus an `unmask_columns`
+/// slice listing columns the caller wants in plaintext rather than the
+/// masked sibling form. For each column in the slice that is ALSO a
+/// masked column on the schema, the SELECT clause emits the bare
+/// parent (the ciphertext for encrypted columns, plaintext for mask-
+/// only columns) rather than the `"<col>_masked" AS "<col>"` alias.
+/// The downstream pipeline (`apply_encryption_on_read` →
+/// `apply_mask_wrap_on_read` → `dispatch_unmask_for_query`) then
+/// decrypts the parent and replaces the row slot with the plaintext.
+///
+/// `unmask_columns` items not present on the schema are silently
+/// ignored at the build layer — the auth fence
+/// (`crud::unmask::authorize_query_hint`) already refused that case
+/// with a typed `unmask_column_not_masked` error. Columns named in
+/// `unmask_columns` AND on the schema but NOT carrying a `.mask({...})`
+/// declaration are also passed through verbatim.
+///
+/// Generated SQL example (PG, schema declares ssn + email masked,
+/// `unmask_columns = ["ssn"]`):
+/// ```sql
+/// SELECT "id", "ssn", "email_masked" AS "email", "name"
+///   FROM users WHERE id = $1
+/// ```
+///
+/// Note `"ssn"` is the bare ciphertext column (BYTEA on PG; BLOB on
+/// SQLite) — the encryption pass will decrypt it on the way out, and
+/// the unmask-for-query pass will overwrite the row slot with the
+/// plaintext for the SDK to consume.
+#[allow(clippy::too_many_arguments)]
+pub fn build_find_with_schema_and_unmask(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+    unmask_columns: &[String],
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -1825,7 +1881,8 @@ pub fn build_find_with_schema(
     let where_clause = build_where(filter, &mut params)?;
 
     // Build SELECT column list from projection, or default to *
-    let select_expr = build_masked_aware_select_expr(select, schema_hint);
+    let select_expr =
+        build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns);
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
     if !where_clause.is_empty() {
@@ -1852,25 +1909,39 @@ pub fn build_find_with_schema(
 }
 
 /// **P5.5 PR 3** — compose the SELECT column-list expression, accounting
-/// for masked columns when `schema_hint` is `Some(_)`.
-///
-/// Three cases:
-/// 1. `select` is an explicit, non-empty projection array → for each
-///    listed column, emit `"<col>_masked" AS "<col>"` if the schema
-///    declares it masked (and `kind != "none"`), else emit `"<col>"`.
-/// 2. `select` is absent / empty AND `schema_hint` declares masked
-///    columns → expand to an explicit list: every column on the schema,
-///    with masked columns aliased through the sibling. `id` is implicit
-///    (every collection has it) and is added at the front. **The
-///    ciphertext / plaintext parent column is NOT emitted** — the
-///    masked sibling carries the user-visible value.
-/// 3. `select` is absent / empty AND `schema_hint` is `None` (or has no
-///    masked columns) → fall through to `*`, preserving the P5 baseline
-///    behaviour for callers that haven't cached a schema yet.
+/// for masked columns when `schema_hint` is `Some(_)`. Thin shim around
+/// [`build_masked_aware_select_expr_with_unmask`] for legacy callers
+/// that have no per-query unmask hint to thread through.
 fn build_masked_aware_select_expr(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
 ) -> String {
+    build_masked_aware_select_expr_with_unmask(select, schema_hint, &[])
+}
+
+/// **P5.5 PR 7** — compose the SELECT column-list expression, accounting
+/// for masked columns AND a per-query unmask hint.
+///
+/// Three cases (same as PR 3) — the unmask hint just overrides the
+/// per-column sibling-alias decision for any listed column:
+/// 1. `select` is an explicit, non-empty projection array → for each
+///    listed column, emit the bare parent if the column is unmask-
+///    listed, the sibling alias if the schema marks it masked, else
+///    the bare parent.
+/// 2. `select` is absent / empty AND `schema_hint` declares masked
+///    columns → expand to an explicit list: every column on the
+///    schema, with masked columns aliased through the sibling EXCEPT
+///    where the unmask hint promotes them back to the parent.
+/// 3. `select` is absent / empty AND `schema_hint` is `None` (or has
+///    no masked columns) → fall through to `*`.
+fn build_masked_aware_select_expr_with_unmask(
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+    unmask_columns: &[String],
+) -> String {
+    let unmask_set: std::collections::HashSet<&str> =
+        unmask_columns.iter().map(String::as_str).collect();
+
     // Case 1: explicit projection.
     if let Some(Value::Array(arr)) = select {
         if !arr.is_empty() {
@@ -1878,7 +1949,12 @@ fn build_masked_aware_select_expr(
                 .iter()
                 .filter_map(|v| v.as_str())
                 .map(|name| {
-                    if column_is_masked(name, schema_hint) {
+                    // Unmask hint wins: emit the bare parent for
+                    // unmask-listed columns even when the schema would
+                    // normally serve the sibling alias.
+                    if unmask_set.contains(name) {
+                        quote_ident(name)
+                    } else if column_is_masked(name, schema_hint) {
                         let sibling = format!("{name}_masked");
                         format!("{} AS {}", quote_ident(&sibling), quote_ident(name))
                     } else {
@@ -1913,7 +1989,10 @@ fn build_masked_aware_select_expr(
                 if col == "id" {
                     continue;
                 }
-                if column_is_masked(col, schema_hint) {
+                // Unmask hint wins (see Case 1 for the rationale).
+                if unmask_set.contains(col.as_str()) {
+                    parts.push(quote_ident(col));
+                } else if column_is_masked(col, schema_hint) {
                     let sibling = format!("{col}_masked");
                     parts.push(format!(
                         "{} AS {}",
@@ -1923,6 +2002,7 @@ fn build_masked_aware_select_expr(
                 } else {
                     parts.push(quote_ident(col));
                 }
+                let _ = def;
             }
             return parts.join(", ");
         }

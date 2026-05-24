@@ -904,6 +904,480 @@ async fn ensure_audit_unmask_table(app_id: &str) -> Result<(), DbError> {
     })
 }
 
+// ===========================================================================
+// P5.5 PR 7 — bulk unmask + per-query unmask hint
+// ===========================================================================
+//
+// These two entry points wrap the single-column unmask machinery for
+// callers that want to amortise the V8↔Rust round-trip when many
+// columns / rows need plaintext at once. They share the same
+// `MaskPolicy::allows` authorization contract as the single-cell path
+// but apply it as a single ATOMIC fence — one denied pair refuses the
+// WHOLE call (Q-MASK-F atomic-or-partial = atomic). The atomic fence
+// is critical for correctness: a partial-grant would leak the fact
+// that a particular pair was rejected through the side-channel of
+// "which columns came back populated".
+//
+// Audit rows reuse the existing `__zeroship_audit_unmask` table to
+// avoid a CHECK-constraint migration on the per-app schema. Each call
+// writes ONE audit row regardless of how many (row, column) pairs are
+// requested; the `column` field carries the comma-joined column list
+// and the `row_pk` field carries the comma-joined row PK list (or, for
+// per-query hint, the SQL filter's JSON representation). The `reason`
+// text is prefixed with `[bulk_unmask] <caller-reason>` /
+// `[query_hint] <caller-reason>` so operators querying the audit log
+// can filter by dispatch shape without needing a new column.
+
+/// **P5.5 PR 7** — args for the bulk unmask dispatcher.
+///
+/// `items[i].columns` is the list of column names to unmask on
+/// `items[i].row_pk`. An item with an empty `columns` list is treated
+/// as a no-op for that row.
+#[derive(Debug, Clone)]
+pub struct BulkUnmaskItem {
+    pub row_pk: String,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BulkUnmaskArgs {
+    pub collection: String,
+    pub items: Vec<BulkUnmaskItem>,
+    pub actor: Option<Value>,
+    pub reason: Option<String>,
+}
+
+/// **P5.5 PR 7** — result of a successful bulk unmask.
+///
+/// `results[row_pk][column]` carries the plaintext for every requested
+/// pair. The shape mirrors the SDK's `Map<id, Record<col, plaintext>>`
+/// so the JS caller materialises it directly.
+#[derive(Debug, Clone, Default)]
+pub struct BulkUnmaskResult {
+    pub results: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+}
+
+/// **P5.5 PR 7** — public dispatch entry for `zeroship.db.bulkUnmaskFields`.
+///
+/// Atomic authorization (Q-MASK-F): BEFORE any decrypt happens, every
+/// (row_pk, column) pair is authorised against the per-app policy. If
+/// ANY pair is denied, the call refuses entirely with a single
+/// `bulk_unmask_partial_unauthorized` audit row; the authorised pairs
+/// are NOT returned. This prevents inferring authorisation results
+/// from "which columns came back populated".
+///
+/// On full authorisation, the decrypt loop runs (one round-trip per
+/// pair through the existing single-cell helpers) and ONE
+/// `bulk_granted` audit row covering the whole call is written on
+/// success.
+///
+/// Unknown columns (`unmask_column_not_masked`) or unknown
+/// collections fail the call up-front before any audit row is written
+/// — the error surface is unchanged from the single-cell path.
+pub async fn dispatch_bulk_unmask(
+    app_id: &str,
+    args: BulkUnmaskArgs,
+) -> Result<BulkUnmaskResult, DbError> {
+    if args.items.is_empty() {
+        return Ok(BulkUnmaskResult::default());
+    }
+
+    // ---- Step 1 — load policy into cache, then resolve every (row,
+    // col) pair's classification + check authorization.
+    ensure_mask_policy_cached(app_id).await?;
+
+    // Per-column classification cache so we don't re-walk the schema
+    // map N×M times. `None` slot = column has no mask declaration →
+    // typed error.
+    let mut classifications: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut unauthorized: Vec<(String, String)> = Vec::new(); // (row_pk, column)
+
+    for item in &args.items {
+        for col in &item.columns {
+            if !classifications.contains_key(col) {
+                let mask_meta = lookup_mask_meta(app_id, &args.collection, col)?
+                    .ok_or_else(|| DbError::ValidationFailed {
+                        code: "unmask_column_not_masked",
+                        message: format!(
+                            "bulkUnmask: column '{}' on collection '{}' has no mask declaration",
+                            col, args.collection
+                        ),
+                        hint: Some(
+                            "Apply `.mask({ kind, classification })` on the field via @zeroship/db"
+                                .into(),
+                        ),
+                    })?;
+                classifications.insert(col.clone(), mask_meta.classification);
+            }
+            let classification = classifications
+                .get(col)
+                .expect("just inserted")
+                .clone();
+            let allowed = check_unmask_authorization(app_id, &args.actor, &classification)?;
+            if !allowed {
+                unauthorized.push((item.row_pk.clone(), col.clone()));
+            }
+        }
+    }
+
+    // ---- Step 2 — atomic-fence enforcement. If ANY pair denied,
+    // emit one audit row covering the whole call + refuse.
+    if !unauthorized.is_empty() {
+        write_audit_bulk_row(
+            app_id,
+            &args,
+            &classifications,
+            "denied",
+            Some(&unauthorized),
+        )
+        .await?;
+        return Err(DbError::Coded {
+            code: "bulk_unmask_partial_unauthorized".into(),
+            message: format!(
+                "bulkUnmask: {} (row, column) pair(s) not authorized; call refused atomically",
+                unauthorized.len()
+            ),
+            hint: Some(
+                "Drop the unauthorized columns or expand the mask policy via defineMaskPolicy()."
+                    .into(),
+            ),
+        });
+    }
+
+    // ---- Step 3 — decrypt loop. Reuse the single-cell fetch helpers
+    // so we don't duplicate the PG / SQLite arms. Bulk-of-one is
+    // exactly one fetch.
+    let mut out: BulkUnmaskResult = BulkUnmaskResult::default();
+    for item in &args.items {
+        if item.columns.is_empty() {
+            continue;
+        }
+        let row_map = out.results.entry(item.row_pk.clone()).or_default();
+        for col in &item.columns {
+            let single_args = UnmaskFieldArgs {
+                collection: args.collection.clone(),
+                row_pk: item.row_pk.clone(),
+                column: col.clone(),
+                actor: args.actor.clone(),
+                reason: args.reason.clone(),
+            };
+            // Read encryption / plaintext path identically to the
+            // single-cell helper — we already checked auth, so call
+            // the FETCH helpers directly (not `dispatch_unmask`,
+            // which would re-audit per pair). This is the
+            // "wrap-over-many" pattern the proposal describes.
+            let plaintext = match lookup_encryption_meta(app_id, &args.collection, col)? {
+                Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(app_id, &single_args).await?,
+            };
+            row_map.insert(col.clone(), plaintext);
+        }
+    }
+
+    // ---- Step 4 — single audit row for the whole call on success.
+    write_audit_bulk_row(app_id, &args, &classifications, "granted", None).await?;
+
+    Ok(out)
+}
+
+/// **P5.5 PR 7** — write the single audit row covering an entire
+/// bulk-unmask call. Reuses `__zeroship_audit_unmask`; the row's
+/// `column` carries a comma-joined column list, `row_pk` carries the
+/// comma-joined row PK list, and `reason` is prefixed `[bulk_unmask]`
+/// so operators can filter by dispatch shape.
+///
+/// `outcome` is either `"granted"` (every pair authorised + decrypted)
+/// or `"denied"` (at least one pair denied; nothing decrypted). The
+/// `unauthorized` slice carries the rejected pairs when the outcome is
+/// `denied`; included in the reason text so audit-log readers see
+/// exactly which pairs caused the refusal.
+async fn write_audit_bulk_row(
+    app_id: &str,
+    args: &BulkUnmaskArgs,
+    classifications: &std::collections::HashMap<String, String>,
+    outcome: &str,
+    unauthorized: Option<&[(String, String)]>,
+) -> Result<(), DbError> {
+    // Build the join-strings up-front: column list (unique, sorted for
+    // stable audit-row diffing), row-pk list (in caller order — the
+    // sequence captures the original bulk shape).
+    let mut columns_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for item in &args.items {
+        for col in &item.columns {
+            columns_set.insert(col.clone());
+        }
+    }
+    let columns_joined = columns_set.iter().cloned().collect::<Vec<_>>().join(",");
+    let row_pks_joined = args
+        .items
+        .iter()
+        .map(|i| i.row_pk.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Classification list: comma-joined unique values from the per-column
+    // map. When the bulk involves columns of multiple classifications
+    // (e.g. one `pii`, one `spi`), the audit row carries the union.
+    let mut class_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for c in classifications.values() {
+        class_set.insert(c.clone());
+    }
+    let classification_joined = class_set
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let caller_reason = args.reason.clone().unwrap_or_default();
+    let reason_text = match unauthorized {
+        Some(pairs) => {
+            let detail: Vec<String> = pairs
+                .iter()
+                .map(|(r, c)| format!("{r}/{c}"))
+                .collect();
+            format!(
+                "[bulk_unmask] unauthorized=[{}] caller={caller_reason}",
+                detail.join(",")
+            )
+        }
+        None => format!("[bulk_unmask] caller={caller_reason}"),
+    };
+
+    let synthetic = UnmaskFieldArgs {
+        collection: args.collection.clone(),
+        row_pk: row_pks_joined,
+        column: columns_joined,
+        actor: args.actor.clone(),
+        reason: Some(reason_text),
+    };
+    write_audit_unmask_row(app_id, &synthetic, &classification_joined, outcome).await
+}
+
+// ---------------------------------------------------------------------------
+// Per-query unmask hint
+// ---------------------------------------------------------------------------
+
+/// **P5.5 PR 7** — pre-query authorization for the
+/// `findOne({...}, { unmask: [...], actor })` hint.
+///
+/// Resolves every column in `unmask_columns` against the cached
+/// schema, then walks every (column, classification) pair through
+/// `MaskPolicy::allows`. If ANY column is denied the hint is REFUSED
+/// entirely — we do NOT silently fall back to masked-only because
+/// that would conceal the authorisation failure from the caller.
+///
+/// Called from `crud::dispatch_find_one` / `dispatch_find` BEFORE
+/// `build_find_with_schema` fires the SQL.
+///
+/// Returns `Ok(())` on full authorisation; on denial returns
+/// `Err(DbError::Coded { code: "unmask_not_permitted", ... })`. The
+/// denied path writes one `denied` audit row covering the whole
+/// query.
+pub async fn authorize_query_hint(
+    app_id: &str,
+    collection: &str,
+    unmask_columns: &[String],
+    actor: &Option<Value>,
+    reason: &Option<String>,
+) -> Result<(), DbError> {
+    if unmask_columns.is_empty() {
+        return Ok(());
+    }
+
+    ensure_mask_policy_cached(app_id).await?;
+
+    let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
+    let mut unauthorized: Vec<String> = Vec::new();
+    for col in unmask_columns {
+        let mask_meta = lookup_mask_meta(app_id, collection, col)?
+            .ok_or_else(|| DbError::ValidationFailed {
+                code: "unmask_column_not_masked",
+                message: format!(
+                    "find: unmask hint refers to column '{col}' on '{collection}' which has no mask declaration"
+                ),
+                hint: Some(
+                    "Drop the column from `opts.unmask` or apply `.mask({ kind, classification })`"
+                        .into(),
+                ),
+            })?;
+        let allowed = check_unmask_authorization(app_id, actor, &mask_meta.classification)?;
+        if !allowed {
+            unauthorized.push(col.clone());
+        }
+        classifications.push(mask_meta.classification);
+    }
+
+    if !unauthorized.is_empty() {
+        write_audit_query_hint_row(
+            app_id,
+            collection,
+            unmask_columns,
+            &classifications,
+            actor,
+            reason,
+            "denied",
+            Some(&unauthorized),
+        )
+        .await?;
+        return Err(DbError::Coded {
+            code: "unmask_not_permitted".into(),
+            message: format!(
+                "find: actor not authorized to unmask {} column(s) via query hint",
+                unauthorized.len()
+            ),
+            hint: Some(
+                "Drop the unauthorized columns from `opts.unmask` or expand the mask policy."
+                    .into(),
+            ),
+        });
+    }
+
+    // Granted audit row is deferred to AFTER the SELECT lands so we
+    // don't leave a ghost row for a SQL failure. The orchestrator
+    // calls `audit_query_hint_granted` after a successful find.
+    Ok(())
+}
+
+/// **P5.5 PR 7** — write the audit row for a successful per-query
+/// unmask hint. Called by the find dispatcher AFTER the SELECT lands.
+/// Single row per query (NOT per row), so the audit-log volume scales
+/// with query count not row count.
+pub async fn audit_query_hint_granted(
+    app_id: &str,
+    collection: &str,
+    unmask_columns: &[String],
+    actor: &Option<Value>,
+    reason: &Option<String>,
+) -> Result<(), DbError> {
+    if unmask_columns.is_empty() {
+        return Ok(());
+    }
+    // Re-resolve classifications for the audit row. Cheap — the
+    // schema lookup is a HashMap read.
+    let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
+    for col in unmask_columns {
+        let mask_meta = lookup_mask_meta(app_id, collection, col)?;
+        let cls = mask_meta
+            .map(|m| m.classification)
+            .unwrap_or_else(|| "pii".to_string());
+        classifications.push(cls);
+    }
+    write_audit_query_hint_row(
+        app_id,
+        collection,
+        unmask_columns,
+        &classifications,
+        actor,
+        reason,
+        "granted",
+        None,
+    )
+    .await
+}
+
+/// **P5.5 PR 7** — rewrite rows from a find/findOne result so the
+/// `unmask`-listed columns carry plaintext instead of the
+/// `__zsmask__`-wrapped sibling.
+///
+/// Per-query hint promotes plaintext for ONLY the listed columns;
+/// non-listed masked columns keep their `MaskedValue<T>` wrapping (the
+/// `apply_mask_wrap_on_read` pass already attached the sentinel before
+/// this helper runs). On the wire we replace `row[col]` with the bare
+/// decrypted string for each listed column.
+///
+/// `rows` is mutated in place. Each row's PK is read from `row["id"]`
+/// (the implicit primary key; aligns with `wrap_row_on_read`'s
+/// expectation).
+pub async fn dispatch_unmask_for_query(
+    app_id: &str,
+    collection: &str,
+    unmask_columns: &[String],
+    rows: &mut [Value],
+) -> Result<(), DbError> {
+    if unmask_columns.is_empty() {
+        return Ok(());
+    }
+    for row in rows.iter_mut() {
+        let Some(row_pk) = row
+            .get("id")
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            })
+        else {
+            continue;
+        };
+        if row_pk.is_empty() {
+            // No PK — can't fetch ciphertext. Leave the row's
+            // `MaskedValue` wrapping in place; the caller's TypeScript
+            // type narrows to plaintext only when row_pk is present.
+            continue;
+        }
+        for col in unmask_columns {
+            // Use the single-cell fetch helpers directly — auth was
+            // already checked upstream via `authorize_query_hint`.
+            let single_args = UnmaskFieldArgs {
+                collection: collection.to_string(),
+                row_pk: row_pk.clone(),
+                column: col.clone(),
+                actor: None,
+                reason: None,
+            };
+            let plaintext = match lookup_encryption_meta(app_id, collection, col)? {
+                Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(app_id, &single_args).await?,
+            };
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert(col.clone(), Value::String(plaintext));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write the audit row for a per-query unmask hint dispatch. Reuses
+/// the unmask audit table with a `[query_hint]` reason prefix and
+/// comma-joined column / classification fields (same shape as the
+/// bulk audit row writer).
+#[allow(clippy::too_many_arguments)]
+async fn write_audit_query_hint_row(
+    app_id: &str,
+    collection: &str,
+    unmask_columns: &[String],
+    classifications: &[String],
+    actor: &Option<Value>,
+    reason: &Option<String>,
+    outcome: &str,
+    unauthorized: Option<&[String]>,
+) -> Result<(), DbError> {
+    let columns_joined = unmask_columns.join(",");
+    let class_set: std::collections::BTreeSet<String> =
+        classifications.iter().cloned().collect();
+    let class_joined = class_set.into_iter().collect::<Vec<_>>().join(",");
+    let caller_reason = reason.clone().unwrap_or_default();
+    let reason_text = match unauthorized {
+        Some(cols) => format!(
+            "[query_hint] unauthorized=[{}] caller={caller_reason}",
+            cols.join(",")
+        ),
+        None => format!("[query_hint] caller={caller_reason}"),
+    };
+    let synthetic = UnmaskFieldArgs {
+        collection: collection.to_string(),
+        // Per-query hint isn't a per-row dispatch; row_pk slot carries
+        // the literal "[query_hint]" marker so operators querying
+        // `row_pk = '<id>'` don't accidentally include query-hint
+        // audit rows.
+        row_pk: "[query_hint]".to_string(),
+        column: columns_joined,
+        actor: actor.clone(),
+        reason: Some(reason_text),
+    };
+    write_audit_unmask_row(app_id, &synthetic, &class_joined, outcome).await
+}
+
 // ---------------------------------------------------------------------------
 // V8 dispatch glue
 // ---------------------------------------------------------------------------
@@ -1006,6 +1480,172 @@ fn require_string(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Str
         .ok_or_else(|| DbError::ValidationFailed {
             code: "invalid_unmask_args",
             message: format!("unmaskField: '{key}' must be a string"),
+            hint: None,
+        })
+        .map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------
+// P5.5 PR 7 — V8 dispatch glue for `bulkUnmaskFields`
+// ---------------------------------------------------------------------------
+
+/// V8-facing dispatch helper for `zeroship.db.bulkUnmaskFields`.
+///
+/// Mirrors [`dispatch_unmask_field`]: parses the args eagerly so a
+/// malformed shape surfaces synchronously, then spawns the bulk
+/// dispatcher and resolves with `{ results: { <rowPk>: { <col>: <pt> } } }`
+/// on success or rejects with the typed `OpError` on failure (most
+/// commonly `bulk_unmask_partial_unauthorized`).
+pub(crate) fn dispatch_bulk_unmask_field<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    args_v: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = crate::v8_bridge::runtime_state(scope);
+    let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
+
+    let parsed = parse_bulk_args(&args_v);
+    let app = app_id.to_string();
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let args = match parsed {
+            Ok(a) => a,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
+            }
+        };
+        match dispatch_bulk_unmask(&app, args).await {
+            Ok(result) => {
+                // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
+                // `BTreeMap` serialises as a JSON object with sorted
+                // keys — deterministic for golden-snapshot tests.
+                let mut obj = serde_json::Map::with_capacity(result.results.len());
+                for (row_pk, cols) in result.results {
+                    let mut col_obj = serde_json::Map::with_capacity(cols.len());
+                    for (c, pt) in cols {
+                        col_obj.insert(c, Value::String(pt));
+                    }
+                    obj.insert(row_pk, Value::Object(col_obj));
+                }
+                let payload = serde_json::json!({ "results": Value::Object(obj) });
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(payload.to_string()),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
+
+    promise
+}
+
+/// Parse the JS-side `{ collection, items: [{ rowPk, columns }], actor?, reason? }`
+/// shape into [`BulkUnmaskArgs`]. Refuses non-object args, missing
+/// fields, items that aren't an array, items missing `rowPk` /
+/// `columns`, and columns arrays containing non-strings — every error
+/// surfaces a typed `ValidationFailed { code: "invalid_bulk_unmask_args" }`
+/// so the SDK can branch on `.code` deterministically.
+fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
+    let obj = v.as_object().ok_or_else(|| DbError::ValidationFailed {
+        code: "invalid_bulk_unmask_args",
+        message: "bulkUnmaskFields: args must be an object".into(),
+        hint: Some(
+            "pass `{ collection, items: [{ rowPk, columns }, ...], actor?, reason? }`"
+                .into(),
+        ),
+    })?;
+    let collection = require_string_with_code(
+        obj,
+        "collection",
+        "invalid_bulk_unmask_args",
+        "bulkUnmaskFields",
+    )?;
+    let items_v = obj
+        .get("items")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| DbError::ValidationFailed {
+            code: "invalid_bulk_unmask_args",
+            message: "bulkUnmaskFields: `items` must be a non-empty array".into(),
+            hint: None,
+        })?;
+    let mut items: Vec<BulkUnmaskItem> = Vec::with_capacity(items_v.len());
+    for (i, item_v) in items_v.iter().enumerate() {
+        let item_obj = item_v.as_object().ok_or_else(|| DbError::ValidationFailed {
+            code: "invalid_bulk_unmask_args",
+            message: format!("bulkUnmaskFields: items[{i}] must be an object"),
+            hint: None,
+        })?;
+        let row_pk = item_obj
+            .get("rowPk")
+            .or_else(|| item_obj.get("row_pk"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| DbError::ValidationFailed {
+                code: "invalid_bulk_unmask_args",
+                message: format!("bulkUnmaskFields: items[{i}].rowPk must be a non-empty string"),
+                hint: None,
+            })?
+            .to_string();
+        if row_pk.is_empty() {
+            return Err(DbError::ValidationFailed {
+                code: "invalid_bulk_unmask_args",
+                message: format!("bulkUnmaskFields: items[{i}].rowPk must be non-empty"),
+                hint: None,
+            });
+        }
+        let columns_v = item_obj.get("columns").and_then(|v| v.as_array()).ok_or_else(|| {
+            DbError::ValidationFailed {
+                code: "invalid_bulk_unmask_args",
+                message: format!("bulkUnmaskFields: items[{i}].columns must be an array of strings"),
+                hint: None,
+            }
+        })?;
+        let mut columns: Vec<String> = Vec::with_capacity(columns_v.len());
+        for (ci, col_v) in columns_v.iter().enumerate() {
+            let s = col_v.as_str().ok_or_else(|| DbError::ValidationFailed {
+                code: "invalid_bulk_unmask_args",
+                message: format!(
+                    "bulkUnmaskFields: items[{i}].columns[{ci}] must be a string"
+                ),
+                hint: None,
+            })?;
+            columns.push(s.to_string());
+        }
+        items.push(BulkUnmaskItem { row_pk, columns });
+    }
+    let actor = obj.get("actor").cloned().filter(|v| !v.is_null());
+    let reason = obj
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Ok(BulkUnmaskArgs {
+        collection,
+        items,
+        actor,
+        reason,
+    })
+}
+
+fn require_string_with_code(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    code: &'static str,
+    method: &str,
+) -> Result<String, DbError> {
+    obj.get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| DbError::ValidationFailed {
+            code,
+            message: format!("{method}: '{key}' must be a string"),
             hint: None,
         })
         .map(str::to_string)
@@ -1242,5 +1882,218 @@ mod tests {
     fn hex_to_bytes_round_trip_with_prefix() {
         assert_eq!(hex_to_bytes("\\xdeadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(hex_to_bytes("\\x").unwrap(), Vec::<u8>::new());
+    }
+
+    // ---------------------------------------------------------------
+    // P5.5 PR 7 — parse_bulk_args validation
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn parse_bulk_args_round_trip_well_formed() {
+        let v = json!({
+            "collection": "users",
+            "items": [
+                { "rowPk": "usr_01", "columns": ["ssn", "email"] },
+                { "rowPk": "usr_02", "columns": ["ssn"] },
+            ],
+            "actor": { "kind": "user", "id": "usr_actor" },
+            "reason": "support ticket #42",
+        });
+        let args = parse_bulk_args(&v).unwrap();
+        assert_eq!(args.collection, "users");
+        assert_eq!(args.items.len(), 2);
+        assert_eq!(args.items[0].row_pk, "usr_01");
+        assert_eq!(args.items[0].columns, vec!["ssn", "email"]);
+        assert_eq!(args.items[1].row_pk, "usr_02");
+        assert_eq!(args.items[1].columns, vec!["ssn"]);
+        assert!(args.actor.is_some());
+        assert_eq!(args.reason.as_deref(), Some("support ticket #42"));
+    }
+
+    #[test]
+    fn parse_bulk_args_accepts_snake_case_row_pk() {
+        // Mirror the single-cell `row_pk` accepted shape — bulk SDK
+        // calls coming through `row_pk` (rather than `rowPk`) must
+        // still parse.
+        let v = json!({
+            "collection": "users",
+            "items": [{ "row_pk": "u1", "columns": ["ssn"] }],
+        });
+        let args = parse_bulk_args(&v).unwrap();
+        assert_eq!(args.items[0].row_pk, "u1");
+    }
+
+    #[test]
+    fn parse_bulk_args_rejects_non_object() {
+        let v = json!("nope");
+        let err = parse_bulk_args(&v).unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "invalid_bulk_unmask_args");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bulk_args_rejects_missing_collection() {
+        let v = json!({ "items": [{ "rowPk": "u1", "columns": ["ssn"] }] });
+        let err = parse_bulk_args(&v).unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "invalid_bulk_unmask_args");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bulk_args_rejects_non_array_items() {
+        let v = json!({ "collection": "users", "items": "not-an-array" });
+        let err = parse_bulk_args(&v).unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, message, .. } => {
+                assert_eq!(code, "invalid_bulk_unmask_args");
+                assert!(message.contains("items"), "diagnostic: {message}");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bulk_args_rejects_empty_row_pk() {
+        let v = json!({
+            "collection": "users",
+            "items": [{ "rowPk": "", "columns": ["ssn"] }],
+        });
+        let err = parse_bulk_args(&v).unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "invalid_bulk_unmask_args");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bulk_args_rejects_non_string_column() {
+        let v = json!({
+            "collection": "users",
+            "items": [{ "rowPk": "u1", "columns": [42] }],
+        });
+        let err = parse_bulk_args(&v).unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, message, .. } => {
+                assert_eq!(code, "invalid_bulk_unmask_args");
+                assert!(message.contains("columns"), "diagnostic: {message}");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bulk_args_treats_null_actor_as_none() {
+        let v = json!({
+            "collection": "users",
+            "items": [{ "rowPk": "u1", "columns": ["ssn"] }],
+            "actor": null,
+        });
+        let args = parse_bulk_args(&v).unwrap();
+        assert!(args.actor.is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // P5.5 PR 7 — dispatch_bulk_unmask atomic auth fence
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bulk_unmask_empty_items_returns_empty_result() {
+        let app_id = "bulk_unit_empty_app";
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        let args = BulkUnmaskArgs {
+            collection: "users".into(),
+            items: vec![],
+            actor: Some(json!({ "kind": "auto" })),
+            reason: None,
+        };
+        let result = runtime.block_on(dispatch_bulk_unmask(app_id, args)).unwrap();
+        assert!(result.results.is_empty());
+    }
+
+    #[test]
+    fn bulk_unmask_unknown_column_returns_typed_error() {
+        // No schema cached for this app → every column lookup fails
+        // with `unmask_column_not_masked`. Pin the typed error code
+        // so SDK callers can branch on .code.
+        let app_id = "bulk_unit_unknown_column_app";
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        let args = BulkUnmaskArgs {
+            collection: "users".into(),
+            items: vec![BulkUnmaskItem {
+                row_pk: "u1".into(),
+                columns: vec!["mystery".into()],
+            }],
+            actor: Some(json!({ "kind": "auto" })),
+            reason: None,
+        };
+        let err = runtime.block_on(dispatch_bulk_unmask(app_id, args)).unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "unmask_column_not_masked");
+            }
+            other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // P5.5 PR 7 — authorize_query_hint unit behaviour
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn query_hint_empty_columns_no_op() {
+        let app_id = "qhint_unit_empty_app";
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        let ok = runtime.block_on(authorize_query_hint(
+            app_id,
+            "users",
+            &[],
+            &Some(json!({ "kind": "user" })),
+            &None,
+        ));
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn query_hint_unknown_column_returns_typed_error() {
+        // No schema cached → unknown column is the typed-error path.
+        let app_id = "qhint_unit_unknown_app";
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(authorize_query_hint(
+                app_id,
+                "users",
+                &["nonexistent".to_string()],
+                &Some(json!({ "kind": "auto" })),
+                &None,
+            ))
+            .unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "unmask_column_not_masked");
+            }
+            other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_unmask_for_query_empty_columns_is_noop() {
+        let app_id = "qhint_unit_empty_dispatch_app";
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        let mut rows = vec![json!({ "id": "u1", "name": "alice" })];
+        let original = rows.clone();
+        runtime
+            .block_on(dispatch_unmask_for_query(app_id, "users", &[], &mut rows))
+            .unwrap();
+        assert_eq!(rows, original, "empty unmask columns must be a no-op");
     }
 }

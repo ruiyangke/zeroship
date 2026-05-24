@@ -5768,3 +5768,736 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
         );
     });
 }
+
+// ===========================================================================
+// P5.5 PR 7 — drift detection + bulk unmask + per-query unmask hint
+// ===========================================================================
+//
+// These tests drive the new dispatch helpers end-to-end on a real
+// SQLite backend:
+//
+//   * `drift_end_to_end_seeded_mismatch_detected` — seed a row where
+//     the sibling text does NOT match `apply_mask_kind(plaintext)`,
+//     run the drift sweep, and assert (1) the report flags the row,
+//     (2) one row lands in `__zeroship_audit_mask_drift`.
+//   * `bulk_unmask_end_to_end` — atomic auth + bulk decrypt + single
+//     audit row per call (the dispatch shape PR 7 ships for
+//     `db.users.bulkUnmask([...])`).
+//   * `per_query_unmask_hint_end_to_end` — wire-up gate for the
+//     `findOne(filter, { unmask: [...], actor })` hint. We can't
+//     stand up V8 here, so the test drives the lower-level
+//     `dispatch_unmask_for_query` directly against rows pre-wrapped
+//     by `wrap_row_on_read`.
+
+use zeroship_plugin_db::crud::mask_drift;
+
+/// **PR 7 — drift gate #1**: seeded mismatch is detected + recorded.
+///
+/// The PR 2 dual-write contract ensures the sibling is correct on
+/// fresh INSERTs. To simulate drift we UPDATE the sibling out-of-band
+/// after the insert so the stored value differs from
+/// `apply_mask_kind(plaintext)`. The drift sweep MUST flag it.
+#[test]
+fn drift_end_to_end_seeded_mismatch_detected() {
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
+    });
+    let app_id = "app_drift_seeded";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_drift_seeded\".\"users\" (\
+                     id            TEXT PRIMARY KEY, \
+                     email         TEXT, \
+                     email_masked  TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+
+        // Row #1 — correct sibling (matches apply_mask_kind(email)).
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_drift_seeded\".\"users\" \
+                 (id, email, email_masked) VALUES \
+                 ('u_ok', 'alice@example.com', 'a***@example.com')",
+                &[],
+            )
+            .await
+            .expect("INSERT clean row");
+
+        // Row #2 — drifted: stored sibling is just '***' but the
+        // correct mask would be 'b***@example.com'.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_drift_seeded\".\"users\" \
+                 (id, email, email_masked) VALUES \
+                 ('u_drift', 'bob@example.com', '***')",
+                &[],
+            )
+            .await
+            .expect("INSERT drifted row");
+
+        // Run at 100% sample to guarantee both rows are inspected.
+        let report = mask_drift::run_drift_check_for_column(
+            app_id, collection, "email", 100.0,
+        )
+        .await
+        .expect("drift check");
+        assert_eq!(report.sampled, 2, "both rows must be sampled: {report:?}");
+        assert_eq!(report.drifted, 1, "exactly one row drifted: {report:?}");
+        assert_eq!(report.samples.len(), 1);
+        let s = &report.samples[0];
+        assert_eq!(s.collection, "users");
+        assert_eq!(s.column, "email");
+        assert_eq!(s.row_pk, "u_drift");
+        assert_eq!(s.stored, "***");
+        assert_eq!(s.expected, "b***@example.com");
+
+        // Audit row landed in the per-app sidecar table.
+        let audit = mask_drift::read_drift_audit_rows_for_tests(app_id)
+            .await
+            .expect("read drift audit rows");
+        assert_eq!(audit.len(), 1, "one drift audit row expected: {audit:?}");
+        let (coll, col, pk, stored, expected) = &audit[0];
+        assert_eq!(coll, "users");
+        assert_eq!(col, "email");
+        assert_eq!(pk, "u_drift");
+        assert_eq!(stored, "***");
+        assert_eq!(expected, "b***@example.com");
+    });
+}
+
+/// **PR 7 — drift gate #2**: aligned siblings produce zero drift.
+#[test]
+fn drift_check_returns_zero_when_aligned() {
+    let schema = serde_json::json!({
+        "id":    { "type": "string" },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
+    });
+    let app_id = "app_drift_aligned";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_drift_aligned\".\"users\" (\
+                     id           TEXT PRIMARY KEY, \
+                     email        TEXT, \
+                     email_masked TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+        for (id, email, masked) in [
+            ("u1", "alice@example.com", "a***@example.com"),
+            ("u2", "bob@example.com", "b***@example.com"),
+            ("u3", "carol@example.com", "c***@example.com"),
+        ] {
+            let sql = format!(
+                "INSERT INTO \"app_drift_aligned\".\"users\" \
+                 (id, email, email_masked) VALUES ('{id}', '{email}', '{masked}')"
+            );
+            backend.pool_exec(&sql, &[]).await.expect("INSERT");
+        }
+        let report = mask_drift::run_drift_check_for_column(
+            app_id, collection, "email", 100.0,
+        )
+        .await
+        .expect("drift check");
+        assert_eq!(report.sampled, 3, "all rows sampled: {report:?}");
+        assert_eq!(report.drifted, 0, "no drift expected: {report:?}");
+        let audit = mask_drift::read_drift_audit_rows_for_tests(app_id)
+            .await
+            .expect("read audit");
+        assert!(audit.is_empty(), "no audit rows for clean run: {audit:?}");
+    });
+}
+
+/// **PR 7 — drift gate #3**: a NULL sibling on a non-NULL parent is
+/// flagged as drift (the dual-write contract guarantees both null
+/// together OR both populated together — a sibling NULL on populated
+/// parent violates the invariant).
+#[test]
+fn drift_check_handles_null_sibling_drift() {
+    let schema = serde_json::json!({
+        "id":    { "type": "string" },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
+    });
+    let app_id = "app_drift_null_sibling";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_drift_null_sibling\".\"users\" (\
+                     id           TEXT PRIMARY KEY, \
+                     email        TEXT, \
+                     email_masked TEXT\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_drift_null_sibling\".\"users\" \
+                 (id, email, email_masked) VALUES ('u1', 'alice@example.com', NULL)",
+                &[],
+            )
+            .await
+            .expect("INSERT NULL sibling");
+        let report = mask_drift::run_drift_check_for_column(
+            app_id, collection, "email", 100.0,
+        )
+        .await
+        .expect("drift check");
+        assert_eq!(report.drifted, 1, "null sibling must drift: {report:?}");
+        assert_eq!(report.samples[0].stored, "__null__");
+    });
+}
+
+/// **PR 7 — drift gate #4**: plaintext-column drift (no encryption).
+/// Identical setup to gate #1, but uses `last4` mask kind to pin
+/// the apply_mask_kind round-trip on a non-email transform.
+#[test]
+fn drift_check_handles_plaintext_column() {
+    let schema = serde_json::json!({
+        "id":  { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+    });
+    let app_id = "app_drift_plaintext";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_drift_plaintext\".\"users\" (\
+                     id         TEXT PRIMARY KEY, \
+                     ssn        TEXT, \
+                     ssn_masked TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+        // One clean, one drifted.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_drift_plaintext\".\"users\" \
+                 (id, ssn, ssn_masked) VALUES \
+                 ('u_ok', '123-45-6789', '***-**-6789')",
+                &[],
+            )
+            .await
+            .expect("INSERT clean");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_drift_plaintext\".\"users\" \
+                 (id, ssn, ssn_masked) VALUES \
+                 ('u_drift', '987-65-4321', 'wrong-mask')",
+                &[],
+            )
+            .await
+            .expect("INSERT drifted");
+        let report = mask_drift::run_drift_check_for_column(
+            app_id, collection, "ssn", 100.0,
+        )
+        .await
+        .expect("drift check");
+        assert_eq!(report.sampled, 2);
+        assert_eq!(report.drifted, 1);
+        assert_eq!(report.samples[0].row_pk, "u_drift");
+        assert_eq!(report.samples[0].expected, "***-**-4321");
+    });
+}
+
+/// **PR 7 — drift gate #5**: encrypted column drift detection. Builds
+/// the encrypted column via the production CRUD encryption pass so the
+/// ciphertext is genuine; then mutates the sibling out-of-band to
+/// simulate drift; then runs the drift check (which decrypts under
+/// the same key and re-applies the mask).
+#[test]
+fn drift_check_handles_encrypted_column() {
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P55_PR7_DRIFT", &"7".repeat(64));
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "encrypted": {
+                "mode": "randomised",
+                "keyId": "p55_pr7_drift",
+                "wraps": "string",
+            },
+            "mask": { "kind": "last4", "classification": "spi" },
+        },
+    });
+    let app_id = "app_drift_encrypted";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_drift_encrypted\".\"users\" (\
+                     id         TEXT PRIMARY KEY, \
+                     ssn        BLOB, \
+                     ssn_masked TEXT NOT NULL DEFAULT '***'\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+
+        // Insert one row via the production encryption pass so the
+        // BLOB is genuine AES-GCM ciphertext under the expected AAD.
+        use zeroship_plugin_db::crud::encryption_pass::encrypt_row_on_write;
+        use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+        let row_pk = "usr_drift_enc";
+        let plaintext = "555-00-1234";
+        let mut doc = serde_json::json!({
+            "id":         row_pk,
+            "ssn":        plaintext,
+            "ssn_masked": "***-**-9999",  // intentionally WRONG masked
+        });
+        encrypt_row_on_write(backend.as_ref(), app_id, collection, &schema, row_pk, &mut doc)
+            .await
+            .expect("encrypt_row_on_write");
+        let bq = build_insert_with_dialect(app_id, collection, &doc, SqlDialect::Sqlite)
+            .expect("build_insert");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+
+        // The correct mask for `555-00-1234` under `last4` is
+        // `***-**-1234`; stored is `***-**-9999`. Drift expected.
+        let report = mask_drift::run_drift_check_for_column(
+            app_id, collection, "ssn", 100.0,
+        )
+        .await
+        .expect("drift check");
+        assert_eq!(report.sampled, 1, "one row sampled: {report:?}");
+        assert_eq!(report.drifted, 1, "drift expected: {report:?}");
+        let s = &report.samples[0];
+        assert_eq!(s.row_pk, row_pk);
+        assert_eq!(s.stored, "***-**-9999");
+        assert_eq!(s.expected, "***-**-1234");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Bulk unmask end-to-end (SQLite)
+// ---------------------------------------------------------------------------
+
+use zeroship_plugin_db::crud::unmask::{
+    dispatch_bulk_unmask, BulkUnmaskArgs, BulkUnmaskItem,
+};
+
+/// **PR 7 — bulk gate #1**: authorised actor unmasks many columns
+/// across many rows in one call; the result map carries plaintext
+/// for every pair, and exactly ONE audit row lands.
+#[test]
+fn bulk_unmask_end_to_end() {
+    let schema = serde_json::json!({
+        "id":    { "type": "string" },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+    });
+    let app_id = "app_bulk_unmask_e2e";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_bulk_unmask_e2e\".\"users\" (\
+                     id           TEXT PRIMARY KEY, \
+                     email        TEXT, \
+                     email_masked TEXT NOT NULL, \
+                     ssn          TEXT, \
+                     ssn_masked   TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+        for (id, email, ssn) in [
+            ("u1", "alice@example.com", "123-45-6789"),
+            ("u2", "bob@example.com", "987-65-4321"),
+        ] {
+            let sql = format!(
+                "INSERT INTO \"app_bulk_unmask_e2e\".\"users\" \
+                 (id, email, email_masked, ssn, ssn_masked) VALUES \
+                 ('{id}', '{email}', 'masked', '{ssn}', 'masked')"
+            );
+            backend.pool_exec(&sql, &[]).await.expect("INSERT");
+        }
+
+        // Policy: `user` can unmask pii AND spi.
+        let policy_v = serde_json::json!({ "user": ["pii", "spi"] });
+        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+            .await
+            .expect("set_mask_policy");
+
+        let args = BulkUnmaskArgs {
+            collection: collection.to_string(),
+            items: vec![
+                BulkUnmaskItem { row_pk: "u1".into(), columns: vec!["email".into(), "ssn".into()] },
+                BulkUnmaskItem { row_pk: "u2".into(), columns: vec!["email".into()] },
+            ],
+            actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
+            reason: Some("ops dashboard".into()),
+        };
+        let result = dispatch_bulk_unmask(app_id, args)
+            .await
+            .expect("bulk unmask");
+        // Plaintext recovered for every pair.
+        let u1 = result.results.get("u1").expect("u1 row");
+        assert_eq!(u1.get("email").map(String::as_str), Some("alice@example.com"));
+        assert_eq!(u1.get("ssn").map(String::as_str), Some("123-45-6789"));
+        let u2 = result.results.get("u2").expect("u2 row");
+        assert_eq!(u2.get("email").map(String::as_str), Some("bob@example.com"));
+
+        // Exactly ONE audit row covering the whole call.
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1, "bulk → single audit row: {audit:?}");
+        assert_eq!(audit[0].0, "granted");
+        assert_eq!(audit[0].1, "user", "actor_role recorded");
+    });
+}
+
+/// **PR 7 — bulk gate #2**: ANY unauthorised pair refuses the WHOLE
+/// call (Q-MASK-F atomic). One audit row with outcome `denied`; no
+/// plaintext returned for the authorised pair either.
+#[test]
+fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
+    let schema = serde_json::json!({
+        "id":    { "type": "string" },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+    });
+    let app_id = "app_bulk_atomic_refuse";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_bulk_atomic_refuse\".\"users\" (\
+                     id           TEXT PRIMARY KEY, \
+                     email        TEXT, \
+                     email_masked TEXT NOT NULL, \
+                     ssn          TEXT, \
+                     ssn_masked   TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+
+        // Policy: `user` can ONLY unmask pii; spi is forbidden.
+        let policy_v = serde_json::json!({ "user": ["pii"] });
+        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+            .await
+            .expect("set_mask_policy");
+
+        let args = BulkUnmaskArgs {
+            collection: collection.to_string(),
+            // Pair (u1, email) authorised; pair (u1, ssn) NOT
+            // authorised. Atomic fence: entire call refuses.
+            items: vec![BulkUnmaskItem {
+                row_pk: "u1".into(),
+                columns: vec!["email".into(), "ssn".into()],
+            }],
+            actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
+            reason: None,
+        };
+        let err = dispatch_bulk_unmask(app_id, args)
+            .await
+            .expect_err("bulk must refuse atomically");
+        match err {
+            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+                assert_eq!(code, "bulk_unmask_partial_unauthorized");
+            }
+            other => panic!("expected Coded::bulk_unmask_partial_unauthorized, got {other:?}"),
+        }
+
+        // Single `denied` audit row covers the whole call.
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1, "atomic refuse → single audit row: {audit:?}");
+        assert_eq!(audit[0].0, "denied");
+    });
+}
+
+/// **PR 7 — bulk gate #3**: unknown column on the schema raises the
+/// typed `unmask_column_not_masked` error BEFORE any audit row writes.
+#[test]
+fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
+    let schema = serde_json::json!({
+        "id":  { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+    });
+    let app_id = "app_bulk_unknown_column";
+    let collection = "users";
+
+    run(async {
+        let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        let args = BulkUnmaskArgs {
+            collection: collection.to_string(),
+            items: vec![BulkUnmaskItem {
+                row_pk: "u1".into(),
+                columns: vec!["does_not_exist".into()],
+            }],
+            actor: Some(serde_json::json!({ "kind": "auto" })),
+            reason: None,
+        };
+        let err = dispatch_bulk_unmask(app_id, args)
+            .await
+            .expect_err("unknown column must refuse");
+        match err {
+            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "unmask_column_not_masked");
+            }
+            other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Per-query unmask hint end-to-end (SQLite)
+// ---------------------------------------------------------------------------
+
+use zeroship_plugin_db::crud::unmask::{
+    audit_query_hint_granted, authorize_query_hint, dispatch_unmask_for_query,
+};
+
+/// **PR 7 — per-query gate #1**: an authorised actor with a query
+/// hint sees plaintext in the listed columns; non-listed masked
+/// columns keep their `__zsmask__` wrapping.
+#[test]
+fn per_query_unmask_hint_end_to_end() {
+    let schema = serde_json::json!({
+        "id":    { "type": "string" },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+    });
+    let app_id = "app_qhint_e2e";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_qhint_e2e\".\"users\" (\
+                     id           TEXT PRIMARY KEY, \
+                     email        TEXT, \
+                     email_masked TEXT NOT NULL, \
+                     ssn          TEXT, \
+                     ssn_masked   TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_qhint_e2e\".\"users\" \
+                 (id, email, email_masked, ssn, ssn_masked) VALUES \
+                 ('u1', 'alice@example.com', 'a***@example.com', '123-45-6789', '***-**-6789')",
+                &[],
+            )
+            .await
+            .expect("INSERT");
+
+        // Policy: `user` can unmask both pii and spi.
+        let policy_v = serde_json::json!({ "user": ["pii", "spi"] });
+        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+            .await
+            .expect("set_mask_policy");
+
+        // Simulate the row shape `dispatch_find_one` would produce
+        // AFTER `apply_mask_wrap_on_read` has wrapped the masked
+        // columns. We're driving `dispatch_unmask_for_query` directly
+        // since the full V8 round-trip is out of scope for this
+        // integration test.
+        let actor = Some(serde_json::json!({ "kind": "user", "id": "actor_x" }));
+        let reason = Some("dashboard view".to_string());
+
+        // Step 1 — upfront auth fence.
+        authorize_query_hint(app_id, collection, &["ssn".to_string()], &actor, &reason)
+            .await
+            .expect("authorize_query_hint must succeed");
+
+        // Step 2 — simulate post-wrap row + run unmask-for-query.
+        let mut rows = vec![serde_json::json!({
+            "id": "u1",
+            "email": {
+                "sentinel": "__zsmask__",
+                "masked": "a***@example.com",
+                "classification": "pii",
+                "_meta": { "collection": "users", "row_pk": "u1", "column": "email" },
+            },
+            "ssn": {
+                "sentinel": "__zsmask__",
+                "masked": "***-**-6789",
+                "classification": "spi",
+                "_meta": { "collection": "users", "row_pk": "u1", "column": "ssn" },
+            },
+        })];
+        dispatch_unmask_for_query(app_id, collection, &["ssn".to_string()], &mut rows)
+            .await
+            .expect("dispatch_unmask_for_query");
+
+        // `ssn` slot now carries plaintext; `email` slot keeps the
+        // sentinel-wrapped form.
+        let row = &rows[0];
+        assert_eq!(
+            row.get("ssn").and_then(|v| v.as_str()),
+            Some("123-45-6789"),
+            "ssn must be plaintext: {row:?}"
+        );
+        let email = row.get("email").and_then(|v| v.as_object()).expect("email obj");
+        assert_eq!(
+            email.get("sentinel").and_then(|v| v.as_str()),
+            Some("__zsmask__"),
+            "email must remain wrapped: {row:?}"
+        );
+
+        // Step 3 — granted audit row lands.
+        audit_query_hint_granted(app_id, collection, &["ssn".to_string()], &actor, &reason)
+            .await
+            .expect("audit");
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1, "one audit row for the query: {audit:?}");
+        assert_eq!(audit[0].0, "granted");
+        assert_eq!(audit[0].1, "user");
+    });
+}
+
+/// **PR 7 — per-query gate #2**: an unauthorised actor REFUSES the
+/// query entirely; we do not silently degrade to masked-only.
+#[test]
+fn per_query_unmask_hint_rejects_unauthorized_actor() {
+    let schema = serde_json::json!({
+        "id":  { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+    });
+    let app_id = "app_qhint_refuse";
+    let collection = "users";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        // Policy: `user` can only unmask `pii`, NOT `spi`.
+        let policy_v = serde_json::json!({ "user": ["pii"] });
+        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+            .await
+            .expect("set_mask_policy");
+
+        let actor = Some(serde_json::json!({ "kind": "user", "id": "actor_x" }));
+        let err = authorize_query_hint(
+            app_id, collection, &["ssn".to_string()], &actor, &None,
+        )
+        .await
+        .expect_err("must refuse");
+        match err {
+            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+                assert_eq!(code, "unmask_not_permitted");
+            }
+            other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
+        }
+        // The denied path wrote one audit row (`denied` outcome) so
+        // operators see the attempt; assert it landed.
+        let audit = read_audit_rows(backend.as_ref(), app_id).await;
+        assert_eq!(audit.len(), 1, "denied path must audit: {audit:?}");
+        assert_eq!(audit[0].0, "denied");
+    });
+}
+
+/// **PR 7 — per-query gate #3**: unknown column on the schema raises
+/// the typed `unmask_column_not_masked` error before any DB hit.
+#[test]
+fn per_query_unmask_hint_unknown_column_returns_typed_error() {
+    let schema = serde_json::json!({
+        "id":  { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        },
+    });
+    let app_id = "app_qhint_unknown";
+    let collection = "users";
+
+    run(async {
+        let (_backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        let actor = Some(serde_json::json!({ "kind": "auto" }));
+        let err = authorize_query_hint(
+            app_id,
+            collection,
+            &["does_not_exist".to_string()],
+            &actor,
+            &None,
+        )
+        .await
+        .expect_err("must refuse on unknown");
+        match err {
+            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "unmask_column_not_masked");
+            }
+            other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
+        }
+    });
+}

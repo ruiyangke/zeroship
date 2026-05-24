@@ -16,7 +16,7 @@ import {
 import { Query } from "./query.js";
 import { IdLoader } from "./loader.js";
 import { trackCollectionAccess } from "./live.js";
-import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, type NamedIndexSpec, type WithSpec, type WithRelations, naming, ok, err } from "./types.js";
+import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, type NamedIndexSpec, type WithSpec, type WithRelations, type Actor, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
@@ -938,6 +938,78 @@ export class Collection<
    * DataLoader pattern — one batched `find({id: {$in: [...]}})` per relation,
    * not per parent row. Equivalent to `.with(opts.with)` on the returned Query.
    */
+  /**
+   * **P5.5 PR 7** — bulk unmask a set of (id, columns) pairs in one
+   * V8↔Rust round-trip.
+   *
+   * Routes through `env.db.bulkUnmaskFields`. Authorisation is
+   * **atomic**: a single denied (id, column) pair rejects the WHOLE
+   * call with `bulk_unmask_partial_unauthorized`. On success the
+   * resolved map carries plaintext for every requested pair.
+   *
+   * `items[i].id` may be either the numeric `id` (legacy collections)
+   * or a typed-id string; it is stringified on the wire.
+   *
+   * ```ts
+   * const plaintexts = await db.users.bulkUnmask(
+   *   [
+   *     { id: "usr_01", columns: ["ssn", "email"] },
+   *     { id: "usr_02", columns: ["ssn"] },
+   *   ],
+   *   { actor: { kind: "user", id: "actor_x" }, reason: "ops dashboard" },
+   * );
+   * // plaintexts.get("usr_01")?.ssn → "123-45-6789"
+   * ```
+   */
+  async bulkUnmask(
+    items: ReadonlyArray<{
+      id: string | number;
+      columns: readonly (string & keyof Row<S>)[];
+    }>,
+    opts: { actor: Actor; reason?: string },
+  ): Promise<Result<Map<string, Record<string, unknown>>>> {
+    return this._run(async () => {
+      const dbAny = this._native as unknown as {
+        bulkUnmaskFields?: (args: {
+          collection: string;
+          items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>;
+          actor?: unknown;
+          reason?: string;
+        }) => Promise<{ results: Record<string, Record<string, unknown>> }>;
+      };
+      if (typeof dbAny.bulkUnmaskFields !== "function") {
+        throw Object.assign(
+          new Error(
+            "@zeroship/db: env.db.bulkUnmaskFields not available — " +
+              "runtime is missing the P5.5 PR 7 bulk unmask surface.",
+          ),
+          { code: "bulk_unmask_not_available" as const },
+        );
+      }
+      const wireItems = items.map((it) => ({
+        rowPk: String(it.id),
+        columns: it.columns.map((c) => this._toColumn(c as string)),
+      }));
+      const result = await dbAny.bulkUnmaskFields({
+        collection: this._name,
+        items: wireItems,
+        actor: opts.actor,
+        reason: opts.reason,
+      });
+      // Map results back from column-name → field-name space so the
+      // returned record matches the user-facing shape of `Row<S>`.
+      const out = new Map<string, Record<string, unknown>>();
+      for (const [rowPk, cols] of Object.entries(result.results ?? {})) {
+        const mapped: Record<string, unknown> = {};
+        for (const [col, plaintext] of Object.entries(cols)) {
+          mapped[this._toField(col)] = plaintext;
+        }
+        out.set(rowPk, mapped);
+      }
+      return out;
+    });
+  }
+
   find<W extends WithSpec>(
     filter: Filter<S>,
     opts: { with: W },
