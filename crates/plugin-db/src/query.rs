@@ -430,8 +430,22 @@ pub fn build_create_table_with_fks(
                 // (`validate_field_name`'s `ReservedName::Suffix`
                 // forbids creator-declared columns ending in
                 // `_masked`); no collision possible.
+                //
+                // **P5.5 PR 6** — attach a `/* __zsmask:kind=…,
+                // classification=… */` inline comment to the sibling
+                // DDL so the SQLite introspector can recover the mask
+                // metadata from `sqlite_master.sql`. PG ignores SQL
+                // comments at parse time, so the introspector on the
+                // PG arm reads `pg_description` populated by the
+                // `COMMENT ON COLUMN` statement emitted alongside the
+                // table create (see `mask_sentinel_for_field`).
+                let sentinel = mask_sentinel_for_field(def);
+                let inline_comment = match &sentinel {
+                    Some(s) => format!(" /* {s} */"),
+                    None => String::new(),
+                };
                 columns.push(format!(
-                    "{} TEXT NOT NULL",
+                    "{} TEXT NOT NULL{inline_comment}",
                     quote_ident(&sibling_col)
                 ));
             }
@@ -488,11 +502,28 @@ pub fn build_create_table_with_fks(
     columns.extend(deferred_fks);
     columns.extend(union_checks);
 
-    Ok(format!(
+    // **P5.5 PR 6** — append `COMMENT ON COLUMN` statements for every
+    // sibling column carrying a mask sentinel. Multi-statement SQL is
+    // accepted by `pool.query_text_params` (the underlying libpq
+    // simple-query protocol) and by SQLite's `sqlite3_exec`. On the
+    // SQLite arm `COMMENT ON COLUMN` is a syntax error — but PR 6's
+    // SQLite path is the inline `/* __zsmask:... */` comment baked
+    // into the CREATE TABLE body, NOT the `COMMENT ON COLUMN`
+    // statement. The dialect-routing call sites
+    // (`build_create_table_with_fks_for_dialect`) strip the trailing
+    // comments before dispatch when targeting SQLite; the default
+    // PG-flavoured emitter below includes them.
+    let create_table = format!(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
         table,
         columns.join(",\n  ")
-    ))
+    );
+    let comment_stmts = build_mask_sentinel_comments(app_id, collection, schema);
+    if comment_stmts.is_empty() {
+        Ok(create_table)
+    } else {
+        Ok(format!("{create_table};\n{}", comment_stmts.join(";\n")))
+    }
 }
 
 /// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement (B2).
@@ -627,13 +658,47 @@ pub fn build_add_column(
     let pg_type = def_to_pg_type(def);
     let constraints = def_to_constraints(field, def);
 
-    Ok(format!(
+    let mut sql = format!(
         "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
         table,
         quote_ident(field),
         pg_type,
         constraints
-    ).trim().to_string())
+    )
+    .trim()
+    .to_string();
+
+    // **P5.5 PR 6** — when the field carries a `.mask({...})`
+    // declaration, also emit the sibling `<col>_masked TEXT NULL` ADD
+    // COLUMN op and the `COMMENT ON COLUMN` sentinel attachment in the
+    // same multi-statement payload. Only the sibling is NULL here
+    // (versus NOT NULL on CREATE TABLE) — existing rows would refuse
+    // the ALTER if the sibling were NOT NULL; the 6a backfill flips it
+    // to NOT NULL after every row has its sibling populated.
+    //
+    // Note: this branch is taken ONLY when the diff classifier emits
+    // an `AddColumn` for a fresh top-level field declared with
+    // `.mask({...})` — for that case the sibling tags along in the
+    // same payload. The separate `MaskBackfill`-paired
+    // `AddColumn(<col>_masked)` op the diff classifier emits for 6a
+    // sets `mask_sibling_for` in `details` and the field IS the
+    // sibling itself; `mask_sibling_column_for_field(sibling, def)`
+    // returns `None` there because the synthetic def carries no
+    // mask block. So we don't double-emit.
+    if let Some(sibling) = mask_sibling_column_for_field(field, def) {
+        sql.push_str(&format!(
+            ";\nALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
+            table,
+            quote_ident(&sibling),
+        ));
+        if let Some(comment) =
+            build_mask_sentinel_comment_for_field(app_id, collection, field, def)
+        {
+            sql.push_str(&format!(";\n{comment}"));
+        }
+    }
+
+    Ok(sql)
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,6 +1255,108 @@ pub(crate) fn mask_sibling_column_for_field(
         return None;
     }
     Some(format!("{field}_masked"))
+}
+
+/// **P5.5 PR 6** — render the canonical mask-sentinel comment payload
+/// for a field's `.mask({...})` declaration, IFF the declaration is
+/// present AND `kind != "none"`. Returns `None` when there's no
+/// sibling to attach a sentinel to.
+///
+/// Reused by both backend introspectors (PG `COMMENT ON COLUMN` write
+/// + SQLite inline-comment parse on read) — keeps the wire shape
+/// consistent. The parser side lives in
+/// [`crate::crud::mask_backfill::parse_mask_sentinel`].
+pub(crate) fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
+    let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
+    let kind_str = mask_meta.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
+    if kind_str == "none" {
+        return None;
+    }
+    let kind = crate::diff::MaskKind::from_sql(kind_str)?;
+    let class_str = mask_meta
+        .get("classification")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pii");
+    let classification = crate::diff::Classification::from_sql(class_str)?;
+    Some(crate::crud::mask_backfill::build_mask_sentinel(
+        kind,
+        classification,
+    ))
+}
+
+/// **P5.5 PR 6** — render the `COMMENT ON COLUMN` statements that
+/// attach the mask sentinel to every sibling column. Returns one
+/// statement per masked field in `schema` (in declared order); the
+/// caller joins them onto the CREATE TABLE / ALTER TABLE SQL via
+/// `;` so they apply atomically.
+///
+/// Only the PG arm executes these statements — SQLite doesn't support
+/// `COMMENT ON COLUMN`. The SQLite arm relies on the inline
+/// `/* __zsmask:... */` comment emitted by `build_create_table_with_fks`,
+/// preserved verbatim in `sqlite_master.sql`.
+///
+/// Returns the empty vector when the schema declares no masked
+/// columns — the caller then emits no extra DDL.
+#[must_use]
+pub fn build_mask_sentinel_comments(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(obj) = schema.as_object() else {
+        return out;
+    };
+    for (field, def) in obj {
+        if is_schema_metadata_key(field) {
+            continue;
+        }
+        let Some(sibling) = mask_sibling_column_for_field(field, def) else {
+            continue;
+        };
+        let Some(sentinel) = mask_sentinel_for_field(def) else {
+            continue;
+        };
+        // Escape single quotes in the sentinel body for the SQL string
+        // literal. The kind+classification alphabet contains none, but
+        // be defensive against a future kind that does.
+        let escaped = sentinel.replace('\'', "''");
+        out.push(format!(
+            "COMMENT ON COLUMN {}.{}.{} IS '{}'",
+            quote_ident(app_id),
+            quote_ident(collection),
+            quote_ident(&sibling),
+            escaped,
+        ));
+    }
+    out
+}
+
+/// **P5.5 PR 6** — render the `COMMENT ON COLUMN` statement for one
+/// masked field, IFF the field has a `.mask({...})` declaration
+/// (`kind != "none"`). Used by the diff classifier's `MaskBackfill`
+/// op to attach the sentinel at the same time as the
+/// `ALTER TABLE ADD COLUMN <col>_masked` op.
+///
+/// Returns `None` for fields without a mask or with `kind: "none"` —
+/// no sibling, no sentinel.
+#[must_use]
+pub fn build_mask_sentinel_comment_for_field(
+    app_id: &str,
+    collection: &str,
+    field: &str,
+    def: &serde_json::Value,
+) -> Option<String> {
+    let sibling = mask_sibling_column_for_field(field, def)?;
+    let sentinel = mask_sentinel_for_field(def)?;
+    let escaped = sentinel.replace('\'', "''");
+    Some(format!(
+        "COMMENT ON COLUMN {}.{}.{} IS '{}'",
+        quote_ident(app_id),
+        quote_ident(collection),
+        quote_ident(&sibling),
+        escaped,
+    ))
 }
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
@@ -5777,6 +5944,103 @@ mod tests {
             !sql.contains("\"name_masked\""),
             "non-masked column must NOT emit sibling: {sql}"
         );
+    }
+
+    /// **P5.5 PR 6** — masked column CREATE TABLE emits `COMMENT ON
+    /// COLUMN` for the sibling so PG introspection round-trips the
+    /// mask metadata via `pg_description`.
+    #[test]
+    fn build_create_table_emits_comment_on_column_sentinel_for_masked_column() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+            .expect("build_create_table_with_fks ok");
+        assert!(
+            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn_masked\""),
+            "expected COMMENT ON COLUMN for sibling: {sql}"
+        );
+        assert!(
+            sql.contains("'__zsmask:kind=last4,classification=spi'"),
+            "expected sentinel literal: {sql}"
+        );
+    }
+
+    /// **P5.5 PR 6** — sibling DDL inline `/* __zsmask:... */` comment
+    /// for SQLite-arm introspection (PG ignores SQL comments; SQLite
+    /// preserves them in `sqlite_master.sql`).
+    #[test]
+    fn build_create_table_emits_inline_mask_sentinel_comment() {
+        let schema = serde_json::json!({
+            "email": {
+                "type": "string",
+                "mask": { "kind": "email", "classification": "pii" }
+            }
+        });
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+            .expect("build_create_table_with_fks ok");
+        assert!(
+            sql.contains("\"email_masked\" TEXT NOT NULL /* __zsmask:kind=email,classification=pii */"),
+            "expected inline /* __zsmask:... */ comment on sibling: {sql}"
+        );
+    }
+
+    /// **P5.5 PR 6** — `kind: "none"` opt-out emits no sibling and no
+    /// `COMMENT ON COLUMN`.
+    #[test]
+    fn build_create_table_no_comment_when_mask_kind_none() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "none", "classification": "pii" }
+            }
+        });
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+            .expect("build_create_table_with_fks ok");
+        assert!(
+            !sql.contains("COMMENT ON COLUMN"),
+            "kind=none must emit no COMMENT: {sql}"
+        );
+        assert!(
+            !sql.contains("__zsmask:"),
+            "kind=none must emit no sentinel: {sql}"
+        );
+    }
+
+    /// **P5.5 PR 6** — `build_add_column` for a fresh field with a
+    /// `.mask({...})` declaration emits BOTH the parent ADD + the
+    /// sibling ADD + the `COMMENT ON COLUMN` sentinel in one
+    /// multi-statement payload.
+    #[test]
+    fn build_add_column_emits_sibling_and_sentinel_when_masked() {
+        let def = serde_json::json!({
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        });
+        let sql = build_add_column("app1", "users", "ssn", &def).expect("build_add_column ok");
+        assert!(sql.contains("ADD COLUMN IF NOT EXISTS \"ssn\""), "parent: {sql}");
+        assert!(sql.contains("ADD COLUMN IF NOT EXISTS \"ssn_masked\""), "sibling: {sql}");
+        assert!(
+            sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn_masked\""),
+            "comment: {sql}"
+        );
+        assert!(
+            sql.contains("'__zsmask:kind=last4,classification=spi'"),
+            "sentinel: {sql}"
+        );
+    }
+
+    /// **P5.5 PR 6** — `build_add_column` for a non-masked field emits
+    /// only the single parent ADD; no sibling DDL, no comment.
+    #[test]
+    fn build_add_column_no_sibling_when_unmasked() {
+        let def = serde_json::json!({ "type": "string" });
+        let sql = build_add_column("app1", "users", "name", &def).expect("build_add_column ok");
+        assert!(!sql.contains("_masked"), "no sibling for unmasked: {sql}");
+        assert!(!sql.contains("COMMENT ON COLUMN"), "no comment: {sql}");
     }
 
     /// **DDL shape** — `t.encrypted(...)` (default-mask path) gets the

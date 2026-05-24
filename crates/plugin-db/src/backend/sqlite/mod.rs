@@ -678,6 +678,11 @@ impl SchemaIntrospect for SqliteBackend {
                 .and_then(|c| c.clone())
                 .unwrap_or_default();
             let encryption_by_col = parse_encryption_sentinels(&create_table_text);
+            // **P5.5 PR 6** — mask sentinels (`/* __zsmask:kind=…,
+            // classification=… */`) attached to `<col>_masked` sibling
+            // column DDL. Same regex-on-DDL pattern P5 uses for
+            // encryption sentinels.
+            let mask_by_parent = parse_mask_sentinels(&create_table_text);
 
             let mut col_map = std::collections::HashMap::new();
             for row in &col_rows {
@@ -696,6 +701,7 @@ impl SchemaIntrospect for SqliteBackend {
                     .unwrap_or(false);
                 let default_expr = row.get(4).and_then(|c| c.clone());
                 let encryption = encryption_by_col.get(&name).cloned();
+                let mask = mask_by_parent.get(&name).cloned();
                 col_map.insert(
                     name,
                     crate::diff::ColumnInfo {
@@ -716,6 +722,7 @@ impl SchemaIntrospect for SqliteBackend {
                         // `vector_dims` / `is_fts_source` / `is_geopoint`
                         // from `sqlite_master.sql` introspection regexes.
                         encryption,
+                        mask,
                         ..Default::default()
                     },
                 );
@@ -2064,6 +2071,75 @@ fn parse_encryption_sentinels(
     out
 }
 
+/// **P5.5 PR 6** — recover per-parent-column mask metadata from the
+/// `/* __zsmask:kind=…,classification=… */` sentinel comments the DDL
+/// emitter writes alongside every `<col>_masked` sibling column (see
+/// `crate::query::build_create_table_with_fks`).
+///
+/// Returns a map keyed on the **PARENT** column name (the sibling's
+/// existence is the discoverability hook, but the mask metadata
+/// belongs on the parent — the diff classifier compares
+/// `live.parent.mask` against `declared.parent.mask`). Parents
+/// without a sibling are absent from the map; the sibling's
+/// existence is implicit in the sentinel attachment.
+///
+/// **Parse fence**: a sentinel that doesn't parse cleanly (unknown
+/// kind, unknown classification, malformed body) is logged via
+/// `tracing::warn!` and skipped — the parent column then reads as
+/// unmasked, and a re-deploy regenerates the sentinel. This mirrors
+/// the PG arm's treatment in `crate::diff::read_live_schema` so both
+/// arms surface the same "loud-but-recoverable" failure shape.
+///
+/// Same hand-rolled walker pattern as
+/// [`parse_encryption_sentinels`] — no `regex` dep required.
+fn parse_mask_sentinels(
+    create_table_text: &str,
+) -> std::collections::HashMap<String, crate::diff::MaskMeta> {
+    use crate::diff::MaskMeta;
+    let mut out = std::collections::HashMap::new();
+    const MARKER: &str = "/* __zsmask:";
+    let mut search_pos = 0usize;
+    while let Some(found) = create_table_text[search_pos..].find(MARKER) {
+        let abs_marker = search_pos + found;
+        // The marker swallows the leading `/* ` so the comment body
+        // starts at `__zsmask:`. We find the matching `*/` to extract
+        // the full sentinel payload.
+        let body_start = abs_marker + "/* ".len();
+        let Some(end_rel) = create_table_text[body_start..].find("*/") else {
+            break;
+        };
+        let body = create_table_text[body_start..body_start + end_rel].trim();
+        // Reuse the canonical parser so the wire shape is centralised.
+        match crate::crud::mask_backfill::parse_mask_sentinel(body) {
+            Ok((kind, classification)) => {
+                let before = &create_table_text[..abs_marker];
+                if let Some(sibling_name) = recover_preceding_quoted_ident(before) {
+                    if let Some(parent) = sibling_name.strip_suffix("_masked") {
+                        out.insert(
+                            parent.to_string(),
+                            MaskMeta {
+                                kind,
+                                classification,
+                                sibling_column: sibling_name.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sentinel = %body,
+                    error = %e.clone().into_string(),
+                    "diff: malformed mask sentinel on SQLite sibling column; \
+                     treating parent column as unmasked",
+                );
+            }
+        }
+        search_pos = body_start + end_rel + "*/".len();
+    }
+    out
+}
+
 /// Find the most recent double-quoted identifier in `text`, returning
 /// the identifier's contents (with `""` un-escaped to `"`). Returns
 /// `None` if no closing-then-opening `"` pair is found.
@@ -2849,6 +2925,87 @@ mod tests {
     fn recover_preceding_quoted_ident_handles_empty() {
         assert!(recover_preceding_quoted_ident("").is_none());
         assert!(recover_preceding_quoted_ident("no quotes here").is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 6 — mask sentinel parser
+    // -----------------------------------------------------------------
+
+    /// **PR 6 — SQLite introspection**: a CREATE TABLE body with an
+    /// inline `/* __zsmask:kind=…,classification=… */` comment attached
+    /// to the `<col>_masked` sibling column gets parsed back as a
+    /// `MaskMeta` on the PARENT column.
+    #[test]
+    fn sqlite_introspection_reads_mask_sentinel_in_create_sql() {
+        use crate::diff::{Classification, MaskKind};
+        let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
+            \"id\" INTEGER PRIMARY KEY,\n  \
+            \"ssn\" TEXT,\n  \
+            \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\n)";
+        let got = parse_mask_sentinels(ddl);
+        let meta = got.get("ssn").expect("mask meta on parent");
+        assert_eq!(meta.kind, MaskKind::Last4);
+        assert_eq!(meta.classification, Classification::Spi);
+        assert_eq!(meta.sibling_column, "ssn_masked");
+    }
+
+    /// Multiple masked columns in one table → one entry per parent.
+    #[test]
+    fn sqlite_introspection_multiple_masked_columns() {
+        use crate::diff::{Classification, MaskKind};
+        let ddl = "CREATE TABLE t (\n  \
+            \"ssn\" TEXT,\n  \
+            \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */,\n  \
+            \"email\" TEXT,\n  \
+            \"email_masked\" TEXT NOT NULL /* __zsmask:kind=email,classification=pii */\n)";
+        let got = parse_mask_sentinels(ddl);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got.get("ssn").unwrap().kind, MaskKind::Last4);
+        assert_eq!(got.get("ssn").unwrap().classification, Classification::Spi);
+        assert_eq!(got.get("email").unwrap().kind, MaskKind::Email);
+        assert_eq!(got.get("email").unwrap().classification, Classification::Pii);
+    }
+
+    /// Sentinel on a non-`_masked`-suffixed column is silently
+    /// ignored — the parent recovery requires the sibling name to end
+    /// in `_masked` (the platform invariant).
+    #[test]
+    fn sqlite_introspection_ignores_non_sibling_sentinel() {
+        let ddl =
+            "CREATE TABLE t (\n  \"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */\n)";
+        let got = parse_mask_sentinels(ddl);
+        assert!(got.is_empty(), "non-sibling sentinel must not stamp parent: {got:?}");
+    }
+
+    /// Empty DDL / no markers → empty map.
+    #[test]
+    fn sqlite_introspection_no_markers_yields_empty_map() {
+        let ddl = "CREATE TABLE t (\"a\" TEXT, \"b\" INTEGER)";
+        let got = parse_mask_sentinels(ddl);
+        assert!(got.is_empty());
+    }
+
+    /// Malformed sentinel (unknown kind) → skipped + warn, parent
+    /// stays unmasked.
+    #[test]
+    fn sqlite_introspection_malformed_sentinel_skipped() {
+        let ddl =
+            "CREATE TABLE t (\n  \"ssn\" TEXT,\n  \
+             \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=cosmic,classification=pii */\n)";
+        let got = parse_mask_sentinels(ddl);
+        assert!(
+            got.is_empty(),
+            "malformed sentinel must NOT stamp parent: {got:?}"
+        );
+    }
+
+    /// Unterminated mask comment doesn't loop forever; we bail out.
+    #[test]
+    fn sqlite_introspection_unterminated_comment() {
+        let ddl =
+            "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi";
+        let got = parse_mask_sentinels(ddl);
+        assert!(got.is_empty());
     }
 
     #[test]

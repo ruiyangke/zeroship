@@ -48,6 +48,14 @@ pub(crate) struct RegisterContext {
     /// `compute_diff` so the plan correctly identifies which need
     /// `CREATE INDEX CONCURRENTLY`.
     pub declared_indexes: Vec<query::IndexSpec>,
+    /// **P5.5 PR 6** — collection name + declared schema JSON. The
+    /// apply stage needs both to dispatch `MaskBackfill` / `MaskRewrite`
+    /// (the schema carries the optional `encrypted` block per column;
+    /// the collection is the SQL table identifier). Threaded through
+    /// the context rather than re-passed down each stage signature so
+    /// existing callers stay churn-free.
+    pub collection: String,
+    pub schema_json: serde_json::Value,
 }
 
 /// Stage tag for the per-app register-model advisory lock. Used as
@@ -235,5 +243,7 @@ async fn build_ctx<B: RegisterBackend>(
         schema_version,
         strictness,
         declared_indexes,
+        collection: collection.to_string(),
+        schema_json: schema.clone(),
     })
 }

@@ -92,7 +92,17 @@ pub mod cross_app_fk;
 pub(crate) mod crud;
 #[cfg(feature = "test-helpers")]
 pub mod crud;
+// **P5.5 PR 6** — `diff` is crate-private in release builds; `pub`
+// under `test-helpers` so `tests/sqlite_integration.rs` (and
+// `tests/integration.rs`) can reach `diff::{compute_diff, ChangeKind,
+// ChangeClass, MaskKind, Classification, DiffOp, MaskMeta,
+// LiveSchema, ColumnInfo}` for the mask-transition round-trip tests
+// and the PG-arm end-to-end coverage. Same shape as `crud` /
+// `encryption` above.
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod diff;
+#[cfg(feature = "test-helpers")]
+pub mod diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
 

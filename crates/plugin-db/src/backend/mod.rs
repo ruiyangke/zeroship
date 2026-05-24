@@ -1612,6 +1612,45 @@ impl Drop for SchemaPendingGuard {
 ///
 /// See `docs/proposals/p0-implementation-plan.md` §"PR 3" step 4
 /// ("Ergonomics") and `docs/proposals/db-system-design.md` §7.
+// **P5.5 PR 6** — the `EncryptedColumn` super-bound is required for
+// the `MaskBackfill` / `MaskRewrite` dispatch in `register_model::apply`
+// (the backfill decrypts encrypted columns before applying the mask
+// transform). The trait is itself gated on `hardening` (see the
+// PostgresBackend impl); we mirror that gate here so non-hardening
+// builds stay buildable. The mask-backfill code under non-hardening
+// supports plaintext-mask columns only (encrypted columns can't be
+// declared without hardening).
+#[cfg(feature = "hardening")]
+pub trait RegisterBackend:
+    PgSqlExecutor
+    + LockManager<Client = compio_postgres::Client>
+    + NamespaceManager
+    + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
+    + IndexBuilder
+    + PgLockManager
+    + VectorIndex
+    + FullTextIndex
+    + SpatialIndex
+    + EncryptedColumn
+{
+}
+
+#[cfg(feature = "hardening")]
+impl<T> RegisterBackend for T where
+    T: PgSqlExecutor
+        + LockManager<Client = compio_postgres::Client>
+        + NamespaceManager
+        + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
+        + IndexBuilder
+        + PgLockManager
+        + VectorIndex
+        + FullTextIndex
+        + SpatialIndex
+        + EncryptedColumn
+{
+}
+
+#[cfg(not(feature = "hardening"))]
 pub trait RegisterBackend:
     PgSqlExecutor
     + LockManager<Client = compio_postgres::Client>
@@ -1625,6 +1664,7 @@ pub trait RegisterBackend:
 {
 }
 
+#[cfg(not(feature = "hardening"))]
 impl<T> RegisterBackend for T where
     T: PgSqlExecutor
         + LockManager<Client = compio_postgres::Client>

@@ -23,6 +23,8 @@ use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
 use super::validate::ApprovedPlan;
+#[cfg(feature = "hardening")]
+use crate::backend::EncryptedColumn;
 use crate::backend::{FullTextIndex, IndexBuilder, LockGuard, PgSqlExecutor, SpatialIndex, VectorIndex};
 use crate::diff::{ChangeClass, ChangeKind, DiffOp};
 use crate::error::DbError;
@@ -42,7 +44,25 @@ use crate::query::IndexKind;
 /// `IndexBuilder` carries the `create_index_with_recovery` call used
 /// by Pass 2. See `docs/proposals/p0-implementation-plan.md` §"PR 2"
 /// and `docs/proposals/db-system-design.md` §7.
-pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex + FullTextIndex + SpatialIndex>(
+/// **P5.5 PR 6**: under `hardening` the `EncryptedColumn` super-bound
+/// is added so the `MaskBackfill` / `MaskRewrite` dispatch can decrypt
+/// encrypted columns before applying the mask transform. Under
+/// non-hardening the bound is dropped (the trait is itself gated);
+/// encrypted columns aren't declarable without `hardening`, so the
+/// decrypt branch is statically unreachable. Inside `run_op` the
+/// mask-backfill arms call the cfg-routed helpers
+/// `dispatch_mask_backfill_op` / `dispatch_mask_rewrite_op` so the
+/// body of `apply` itself stays cfg-clean.
+#[cfg(feature = "hardening")]
+pub(crate) async fn apply<
+    'p,
+    B: PgSqlExecutor
+        + IndexBuilder
+        + VectorIndex
+        + FullTextIndex
+        + SpatialIndex
+        + EncryptedColumn,
+>(
     backend: &B,
     ctx: RegisterContext,
     lock_guard: LockGuard<'p>,
@@ -52,8 +72,10 @@ pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex + Fu
         app_id,
         deploy_id,
         schema_version,
-        strictness: _,
+        strictness,
         declared_indexes,
+        collection: _ctx_collection,
+        schema_json,
     } = ctx;
 
     let run_op = async |op: &DiffOp| -> Result<(), DbError> {
@@ -233,6 +255,80 @@ pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex + Fu
             ChangeKind::DropColumn | ChangeKind::DropIndex => {
                 Err(destructive_invariant_error(op))
             }
+
+            // ----- P5.5 PR 6a — backfill the sibling column ---------
+            //
+            // The accompanying `ALTER ADD COLUMN <col>_masked NULL`
+            // op runs earlier in pass 1 (the diff emits the ADD before
+            // the MaskBackfill). Once the sibling exists,
+            // `run_mask_backfill` walks every row, computes the mask
+            // (decrypting first on encrypted columns), writes the
+            // sibling, then flips the column to NOT NULL on completion.
+            ChangeKind::MaskBackfill {
+                collection: ref coll,
+                column,
+                kind,
+                classification,
+            } => {
+                dispatch_mask_backfill_op(
+                    backend,
+                    &app_id,
+                    coll,
+                    column,
+                    *kind,
+                    *classification,
+                    &schema_json,
+                )
+                .await
+            }
+
+            // ----- P5.5 PR 6b — rewrite the sibling column ---------
+            //
+            // Touches every row under the NEW kind. No schema mutation.
+            ChangeKind::MaskRewrite {
+                collection: ref coll,
+                column,
+                old_kind: _,
+                new_kind,
+                classification,
+            } => {
+                dispatch_mask_rewrite_op(
+                    backend,
+                    &app_id,
+                    coll,
+                    column,
+                    *new_kind,
+                    *classification,
+                    &schema_json,
+                )
+                .await
+            }
+
+            // ----- P5.5 PR 6c — drop the sibling column -----------
+            //
+            // Only invoked under `strictness == "off"` — validate
+            // refuses the op under strict + lenient. The pool_exec
+            // path issues `ALTER TABLE … DROP COLUMN IF EXISTS`.
+            ChangeKind::MaskRemove {
+                collection: ref coll,
+                column,
+            } => {
+                if strictness != "off" {
+                    return Err(DbError::Internal {
+                        message: format!(
+                            "db: mask_remove reached apply under strictness={strictness:?} \
+                             — validate stage should have refused it"
+                        ),
+                    });
+                }
+                crate::crud::mask_backfill::run_mask_remove(
+                    &app_id,
+                    coll,
+                    column,
+                    backend.pool_handle().as_ref(),
+                )
+                .await
+            }
         };
 
         if let Some(id) = audit_id {
@@ -312,7 +408,20 @@ pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex + Fu
     let pass1: Result<(), DbError> = async {
         for op in &approved.ops {
             if op.class == ChangeClass::Destructive {
-                continue;
+                // **P5.5 PR 6c**: `MaskRemove` under
+                // `strictness == "off"` must actually run — validate
+                // didn't refuse it (only `strict` + `lenient` do). The
+                // other destructive variants (DropColumn / DropIndex)
+                // stay on the skip path: under `off` they'd reach apply
+                // and trip `check_destructive_invariant`, which is
+                // explicitly the pre-PR-6 behaviour.
+                if matches!(op.change_kind, ChangeKind::MaskRemove { .. })
+                    && strictness == "off"
+                {
+                    // fall through to run_op
+                } else {
+                    continue;
+                }
             }
             if matches!(op.change_kind, ChangeKind::AddIndex) {
                 continue;
@@ -353,6 +462,403 @@ pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex + Fu
     Ok(())
 }
 
+/// Non-hardening twin of [`apply`]. Drops the `EncryptedColumn`
+/// super-bound and routes mask-backfill through the plaintext-only
+/// dispatch. Body kept verbatim against the hardening arm via the
+/// shared `dispatch_mask_*_op` helpers below — any divergence between
+/// the two should land in those helpers, not in the apply body.
+#[cfg(not(feature = "hardening"))]
+pub(crate) async fn apply<
+    'p,
+    B: PgSqlExecutor + IndexBuilder + VectorIndex + FullTextIndex + SpatialIndex,
+>(
+    backend: &B,
+    ctx: RegisterContext,
+    lock_guard: LockGuard<'p>,
+    approved: ApprovedPlan,
+) -> Result<(), DbError> {
+    // Re-walk the same body the hardening arm runs. We can't share via
+    // a generic inner function because the `EncryptedColumn` super-bound
+    // is required by the hardening arm's signature; calling such an
+    // inner from this arm would require feeding it a stub impl that
+    // doesn't exist in non-hardening builds. So we keep two copies and
+    // pin a test that exercises both at integration time.
+    let RegisterContext {
+        app_id,
+        deploy_id,
+        schema_version,
+        strictness,
+        declared_indexes,
+        collection: _ctx_collection,
+        schema_json,
+    } = ctx;
+
+    let run_op = async |op: &DiffOp| -> Result<(), DbError> {
+        check_destructive_invariant(op)?;
+        let audit_id = match crate::audit::write_audit_row(
+            backend.pool_handle().as_ref(),
+            &app_id,
+            &crate::audit::AuditRow {
+                collection: op.collection.clone(),
+                phase: crate::audit::Phase::Ddl,
+                change_class: op.class.as_audit(),
+                change_kind: op.change_kind.as_sql().to_string(),
+                details: op.details.clone(),
+                ddl_sql: op.sql.clone(),
+                status: crate::audit::InitialStatus::Running,
+                deploy_id: deploy_id.clone(),
+                schema_version,
+                actor: crate::audit::ActorKind::Auto,
+            },
+        )
+        .await
+        {
+            Ok(id) => Some(id),
+            Err(audit_err) => {
+                tracing::warn!(
+                    app_id = %app_id,
+                    collection = %op.collection,
+                    transition = "Running/insert_failed",
+                    audit_err = %audit_err,
+                    "audit: failed to insert running row",
+                );
+                None
+            }
+        };
+        let result: Result<(), DbError> = match &op.change_kind {
+            ChangeKind::CreateTable
+            | ChangeKind::AddColumn
+            | ChangeKind::AddForeignKey
+            | ChangeKind::DropForeignKey => {
+                if let Some(sql) = &op.sql {
+                    backend
+                        .pool_exec(sql, &[])
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| match e {
+                            DbError::Internal { message } => DbError::Internal {
+                                message: format!(
+                                    "db: {} failed: {}",
+                                    op.change_kind.as_sql(),
+                                    message
+                                ),
+                            },
+                            other => other,
+                        })
+                } else {
+                    Ok(())
+                }
+            }
+            ChangeKind::AddIndex => {
+                let spec_owned = declared_indexes
+                    .iter()
+                    .find(|s| {
+                        op.details.get("index_name").and_then(Value::as_str)
+                            == Some(s.name.as_str())
+                    })
+                    .cloned();
+                if let Some(spec) = spec_owned {
+                    match &spec.kind {
+                        IndexKind::BTree => {
+                            backend
+                                .create_index_with_recovery(
+                                    &app_id,
+                                    &op.collection,
+                                    &spec,
+                                    &deploy_id,
+                                    schema_version,
+                                )
+                                .await
+                        }
+                        IndexKind::Vector { dims, metric } => {
+                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
+                            backend
+                                .ensure_vector_index(
+                                    &app_id,
+                                    &op.collection,
+                                    column,
+                                    *dims,
+                                    *metric,
+                                )
+                                .await
+                        }
+                        IndexKind::Fts { language } => {
+                            backend
+                                .ensure_fts_index(
+                                    &app_id,
+                                    &op.collection,
+                                    &spec.columns,
+                                    language,
+                                )
+                                .await
+                        }
+                        IndexKind::Spatial => {
+                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
+                            backend
+                                .ensure_spatial_index(&app_id, &op.collection, column)
+                                .await
+                        }
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            ChangeKind::DropColumn | ChangeKind::DropIndex => Err(destructive_invariant_error(op)),
+            ChangeKind::MaskBackfill {
+                collection: ref coll,
+                column,
+                kind,
+                classification,
+            } => {
+                dispatch_mask_backfill_op(
+                    backend,
+                    &app_id,
+                    coll,
+                    column,
+                    *kind,
+                    *classification,
+                    &schema_json,
+                )
+                .await
+            }
+            ChangeKind::MaskRewrite {
+                collection: ref coll,
+                column,
+                old_kind: _,
+                new_kind,
+                classification,
+            } => {
+                dispatch_mask_rewrite_op(
+                    backend,
+                    &app_id,
+                    coll,
+                    column,
+                    *new_kind,
+                    *classification,
+                    &schema_json,
+                )
+                .await
+            }
+            ChangeKind::MaskRemove {
+                collection: ref coll,
+                column,
+            } => {
+                if strictness != "off" {
+                    return Err(DbError::Internal {
+                        message: format!(
+                            "db: mask_remove reached apply under strictness={strictness:?} \
+                             — validate stage should have refused it"
+                        ),
+                    });
+                }
+                crate::crud::mask_backfill::run_mask_remove(
+                    &app_id,
+                    coll,
+                    column,
+                    backend.pool_handle().as_ref(),
+                )
+                .await
+            }
+        };
+        if let Some(id) = audit_id {
+            match &result {
+                Ok(_) => {
+                    if let Err(audit_err) = crate::audit::update_audit_status(
+                        backend.pool_handle().as_ref(),
+                        &app_id,
+                        id,
+                        crate::audit::TerminalStatus::Applied,
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            app_id = %app_id,
+                            audit_id = id,
+                            transition = "Applied",
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
+                        );
+                    }
+                }
+                Err(e) => {
+                    let msg = e.clone().into_string();
+                    if let Err(audit_err) = crate::audit::update_audit_status(
+                        backend.pool_handle().as_ref(),
+                        &app_id,
+                        id,
+                        crate::audit::TerminalStatus::Failed,
+                        Some(msg.as_str()),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            app_id = %app_id,
+                            audit_id = id,
+                            transition = "Failed",
+                            ddl_err = %msg,
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
+                        );
+                    }
+                }
+            }
+        }
+        result
+    };
+
+    let pass1: Result<(), DbError> = async {
+        for op in &approved.ops {
+            if op.class == ChangeClass::Destructive {
+                if matches!(op.change_kind, ChangeKind::MaskRemove { .. })
+                    && strictness == "off"
+                {
+                    // fall through
+                } else {
+                    continue;
+                }
+            }
+            if matches!(op.change_kind, ChangeKind::AddIndex) {
+                continue;
+            }
+            run_op(op).await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    let _ = lock_guard.release().await;
+    pass1?;
+
+    for op in &approved.ops {
+        if op.class == ChangeClass::Destructive {
+            continue;
+        }
+        if !matches!(op.change_kind, ChangeKind::AddIndex) {
+            continue;
+        }
+        run_op(op).await?;
+    }
+
+    Ok(())
+}
+
+/// **P5.5 PR 6** — cfg-routed dispatcher for `MaskBackfill`. Under
+/// `hardening` it calls into the decrypt-aware variant; under
+/// non-hardening into the plaintext-only variant. Both have the same
+/// observable behaviour for non-encrypted columns; encrypted columns
+/// cannot be declared without `hardening` so the non-hardening arm
+/// never sees one.
+#[cfg(feature = "hardening")]
+async fn dispatch_mask_backfill_op<B>(
+    backend: &B,
+    app_id: &str,
+    collection: &str,
+    column: &str,
+    kind: crate::diff::MaskKind,
+    classification: crate::diff::Classification,
+    schema_json: &Value,
+) -> Result<(), DbError>
+where
+    B: PgSqlExecutor + EncryptedColumn,
+{
+    let enc_meta = encryption_meta_for_field(schema_json, column);
+    crate::crud::mask_backfill::run_mask_backfill(
+        backend,
+        app_id,
+        collection,
+        column,
+        kind,
+        classification,
+        enc_meta.as_ref(),
+        backend.pool_handle().as_ref(),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(not(feature = "hardening"))]
+async fn dispatch_mask_backfill_op<B>(
+    backend: &B,
+    app_id: &str,
+    collection: &str,
+    column: &str,
+    kind: crate::diff::MaskKind,
+    classification: crate::diff::Classification,
+    _schema_json: &Value,
+) -> Result<(), DbError>
+where
+    B: PgSqlExecutor,
+{
+    crate::crud::mask_backfill::run_mask_backfill(
+        backend,
+        app_id,
+        collection,
+        column,
+        kind,
+        classification,
+        None,
+        backend.pool_handle().as_ref(),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(feature = "hardening")]
+async fn dispatch_mask_rewrite_op<B>(
+    backend: &B,
+    app_id: &str,
+    collection: &str,
+    column: &str,
+    new_kind: crate::diff::MaskKind,
+    classification: crate::diff::Classification,
+    schema_json: &Value,
+) -> Result<(), DbError>
+where
+    B: PgSqlExecutor + EncryptedColumn,
+{
+    let enc_meta = encryption_meta_for_field(schema_json, column);
+    crate::crud::mask_backfill::run_mask_rewrite(
+        backend,
+        app_id,
+        collection,
+        column,
+        new_kind,
+        classification,
+        enc_meta.as_ref(),
+        backend.pool_handle().as_ref(),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[cfg(not(feature = "hardening"))]
+async fn dispatch_mask_rewrite_op<B>(
+    backend: &B,
+    app_id: &str,
+    collection: &str,
+    column: &str,
+    new_kind: crate::diff::MaskKind,
+    classification: crate::diff::Classification,
+    _schema_json: &Value,
+) -> Result<(), DbError>
+where
+    B: PgSqlExecutor,
+{
+    crate::crud::mask_backfill::run_mask_rewrite(
+        backend,
+        app_id,
+        collection,
+        column,
+        new_kind,
+        classification,
+        None,
+        backend.pool_handle().as_ref(),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Enforce the contract that any `DropColumn` / `DropIndex` op reaching
 /// the apply layer must carry `ChangeClass::Destructive` — the upstream
 /// pass1 / pass2 loops filter destructive ops out before they ever
@@ -378,7 +884,56 @@ fn check_destructive_invariant(op: &DiffOp) -> Result<(), DbError> {
     {
         return Err(destructive_invariant_error(op));
     }
+    // **P5.5 PR 6c**: a `MaskRemove` op tagged anything other than
+    // `Destructive` is a misclassification — the diff classifier emits
+    // it with `ChangeClass::Destructive` unconditionally so we can
+    // route it through the strictness gate before reaching apply. A
+    // `MaskRemove` that arrives here without that class has bypassed
+    // the gate.
+    if matches!(op.change_kind, ChangeKind::MaskRemove { .. })
+        && op.class != ChangeClass::Destructive
+    {
+        return Err(destructive_invariant_error(op));
+    }
     Ok(())
+}
+
+/// **P5.5 PR 6** — pull the encryption metadata for a field out of the
+/// declared schema JSON, IFF the field is `t.encrypted(...)`-tagged.
+/// Returns `None` for plaintext columns; the mask backfill / rewrite
+/// then takes the no-decrypt branch.
+///
+/// The shape mirrors `crud::encryption_pass::parse_mode` /
+/// `parse_wraps` — kept independent so a tweak to the schema-wire
+/// shape lands in one place per consumer (backfill vs CRUD).
+#[cfg(feature = "hardening")]
+fn encryption_meta_for_field(
+    schema: &Value,
+    field: &str,
+) -> Option<crate::diff::EncryptionMeta> {
+    let def = schema.as_object()?.get(field)?;
+    let enc_obj = def.get("encrypted")?.as_object()?;
+    let mode_str = enc_obj.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
+    let mode = match mode_str {
+        "randomised" | "randomized" => crate::backend::EncryptionMode::Randomised,
+        "deterministic" => crate::backend::EncryptionMode::Deterministic,
+        _ => return None,
+    };
+    let key_id = enc_obj
+        .get("keyId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+    let wraps = match enc_obj.get("wraps").and_then(|v| v.as_str()) {
+        Some("number") => crate::diff::WrappedType::Number,
+        Some("bytes") => crate::diff::WrappedType::Bytes,
+        _ => crate::diff::WrappedType::String,
+    };
+    Some(crate::diff::EncryptionMeta {
+        mode,
+        key_id,
+        wraps,
+    })
 }
 
 /// Build the diagnostic message for a destructive-invariant violation.
@@ -425,6 +980,80 @@ mod tests {
             sql: None,
             details: serde_json::json!({}),
             field: Some("legacy_col".into()),
+        }
+    }
+
+    /// **P5.5 PR 6c**: `MaskRemove` must reach apply ONLY tagged
+    /// `Destructive`. The validate stage classifies it that way; this
+    /// gate refuses any misclassified `MaskRemove`.
+    #[test]
+    fn mask_remove_without_destructive_class_returns_internal_error() {
+        let op = diff_op(
+            ChangeKind::MaskRemove {
+                collection: "users".into(),
+                column: "ssn".into(),
+            },
+            ChangeClass::Additive,
+        );
+        let result = check_destructive_invariant(&op);
+        match result {
+            Err(DbError::Internal { message }) => {
+                assert!(
+                    message.contains("mask_remove"),
+                    "must name change_kind: {message}"
+                );
+                assert!(
+                    message.contains("Destructive"),
+                    "must name invariant: {message}"
+                );
+            }
+            other => panic!("expected DbError::Internal, got {other:?}"),
+        }
+    }
+
+    /// **P5.5 PR 6c**: `MaskRemove` tagged `Destructive` passes the
+    /// gate — apply's strictness branch decides whether to actually run
+    /// the DROP COLUMN.
+    #[test]
+    fn mask_remove_with_destructive_class_passes_gate() {
+        let op = diff_op(
+            ChangeKind::MaskRemove {
+                collection: "users".into(),
+                column: "ssn".into(),
+            },
+            ChangeClass::Destructive,
+        );
+        assert!(check_destructive_invariant(&op).is_ok());
+    }
+
+    /// **P5.5 PR 6a / 6b**: `MaskBackfill` / `MaskRewrite` are NOT
+    /// destructive — the gate must let them through with any
+    /// classification (the apply match arm handles their semantics).
+    #[test]
+    fn mask_backfill_and_rewrite_pass_gate_regardless_of_class() {
+        for kind in [
+            ChangeKind::MaskBackfill {
+                collection: "u".into(),
+                column: "s".into(),
+                kind: crate::diff::MaskKind::Last4,
+                classification: crate::diff::Classification::Spi,
+            },
+            ChangeKind::MaskRewrite {
+                collection: "u".into(),
+                column: "s".into(),
+                old_kind: crate::diff::MaskKind::Full,
+                new_kind: crate::diff::MaskKind::Last4,
+                classification: crate::diff::Classification::Spi,
+            },
+        ] {
+            for class in [ChangeClass::Additive, ChangeClass::Compatible, ChangeClass::Destructive] {
+                let op = diff_op(kind.clone(), class);
+                assert!(
+                    check_destructive_invariant(&op).is_ok(),
+                    "gate must not fire on {:?} / {class:?}",
+                    op.change_kind
+                );
+            }
         }
     }
 

@@ -76,6 +76,15 @@ pub mod mask_policy;
 pub(crate) use mask_policy::dispatch_set_mask_policy_field;
 pub(crate) use unmask::dispatch_unmask_field;
 
+// **P5.5 PR 6** — mask backfill / rewrite / removal jobs driven by the
+// register-model apply pipeline. Same visibility pattern: `pub` under
+// `test-helpers` so the integration tests can drive the helpers
+// directly without standing up the full orchestrator.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod mask_backfill;
+#[cfg(feature = "test-helpers")]
+pub mod mask_backfill;
+
 // ---------------------------------------------------------------------------
 // dispatch_op template
 // ---------------------------------------------------------------------------
