@@ -483,6 +483,58 @@ impl WakeMachine {
                 }
             };
             let agent_url = self.backend.derive_agent_url(snap.vm_index);
+
+            // ─── T5: signed /version fingerprint check ─────────────
+            //
+            // After livez but BEFORE clock_resync. Same signing key as
+            // clock_resync; reuses the agent's already-spun-up HTTP
+            // server. Mismatch = partial-fleet rollout landed the
+            // wake on a stale agent binary; roll back with a distinct
+            // wire code so the SLO dashboard can route rollout-skew
+            // failures away from `livez_timeout` /
+            // `restore_backend_failed`. See
+            // `verify_agent_version_post_restore` for the sentinel
+            // semantics (legacy agent / "unknown" build SHA → skip
+            // with WARN, not fail).
+            match crate::restore_handler::verify_agent_version_post_restore(
+                &agent_url,
+                &sealed.signing_key_bytes,
+                crate::restore_handler::CONTROLLER_GIT_COMMIT,
+            )
+            .await
+            {
+                crate::restore_handler::VersionCheckOutcome::Match => {
+                    tracing::debug!(
+                        wake_id = %self.wake_id,
+                        sandbox_id = %self.sandbox_id,
+                        "T5 /version probe matched — wake proceeds"
+                    );
+                }
+                crate::restore_handler::VersionCheckOutcome::Skipped { reason } => {
+                    tracing::warn!(
+                        target: "sandbox::wake::version_check",
+                        wake_id = %self.wake_id,
+                        sandbox_id = %self.sandbox_id,
+                        reason,
+                        "T5 /version probe skipped — additive check disabled for this wake"
+                    );
+                }
+                crate::restore_handler::VersionCheckOutcome::Mismatch { expected, got } => {
+                    return self
+                        .rollback_with(
+                            g1,
+                            snap.vm_index,
+                            WakeErrorCode::AgentVersionMismatch,
+                            format!(
+                                "agent /version git_commit={got} does not match \
+                                 controller build SHA {expected} \
+                                 (partial fleet rollout — wait for completion and retry)"
+                            ),
+                        )
+                        .await;
+                }
+            }
+
             if let Err(e) = crate::restore_handler::clock_resync_post_restore(
                 &agent_url,
                 self.sandbox_id,

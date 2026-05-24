@@ -3,6 +3,7 @@ name = "zeroship-sandbox"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship sandbox service — pluggable backends (docker, k8s+libkrun) for AI builder sessions"
+build = "build.rs"
 
 [[bin]]
 name = "zeroship-sandbox"

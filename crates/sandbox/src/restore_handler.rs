@@ -3059,6 +3059,226 @@ fn clock_resync_random_hex(n_bytes: usize) -> Result<String, String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// T5: outcome of [`verify_agent_version_post_restore`] reflecting why a
+/// fingerprint comparison succeeded (or failed). Distinct from a bare
+/// `Result<(), String>` so callers can branch on the structured reason
+/// — for example, the wake state machine logs `Skipped` at WARN but
+/// continues, while `Mismatch` rolls back with
+/// `WakeErrorCode::AgentVersionMismatch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VersionCheckOutcome {
+    /// Agent's `git_commit` byte-matched the controller's
+    /// `CONTROLLER_GIT_COMMIT`. Wake proceeds.
+    Match,
+    /// Agent did not return a parseable `git_commit` (legacy agent
+    /// pre-T5 build) OR the controller itself was built with
+    /// `CONTROLLER_GIT_COMMIT="unknown"` (vendor-tarball build,
+    /// non-git checkout). Either way the comparison cannot proceed
+    /// safely; caller logs WARN and continues (the signed-auth check
+    /// at the wire layer is the existing trust anchor — see the
+    /// `wait_for_agent_livez` legacy-fallback in nomad_ch.rs).
+    Skipped { reason: &'static str },
+    /// Agent's `git_commit` is well-formed but disagrees with the
+    /// controller's `CONTROLLER_GIT_COMMIT`. Mismatched build SHAs
+    /// during a partial fleet rollout — the caller MUST fail the wake
+    /// with `WakeErrorCode::AgentVersionMismatch` so the SLO dashboard
+    /// can split rollout-skew from "real" wake failures.
+    Mismatch { expected: String, got: String },
+}
+
+/// T5: probe the just-restored agent's signed `/version` endpoint and
+/// compare the reported `git_commit` to the controller's compile-time
+/// `CONTROLLER_GIT_COMMIT` (build.rs).
+///
+/// **Why post-restore.** The create-side path in `nomad_ch.rs`'s
+/// `wait_for_agent_livez` already verifies the `pubkey_fingerprint` on
+/// `/version` — that closes the stale-tenant race (a tenant that owned
+/// the IP previously cannot answer for our signing key). T5 closes a
+/// *different* race on the **restore** path: a partial fleet rollout
+/// (controller upgraded everywhere, but one Nomad node still runs the
+/// previous agent image) would let the wake land on a `git_commit` that
+/// disagrees with the controller's BUILD_GIT_SHA. The pubkey-fp check
+/// would PASS (the older agent still has our pubkey at
+/// `/run/keys/controller-pubkey`), but the agent binary is mismatched.
+/// This probe is the dedicated guard for that scenario.
+///
+/// **Option A (per T5 spec).** Expected fingerprint is the controller's
+/// own `CONTROLLER_GIT_COMMIT` (both binaries deployed together; v1
+/// has no per-sandbox typed-fingerprint plumbing — that's Option B
+/// future work).
+///
+/// **Auth.** `/version` is auth-gated (Ed25519 signed request). The
+/// per-sandbox signing key is the same one used by
+/// [`clock_resync_post_restore`]; the caller (wake_machine) supplies
+/// `signing_key_bytes` straight out of the unsealed record.
+///
+/// **Sentinel handling.** `CONTROLLER_GIT_COMMIT="unknown"` (non-git
+/// build) → return `Skipped` so vendor-tarball + sandbox-tarball
+/// builds remain usable. An agent that omits `git_commit` from
+/// `/version` (legacy pre-T5 binary) also returns `Skipped` — the
+/// existing signed-auth check at the call layer is sufficient
+/// attestation for those agents; this T5 probe is additive.
+///
+/// **Failure shape.** Transport errors on `/version` route through
+/// `Skipped { reason: "transport_error" }` rather than `Mismatch`:
+/// the wake state machine should not roll back on a flaky network
+/// when the underlying livez probe just succeeded — the agent is
+/// alive and our crypto handshake holds. Logging the transport error
+/// is the operator visibility; not failing the wake is the
+/// availability decision.
+///
+/// Returns:
+/// - `Ok(Match)` — `git_commit` matched. Wake proceeds.
+/// - `Ok(Skipped { reason })` — comparison could not run. Caller logs
+///   WARN and proceeds.
+/// - `Ok(Mismatch { expected, got })` — caller MUST fail the wake.
+pub(crate) async fn verify_agent_version_post_restore(
+    agent_url: &str,
+    signing_key_bytes: &[u8; 32],
+    expected_git_commit: &str,
+) -> VersionCheckOutcome {
+    // Sentinel #1: controller built without a git SHA. Vendor-tarball
+    // or non-git builds — comparison can't anchor on anything stable
+    // so we skip. The signed-auth on /version already attests that the
+    // agent is verifying with our pubkey.
+    if expected_git_commit == "unknown" || expected_git_commit.is_empty() {
+        return VersionCheckOutcome::Skipped {
+            reason: "controller_build_sha_unknown",
+        };
+    }
+
+    use ed25519_dalek::SigningKey;
+    use zeroship_sandbox_agent::sig;
+
+    let signing_key = SigningKey::from_bytes(signing_key_bytes);
+    let url = format!("{agent_url}/version");
+    let path = "/version".to_string();
+    let url_for_blocking = url.clone();
+
+    let resp_result: Result<(u16, String), String> =
+        compio::runtime::spawn_blocking(move || {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let nonce = match clock_resync_random_hex(16) {
+                Ok(n) => n,
+                Err(e) => return Err(format!("nonce gen: {e}")),
+            };
+            // Empty body — GET /version. Signature covers
+            // (method, path, body=&[], ts, nonce); body hash on the
+            // agent side hashes the empty byte slice.
+            let signature = sig::sign(&signing_key, "GET", &path, &[], ts, &nonce);
+            let resp = ureq::get(&url_for_blocking)
+                .timeout(Duration::from_secs(10))
+                .set("x-sbx-timestamp", &ts.to_string())
+                .set("x-sbx-nonce", &nonce)
+                .set("x-sbx-signature", &signature)
+                .call();
+            match resp {
+                Ok(r) => {
+                    let status = r.status();
+                    let body = r.into_string().unwrap_or_default();
+                    Ok((status, body))
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let body = r.into_string().unwrap_or_default();
+                    Ok((code, body))
+                }
+                Err(e) => Err(format!("transport: {e}")),
+            }
+        })
+        .await
+        .unwrap_or_else(|p| Err(format!("/version spawn_blocking panic: {p:?}")));
+
+    let (status, body) = match resp_result {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::wake::version_check",
+                agent_url = %agent_url,
+                error = %e,
+                "T5 /version probe transport error — skipping comparison"
+            );
+            return VersionCheckOutcome::Skipped {
+                reason: "transport_error",
+            };
+        }
+    };
+    if status != 200 {
+        tracing::warn!(
+            target: "sandbox::wake::version_check",
+            agent_url = %agent_url,
+            status,
+            body_excerpt = %body.chars().take(256).collect::<String>(),
+            "T5 /version probe non-200 — skipping comparison"
+        );
+        return VersionCheckOutcome::Skipped {
+            reason: "non_200_response",
+        };
+    }
+    let parsed: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::wake::version_check",
+                agent_url = %agent_url,
+                error = %e,
+                "T5 /version probe body not JSON — skipping comparison"
+            );
+            return VersionCheckOutcome::Skipped {
+                reason: "body_not_json",
+            };
+        }
+    };
+    let got_git_commit = match parsed.get("git_commit").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            // Legacy agent: pre-T5 binary that doesn't emit
+            // `git_commit` in /version. Existing signed-auth on the
+            // GET already attests this agent is verifying with OUR
+            // pubkey — accept and skip the additive comparison.
+            tracing::warn!(
+                target: "sandbox::wake::version_check",
+                agent_url = %agent_url,
+                "T5 /version probe missing git_commit field — legacy agent, skipping comparison"
+            );
+            return VersionCheckOutcome::Skipped {
+                reason: "agent_git_commit_missing",
+            };
+        }
+    };
+    // Sentinel #2: the agent itself was built with
+    // `AGENT_GIT_COMMIT="unknown"`. Treat the same as the controller
+    // sentinel — skip the comparison, both sides on the rare
+    // non-git-build path.
+    if got_git_commit == "unknown" {
+        tracing::warn!(
+            target: "sandbox::wake::version_check",
+            agent_url = %agent_url,
+            "T5 /version probe agent git_commit=\"unknown\" — non-git build, skipping comparison"
+        );
+        return VersionCheckOutcome::Skipped {
+            reason: "agent_build_sha_unknown",
+        };
+    }
+    if got_git_commit == expected_git_commit {
+        VersionCheckOutcome::Match
+    } else {
+        VersionCheckOutcome::Mismatch {
+            expected: expected_git_commit.to_string(),
+            got: got_git_commit.to_string(),
+        }
+    }
+}
+
+/// T5: the controller's build-time git commit. Compared against the
+/// restored agent's `/version.git_commit` to detect partial-rollout
+/// build skew. `"unknown"` on non-git builds — treated as a
+/// signal-suppressed sentinel by
+/// [`verify_agent_version_post_restore`].
+pub(crate) const CONTROLLER_GIT_COMMIT: &str = env!("CONTROLLER_GIT_COMMIT");
+
 #[cfg(test)]
 mod real_backend_tests {
     use super::*;
