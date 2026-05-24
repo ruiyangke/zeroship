@@ -1291,11 +1291,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: 2 remaining locks (`db.rs::ENV_LOCK` for 9 keys vs `nomad_ch::test_env_lock::TASK_DRIVER_ENV_LOCK` for 1 key)
 - **Symptom**: cross-module disjoint-key env-mutation UB per Rust 2024 still possible. Full close: single crate-wide static.
 
-### [R14-API1] (MINOR, api-surface-r14) RealRestoreBackend::with_nomad_handle / with_shared_allocator over-pub
+### [R14-API1] (MINOR, api-surface-r14) RealRestoreBackend::with_nomad_handle / with_shared_allocator over-pub — CLOSED 00161cea
 - **Source**: 2026-05-25 api-surface-r14
 - **Files**: `crates/sandbox/src/restore_handler.rs:1022, 1039`
 - **Symptom**: pub fn consumed only by `lib.rs::AppState::from_config` + same-file tests. Zero out-of-crate prod callers.
 - **Action**: pub→pub(crate).
+- **Resolution**: 00161cea — 2-token demotion `pub fn` → `pub(crate) fn` on both builders. Cargo check clean; tests 332/332.
 
 ### [R14-API2] (MINOR, api-surface-r14) Retry-After header docstring vs response builder drift
 - **Source**: 2026-05-25 api-surface-r14
