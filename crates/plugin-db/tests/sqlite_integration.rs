@@ -4027,6 +4027,179 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
     });
 }
 
+/// **P5.5 PR 3 — aliased SELECT serves the masked sibling**: a default
+/// read against a masked-column DDL must emit
+/// `"<col>_masked" AS "<col>"` in the SELECT clause and never include
+/// the parent (ciphertext / plaintext) column. End-to-end gate: drive a
+/// dual-write through the dialect-aware INSERT builder (PR 2), then
+/// build a `find` SQL via `build_find_with_schema` with the cached
+/// schema, run it through the SQLite session, and assert the engine
+/// returns the masked string under the parent key.
+#[test]
+fn aliased_select_serves_masked_sibling_sqlite() {
+    use zeroship_plugin_db::query::{
+        build_find_with_schema, build_insert_with_dialect, SqlDialect,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"users\" (\
+                     id    TEXT PRIMARY KEY, \
+                     ssn   TEXT, \
+                     ssn_masked TEXT NOT NULL, \
+                     name  TEXT\
+                 )",
+                &[],
+                )
+            .await
+            .expect("CREATE TABLE ok");
+
+        // Dual-write a row: parent stores plaintext (no encryption pass
+        // in this fixture — masking + encryption are orthogonal in
+        // `apply_mask_on_write` design), sibling stores the masked
+        // string. This is the row PR 2's dual-write produced.
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "name": { "type": "string" }
+        });
+        let doc = serde_json::json!({
+            "id": "usr_01",
+            "ssn": "123-45-6789",
+            "ssn_masked": "***-**-6789",
+            "name": "alice"
+        });
+        let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite)
+            .expect("build_insert_with_dialect");
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        client
+            .query(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT");
+
+        // Build a default read with schema awareness: the SELECT must
+        // alias the sibling under the parent name AND must NOT include
+        // the parent column (`ssn`) directly. Verify the SQL shape
+        // BEFORE running the query — this is the load-bearing
+        // assertion PR 3 ships.
+        let bq = build_find_with_schema(
+            "app_demo",
+            "users",
+            &serde_json::json!({ "id": "usr_01" }),
+            None,
+            None,
+            None,
+            None,
+            Some(&schema),
+        )
+        .expect("build_find_with_schema");
+        assert!(
+            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            "SELECT must alias the sibling under the parent name: {}",
+            bq.sql,
+        );
+        // The parent column slot (ciphertext / plaintext) must NOT
+        // appear in the SELECT clause — `<col>_masked AS <col>` is the
+        // ONLY way `ssn` enters the result set.
+        let select_clause = bq
+            .sql
+            .split(" FROM ")
+            .next()
+            .expect("SELECT prefix")
+            .to_string();
+        // Crude but adequate: there's no occurrence of bare `"ssn"`
+        // (without the `_masked` suffix or AS-rewrite) in the SELECT.
+        let bare_ssn_count = select_clause.matches("\"ssn\"").count();
+        let aliased_count = select_clause.matches("\"ssn_masked\" AS \"ssn\"").count();
+        assert_eq!(
+            bare_ssn_count, aliased_count,
+            "every occurrence of `\"ssn\"` in the SELECT must be the AS-rewrite tail: {select_clause}"
+        );
+
+        // Execute the SELECT and verify the row returns the masked
+        // string under the parent name.
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let rows = client
+            .query(&bq.sql, &param_refs)
+            .await
+            .expect("SELECT");
+        assert_eq!(rows.len(), 1);
+        // The aliased SELECT puts `ssn_masked` under the `ssn` column
+        // slot. Column ordering: id, ssn, name (the schema iteration
+        // order in `build_masked_aware_select_expr`'s "case 2").
+        // Find the `ssn` value (the masked string).
+        let row = &rows[0];
+        // Row shape: `Vec<Option<String>>` from the SQLite client.
+        // Order is the order we emitted in SELECT: id, ssn (= sibling
+        // value), name.
+        assert_eq!(
+            row.iter().filter_map(|c| c.as_deref()).find(|s| *s == "***-**-6789"),
+            Some("***-**-6789"),
+            "row must include the masked string: {row:?}"
+        );
+        // Ciphertext / plaintext parent value must NOT appear (we
+        // dropped it from the SELECT).
+        assert!(
+            !row.iter().any(|c| c.as_deref() == Some("123-45-6789")),
+            "parent slot ciphertext / plaintext must not surface on default read: {row:?}"
+        );
+    });
+}
+
+/// **P5.5 PR 3 — kind: none preserves the P5 decrypt-on-read path**:
+/// when a column declares `mask: { kind: "none" }`, the SELECT clause
+/// must emit the parent column directly (no AS-rewrite), and the row
+/// must surface the parent's value (the ciphertext / plaintext under
+/// the parent column).
+#[test]
+fn aliased_select_skips_kind_none_sqlite() {
+    use zeroship_plugin_db::query::build_find_with_schema;
+
+    let schema = serde_json::json!({
+        "ssn": {
+            "type": "string",
+            "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+            "mask": { "kind": "none", "classification": "spi" }
+        },
+        "name": { "type": "string" }
+    });
+    let bq = build_find_with_schema(
+        "app_demo",
+        "users",
+        &serde_json::json!({}),
+        None,
+        None,
+        None,
+        None,
+        Some(&schema),
+    )
+    .expect("build_find_with_schema");
+    assert!(
+        !bq.sql.contains("\"ssn_masked\""),
+        "kind=none must NOT trigger the AS-rewrite: {}",
+        bq.sql,
+    );
+    // `*` should fall through (no masked columns triggered the
+    // explicit column-list expansion).
+    assert!(
+        bq.sql.contains("SELECT *"),
+        "schema with only kind=none masks must fall through to `*`: {}",
+        bq.sql,
+    );
+}
+
 /// **P5.5 PR 2 — NOT NULL contract on the sibling**: omitting the
 /// sibling from an INSERT against a masked-column DDL must fail at the
 /// engine level (the sibling is `TEXT NOT NULL`). This is the

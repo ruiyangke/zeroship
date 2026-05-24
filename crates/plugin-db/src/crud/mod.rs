@@ -179,7 +179,12 @@ pub(crate) fn dispatch_find_one<'s>(
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let built = query::build_find(
+        // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
+        // When the schema declares masked columns, the SELECT clause
+        // emits `"<col>_masked" AS "<col>"` so the ciphertext column
+        // never leaves Postgres on a default read.
+        let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
+        let built = query::build_find_with_schema(
             &app,
             &coll,
             &filter,
@@ -187,6 +192,7 @@ pub(crate) fn dispatch_find_one<'s>(
             None,
             order_by.as_ref(),
             select.as_ref(),
+            schema_hint.as_ref(),
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -201,8 +207,25 @@ pub(crate) fn dispatch_find_one<'s>(
         match exec_query(bq).await {
             Ok(rows) => {
                 // **P5 PR 2** — decrypt encrypted columns on the
-                // returned row. No-op when the schema declares none.
+                // returned row. No-op when the schema declares none
+                // OR when every encrypted column is also masked
+                // without an explicit `kind: "none"` opt-out (the
+                // aliased SELECT already returns the sibling, not the
+                // ciphertext — there's nothing to decrypt).
                 let rows = match apply_encryption_on_read(&app, &coll, rows).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                // **P5.5 PR 3** — wrap masked-column values in the
+                // `__zsmask__`-tagged wire shape so the SDK can
+                // construct `MaskedValue<T>`.
+                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -253,7 +276,10 @@ pub(crate) fn dispatch_find<'s>(
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let built = query::build_find(
+        // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
+        // See `dispatch_find_one` for the rationale.
+        let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
+        let built = query::build_find_with_schema(
             &app,
             &coll,
             &filter,
@@ -261,6 +287,7 @@ pub(crate) fn dispatch_find<'s>(
             offset,
             order_by.as_ref(),
             select.as_ref(),
+            schema_hint.as_ref(),
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -277,6 +304,18 @@ pub(crate) fn dispatch_find<'s>(
                 // **P5 PR 2** — decrypt encrypted columns on every
                 // returned row. No-op when the schema declares none.
                 let rows = match apply_encryption_on_read(&app, &coll, rows).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                // **P5.5 PR 3** — wrap masked columns in the
+                // `__zsmask__`-tagged wire shape.
+                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -348,6 +387,19 @@ pub(crate) fn dispatch_insert<'s>(
                 let rows = apply_encryption_on_read(&app, &coll, rows).await;
                 let rows = match rows {
                     Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                // **P5.5 PR 3** — wrap masked columns from RETURNING *
+                // so the SDK sees `MaskedValue<T>`, not the raw
+                // ciphertext / plaintext parent slot.
+                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
+                    Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
                             resolver,
@@ -443,6 +495,17 @@ pub(crate) fn dispatch_update_one<'s>(
         match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
                 let rows = match apply_encryption_on_read(&app, &coll, rows).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                // **P5.5 PR 3** — wrap masked columns from RETURNING *.
+                let rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
                     Ok(r) => r,
                     Err(e) => {
                         return OpResult::JsValue {
@@ -1492,6 +1555,44 @@ fn schema_has_encrypted_columns(schema: &Value) -> bool {
         .as_object()
         .map(|o| o.values().any(|def| def.get("encrypted").is_some()))
         .unwrap_or(false)
+}
+
+/// **P5.5 PR 3** — wrap masked columns on every row in `rows` so the
+/// SDK can construct `MaskedValue<T>` from the wire payload.
+///
+/// Synchronous (no backend round-trip) — `mask_pass::wrap_row_on_read`
+/// reads from the row map directly. Short-circuits when:
+///   - the cached schema for `(app_id, collection)` is absent (the
+///     collection wasn't registered on this isolate yet), OR
+///   - the schema declares no masked columns.
+///
+/// Two row shapes are accepted (mirrors the `wrap_row_on_read` docs):
+///
+/// 1. **Aliased-SELECT** (`find`, `findOne`): the SELECT clause already
+///    aliased `<col>_masked AS <col>` (via
+///    `query::build_find_with_schema`). The parent slot carries the
+///    masked string; no `<col>_masked` key is present on the row.
+///    `wrap_row_on_read` wraps the parent slot in place.
+///
+/// 2. **RETURNING-`*`** (`insert`, `update_one`): the row carries both
+///    the parent (ciphertext / plaintext) AND the sibling. The wrap
+///    prefers the sibling's value, drops the sibling key, and wraps
+///    the parent slot.
+fn apply_mask_wrap_on_read(
+    app_id: &str,
+    collection: &str,
+    mut rows: Vec<Value>,
+) -> Result<Vec<Value>, DbError> {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return Ok(rows);
+    };
+    if !schema_has_masked_columns(&schema) {
+        return Ok(rows);
+    }
+    for row in rows.iter_mut() {
+        crate::crud::mask_pass::wrap_row_on_read(&schema, collection, row)?;
+    }
+    Ok(rows)
 }
 
 /// **P5.5 PR 2** — cheap walk: does any field def on `schema` carry a

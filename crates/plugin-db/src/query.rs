@@ -1589,6 +1589,13 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
 // ---------------------------------------------------------------------------
 
 /// Build a SELECT query: `SELECT [cols|*] FROM "app_id"."collection" WHERE ... LIMIT ... OFFSET ...`
+///
+/// Thin shim around [`build_find_with_schema`] that passes `None` for the
+/// schema — the legacy CRUD entry point. Callers that have a cached schema
+/// available (the orchestrator's `dispatch_find` / `dispatch_find_one`)
+/// should prefer [`build_find_with_schema`] so the SELECT clause can
+/// substitute `"<col>_masked" AS "<col>"` for every masked column (P5.5 PR 3,
+/// "default reads serve from the masked sibling").
 pub fn build_find(
     app_id: &str,
     collection: &str,
@@ -1597,6 +1604,49 @@ pub fn build_find(
     offset: Option<i64>,
     order_by: Option<&Value>,
     select: Option<&Value>,
+) -> Result<BuiltQuery, QueryError> {
+    build_find_with_schema(app_id, collection, filter, limit, offset, order_by, select, None)
+}
+
+/// **P5.5 PR 3** — schema-aware SELECT builder.
+///
+/// Same shape as [`build_find`], plus an optional `schema` (the cached
+/// `serde_json::Value` from `IsolateDbContext::schema_for`). When the
+/// schema is `Some(_)` and declares masked columns (`def.mask = Some({...})`
+/// with `kind != "none"`), the SELECT clause emits
+/// `"<col>_masked" AS "<col>"` in place of the bare parent column, and
+/// the ciphertext / plaintext column is NOT included. This is the load-
+/// bearing read-side flip from "decrypt on read" (P5) to "serve from the
+/// masked sibling" (P5.5 Path B).
+///
+/// Generated SQL example (PG):
+/// ```sql
+/// -- P5 baseline (schema=None or no masked columns):
+/// SELECT * FROM users WHERE id = $1
+///
+/// -- P5.5 Path B (schema declares ssn + email masked):
+/// SELECT "id", "ssn_masked" AS "ssn", "email_masked" AS "email", "name"
+///   FROM users WHERE id = $1
+/// ```
+///
+/// Opt-out path: columns declared with `.mask({ kind: "none" })` keep
+/// emitting the parent column directly, preserving the P5 decrypt-on-read
+/// behaviour for callers that explicitly need plaintext.
+///
+/// When `select` carries an explicit projection array, each requested
+/// column is rewritten the same way — `select: ["ssn"]` becomes
+/// `SELECT "ssn_masked" AS "ssn"`. `id` and other non-masked columns
+/// pass through unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn build_find_with_schema(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -1608,21 +1658,7 @@ pub fn build_find(
     let where_clause = build_where(filter, &mut params)?;
 
     // Build SELECT column list from projection, or default to *
-    let select_expr = match select {
-        Some(Value::Array(arr)) if !arr.is_empty() => {
-            let cols: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(quote_ident)
-                .collect();
-            if cols.is_empty() {
-                "*".to_string()
-            } else {
-                cols.join(", ")
-            }
-        }
-        _ => "*".to_string(),
-    };
+    let select_expr = build_masked_aware_select_expr(select, schema_hint);
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
     if !where_clause.is_empty() {
@@ -1646,6 +1682,106 @@ pub fn build_find(
     }
 
     Ok(BuiltQuery { sql, params })
+}
+
+/// **P5.5 PR 3** — compose the SELECT column-list expression, accounting
+/// for masked columns when `schema_hint` is `Some(_)`.
+///
+/// Three cases:
+/// 1. `select` is an explicit, non-empty projection array → for each
+///    listed column, emit `"<col>_masked" AS "<col>"` if the schema
+///    declares it masked (and `kind != "none"`), else emit `"<col>"`.
+/// 2. `select` is absent / empty AND `schema_hint` declares masked
+///    columns → expand to an explicit list: every column on the schema,
+///    with masked columns aliased through the sibling. `id` is implicit
+///    (every collection has it) and is added at the front. **The
+///    ciphertext / plaintext parent column is NOT emitted** — the
+///    masked sibling carries the user-visible value.
+/// 3. `select` is absent / empty AND `schema_hint` is `None` (or has no
+///    masked columns) → fall through to `*`, preserving the P5 baseline
+///    behaviour for callers that haven't cached a schema yet.
+fn build_masked_aware_select_expr(
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+) -> String {
+    // Case 1: explicit projection.
+    if let Some(Value::Array(arr)) = select {
+        if !arr.is_empty() {
+            let cols: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|name| {
+                    if column_is_masked(name, schema_hint) {
+                        let sibling = format!("{name}_masked");
+                        format!("{} AS {}", quote_ident(&sibling), quote_ident(name))
+                    } else {
+                        quote_ident(name)
+                    }
+                })
+                .collect();
+            if !cols.is_empty() {
+                return cols.join(", ");
+            }
+        }
+    }
+
+    // Case 2: implicit projection — expand `*` to an explicit list when
+    // the schema declares any masked column, so the BYTEA / plaintext
+    // parent column never leaves Postgres on a default read.
+    if let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) {
+        let any_masked = schema_obj.values().any(|def| {
+            def.get("mask")
+                .and_then(|m| m.as_object())
+                .and_then(|o| o.get("kind").and_then(|k| k.as_str()))
+                .map(|k| k != "none")
+                .unwrap_or(false)
+        });
+        if any_masked {
+            let mut parts: Vec<String> = Vec::with_capacity(schema_obj.len() + 1);
+            // `id` is implicit (`build_create_table_with_fks` always
+            // emits a primary key column). Emit it first; if the schema
+            // declares it explicitly, the dedupe loop below skips it.
+            parts.push(quote_ident("id"));
+            for (col, def) in schema_obj.iter() {
+                if col == "id" {
+                    continue;
+                }
+                if column_is_masked(col, schema_hint) {
+                    let sibling = format!("{col}_masked");
+                    parts.push(format!(
+                        "{} AS {}",
+                        quote_ident(&sibling),
+                        quote_ident(col)
+                    ));
+                } else {
+                    parts.push(quote_ident(col));
+                }
+            }
+            return parts.join(", ");
+        }
+    }
+
+    // Case 3: fallthrough — preserve `*` for back-compat with callers
+    // that have no schema cached / no masked columns declared.
+    "*".to_string()
+}
+
+/// **P5.5 PR 3** — does the column named `name` declare a non-`none`
+/// `.mask({...})` entry on `schema_hint`? Returns `false` when the
+/// schema is missing, the column is absent from it, or the mask is the
+/// explicit opt-out (`kind: "none"`).
+fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
+    let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) else {
+        return false;
+    };
+    let Some(def) = schema_obj.get(name) else {
+        return false;
+    };
+    let Some(mask) = def.get("mask").and_then(|v| v.as_object()) else {
+        return false;
+    };
+    let kind = mask.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
+    kind != "none"
 }
 
 /// Build a SELECT COUNT(*) query.

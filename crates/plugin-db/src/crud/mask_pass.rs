@@ -346,6 +346,138 @@ fn mask_date_decade(plaintext: &str) -> String {
     format!("{decade}?-**-**")
 }
 
+// =====================================================================
+// P5.5 PR 3 — read-side flip: wrap masked columns in MaskedValueRepr
+// =====================================================================
+
+/// **P5.5 PR 3** — wrap each masked column on `row` in a
+/// `MaskedValueRepr` so the JS-side SDK can construct `MaskedValue<T>`
+/// from the wire payload.
+///
+/// Called AFTER the SELECT (or RETURNING) materialises rows, BEFORE
+/// the row crosses back to V8.
+///
+/// Two row shapes are handled uniformly:
+///
+/// 1. **Aliased-SELECT shape** (`find` / `findOne`, PR 3 read-side
+///    flip): the SELECT clause already aliased `<col>_masked AS <col>`,
+///    so `row[col]` holds the masked string and no `<col>_masked` key
+///    is present. We wrap `row[col]` in place.
+///
+/// 2. **Dual-write RETURNING-`*` shape** (`insert` / `update` /
+///    `upsert` / `findOrCreate` / `delete` write paths): the row carries
+///    BOTH the parent (ciphertext / plaintext) AND the sibling
+///    (`<col>_masked`). We prefer the sibling's value (the safe
+///    default), drop the sibling key from the row, and wrap the parent
+///    slot. This way the SDK never sees raw ciphertext on a write
+///    RETURNING path.
+///
+/// The wire shape mirrors the SDK's `MaskedValueRepr` (sdks/db/src/
+/// types.ts): a `sentinel: "__zsmask__"` discriminator plus `masked`
+/// (the user-facing string) and `classification` (drives unmask
+/// authorization in PR 4). Per-row metadata (`{collection, row_pk,
+/// column}`) rides on a `_meta` key so PR 4's `.unmask()` can route
+/// the round-trip back to the right row.
+///
+/// **Opt-out** (`mask: { kind: "none" }`): columns explicitly opted
+/// out of masking are skipped — they retain whatever value the SELECT
+/// produced (typically plaintext via the P5 decrypt-on-read path).
+///
+/// Returns `Ok(())` when the schema declares no masked columns or the
+/// row is missing fields; never errors on a malformed row.
+pub(crate) fn wrap_row_on_read(
+    schema: &Value,
+    collection: &str,
+    row: &mut Value,
+) -> Result<(), DbError> {
+    let Some(schema_obj) = schema.as_object() else {
+        return Ok(());
+    };
+    let Some(obj) = row.as_object_mut() else {
+        return Ok(());
+    };
+
+    // The unmask round-trip (PR 4) needs the row's PK to identify which
+    // row to fetch plaintext for. We pluck it once up-front; rows that
+    // didn't surface an `id` (composite-PK collections, or rows that
+    // came back via a projection without `id`) get the empty string —
+    // PR 4 will reject `unmask()` on those with a typed error.
+    let row_pk = obj
+        .get("id")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+
+    // Collect replacements first so we don't hold a mutable borrow on
+    // `obj` while iterating the schema.
+    let mut to_wrap: Vec<(String, String, String)> = Vec::new(); // (col, masked_value, classification)
+    let mut to_strip: Vec<String> = Vec::new();
+
+    for (col, def) in schema_obj.iter() {
+        let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let kind = mask_meta.get("kind").and_then(|v| v.as_str()).unwrap_or("full");
+        if kind == "none" {
+            continue;
+        }
+        let classification = mask_meta
+            .get("classification")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pii")
+            .to_string();
+
+        // Pick the masked value: prefer the sibling (RETURNING-`*`
+        // dual-write shape); fall back to the parent slot when the
+        // SELECT already aliased the sibling back to the parent name
+        // (P5.5 read-side flip).
+        let sibling_key = format!("{col}_masked");
+        let masked_value: Option<String> = if let Some(sib) = obj.get(&sibling_key) {
+            sib.as_str().map(|s| s.to_string())
+        } else if let Some(parent) = obj.get(col) {
+            parent.as_str().map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        // If the row carried a sibling, strip it regardless (the SDK
+        // surface only exposes the parent column).
+        if obj.contains_key(&sibling_key) {
+            to_strip.push(sibling_key);
+        }
+
+        let Some(masked) = masked_value else {
+            // Parent absent (e.g. SELECT projection excluded it) and no
+            // sibling present — nothing to wrap.
+            continue;
+        };
+
+        to_wrap.push((col.clone(), masked, classification));
+    }
+
+    for stripped in to_strip {
+        obj.remove(&stripped);
+    }
+
+    for (col, masked, classification) in to_wrap {
+        let repr = serde_json::json!({
+            "sentinel": "__zsmask__",
+            "masked": masked,
+            "classification": classification,
+            "_meta": {
+                "collection": collection,
+                "row_pk": row_pk,
+                "column": col,
+            },
+        });
+        obj.insert(col, repr);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +799,228 @@ mod tests {
         apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
 
         assert_eq!(row, original);
+    }
+
+    // -----------------------------------------------------------------
+    // P5.5 PR 3 — wrap_row_on_read: read-side flip
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn wrap_row_on_read_aliased_select_shape() {
+        // SELECT "ssn_masked" AS "ssn", ... — the parent slot already
+        // contains the masked string; no sibling key is present.
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "name": { "type": "string" }
+        });
+        let mut row = json!({
+            "id": "usr_01",
+            "ssn": "***-**-6789",
+            "name": "alice"
+        });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        let obj = row.as_object().unwrap();
+        let ssn = obj.get("ssn").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(ssn.get("sentinel").and_then(|v| v.as_str()), Some("__zsmask__"));
+        assert_eq!(ssn.get("masked").and_then(|v| v.as_str()), Some("***-**-6789"));
+        assert_eq!(ssn.get("classification").and_then(|v| v.as_str()), Some("spi"));
+        let meta = ssn.get("_meta").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(meta.get("collection").and_then(|v| v.as_str()), Some("users"));
+        assert_eq!(meta.get("row_pk").and_then(|v| v.as_str()), Some("usr_01"));
+        assert_eq!(meta.get("column").and_then(|v| v.as_str()), Some("ssn"));
+        // Non-masked column untouched.
+        assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("alice"));
+    }
+
+    #[test]
+    fn wrap_row_on_read_returning_star_shape_prefers_sibling() {
+        // RETURNING *: row carries BOTH parent (ciphertext / plaintext)
+        // AND sibling. The sibling carries the masked string; we wrap
+        // the parent slot with it and drop the sibling key.
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let mut row = json!({
+            "id": "usr_01",
+            "ssn": "BASE64CIPHERTEXT",   // parent — what RETURNING * yields
+            "ssn_masked": "***-**-6789"   // sibling — the safe display value
+        });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        let obj = row.as_object().unwrap();
+        // Sibling stripped — SDK surface only exposes the parent.
+        assert!(obj.get("ssn_masked").is_none(), "sibling must be stripped: {row}");
+        let ssn = obj.get("ssn").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(ssn.get("masked").and_then(|v| v.as_str()), Some("***-**-6789"));
+    }
+
+    #[test]
+    fn wrap_row_on_read_skips_kind_none() {
+        // Opt-out: `kind: "none"` retains plaintext-on-read (P5
+        // decrypt-on-read path); no wrapping happens.
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" },
+                "mask": { "kind": "none", "classification": "spi" }
+            }
+        });
+        let mut row = json!({
+            "id": "usr_01",
+            "ssn": "decrypted-plaintext"
+        });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        // Parent slot unchanged: still a bare string.
+        assert_eq!(
+            row.get("ssn").and_then(|v| v.as_str()),
+            Some("decrypted-plaintext"),
+            "kind=none must NOT wrap: {row}"
+        );
+    }
+
+    #[test]
+    fn wrap_row_on_read_uses_default_pii_classification() {
+        // When the schema mask block omits `classification`, default is
+        // `"pii"` (mirrors PR 1's PR-defined default).
+        let schema = json!({
+            "email": {
+                "type": "string",
+                "mask": { "kind": "email" }
+            }
+        });
+        let mut row = json!({
+            "id": "usr_01",
+            "email": "a***@example.com"
+        });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        let email = row.get("email").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(email.get("classification").and_then(|v| v.as_str()), Some("pii"));
+    }
+
+    #[test]
+    fn wrap_row_on_read_handles_numeric_id() {
+        // typed_id collections use string `id`, but legacy collections
+        // can carry numeric PK — `row_pk` must stringify either.
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let mut row = json!({
+            "id": 42,
+            "ssn": "***-**-6789"
+        });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        let ssn = row.get("ssn").and_then(|v| v.as_object()).unwrap();
+        let meta = ssn.get("_meta").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(meta.get("row_pk").and_then(|v| v.as_str()), Some("42"));
+    }
+
+    #[test]
+    fn wrap_row_on_read_handles_missing_id() {
+        // Projection that excluded `id` — `row_pk` falls back to empty
+        // string; the wrap still happens (PR 4 will surface a typed
+        // error on `unmask()` when row_pk is empty).
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let mut row = json!({ "ssn": "***-**-6789" });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        let ssn = row.get("ssn").and_then(|v| v.as_object()).unwrap();
+        let meta = ssn.get("_meta").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(meta.get("row_pk").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(meta.get("collection").and_then(|v| v.as_str()), Some("users"));
+    }
+
+    #[test]
+    fn wrap_row_on_read_noop_when_no_masked_columns() {
+        // Schema with only non-masked fields — row passes through
+        // unchanged.
+        let schema = json!({
+            "name": { "type": "string" },
+            "age": { "type": "number" }
+        });
+        let mut row = json!({ "id": "usr_01", "name": "alice", "age": 30 });
+        let original = row.clone();
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        assert_eq!(row, original);
+    }
+
+    #[test]
+    fn wrap_row_on_read_noop_when_row_not_object() {
+        // Defensive: a `Value::Null` row passes through without error.
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let mut row = Value::Null;
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+        assert_eq!(row, Value::Null);
+    }
+
+    #[test]
+    fn wrap_row_on_read_handles_multiple_masked_columns() {
+        let schema = json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "email": {
+                "type": "string",
+                "mask": { "kind": "email", "classification": "pii" }
+            },
+            "dob": {
+                "type": "string",
+                "mask": { "kind": "dateYear", "classification": "pii" }
+            }
+        });
+        // Aliased-SELECT shape: parent slots hold masked strings.
+        let mut row = json!({
+            "id": "usr_01",
+            "ssn": "***-**-6789",
+            "email": "b***@example.com",
+            "dob": "1985-**-**"
+        });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        for (col, classification) in [("ssn", "spi"), ("email", "pii"), ("dob", "pii")] {
+            let wrapped = row.get(col).and_then(|v| v.as_object()).unwrap();
+            assert_eq!(
+                wrapped.get("sentinel").and_then(|v| v.as_str()),
+                Some("__zsmask__"),
+                "col {col}"
+            );
+            assert_eq!(
+                wrapped.get("classification").and_then(|v| v.as_str()),
+                Some(classification),
+                "col {col}"
+            );
+        }
     }
 }
