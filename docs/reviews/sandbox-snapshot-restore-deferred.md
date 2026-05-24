@@ -1505,11 +1505,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: C-7 fix replaced `c4_default_policy_envelopes_observed_teardown` with `c7_retry_budget_default_is_under_client_deadline`. Both pin a constant against another constant — neither drives the retry LOOP. R14-A6 added 3 more constant-arithmetic tests + 1 wake-call-site regression-pin (good). Predicted: next refactor of the budget will require this delete-and-replace dance again.
 - **Action**: replace constant-arithmetic tests with property-based tests that DRIVE the loop. E.g., proptest: arbitrary host_fence_timeout → invariant that retry budget < client_deadline holds for ALL inputs.
 
-### [R15-Q1] (MAJOR, code-quality-r15) C-6 fix introduced same-cycle regression of R14-Q3
+### [R15-Q1] (MAJOR, code-quality-r15) C-6 fix introduced same-cycle regression of R14-Q3 — CLOSED
 - **Source**: 2026-05-25 code-quality-r15
-- **Files**: `admin_handlers.rs:1340-1352` (C-6 fix at 91ce9be5, 20:09 UTC) uses the EXACT `chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()` pattern. R14-Q3 closed this exact pattern at `snapshot_store_gcs.rs` 3 minutes later (20:12 UTC) WITHOUT propagating the cleanup.
-- **Symptom**: 2 detach sites now DIVERGE in shape — one uses byte-slice (9afd0986), one uses the over-engineered char dance (91ce9be5). Reviewer-induced inconsistency.
-- **Action**: 1-line fix at admin_handlers.rs:1340-1352. Apply byte-slice form: `let tail = &sandbox_id[sandbox_id.len().saturating_sub(8)..];`. Bundle with R15-Q3 helper extract.
+- **Files**: `admin_handlers.rs:1340-1352` (C-6 fix at 91ce9be5, 20:09 UTC) used the EXACT `chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()` pattern. R14-Q3 closed this exact pattern at `snapshot_store_gcs.rs` 3 minutes later (20:12 UTC) WITHOUT propagating the cleanup.
+- **Symptom**: 2 detach sites had DIVERGED in shape — one used byte-slice (9afd0986), one used the over-engineered char dance (91ce9be5). Reviewer-induced inconsistency.
+- **Resolution**: replaced with byte-slice form via `s.get(s.len().saturating_sub(8)..)` matching R14-Q3 9afd0986. Doc comment updated (drops misleading tail-visible-in-ps rationale; mentions Linux's 15-char `pr_set_name` truncation). Both detach thread-name sites now use IDENTICAL shape. Will be subsumed by R14-A1 `detach_isolated` helper extract when that refactor lands. Tests: 337/337 unchanged.
 
 ### [R15-Q2] (MINOR, code-quality-r15) C-7 per-attempt INFO log noisy at scale
 - **Source**: 2026-05-25 code-quality-r15
