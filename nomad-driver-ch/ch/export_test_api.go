@@ -16,6 +16,7 @@ package ch
 import (
 	"context"
 	"os/exec"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
@@ -124,6 +125,20 @@ func CallRealTeardownTap(tapName string) error {
 // config.json rewriter. Pure function; no side effects.
 func RewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOctet uint8) ([]byte, error) {
 	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet)
+}
+
+// WaitForCHSocketReady is the test entry point for the C-7-LT-3-PR1
+// retrying Unix-socket readiness probe. Pure-ish: the only side
+// effect is the connect attempts (no global state mutated).
+//
+// Tests use this in two shapes:
+//
+//	(1) happy path — a goroutine bind()s the socket mid-loop and
+//	    the helper returns nil with attempts >= 1;
+//	(2) timeout path — no listener exists and the helper returns
+//	    a "not responsive within %v" error after the budget.
+func WaitForCHSocketReady(sockPath string, totalBudget, perAttempt, cadence time.Duration) error {
+	return waitForCHSocketReady(sockPath, totalBudget, perAttempt, cadence)
 }
 
 // PreflightDiskPaths is the test entry point for the C-2 pre-flight stat

@@ -35,6 +35,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,15 +55,30 @@ const (
 )
 
 // defaultAPISocketPollTimeout bounds the time we wait for CH's
-// --api-socket to become responsive after --restore. The bash
-// wrapper polls 50 × 200ms = 10s; we match that. Exposed as a
-// var (not const) so tests can shorten it.
-var defaultAPISocketPollTimeout = 10 * time.Second
+// --api-socket to become responsive after --restore. C-7-LT-3
+// (smoke-r14, 2026-05-25) widened this from 10s → 60s after a
+// cluster wake observed the socket fail to accept within the prior
+// 10s budget. The bash wrapper's 50 × 200ms = 10s budget assumed
+// cold-boot timing; --restore's memory-image mmap + page-fault-in
+// can take materially longer on a GCE n2-standard-4 host. The
+// retrying connect loop (waitForCHSocketReady) cheaply tolerates
+// the longer ceiling — first-success returns immediately, so the
+// happy path is unchanged. Exposed as a var (not const) so tests
+// can shorten it.
+var defaultAPISocketPollTimeout = 60 * time.Second
 
-// defaultAPISocketPollInterval is how often the poller checks for
-// the socket file + a successful ch-remote ping. 200ms matches the
-// wrapper's `sleep 0.2`.
-var defaultAPISocketPollInterval = 200 * time.Millisecond
+// defaultAPISocketPollInterval is how often the readiness probe
+// retries a Unix-socket connect. 100ms matches the host-fence probe
+// rhythm (compio-side C-7-LT-2-PR1 in sandbox-snapshot-restore) so
+// the two readiness shapes stay symmetric.
+var defaultAPISocketPollInterval = 100 * time.Millisecond
+
+// defaultAPISocketPollPerAttempt is the per-Dial timeout inside the
+// probe loop. Short (200ms) so a hung Dial doesn't dominate the
+// retry cadence; the readiness signal we want is "accept succeeds
+// quickly" — a slow accept implies CH still booting and we'd
+// rather retry than block.
+var defaultAPISocketPollPerAttempt = 200 * time.Millisecond
 
 // SetAPISocketPollForTest shortens both the poll timeout and the
 // poll interval so the restore tests don't sleep real seconds.
@@ -96,48 +112,102 @@ func SetPollAPISocketForTest(fn func(c *Client, socketPath string, timeout, inte
 	return prev
 }
 
-// pollAPISocketDefault is the production poller. Waits for the
-// socket file to exist on disk AND for `ch-remote --api-socket <p>
-// ping` to return success. The latter discriminates the case "file
-// is there but CH hasn't bound yet" from the happy path.
+// pollAPISocketDefault is the production poller. Delegates to
+// waitForCHSocketReady, which probes the Unix socket with a
+// retrying `net.DialTimeout("unix", …)` loop until either a connect
+// succeeds (CH is ready) or the budget expires.
 //
-// When ch-remote is not resolvable (tests without ZSBX_CH_REMOTE_BIN
-// set; the binary really not being installed) the poller falls back
-// to a socket-file-only liveness check so the seam stays useful in
-// unit tests.
+// C-7-LT-3 (smoke-r14, 2026-05-25) replaced the prior "stat the
+// socket file + shell out to ch-remote ping" implementation. Two
+// problems with the old shape:
+//
+//  1. Budget was 10s — too tight for --restore under prod load.
+//     Widened to 60s here (defaultAPISocketPollTimeout) per the
+//     review's recommendation; the retrying connect loop makes
+//     the wider ceiling cheap because first-success returns
+//     immediately.
+//  2. ch-remote ping fork/execs on every retry attempt — 50
+//     fork/execs in 10s is wasteful and would compound on a
+//     contended host. A direct Unix-socket connect probes the
+//     exact readiness signal we care about (CH bound + accepting)
+//     with no per-attempt process spawn.
+//
+// The `c *Client` argument is retained for signature compatibility
+// with the seam (tests swap pollAPISocketFn and need a stable
+// shape); the new implementation doesn't consume it.
 func pollAPISocketDefault(c *Client, socketPath string, timeout, interval time.Duration) error {
-	if socketPath == "" {
-		return errors.New("ch: pollAPISocket: empty socket path")
-	}
 	if timeout <= 0 {
 		timeout = defaultAPISocketPollTimeout
 	}
 	if interval <= 0 {
 		interval = defaultAPISocketPollInterval
 	}
-	deadline := time.Now().Add(timeout)
-	chRemote := ""
-	if c != nil {
-		chRemote = c.CHRemoteBin()
+	return waitForCHSocketReady(socketPath, timeout, defaultAPISocketPollPerAttempt, interval)
+}
+
+// waitForCHSocketReady probes a Unix-domain socket path with a
+// retrying `net.DialTimeout` loop and returns nil on first
+// successful connect, or a timeout error including attempt count
+// + lastErr if the total budget expires.
+//
+// Mirrors C-7-LT-2-PR1's compio-native pattern on the
+// sandbox-snapshot-restore worktree (the controller's host-fence
+// TCP probe).
+//
+// Arguments:
+//   - sockPath:    absolute path to the Unix-domain socket file CH
+//                  binds to via --api-socket.
+//   - totalBudget: outer deadline for the whole loop. The fn
+//                  returns no later than this duration after the
+//                  first attempt unless a successful Dial returns
+//                  earlier. Caller passes the wider 60s default
+//                  (see defaultAPISocketPollTimeout) on the restore
+//                  path; tests pass shorter to keep CI snappy.
+//   - perAttempt:  per-Dial timeout. Short (200ms) so a hung Dial
+//                  doesn't dominate the retry cadence.
+//   - cadence:     sleep between attempts. 100ms matches the
+//                  host-fence probe rhythm.
+//
+// Edge cases:
+//   - Empty sockPath returns an immediate error (defensive — the
+//     restore branch never passes an empty path, but the helper is
+//     pure-fn callable from tests).
+//   - perAttempt <= 0 → defaultAPISocketPollPerAttempt.
+//   - cadence <= 0    → defaultAPISocketPollInterval.
+//   - totalBudget <=0 → immediate timeout (no attempts).
+//
+// First-success: returns nil the moment any Dial succeeds; does
+// NOT consume the remaining budget once readiness is observed.
+func waitForCHSocketReady(sockPath string, totalBudget, perAttempt, cadence time.Duration) error {
+	if sockPath == "" {
+		return errors.New("ch: waitForCHSocketReady: empty socket path")
 	}
-	for {
-		if _, err := os.Stat(socketPath); err == nil {
-			if chRemote == "" {
-				// No ch-remote → file-presence is the strongest
-				// signal we have. Sufficient for the test seam.
-				return nil
-			}
-			// File exists; try the ping.
-			cmd := exec.Command(chRemote, "--api-socket", socketPath, "ping")
-			if err := cmd.Run(); err == nil {
-				return nil
-			}
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("ch: api socket not responsive at %s within %s", socketPath, timeout)
-		}
-		time.Sleep(interval)
+	if perAttempt <= 0 {
+		perAttempt = defaultAPISocketPollPerAttempt
 	}
+	if cadence <= 0 {
+		cadence = defaultAPISocketPollInterval
+	}
+	deadline := time.Now().Add(totalBudget)
+	var lastErr error
+	attempts := 0
+	for time.Now().Before(deadline) {
+		attempts++
+		conn, err := net.DialTimeout("unix", sockPath, perAttempt)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		// Don't oversleep past the deadline — keeps the error path
+		// reporting an attempts count that reflects what we
+		// actually tried rather than padding with a wasted sleep.
+		if time.Until(deadline) <= cadence {
+			break
+		}
+		time.Sleep(cadence)
+	}
+	return fmt.Errorf("ch: api socket not responsive at %s within %v (attempts=%d, lastErr=%v)", sockPath, totalBudget, attempts, lastErr)
 }
 
 // resumeFn is the seam tests swap to drive the resume step's
@@ -294,7 +364,9 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	pid := runner.Pid()
 
 	// Step 5: poll the API socket. CH may take up to ~1s to bind it
-	// after mmap'ing the snapshot memory image.
+	// after mmap'ing the snapshot memory image; under load the
+	// restore path has been observed past 10s (smoke-r14,
+	// C-7-LT-3) — the default budget is now 60s.
 	if err := pollAPISocketFn(p.chClient, apiSocket, defaultAPISocketPollTimeout, defaultAPISocketPollInterval); err != nil {
 		_ = runner.Signal(os.Kill)
 		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: %w", err)

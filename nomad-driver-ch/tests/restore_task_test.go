@@ -23,6 +23,7 @@ package tests
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -699,5 +700,171 @@ func atomicIdx(steps []string) stepIdx {
 		}
 	}
 	return idx
+}
+
+// -- C-7-LT-3-PR1 waitForCHSocketReady tests -------------------------
+
+// TestWaitForCHSocketReady_Happy: a goroutine binds a Unix socket
+// mid-loop; the probe returns nil within budget.
+//
+// Pins the first-success behaviour: once Dial succeeds the helper
+// returns immediately rather than consuming the remaining budget.
+func TestWaitForCHSocketReady_Happy(t *testing.T) {
+	sockDir := t.TempDir()
+	sockPath := filepath.Join(sockDir, "ch.sock")
+
+	// Bind the listener after a short delay so the probe enters its
+	// retry loop at least once. Tighter than the cadence so the
+	// first retry attempt sees a live listener.
+	listenerReady := make(chan struct{})
+	var ln net.Listener
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		var err error
+		ln, err = net.Listen("unix", sockPath)
+		if err != nil {
+			t.Errorf("net.Listen unix %s: %v", sockPath, err)
+			close(listenerReady)
+			return
+		}
+		close(listenerReady)
+		// Accept-loop so the probe's Dial doesn't observe immediate
+		// connection refused after acceptance opens.
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+	}()
+	t.Cleanup(func() {
+		<-listenerReady
+		if ln != nil {
+			_ = ln.Close()
+		}
+	})
+
+	start := time.Now()
+	err := ch.WaitForCHSocketReady(sockPath, 2*time.Second, 200*time.Millisecond, 50*time.Millisecond)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitForCHSocketReady (happy): %v", err)
+	}
+	// Must return shortly after the listener becomes ready —
+	// definitely under 1s (much less than the 2s budget).
+	if elapsed > time.Second {
+		t.Errorf("WaitForCHSocketReady took %v; expected first-success well under 1s", elapsed)
+	}
+	// And must have waited at least one cadence tick (the listener
+	// is delayed 150ms; we'd expect at least one failed Dial).
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("WaitForCHSocketReady returned in %v; suspiciously fast (did the helper actually probe?)", elapsed)
+	}
+}
+
+// TestWaitForCHSocketReady_Timeout: no listener ever exists; the
+// probe runs the full budget and returns an error naming attempt
+// count + lastErr + budget so an operator can see what happened.
+func TestWaitForCHSocketReady_Timeout(t *testing.T) {
+	sockDir := t.TempDir()
+	sockPath := filepath.Join(sockDir, "ch.sock")
+	// Deliberately do NOT create the socket.
+
+	start := time.Now()
+	err := ch.WaitForCHSocketReady(sockPath, 250*time.Millisecond, 50*time.Millisecond, 25*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("WaitForCHSocketReady: expected timeout error, got nil")
+	}
+	// Error shape: must name the budget, attempt count, and lastErr.
+	msg := err.Error()
+	mustContainTest(t, "timeout error", msg, sockPath)
+	mustContainTest(t, "timeout error", msg, "not responsive")
+	mustContainTest(t, "timeout error", msg, "attempts=")
+	mustContainTest(t, "timeout error", msg, "lastErr=")
+	mustContainTest(t, "timeout error", msg, "250ms")
+
+	// Elapsed must be close to the budget (within +/- 50% slack).
+	if elapsed < 200*time.Millisecond {
+		t.Errorf("WaitForCHSocketReady returned in %v; expected ~250ms (the budget)", elapsed)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("WaitForCHSocketReady took %v; expected near-budget (~250ms), well under 500ms", elapsed)
+	}
+}
+
+// TestWaitForCHSocketReady_AcceptAtBudgetEdge: the listener appears
+// right at the deadline boundary. The probe must still succeed if
+// it can dial before the budget expires; the helper's deadline
+// math should not exit early.
+func TestWaitForCHSocketReady_AcceptAtBudgetEdge(t *testing.T) {
+	sockDir := t.TempDir()
+	sockPath := filepath.Join(sockDir, "ch.sock")
+
+	// Bind the listener at ~250ms — close enough to the 500ms
+	// budget edge that any off-by-one in the deadline math would
+	// surface as a spurious timeout.
+	listenerReady := make(chan struct{})
+	var ln net.Listener
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		var err error
+		ln, err = net.Listen("unix", sockPath)
+		if err != nil {
+			close(listenerReady)
+			return
+		}
+		close(listenerReady)
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+	}()
+	t.Cleanup(func() {
+		<-listenerReady
+		if ln != nil {
+			_ = ln.Close()
+		}
+	})
+
+	err := ch.WaitForCHSocketReady(sockPath, 500*time.Millisecond, 50*time.Millisecond, 25*time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitForCHSocketReady at budget edge: %v", err)
+	}
+}
+
+// TestWaitForCHSocketReady_EmptyPath asserts the defensive guard:
+// passing an empty path returns an immediate error, doesn't enter
+// the loop, and doesn't consume the budget.
+func TestWaitForCHSocketReady_EmptyPath(t *testing.T) {
+	start := time.Now()
+	err := ch.WaitForCHSocketReady("", time.Minute, 200*time.Millisecond, 100*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error for empty sockPath, got nil")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("empty-path check took %v; expected immediate return", elapsed)
+	}
+	mustContainTest(t, "empty-path error", err.Error(), "empty socket path")
+}
+
+// mustContainTest is a local helper to keep these C-7-LT-3 tests
+// self-contained (start_task_test.go has the package-wide
+// mustContain helper but it takes a different signature shape; the
+// alias here is purely for readability).
+func mustContainTest(t *testing.T, label, haystack, needle string) {
+	t.Helper()
+	if !strings.Contains(haystack, needle) {
+		t.Errorf("%s: missing %q in %q", label, needle, haystack)
+	}
 }
 
