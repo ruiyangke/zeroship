@@ -182,10 +182,22 @@ impl WakeMachine {
                     .await
                 {
                     Ok(rows_affected) if rows_affected == 0 => {
+                        // R24-I1: thread error_code + error_message into
+                        // the terminal-overwrite WARN so a single log
+                        // line carries full context. Operator triage no
+                        // longer requires grep-correlating this WARN
+                        // with the prior "terminal failed" WARN by
+                        // wake_id. Uses the unsanitized `message` to
+                        // match the prior WARN — both events route to
+                        // the same operator-only journald stream (the
+                        // R16-S2 sanitization is required only for the
+                        // pg column, which is SELECT-able by other roles).
                         tracing::warn!(
                             target: "sandbox::wake::terminal_overwrite_blocked",
                             wake_id = %self.wake_id,
                             attempted_state = ?WakeJobState::Failed,
+                            error_code = code.as_str(),
+                            error_message = %message,
                             "update_wake_job_state no-op: row already terminal (R20-C1 guard tripped)"
                         );
                         crate::metrics::inc_wake_terminal_overwrite_blocked();
