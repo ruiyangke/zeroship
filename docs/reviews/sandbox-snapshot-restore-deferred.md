@@ -81,7 +81,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Captured, not fixed** per brief constraint (NEW bug → capture verbatim).
 - **Blocked**: B-SLO empirical validation at c=20 scale (deferred until #23 is fixed).
 
-### [C-5] (CLOSED at `__C5_HASH__`) Worker VM GCS scope too narrow — L2 upload 403 "Provided scope(s) are not authorized"
+### [C-5] (CLOSED at `d7740b03`) Worker VM GCS scope too narrow — L2 upload 403 "Provided scope(s) are not authorized"
 - **Source**: T-8b-smoke-r5 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r5.md` § "C-5 (minor, non-blocking) — GCS scope 403"); minor, but must close before T-8b-stress (c=20) or every L2 upload silently drops to GCS.
 - **Symptom**: Detached L2 upload runs cleanly as code (no compio panic — C-3 already closed that surface), but the HTTPS call returns 403: `GCS single-shot upload snapshots/v1/.../config.json: status 403, … Provided scope(s) are not authorized`. Fire-and-forget detach masks the failure in smoke (CREATE/SNAPSHOT/WAKE assertions still pass), but at c=20 stress every L2 upload would fail silently — defeating the snapshot-tier purpose.
 - **Root cause**: `crates/sandbox/scripts/provision-gcp-cluster.sh:286` provisioned the worker VM with `--scopes=storage-ro,logging-write,monitoring-write` (read-only on `devstorage`). `gs_pull` (controller binary fetch) works, but `GcsSnapshotStore::put` needs `devstorage.read_write`.
