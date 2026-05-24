@@ -201,6 +201,28 @@ pub struct AppState {
     /// Owns the GC retention window the wake_jobs GC sweep reads at
     /// every iteration. Static at runtime (env reload not supported).
     pub wake_lifecycle: crate::config::WakeLifecycleConfig,
+
+    /// r3-A (T-8b-stress-r3 fix): the local Nomad agent's node ID,
+    /// fetched once at boot via `GET /v1/agent/self`. When `Some`, the
+    /// jobspec builders emit a `Constraints` block pinning every
+    /// submitted alloc to THIS worker — closing the cross-node race
+    /// where the controller stages `workspace.img` on its local fs
+    /// but Nomad's scheduler picks a different worker (78%
+    /// stress-r3 failure rate at WORKER_COUNT=3).
+    ///
+    /// `None` is the disabled-by-detection-failure shape: a boot-time
+    /// /v1/agent/self HTTP failure, non-200, parse error, or missing
+    /// `stats.client.node_id` field. Boot does NOT block on this —
+    /// the controller boots without the constraint and falls back to
+    /// the pre-r3-A random-placement behaviour (a controller restart
+    /// shouldn't fail because Nomad agent restarted). The
+    /// `sandbox_nomad_node_id_lookup_failures_total` counter (see
+    /// [`crate::metrics::inc_nomad_node_id_lookup_failure`]) bumps so
+    /// operators can alert on the degraded shape.
+    ///
+    /// Field is `pub` (no security sensitivity — a node-id is the
+    /// local agent's self-reported identifier, not a credential).
+    pub local_nomad_node_id: Option<String>,
 }
 
 impl AppState {
@@ -488,6 +510,13 @@ impl AppState {
             // assignment on `let mut state = new_fixture(...)`.
             wake_response_mode: crate::config::WakeResponseMode::Sync,
             wake_lifecycle: crate::config::WakeLifecycleConfig::default(),
+            // r3-A: fixtures get `None` — no boot-time /v1/agent/self
+            // lookup happens for in-process tests, so the produced
+            // jobspecs omit the Constraints block (matches pre-r3-A
+            // behaviour). Tests that need to exercise the pinned-shape
+            // can set the field via plain assignment on the returned
+            // `Self`.
+            local_nomad_node_id: None,
         }
     }
 }
@@ -614,6 +643,59 @@ impl AppState {
                 );
             }
         }
+
+        // r3-A (T-8b-stress-r3 fix): fetch THIS controller's local Nomad
+        // node_id once at boot. The jobspec builders (cold-boot +
+        // restore) emit a Nomad `Constraints` block pinning every alloc
+        // to this node when the value is `Some`, closing the cross-node
+        // placement race where `workspace.img` is staged on THIS
+        // worker's local fs but Nomad's scheduler picks a different
+        // worker → the driver's `assert_disk_image_present` ENOENTs.
+        // T-8b-stress-r3 surfaced 78% cross-node failure at
+        // WORKER_COUNT=3 from exactly this gap.
+        //
+        // Failure is NON-fatal: a transient /v1/agent/self HTTP failure
+        // or unparseable response leaves the field as `None`, the
+        // jobspec builders omit the Constraints block, and the
+        // controller falls back to pre-r3-A random-placement behaviour.
+        // Bumping `inc_nomad_node_id_lookup_failure` so operators can
+        // alert on the degraded shape; a controller restart against a
+        // transiently-unavailable Nomad agent shouldn't fail boot.
+        //
+        // Sourced from `config.nomad_ch.nomad_addr` even when the
+        // active backend isn't nomad-ch — docker/k8s deploys won't
+        // submit Nomad jobs so the field is harmlessly ignored, and we
+        // don't want to branch on backend before backend construction
+        // (chicken-and-egg with the probe).
+        let local_nomad_node_id: Option<String> =
+            match crate::backend::nomad_ch::fetch_local_nomad_node_id(
+                &config.nomad_ch.nomad_addr,
+            )
+            .await
+            {
+                Ok(id) => {
+                    tracing::info!(
+                        nomad_addr = %config.nomad_ch.nomad_addr,
+                        node_id = %id,
+                        "sandbox/nomad-ch: cached local node_id for r3-A \
+                         placement constraint"
+                    );
+                    Some(id)
+                }
+                Err(e) => {
+                    crate::metrics::inc_nomad_node_id_lookup_failure();
+                    tracing::warn!(
+                        nomad_addr = %config.nomad_ch.nomad_addr,
+                        error = %e,
+                        "sandbox/nomad-ch: boot-time /v1/agent/self lookup \
+                         failed (non-fatal — jobspecs will omit the r3-A \
+                         Constraints block; cross-node placement race \
+                         possible at WORKER_COUNT>1 until next controller \
+                         restart against a reachable Nomad agent)"
+                    );
+                    None
+                }
+            };
 
         let backend = Backend::from_config_with_persist(&config, persist.clone())?;
         backend.probe().await?;
@@ -932,6 +1014,7 @@ impl AppState {
             restore_backend,
             wake_response_mode,
             wake_lifecycle,
+            local_nomad_node_id,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once

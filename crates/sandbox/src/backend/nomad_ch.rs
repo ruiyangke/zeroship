@@ -3053,6 +3053,87 @@ async fn wait_for_job_gone(
     Err(msg)
 }
 
+// ─── Nomad agent self-identification ─────────────────────────────
+
+/// r3-A (T-8b-stress-r3 fix). Fetch the Nomad agent's local node ID by
+/// querying `GET /v1/agent/self` against `nomad_addr`. Returns the node
+/// ID string (`Stats.client.node_id`) when the local Nomad agent is
+/// reachable and running in client mode.
+///
+/// **Why this matters**: the controller stages `workspace.img` on its
+/// LOCAL filesystem before submitting the Nomad job. Without a placement
+/// constraint pinning the alloc to THIS node, Nomad's scheduler can pick
+/// any client in the cluster — when it picks a different worker, the
+/// driver's `assert_disk_image_present` stats the path on that node's
+/// local fs and ENOENTs. T-8b-stress-r3 surfaced 78% cross-node-placement
+/// failure at WORKER_COUNT=3 from exactly this gap.
+///
+/// **Failure shape**: returns `Err(_)` when Nomad is unreachable, the
+/// response is non-200, the JSON is unparseable, or `Stats.client.node_id`
+/// is absent (single-server mode, or an unexpected agent shape). Callers
+/// at boot are expected to demote the failure to a WARN + bump the
+/// `inc_nomad_node_id_lookup_failure` counter, then continue with the
+/// `Option<String>` set to `None`. The fallback shape (no Constraints
+/// block) restores the pre-r3-A behaviour — random cross-node placement
+/// — so a controller restart against a transiently-unavailable Nomad
+/// agent doesn't fail the boot path.
+pub(crate) async fn fetch_local_nomad_node_id(
+    nomad_addr: &str,
+) -> Result<String, String> {
+    let url = format!("{nomad_addr}/v1/agent/self");
+    let resp = http_get_unsigned(&url, Duration::from_secs(5)).await?;
+    if resp.status != 200 {
+        return Err(format!(
+            "GET {url} → status {}: {}",
+            resp.status,
+            resp.body.trim()
+        ));
+    }
+    parse_nomad_agent_self_node_id(&resp.body)
+}
+
+/// Pure parser for the `/v1/agent/self` body. Extracted from
+/// [`fetch_local_nomad_node_id`] so unit tests can exercise the
+/// response-shape handling (Nomad-version drift, missing fields,
+/// empty strings) without launching an HTTP fixture.
+///
+/// **Field path**: `stats.client.node_id`. Live Nomad 1.x agents emit
+/// lower-case Go-json-tag keys (`stats`/`client`/`node_id`); some
+/// older API references show PascalCase. Accept both for defensiveness
+/// — a server-mode-only agent has no `stats.client` block, which is
+/// the legitimate "no client node_id" shape and surfaces here as
+/// `Err("missing stats.client.node_id…")`.
+pub(crate) fn parse_nomad_agent_self_node_id(body: &str) -> Result<String, String> {
+    let body: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("parse /v1/agent/self body: {e}"))?;
+    // Nomad's /v1/agent/self body shape (verified against Nomad 1.x):
+    //   { "config": {...}, "stats": {...}, "member": {...} }
+    // The client's node ID lives under `stats.client.node_id`. Note the
+    // lowercase `stats` / `client` — older docs sometimes show `Stats`,
+    // but the live API response is lower-case (Go json tags). Accept
+    // both for defensiveness against agent-version drift.
+    let node_id = body
+        .get("stats")
+        .or_else(|| body.get("Stats"))
+        .and_then(|stats| stats.get("client").or_else(|| stats.get("Client")))
+        .and_then(|client| {
+            client.get("node_id").or_else(|| client.get("NodeID"))
+        })
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            "missing stats.client.node_id in /v1/agent/self response \
+             (single-server-only agent? unexpected response shape?)"
+                .to_string()
+        })?;
+    if node_id.is_empty() {
+        return Err(
+            "stats.client.node_id present but empty in /v1/agent/self response"
+                .to_string(),
+        );
+    }
+    Ok(node_id.to_string())
+}
+
 // ─── Generic HTTP (unsigned — Nomad API) ─────────────────────────
 
 async fn http_get_unsigned(url: &str, timeout: Duration) -> Result<AgentResponse, String> {
@@ -7023,5 +7104,95 @@ mod tests {
                 "R10-C1: post-unregister, register_restored at the same \
                  sandbox_id must succeed (Vacant slot)",
             );
+    }
+
+    // ─── r3-A — local Nomad node_id discovery (parser) ───────
+    //
+    // The HTTP transport is exercised end-to-end at cluster boot;
+    // these tests pin the JSON-decoder invariants so a Nomad-version
+    // shape drift surfaces with a unit failure instead of a silent
+    // `None` fallback (which would degrade to pre-r3-A random
+    // placement under WORKER_COUNT>1).
+
+    /// Happy path: lowercase keys (Nomad 1.x live shape) yield the
+    /// node_id verbatim.
+    #[test]
+    fn parse_nomad_agent_self_node_id_lowercase_keys() {
+        let body = r#"{
+            "config": {},
+            "stats": {
+                "client": {
+                    "node_id": "0123456789abcdef-1111-2222-3333-444455556666"
+                }
+            },
+            "member": {}
+        }"#;
+        let id = parse_nomad_agent_self_node_id(body)
+            .expect("lowercase shape must parse");
+        assert_eq!(id, "0123456789abcdef-1111-2222-3333-444455556666");
+    }
+
+    /// Defensive fallback: PascalCase keys (older docs / agent-version
+    /// drift) also yield the node_id verbatim.
+    #[test]
+    fn parse_nomad_agent_self_node_id_pascal_case_keys() {
+        let body = r#"{
+            "Stats": {
+                "Client": {
+                    "NodeID": "PASCAL-CASE-NODE-ID"
+                }
+            }
+        }"#;
+        let id = parse_nomad_agent_self_node_id(body)
+            .expect("PascalCase shape must parse");
+        assert_eq!(id, "PASCAL-CASE-NODE-ID");
+    }
+
+    /// Server-only agent: no `stats.client` block. The function
+    /// returns Err so the boot path can demote to WARN + leave the
+    /// AppState field as None (random-placement fallback).
+    #[test]
+    fn parse_nomad_agent_self_node_id_missing_client_block_errs() {
+        let body = r#"{
+            "config": {},
+            "stats": {
+                "runtime": { "version": "1.7.0" }
+            }
+        }"#;
+        let err = parse_nomad_agent_self_node_id(body)
+            .expect_err("server-only agent must surface as Err");
+        assert!(
+            err.contains("missing stats.client.node_id"),
+            "error message must point operator at the missing field, got: {err}"
+        );
+    }
+
+    /// Empty node_id is treated as a hard error — an agent that
+    /// reports the field but with empty content is malformed in the
+    /// same way a missing field is.
+    #[test]
+    fn parse_nomad_agent_self_node_id_empty_string_errs() {
+        let body = r#"{
+            "stats": { "client": { "node_id": "" } }
+        }"#;
+        let err = parse_nomad_agent_self_node_id(body)
+            .expect_err("empty node_id must surface as Err");
+        assert!(
+            err.contains("present but empty"),
+            "error message must distinguish empty-vs-missing, got: {err}"
+        );
+    }
+
+    /// Non-JSON body (e.g., HTML interstitial from a misrouted proxy)
+    /// surfaces as a parse error.
+    #[test]
+    fn parse_nomad_agent_self_node_id_malformed_body_errs() {
+        let body = "<html>nope</html>";
+        let err = parse_nomad_agent_self_node_id(body)
+            .expect_err("non-JSON body must surface as Err");
+        assert!(
+            err.contains("parse /v1/agent/self body"),
+            "error message must name the source, got: {err}"
+        );
     }
 }

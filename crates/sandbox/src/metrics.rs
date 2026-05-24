@@ -147,6 +147,20 @@ static VM_INDEX_LEAKS_WAIT_FAILED: AtomicU64 = AtomicU64::new(0);
 /// healthy cluster should see this counter near zero.
 static WAKE_TERMINAL_OVERWRITE_BLOCKED: AtomicU64 = AtomicU64::new(0);
 
+/// `sandbox_nomad_node_id_lookup_failures_total`. Counter — increments
+/// once per boot-time `GET /v1/agent/self` call that fails (Nomad
+/// unreachable, non-200, unparseable body, or missing `stats.client.node_id`).
+/// r3-A (T-8b-stress-r3 fix): the controller caches the local Nomad
+/// node_id at boot and uses it to emit a Nomad `Constraints` block
+/// pinning every submitted alloc to the staging worker. A boot-time
+/// fetch failure is non-fatal — the controller keeps running but
+/// emits jobspecs without the constraint (falling back to random
+/// cross-node placement, the pre-r3-A behaviour). This counter
+/// surfaces a misconfigured/unreachable local Nomad agent so an
+/// operator can alert before stress-run cross-node failures cascade.
+/// Healthy clusters should see this counter at zero after first boot.
+static NOMAD_NODE_ID_LOOKUP_FAILURES: AtomicU64 = AtomicU64::new(0);
+
 // ────────────────────────────────────────────────────────────────────
 // Gauges
 // ────────────────────────────────────────────────────────────────────
@@ -302,6 +316,23 @@ pub fn inc_wake_terminal_overwrite_blocked() {
 #[doc(hidden)]
 pub fn wake_terminal_overwrite_blocked_value() -> u64 {
     WAKE_TERMINAL_OVERWRITE_BLOCKED.load(Ordering::Relaxed)
+}
+
+/// Bump `sandbox_nomad_node_id_lookup_failures_total` once. r3-A
+/// (T-8b-stress-r3 fix): emitted at controller boot when the
+/// `GET /v1/agent/self` call to fetch the local Nomad node_id fails.
+/// See `crate::backend::nomad_ch::fetch_local_nomad_node_id` for the
+/// failure shapes; a non-zero value here means cold-boot + restore
+/// jobspecs are missing the node-affinity Constraints block and the
+/// scheduler will fall back to random cross-node placement.
+pub fn inc_nomad_node_id_lookup_failure() {
+    NOMAD_NODE_ID_LOOKUP_FAILURES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Test-only accessor for the nomad-node-id-lookup-failures counter.
+#[doc(hidden)]
+pub fn nomad_node_id_lookup_failures_value() -> u64 {
+    NOMAD_NODE_ID_LOOKUP_FAILURES.load(Ordering::Relaxed)
 }
 
 /// Test-only accessor for the takeover-orphan counter.
@@ -508,6 +539,18 @@ mod tests {
         inc_wake_terminal_overwrite_blocked();
         inc_wake_terminal_overwrite_blocked();
         let post = wake_terminal_overwrite_blocked_value();
+        assert!(post >= pre + 2, "got {pre} -> {post}");
+    }
+
+    /// r3-A: nomad-node-id-lookup-failure counter increments
+    /// monotonically. Bumped at controller boot when
+    /// `fetch_local_nomad_node_id` returns Err.
+    #[test]
+    fn inc_nomad_node_id_lookup_failure_monotonic() {
+        let pre = nomad_node_id_lookup_failures_value();
+        inc_nomad_node_id_lookup_failure();
+        inc_nomad_node_id_lookup_failure();
+        let post = nomad_node_id_lookup_failures_value();
         assert!(post >= pre + 2, "got {pre} -> {post}");
     }
 }
