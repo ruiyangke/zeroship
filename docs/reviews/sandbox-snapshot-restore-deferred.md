@@ -3,7 +3,7 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-25 r16 (round-16 r1 deferred-backlog refresh: C-8c surfaced from smoke-r11 (sync wake contract structurally out of knobs); C-7-LT design proposal READY at docs/proposals/c7-lt-async-wake.md (uncommitted); R15-S1 CLOSED at da951dd9; R15-I2 CLOSED at 64af1803; #24 CLOSED at a4c481e1; R16-I1/R16-I2/R16-A1/R15-S2 added. Prior r2 note: deferred-backlog refresh: #24 CLOSED at `a4c481e1` — `ZSBX_SANDBOX_ID` env injection verified in tree at `nomad_ch.rs:2373` + regression tests at L4020-4069; entry was stale paperwork written before the fix landed. Prior r1 note: post critical-fix-sweep cluster smoke at v18 + rootfs v5: Phase 1 c=4 HARD FAIL 0/16 creates, NEW bug #24 — controller `Tasks[].Env` block in `nomad_ch.rs:2224-2264` missing `ZSBX_SANDBOX_ID` so the wrapper's R8-DEPLOY1 guard fires at line 153 on every cold boot, killing alloc in ~50ms with empty ch.stderr. Phase 2 c=20 NOT REACHED. Cluster fully torn down. B19 + B-SLO REMAIN UNVERIFIED at cluster on this branch HEAD. Detail: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-r1.md`).
+Last updated: 2026-05-25 r17 (C-7-LT-PR1 LANDED: R14-A1 helper extracted at `3d8acc23`, 5 sites migrated `eab3ec43`/`4fd195ef`/`96fa5f0f`, WakeResponseMode flag default-OFF at `b64d2f39`, 0009_wake_jobs migration at `259f0e50`, WakeJobRow/State/ErrorCode + 5 CRUD methods at `a0888d9e`. R14-A1 CLOSED, R16-I1 CLOSED; C-7-LT moves from DESIGN-READY to PR1-LANDED, PR2 (handler + state machine) next. Lib tests 347 → 360; pg-gated tests written but skipped (local pg down). Prior r16 r1 note: C-8c surfaced from smoke-r11 (sync wake contract structurally out of knobs); C-7-LT design proposal READY at docs/proposals/c7-lt-async-wake.md (uncommitted); R15-S1 CLOSED at da951dd9; R15-I2 CLOSED at 64af1803; #24 CLOSED at a4c481e1; R16-I1/R16-I2/R16-A1/R15-S2 added. Prior r2 note: deferred-backlog refresh: #24 CLOSED at `a4c481e1` — `ZSBX_SANDBOX_ID` env injection verified in tree at `nomad_ch.rs:2373` + regression tests at L4020-4069; entry was stale paperwork written before the fix landed. Prior r1 note: post critical-fix-sweep cluster smoke at v18 + rootfs v5: Phase 1 c=4 HARD FAIL 0/16 creates, NEW bug #24 — controller `Tasks[].Env` block in `nomad_ch.rs:2224-2264` missing `ZSBX_SANDBOX_ID` so the wrapper's R8-DEPLOY1 guard fires at line 153 on every cold boot, killing alloc in ~50ms with empty ch.stderr. Phase 2 c=20 NOT REACHED. Cluster fully torn down. B19 + B-SLO REMAIN UNVERIFIED at cluster on this branch HEAD. Detail: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-r1.md`).
 Prior update: 2026-05-23 (cycle r7+B22-fixer: bug #22 CLOSED — root cause was CH `--restore` preserving `CLOCK_REALTIME` from snapshot-time; fix is signed `/_clock_resync` handshake on agent + controller-side call in `do_restore_inner` between `wait_for_livez` and `register_restored`. v17 controller + v4 rootfs pushed; cluster c=4 confirms POST-WAKE EXEC 7/7 = 100% (was 0/9). B19 also FULLY CLOSED. B-SLO escalation blocked on NEW bug #23 — provision script fails on SERVER_COUNT>1).
 Branch HEAD at seed: `fce3e208`.
 Branch HEAD at last update: B20 fixer cycle on `3e8bfad5` parent (B20 + Appendix D commit forthcoming). Prior commits: `4fd92bef` (S4); `0aa93a0f` (A3-partial); `15b4f9a8` (B19 in-code); `4e6c70c1` (R4-T1); `28f60d73` (R3-Q3); `2928d5ae` (A4 closed); `b4ddb98b` (B18). Lib tests at parent HEAD: **275 passed**.
@@ -201,22 +201,25 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## IMPORTANT (round-r3 reviewers — structural decay + T6/T7 regressions)
 
-### [C-7-LT] (DESIGN-READY 2026-05-25 r16) Async wake-response contract: 202 + polling (CRITICAL architectural sprint)
+### [C-7-LT] (PR1 LANDED 2026-05-25; PR2 next) Async wake-response contract: 202 + polling (CRITICAL architectural sprint)
 - **Design**: `docs/proposals/c7-lt-async-wake.md` — 2490 words, 13 sections, READY FOR REVIEW.
 - **Scope**: 400-500 LOC across handlers + state machine + pg migration + worker discipline; ~450 LOC tests; 5-phase migration with feature-flag gate.
-- **Open design questions** (user input requested before implementation):
-  1. Internal caller `wake_sandbox`: sync wrapper for ergonomics, or adopt polling directly? (Proposal default: poll directly, fewer code shapes to maintain.)
-  2. Long-poll `?wait=<seconds>` v1 scope, or pure short-poll only? (Proposal default: pure short-poll v1; long-poll added in v2 if SLO data warrants.)
-  3. `wake_jobs.error_code` structured enum, or opaque message? (Proposal default: structured enum for SLO dashboards.)
-- **Implementation plan**: 3-PR sprint over 2-3 cron cycles. PR1: `detach_isolated` helper + `wake_jobs` migration. PR2: handler + state machine. PR3: tests + smoke-r12 cluster validation.
+- **Design questions resolved (user-green-lit defaults):**
+  1. Internal caller `wake_sandbox`: adopt polling shape directly (no sync wrapper).
+  2. Pure short-poll v1; no `?wait=` long-poll.
+  3. `wake_jobs.error_code` structured enum (in 0009 migration + WakeErrorCode).
+- **Implementation plan**: 3-PR sprint over 2-3 cron cycles.
+  - **PR1 LANDED 2026-05-25** at `3d8acc23` (R14-A1 helper) → `eab3ec43` (C-6 site migrated) → `4fd195ef` (C-3 site migrated) → `96fa5f0f` (R16-I1 sibling-C-6 sites migrated) → `b64d2f39` (WakeResponseMode flag, default OFF) → `259f0e50` (0009_wake_jobs migration) → `a0888d9e` (WakeJobRow + WakeJobState + WakeErrorCode + 5 CRUD methods + 3 lib tests + 5 pg-gated tests). Lib test count 347 → 360; pg-gated CRUD tests written but skipped (local pg down).
+  - **PR2 (next)**: wake handler + state machine. Reads `state.wake_response_mode`; switches 200 OK → 202 Accepted + polling when `=async`. Internal callers (`wake_sandbox`) adopt polling shape directly per Q1.
+  - **PR3**: tests + smoke-r12 cluster validation; flip default to `async`.
 - **Closes structurally**: C-4, C-6, C-7, C-8, C-8a, C-8b, C-8c — the entire 7-bug retry-tuning chain.
 
-### [R16-I1] (OPEN, 3-cycle propagated misclassification) Sibling-C-6 sites at sweep.rs:611 + registry.rs:870 STILL misclassified as "safe" (IMPORTANT, concurrency-r16)
-- **Location**: `crates/sandbox/src/sweep.rs:611`, `crates/sandbox/src/registry.rs:870` (per concurrency-r16; cross-check exact line via `grep -n "compio::runtime::spawn.*detach" crates/sandbox/src/`)
+### [R16-I1] (CLOSED 2026-05-25 at `96fa5f0f`) Sibling-C-6 sites at sweep.rs:611 + registry.rs:870 STILL misclassified as "safe" (IMPORTANT, concurrency-r16)
+- **Location**: `crates/sandbox/src/sweep.rs:611`, `crates/sandbox/src/registry.rs:870` + 3 lib.rs sites (start_health_loop, spawn_heartbeat_task, spawn_takeover_task) discovered during the audit.
 - **Claim in deferred C-6 entry**: both sites have only top-of-loop `compio::time::sleep` with no bursty awaits → declared safe.
 - **Concurrency-r16 challenge**: both `.await` on teardown-class operations inline on the ntex-worker compio runtime — same C-6 wedge fingerprint. Latent at T-8b-stress c=20.
-- **Action**: re-audit both sites against the C-6 mechanism. If wedge-prone, apply the OS-thread fix (mirrors C-3/C-6 pattern) OR extract the R14-A1 `detach_isolated` helper and migrate.
-- **Blocker**: best applied alongside C-7-LT's `detach_isolated` extraction.
+- **Resolution**: as part of C-7-LT PR1, extracted `crate::detach::detach_isolated` (R14-A1) and migrated all SIX production periodic-loop sites to it (sweep.rs::spawn_transient_state_takeover, sweep.rs::spawn_idle_eviction_sweep, registry.rs::start_idle_gc, lib.rs::start_health_loop, lib.rs::spawn_heartbeat_task, lib.rs::spawn_takeover_task). Each loop now runs on its own OS thread with a private compio runtime — the C-6 wedge mechanism cannot transit the runtime boundary. Test-only fixture at lib.rs `#[cfg(test)] shutdown_tests` left unchanged (exists solely to validate the shutdown-flag observation pattern in isolation, not the production topology).
+- **Status**: CLOSED at `96fa5f0f`. Cluster smoke-r12 (PR3) will exercise c=20 stress and confirm no wedge fingerprint.
 
 ### [R16-I2] (PARTIAL — instrumentation closed 2026-05-25 at `417cd6cd`; structural fix subsumed by C-7-LT) C-8b 2× factor envelopes OK case but not the LEAK case (IMPORTANT, concurrency-r16)
 - **Location**: `crates/sandbox/src/backend/nomad_ch.rs::wait_for_agent_silent` (lines 3205-3273)
@@ -1476,11 +1479,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## NEW r14 ROUND 2 FINDINGS (added by pilot cycle 2026-05-25 r13 — architecture r14, concurrency r14, security r14)
 
-### [R14-A1] (CRITICAL, architecture-r14) 9 `compio::runtime::spawn(...).detach()` sites; 2 problematic; needs `detach_isolated` helper
+### [R14-A1] (CLOSED 2026-05-25 at `3d8acc23` ... `96fa5f0f`) 9 `compio::runtime::spawn(...).detach()` sites; 2 problematic; needs `detach_isolated` helper
 - **Source**: 2026-05-25 architecture-r14
 - **Files**: `crates/sandbox/src/admin_handlers.rs:1311` (C-6 FIXED at 91ce9be5), `crates/sandbox/src/backend/nomad_ch.rs:2002` CreateGuard::drop (STILL UNFIXED, same pattern)
 - **Symptom**: C-3 + C-6 fixes converge on the same `std::thread::Builder::spawn + Runtime::new() + block_on` pattern. CreateGuard::drop on create failure has the same runtime-starvation shape but is admin-reachable (create-failure spam). Code-review fence not structural.
-- **Action**: extract `detach_isolated(name, fut)` helper. Migrate C-3 (snapshot_store_gcs.rs:1132) + C-6 (admin_handlers.rs:1340-1378) + CreateGuard::drop site to use it. ~30 LOC helper + 3 call-site updates.
+- **Resolution**: helper extracted at `3d8acc23` (`crate::detach::detach_isolated`, FnOnce-factory shape to permit `!Send` futures). Migrated sites: C-6 at `eab3ec43` (admin_handlers::teardown_source_for_snapshot), C-3 at `4fd195ef` (snapshot_store_gcs::Tiered::put L2 upload), R16-I1 sibling-C-6 sites at `96fa5f0f` (sweep::spawn_transient_state_takeover, sweep::spawn_idle_eviction_sweep, registry::start_idle_gc, lib::start_health_loop, lib::spawn_heartbeat_task, lib::spawn_takeover_task). Total: 8 production call sites migrated + 5 helper unit tests + 244 LOC helper module. CreateGuard::drop NOT in this PR — different shape (sync-only, no compio runtime requirement) and out of scope for C-7-LT PR1; track separately if it needs the same isolation treatment.
 
 ### [R14-A2] (IMPORTANT, architecture-r14) restore_handler.rs crossed 3000 LOC: 2662 → 3101 (+439)
 - **Source**: 2026-05-25 architecture-r14
