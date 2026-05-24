@@ -828,6 +828,368 @@ pub fn spawn_idle_eviction_sweep(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// T-8b-stress-r2 controller v34: host_dir GC sweep
+// ────────────────────────────────────────────────────────────────────
+//
+// **Why this exists.** T-8b-stress-r2 caught a race between a failing
+// CREATE's per-alloc `rm -rf host_dir` (in `CreateGuard::drop`) and a
+// concurrent retry-CREATE's `StartTask` running on the same Nomad worker
+// for the same `sandbox_id`. The retry's `nomad-driver-ch::StartTask`
+// preflight saw `<host_dir>/workspace.img` missing — even though the
+// controller's `create_ext4_image_if_missing` had successfully created
+// it — because the prior alloc's cleanup unlinked the parent dir mid-
+// retry. 48/60 CREATEs hit this; the controller v33 `fsync_dir` +
+// `assert_disk_image_present` parity check addressed staging visibility
+// (a real issue) but not THIS race.
+//
+// **Fix shape (sweeper-owned host_dir GC).** Per-alloc cleanup paths —
+// `CreateGuard::drop` step 3, `stop_inner` step 5 — now LEAK the
+// host_dir. The sweeper here reaps it after:
+//   - The sandbox is in a terminal state (`stopped` / `lost` / `orphan`)
+//     OR there's no DB row at all for the dir's `<uuid>` (truly
+//     orphaned from a prior controller's deleted-state).
+//   - There is NO pending `wake_jobs` row for the sandbox (a non-
+//     terminal `wake_jobs` row means a restore is in flight and will
+//     need `workspace.img` shortly — reaping now would silently break
+//     wake).
+//   - The directory's mtime is older than `GRACE_SECS` (default 1 hour,
+//     env `SANDBOX_HOST_DIR_GC_GRACE_SECS`). Operators retain on-disk
+//     artefacts for inspection during the grace window.
+//
+// **What we DON'T reap.** The per-user home directory tree
+// (`<host_state_dir>/users/<user_id>/home.img`) is user-scoped state
+// owned by the user lifecycle, not the sandbox lifecycle. The sweep
+// iterates `host_state_dir` direct children and SKIPS the literal
+// directory named `users` — any other non-UUID name is also skipped
+// (defense in depth: operator artefacts under a custom-named subdir
+// are never touched).
+
+/// `SANDBOX_HOST_DIR_GC_POLL_SECS`. Cadence between sweeps. 300 s (5 min)
+/// matches the idle-eviction sweep's cadence — the work is cheap (one
+/// readdir on `host_state_dir` + N pg lookups + best-effort `rm -rf`)
+/// and a tighter cadence would barely reduce the time-to-reap given the
+/// 1-hour mtime grace. Env tunable; floor 60 s (sub-minute polling
+/// would hammer pg's `get_sandbox_row` for no benefit).
+pub(crate) const HOST_DIR_GC_POLL_SECS: u64 = 300;
+
+/// Minimum cadence floor — operator can shorten via env but not below
+/// this. The floor is set by the cost-of-polling pg vs. the value of
+/// faster reaping: a 1-minute cadence reaps within 1 hour 1 min instead
+/// of 1 hour 5 min, which is irrelevant.
+pub(crate) const HOST_DIR_GC_POLL_FLOOR_SECS: u64 = 60;
+
+/// `SANDBOX_HOST_DIR_GC_GRACE_SECS`. Minimum mtime age before a
+/// host_dir is eligible for GC, in seconds. Default 3600 (1 hour).
+/// Operators can shorten this for dev / test (env minimum 60 s — see
+/// `HOST_DIR_GC_GRACE_FLOOR_SECS`) or lengthen for forensic-friendly
+/// production fleets.
+pub(crate) const HOST_DIR_GC_GRACE_SECS: u64 = 3600;
+
+/// Minimum grace floor. 60 s is the absolute minimum: short enough for
+/// test fixtures to drive the sweeper to completion, long enough that
+/// a fresh CREATE's StartTask (typically <10 s) cannot lose the race
+/// against a sweep tick that fires immediately after the CREATE's
+/// CreateGuard::drop leaves the dir. The mandate's 1-hour default has
+/// plenty of headroom over this floor; the floor exists so a careless
+/// env value (`=0`) can't disable the safety entirely.
+pub(crate) const HOST_DIR_GC_GRACE_FLOOR_SECS: u64 = 60;
+
+/// One iteration of the host_dir GC sweep. Public for the pg-gated
+/// test suite. Returns `(scanned, reaped)` — `scanned` is the count of
+/// candidate `<uuid>`-shaped subdirs the iter found, `reaped` is the
+/// count that actually got `rm -rf`'d.
+///
+/// Per-tick cost: O(N_subdirs × 1 pg lookup × 1 wake_jobs lookup). The
+/// pg work is two SELECTs per dir; on a fleet with thousands of
+/// long-tail terminal sandboxes the wall is dominated by the rm -rf
+/// itself (~hundreds of ms per dir for a populated workspace tree).
+/// Operators can shorten the grace if the steady-state size of
+/// host_state_dir becomes a problem; today the cost is well within
+/// the 5-min sweep budget.
+pub async fn run_host_dir_gc_once(
+    state: &Arc<AppState>,
+    grace_secs: u64,
+) -> (u64, u64) {
+    let Some(db) = state.database.as_ref() else {
+        return (0, 0);
+    };
+
+    let host_state_dir = &state.config.nomad_ch.host_state_dir;
+    if !host_state_dir.exists() {
+        tracing::debug!(
+            target: "sandbox::host_dir_gc",
+            host_state_dir = %host_state_dir.display(),
+            "sandbox host_dir GC: host_state_dir does not exist yet (no sandboxes ever created)"
+        );
+        return (0, 0);
+    }
+
+    let entries = match std::fs::read_dir(host_state_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::host_dir_gc",
+                error = %e,
+                host_state_dir = %host_state_dir.display(),
+                "sandbox host_dir GC: readdir failed (continuing)"
+            );
+            return (0, 0);
+        }
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut scanned: u64 = 0;
+    let mut reaped: u64 = 0;
+
+    for entry_res in entries {
+        if state.shutdown_requested() {
+            break;
+        }
+        let entry = match entry_res {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    target: "sandbox::host_dir_gc",
+                    error = %e,
+                    "sandbox host_dir GC: readdir entry failed (skipping)"
+                );
+                continue;
+            }
+        };
+        let name_os = entry.file_name();
+        let name = match name_os.to_str() {
+            Some(n) => n,
+            None => continue, // non-UTF8 name — skip silently
+        };
+
+        // The per-user home dir tree lives at `<host_state_dir>/users/`
+        // — owned by the user lifecycle, not the sandbox lifecycle.
+        // Never reap. Defence-in-depth: any non-UUID directory name
+        // is also skipped (operator artefacts are safe).
+        if name == "users" {
+            continue;
+        }
+
+        // Try to parse the entry name as a Uuid::simple — the layout
+        // convention is `<sandbox-id-simple>/...` (see
+        // `NomadCHBackend::create` line ~552). Anything that doesn't
+        // parse is not a host_dir we own.
+        let sandbox_uuid = match Uuid::parse_str(name) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    target: "sandbox::host_dir_gc",
+                    name,
+                    error = %e,
+                    "sandbox host_dir GC: stat failed (skipping)"
+                );
+                continue;
+            }
+        };
+        if !metadata.is_dir() {
+            // Not a dir — operator may have planted a regular file under
+            // host_state_dir. Skip.
+            continue;
+        }
+
+        scanned += 1;
+
+        // Grace check: dir mtime must be older than `grace_secs`.
+        // A young dir is still in the "may be racing a CREATE / retry"
+        // window — leave it alone.
+        let mtime_secs = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now_secs.saturating_sub(mtime_secs) < grace_secs {
+            tracing::debug!(
+                target: "sandbox::host_dir_gc",
+                name,
+                age_secs = now_secs.saturating_sub(mtime_secs),
+                grace_secs,
+                "sandbox host_dir GC: dir under grace, skipping"
+            );
+            continue;
+        }
+
+        // Eligibility gate 1: sandbox state.
+        //
+        //   - Row absent → orphan from a deleted sandbox (or pre-v34
+        //     leak); reap is safe.
+        //   - Row exists + status terminal (stopped/lost/orphan) →
+        //     reap is safe (the controller is done with this sandbox).
+        //   - Row exists + status non-terminal (running/restoring/etc)
+        //     → preserve (a live VM or in-flight restore depends on
+        //     workspace.img).
+        //   - Row exists + status snapshotted/snapshotted_suspect →
+        //     PRESERVE. The workspace.img is durable state needed by
+        //     the next wake; reaping would silently break wake.
+        let row = match db.get_sandbox_row(sandbox_uuid).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    target: "sandbox::host_dir_gc",
+                    name,
+                    error = %e,
+                    "sandbox host_dir GC: pg query failed (skipping)"
+                );
+                continue;
+            }
+        };
+        let eligible_by_state = match row.as_ref() {
+            None => true, // no row → orphan
+            Some(r) => matches!(
+                r.status,
+                SandboxStatus::Stopped | SandboxStatus::Lost | SandboxStatus::Orphan
+            ),
+        };
+        if !eligible_by_state {
+            tracing::debug!(
+                target: "sandbox::host_dir_gc",
+                name,
+                status = ?row.as_ref().map(|r| r.status.as_str()),
+                "sandbox host_dir GC: sandbox not in terminal state, skipping"
+            );
+            continue;
+        }
+
+        // Eligibility gate 2: no pending wake_jobs row.
+        //
+        // A non-terminal wake_jobs row means restore_handler.rs is in
+        // flight and needs `<host_dir>/restore/` + `workspace.img`. Even
+        // if the sandbox row is terminal (e.g. previous boot's stop
+        // recorded `stopped` but a wake POST has since arrived and
+        // started the wake), reaping now would break the in-flight
+        // restore. The sandbox state row transitions terminal → restoring
+        // mid-wake (see wake_machine.rs), and the wake_jobs row is the
+        // immediate-truth source for in-flight wakes.
+        let pending = match db
+            .find_pending_wake_for_sandbox(&format!(
+                "sbx_{}",
+                zeroship_core::typed_id::uuid_to_base62(&sandbox_uuid)
+            ))
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    target: "sandbox::host_dir_gc",
+                    name,
+                    error = %e,
+                    "sandbox host_dir GC: wake_jobs lookup failed (skipping)"
+                );
+                continue;
+            }
+        };
+        if pending.is_some() {
+            tracing::debug!(
+                target: "sandbox::host_dir_gc",
+                name,
+                "sandbox host_dir GC: pending wake_jobs row present, skipping"
+            );
+            continue;
+        }
+
+        // All gates passed — reap.
+        let path = entry.path();
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                reaped += 1;
+                tracing::info!(
+                    target: "sandbox::host_dir_gc",
+                    sandbox_id = %sandbox_uuid,
+                    host_dir = %path.display(),
+                    sandbox_row_status = ?row.as_ref().map(|r| r.status.as_str()),
+                    age_secs = now_secs.saturating_sub(mtime_secs),
+                    "sandbox host_dir GC: reaped"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "sandbox::host_dir_gc",
+                    sandbox_id = %sandbox_uuid,
+                    host_dir = %path.display(),
+                    error = %e,
+                    "sandbox host_dir GC: rm -rf failed (next sweep retries)"
+                );
+            }
+        }
+    }
+
+    (scanned, reaped)
+}
+
+/// Spawn the host_dir GC loop. Runs on its own dedicated OS thread with
+/// a private compio runtime (`detach_isolated`) so the rm -rf work
+/// (potentially hundreds of ms per dir for a populated workspace tree)
+/// doesn't share runtime time with the ntex worker. Lives for the
+/// process lifetime, observes `state.shutdown_requested()` between
+/// iterations.
+///
+/// Skipped when `state.database` is `None` — without pg we can't tell
+/// terminal from in-flight sandboxes, and reaping blind would risk
+/// breaking a live VM's workspace.img. Single-tenant / no-pg deploys
+/// keep the pre-v34 contract (host_dir leaks accumulate until the
+/// operator wipes them; matches today's no-DB story for every other
+/// pg-only sweep — `wake_jobs_gc`, `transient_state_takeover`, etc.).
+pub(crate) fn spawn_host_dir_gc(state: Arc<AppState>) {
+    if state.database.is_none() {
+        tracing::info!(
+            target: "sandbox::host_dir_gc",
+            "sandbox host_dir GC: skipped (no database wired — host_dir leaks accumulate; operator must wipe manually)"
+        );
+        return;
+    }
+    crate::detach::detach_isolated("host-dir-gc", move || async move {
+        let interval_secs = read_u64_env("SANDBOX_HOST_DIR_GC_POLL_SECS", HOST_DIR_GC_POLL_SECS)
+            .max(HOST_DIR_GC_POLL_FLOOR_SECS);
+        let grace_secs = read_u64_env("SANDBOX_HOST_DIR_GC_GRACE_SECS", HOST_DIR_GC_GRACE_SECS)
+            .max(HOST_DIR_GC_GRACE_FLOOR_SECS);
+        let interval = Duration::from_secs(interval_secs);
+        tracing::info!(
+            target: "sandbox::host_dir_gc",
+            interval_secs,
+            grace_secs,
+            host_state_dir = %state.config.nomad_ch.host_state_dir.display(),
+            "sandbox host_dir GC: loop started"
+        );
+        loop {
+            if state.shutdown_requested() {
+                tracing::info!(
+                    target: "sandbox::host_dir_gc",
+                    "sandbox host_dir GC: shutdown"
+                );
+                break;
+            }
+            compio::time::sleep(interval).await;
+            if state.shutdown_requested() {
+                break;
+            }
+            let (scanned, reaped) = run_host_dir_gc_once(&state, grace_secs).await;
+            if scanned > 0 || reaped > 0 {
+                tracing::debug!(
+                    target: "sandbox::host_dir_gc",
+                    scanned,
+                    reaped,
+                    "sandbox host_dir GC: tick"
+                );
+            }
+        }
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────
 
