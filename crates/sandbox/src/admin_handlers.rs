@@ -2453,6 +2453,15 @@ mod tests {
             WakeErrorCode::RegisterFailed,
             WakeErrorCode::Internal,
             WakeErrorCode::WakeWorkerAborted,
+            // R23-API1 / R25-S1: controller-side staging preflight
+            // rejection. Distinct wire code so RO admin bearers see
+            // the operator-facing `staging_image_missing` (not the
+            // internal `staging_path_missing` pg form) AND no fs path
+            // leaks via the `error_message` field — that's enforced
+            // at the producer site (wake_machine `StagingPreflight`
+            // classification) where the typed-id form is composed
+            // path-free.
+            WakeErrorCode::StagingPathMissing,
         ] {
             let mut row = make_wake_row(WakeJobState::Failed);
             row.error_code = Some(code);

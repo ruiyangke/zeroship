@@ -104,13 +104,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "wake_jobs error_code CHECK accepts `wake_worker_aborted` for the takeover sweep (R19-C1)",
         sql: include_str!("../migrations/0012_wake_jobs_aborted_code.sql"),
     },
+    Migration {
+        version: 13,
+        description: "wake_jobs error_code CHECK accepts `staging_path_missing` for the controller-side preflight (R23-API1 / R25-S1 / R25-I1 / R25-I2)",
+        sql: include_str!("../migrations/0013_wake_jobs_staging_path_missing_code.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 12;
+pub const LATEST_MIGRATION_VERSION: i64 = 13;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
@@ -1521,6 +1526,28 @@ pub enum WakeErrorCode {
     /// controller behind the wake disappeared and we cleaned up
     /// after it" — operationally distinct.
     WakeWorkerAborted,
+    /// R23-API1 / R25-S1 / R25-I1 / R25-I2: controller-side disk-image
+    /// staging preflight rejected the alloc BEFORE handing it to
+    /// Nomad. The `submit_restore_job` site runs `assert_disk_image_present`
+    /// against `workspace.img` + `user_home.img`; a missing image
+    /// (e.g. snapshot teardown didn't preserve workspace.img, or out-of-
+    /// band rm of the per-user home image) is a distinct failure mode
+    /// from `restore_backend_failed` — the Nomad submit never fired,
+    /// the alloc never started, and the failure is operator-actionable
+    /// (re-stage from snapshot store / restore from backup). Without
+    /// this variant the only mapping was `RestoreFailed`, which clients
+    /// today branch on as "alloc-level backend problem, retry/give up";
+    /// staging-preflight should route to "operator: investigate disk".
+    ///
+    /// SECURITY (R25-S1): the path-bearing detail goes in structured
+    /// fields carried by `RestoreHandlerError::StagingPreflight`, NOT
+    /// in the `error_message` free-text field. The wire `message`
+    /// surfaced to RO admin bearers via `GET /admin/sandboxes/{id}/
+    /// wake/{wake_id}` carries ONLY the user-safe summary "staging
+    /// image missing: <which> for <typed_sandbox_id>"; the verbatim
+    /// host path is logged via tracing on the controller and never
+    /// crosses the wire.
+    StagingPathMissing,
 }
 
 impl WakeErrorCode {
@@ -1540,6 +1567,15 @@ impl WakeErrorCode {
             // `wake_jobs_error_code_check` constraint to accept this
             // value.
             Self::WakeWorkerAborted => "wake_worker_aborted",
+            // R23-API1 / R25-S1 / R25-I1 / R25-I2: controller-side
+            // disk-image staging preflight rejection. Internal pg
+            // string is `staging_path_missing` (the local enum-name
+            // form); the wire code is `staging_image_missing` — they
+            // differ intentionally because the internal name describes
+            // the failure SHAPE ("a path was missing") and the wire
+            // code describes the FAILED RESOURCE ("an image was
+            // missing") in operator-facing language.
+            Self::StagingPathMissing => "staging_path_missing",
         }
     }
 
@@ -1553,6 +1589,7 @@ impl WakeErrorCode {
             "register_failed" => Self::RegisterFailed,
             "internal" => Self::Internal,
             "wake_worker_aborted" => Self::WakeWorkerAborted,
+            "staging_path_missing" => Self::StagingPathMissing,
             _ => return None,
         })
     }
@@ -1603,6 +1640,17 @@ impl WakeErrorCode {
             // distinct wire code even though clients today branch
             // both into the same retry bucket.
             Self::WakeWorkerAborted => "wake_worker_aborted",
+            // R23-API1 / R25-S1: distinct from `restore_backend_failed`
+            // so the SLO dashboard + operator triage can route
+            // "controller refused to submit because a host disk image
+            // is missing" (operator-actionable: re-stage or restore
+            // from backup) separately from "Nomad alloc itself failed
+            // mid-restore". The wire code uses the operator-facing
+            // resource name `staging_image_missing` (rather than the
+            // internal enum's `staging_path_missing`) so dashboards
+            // and runbooks read in domain language. Snake_case per
+            // §10.0.
+            Self::StagingPathMissing => "staging_image_missing",
         }
     }
 }
@@ -3582,6 +3630,8 @@ mod tests {
             WakeErrorCode::RegisterFailed,
             WakeErrorCode::Internal,
             WakeErrorCode::WakeWorkerAborted,
+            // R23-API1 / R25-S1: controller-side staging preflight.
+            WakeErrorCode::StagingPathMissing,
         ] {
             let s = variant.as_str();
             let parsed = WakeErrorCode::from_str_opt(s)
@@ -3615,6 +3665,14 @@ mod tests {
             // signal. The wire code is intentionally distinct from
             // `internal_error` (operationally distinct failure mode).
             (WakeErrorCode::WakeWorkerAborted, "wake_worker_aborted"),
+            // R23-API1 / R25-S1: staging preflight rejection. Wire
+            // code is intentionally distinct from `restore_backend_failed`
+            // (operator-actionable resource issue, not an alloc-level
+            // failure). NB: internal `as_str` form is `staging_path_missing`
+            // (failure shape) but wire code is `staging_image_missing`
+            // (resource name) — pinned together here so a future rename
+            // of either side breaks one of these test cases.
+            (WakeErrorCode::StagingPathMissing, "staging_image_missing"),
         ];
         for (variant, wire) in cases {
             assert_eq!(
