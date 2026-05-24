@@ -6017,6 +6017,7 @@ dependencies = [
  "uuid",
  "zeroize",
  "zeroship-core",
+ "zeroship-sandbox",
  "zeroship-sandbox-agent",
 ]
 

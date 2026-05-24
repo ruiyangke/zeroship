@@ -1690,12 +1690,14 @@ impl NomadCHBackend {
     /// to point the controller at a fixture HTTP listener on
     /// `127.0.0.1:<ephemeral>`.
     ///
-    /// Marked `pub` rather than `pub(crate)` so integration tests
-    /// in `tests/` can call it; the `#[cfg(any(test, feature =
-    /// "test-support"))]` gate would be cleaner if we want to
-    /// strip it from production binaries — Phase 1 leaves it
-    /// unconditionally public with a "tests only" doc-comment
-    /// (the function name self-identifies as test scaffolding).
+    /// Gated under `#[cfg(any(test, feature = "test-support"))]`
+    /// so the symbol is stripped from production binaries (R27-API2
+    /// close-out, mirrors the `freed_for_test` precedent at :399).
+    /// Integration tests in `tests/` link as external crates and
+    /// pick the function up via the `test-support` feature, which
+    /// the in-crate self dev-dep enables automatically (see
+    /// `Cargo.toml [dev-dependencies] zeroship-sandbox`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn _test_inject_sandbox(
         &self,
         sandbox_id: Uuid,
