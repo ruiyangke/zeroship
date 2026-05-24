@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -312,10 +313,14 @@ func (r *fakeRunner) StderrTail(_ int) []byte {
 
 // TestStartTask_SpawnInvokesCH end-to-end: builds a plugin with a fake
 // runner factory, drives StartTask with a valid TaskConfig, asserts:
-//   - the spawned argv vector includes --api-socket, --config, the
-//     resolved CH binary
+//   - the spawned argv vector includes the long-argv flag set
+//     (--api-socket, --kernel, --cmdline, --disk, --net, --memory,
+//     --cpus, --console, --serial) — the C-1 fix shape, matching the
+//     bash wrapper at nomad-vm-wrapper.sh:638-647
 //   - the persisted TaskState carries the PID + APISocket + TapName the
 //     fake runner reported
+//   - config.json is still materialised under the task dir as a
+//     debugging artifact (NOT passed to CH — see C-1 fix note)
 //
 // The test sets ZSBX_CH_BIN to a synthetic stub so binary discovery
 // resolves without requiring cloud-hypervisor on the test host.
@@ -374,16 +379,20 @@ func TestStartTask_SpawnInvokesCH(t *testing.T) {
 		t.Fatal("runner factory not invoked")
 	}
 
-	// argv assertions.
+	// argv assertions: full long-argv flag set (C-1 fix shape).
 	argv := capturedRunner.argv
 	if len(argv) == 0 || argv[0] != chBin {
 		t.Errorf("argv[0] = %q, want %q", argv[0], chBin)
 	}
-	if !containsAdjacent(argv, "--api-socket") {
-		t.Errorf("argv missing --api-socket: %v", argv)
+	for _, want := range []string{"--api-socket", "--kernel", "--cmdline", "--disk", "--net", "--memory", "--cpus"} {
+		if !containsAdjacent(argv, want) {
+			t.Errorf("argv missing %s: %v", want, argv)
+		}
 	}
-	if !containsAdjacent(argv, "--config") {
-		t.Errorf("argv missing --config: %v", argv)
+	// C-1 negative pin: --config must NOT appear in the spawn argv. CH
+	// v51.1 rejects it with exit 2.
+	if containsAdjacent(argv, "--config") {
+		t.Errorf("argv unexpectedly contains --config (CH v51.1 rejects it): %v", argv)
 	}
 
 	// State assertions: the persisted TaskState should carry PID +
@@ -411,16 +420,20 @@ func TestStartTask_SpawnInvokesCH(t *testing.T) {
 		t.Error("TaskState.StartedAt is zero")
 	}
 
-	// Extract the --config path from the argv and read it back to
-	// verify materialisation. Avoids hard-coding the run-dir layout
-	// (driver-internal).
-	configPath := argvAfter(argv, "--config")
-	if configPath == "" {
-		t.Fatal("--config not found in argv")
+	// config.json is still materialised under the task dir as a
+	// debugging artifact (the JSON file is no longer fed to CH, but
+	// it round-trips with the T-6 restore-path rewriter and is
+	// operator-visible in the alloc dir). Use the api-socket path
+	// to recover the run-dir.
+	apiSocketPath := argvAfter(argv, "--api-socket")
+	if apiSocketPath == "" {
+		t.Fatal("--api-socket not found in argv")
 	}
+	runDir := filepath.Dir(apiSocketPath)
+	configPath := filepath.Join(runDir, "config.json")
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
-		t.Fatalf("read %s: %v", configPath, err)
+		t.Fatalf("read %s (debug artifact): %v", configPath, err)
 	}
 	mustContain(t, "config.json contents", string(configBytes), "boot_vcpus")
 	mustContain(t, "config.json contents", string(configBytes), "SANDBOX_AGENT_SANDBOX_ID=sbx_test")
@@ -432,6 +445,249 @@ func TestStartTask_SpawnInvokesCH(t *testing.T) {
 	capturedRunner.waitErr = nil
 	capturedRunner.mu.Unlock()
 	close(capturedRunner.waitCh)
+}
+
+// TestStartTask_SpawnUsesApiSocketFlag pins the --api-socket flag
+// position + value. The path must live under the per-task run dir
+// (Nomad's NOMAD_TASK_DIR) and end in ch.sock so an operator looking
+// at the alloc dir finds the CH control channel where they expect.
+func TestStartTask_SpawnUsesApiSocketFlag(t *testing.T) {
+	argv := captureColdBootArgv(t)
+	got := argvAfter(argv, "--api-socket")
+	if got == "" {
+		t.Fatal("--api-socket missing from argv")
+	}
+	if !strings.HasSuffix(got, "ch.sock") {
+		t.Errorf("--api-socket value = %q, want suffix ch.sock", got)
+	}
+}
+
+// TestStartTask_SpawnPassesKernelPath pins --kernel <path>. The wrapper
+// passes the kernel by path (typically /opt/zsbx/vmlinuz); the Go
+// driver mirrors that 1:1 from TaskConfig.Kernel.
+func TestStartTask_SpawnPassesKernelPath(t *testing.T) {
+	argv := captureColdBootArgv(t)
+	got := argvAfter(argv, "--kernel")
+	if got != "/opt/zsbx/vmlinuz" {
+		t.Errorf("--kernel value = %q, want /opt/zsbx/vmlinuz", got)
+	}
+}
+
+// TestStartTask_SpawnPassesCmdlineWithSandboxId pins --cmdline. The
+// kernel cmdline carries the agent identity tokens: SANDBOX_AGENT_SANDBOX_ID
+// (R8-DEPLOY1) and zsbx_pubkey (controller signing key). Drift in the
+// shape here breaks the guest's /sbin/init pubkey decode + the agent's
+// OnceLock bind.
+func TestStartTask_SpawnPassesCmdlineWithSandboxId(t *testing.T) {
+	argv := captureColdBootArgv(t)
+	got := argvAfter(argv, "--cmdline")
+	if got == "" {
+		t.Fatal("--cmdline missing from argv")
+	}
+	mustContain(t, "--cmdline value", got, "SANDBOX_AGENT_SANDBOX_ID=sbx_test")
+	mustContain(t, "--cmdline value", got, "zsbx_pubkey=deadbeef")
+	mustContain(t, "--cmdline value", got, "console=ttyS0")
+	mustContain(t, "--cmdline value", got, "root=/dev/vda")
+	mustContain(t, "--cmdline value", got, "ip=10.99.107.2::10.99.107.1:255.255.255.252::eth0:none")
+}
+
+// TestStartTask_SpawnPassesDisksWithVirtIOBlk pins the --disk flag
+// shape. CH quirk (wrapper l.351-353): all disks share a SINGLE --disk
+// flag with multiple `path=…` tokens as separate argv slots. The
+// rootfs is the first disk; workspace + userhome follow.
+func TestStartTask_SpawnPassesDisksWithVirtIOBlk(t *testing.T) {
+	argv := captureColdBootArgv(t)
+
+	// Find the --disk flag and the run of argv slots that follow before
+	// the next `--flag` token. All of them belong to the single --disk.
+	diskIdx := -1
+	for i, a := range argv {
+		if a == "--disk" {
+			diskIdx = i
+			break
+		}
+	}
+	if diskIdx < 0 {
+		t.Fatal("--disk missing from argv")
+	}
+	// Negative pin: a SECOND `--disk` flag would mean we mis-split
+	// disks into multiple flags (CH's clap parser would only register
+	// the LAST). Wrapper l.351-353 explicitly warns about this.
+	for i := diskIdx + 1; i < len(argv); i++ {
+		if argv[i] == "--disk" {
+			t.Errorf("argv contains a SECOND --disk flag at %d; disks must share ONE --disk: %v", i, argv)
+		}
+	}
+
+	var diskArgs []string
+	for j := diskIdx + 1; j < len(argv); j++ {
+		if strings.HasPrefix(argv[j], "--") {
+			break
+		}
+		diskArgs = append(diskArgs, argv[j])
+	}
+	if len(diskArgs) != 3 {
+		t.Fatalf("--disk arg count = %d (%v), want 3 (rootfs, workspace, userhome)", len(diskArgs), diskArgs)
+	}
+	// rootfs lives under the run dir (taskDir/rootfs.img).
+	if !strings.Contains(diskArgs[0], "path=") || !strings.HasSuffix(strings.SplitN(diskArgs[0], ",", 2)[0], "rootfs.img") {
+		t.Errorf("disk[0] = %q, want path=<run-dir>/rootfs.img,…", diskArgs[0])
+	}
+	mustContain(t, "disk[0]", diskArgs[0], "image_type=raw")
+	mustContain(t, "disk[0]", diskArgs[0], "readonly=off")
+	// workspace.img + userhome.img from TaskConfig.
+	mustContain(t, "disk[1]", diskArgs[1], "path=/tmp/ws.img")
+	mustContain(t, "disk[1]", diskArgs[1], "image_type=raw")
+	mustContain(t, "disk[2]", diskArgs[2], "path=/tmp/uh.img")
+	mustContain(t, "disk[2]", diskArgs[2], "image_type=raw")
+}
+
+// TestStartTask_SpawnPassesNetTapMac pins --net tap=…,mac=… . The tap
+// name + MAC come from the resolved NetSpec (operator-supplied or
+// auto-derived); we test the operator-supplied path here.
+func TestStartTask_SpawnPassesNetTapMac(t *testing.T) {
+	argv := captureColdBootArgv(t)
+	got := argvAfter(argv, "--net")
+	if got == "" {
+		t.Fatal("--net missing from argv")
+	}
+	mustContain(t, "--net value", got, "tap=test-tap-7")
+	mustContain(t, "--net value", got, "mac=12:34:56:78:9b:07")
+}
+
+// TestStartTask_SpawnPassesMemoryAndCpus pins --memory size=…,shared=on
+// and --cpus boot=… . Shape comes from TaskConfig.MemoryMB / CPUs.
+func TestStartTask_SpawnPassesMemoryAndCpus(t *testing.T) {
+	argv := captureColdBootArgv(t)
+	mem := argvAfter(argv, "--memory")
+	if mem != "size=256M,shared=on" {
+		t.Errorf("--memory value = %q, want size=256M,shared=on", mem)
+	}
+	cpus := argvAfter(argv, "--cpus")
+	if cpus != "boot=2" {
+		t.Errorf("--cpus value = %q, want boot=2", cpus)
+	}
+}
+
+// TestStartTask_DoesNotPassConfigFlag is the C-1 negative pin: if a
+// future refactor reintroduces `--config <path>`, this test fires
+// before the cluster smoke does. CH v51.1 rejects --config with exit
+// 2 ("error: unexpected argument '--config' found"), so this guards
+// against a silent regression.
+func TestStartTask_DoesNotPassConfigFlag(t *testing.T) {
+	argv := captureColdBootArgv(t)
+	if containsAdjacent(argv, "--config") {
+		t.Errorf("argv unexpectedly contains --config (CH v51.1 has no such flag): %v", argv)
+	}
+}
+
+// TestStartTask_SpawnArgvShape_PureFn exercises BuildSpawnArgv as a
+// pure function — no plugin / runner / taskdir plumbing. Pins the
+// argv shape against the wrapper's cold-boot block. Independent of
+// the end-to-end StartTask test so a regression in the helper surfaces
+// directly.
+func TestStartTask_SpawnArgvShape_PureFn(t *testing.T) {
+	cfg := validColdBootConfig()
+	disks := []ch.DiskSpec{
+		{Path: "/run/zsbx/rootfs.img", Readonly: false, Serial: "zsbx-root"},
+		{Path: "/var/lib/zsbx/img/workspace.img", Readonly: false, Serial: "zsbx-work"},
+		{Path: "/var/lib/zsbx/img/userhome.img", Readonly: false, Serial: "zsbx-home"},
+	}
+	net := ch.NetSpec{Tap: "zsbx-nm-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}
+	argv := ch.BuildSpawnArgv(
+		"/usr/bin/cloud-hypervisor",
+		"/run/zsbx/ch.sock",
+		cfg,
+		"console=ttyS0 root=/dev/vda zsbx_pubkey=deadbeef SANDBOX_AGENT_SANDBOX_ID=sbx_test123",
+		disks,
+		net,
+		"/run/zsbx/serial.log",
+	)
+
+	// argv[0] is the binary; the rest must include the wrapper's flag
+	// set in order. We don't pin exact positions (allows reordering
+	// adjacent flags) but we do pin: (a) each flag appears, (b) --disk
+	// is followed by 3 contiguous disk args, (c) --config never appears.
+	if argv[0] != "/usr/bin/cloud-hypervisor" {
+		t.Errorf("argv[0] = %q, want /usr/bin/cloud-hypervisor", argv[0])
+	}
+	wantFlags := []string{"--api-socket", "--kernel", "--cmdline", "--disk", "--net", "--memory", "--cpus", "--console", "--serial"}
+	for _, f := range wantFlags {
+		if !containsAdjacent(argv, f) {
+			t.Errorf("argv missing %s: %v", f, argv)
+		}
+	}
+	if containsAdjacent(argv, "--config") {
+		t.Errorf("BuildSpawnArgv must NOT emit --config: %v", argv)
+	}
+	if got := argvAfter(argv, "--memory"); got != "size=512M,shared=on" {
+		t.Errorf("--memory = %q, want size=512M,shared=on", got)
+	}
+	if got := argvAfter(argv, "--cpus"); got != "boot=2" {
+		t.Errorf("--cpus = %q, want boot=2", got)
+	}
+	if got := argvAfter(argv, "--console"); got != "off" {
+		t.Errorf("--console = %q, want off", got)
+	}
+	if got := argvAfter(argv, "--serial"); got != "file=/run/zsbx/serial.log" {
+		t.Errorf("--serial = %q, want file=/run/zsbx/serial.log", got)
+	}
+}
+
+// captureColdBootArgv is the shared setup for all SpawnPasses* sub-tests:
+// stand up a plugin with a fake runner, drive StartTask once with a
+// canonical valid TaskConfig, return the recorded argv. The fake runner
+// is left blocked in Wait — captureColdBootArgv schedules a t.Cleanup
+// that unblocks it so the supervisor goroutine reaps.
+func captureColdBootArgv(t *testing.T) []string {
+	t.Helper()
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	prev := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prev) })
+
+	cfg := ch.TaskConfig{
+		VMIndex:      7,
+		Kernel:       "/opt/zsbx/vmlinuz",
+		CPUs:         2,
+		MemoryMB:     256,
+		SandboxId:    "sbx_test",
+		WorkspaceImg: "/tmp/ws.img",
+		UserHomeImg:  "/tmp/uh.img",
+		PubkeyHex:    "deadbeef",
+		Net:          []ch.NetSpec{{Tap: "test-tap-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}},
+	}
+
+	var capturedRunner *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		r := newFakeRunner(cmd)
+		capturedRunner = r
+		return r
+	}
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	if capturedRunner == nil {
+		t.Fatal("runner factory not invoked")
+	}
+	t.Cleanup(func() {
+		if capturedRunner != nil {
+			capturedRunner.mu.Lock()
+			done := false
+			select {
+			case <-capturedRunner.waitCh:
+				done = true
+			default:
+			}
+			capturedRunner.mu.Unlock()
+			if !done {
+				close(capturedRunner.waitCh)
+			}
+		}
+	})
+	return capturedRunner.argv
 }
 
 // TestStartTask_RestoreFromRoutesToRestoreBranch asserts that

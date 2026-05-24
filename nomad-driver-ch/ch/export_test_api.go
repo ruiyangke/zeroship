@@ -33,6 +33,21 @@ func BuildConfigJSON(cfg TaskConfig, taskDir string) ([]byte, error) {
 	return buildConfigJSON(cfg, taskDir)
 }
 
+// BuildSpawnArgv is the test entry point for the C-1 long-argv spawn
+// builder. Mirrors the wrapper's cold-boot CH spawn vector at
+// nomad-vm-wrapper.sh:638-647. Pure function; no side effects.
+func BuildSpawnArgv(
+	chBin string,
+	apiSocket string,
+	cfg TaskConfig,
+	cmdline string,
+	disks []DiskSpec,
+	net NetSpec,
+	serialLog string,
+) []string {
+	return buildSpawnArgv(chBin, apiSocket, &cfg, cmdline, disks, net, serialLog)
+}
+
 // NewPluginForTest constructs a *Plugin with a caller-supplied runner
 // factory. Mirrors NewPlugin but lets the test substitute the fake
 // runner that records argv without spawning CH.

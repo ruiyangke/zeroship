@@ -7,11 +7,21 @@
 // wrapper at crates/sandbox/scripts/nomad-vm-wrapper.sh (cold-boot branch,
 // pre-restore).
 //
-// T-1 (this implementation) covers steps 1-4 of the wrapper: tap re-up
-// (basic — T-3 owns the deep tap work), env validation, config.json
-// materialisation for cloud-hypervisor, and the CH spawn itself with
-// --api-socket / --config / --serial. The wait (cmd.Wait) is plumbed
-// through to WaitTask via the processRunner seam introduced in ch_client.go.
+// T-1 covers steps 1-4 of the wrapper: tap re-up (basic — T-3 owns the
+// deep tap work), env validation, config.json materialisation as a
+// debugging artifact, and the CH spawn itself.
+//
+// C-1 (2026-05-25) fix: T-1's original design choice of
+// `cloud-hypervisor --config <json-path>` was wrong — CH v51.1 has no
+// `--config` flag and rejects with exit 2 ("error: unexpected argument
+// '--config' found"). The wrapper (nomad-vm-wrapper.sh:638-647) uses
+// the long-argv form with explicit flags: --kernel / --cmdline / --disk
+// / --net / --memory / --cpus / --serial / --console / --api-socket.
+// We now mirror that exactly. config.json is still written for operator
+// diagnostics (round-trip with the T-6 restore-path rewriter) but the
+// spawn argv no longer references it. The restore path
+// (`--restore source_url=file://...`) is unaffected — it never used
+// `--config`.
 
 package ch
 
@@ -221,10 +231,11 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		}
 	}
 
-	// Build the CH config.json. We use --config rather than the wrapper's
-	// long argv list because it's trivially testable (one JSON document
-	// pinned by tests) and lets us round-trip config through a snapshot
-	// rewriter the same way T-6's restore branch will need to.
+	// Materialise config.json as a debugging artifact (round-trips with
+	// the T-6 restore-path rewriter so an operator inspecting the alloc
+	// dir sees the same JSON shape on both branches). NOT consumed by CH
+	// — see the C-1 fix note in the file header. The actual spawn uses
+	// the long-argv flags below.
 	chConfig := buildCHConfig(&driverConfig, cmdline, disks, []NetSpec{netSpec}, serialLog)
 	configBytes, err := json.MarshalIndent(chConfig, "", "  ")
 	if err != nil {
@@ -234,12 +245,27 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		return nil, nil, fmt.Errorf("ch: StartTask: write config %s: %w", configPath, err)
 	}
 
-	// Spawn CH via the processRunner seam.
-	argv := []string{
-		chBin,
-		"--api-socket", apiSocket,
-		"--config", configPath,
-	}
+	// Spawn CH with explicit long-argv flags (C-1 fix). Mirrors the
+	// wrapper's cold-boot block at nomad-vm-wrapper.sh:638-647:
+	//
+	//   cloud-hypervisor \
+	//     --api-socket "$API_SOCK" \
+	//     --kernel    vmlinuz \
+	//     --cmdline   "console=ttyS0 root=/dev/vda rw init=/sbin/init …" \
+	//     --disk      path=$DISK,readonly=off,direct=off,image_type=raw \
+	//                 path=$WS,…  path=$UH,…  \
+	//     --net       tap=$TAP,mac=$MAC \
+	//     --memory    size=${N}M,shared=on \
+	//     --cpus      boot=${N} \
+	//     --console   off \
+	//     --serial    file=$RUNTIME/serial.log
+	//
+	// CH quirk (wrapper l.351-353): `--disk` takes ALL disk arguments as
+	// ONE space-separated token vector, NOT one per flag. So in argv it
+	// is `["--disk", "path=…", "path=…", "path=…"]` — three argv slots
+	// after a single `--disk` flag. Listing them as separate `--disk
+	// path=…  --disk path=…` registers only the LAST one.
+	argv := buildSpawnArgv(chBin, apiSocket, &driverConfig, cmdline, disks, netSpec, serialLog)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = runDir
 	// Stdout → CH's own log file is preferable; default exec.Cmd
@@ -680,6 +706,92 @@ func buildCHConfig(cfg *TaskConfig, cmdline string, disks []DiskSpec, nets []Net
 	}
 	doc.Console = &chConsoleSer{Mode: "Off"}
 	return doc
+}
+
+// buildSpawnArgv assembles the cloud-hypervisor argv vector for the
+// cold-boot spawn. C-1 fix: mirrors the wrapper at
+// nomad-vm-wrapper.sh:638-647 line-for-line. Pure function — easy to
+// unit-test the argv shape without spawning CH.
+//
+// The argv layout is:
+//
+//	[chBin,
+//	 --api-socket <sock>,
+//	 --kernel <kernel>,
+//	 --cmdline <cmdline>,
+//	 --disk <d0> [<d1> ...],
+//	 --net  tap=<tap>,mac=<mac>,
+//	 --memory size=<MB>M,shared=on,
+//	 --cpus boot=<N>,
+//	 --console off,
+//	 --serial file=<serial-log>]
+//
+// CH quirk: all disks share a single `--disk` flag. Each disk is a
+// separate argv slot after that one flag (CH's clap parser accepts
+// num_args=1.. for --disk). See wrapper l.351-353.
+//
+// `--console off` is emitted unconditionally; the bash wrapper does
+// the same — without it CH defaults to console=tty which fights the
+// serial-file path on a headless host. `--serial` is omitted when
+// serialLog == "" (test path).
+func buildSpawnArgv(
+	chBin string,
+	apiSocket string,
+	cfg *TaskConfig,
+	cmdline string,
+	disks []DiskSpec,
+	net NetSpec,
+	serialLog string,
+) []string {
+	argv := []string{
+		chBin,
+		"--api-socket", apiSocket,
+		"--kernel", cfg.Kernel,
+		"--cmdline", cmdline,
+	}
+	if len(disks) > 0 {
+		argv = append(argv, "--disk")
+		for _, d := range disks {
+			argv = append(argv, formatDiskArg(d))
+		}
+	}
+	argv = append(argv,
+		"--net", formatNetArg(net),
+		"--memory", fmt.Sprintf("size=%dM,shared=on", cfg.MemoryMB),
+		"--cpus", fmt.Sprintf("boot=%d", cfg.CPUs),
+		"--console", "off",
+	)
+	if serialLog != "" {
+		argv = append(argv, "--serial", "file="+serialLog)
+	}
+	return argv
+}
+
+// formatDiskArg renders one DiskSpec as the wrapper's argv shape:
+//
+//	path=<path>,readonly=<off|on>,direct=off,image_type=raw
+//
+// `direct=off` is the wrapper's choice (matches the comment about CH's
+// O_DIRECT semantics on the workspace/userhome ext4 images). `image_type=raw`
+// is required to tell CH not to try qcow2 detection — our images are
+// raw ext4 by construction.
+func formatDiskArg(d DiskSpec) string {
+	ro := "off"
+	if d.Readonly {
+		ro = "on"
+	}
+	return fmt.Sprintf("path=%s,readonly=%s,direct=off,image_type=raw", d.Path, ro)
+}
+
+// formatNetArg renders one NetSpec as the wrapper's argv shape:
+//
+//	tap=<tap>,mac=<mac>
+//
+// IP / mask are NOT passed here — the kernel cmdline carries the guest
+// IP via `ip=<vm>::<host>:<mask>::eth0:none` (handled in
+// synthesizeCmdline), and CH itself doesn't run a DHCP server.
+func formatNetArg(n NetSpec) string {
+	return fmt.Sprintf("tap=%s,mac=%s", n.Tap, n.MAC)
 }
 
 // buildConfigJSON is the test entry point — round-trips a TaskConfig
