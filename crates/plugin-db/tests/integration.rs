@@ -7196,3 +7196,332 @@ async fn wal_connection_stays_platform_role() {
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
 }
+
+// ---------------------------------------------------------------------------
+// P6a-3 — Drop-namespace sequencing (§17.7 PG ordering + CRITICAL #4).
+//
+// `orchestrator::drop_namespace` runs the §17.7 PG teardown: subscription
+// gate → broker drain → slot/publication teardown (via
+// ChangeStream::deprovision) → DROP SCHEMA CASCADE → DROP ROLE. These
+// tests provision a full app (schema + slot + publication + per-app role)
+// and verify the ordering, the subscription gate (defer vs --force),
+// idempotency of steps 4-7, and retry-from-step-3 on partial failure.
+//
+// Slot-dependent tests skip when wal_level != logical (CI's pg-test runs
+// with -c wal_level=logical).
+// ---------------------------------------------------------------------------
+
+use zeroship_plugin_db::backend::BackendHandle;
+use zeroship_plugin_db::orchestrator::drop_namespace::{
+    drop_namespace, DropNamespaceOpts, DropNamespaceOutcome,
+};
+
+/// Build a `BackendHandle::Postgres` over a fresh `PostgresBackend` for
+/// the drop-namespace tests. (`PostgresBackend` is already imported at
+/// module scope earlier in this file — referenced unqualified here.)
+fn pg_backend_handle(pool: &std::rc::Rc<Pool>, url: &str) -> BackendHandle {
+    BackendHandle::Postgres(std::rc::Rc::new(PostgresBackend::new(
+        std::rc::Rc::clone(pool),
+        url.to_string(),
+    )))
+}
+
+async fn slot_exists(pool: &Pool, app: &str) -> bool {
+    let slot = zeroship_plugin_db::replication::slot_name(app).unwrap();
+    let rows = pool
+        .query_text_params(
+            "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
+            &[slot.as_str()],
+        )
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+async fn publication_exists(pool: &Pool, app: &str) -> bool {
+    let pubn = zeroship_plugin_db::replication::publication_name(app).unwrap();
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_publication WHERE pubname = $1", &[pubn.as_str()])
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+async fn schema_exists(pool: &Pool, app: &str) -> bool {
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_namespace WHERE nspname = $1", &[app])
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+async fn role_exists(pool: &Pool, app: &str) -> bool {
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[role.as_str()])
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+#[compio::test]
+async fn drop_namespace_defers_on_active_subscription() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_drop_defer";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+
+    let backend = pg_backend_handle(&pool, &url);
+    // count > 0, force = false → defer. No teardown runs.
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 2 },
+    )
+    .await
+    .expect("drop_namespace");
+
+    assert_eq!(
+        outcome,
+        DropNamespaceOutcome::Deferred { active_subscriptions: 2 },
+        "active subscription without --force must defer with the count"
+    );
+    // Schema must still exist — no teardown ran.
+    assert!(schema_exists(&pool, app).await, "deferred drop must NOT drop the schema");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_force_fires_subscription_app_dropped() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_drop_force";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+
+    // Register a live subscription on this thread's broker so the
+    // force-drain has something to close.
+    let sub = zeroship_plugin_db::broker::subscribe(app, "widgets");
+    assert_eq!(
+        zeroship_plugin_db::broker::app_subscription_count(app),
+        1,
+        "subscription should be live before drop"
+    );
+
+    let backend = pg_backend_handle(&pool, &url);
+    // force = true → drain broker + proceed to completion.
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: true, subscription_count: 1 },
+    )
+    .await
+    .expect("drop_namespace --force");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed, "--force must complete");
+
+    // The subscription must have been closed (subscription_app_dropped →
+    // broker Closed). The iterator surfaces the terminal close.
+    assert!(sub.is_closed(), "active subscriber must be closed under --force");
+    assert_eq!(
+        zeroship_plugin_db::broker::app_subscription_count(app),
+        0,
+        "broker must be drained for the app after --force drop"
+    );
+    // Schema gone.
+    assert!(!schema_exists(&pool, app).await, "schema must be dropped under --force");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping drop_namespace_pg_ordering — wal_level != logical");
+        return;
+    }
+    let app = "p6a_drop_order";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    // Provision slot + publication.
+    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .expect("provision slot + publication");
+    assert!(slot_exists(&pool, app).await, "slot provisioned");
+    assert!(publication_exists(&pool, app).await, "publication provisioned");
+
+    let backend = pg_backend_handle(&pool, &url);
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 0 },
+    )
+    .await
+    .expect("drop_namespace");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed);
+
+    // End state: slot, publication, AND schema all gone. The ordering
+    // (slot → publication → schema) is enforced inside
+    // `drop_publication_and_slot` + the orchestrator; the end-state check
+    // proves the full teardown ran. CRITICAL #4: the publication (which
+    // references the schema via FOR TABLES IN SCHEMA) is dropped BEFORE
+    // the schema, so DROP SCHEMA never tears out a publication's tracked
+    // tables.
+    assert!(!slot_exists(&pool, app).await, "slot must be dropped");
+    assert!(!publication_exists(&pool, app).await, "publication must be dropped");
+    assert!(!schema_exists(&pool, app).await, "schema must be dropped");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_drops_per_app_role_last() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_drop_role";
+    c1_cleanup(&pool, app).await;
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    // Provision the per-app role + give it an object in the schema so the
+    // "role still owns objects" path is exercised (the CASCADE must clear
+    // it before DROP ROLE).
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app}".t (id SERIAL PRIMARY KEY)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(role_exists(&pool, app).await, "role provisioned");
+
+    let backend = pg_backend_handle(&pool, &url);
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 0 },
+    )
+    .await
+    .expect("drop_namespace");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed);
+
+    // Both schema and role gone — role dropped AFTER schema (step 7).
+    assert!(!schema_exists(&pool, app).await, "schema dropped");
+    assert!(!role_exists(&pool, app).await, "per-app role dropped last");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_idempotent_steps_4_to_7() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping drop_namespace_idempotent — wal_level != logical");
+        return;
+    }
+    let app = "p6a_drop_idem";
+    c1_cleanup(&pool, app).await;
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    let backend = pg_backend_handle(&pool, &url);
+    let opts = DropNamespaceOpts { force: false, subscription_count: 0 };
+
+    // First drop: full teardown.
+    let first = drop_namespace(&backend, &pool, app, &opts).await.expect("first drop");
+    assert_eq!(first, DropNamespaceOutcome::Completed);
+    assert!(!slot_exists(&pool, app).await);
+    assert!(!publication_exists(&pool, app).await);
+    assert!(!schema_exists(&pool, app).await);
+    assert!(!role_exists(&pool, app).await);
+
+    // Second drop on the already-torn-down app: every step (4-7) is a
+    // no-op, returns Completed, no error.
+    let second = drop_namespace(&backend, &pool, app, &opts)
+        .await
+        .expect("second drop must be idempotent");
+    assert_eq!(
+        second,
+        DropNamespaceOutcome::Completed,
+        "idempotent re-drop must succeed with everything already gone"
+    );
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_retries_from_step_3_on_partial_failure() {
+    // §17.7: "retry from step 3 on partial failure; steps 4-7 idempotent."
+    // We simulate a partial failure by dropping the publication+slot
+    // first (leaving the schema + role), then running drop_namespace —
+    // step 3 (deprovision) finds nothing to do (idempotent), and steps
+    // 6-7 finish the teardown. This proves a re-run after a crash that
+    // got partway through completes cleanly.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping drop_namespace_retries — wal_level != logical");
+        return;
+    }
+    let app = "p6a_drop_retry";
+    c1_cleanup(&pool, app).await;
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // Simulate a crash AFTER step 3 (slot+publication dropped) but BEFORE
+    // steps 6-7 (schema + role still present).
+    zeroship_plugin_db::replication::drop_publication_and_slot(&pool, app)
+        .await
+        .expect("partial: drop slot+publication");
+    assert!(!slot_exists(&pool, app).await, "slot gone after partial");
+    assert!(!publication_exists(&pool, app).await, "publication gone after partial");
+    assert!(schema_exists(&pool, app).await, "schema still present after partial");
+    assert!(role_exists(&pool, app).await, "role still present after partial");
+
+    // Retry: step 3 is a no-op (nothing to deprovision), steps 6-7 finish.
+    let backend = pg_backend_handle(&pool, &url);
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 0 },
+    )
+    .await
+    .expect("retry drop_namespace after partial failure");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed);
+    assert!(!schema_exists(&pool, app).await, "retry must drop the schema");
+    assert!(!role_exists(&pool, app).await, "retry must drop the role");
+
+    c1_cleanup(&pool, app).await;
+}

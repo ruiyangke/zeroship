@@ -30,6 +30,7 @@
 //! consumer moved to its canonical import.
 
 pub mod auto_tx;
+pub mod drop_namespace;
 pub mod register_model;
 pub mod transaction;
 
