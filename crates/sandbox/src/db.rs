@@ -1092,7 +1092,13 @@ fn load_or_generate_host_id() -> Result<Uuid> {
     }
 
     let path = host_id_file_path();
-    if let Ok(s) = std::fs::read_to_string(&path) {
+    if path.exists() {
+        enforce_host_id_file_mode(&path)?;
+        let s = std::fs::read_to_string(&path).map_err(|e| {
+            DatabaseError::Validation(format!(
+                "host_id file {path:?}: read: {e}"
+            ))
+        })?;
         let s = s.trim();
         if let Ok(uuid) = Uuid::parse_str(s) {
             return Ok(uuid);
@@ -1135,6 +1141,47 @@ fn write_host_id_file(path: &std::path::Path, uuid: Uuid) -> std::io::Result<()>
         let perms = std::fs::Permissions::from_mode(0o600);
         std::fs::set_permissions(path, perms)?;
     }
+    Ok(())
+}
+
+/// R11-S2: symmetric read-side check for the host_id file. The writer
+/// (`write_host_id_file`) emits mode 0o600; the reader had no
+/// validation. A non-root attacker who pre-creates
+/// `<SANDBOX_PERSIST_DIR>/state/host_id` with mode 0o600 + matching uid
+/// can inject a forged host_id and bypass
+/// `claim_orphan_transient_for_recovery`'s self-host_id fence —
+/// recovery CAS would treat the attacker's host as "self" (skipping
+/// its rows) OR treat self as "other" (improperly claiming self's own
+/// work). Strict "uid == 0" matches the R9-S4 family invariant
+/// (snapshot KEK, sealed-records AEAD key, pg-password file, admin
+/// token) and the systemd-style root-secret convention. On non-Unix
+/// targets this is a no-op (modes are POSIX-only).
+fn enforce_host_id_file_mode(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let meta = std::fs::metadata(path).map_err(|e| {
+            DatabaseError::Validation(format!(
+                "host_id file {path:?}: stat: {e}"
+            ))
+        })?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Err(DatabaseError::Validation(format!(
+                "host_id file {path:?}: mode={mode:o} \
+                 must be 0o600 (chmod 600 the file)"
+            )));
+        }
+        let uid = meta.uid();
+        if uid != 0 {
+            return Err(DatabaseError::Validation(format!(
+                "host_id file {path:?}: owner uid {uid} \
+                 != 0 (chown root:root the file)"
+            )));
+        }
+    }
+    let _ = path;
     Ok(())
 }
 
@@ -2847,25 +2894,38 @@ mod tests {
 
     // ─── host_id resolution ──────────────────────────────────────
 
+    #[cfg(unix)]
     #[test]
     fn from_env_generates_host_id_when_absent() {
         with_env_clean(|| {
+            use std::os::unix::fs::MetadataExt as _;
             let tmp = tempdir();
             set_env("SANDBOX_PERSIST_DIR", tmp.path().to_str().unwrap());
             let uuid = load_or_generate_host_id().expect("generate");
-            // File written; same value on next call.
-            let again = load_or_generate_host_id().expect("re-load");
-            assert_eq!(uuid, again, "host_id must be stable across calls");
-            // The file itself contains the UUID (hyphenated form).
+            // The re-load arm exercises the new R11-S2 mode+uid check.
+            // The writer emits 0o600, but uid==0 is only satisfied when
+            // the test runner is root — skip the re-load arm otherwise.
             let path = tmp.path().join("state").join("host_id");
+            let runner_uid = std::fs::metadata(&path).unwrap().uid();
+            if runner_uid == 0 {
+                // File written; same value on next call.
+                let again = load_or_generate_host_id().expect("re-load");
+                assert_eq!(uuid, again, "host_id must be stable across calls");
+            }
+            // The file itself contains the UUID (hyphenated form) —
+            // checked via std::fs::read_to_string directly so this arm
+            // does NOT route through the uid==0 gate.
             let on_disk = std::fs::read_to_string(&path).unwrap();
             assert_eq!(on_disk.trim(), uuid.to_string());
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn from_env_loads_host_id_from_persistent_file() {
         with_env_clean(|| {
+            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
             let tmp = tempdir();
             set_env("SANDBOX_PERSIST_DIR", tmp.path().to_str().unwrap());
             // Pre-write a UUID; the loader must return that exact one.
@@ -2873,6 +2933,19 @@ mod tests {
             let path = tmp.path().join("state").join("host_id");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, preset.to_string()).unwrap();
+            // Satisfy the R11-S2 mode check; the uid==0 arm of the
+            // check only passes under root — skip when non-root (the
+            // negative arm `host_id_read_rejects_non_root_owned_file`
+            // pins the bug-fix assertion in non-root environments).
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let runner_uid = std::fs::metadata(&path).unwrap().uid();
+            if runner_uid != 0 {
+                eprintln!(
+                    "skipping from_env_loads_host_id_from_persistent_file: \
+                     not running as root, R11-S2 uid==0 check would refuse the file"
+                );
+                return;
+            }
 
             let uuid = load_or_generate_host_id().unwrap();
             assert_eq!(uuid, preset);
@@ -2903,6 +2976,121 @@ mod tests {
             let err = load_or_generate_host_id()
                 .expect_err("garbage SANDBOX_HOST_ID must error");
             assert!(matches!(err, DatabaseError::Validation(_)));
+        });
+    }
+
+    // ─── R11-S2: host_id file reader mode + uid check ─────────────
+
+    /// R11-S2: the host_id file reader at `load_or_generate_host_id`
+    /// has no mode validation in the original implementation. A file
+    /// with loose permissions (e.g. 0o644) MUST be refused, matching
+    /// the writer's emitted mode 0o600 (R9-S4 family invariant).
+    #[cfg(unix)]
+    #[test]
+    fn host_id_read_rejects_loose_permissions() {
+        with_env_clean(|| {
+            use std::os::unix::fs::PermissionsExt as _;
+            let tmp = tempdir();
+            set_env("SANDBOX_PERSIST_DIR", tmp.path().to_str().unwrap());
+            // Pre-write a UUID at loose 0o644 — must be refused.
+            let preset = uuid::Uuid::now_v7();
+            let path = tmp.path().join("state").join("host_id");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, preset.to_string()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            let err = load_or_generate_host_id()
+                .expect_err("0o644 host_id file must be rejected (R11-S2)");
+            match err {
+                DatabaseError::Validation(msg) => {
+                    assert!(
+                        msg.contains("mode=") && msg.contains("must be 0o600"),
+                        "error must mention mode != 0o600; got: {msg}"
+                    );
+                }
+                other => panic!("expected Validation, got {other:?}"),
+            }
+        });
+    }
+
+    /// R11-S2: a 0o600 host_id file owned by a non-root uid (i.e. the
+    /// test-runner user, which is uid != 0 in CI/dev) MUST be refused.
+    /// Without the owner check, a non-root attacker who pre-creates a
+    /// chmod-600 file at `<SANDBOX_PERSIST_DIR>/state/host_id` before
+    /// the controller starts can inject a forged host_id — bypassing
+    /// `claim_orphan_transient_for_recovery`'s self-host_id fence
+    /// (recovery CAS treats the attacker's host as "self", skipping
+    /// its rows, or self as "other", improperly claiming self's own
+    /// work). Sibling of R9-S4 (snapshot KEK), R9-S4b (sealed-records
+    /// AEAD key), R9-S4c (pg-password file), and R9-S4d (admin token).
+    #[cfg(unix)]
+    #[test]
+    fn host_id_read_rejects_non_root_owned_file() {
+        with_env_clean(|| {
+            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            let tmp = tempdir();
+            set_env("SANDBOX_PERSIST_DIR", tmp.path().to_str().unwrap());
+            let preset = uuid::Uuid::now_v7();
+            let path = tmp.path().join("state").join("host_id");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, preset.to_string()).unwrap();
+            // The file is created by the test-runner process, so its
+            // uid == effective uid of the runner. If that's 0 there's
+            // no non-root-owned file to materialise — skip (the
+            // positive arm below covers that branch).
+            let runner_uid = std::fs::metadata(&path).unwrap().uid();
+            if runner_uid == 0 {
+                eprintln!(
+                    "skipping host_id_read_rejects_non_root_owned_file: \
+                     running as root, can't materialise a non-root-owned file"
+                );
+                return;
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            let err = load_or_generate_host_id()
+                .expect_err("non-root-owned host_id file must be refused even at 0o600");
+            match err {
+                DatabaseError::Validation(msg) => {
+                    assert!(
+                        msg.contains("owner uid") && msg.contains("!= 0"),
+                        "error must mention owner uid != 0; got: {msg}"
+                    );
+                }
+                other => panic!("expected Validation, got {other:?}"),
+            }
+        });
+    }
+
+    /// R11-S2 positive arm: when the test runs as root, a 0o600
+    /// host_id file owned by root loads cleanly. Skipped when not
+    /// running as root (the common case in CI/dev) — the negative
+    /// arms above pin the bug-fix assertions in non-root environments.
+    #[cfg(unix)]
+    #[test]
+    fn host_id_read_accepts_root_owned_0o600_file_when_running_as_root() {
+        with_env_clean(|| {
+            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            let tmp = tempdir();
+            set_env("SANDBOX_PERSIST_DIR", tmp.path().to_str().unwrap());
+            let preset = uuid::Uuid::now_v7();
+            let path = tmp.path().join("state").join("host_id");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, preset.to_string()).unwrap();
+            let runner_uid = std::fs::metadata(&path).unwrap().uid();
+            if runner_uid != 0 {
+                eprintln!(
+                    "skipping host_id_read_accepts_root_owned_0o600_file_when_running_as_root: \
+                     not running as root, can't create a root-owned host_id file"
+                );
+                return;
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let uuid = load_or_generate_host_id()
+                .expect("root-owned 0o600 host_id file must load");
+            assert_eq!(uuid, preset);
         });
     }
 
