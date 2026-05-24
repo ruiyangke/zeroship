@@ -177,7 +177,7 @@ gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
 if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
   echo "[startup] INSTALL_CH_PLUGIN_DRIVER=1 — installing nomad-driver-ch"
   mkdir -p /etc/zeroship/nomad-plugins
-  gs_pull nomad-driver-ch.v13 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
+  gs_pull nomad-driver-ch.v14 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
   chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
   # Surface the embedded gitSHA so we can confirm which build landed.
   /etc/zeroship/nomad-plugins/nomad-driver-ch --version || true
