@@ -354,6 +354,115 @@ pub(crate) fn spawn_wake_jobs_gc(state: Arc<AppState>) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// R19-C1: wake_jobs takeover sweep
+// ────────────────────────────────────────────────────────────────────
+
+/// R19-C1: cadence for the wake_jobs takeover sweep. 60 s mirrors
+/// the GC sweep — same fingerprint (one indexed UPDATE backed by
+/// `wake_jobs_lessee_idx`), cheap regardless of fleet size. The
+/// per-iteration *threshold* (how stale a row must be to claim) is
+/// configurable via `SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS`;
+/// this poll cadence is hard-coded since the threshold is what
+/// matters for correctness, not the poll cycle.
+pub(crate) const WAKE_JOBS_TAKEOVER_POLL_SECS: u64 = 60;
+
+/// Run a single iteration of the wake_jobs takeover sweep. Calls
+/// `Database::claim_orphan_wake_for_recovery(threshold)` where
+/// `threshold` is taken from
+/// `state.wake_lifecycle.takeover_threshold_secs` (env
+/// `SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS`, default 60 s).
+/// Returns the number of rows claimed. Errors are logged-and-
+/// continued (the next tick retries; pg may have blipped).
+///
+/// Public so the pg-gated tests can drive a single pass without
+/// spawning the loop.
+///
+/// **Why this loop matters.** Without it, a controller crash mid-
+/// wake leaves the row in a non-terminal state. The GC sweep skips
+/// it (only `ok`/`failed` rows). The GATE-C2 UNIQUE INDEX
+/// (migration 0011) then blocks every subsequent wake POST for
+/// that sandbox: handler short-circuits with `Replay(stale_row)`
+/// pointing at the dead wake_id, client polls forever. This loop
+/// reads the `lessee_updated_at` column R17-A1 writes — closing
+/// the loop on the wedge concurrency-r19 escalated as R19-C1.
+pub async fn run_wake_jobs_takeover_once(state: &Arc<AppState>) -> u64 {
+    let Some(db) = state.database.as_ref() else {
+        return 0;
+    };
+    let threshold_secs = state.wake_lifecycle.takeover_threshold_secs;
+    let threshold = Duration::from_secs(threshold_secs);
+    match db.claim_orphan_wake_for_recovery(threshold).await {
+        Ok(n) => {
+            if n > 0 {
+                tracing::warn!(
+                    target: "sandbox::wake::takeover",
+                    claimed = n,
+                    threshold_secs,
+                    "sandbox wake_jobs takeover: claimed orphan rows \
+                     (controller lessee abandoned mid-wake; rows \
+                     transitioned to failed/wake_worker_aborted)"
+                );
+            } else {
+                tracing::debug!(
+                    target: "sandbox::wake::takeover",
+                    threshold_secs,
+                    "sandbox wake_jobs takeover: no orphans"
+                );
+            }
+            n
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::wake::takeover",
+                error = %e,
+                threshold_secs,
+                "sandbox wake_jobs takeover: sweep failed (continuing)"
+            );
+            0
+        }
+    }
+}
+
+/// Spawn the wake_jobs takeover loop. Runs on its own dedicated OS
+/// thread with a private compio runtime (`detach_isolated`), same
+/// fingerprint as `spawn_wake_jobs_gc` — the takeover's pg UPDATE
+/// shares the wake_jobs table with hot inserts from the wake-POST
+/// handler, so we keep it off the shared ntex runtime so a stalled
+/// pg call cannot starve sibling wake handlers.
+///
+/// Lives for the process lifetime, observes
+/// `state.shutdown_requested()` between iterations. Skipped when
+/// `state.database` is `None`.
+pub(crate) fn spawn_wake_jobs_takeover(state: Arc<AppState>) {
+    if state.database.is_none() {
+        return;
+    }
+    crate::detach::detach_isolated("wake-takeover", move || async move {
+        let interval = Duration::from_secs(WAKE_JOBS_TAKEOVER_POLL_SECS);
+        tracing::info!(
+            target: "sandbox::wake::takeover",
+            interval_secs = WAKE_JOBS_TAKEOVER_POLL_SECS,
+            threshold_secs = state.wake_lifecycle.takeover_threshold_secs,
+            "sandbox wake_jobs takeover: loop started"
+        );
+        loop {
+            if state.shutdown_requested() {
+                tracing::info!(
+                    target: "sandbox::wake::takeover",
+                    "sandbox wake_jobs takeover: shutdown"
+                );
+                break;
+            }
+            compio::time::sleep(interval).await;
+            if state.shutdown_requested() {
+                break;
+            }
+            let _ = run_wake_jobs_takeover_once(&state).await;
+        }
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Idle-eviction sweep
 // ────────────────────────────────────────────────────────────────────
 
@@ -964,5 +1073,52 @@ mod unit_tests {
         // Non-transient states yield None.
         assert_eq!(recovery_target(SandboxStatus::Running), None);
         assert_eq!(recovery_target(SandboxStatus::Snapshotted), None);
+    }
+
+    // ─── R19-C1 takeover sweep — cadence + threshold pins ─────────
+    //
+    // The actual sweep behaviour (claim_orphan_wake_for_recovery SQL
+    // semantics) is covered by the pg-gated suite in
+    // `tests/sandbox_pg_e2e.rs::wake_jobs_crud::claim_orphan_*`. Here
+    // we pin the loop constants so a refactor that bumps the cadence
+    // or quietly weakens the threshold has to update this file too.
+
+    /// R19-C1: the takeover poll cadence is hard-coded — operators
+    /// tune the *threshold* (`SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS`)
+    /// not the poll cycle. Pinning the constant catches an
+    /// accidental cadence drift that would, e.g., turn a 60 s sweep
+    /// into a 600 s sweep and silently keep the wedge open for an
+    /// extra 9 minutes per sandbox.
+    #[test]
+    fn wake_jobs_takeover_cadence_is_60s() {
+        assert_eq!(WAKE_JOBS_TAKEOVER_POLL_SECS, 60);
+    }
+
+    /// R19-C1: the default takeover threshold is 60 s and the
+    /// minimum floor is 30 s. Pinning both means a future bump to
+    /// "make the sweep more aggressive" forces this test (and the
+    /// concurrency-r19 review correlation) to be updated in
+    /// lockstep — preventing a silent value drift below the
+    /// in-flight-wake-stage worst case.
+    #[test]
+    fn wake_lifecycle_takeover_threshold_floor_and_default_pinned() {
+        use crate::config::WakeLifecycleConfig;
+        assert_eq!(
+            WakeLifecycleConfig::DEFAULT_TAKEOVER_THRESHOLD_SECS, 60,
+            "R19-C1 default threshold drift"
+        );
+        assert_eq!(
+            WakeLifecycleConfig::MIN_TAKEOVER_THRESHOLD_SECS, 30,
+            "R19-C1 minimum threshold drift"
+        );
+        // Default ≥ minimum is an invariant: `from_env` accepts
+        // unset → default, so default below minimum would mean a
+        // default-config boot ships a value that the same code path
+        // would reject if the operator typed it explicitly.
+        assert!(
+            WakeLifecycleConfig::DEFAULT_TAKEOVER_THRESHOLD_SECS
+                >= WakeLifecycleConfig::MIN_TAKEOVER_THRESHOLD_SECS,
+            "default must satisfy the minimum it enforces"
+        );
     }
 }

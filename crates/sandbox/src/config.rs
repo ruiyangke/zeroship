@@ -934,11 +934,42 @@ pub struct WakeLifecycleConfig {
     /// (5 min). Values < 1 s are rejected (would race the client's
     /// first poll).
     pub wake_jobs_gc_retention_secs: u64,
+
+    /// R19-C1 takeover sweep threshold. The takeover sweep
+    /// (`sweep::run_wake_jobs_takeover_once`) claims non-terminal
+    /// rows whose `lessee_updated_at` is older than this — those
+    /// rows lost their controller mid-wake.
+    ///
+    /// **Minimum**: must comfortably exceed the longest single state
+    /// transition's wall-time (the wake state machine bumps
+    /// `lessee_updated_at` on every transition; a too-tight threshold
+    /// would steal in-flight rows from a still-progressing
+    /// controller). The wake ladder's worst-case is bounded by the
+    /// CH-restore + livez-poll + clock-resync + register stages,
+    /// each capped at tens of seconds. 60 s is the floor that
+    /// matches the documented agent_livez_timeout (30 s) +
+    /// host_fence (30 s) + a safety margin.
+    ///
+    /// Env: `SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS`.
+    /// Default 60 s. Values < `MIN_TAKEOVER_THRESHOLD_SECS` rejected
+    /// at boot.
+    pub takeover_threshold_secs: u64,
 }
 
 impl WakeLifecycleConfig {
     pub const DEFAULT_GC_RETENTION_SECS: u64 = 300;
     pub const MIN_GC_RETENTION_SECS: u64 = 1;
+    /// R19-C1 default takeover threshold: 60 s. A wake whose lessee
+    /// hasn't bumped `lessee_updated_at` in 60 s is presumed
+    /// abandoned (the wake ladder's longest single-stage timeout —
+    /// the agent /livez poll — is 30 s; doubling that gives one
+    /// safety-margin step on either side).
+    pub const DEFAULT_TAKEOVER_THRESHOLD_SECS: u64 = 60;
+    /// R19-C1 minimum takeover threshold: 30 s. Below this the
+    /// in-flight CH-restore / livez-poll stages could race a
+    /// healthy controller and steal its row. Boot refuses to start
+    /// with a value below this floor.
+    pub const MIN_TAKEOVER_THRESHOLD_SECS: u64 = 30;
 
     /// Resolve from env. Unset → defaults; unparseable / out-of-
     /// range → `Err` (boot refuses to start).
@@ -963,8 +994,30 @@ impl WakeLifecycleConfig {
             }
             _ => Self::DEFAULT_GC_RETENTION_SECS,
         };
+        let takeover = match std::env::var("SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS") {
+            Ok(s) if !s.trim().is_empty() => {
+                let n: u64 = s.trim().parse().map_err(|e| {
+                    format!(
+                        "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS={s:?}: parse: {e}"
+                    )
+                })?;
+                if n < Self::MIN_TAKEOVER_THRESHOLD_SECS {
+                    return Err(format!(
+                        "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS={n} \
+                         must be >= {} (below this the takeover sweep \
+                         could steal rows from a healthy mid-flight \
+                         wake — the worst single-stage timeout in the \
+                         wake ladder is ~30s)",
+                        Self::MIN_TAKEOVER_THRESHOLD_SECS
+                    ));
+                }
+                n
+            }
+            _ => Self::DEFAULT_TAKEOVER_THRESHOLD_SECS,
+        };
         Ok(Self {
             wake_jobs_gc_retention_secs: retention,
+            takeover_threshold_secs: takeover,
         })
     }
 }
@@ -973,6 +1026,7 @@ impl Default for WakeLifecycleConfig {
     fn default() -> Self {
         Self {
             wake_jobs_gc_retention_secs: Self::DEFAULT_GC_RETENTION_SECS,
+            takeover_threshold_secs: Self::DEFAULT_TAKEOVER_THRESHOLD_SECS,
         }
     }
 }
@@ -1171,6 +1225,51 @@ mod wake_lifecycle_config_tests {
         // get the same retention as the env-unset path).
         let d = WakeLifecycleConfig::default();
         assert_eq!(d.wake_jobs_gc_retention_secs, 300);
+        // R19-C1: takeover threshold default matches the env-default
+        // path too.
+        assert_eq!(d.takeover_threshold_secs, 60);
+    }
+
+    // ─── R19-C1: takeover_threshold_secs env parsing ──────────────
+
+    #[test]
+    fn default_takeover_threshold_when_unset() {
+        with_env("SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS", None, || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.takeover_threshold_secs,
+                WakeLifecycleConfig::DEFAULT_TAKEOVER_THRESHOLD_SECS
+            );
+            assert_eq!(cfg.takeover_threshold_secs, 60);
+        });
+    }
+
+    #[test]
+    fn explicit_takeover_threshold_accepted() {
+        with_env(
+            "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS",
+            Some("120"),
+            || {
+                let cfg = WakeLifecycleConfig::from_env().unwrap();
+                assert_eq!(cfg.takeover_threshold_secs, 120);
+            },
+        );
+    }
+
+    #[test]
+    fn takeover_threshold_below_minimum_rejected() {
+        with_env(
+            "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS",
+            Some("10"),
+            || {
+                let err = WakeLifecycleConfig::from_env()
+                    .expect_err("10s threshold must fail (< MIN)");
+                assert!(
+                    err.contains("30") || err.contains("ladder"),
+                    "error must mention the floor or rationale; got: {err}"
+                );
+            },
+        );
     }
 }
 

@@ -923,6 +923,20 @@ impl AppState {
         if state.database.is_some() {
             sweep::spawn_wake_jobs_gc(state.clone());
         }
+        // R19-C1: periodic takeover sweep that flips non-terminal
+        // wake_jobs rows whose `lessee_updated_at` has gone stale
+        // (controller crashed mid-wake) to `failed`/
+        // `wake_worker_aborted`. Without it, GATE-C2's UNIQUE INDEX
+        // (migration 0011) wedges the sandbox permanently after any
+        // mid-wake controller crash — every subsequent wake POST
+        // returns a 202 pointing at the dead wake_id and the client
+        // polls forever. Spawn is gated on `database.is_some()` for
+        // the same reason as `spawn_wake_jobs_gc`: no pg → no rows
+        // to sweep. Sibling concern of `spawn_transient_state_takeover`
+        // but on the `wake_jobs` table instead of `sandboxes`.
+        if state.database.is_some() {
+            sweep::spawn_wake_jobs_takeover(state.clone());
+        }
         // T6: auto-spawn idle eviction sweep. Production now has all
         // deps wired (snapshot_store + ch_remote + restore_backend
         // populated above, Backend::lookup_source_vm_ops async lookup
