@@ -381,7 +381,7 @@ pub struct AdminSandboxRow {
     pub in_memory: bool,
 }
 
-async fn open_app_pool(state: &AppState) -> Result<Pool, HttpResponse> {
+async fn open_app_pool(state: &AppState) -> Result<std::rc::Rc<Pool>, HttpResponse> {
     let Some(db) = state.database.as_ref() else {
         return Err(err(503, "pg_disabled", "pg integration disabled"));
     };

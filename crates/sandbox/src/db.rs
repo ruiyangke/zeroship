@@ -28,11 +28,81 @@
 //!   designated-migrator pattern + UNIQUE-constraint race-tolerance
 //!   on `sandbox.schema_migrations.version` (D-4 / § 7.1).
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use compio_postgres::{Config, Pool, PoolConfig};
 use uuid::Uuid;
+
+// ────────────────────────────────────────────────────────────────────
+// Per-compio-worker pool cache (R26-C1 / R25-C1 / R23-P1 / R11-P1)
+// ────────────────────────────────────────────────────────────────────
+//
+// `compio_postgres::Pool` is `!Send + !Sync` (uses `Rc<TcpStream>` +
+// `RefCell` internally — see `crates/compio-postgres/src/pool.rs:14-17,
+// 228`), so the cache cannot live as an `Arc`/`OnceLock` on the
+// `Database` struct (which is shared across compio workers as
+// `Arc<Database>`). The architecturally-correct shape — confirmed in
+// the deferred backlog at "R11-P1 thread-local feasibility CONFIRMED"
+// — is a per-compio-worker `thread_local!` holding `Rc<Pool>`.
+//
+// Two roles cached (`sandbox_app` + `sandbox_audit`); the GDPR pool
+// remains uncached per § 13.2 of the design (opened-on-demand, dropped
+// at end-of-request). The DSN is kept as a tiebreaker so a test
+// fixture that swaps role DSNs mid-process doesn't return a stale
+// pool — `set_role_dsns_for_test` exists for that case.
+//
+// Thundering-herd: compio is single-threaded per worker. Two tasks on
+// the same thread can interleave around the `Pool::connect_with_config`
+// await; the post-await re-check (`borrow_mut().get_or_insert_with`)
+// resolves the race by keeping the first inserted pool — the second
+// task's locally-built pool drops on function exit.
+thread_local! {
+    static POOL_APP_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
+    static POOL_AUDIT_CELL: RefCell<Option<(String, Rc<Pool>)>> = const { RefCell::new(None) };
+}
+
+/// Try a thread-local cache read. Returns `Some(Rc<Pool>)` if the
+/// cached entry matches `dsn`; `None` otherwise.
+fn cached_pool(
+    cell: &'static std::thread::LocalKey<RefCell<Option<(String, Rc<Pool>)>>>,
+    dsn: &str,
+) -> Option<Rc<Pool>> {
+    cell.with(|c| {
+        let borrow = c.borrow();
+        match &*borrow {
+            Some((cached_dsn, pool)) if cached_dsn == dsn => Some(Rc::clone(pool)),
+            _ => None,
+        }
+    })
+}
+
+/// Install a freshly-built pool into the thread-local cache. If a
+/// concurrent task already inserted one for the same DSN (post-await
+/// race), drop the local build and return the cached entry. If the
+/// cached entry is for a different DSN (test fixture rotation),
+/// evict and replace.
+fn install_pool(
+    cell: &'static std::thread::LocalKey<RefCell<Option<(String, Rc<Pool>)>>>,
+    dsn: String,
+    pool: Rc<Pool>,
+) -> Rc<Pool> {
+    cell.with(|c| {
+        let mut borrow = c.borrow_mut();
+        if let Some((cached_dsn, cached_pool)) = borrow.as_ref() {
+            if cached_dsn == &dsn {
+                // Lost the race — caller's local build drops on return.
+                return Rc::clone(cached_pool);
+            }
+            // DSN mismatch — fall through to replace.
+        }
+        let out = Rc::clone(&pool);
+        *borrow = Some((dsn, pool));
+        out
+    })
+}
 
 // ────────────────────────────────────────────────────────────────────
 // Embedded migrations
@@ -522,63 +592,81 @@ impl Database {
         self.config.pool_max
     }
 
-    /// Open a transient connection pool.
+    /// Get the `sandbox_app`-role pool, reused across calls on the
+    /// same compio worker thread.
     ///
-    /// Per-call `Pool` creation is suboptimal — every `Database`
-    /// method opens a fresh TCP + STARTUP + auth handshake, and the
-    /// wake path pays this 5× per restore (`get_sandbox_row`,
-    /// `read_snapshot_row`, `update_sandbox_status` ×2,
-    /// `clear_snapshot_metadata`). Tracked as **R11-P1** (CRITICAL,
-    /// performance-r11) in
-    /// `docs/reviews/sandbox-snapshot-restore-deferred.md`.
+    /// **R26-C1 / R25-C1 / R23-P1 / R11-P1 (closed)**: prior to this
+    /// refactor every `Database` method opened a fresh TCP + STARTUP +
+    /// auth handshake, and the wake path paid this 5× per restore
+    /// (`get_sandbox_row`, `read_snapshot_row`, `update_sandbox_status`
+    /// ×2, `clear_snapshot_metadata`). At c=20 burst × ~14 conns ×
+    /// ~8ms = ~280 conns/sec sustained on the controller's pg —
+    /// below 1× safety against the default `max_connections=100/200`.
     ///
-    /// Not yet fixed because `compio_postgres::Pool` is `!Send` +
-    /// `!Sync` (per compio-postgres design), so the cache can't be
-    /// an `Arc`/`OnceLock` on `Database` — it has to be a
-    /// per-compio-worker `thread_local!`. That's a focused refactor
-    /// touching every call site; deferred to a dedicated R11-P1
-    /// sprint rather than landed mid-Phase-B cutover, where it
-    /// would risk destabilising the wake path. Current pattern is
-    /// correct, just slow.
-    async fn open_pool(&self) -> Result<Pool> {
+    /// The cache is per-compio-worker (`thread_local!`) because
+    /// `compio_postgres::Pool` is `!Send + !Sync` (uses
+    /// `Rc<TcpStream>` + `RefCell`) — a global `Arc<Pool>` on
+    /// `Database` would not compile. Each compio worker thread keeps
+    /// its own `Rc<Pool>`; the first call on a thread pays the
+    /// connect cost, subsequent calls return the cached handle.
+    async fn open_pool(&self) -> Result<Rc<Pool>> {
+        let dsn = &self.config.dsn;
+        if let Some(pool) = cached_pool(&POOL_APP_CELL, dsn) {
+            return Ok(pool);
+        }
         let mut cfg = PoolConfig::default();
         cfg.max_size = self.config.pool_max.max(2);
-        Pool::connect_with_config(&self.config.dsn, cfg)
-            .await
-            .map_err(DatabaseError::Pg)
+        let pool = Rc::new(
+            Pool::connect_with_config(dsn, cfg)
+                .await
+                .map_err(DatabaseError::Pg)?,
+        );
+        Ok(install_pool(&POOL_APP_CELL, dsn.clone(), pool))
     }
 
-    /// Phase-3: open a transient pool authenticated as the
-    /// `sandbox_app` role. Alias for `open_pool` — the controller's
-    /// default DML role. Exposed under a role-named accessor so
-    /// call sites read self-documenting.
-    pub async fn pool_app(&self) -> Result<Pool> {
+    /// Phase-3: pool authenticated as the `sandbox_app` role. Alias
+    /// for `open_pool` — the controller's default DML role. Exposed
+    /// under a role-named accessor so call sites read
+    /// self-documenting. Cached per-compio-worker (R26-C1).
+    pub async fn pool_app(&self) -> Result<Rc<Pool>> {
         self.open_pool().await
     }
 
-    /// Phase-3: open a transient pool authenticated as the
-    /// `sandbox_audit` role. Used by `insert_event` once the audit
-    /// pipe is split from the controller; falls back to
-    /// `SANDBOX_DATABASE_URL` when `SANDBOX_DATABASE_URL_AUDIT` is
-    /// unset (dev convenience).
-    pub async fn pool_audit(&self) -> Result<Pool> {
+    /// Phase-3: pool authenticated as the `sandbox_audit` role. Used
+    /// by `insert_event` once the audit pipe is split from the
+    /// controller; falls back to `SANDBOX_DATABASE_URL` when
+    /// `SANDBOX_DATABASE_URL_AUDIT` is unset (dev convenience).
+    /// Cached per-compio-worker (R26-C1).
+    pub async fn pool_audit(&self) -> Result<Rc<Pool>> {
+        let dsn = &self.config.dsn_audit;
+        if let Some(pool) = cached_pool(&POOL_AUDIT_CELL, dsn) {
+            return Ok(pool);
+        }
         let mut cfg = PoolConfig::default();
         cfg.max_size = self.config.pool_max.max(2);
-        Pool::connect_with_config(&self.config.dsn_audit, cfg)
-            .await
-            .map_err(DatabaseError::Pg)
+        let pool = Rc::new(
+            Pool::connect_with_config(dsn, cfg)
+                .await
+                .map_err(DatabaseError::Pg)?,
+        );
+        Ok(install_pool(&POOL_AUDIT_CELL, dsn.clone(), pool))
     }
 
     /// Phase-3: open a transient pool authenticated as the
     /// `sandbox_gdpr` role. Opened on demand inside the GDPR-delete
-    /// admin handler and dropped at end-of-request; never cached
-    /// (§ 13.2).
-    pub async fn pool_gdpr(&self) -> Result<Pool> {
+    /// admin handler and dropped at end-of-request; **never cached**
+    /// (§ 13.2 — GDPR role is privileged; the design pins
+    /// per-request lifetime so a leaked `Rc<Pool>` cannot escalate
+    /// auth scope on unrelated requests). The `Rc<Pool>` return type
+    /// matches `pool_app` / `pool_audit` for call-site uniformity;
+    /// the `Rc` count is 1, dropped at end-of-handler.
+    pub async fn pool_gdpr(&self) -> Result<Rc<Pool>> {
         let mut cfg = PoolConfig::default();
         // GDPR cascade is a single TX; one connection is enough.
         cfg.max_size = 2;
         Pool::connect_with_config(&self.config.dsn_gdpr, cfg)
             .await
+            .map(Rc::new)
             .map_err(DatabaseError::Pg)
     }
 
