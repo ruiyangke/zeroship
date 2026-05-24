@@ -1709,10 +1709,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R17-I1] CLOSED at `c3038389` — thread name renamed; pin test added.
 - [R17-I2] CLOSED at `96678eaa` — symmetric COALESCE on `error_code`/`error_message`/`agent_url`.
 - [R16-S1] CLOSED at `fa4fe63c` — `sandbox_audit` SELECT on `wake_jobs` REVOKED in 0010.
-- [R16-S2] CLOSED at `b2b6c3c9` — `sanitize_error_message` applied at the terminal-failed pg write site.
+- [R16-S2] CLOSED (PARTIAL at `b2b6c3c9`; FULLY CLOSED at `3c75a8ce` via R17-S1) — `sanitize_error_message` applied at the terminal-failed pg write site; 169.254/16 + 100.64/10 gaps closed in follow-up.
 - [R16-S3] CLOSED at `fa4fe63c` — column-level CHECK on `agent_url` shape.
 - [R16-S4] CLOSED at `4ab58eac` — `from_env` fail-CLOSED on unrecognised values.
 - [R16-S5] CLOSED at `4ab58eac` — `wake_jobs_gc_retention_secs` env-driven through `WakeLifecycleConfig`.
+- [R17-S1] CLOSED at `3c75a8ce` — `match_rfc1918_at` extended with 169.254/16 (RFC 3927 link-local / IMDS) and 100.64/10 (RFC 6598 CGNAT) arms; 6 new unit tests pin each new prefix being matched/preserved. Sanitizer policy now matches the sibling SSRF guard at `crates/runtime/src/transport/ssrf.rs:45-51`.
 - R17-A5 is being closed in a separate fixer running against `nomad_ch.rs::CreateGuard::drop` (not touched here).
 - Sandbox lib tests: 374 → 396 (+22). All pg-gated tests still gated; build clean release.
 - **PR3 (next cycle, formerly listed at PR2): cluster smoke validation under `SANDBOX_WAKE_RESPONSE_MODE=async`** — c=1/c=20 stress with the polling client (snapshot_stress.py update). Smoke-r12 confirms WAKE OK 1/1 at fence=30 (the empirical scenario C-8c declared structurally out of knobs).
