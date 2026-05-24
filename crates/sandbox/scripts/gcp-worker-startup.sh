@@ -177,22 +177,22 @@ gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
 if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
   echo "[startup] INSTALL_CH_PLUGIN_DRIVER=1 — installing nomad-driver-ch"
   mkdir -p /etc/zeroship/nomad-plugins
-  # nomad-driver-ch v15 SHA-pin (R20-S3). The GCS object is built by
+  # nomad-driver-ch v16 SHA-pin (R20-S3). The GCS object is built by
   # `nomad-driver-ch/scripts/build-binary.sh --verify` in the driver
   # worktree and uploaded out-of-band by the operator; the driver
   # binary, the GCS mirror, and the DRIVER_BINARY_SHA256 pin below
   # MUST move together (mirrors the R24-T1 snapshot_stress.py
   # lockstep at dd2079a9). A SHA mismatch is FATAL — the worker
   # refuses to start until operator reconciles.
-  DRIVER_BINARY_SHA256="2d5618adb82bfcdc5e098e2bfd4b22f4b7cf590e7c5b1f4f9a86304f57ce826c"
-  gs_pull nomad-driver-ch.v15 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
+  DRIVER_BINARY_SHA256="0e153a6ff7d5b6e8fe5b261c49a240cc7b86619ef302552c76186cabc35e5ec1"
+  gs_pull nomad-driver-ch.v16 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
   chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
   got=$(sha256sum /etc/zeroship/nomad-plugins/nomad-driver-ch | awk '{print $1}')
   if [ "$got" != "$DRIVER_BINARY_SHA256" ]; then
     echo "[startup] FATAL: nomad-driver-ch SHA mismatch" >&2
     echo "[startup]   expected: $DRIVER_BINARY_SHA256" >&2
     echo "[startup]   got:      $got" >&2
-    echo "[startup]   GCS object: gs://$ARTIFACT_BUCKET/nomad-driver-ch.v15" >&2
+    echo "[startup]   GCS object: gs://$ARTIFACT_BUCKET/nomad-driver-ch.v16" >&2
     echo "[startup]   Rebuild via nomad-driver-ch/scripts/build-binary.sh --verify and re-upload." >&2
     exit 1
   fi
