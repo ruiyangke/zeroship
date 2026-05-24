@@ -956,12 +956,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## NEW r12 ROUND FINDINGS (added by pilot cycle 2026-05-25 r7 — code-quality r12, api-surface r12, concurrency r12)
 
-### [R12-I1] (CRITICAL — T-8 blocker, concurrency-r12) Wake path hardcodes `Driver: "raw_exec"` — split-brain on T-8 cutover
+### [R12-I1] (CRITICAL — T-8 blocker, concurrency-r12) Wake path hardcodes `Driver: "raw_exec"` — split-brain on T-8 cutover — CLOSED at `b3bf741c`
 - **Source**: 2026-05-25 concurrency-r12
 - **File**: `crates/sandbox/src/restore_handler.rs:1323` (`build_restore_nomad_job_json` hardcodes `"Driver": "raw_exec"`); does NOT call `task_driver_mode_from_env()` like the cold-boot builder at `nomad_ch.rs::build_nomad_job_json_with`.
 - **Symptom**: under T-8's `SANDBOX_TASK_DRIVER=ch_plugin` cutover + bash-wrapper removal, CREATEs go through the Go plugin but RESTOREs still try `raw_exec` → split-brain on the same `vm_index` slot. With the wrapper removed, every wake fails with "no such driver: raw_exec" or "wrapper not found".
 - **Action**: collapse the two builders into a single `build_nomad_job_json_with(... restore_from: Option<&Path>, mode: TaskDriverMode)` that T-7 already designed for; or add the env consultation + ChPlugin branch to `build_restore_nomad_job_json`. The merge approach is cleaner and closes the R10-A4 nomad_ch.rs split for free.
 - **Blocks**: T-8b-cutover. T-8b-stress should also be done with this fix in place, otherwise stress results are invalid.
+- **Resolution (`b3bf741c`)**: approach (b) — added `TaskDriverMode` arg to `build_restore_nomad_job_json` mirroring the cold-boot builder's RawExec/ChPlugin match-on-mode. Production caller `submit_restore_job` reads `task_driver_mode_from_env()` once per submit. Wake-path under ChPlugin emits `Driver: "ch"` + typed Config with `restore_from = <alloc_dir>`. 5 new tests pin both modes (lib 322 → 327). Approach (a) merge deferred — the wake builder's substantive divergence (no `ZSBX_SANDBOX_ID`/`ZSBX_PUBKEY_HEX`, restore-specific Meta, externally-passed memory/cpus to match snapshot-saved values) made the field-set merge non-trivial. The remaining R10-A4 builder-duplication carry stays open; this PR closes the T-8 blocker only.
 
 ### [R12-M1] (MINOR, concurrency-r12) Rollback closure 3-layer silent-fail compounded (R10-S2 + R11-C1 + R11-C2 + R12-M1)
 - **Source**: 2026-05-25 concurrency-r12
@@ -1003,3 +1004,4 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### Closed this cycle:
 - [R11-T3] CLOSED at `eb26db31` — capability presence pins for proxy.ws-v1 + auth.ed25519-v1.1
 - [R11-S2] CLOSED at `85e4f2f9` — host_id reader mode+uid check (with defense-in-depth bonus: original silently regenerated on any read failure; new path surfaces permission errors as Validation)
+- [R12-I1] CLOSED at `b3bf741c` — wake-path SANDBOX_TASK_DRIVER feature flag (T-8 blocker; split-brain CREATE-vs-RESTOREs eliminated)
