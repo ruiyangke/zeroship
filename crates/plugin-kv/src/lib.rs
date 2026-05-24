@@ -6,7 +6,8 @@
 //! backend and never re-derive the app_id per call (mirrors `env.db`).
 //!
 //! Pluggable `Backend` dispatches to either:
-//! - `InMemory` — dev only, per-worker HashMap
+//! - `RedbBackend` — single-process embedded persistent store (the
+//!   self-host tier and the test backend)
 //! - `Redis` — strongly consistent, atomic INCR / set-if-absent, TTL,
 //!   network-backed
 //!
@@ -35,7 +36,7 @@ pub mod error;
 pub mod limits;
 pub mod v8_class;
 
-pub use backend::{Backend, InMemory, TtlState};
+pub use backend::{Backend, TtlState};
 #[cfg(feature = "redb")]
 pub use backend::RedbBackend;
 #[cfg(feature = "redis")]
@@ -58,21 +59,14 @@ impl std::fmt::Debug for KvPlugin {
 }
 
 impl KvPlugin {
-    /// In-memory backend (dev only — no cross-worker state).
-    #[must_use]
-    pub fn in_memory() -> Self {
-        Self { backend: Arc::new(InMemory::new()) }
-    }
-
-    /// Custom backend — use for `Redis` in production or custom impls.
+    /// Construct with a backend. There is no infallible default backend:
+    /// `RedbBackend::open` is fallible (it takes an exclusive file lock),
+    /// so callers open the backend and pass it here. Use `RedbBackend`
+    /// for the embedded/self-host tier or `Redis` for distributed fleets.
     #[must_use]
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
         Self { backend }
     }
-}
-
-impl Default for KvPlugin {
-    fn default() -> Self { Self::in_memory() }
 }
 
 impl NativePlugin for KvPlugin {

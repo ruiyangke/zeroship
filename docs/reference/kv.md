@@ -263,14 +263,14 @@ Branch on `error.code`; never substring-match `error.message`.
 ## Backends
 
 The SDK speaks one wire contract; the runtime selects the backend at
-boot. All three are functionally identical from JS:
+boot. Both are functionally identical from JS:
 
-- **InMemory** — dev/test default. A per-worker map; not shared across
-  processes and not persistent. Selected when no path/URL is configured.
-- **redb** — single-process persistent tier (self-host / single-node).
-  Selected via `ZEROSHIP_KV_PATH`. Survives restart with immediate
-  durability. **Single-process only** — redb takes an exclusive file
-  lock, so a multi-worker-process deployment must use Redis.
+- **redb** — embedded persistent tier (dev / self-host / single-node),
+  and the test backend. Selected when no `ZEROSHIP_KV_URL` is set: the
+  file is `ZEROSHIP_KV_PATH` if set, else the default `./.zeroship/kv.redb`.
+  Survives restart with immediate durability. **Single-process only** —
+  redb takes an exclusive file lock, so a multi-worker-process
+  deployment must use Redis.
 - **Redis / Dragonfly** — distributed production tier. Selected via
   `ZEROSHIP_KV_URL`. Atomic `incr`-with-TTL-on-create runs as a small
   Lua script; `list` maps to a cursor-passthrough `SCAN`. Use this for

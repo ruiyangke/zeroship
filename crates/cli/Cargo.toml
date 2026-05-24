@@ -13,15 +13,8 @@ zeroship-core = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
 zeroship-plugin-storage = { workspace = true }
-zeroship-plugin-kv = { workspace = true, features = ["redb"] }
+zeroship-plugin-kv = { workspace = true }
 serde_json = { workspace = true }
-
-[features]
-default = ["kv-redb"]
-# Forwards plugin-kv's `redb` feature so the CLI can select the embedded
-# persistent KV backend via ZEROSHIP_KV_PATH. On by default; the
-# ZEROSHIP_KV_PATH selection arm in `main.rs` is gated on this.
-kv-redb = ["zeroship-plugin-kv/redb"]
 
 [dev-dependencies]
 # P5.5 PR 8 — `migrate.rs` scanner tests create a temp source tree

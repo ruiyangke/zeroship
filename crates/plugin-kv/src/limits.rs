@@ -138,7 +138,7 @@ pub fn resolve_list_limit(limit: Option<f64>) -> usize {
 ///
 /// Without this, a creator listing keys under prefix `a[b` would have
 /// `[b` interpreted as a character class and silently match the wrong
-/// keys. The InMemory / redb backends do literal `starts_with` and
+/// keys. The redb backend does literal `starts_with` and
 /// don't need escaping, so this lives here for the Redis backend to
 /// call (and is unit-tested here, away from a live server).
 #[must_use]

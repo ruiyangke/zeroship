@@ -2,7 +2,7 @@
 name = "zeroship-plugin-kv"
 version = "0.1.0"
 edition = "2021"
-description = "Key-value plugin — zeroship.kv.* native primitives (in-memory for dev, Redis later)"
+description = "Key-value plugin — zeroship.kv.* native primitives (redb embedded + Redis distributed)"
 
 [dependencies]
 zeroship-runtime = { workspace = true }
@@ -20,11 +20,11 @@ async-trait = "0.1"
 url = { workspace = true }
 
 [features]
-default = ["redis"]
+default = ["redis", "redb"]
 # Redis-backed distributed KV — the production default.
 redis = ["dep:compio-redis"]
-# redb-backed single-process persistent KV — the self-host tier. Not in
-# default features; opt in for the embedded persistent backend.
+# redb-backed single-process persistent KV — the always-available
+# embedded + test backend. In default features.
 redb = ["dep:redb"]
 
 [dev-dependencies]

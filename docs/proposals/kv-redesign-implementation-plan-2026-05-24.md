@@ -2,6 +2,8 @@
 
 Status: pre-ship proposal, drafted in worktree `kv-v8class`. Do NOT commit until the implementing PR. Pre-launch → no back-compat (rename/break freely).
 
+> **Amended 2026-05-24 (commit 4): InMemory removed.** The shipped design is **two backends, not three**: `RedbBackend` (embedded persistent — also the test backend, a default feature) + `Redis` (distributed). The `InMemory` backend and `KvPlugin::in_memory()` / `Default` are gone; redb's test suite carries the canonical-semantics coverage that lived in `memory.rs`. `serve` defaults to redb at `./.zeroship/kv.redb` (override with `ZEROSHIP_KV_PATH`); `ZEROSHIP_KV_URL` still selects Redis. The text below is left as originally drafted; read it through this amendment.
+
 ## Goal
 
 Three things at once, because the v8_class rewrite is the moment to get the "forever" shape right:

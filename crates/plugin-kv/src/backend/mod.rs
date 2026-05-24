@@ -1,9 +1,9 @@
 //! Backend abstraction for `env.kv.*`.
 //!
-//! Three impls ship today:
-//! - `InMemory` — per-worker HashMap, dev only. No cross-worker state.
+//! Two impls ship today:
 //! - `RedbBackend` — single-process embedded persistent store (`redb`),
-//!   the self-host / single-worker-process tier. Exclusive file lock.
+//!   the self-host / single-worker-process tier (and the test backend).
+//!   Exclusive file lock; always available (default feature).
 //! - `Redis` — network-backed, strongly consistent. Production fleets.
 //!
 //! Commitment (permanent): **every backend is strongly consistent with
@@ -26,13 +26,11 @@
 //!   rate-limit semantics). Incrementing an existing key leaves the
 //!   key's existing expiry untouched.
 
-pub mod memory;
 #[cfg(feature = "redb")]
 pub mod redb;
 #[cfg(feature = "redis")]
 pub mod redis;
 
-pub use memory::InMemory;
 #[cfg(feature = "redb")]
 pub use redb::RedbBackend;
 #[cfg(feature = "redis")]
@@ -146,9 +144,9 @@ pub trait Backend: Send + Sync + std::fmt::Debug {
 /// For our "millions of small apps" model that's the correct default;
 /// whale-app handling is a v2 feature.
 ///
-/// The InMemory backend doesn't care about the braces — they're just
-/// extra bytes in the map key. The Redis/Dragonfly backend is where the
-/// hash tag does real work.
+/// The redb backend doesn't care about the braces — they're just extra
+/// bytes in the table key. The Redis/Dragonfly backend is where the hash
+/// tag does real work.
 pub fn scope(app_id: &str, key: &str) -> String {
     format!("{{{app_id}}}:{key}")
 }

@@ -45,7 +45,7 @@ use crate::limits::{
 /// [`mint_kv`] drops the Box on GC. The `Arc<dyn Backend>` clone is
 /// released with the Box (no other native resource to free).
 pub struct Kv {
-    /// The active backend (`InMemory` / `Redis`). Cloned per dispatch
+    /// The active backend (redb / Redis). Cloned per dispatch
     /// into the spawned op future.
     pub(crate) backend: Arc<dyn Backend>,
     /// The app_id this Kv belongs to, stamped at mint time from

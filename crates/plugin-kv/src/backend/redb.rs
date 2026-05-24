@@ -9,8 +9,7 @@
 //! Conforms to the canonical `incr` contract (overflow → error,
 //! non-numeric → error, preserve existing TTL on increment) and the full
 //! expanded surface (`set_if_absent` / `expire` / `ttl` / `persist` /
-//! paginated `list`), byte-for-byte interchangeable with the InMemory
-//! backend's cursor contract.
+//! paginated `list`), honoring the canonical cursor contract exactly.
 //!
 //! ## Storage layout
 //!
@@ -18,8 +17,8 @@
 //! value `(payload, expires_at_ms)` — redb has a built-in `Value` impl for
 //! `(&str, Option<u64>)`, so no custom codec is needed. `expires_at_ms` is
 //! an **absolute** UNIX-epoch millisecond deadline (see [`now_ms`]); it
-//! must be wall-clock so a TTL survives a process restart (unlike the
-//! InMemory backend's `Instant`, which is monotonic and process-local).
+//! must be wall-clock so a TTL survives a process restart (a monotonic
+//! `Instant` would be process-local and reset across restarts).
 //!
 //! ## Atomicity
 //!
@@ -31,8 +30,8 @@
 //! ## Blocking I/O
 //!
 //! redb is synchronous/blocking. We call it directly inside the async fns
-//! (the same posture as InMemory's blocking-under-lock) rather than
-//! offloading to a thread — zero tokio, and the single-process tier isn't
+//! rather than offloading to a thread — zero tokio, and the
+//! single-process tier isn't
 //! throughput-critical. A `compio::dispatcher::Dispatcher` offload is the
 //! documented hook if an fsync stall is ever measured; it is NOT this
 //! commit.
@@ -470,7 +469,7 @@ impl Backend for RedbBackend {
         }
 
         // A next cursor is returned only when we filled the page AND saw at
-        // least one more matching key — mirrors InMemory exactly.
+        // least one more matching key (the canonical cursor contract).
         let next_cursor = if page.len() == limit && any_remaining {
             last_scoped
         } else {
