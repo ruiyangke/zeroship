@@ -467,6 +467,17 @@ Environment=SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET=99
 # override via metadata; this is the cluster-smoke baseline.
 Environment=SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS=30
 
+# C-7-LT (T-8b-smoke-r12, controller v27): activate async wake response
+# mode. The synchronous-response contract was empirically shown across
+# r4-r11 to be under-budgetable inside the 60 s ntex client deadline
+# (smoke-r11 measured a 60.166 s teardown vs a hard-capped 50 s wake
+# budget — C-8c). Async mode returns 202 + {wake_id, poll_url} from
+# POST /wake immediately; the state machine runs server-side without
+# the client deadline binding it. Clients GET /wake/{wake_id} every
+# 500ms-1s until terminal. Legacy sync remains available via ?sync=1
+# (used only by older clients during cutover; new smoke flow polls).
+Environment=SANDBOX_WAKE_RESPONSE_MODE=async
+
 # Wrapper inputs: point at the artifact dir holding vmlinuz + rootfs-slim.img.
 # The wrapper reads ZSBX_ARTIFACT_DIR from its Nomad task env; the
 # controller propagates SANDBOX_NOMAD_CH_RUNTIME_DIR there.
