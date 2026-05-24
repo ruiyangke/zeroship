@@ -247,6 +247,7 @@ mod tests {
             "test-immediate",
             "test-panicker",
             "test-after-pnc",
+            "test-r29-c1",   // backend/nomad_ch.rs r29-A2 regression
         ];
         // Dynamic / format-string prefixes. Each entry is the prefix
         // that lands at byte 0 of the OS-level name; the tail (a

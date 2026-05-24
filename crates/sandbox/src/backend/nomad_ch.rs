@@ -342,48 +342,104 @@ impl VmIndexAllocator {
         }
     }
 
-    /// T-8b-stress-r8 r24-A2-S3: same release semantics as
-    /// [`Self::release`], but delayed by `delay` to give the host
-    /// kernel time to evict the tap netdev / drain fcntl locks from
-    /// the previous tenant before a fresh CREATE picks up the same
-    /// slot. Spawned as a detached compio task so the caller
-    /// doesn't block on the delay.
+    /// T-8b-stress-r8 r24-A2-S3 / r29-A2: inline-await variant of
+    /// the delayed release. Sleeps `delay`, then releases slot `i`
+    /// back into the allocator + emits the operator-facing log
+    /// line. This is the safe default everywhere — the caller's
+    /// runtime stays alive for the full sleep because the future is
+    /// driven by `.await`, not detached.
     ///
-    /// The driver's r24-A2-S2 verify gate closes the tuntap-add
-    /// window on the worker side; this controller-side delay adds
-    /// defense-in-depth for the rest of the per-VM state (host_dir
-    /// GC, sweeper races, etc.). 5 s is the default in production
-    /// config; 0 disables the delay (tests).
+    /// Use this from:
     ///
-    /// Behaviour at `delay == 0`: still spawns the task but skips
-    /// the sleep call — semantically equivalent to a direct
-    /// `release()` but goes through the same code path so a test
-    /// pinning "release fires" sees the spawn the same way
-    /// production does.
-    pub fn spawn_delayed_release(
+    /// - `stop_inner` (long-lived ntex-worker runtime — could also
+    ///   use the detached variant, but inline keeps the call sites
+    ///   uniform with the short-lived runtime paths)
+    /// - `CreateGuard::drop`'s detached cleanup future (runs under
+    ///   `detach_isolated`'s SHORT-LIVED private compio runtime —
+    ///   detaching here would lose the timer, see r29-A2 below)
+    /// - any future caller running under `detach_isolated` that
+    ///   needs to release a slot after a delay
+    ///
+    /// r29-A2 history: this replaces the pre-r29 `spawn_delayed_release`
+    /// fire-and-forget helper. That helper used
+    /// `compio::runtime::spawn(...).detach()` against the CURRENT
+    /// runtime — fine on the long-lived worker, but planted a
+    /// timer task that got discarded by `Scheduler::clear()` when
+    /// any short-lived runtime (`detach_isolated`'s private mint)
+    /// dropped. R28-C1 found one such leak (CreateGuard::drop);
+    /// R29-C1 found the second (`snap-teardown-<tail>` →
+    /// `stop_preserving_state` → `stop_inner` → spawn_delayed_release).
+    /// Both close by routing through this inline-await helper so
+    /// the timer is bound to the caller's task, not detached onto a
+    /// runtime that may not outlive the delay.
+    ///
+    /// If a caller genuinely cannot await (returning a `Task`
+    /// JoinHandle is acceptable but `.detach()` is not), use
+    /// [`Self::spawn_delayed_release_in_worker`] — which makes the
+    /// runtime-lifetime decision explicit via the return type.
+    ///
+    /// Behaviour at `delay == 0`: skips the sleep and releases
+    /// synchronously inside the calling task.
+    pub async fn release_vm_index_after(
         allocator: Arc<Mutex<Self>>,
         i: u16,
         delay: Duration,
         reason: &'static str,
         sandbox_id: Uuid,
     ) {
-        compio::runtime::spawn(async move {
-            if !delay.is_zero() {
-                compio::time::sleep(delay).await;
-            }
-            allocator
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .release(i);
-            tracing::info!(
-                vm_index = i,
-                reason = %reason,
-                sandbox_id = %sandbox_id,
-                delay_ms = delay.as_millis() as u64,
-                "sandbox/nomad-ch vm_index released (r24-A2-S3 delayed)"
-            );
-        })
-        .detach();
+        if !delay.is_zero() {
+            compio::time::sleep(delay).await;
+        }
+        allocator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .release(i);
+        tracing::info!(
+            vm_index = i,
+            reason = %reason,
+            sandbox_id = %sandbox_id,
+            delay_ms = delay.as_millis() as u64,
+            "sandbox/nomad-ch vm_index released (r24-A2-S3 delayed)"
+        );
+    }
+
+    /// r29-A2: spawn the delayed release on the CURRENT compio
+    /// runtime and return a `Task<()>` JoinHandle. The caller MUST
+    /// either hold the task to completion OR call `.detach()` on it
+    /// — but `.detach()` is only sound when the current runtime is
+    /// guaranteed to outlive the delay. The pre-r29
+    /// `spawn_delayed_release` helper hid this decision; returning
+    /// `Task<()>` here forces the caller to confront it.
+    ///
+    /// Long-lived ntex / snap-idle-gc / sweep loop callers can
+    /// safely call `.detach()` on the returned task. Short-lived
+    /// runtimes (`detach_isolated`'s private mint) MUST use
+    /// [`Self::release_vm_index_after`] instead — `.await`-ing it
+    /// inline keeps the timer alive across the sleep.
+    ///
+    /// No current call site in this crate uses this helper; it
+    /// exists as the type-safe escape hatch for any future
+    /// background-task path that needs fire-and-forget delayed
+    /// release on a long-lived runtime without blocking the caller.
+    #[allow(dead_code)] // typed escape hatch — see rustdoc
+    pub fn spawn_delayed_release_in_worker(
+        allocator: Arc<Mutex<Self>>,
+        i: u16,
+        delay: Duration,
+        reason: &'static str,
+        sandbox_id: Uuid,
+    ) -> compio::runtime::Task<
+        Result<(), Box<dyn std::any::Any + Send>>,
+    > {
+        // `compio::runtime::spawn` wraps the spawned future's output
+        // in `Result<T, Box<dyn Any + Send>>` (panic-catch). We
+        // surface that wrapper in the return type rather than
+        // hide it — if a caller `.await`s the Task and the release
+        // panicked (it doesn't today; `release` is a BTreeSet
+        // insert that can't panic), the Err is reachable.
+        compio::runtime::spawn(Self::release_vm_index_after(
+            allocator, i, delay, reason, sandbox_id,
+        ))
     }
 
     /// Non-destructive read of the `freed` set so tests can pin
@@ -1321,7 +1377,20 @@ impl NomadCHBackend {
             // this controller-side delay adds defense-in-depth.
             // Production default 5 s; 0 in tests via the
             // vm_index_release_delay_secs config knob.
-            VmIndexAllocator::spawn_delayed_release(
+            //
+            // r29-A2 (R29-C1 class-fix): inline-await the release
+            // instead of detaching the timer task. `stop_inner` is
+            // reached from BOTH long-lived (ntex-worker, snap-idle-
+            // gc, sweeper) and short-lived (`detach_isolated`'s
+            // private compio runtime, used by `snap-teardown-<tail>`)
+            // call paths. The detach-onto-current-runtime shape that
+            // pre-r29 `spawn_delayed_release` used silently dropped
+            // the timer on the short-lived path → vm_index leaked on
+            // every successful admin-snapshot teardown (R29-C1).
+            // Awaiting inline adds the delay to stop_inner's wall
+            // (5 s in prod), which is negligible compared to the
+            // host_fence + Nomad-purge waits already on this path.
+            VmIndexAllocator::release_vm_index_after(
                 Arc::clone(&self.vm_index_allocator),
                 sandbox.vm_index,
                 Duration::from_secs(
@@ -1329,7 +1398,8 @@ impl NomadCHBackend {
                 ),
                 "stop-fence-passed",
                 sandbox_id,
-            );
+            )
+            .await;
         } else if !job_confirmed_gone {
             // C-7-LT-2-PR2 defense-in-depth: bump the per-reason leak
             // counter so operators can `rate(sandbox_vm_index_leaks_total{
@@ -2272,47 +2342,27 @@ impl Drop for CreateGuard {
                         // `reason=create-failure-cleanup` to keep
                         // FM-B's failed-create attribution.
                         //
-                        // R28-C1: the delay + release is INLINED
-                        // here rather than dispatched via
-                        // `VmIndexAllocator::spawn_delayed_release`.
-                        // Reason: this cleanup_future runs on the
+                        // r29-A2 (R28-C1 + R29-C1 class-fix): use
+                        // the inline-await helper so the timer is
+                        // bound to THIS task, not detached onto the
                         // short-lived private compio runtime minted
-                        // by `detach_isolated("create-rollbk", …)`,
-                        // which is dropped as soon as the future
-                        // returns Ready. `spawn_delayed_release`
-                        // calls `compio::runtime::spawn(…).detach()`
-                        // against the CURRENT runtime — so the
-                        // detached timer task would be planted on
-                        // that same short-lived runtime, then
-                        // dropped pending when the runtime tears
-                        // down (compio 0.11 `Scheduler::clear` at
-                        // runtime drop discards pending futures),
-                        // leaking the vm_index until the next
-                        // controller-boot orphan prune.
-                        //
-                        // The `stop_inner` site at the top of this
-                        // file uses `spawn_delayed_release`
-                        // correctly because it runs on the
-                        // long-lived ntex-worker compio runtime,
-                        // which outlives the 5 s delay. Do NOT
-                        // unify the two call sites by changing
-                        // `spawn_delayed_release` — the bug is the
-                        // runtime lifetime mismatch, not the helper
-                        // itself.
-                        if !release_delay.is_zero() {
-                            compio::time::sleep(release_delay).await;
-                        }
-                        vm_index_allocator
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .release(i);
-                        tracing::info!(
-                            vm_index = i,
-                            reason = "create-failure-cleanup",
-                            sandbox_id = %sandbox_id,
-                            delay_ms = release_delay.as_millis() as u64,
-                            "sandbox/nomad-ch vm_index released (r24-A2-S3 delayed, R28-C1 inline)"
-                        );
+                        // by `detach_isolated("create-rollbk", …)`.
+                        // Detaching here would land the timer task
+                        // on the same runtime the cleanup future is
+                        // on — when `block_on` returns Ready and the
+                        // private runtime drops, `Scheduler::clear`
+                        // discards the pending timer, leaking the
+                        // vm_index until the next controller-boot
+                        // orphan prune. See `release_vm_index_after`
+                        // rustdoc for the full r29-A2 history.
+                        VmIndexAllocator::release_vm_index_after(
+                            Arc::clone(&vm_index_allocator),
+                            i,
+                            release_delay,
+                            "create-failure-cleanup",
+                            sandbox_id,
+                        )
+                        .await;
                     }
                 } else if let Some(i) = vm_index_opt {
                     tracing::warn!(
@@ -4697,54 +4747,50 @@ mod tests {
         );
     }
 
-    // ─── T-8b-stress-r8 r24-A2-S3 spawn_delayed_release ───────
+    // ─── T-8b-stress-r8 r24-A2-S3 / r29-A2 delayed release ────
 
-    /// Zero-delay path: the release task fires "immediately" (one
-    /// runtime yield). The slot reappears in the freed set within a
-    /// short polling budget.
+    /// Zero-delay path: `release_vm_index_after` collapses to a
+    /// synchronous release inside the calling task — the slot is in
+    /// freed by the time the future returns Ready.
     #[compio::test]
-    async fn spawn_delayed_release_with_zero_delay_releases_immediately() {
+    async fn release_vm_index_after_with_zero_delay_releases_immediately() {
         let pool = Arc::new(Mutex::new(VmIndexAllocator::new(11, 11)));
         let i = pool.lock().unwrap().alloc().expect("alloc");
         assert_eq!(i, 11);
 
-        // Spawn with zero delay. Even with zero sleep, the task
-        // runs asynchronously — poll for the slot to land in
-        // freed.
-        VmIndexAllocator::spawn_delayed_release(
+        VmIndexAllocator::release_vm_index_after(
             Arc::clone(&pool),
             i,
             Duration::ZERO,
             "test-zero-delay",
             Uuid::nil(),
-        );
+        )
+        .await;
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut observed = false;
-        while Instant::now() < deadline {
-            if pool.lock().unwrap().freed_for_test().contains(&11) {
-                observed = true;
-                break;
-            }
-            compio::time::sleep(Duration::from_millis(5)).await;
-        }
         assert!(
-            observed,
-            "spawn_delayed_release(ZERO) did not release within 1 s"
+            pool.lock().unwrap().freed_for_test().contains(&11),
+            "release_vm_index_after(ZERO) did not release inline"
         );
     }
 
-    /// Non-zero delay path: the release task waits the configured
-    /// delay before releasing. We pin (a) the slot is NOT in freed
-    /// before the delay elapses, and (b) IS in freed after.
+    /// Non-zero delay path: the release waits the configured delay
+    /// before releasing. We pin (a) the slot is NOT in freed before
+    /// the delay elapses, and (b) IS in freed after. The inline-
+    /// await shape means we drive the future via a sibling spawn so
+    /// we can observe the "halfway" state from the main task.
     #[compio::test]
-    async fn spawn_delayed_release_honors_configured_delay() {
+    async fn release_vm_index_after_honors_configured_delay() {
         let pool = Arc::new(Mutex::new(VmIndexAllocator::new(22, 22)));
         let i = pool.lock().unwrap().alloc().expect("alloc");
         assert_eq!(i, 22);
 
         let delay = Duration::from_millis(200);
-        VmIndexAllocator::spawn_delayed_release(
+        // Spawn the release on a sibling task (joinable) so the main
+        // task can poll the allocator while the delay elapses. This
+        // mirrors how `spawn_delayed_release_in_worker` would land
+        // in a long-lived caller — the Task handle gives us the
+        // joinable shape needed for the halfway-check.
+        let task = VmIndexAllocator::spawn_delayed_release_in_worker(
             Arc::clone(&pool),
             i,
             delay,
@@ -4752,32 +4798,136 @@ mod tests {
             Uuid::nil(),
         );
 
-        // Before the delay elapses, slot 22 MUST still be allocated
-        // (not in freed). Wait half the delay then check — gives a
-        // robust margin against scheduler jitter without making the
-        // test slow.
+        // Before the delay elapses, slot 22 MUST still be allocated.
         compio::time::sleep(delay / 2).await;
         let halfway_present = pool.lock().unwrap().freed_for_test().contains(&22);
         assert!(
             !halfway_present,
-            "spawn_delayed_release fired before the configured delay \
+            "release_vm_index_after fired before the configured delay \
              ({delay:?} elapsed 50%) — r24-A2-S3 release MUST be deferred"
         );
 
-        // Wait the rest of the delay plus a small margin for the
-        // task to actually run after sleep returns.
-        let deadline = Instant::now() + delay + Duration::from_millis(500);
-        let mut observed = false;
+        // Await the task: by the time it returns, the release has
+        // happened. The Result wrapper is the compio spawn panic-
+        // catch wrapper; `release_vm_index_after` cannot panic so
+        // Ok is the only observed shape today.
+        task.await.expect("release_vm_index_after must not panic");
+        assert!(
+            pool.lock().unwrap().freed_for_test().contains(&22),
+            "release_vm_index_after did not fire after delay ({delay:?}) elapsed"
+        );
+    }
+
+    /// r29-A2: `spawn_delayed_release_in_worker` returns a typed
+    /// `compio::runtime::Task<()>` JoinHandle. The contract is "if
+    /// you don't await or detach, the timer is bound to the Task
+    /// you hold." This test pins that the return type IS joinable
+    /// and that awaiting it observes the release deterministically
+    /// — the property the deleted `spawn_delayed_release`
+    /// fire-and-forget shape did NOT give callers (R28-C1 / R29-C1
+    /// both surfaced because callers couldn't observe the timer's
+    /// fate, only hope the current runtime outlived it).
+    #[compio::test]
+    async fn spawn_delayed_release_in_worker_returns_joinable_task() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(33, 33)));
+        let i = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(i, 33);
+
+        let task = VmIndexAllocator::spawn_delayed_release_in_worker(
+            Arc::clone(&pool),
+            i,
+            Duration::from_millis(50),
+            "test-joinable",
+            Uuid::nil(),
+        );
+        // Type-level assertion via shadowing: the returned value
+        // MUST be `compio::runtime::Task<Result<(), Box<dyn Any+Send>>>`.
+        // The `Result` wrapper is compio's panic-catch shape on
+        // `spawn`. If a future refactor changes this contract the
+        // compiler catches it here before the rustdoc drifts.
+        let task: compio::runtime::Task<
+            Result<(), Box<dyn std::any::Any + Send>>,
+        > = task;
+
+        // Joining the task waits for the release to complete; the
+        // slot is then guaranteed to be in `freed` without a poll.
+        task.await.expect("release_vm_index_after must not panic");
+        assert!(
+            pool.lock().unwrap().freed_for_test().contains(&33),
+            "spawn_delayed_release_in_worker: awaiting the Task did \
+             not observe a completed release"
+        );
+    }
+
+    /// R29-C1 regression: a release dispatched from inside a
+    /// `detach_isolated` body (short-lived private compio runtime)
+    /// MUST complete before `block_on` returns. The pre-r29
+    /// `spawn_delayed_release` planted a detached timer on the same
+    /// short-lived runtime; `Scheduler::clear` discarded the timer
+    /// at runtime drop, leaking the slot.
+    ///
+    /// This mirrors the R28-C1 `CreateGuard::drop` regression test
+    /// but exercises the helper that's reachable from
+    /// `admin_handlers.rs::snap-teardown-<tail>` →
+    /// `teardown_source_for_snapshot` → `stop_preserving_state` →
+    /// `stop_inner` (which now awaits `release_vm_index_after`
+    /// inline). We don't need the full stack; what we're pinning is
+    /// the helper's behaviour: when invoked inside a detached
+    /// future on a short-lived runtime with `delay > 0`, the
+    /// release MUST still observe before the runtime drops.
+    ///
+    /// `#[test]` (not `#[compio::test]`) so the outer thread is
+    /// plain `std::thread`, exactly the shape `detach_isolated`
+    /// uses (a fresh OS thread + private runtime per dispatch).
+    #[test]
+    fn release_vm_index_after_survives_short_lived_runtime() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(77, 77)));
+        let allocated = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(allocated, 77);
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        // Non-zero delay is the load-bearing detail: the pre-fix
+        // R29-C1 bug fired specifically when `delay > 0` gave the
+        // short-lived runtime time to drop before a detached timer
+        // task could run. 100 ms is enough to outlive the post-Ready
+        // `block_on` cycle yet short enough for cheap test wall.
+        let pool_for_fut = Arc::clone(&pool);
+        crate::detach::detach_isolated(
+            "test-r29-c1",
+            move || async move {
+                VmIndexAllocator::release_vm_index_after(
+                    pool_for_fut,
+                    allocated,
+                    Duration::from_millis(100),
+                    "test-r29-c1",
+                    Uuid::nil(),
+                )
+                .await;
+            },
+        );
+
+        // Poll up to 5 s for the index to reappear. With the
+        // inline-await fix it shows up ~100 ms after dispatch (delay
+        // + OS-thread spawn + runtime mint). Without the fix (the
+        // pre-r29 `.detach()`-onto-current-runtime shape) it never
+        // does — the timer task is discarded when the private
+        // runtime drops.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
         while Instant::now() < deadline {
-            if pool.lock().unwrap().freed_for_test().contains(&22) {
-                observed = true;
+            if let Ok(i) = pool.lock().unwrap().alloc() {
+                assert_eq!(i, 77);
+                released = true;
                 break;
             }
-            compio::time::sleep(Duration::from_millis(10)).await;
+            std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
-            observed,
-            "spawn_delayed_release did not fire after delay ({delay:?}) elapsed"
+            released,
+            "R29-C1 regression: release dispatched from inside a \
+             `detach_isolated` body with delay > 0 did not observe \
+             before the short-lived runtime dropped — `Scheduler::clear` \
+             discarded the timer task"
         );
     }
 
