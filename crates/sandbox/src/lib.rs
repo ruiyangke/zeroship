@@ -698,11 +698,16 @@ impl AppState {
                 }
             };
 
-        let backend = Backend::from_config_full(
-            &config,
-            persist.clone(),
-            local_nomad_node_id.clone(),
-        )?;
+        let backend = {
+            let mut b = Backend::builder(&config);
+            if let Some(p) = persist.clone() {
+                b = b.with_persist(p);
+            }
+            if let Some(id) = local_nomad_node_id.clone() {
+                b = b.with_local_nomad_node_id(id);
+            }
+            b.build()?
+        };
         backend.probe().await?;
         // Clean up orphan Pods + ConfigMaps from a previous run.
         // Errors here are non-fatal — operators may want to keep
@@ -2185,7 +2190,7 @@ mod admin_token_setter_tests {
     use crate::backend::Backend;
     use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
 
-    /// Minimal config that satisfies `Backend::from_config` for the
+    /// Minimal config that satisfies `Backend::builder(&cfg).build()` for the
     /// nomad-ch backend WITHOUT touching the network — the builder
     /// only needs `SandboxConfig` to populate the field; no probe
     /// runs here.
@@ -2247,7 +2252,7 @@ mod admin_token_setter_tests {
 
     fn min_state() -> AppState {
         let cfg = min_cfg();
-        let backend = Backend::from_config(&cfg).expect("backend");
+        let backend = Backend::builder(&cfg).build().expect("backend");
         AppState::new_fixture(cfg, backend)
     }
 
@@ -2388,7 +2393,7 @@ mod persist_setter_tests {
     use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
     use crate::persist::{AeadKey, Persistence};
 
-    /// Minimal config that satisfies `Backend::from_config` for the
+    /// Minimal config that satisfies `Backend::builder(&cfg).build()` for the
     /// nomad-ch backend WITHOUT touching the network. Mirrors the
     /// fixture in `admin_token_setter_tests` — duplicated rather
     /// than shared so each test module's helpers stay self-contained
@@ -2452,7 +2457,7 @@ mod persist_setter_tests {
 
     fn min_state() -> AppState {
         let cfg = min_cfg();
-        let backend = Backend::from_config(&cfg).expect("backend");
+        let backend = Backend::builder(&cfg).build().expect("backend");
         AppState::new_fixture(cfg, backend)
     }
 
@@ -2531,7 +2536,7 @@ mod field_setter_tests {
     use crate::snapshot_handler::MockChRemoteClient;
     use crate::snapshot_store::LocalDiskSnapshotStore;
 
-    /// Minimal config that satisfies `Backend::from_config` for the
+    /// Minimal config that satisfies `Backend::builder(&cfg).build()` for the
     /// nomad-ch backend WITHOUT touching the network. Duplicated from
     /// the sibling test modules for self-containment (same rationale
     /// as `persist_setter_tests::min_cfg`).
@@ -2593,7 +2598,7 @@ mod field_setter_tests {
 
     fn min_state() -> AppState {
         let cfg = min_cfg();
-        let backend = Backend::from_config(&cfg).expect("backend");
+        let backend = Backend::builder(&cfg).build().expect("backend");
         AppState::new_fixture(cfg, backend)
     }
 
@@ -2604,7 +2609,7 @@ mod field_setter_tests {
         // new config landed.
         let mut first = min_cfg();
         first.port = 11111;
-        let backend = Backend::from_config(&first).expect("backend");
+        let backend = Backend::builder(&first).build().expect("backend");
         let state = AppState::new_fixture(first, backend);
         assert_eq!(state.config.port, 11111, "fixture starts with first cfg");
 

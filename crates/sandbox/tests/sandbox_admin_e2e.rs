@@ -66,7 +66,7 @@ fn make_state_with_admin_tokens(
     admin_ro_token: Option<String>,
 ) -> Arc<zeroship_sandbox::AppState> {
     let cfg = make_cfg("ignored-creator-token");
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     // A5: `admin_token` is `pub(crate)`; out-of-crate construction
     // goes through `AppState::new_fixture` + the `with_admin_token`
     // builder (which rejects empty strings — the post-Round-4
@@ -758,7 +758,7 @@ fn make_state_with_snapshot_wiring(
 ) -> Arc<zeroship_sandbox::AppState> {
     let mut cfg = make_cfg("ignored-creator-token");
     cfg.snapshot_enabled = true;
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     // Build the snapshot trio identically to AppState::from_config's
     // production path, but with an in-memory L1 root so the test
     // doesn't litter `/var/zeroship`.

@@ -429,8 +429,8 @@ impl NomadCHBackend {
 
     /// r3-A: read accessor for the cached local Nomad node_id. Mainly
     /// here so the AppState wiring (which constructs the backend via
-    /// `Backend::from_config_with_persist` and then re-wraps with the
-    /// builder) can assert post-install state.
+    /// `Backend::builder(&cfg).with_persist(...).with_local_nomad_node_id(...).build()`)
+    /// can assert post-install state.
     pub fn local_nomad_node_id(&self) -> Option<&str> {
         self.local_nomad_node_id.as_deref()
     }

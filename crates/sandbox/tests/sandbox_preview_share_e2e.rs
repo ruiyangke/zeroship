@@ -162,7 +162,13 @@ fn make_state_inner(
     persist: Option<Arc<zeroship_sandbox::persist::Persistence>>,
 ) -> (Arc<zeroship_sandbox::AppState>, Uuid) {
     let cfg = make_cfg(token);
-    let backend = Backend::from_config_with_persist(&cfg, persist).expect("backend");
+    let backend = {
+        let mut b = Backend::builder(&cfg);
+        if let Some(p) = persist {
+            b = b.with_persist(p);
+        }
+        b.build().expect("backend")
+    };
     let sandbox_id = Uuid::now_v7();
     if let Backend::NomadCh(b) = &backend {
         b._test_inject_sandbox(

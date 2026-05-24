@@ -179,57 +179,109 @@ pub enum Backend {
     NomadCh(std::sync::Arc<nomad_ch::NomadCHBackend>),
 }
 
-impl Backend {
-    /// Construct without sealed-record persistence. Convenience wrapper
-    /// around [`Backend::from_config_with_persist`] for callers (tests,
-    /// the legacy lifecycle examples) that don't exercise the
-    /// restart-restore path. New code in the controller goes through
-    /// the with-persist variant — see `crate::AppState::from_config`.
-    pub fn from_config(cfg: &SandboxConfig) -> Result<Self, String> {
-        Self::from_config_with_persist(cfg, None)
+/// Builder for [`Backend`]. Returned by [`Backend::builder`].
+///
+/// Setters take `T` (not `Option<T>`); callers only invoke
+/// `.with_persist(p)` / `.with_local_nomad_node_id(id)` when they have
+/// a value. Missing optional fields fall through as `None` to
+/// [`BackendBuilder::build`].
+///
+/// `local_nomad_node_id` is meaningful only for the `nomad-ch`
+/// backend (installed on the inner `NomadCHBackend` for r3-A node-pin
+/// constraints); other backends ignore it.
+///
+/// **Why a builder, not a flat struct of `Option` fields**: tests +
+/// lifecycle examples that don't exercise persistence / node-pin
+/// stay one-liners (`Backend::builder(&cfg).build()?`); orthogonal
+/// extension fields (r27-A1 staging-locality, future VFIO-handoff or
+/// tap-leak edges) absorb as new `.with_*()` setters without
+/// reshaping any existing call site. Replaces R26-I2 / R27-I1's
+/// telescoping `from_config*` cascade.
+#[must_use]
+#[allow(missing_debug_implementations)] // Persistence has no Debug; see sweep.rs convention
+pub struct BackendBuilder<'a> {
+    cfg: &'a SandboxConfig,
+    persist: Option<std::sync::Arc<crate::persist::Persistence>>,
+    local_nomad_node_id: Option<String>,
+}
+
+impl<'a> BackendBuilder<'a> {
+    /// Attach a shared sealed-record persistence handle. The same
+    /// handle is cloned (`Arc::clone`) into all three backend variants
+    /// so the file I/O state (sealed-records dir + AEAD key) lives in
+    /// one place. Omit to disable seal-on-create + delete-on-stop
+    /// entirely (Phase 0 default off behaviour).
+    pub fn with_persist(
+        mut self,
+        persist: std::sync::Arc<crate::persist::Persistence>,
+    ) -> Self {
+        self.persist = Some(persist);
+        self
     }
 
-    /// Construct from config with an optional shared persistence
-    /// handle. The same handle is cloned (`Arc::clone`) into all three
-    /// backend variants so the file I/O state (sealed-records dir +
-    /// AEAD key) lives in one place. `None` disables seal-on-create
-    /// and delete-on-stop entirely (Phase 0 default off behaviour).
-    pub fn from_config_with_persist(
-        cfg: &SandboxConfig,
-        persist: Option<std::sync::Arc<crate::persist::Persistence>>,
-    ) -> Result<Self, String> {
-        Self::from_config_full(cfg, persist, None)
+    /// r3-A (T-8b-stress-r3 fix): pin sandbox creates to this Nomad
+    /// node_id. Installed on the inner `NomadCHBackend` when the
+    /// backend variant is `nomad-ch`. Other backends (`docker`, `k8s`)
+    /// silently ignore the value — the constraint is meaningful only
+    /// for the Nomad-driven path.
+    pub fn with_local_nomad_node_id(mut self, node_id: String) -> Self {
+        self.local_nomad_node_id = Some(node_id);
+        self
     }
 
-    /// r3-A (T-8b-stress-r3 fix): full constructor variant — same as
-    /// [`Self::from_config_with_persist`] plus a `local_nomad_node_id`
-    /// that is installed on the inner `NomadCHBackend` when the
-    /// backend is `nomad-ch`. Other backends (`docker`, `k8s`) ignore
-    /// the field — the constraint is meaningful only for the
-    /// Nomad-driven path.
-    ///
-    /// Boot wiring (`crate::AppState::from_config`) calls this
-    /// directly; tests + the legacy lifecycle examples keep using
-    /// [`Self::from_config`] / [`Self::from_config_with_persist`]
-    /// which thread `None` through.
-    pub fn from_config_full(
-        cfg: &SandboxConfig,
-        persist: Option<std::sync::Arc<crate::persist::Persistence>>,
-        local_nomad_node_id: Option<String>,
-    ) -> Result<Self, String> {
+    /// Materialize the [`Backend`] enum variant selected by
+    /// `cfg.backend`. Fails fast on an unknown backend string.
+    pub fn build(self) -> Result<Backend, String> {
+        let Self {
+            cfg,
+            persist,
+            local_nomad_node_id,
+        } = self;
         match cfg.backend.as_str() {
-            "docker" => Ok(Self::Docker(docker::DockerBackend::new(
+            "docker" => Ok(Backend::Docker(docker::DockerBackend::new(
                 cfg.clone(),
                 persist,
             ))),
-            "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone(), persist)?)),
-            "nomad-ch" => Ok(Self::NomadCh(std::sync::Arc::new(
+            "k8s" => Ok(Backend::K8s(k8s::K8sBackend::new(
+                cfg.clone(),
+                persist,
+            )?)),
+            "nomad-ch" => Ok(Backend::NomadCh(std::sync::Arc::new(
                 nomad_ch::NomadCHBackend::new(cfg.clone(), persist)?
                     .with_local_nomad_node_id(local_nomad_node_id),
             ))),
             other => Err(format!(
                 "unknown SANDBOX_BACKEND={other:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""
             )),
+        }
+    }
+}
+
+impl Backend {
+    /// Entry point to construct a [`Backend`]. Optional fields default
+    /// to `None`; opt in by chaining `.with_*()` setters before
+    /// `.build()`. See [`BackendBuilder`] for the available setters.
+    ///
+    /// Replaces the prior 3-level telescoping constructor cascade
+    /// (R27-I1) — see git history (commit landing R27-I1) for the
+    /// pre-builder shape.
+    ///
+    /// Typical call sites:
+    /// ```ignore
+    /// // tests / lifecycle examples (no persistence, no node-pin)
+    /// let backend = Backend::builder(&cfg).build()?;
+    ///
+    /// // boot path (`crate::AppState::from_config`)
+    /// let backend = Backend::builder(&cfg)
+    ///     .with_persist(persist)
+    ///     .with_local_nomad_node_id(node_id)
+    ///     .build()?;
+    /// ```
+    pub fn builder(cfg: &SandboxConfig) -> BackendBuilder<'_> {
+        BackendBuilder {
+            cfg,
+            persist: None,
+            local_nomad_node_id: None,
         }
     }
 

@@ -2826,7 +2826,7 @@ fn build_sweep_state(
     snapshot_enabled: bool,
 ) -> std::sync::Arc<zeroship_sandbox::AppState> {
     let cfg = sweep_test_cfg(snapshot_enabled);
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     // A5: `admin_token` is `pub(crate)`; out-of-crate construction
     // goes through `AppState::new_fixture` (admin_token = None).
     // A6b: `database` is `pub(crate)`; set via `with_database`
@@ -3427,7 +3427,7 @@ async fn phase_b_lookup_source_vm_ops_resolves_handle_against_nomad() {
     // returns Err.
     let mut cfg = sweep_test_cfg(true);
     cfg.nomad_ch.nomad_addr = nomad_addr;
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     let sid = Uuid::now_v7();
     let user_id = typed_id("usr");
     let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -3558,7 +3558,7 @@ async fn teardown_source_for_snapshot_preserves_host_dir_then_stop_reaps() {
     // 3. Construct the Backend (the full enum, not just the inner
     //    nomad-ch backend) so the test exercises the snapshot
     //    teardown's dispatch through `Backend::teardown_source_for_snapshot`.
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
 
     // 4. Inject a sandbox record. `_test_inject_sandbox` derives
     //    host_dir as `<host_state_dir>/<sandbox-id>/`; we materialise

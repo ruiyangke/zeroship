@@ -727,7 +727,7 @@ impl SandboxConfig {
     /// integration tests. Returns a `SandboxConfig` populated with
     /// defaults that exercise the `nomad-ch` backend wiring without
     /// touching the network (the network probe runs in
-    /// `Backend::from_config`, not here). The `token` field is set
+    /// [`crate::backend::Backend::probe`], not here). The `token` field is set
     /// to a non-empty placeholder; tests that need a specific
     /// bearer chain [`Self::with_token`].
     ///

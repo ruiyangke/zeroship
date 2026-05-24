@@ -65,7 +65,7 @@ async fn run() -> Result<(), String> {
 
     // 2. Build backend + registry directly (skip the HTTP layer for a
     //    pure-Rust lifecycle test).
-    let backend = Backend::from_config(&config)?;
+    let backend = Backend::builder(&config).build()?;
     println!("{G}-- probe backend --{Z}");
     let started = Instant::now();
     backend.probe().await?;
