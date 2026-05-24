@@ -22,9 +22,18 @@
 // Idempotency contract (so a Nomad-client restart that left a tap behind
 // doesn't fail StartTask):
 //
-//   - `ip tuntap add` → if the device already exists, treat the error as
-//     success. Stderr shape: "ioctl(TUNSETIFF): Device or resource busy"
-//     (most kernels) or "File exists".
+//   - `ip tuntap add` → if the device already exists, DELETE it first then
+//     re-create. The vm_index is serialised by the controller, so any
+//     pre-existing tap at the target name is from a prior alloc that
+//     should have been torn down (either DestroyTask never ran, or its
+//     best-effort teardown failed). Silently treating "already exists" as
+//     success leaves the tap with whatever state the prior alloc imprinted
+//     (DOWN/NO-CARRIER, possibly with the wrong IP); CH then emits the
+//     "Tap %s already exists. IP configuration will not be overwritten."
+//     WARN and exits. The pre-delete-on-collision policy ensures the next
+//     `ip tuntap add` lands on a clean kernel state. Stderr shape on
+//     collision: "ioctl(TUNSETIFF): Device or resource busy" (most kernels)
+//     or "File exists".
 //   - `ip addr add`   → if the address is already on the device, treat as
 //     success. Stderr shape: "RTNETLINK answers: File exists".
 //   - `ip link set up` → always idempotent (ip exits 0 if already up).
@@ -100,12 +109,16 @@ func setupTapForVM(idx uint16, subnetBaseOctet uint8) (string, error) {
 	return setupTapFn(idx, subnetBaseOctet)
 }
 
-// realSetupTap performs the host-side /30 plumbing for one VM. Idempotent
-// on each step; see the file-level comment for the precise error
-// semantics.
+// realSetupTap performs the host-side /30 plumbing for one VM. Each
+// step's idempotency policy is documented at the file-level comment.
 //
-// Steps mirror the bash wrapper's cold-boot tap setup:
+// Steps mirror the bash wrapper's cold-boot tap setup, with the
+// addition of a pre-delete on tap-add collision (T-8b-stress fix —
+// see file-level comment):
+//
 //  1. ip tuntap add dev <tap> mode tap user <owner>
+//     → on "already exists": ip link delete <tap> (tolerating
+//       Cannot-find-device), then retry the tuntap-add ONCE.
 //  2. ip addr add <host_ip>/30 dev <tap>
 //  3. ip link set dev <tap> up
 //
@@ -117,12 +130,35 @@ func realSetupTap(idx uint16, subnetBaseOctet uint8) (string, error) {
 		return "", err
 	}
 
-	// Step 1: create the tap device.
+	// Step 1: create the tap device. On collision (the prior alloc's
+	// DestroyTask didn't tear it down — observed under T-8b-stress with
+	// 9/11 wake failures), delete the stranded tap first then re-add.
+	// vm_index serialisation makes the tap name driver-owned for the
+	// lifetime of THIS alloc; leftover state is always safe to replace.
 	if out, err := runIP("tuntap", "add", "dev", tapName, "mode", "tap", "user", defaultTapOwner); err != nil {
 		if !isAlreadyExists(out) {
 			return "", fmt.Errorf("ip tuntap add %s: %w (output=%q)", tapName, err, string(out))
 		}
-		// Already exists → idempotent success.
+		// Tap leaked from a prior alloc. Delete it, then re-add. We
+		// shell to `ip link delete` directly (not realTeardownTap) so
+		// this step is isolated from the swappable teardownTapFn seam
+		// — operators / tests pinning teardown don't accidentally
+		// disable the collision-replace path. Tolerate
+		// Cannot-find-device on the delete (race window: someone else
+		// tore down the leftover between our tuntap-add EEXIST and
+		// our delete).
+		if delOut, delErr := runIP("link", "delete", tapName); delErr != nil {
+			if !isNoSuchDevice(delOut) {
+				return "", fmt.Errorf("ip link delete %s (collision-replace): %w (output=%q)", tapName, delErr, string(delOut))
+			}
+		}
+		// Second attempt at tuntap-add. If THIS still fails with
+		// already-exists, something else races us (e.g., concurrent
+		// driver / orchestration manipulating the same name) — surface
+		// it loudly rather than masking.
+		if out2, err2 := runIP("tuntap", "add", "dev", tapName, "mode", "tap", "user", defaultTapOwner); err2 != nil {
+			return "", fmt.Errorf("ip tuntap add %s (after collision-replace): %w (output=%q)", tapName, err2, string(out2))
+		}
 	}
 
 	// Step 2: assign the host-side /30 address.

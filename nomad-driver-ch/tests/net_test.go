@@ -218,27 +218,155 @@ func TestSetupTap_HappyPath(t *testing.T) {
 	}
 }
 
-// TestSetupTap_IdempotentOnExistingTap simulates iproute2 emitting "File
-// exists" on tuntap-add (the device was left behind by a prior alloc).
-// Setup must still succeed.
-func TestSetupTap_IdempotentOnExistingTap(t *testing.T) {
+// TestSetupTap_DeletesAndReAddsOnExistingTap simulates iproute2 emitting
+// "Device or resource busy" on tuntap-add — the device was left behind by
+// a prior alloc whose DestroyTask never ran (or whose best-effort teardown
+// failed). The driver MUST delete the stranded tap first, then re-add it,
+// rather than silently treating "already exists" as success (which leaves
+// the kernel state from the prior alloc and surfaces downstream as CH's
+// "Tap %s already exists. IP configuration will not be overwritten." WARN
+// followed by exit -1).
+//
+// Closes T-8b-stress Bug 2: 9/11 wake failures on tap-already-exists.
+// vm_index serialisation makes the tap name driver-owned, so a leftover
+// at the target name is always safe to replace.
+func TestSetupTap_DeletesAndReAddsOnExistingTap(t *testing.T) {
+	rec := newIPRecorder(
+		// Call 1: tuntap-add → EEXIST (the prior alloc's leftover).
+		ipScript{
+			matchPrefix: "tuntap",
+			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+		// Call 2: link delete → success (defaults handle this; but pin
+		// explicitly so a future re-ordering surfaces here, not in a
+		// flaky cluster smoke).
+		ipScript{matchPrefix: "link", out: nil, err: nil},
+		// Call 3: tuntap-add retry → success (defaults: nil/nil).
+		// Call 4: addr-add → success.
+		// Call 5: link-set-up → success.
+	)
+	prev := ch.SetRunIPForTest(rec.run)
+	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
+
+	if _, err := ch.CallRealSetupTap(7, 99); err != nil {
+		t.Fatalf("realSetupTap should pre-delete + re-add on existing tap, got %v", err)
+	}
+	calls := rec.recorded()
+	if len(calls) != 5 {
+		t.Fatalf("call count = %d, want 5 (tuntap-add-eexist, link-del, tuntap-add-retry, addr-add, link-set-up): %v", len(calls), calls)
+	}
+
+	// Pin the EXACT sequence — operator hand-debug depends on this
+	// ordering when triaging stranded-tap leftovers.
+	wantSeq := [][]string{
+		{"tuntap", "add", "dev", "zsbx-nm-7", "mode", "tap", "user", "nobody"},
+		{"link", "delete", "zsbx-nm-7"},
+		{"tuntap", "add", "dev", "zsbx-nm-7", "mode", "tap", "user", "nobody"},
+		{"addr", "add", "10.99.107.1/30", "dev", "zsbx-nm-7"},
+		{"link", "set", "dev", "zsbx-nm-7", "up"},
+	}
+	for i, want := range wantSeq {
+		if !argvEqual(calls[i], want) {
+			t.Errorf("call %d: %v, want %v", i, calls[i], want)
+		}
+	}
+}
+
+// TestSetupTap_ToleratesDeleteRaceOnReAdd simulates the delete step
+// returning Cannot-find-device — the leftover tap was torn down between
+// our tuntap-add EEXIST and our delete (e.g., another process raced us
+// to teardown). The retry tuntap-add must still succeed.
+func TestSetupTap_ToleratesDeleteRaceOnReAdd(t *testing.T) {
 	rec := newIPRecorder(
 		ipScript{
 			matchPrefix: "tuntap",
 			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
 			err:         &fakeExitErr{msg: "exit status 2"},
 		},
-		// addr + link default to success
+		// link delete races with another teardown → Cannot-find-device.
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("Cannot find device \"zsbx-nm-7\"\n"),
+			err:         &fakeExitErr{msg: "exit status 1"},
+		},
+		// retry tuntap-add succeeds; addr/link defaults.
 	)
 	prev := ch.SetRunIPForTest(rec.run)
 	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
 
 	if _, err := ch.CallRealSetupTap(7, 99); err != nil {
-		t.Fatalf("realSetupTap should tolerate existing tap, got %v", err)
+		t.Fatalf("realSetupTap should tolerate Cannot-find-device on delete-race, got %v", err)
 	}
 	calls := rec.recorded()
-	if len(calls) != 3 {
-		t.Errorf("call count = %d, want 3 (idempotency must not short-circuit subsequent steps): %v", len(calls), calls)
+	if len(calls) != 5 {
+		t.Errorf("call count = %d, want 5: %v", len(calls), calls)
+	}
+}
+
+// TestSetupTap_SurfacesUnrecognizedDeleteFailure asserts that a real
+// failure on the collision-replace delete (e.g., EPERM, EBUSY on a
+// kernel that wedges the device) bubbles up as a clean error rather than
+// being silently absorbed. Catches the inverse risk of the previous
+// "silently treat EEXIST as success" bug.
+func TestSetupTap_SurfacesUnrecognizedDeleteFailure(t *testing.T) {
+	rec := newIPRecorder(
+		ipScript{
+			matchPrefix: "tuntap",
+			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+		ipScript{
+			matchPrefix: "link",
+			out:         []byte("RTNETLINK answers: Operation not permitted\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+	)
+	prev := ch.SetRunIPForTest(rec.run)
+	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
+
+	_, err := ch.CallRealSetupTap(7, 99)
+	if err == nil {
+		t.Fatal("expected error on unrecognised delete failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "collision-replace") {
+		t.Errorf("err = %v, want hint that this is the collision-replace path", err)
+	}
+	if !strings.Contains(err.Error(), "Operation not permitted") {
+		t.Errorf("err = %v, want stderr captured", err)
+	}
+}
+
+// TestSetupTap_SurfacesPersistentEexist asserts that if the retry
+// tuntap-add ALSO returns EEXIST (some external process actively
+// re-creating the tap concurrently — pathological / non-vm_index-owned
+// scenario), we DON'T loop forever; the second EEXIST surfaces as an
+// error so the operator can investigate.
+func TestSetupTap_SurfacesPersistentEexist(t *testing.T) {
+	rec := newIPRecorder(
+		ipScript{
+			matchPrefix: "tuntap",
+			out:         []byte("ioctl(TUNSETIFF): Device or resource busy\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+		// delete → success (defaults)
+		ipScript{matchPrefix: "link", out: nil, err: nil},
+		// retry tuntap-add ALSO EEXIST — surface it.
+		ipScript{
+			matchPrefix: "tuntap",
+			out:         []byte("File exists\n"),
+			err:         &fakeExitErr{msg: "exit status 2"},
+		},
+	)
+	prev := ch.SetRunIPForTest(rec.run)
+	t.Cleanup(func() { ch.SetRunIPForTest(prev) })
+
+	_, err := ch.CallRealSetupTap(7, 99)
+	if err == nil {
+		t.Fatal("expected error on persistent EEXIST after collision-replace, got nil")
+	}
+	if !strings.Contains(err.Error(), "after collision-replace") {
+		t.Errorf("err = %v, want hint that the retry path failed", err)
 	}
 }
 
