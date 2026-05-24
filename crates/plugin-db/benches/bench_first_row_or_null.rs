@@ -1,5 +1,6 @@
-//! findOne lowering microbench — measures the full `&[Row] → JSON-string`
-//! path the SDK sees on a `findOne` call.
+//! `find().first()` lowering microbench — measures the full `&[Row] →
+//! JSON-string` path the SDK sees on a single-row read (`find` with
+//! `LIMIT 1`, the implementation of `Query.first()`).
 //!
 //! ## Why this bench exists
 //!
@@ -25,9 +26,10 @@
 //! ## Workloads
 //!
 //! Same three column-count shapes as `bench_row_to_json` (narrow / medium
-//! / wide), each wrapped in a single-row `Vec<Row>` — `findOne` is by
-//! definition a `LIMIT 1` query, so the bench mirrors that workload
-//! exactly. The OID mix (INT4 / INT8 / BOOL / TEXT / JSONB / TIMESTAMPTZ)
+//! / wide), each wrapped in a single-row `Vec<Row>` — `Query.first()`
+//! is by definition a `LIMIT 1` query, so the bench mirrors that
+//! workload exactly. The OID mix (INT4 / INT8 / BOOL / TEXT / JSONB /
+//! TIMESTAMPTZ)
 //! is identical too, for direct comparability.
 //!
 //! ## Running
@@ -190,9 +192,10 @@ fn bench_first_row_or_null(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
     group.warm_up_time(Duration::from_secs(1));
 
-    // findOne always materialises exactly one row at the SDK boundary
-    // (the SQL builder appends `LIMIT 1`), so each input is a 1-element
-    // slice. Keeping the slice constructed once outside the loop holds
+    // `Query.first()` always materialises exactly one row at the SDK
+    // boundary (the SQL builder appends `LIMIT 1`), so each input is a
+    // 1-element slice. Keeping the slice constructed once outside the
+    // loop holds
     // allocation out of the timed work — only the decode + serialise
     // path is measured.
     let narrow: [Row; 1] = [narrow_row()];

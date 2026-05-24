@@ -28,8 +28,7 @@ import {
 //
 // A `query` handler may read but must not write. The capability ctx
 // `QueryCtx.db.<col>` is a `ReadOnlyCollection<unknown>` — no
-// `create`, `update`, `delete`, `upsert`, `findOneAndUpdate`,
-// `findOneAndDelete`.
+// `create`, `update`, `delete`, `upsert`.
 
 // ✓ reads compile
 export const listUsers = query<unknown, unknown[]>(async (_args, ctx) => {

@@ -30,19 +30,17 @@ function makeMockNative() {
   const noopList = async () => [];
   const noopCount = async () => 0;
   const collection = (): unknown => ({
-    findOne: noop,
     find: noopList,
     insert: noop,
     insertMany: noopList,
-    updateOne: noop,
+    update: noop,
     updateMany: noopCount,
-    deleteOne: noop,
+    delete: noop,
     deleteMany: noopCount,
     upsert: noop,
     count: noopCount,
     distinct: noopList,
     aggregate: noopList,
-    findOrCreate: noop,
     search: noopList,
     near: noopList,
   });

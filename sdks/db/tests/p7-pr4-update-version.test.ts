@@ -22,7 +22,7 @@ import { OptimisticLockError } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 
-/** Native double that captures the last `updateOne` arguments so the
+/** Native double that captures the last `update` arguments so the
  *  test can assert the SDK no longer ships `$inc: { version: 1 }`. */
 function makeNativeCapturingUpdate() {
   const captured: { filter?: AnyRec; update?: AnyRec } = {};
@@ -30,7 +30,7 @@ function makeNativeCapturingUpdate() {
     registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
-        async updateOne(filter: AnyRec, update: AnyRec) {
+        async update(filter: AnyRec, update: AnyRec) {
           captured.filter = filter;
           captured.update = update;
           // Echo a faux row back so the SDK returns it through the
@@ -47,13 +47,13 @@ function makeNativeCapturingUpdate() {
 }
 
 /** Native double that throws a typed `version_mismatch` Error from
- *  `updateOne` to simulate the runtime's PR 4 CAS-failure path. */
+ *  `update` to simulate the runtime's PR 4 CAS-failure path. */
 function makeNativeVersionMismatch() {
   const native = {
     registerModel: () => Promise.resolve(),
     collection(_name: string) {
       return {
-        async updateOne(_filter: AnyRec, _update: AnyRec) {
+        async update(_filter: AnyRec, _update: AnyRec) {
           const e = new Error(
             "Optimistic concurrency check failed for posts post_x: expected version 5",
           );

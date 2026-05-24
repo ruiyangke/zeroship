@@ -22,7 +22,7 @@ function makeFailingNative(err: Error) {
     collection(_name: string) {
       return {
         async insert(_doc: AnyRec) { throw err; },
-        async updateOne(_f: AnyRec, _u: AnyRec) { throw err; },
+        async update(_f: AnyRec, _u: AnyRec) { throw err; },
         async find(_f: AnyRec, _o: AnyRec) { throw err; },
       };
     },

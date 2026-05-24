@@ -359,13 +359,13 @@ fn mask_date_decade(plaintext: &str) -> String {
 ///
 /// Two row shapes are handled uniformly:
 ///
-/// 1. **Aliased-SELECT shape** (`find` / `findOne`, PR 3 read-side
-///    flip): the SELECT clause already aliased `<col>_masked AS <col>`,
-///    so `row[col]` holds the masked string and no `<col>_masked` key
+/// 1. **Aliased-SELECT shape** (`find`, PR 3 read-side flip): the
+///    SELECT clause already aliased `<col>_masked AS <col>`, so
+///    `row[col]` holds the masked string and no `<col>_masked` key
 ///    is present. We wrap `row[col]` in place.
 ///
 /// 2. **Dual-write RETURNING-`*` shape** (`insert` / `update` /
-///    `upsert` / `findOrCreate` / `delete` write paths): the row carries
+///    `upsert` / `delete` write paths): the row carries
 ///    BOTH the parent (ciphertext / plaintext) AND the sibling
 ///    (`<col>_masked`). We prefer the sibling's value (the safe
 ///    default), drop the sibling key from the row, and wrap the parent

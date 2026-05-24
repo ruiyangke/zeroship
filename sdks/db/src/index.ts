@@ -2,7 +2,13 @@
 
 // Primary API — schema declarators
 export { t, naming, schema, MaskedValue } from "./types.js";
-export { ValidationError, OptimisticLockError } from "./errors.js";
+export {
+  ValidationError,
+  OptimisticLockError,
+  NotFoundError,
+  NotUniqueError,
+  InvalidOperationError,
+} from "./errors.js";
 export { withRetry, isOptimisticLockError } from "./with-retry.js";
 export type { WithRetryOptions } from "./with-retry.js";
 

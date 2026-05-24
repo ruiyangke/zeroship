@@ -9,7 +9,7 @@
  * deferred.
  *
  * The native surface is the Subscription v8_class (returned from
- * `env.db.openSubscription(collection)`) with `.next()` →
+ * `env.db.<collection>.openSubscription()`) with `.next()` →
  * Promise<SubscriptionEvent | null> and `.close()`. This module
  * wraps it into an `AsyncIterable` so callers can write:
  *
@@ -74,19 +74,24 @@ interface NativeSubscription {
   close(): void;
 }
 
-/** The native zeroship.db surface this module consumes. */
+/** The native zeroship.db surface this module consumes.
+ *  **P9 PR 1** — the `Db.openSubscription` duplicate entry was removed;
+ *  subscriptions are minted via `collection(name).openSubscription()`. */
+type NativeCollectionWithSub = {
+  openSubscription: () => NativeSubscription;
+};
 type NativeDb = {
-  openSubscription: (collection: string) => NativeSubscription;
+  collection: (name: string) => NativeCollectionWithSub;
 };
 
 /** Pull the native handle off `env`, throwing on a misconfigured runtime. */
 function getNativeDb(): NativeDb {
   const db = (env as { db?: NativeDb } | undefined)?.db;
-  if (!db || typeof db.openSubscription !== "function") {
+  if (!db || typeof db.collection !== "function") {
     throw Object.assign(
       new Error(
-        "@zeroship/db/subscribe: env.db.openSubscription not available — " +
-          "runtime is missing the Subscription v8_class surface.",
+        "@zeroship/db/subscribe: env.db.collection not available — " +
+          "runtime is missing the Db v8_class surface.",
       ),
       { code: "native_subscription_unavailable" as const },
     );
@@ -109,7 +114,17 @@ export function subscribe(collection: string): Subscription {
     );
   }
   const native = getNativeDb();
-  const sub = native.openSubscription(collection);
+  const col = native.collection(collection);
+  if (typeof col?.openSubscription !== "function") {
+    throw Object.assign(
+      new Error(
+        "@zeroship/db/subscribe: env.db.<collection>.openSubscription not available — " +
+          "runtime is missing the Subscription v8_class surface.",
+      ),
+      { code: "native_subscription_unavailable" as const },
+    );
+  }
+  const sub = col.openSubscription();
   let closed = false;
 
   function doClose(): void {

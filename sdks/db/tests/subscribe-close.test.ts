@@ -44,8 +44,8 @@ function makeFakeSub(events: (SubEvent | null)[]): FakeSub & { closes: number; p
 let subscribe: typeof import("../src/subscribe.js").subscribe;
 
 before(async () => {
-  // The subscribe module reads env.db.openSubscription lazily on each
-  // call, so we just install the test env up front.
+  // The subscribe module reads env.db.<col>.openSubscription lazily on
+  // each call, so we just install the test env up front.
   ({ subscribe } = await import("../src/subscribe.js"));
 });
 
@@ -55,8 +55,9 @@ describe("Subscription iterator — close semantics", () => {
       { kind: "change", op: "insert", collection: "m", pk: 1, columns: ["x"] },
       { kind: "change", op: "insert", collection: "m", pk: 2, columns: ["x"] },
     ]);
+    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
-      openSubscription: (_c: string) => fake,
+      collection: (_c: string) => ({ openSubscription: () => fake }),
     };
     const sub = subscribe("messages");
     const iter = sub[Symbol.asyncIterator]();
@@ -85,8 +86,9 @@ describe("Subscription iterator — close semantics", () => {
       { kind: "change", op: "insert", collection: "m", pk: 2, columns: ["x"] },
       { kind: "change", op: "insert", collection: "m", pk: 3, columns: ["x"] },
     ]);
+    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
-      openSubscription: (_c: string) => fake,
+      collection: (_c: string) => ({ openSubscription: () => fake }),
     };
     const sub = subscribe("messages");
 
@@ -104,8 +106,9 @@ describe("Subscription iterator — close semantics", () => {
       { kind: "change", op: "insert", collection: "m", pk: 1, columns: ["x"] },
       { kind: "change", op: "insert", collection: "m", pk: 2, columns: ["x"] },
     ]);
+    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
-      openSubscription: (_c: string) => fake,
+      collection: (_c: string) => ({ openSubscription: () => fake }),
     };
     const sub = subscribe("messages");
 
@@ -126,8 +129,9 @@ describe("Subscription iterator — close semantics", () => {
     // null from the native wrapper means "the native side closed itself";
     // the JS iterator must reflect that with {done: true}.
     const fake = makeFakeSub([]); // empty event list → next() returns null
+    // **P9 PR 1** — subscriptions are minted via `env.db.<col>.openSubscription()`.
     (env as { db?: unknown }).db = {
-      openSubscription: (_c: string) => fake,
+      collection: (_c: string) => ({ openSubscription: () => fake }),
     };
     const sub = subscribe("messages");
     const iter = sub[Symbol.asyncIterator]();

@@ -2,9 +2,9 @@
 //!
 //! `DbPlugin::build_instance` returns a `Db` instance from this
 //! module; the `NativeRegistrar` then attaches the Db-scoped entry
-//! points (`registerModel`, `beginTransaction`, `openSubscription`,
-//! the `replication*` ops) on top. `Migrations` is reached via the
-//! `migrations` getter on this class, not via flat callbacks.
+//! points (`registerModel`, `beginTransaction`, the `replication*`
+//! ops) on top. `Migrations` is reached via the `migrations` getter
+//! on this class, not via flat callbacks.
 //!
 //! ## What this class adds
 //!
@@ -44,7 +44,6 @@ use crate::orchestrator::transaction::begin_transaction_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
 use crate::v8_bridge::{read_json_arg, v8_value_to_serde_json};
 use crate::v8_classes::collection::mint_collection;
-use crate::v8_classes::subscription::refuse_mv_subscription;
 
 // ---------------------------------------------------------------------------
 // Db state
@@ -208,37 +207,6 @@ impl Db {
             }
         };
         Ok(begin_transaction_dispatch(scope, isolation, self.app_id.clone()).into())
-    }
-
-    /// `db.openSubscription(collection)` — mint a [`super::subscription::Subscription`]
-    /// wrapper for the given collection name.
-    #[v8_method]
-    #[v8_name = "openSubscription"]
-    fn open_subscription<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        collection: String,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        if collection.is_empty() {
-            return Err(OpError::type_error(
-                "db.openSubscription: collection must be a non-empty string",
-            ));
-        }
-        // P2 PR 3 — reject MV shadow names at the SDK boundary.
-        // Materialised-view refreshes write to `__zeroship_mv_<name>`
-        // tables; the CDC dispatcher's relation filter
-        // (`is_filtered_relation` in `backend/sqlite/cdc.rs`) drops
-        // those writes before they reach the broker. A subscription on
-        // an MV shadow name would therefore silently never fire — a
-        // loud refusal at the SDK boundary is the better UX. The error
-        // code matches `query::QueryError::InvalidCollection` so SDK
-        // callers can branch on `e.code === "invalid_collection"`
-        // (`crate::error::DbError::ValidationFailed::code`).
-        if let Some(refusal) = refuse_mv_subscription(&collection) {
-            return Err(refusal);
-        }
-        let obj = super::subscription::mint_subscription(scope, &self.app_id, &collection)?;
-        Ok(obj.into())
     }
 
     /// `db.startReplicationConsumer(opts?)` — provisions the per-app
@@ -485,8 +453,8 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 /// Called from `DbPlugin::build_instance` once per V8 isolate during
 /// `build_env_object`. The returned object becomes the `env.db`
 /// namespace value; the runtime then layers the Db-scoped entry
-/// points (registerModel, beginTransaction, openSubscription, …) on
-/// top via the `NativeRegistrar` returned by `DbPlugin::register`.
+/// points (registerModel, beginTransaction, …) on top via the
+/// `NativeRegistrar` returned by `DbPlugin::register`.
 pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,

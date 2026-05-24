@@ -2051,8 +2051,8 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
 ///
 /// Thin shim around [`build_find_with_schema`] that passes `None` for the
 /// schema — the legacy CRUD entry point. Callers that have a cached schema
-/// available (the orchestrator's `dispatch_find` / `dispatch_find_one`)
-/// should prefer [`build_find_with_schema`] so the SELECT clause can
+/// available (the orchestrator's `dispatch_find`) should prefer
+/// [`build_find_with_schema`] so the SELECT clause can
 /// substitute `"<col>_masked" AS "<col>"` for every masked column (P5.5 PR 3,
 /// "default reads serve from the masked sibling").
 pub fn build_find(

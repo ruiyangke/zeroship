@@ -57,13 +57,14 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
       registerModel: () => Promise.resolve(),
       collection: () => ({
         async find() { return [{ id: 1, title: "buy milk" }]; },
-        async findOne() { return null; },
+        // **P9 PR 1** — Collection-scoped openSubscription replaces the
+        // deleted Db-level entry point.
+        openSubscription: () => {
+          const s = makeFakeSub();
+          subs.push(s);
+          return s;
+        },
       }),
-      openSubscription: () => {
-        const s = makeFakeSub();
-        subs.push(s);
-        return s;
-      },
     } as unknown as ZeroshipDb;
 
     installEnv(native);
@@ -119,9 +120,8 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
       registerModel: () => Promise.resolve(),
       collection: () => ({
         async find() { return [] as unknown[]; },
-        async findOne() { return null; },
+        openSubscription: () => makeFakeSub(),
       }),
-      openSubscription: () => makeFakeSub(),
     } as unknown as ZeroshipDb;
 
     installEnv(native);
@@ -162,13 +162,12 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
           if (runCount === 1) return [{ id: 1, title: "ok" }];
           throw new Error("rerun failed: synthetic");
         },
-        async findOne() { return null; },
+        openSubscription: () => {
+          const s = makeFakeSub();
+          subs.push(s);
+          return s;
+        },
       }),
-      openSubscription: () => {
-        const s = makeFakeSub();
-        subs.push(s);
-        return s;
-      },
     } as unknown as ZeroshipDb;
 
     installEnv(native);
@@ -329,18 +328,24 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
         };
       },
       collection: () => ({
-        async find(filter: Record<string, unknown>) {
-          events.push(`find:${JSON.stringify(filter)}`);
+        async find(filter: Record<string, unknown>, opts: Record<string, unknown>) {
+          // **P9 PR 1** — split batched (`$in`) vs single (`limit:1`)
+          // shapes so the same fixture covers both paths the SDK now
+          // exercises.
           const idClause = filter.id as { $in?: number[] } | undefined;
           if (idClause && Array.isArray(idClause.$in)) {
+            events.push(`findBatched:${JSON.stringify(filter)}`);
             return idClause.$in.map((id) => ({ id, v: `row-${id}` }));
           }
+          if (opts && (opts as { limit?: number }).limit === 1) {
+            events.push(`findSingle:${JSON.stringify(filter)}`);
+            if (typeof filter.id === "number" || typeof filter.id === "string") {
+              return [{ id: filter.id, v: `row-${String(filter.id)}` }];
+            }
+            return [];
+          }
+          events.push(`find:${JSON.stringify(filter)}`);
           return [];
-        },
-        async findOne(filter: Record<string, unknown>) {
-          events.push(`findOne:${JSON.stringify(filter)}`);
-          if (typeof filter.id === "number") return { id: filter.id, v: `row-${filter.id}` };
-          return null;
         },
       }),
     } as unknown as ZeroshipDb;
@@ -366,7 +371,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
     // behaviour would route this through the loader (because
     // `_txDepth` wasn't bumped yet). The post-fix behaviour bumps
     // synchronously, so `_txDepth > 0` at the call boundary forces
-    // the findOne fallback path.
+    // the single-row find path (formerly the findOne fallback).
     const getDuringBegin = db.users.get(42);
 
     // Release begin.
@@ -375,17 +380,17 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
 
     assert.equal(txRes.error, null);
     assert.equal(getRes.error, null);
-    // With the fix, this get goes through findOne (bypasses loader)
-    // because _txDepth was already > 0 at the call boundary.
-    const findCalls = events.filter((e) => e.startsWith("find:"));
-    const findOneCalls = events.filter((e) => e.startsWith("findOne:"));
+    // With the fix, this get goes through find with limit:1 (bypasses
+    // loader) because _txDepth was already > 0 at the call boundary.
+    const batchedCalls = events.filter((e) => e.startsWith("findBatched:"));
+    const singleCalls = events.filter((e) => e.startsWith("findSingle:"));
     assert.equal(
-      findCalls.length, 0,
+      batchedCalls.length, 0,
       `expected no loader-batched find, got events=${JSON.stringify(events)}`,
     );
     assert.equal(
-      findOneCalls.length, 1,
-      `expected one findOne (loader bypass), got events=${JSON.stringify(events)}`,
+      singleCalls.length, 1,
+      `expected one single-row find (loader bypass), got events=${JSON.stringify(events)}`,
     );
   });
 

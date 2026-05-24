@@ -536,8 +536,8 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
   update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
-  delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }): Promise<Row<S> | null>;
-  deleteMany(filter: Filter<S>, opts?: { hard?: boolean }): Promise<{ deletedCount: number }>;
+  delete(idOrFilter: number | Filter<S>): Promise<Row<S> | null>;
+  deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
@@ -556,6 +556,14 @@ export type TxQuery<
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
   after(id: number): TxQuery<S, P, AllSchemas>;
   with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  /** **P9 PR 1** — first matching row or `null`; throws on native error. */
+  first(): Promise<P | null>;
+  /** **P9 PR 1** — strict exactly-one; throws `NotFoundError` on zero or
+   *  `NotUniqueError` on >1 matches. */
+  unique(): Promise<P>;
+  /** **P9 PR 1** — last matching row in the current sort, or `null`;
+   *  throws `InvalidOperationError` if no sort was set. */
+  last(): Promise<P | null>;
   then<TResult1 = P[], TResult2 = never>(
     resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
     reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
@@ -637,11 +645,11 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async updateMany(filter: Filter<S>, patch: UpdateExpression<S>) {
       return unwrap(await collection.updateMany(filter, patch));
     },
-    async delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }) {
-      return unwrap(await collection.delete(idOrFilter, opts));
+    async delete(idOrFilter: number | Filter<S>) {
+      return unwrap(await collection.delete(idOrFilter));
     },
-    async deleteMany(filter: Filter<S>, opts?: { hard?: boolean }) {
-      return unwrap(await collection.deleteMany(filter, opts));
+    async deleteMany(filter: Filter<S>) {
+      return unwrap(await collection.deleteMany(filter));
     },
     async count(filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.count(filter));
@@ -673,6 +681,17 @@ function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
       (query as unknown as { with(s: WithSpec): unknown }).with(spec);
       return wrapped;
     }) as TxQuery<S, Row<S>>["with"],
+    // **P9 PR 1** — Result→throw shims for the new terminals so the
+    // tx-callback contract (throw, not return Result) stays uniform.
+    async first(): Promise<Row<S> | null> {
+      return unwrap(await query.first());
+    },
+    async unique(): Promise<Row<S>> {
+      return unwrap(await query.unique());
+    },
+    async last(): Promise<Row<S> | null> {
+      return unwrap(await query.last());
+    },
     then<TResult1 = Row<S>[], TResult2 = never>(
       resolve?: ((value: Row<S>[]) => TResult1 | PromiseLike<TResult1>) | null,
       reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,

@@ -2,8 +2,9 @@
  * `db.live(queryFn)` — reactive query layer over the coarse-grained
  * per-table subscription broker.
  *
- * Today `env.db.openSubscription(name)` emits one event per row mutation
- * on a collection. App code that wants a *query-shaped* live primitive
+ * Today `env.db.<collection>.openSubscription()` emits one event per
+ * row mutation on a collection. App code that wants a *query-shaped*
+ * live primitive
  * (initial result + a fresh result on every relevant change) has to wire
  * the refetch + diff loop itself. `db.live(queryFn)` does that wiring:
  *
@@ -14,7 +15,7 @@
  * v1 scope (intentionally small):
  *
  *   - Table-set detection: while the first `queryFn()` runs, every
- *     `Collection.find/findOne/get/...` call pushes the collection name
+ *     `Collection.find/get/...` call pushes the collection name
  *     into a module-level tracking context (`liveTracker.current`).
  *     The set is frozen after the first execution — subsequent reruns
  *     do NOT re-observe (a queryFn that conditionally touches different

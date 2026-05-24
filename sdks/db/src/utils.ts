@@ -75,7 +75,7 @@ export function rehydrateMaskedValues(doc: PlainObject): PlainObject {
  *  into `MaskedValue<T>` instances. See [`rehydrateMaskedValues`].
  *  Every Collection read method funnels through `mapResultDoc`, so the
  *  rehydration is applied once at the boundary regardless of the call
- *  site (find / findOne / insert RETURNING / update RETURNING / ...).
+ *  site (find / insert RETURNING / update RETURNING / ...).
  */
 export function mapResultDoc(doc: PlainObject, toField: (s: string) => string): PlainObject {
   const out: PlainObject = {};

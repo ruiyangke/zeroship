@@ -3,10 +3,11 @@
  * body must be caught by the outer tx wrapper and surface as
  * `result.error`, not as an unhandled rejection. Pins the path:
  *
- *   tx.users.update(...) -> Collection.update() -> updateOne() returns null
- *   (CAS miss) -> Collection.update throws OptimisticLockError ->
- *   `unwrap` re-throws -> tx body rejects -> outer wrapper catches and
- *   rolls back -> result.error === OptimisticLockError instance.
+ *   tx.users.update(...) -> Collection.update() -> native update()
+ *   returns null (CAS miss) -> Collection.update throws
+ *   OptimisticLockError -> `unwrap` re-throws -> tx body rejects ->
+ *   outer wrapper catches and rolls back -> result.error ===
+ *   OptimisticLockError instance.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -30,8 +31,8 @@ function makeNativeCasMissOnUpdate() {
     },
     collection(_name: string) {
       return {
-        async updateOne(filter: AnyRec, update: AnyRec) {
-          calls.push({ method: "updateOne", args: [filter, update] });
+        async update(filter: AnyRec, update: AnyRec) {
+          calls.push({ method: "update", args: [filter, update] });
           // Returning null with a versioned filter (version: N) drives
           // Collection.update to throw OptimisticLockError.
           return null;
@@ -59,7 +60,7 @@ describe("db.transaction — OptimisticLockError surfaces via result.error", () 
 
     const result = await db.transaction(async (tx) => {
       // Versioned filter: { id: 1, version: 7 } — the CAS guard
-      // detects the modified row (updateOne returns null) and the
+      // detects the modified row (native update returns null) and the
       // Collection throws OptimisticLockError.
       const out = await tx.widgets.update(
         { id: 1, version: 7 } as never,
@@ -92,7 +93,7 @@ describe("db.transaction — OptimisticLockError surfaces via result.error", () 
       },
       collection(_name: string) {
         return {
-          async updateOne(_f: AnyRec, _u: AnyRec) { return { id: 1, name: "x" }; },
+          async update(_f: AnyRec, _u: AnyRec) { return { id: 1, name: "x" }; },
         };
       },
     } as unknown as ZeroshipDb;

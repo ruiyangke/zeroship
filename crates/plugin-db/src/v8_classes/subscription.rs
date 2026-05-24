@@ -73,9 +73,10 @@ impl Drop for Subscription {
 #[allow(dead_code)] // Methods invoked via V8 callbacks; Rust can't trace through extern.
 impl Subscription {
     /// `new Subscription()` from JS rejects — real instances come from
-    /// [`mint_subscription`] via `db.openSubscription(name)` /
-    /// `collection.openSubscription()`, which registers the broker
-    /// entry as part of minting.
+    /// [`mint_subscription`] via `collection.openSubscription()` (the
+    /// duplicate `db.openSubscription(name)` Db-level entry point was
+    /// removed in P9 PR 1), which registers the broker entry as part
+    /// of minting.
     #[v8_constructor]
     fn new() -> Result<Subscription, OpError> {
         Err(OpError::type_error("Illegal constructor"))
@@ -154,9 +155,10 @@ impl Subscription {
 /// `mv_subscribe_rejected_at_sdk`.
 ///
 /// Returns `Some(OpError)` for refused names and `None` for OK names.
-/// Used by both `Db::open_subscription` (path `db.openSubscription(...)`)
-/// and `Collection::open_subscription` (path
-/// `db.collection(...).openSubscription()`). The wire `code` is
+/// Used by `Collection::open_subscription` (path
+/// `db.collection(...).openSubscription()`). P9 PR 1 removed the
+/// duplicate `Db::open_subscription` entry point; the Collection-
+/// scoped surface is the only path now. The wire `code` is
 /// `invalid_collection` — the same code
 /// `query::QueryError::InvalidCollection` flows through
 /// (`crate::error::From<QueryError> for DbError`), so SDK callers

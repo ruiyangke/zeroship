@@ -302,7 +302,7 @@ describe("C2 — partial update against a flat-expanded union", () => {
       registerModel: () => Promise.resolve(),
       collection(_name: string) {
         return {
-          async updateOne(_f: Record<string, unknown>, _u: Record<string, unknown>) {
+          async update(_f: Record<string, unknown>, _u: Record<string, unknown>) {
             return { id: 1, kind: "login", userId: 1, ip: "x" };
           },
         };

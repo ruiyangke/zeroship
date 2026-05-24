@@ -24,9 +24,10 @@
 //!   row to `cancelled` + releases the advisory lock) if user code
 //!   drops the handle without `.cancel()` / `.reset()` / a terminal
 //!   `.commitBatch(isDone=true)`.
-//! - [`subscription`] — `env.db.openSubscription(collection)` returns
-//!   a `Subscription` wrapper. GC finalizer closes the broker entry
-//!   so callers that drop the wrapper without `.close()` still release
+//! - [`subscription`] — `env.db.<collection>.openSubscription()` (P9 PR 1:
+//!   the duplicate `env.db.openSubscription(name)` entry was removed)
+//!   returns a `Subscription` wrapper. GC finalizer closes the broker
+//!   entry so callers that drop the wrapper without `.close()` still release
 //!   the slot.
 
 pub mod collection;

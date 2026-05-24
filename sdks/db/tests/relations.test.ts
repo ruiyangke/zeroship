@@ -22,9 +22,19 @@ import { Query } from "../src/query.js";
 
 type AnyRec = Record<string, unknown>;
 
+/**
+ * **P9 PR 1** — the SDK's `get()` now routes through `find` with
+ * `{limit:1}` (the native `findOne` v8_method was removed). The mock
+ * splits `find` calls into two buckets:
+ *   - `findBatched`: the `{id: {$in: [...]}}` shape from the IdLoader
+ *   - `findSingle`: the `{limit:1}` shape (formerly the `findOne` call)
+ *
+ * Old test assertions on `calls.findOne` migrate to `calls.findSingle`.
+ */
 type CallLog = {
   find: { collection: string; filter: AnyRec; opts: AnyRec }[];
-  findOne: { collection: string; filter: AnyRec; opts: AnyRec }[];
+  findBatched: { collection: string; filter: AnyRec; opts: AnyRec }[];
+  findSingle: { collection: string; filter: AnyRec; opts: AnyRec }[];
 };
 
 /** Mock native that returns rows by table. The find handler understands
@@ -38,7 +48,7 @@ type CallLog = {
 function makeMock(
   tables: Record<string, Record<number, AnyRec>>,
 ): { native: ZeroshipDb; calls: CallLog } {
-  const calls: CallLog = { find: [], findOne: [] };
+  const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
   const native = {
     registerModel: () => Promise.resolve(),
     beginTransaction: async () => ({
@@ -47,22 +57,6 @@ function makeMock(
     }),
     collection(name: string) {
       return {
-        async findOne(filter: AnyRec, opts: AnyRec) {
-          calls.findOne.push({ collection: name, filter, opts });
-          const rows = tables[name] ?? {};
-          const id = filter.id;
-          if (typeof id === "number" || typeof id === "string") {
-            return (rows as Record<string, AnyRec>)[String(id)] ?? null;
-          }
-          for (const r of Object.values(rows)) {
-            let ok = true;
-            for (const [k, v] of Object.entries(filter)) {
-              if (r[k] !== v) { ok = false; break; }
-            }
-            if (ok) return r;
-          }
-          return null;
-        },
         async find(filter: AnyRec, opts: AnyRec) {
           calls.find.push({ collection: name, filter, opts });
           const rows = tables[name] ?? {};
@@ -71,15 +65,19 @@ function makeMock(
             | string
             | number
             | undefined;
-          if (
+          const isBatched =
             idClause !== null &&
             typeof idClause === "object" &&
-            Array.isArray((idClause as AnyRec).$in)
-          ) {
+            Array.isArray((idClause as AnyRec).$in);
+          if (isBatched) {
+            calls.findBatched.push({ collection: name, filter, opts });
             const ids = (idClause as { $in: (string | number)[] }).$in;
             return ids
               .map((i) => (rows as Record<string, AnyRec>)[String(i)])
               .filter(Boolean);
+          }
+          if (opts && (opts as AnyRec).limit === 1) {
+            calls.findSingle.push({ collection: name, filter, opts });
           }
           if (typeof idClause === "number" || typeof idClause === "string") {
             const r = (rows as Record<string, AnyRec>)[String(idClause)];
@@ -126,7 +124,8 @@ function makeDb(calls?: CallLog) {
   const mock = makeMock(tables);
   if (calls) {
     calls.find = mock.calls.find;
-    calls.findOne = mock.calls.findOne;
+    calls.findBatched = mock.calls.findBatched;
+    calls.findSingle = mock.calls.findSingle;
   }
   const db = installSchemaForTest(
     {
@@ -190,9 +189,10 @@ describe("with: { fk: true } — relation-aware reads", () => {
     assert.ok(data);
     assert.deepEqual((data as AnyRec).userId, { id: 1, email: "alice@example.com", name: "Alice" });
 
-    // get(id) with `with` skips the DataLoader path and goes through findOne.
-    assert.equal(calls.findOne.length, 1, "get(id, {with}) bypasses the loader");
-    assert.equal(calls.findOne[0].collection, "todos");
+    // get(id) with `with` skips the DataLoader path and goes through
+    // find with limit:1 (formerly findOne).
+    assert.equal(calls.findSingle.length, 1, "get(id, {with}) bypasses the loader");
+    assert.equal(calls.findSingle[0].collection, "todos");
   });
 
   test("null FK value → joined field is null", async () => {
@@ -375,7 +375,7 @@ describe("with: parallel relation loading", () => {
     slowTargets: Set<string>,
     delayMs: number,
   ): { native: ZeroshipDb; calls: CallLog } {
-    const calls: CallLog = { find: [], findOne: [] };
+    const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
     const native = {
       registerModel: () => Promise.resolve(),
       beginTransaction: async () => ({
@@ -384,10 +384,6 @@ describe("with: parallel relation loading", () => {
       }),
       collection(name: string) {
         return {
-          async findOne(filter: AnyRec, opts: AnyRec) {
-            calls.findOne.push({ collection: name, filter, opts });
-            return null;
-          },
           async find(filter: AnyRec, opts: AnyRec) {
             calls.find.push({ collection: name, filter, opts });
             if (slowTargets.has(name)) {
@@ -612,7 +608,7 @@ describe("with: soft-delete + relations contract", () => {
         101: { id: 101, userId: 2, title: "bob todo" },
       },
     };
-    const calls: CallLog = { find: [], findOne: [] };
+    const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
     const native = {
       registerModel: () => Promise.resolve(),
       beginTransaction: async () => ({
@@ -621,10 +617,6 @@ describe("with: soft-delete + relations contract", () => {
       }),
       collection(name: string) {
         return {
-          async findOne(filter: AnyRec, opts: AnyRec) {
-            calls.findOne.push({ collection: name, filter, opts });
-            return null;
-          },
           async find(filter: AnyRec, opts: AnyRec) {
             calls.find.push({ collection: name, filter, opts });
             const rows = tables[name] ?? {};

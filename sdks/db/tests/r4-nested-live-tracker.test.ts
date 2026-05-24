@@ -61,7 +61,6 @@ function makeMockNative() {
     registerModel: async () => undefined,
     collection(name: string) {
       return {
-        async findOne(_f: AnyRec, _o: AnyRec) { return null; },
         async find(_f: AnyRec, _o: AnyRec) {
           return [...(rowsByTable[name] ?? [])];
         },
@@ -69,12 +68,14 @@ function makeMockNative() {
           (rowsByTable[name] ??= []).push(row);
           return row;
         },
+        // **P9 PR 1** — Collection-scoped openSubscription replaces
+        // the deleted Db-level entry point.
+        openSubscription(): FakeSub {
+          const sub = makeFakeSub();
+          (subs[name] ??= []).push(sub);
+          return sub;
+        },
       };
-    },
-    openSubscription(name: string): FakeSub {
-      const sub = makeFakeSub();
-      (subs[name] ??= []).push(sub);
-      return sub;
     },
   };
   return { native: native as unknown as ZeroshipDb, rowsByTable, subs };

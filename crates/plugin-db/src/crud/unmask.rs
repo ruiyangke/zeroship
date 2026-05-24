@@ -1159,7 +1159,7 @@ async fn write_audit_bulk_row(
 // ---------------------------------------------------------------------------
 
 /// **P5.5 PR 7** — pre-query authorization for the
-/// `findOne({...}, { unmask: [...], actor })` hint.
+/// `find({...}, { unmask: [...], actor })` hint.
 ///
 /// Resolves every column in `unmask_columns` against the cached
 /// schema, then walks every (column, classification) pair through
@@ -1167,7 +1167,7 @@ async fn write_audit_bulk_row(
 /// entirely — we do NOT silently fall back to masked-only because
 /// that would conceal the authorisation failure from the caller.
 ///
-/// Called from `crud::dispatch_find_one` / `dispatch_find` BEFORE
+/// Called from `crud::dispatch_find` BEFORE
 /// `build_find_with_schema` fires the SQL.
 ///
 /// Returns `Ok(())` on full authorisation; on denial returns
@@ -1276,7 +1276,7 @@ pub async fn audit_query_hint_granted(
     .await
 }
 
-/// **P5.5 PR 7** — rewrite rows from a find/findOne result so the
+/// **P5.5 PR 7** — rewrite rows from a `find` result so the
 /// `unmask`-listed columns carry plaintext instead of the
 /// `__zsmask__`-wrapped sibling.
 ///

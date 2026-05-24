@@ -14,21 +14,38 @@ import { t } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 
+/**
+ * **P9 PR 1** — the SDK's `get()` (and every other "first matching row"
+ * path) now routes through `find` with `{ limit: 1 }`. The mock log
+ * splits `find` calls into two buckets:
+ *   - `findBatched`: the `{id: {$in: [...]}}` shape coming from the
+ *     IdLoader's batched flush.
+ *   - `findSingle`: the `{ limit: 1 }` shape coming from a non-loader
+ *     `Collection.get(...)` (filter object / select / orderBy / tx).
+ *
+ * Old test asserts on `calls.findOne.length` map to `calls.findSingle.length`.
+ */
 type CallLog = {
+  /** Every `find` call, in order. */
   find: { filter: AnyRec; opts: AnyRec }[];
-  findOne: { filter: AnyRec; opts: AnyRec }[];
+  /** Subset of `find` whose filter is `{id: {$in: [...]}}` — the IdLoader's
+   *  batched flush. */
+  findBatched: { filter: AnyRec; opts: AnyRec }[];
+  /** Subset of `find` whose opts include `limit: 1` — the post-P9 "first
+   *  matching row" shape (formerly the native `findOne` v8_method). */
+  findSingle: { filter: AnyRec; opts: AnyRec }[];
 };
 
-/** A mock native that records every `find` / `findOne` call and returns
- *  rows from the provided row table keyed by id.
+/** A mock native that records every `find` call and returns rows from
+ *  the provided row table keyed by id.
  *
  *  **P7 PR 3** — `Collection.get(N)` stringifies the numeric id on the
- *  way into the IdLoader (`String(idOrFilter)`); the mock now accepts
- *  both `number` and `string` lookups by coercing via `String()` so
- *  pre-PR 3 row tables keyed by `number` still match the new wire shape
- *  without rewriting every fixture. */
+ *  way into the IdLoader (`String(idOrFilter)`); the mock accepts both
+ *  `number` and `string` lookups by coercing via `String()` so pre-PR 3
+ *  row tables keyed by `number` still match the new wire shape without
+ *  rewriting every fixture. */
 function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Error }) {
-  const calls: CallLog = { find: [], findOne: [] };
+  const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
   let beginCount = 0;
   // String-keyed view onto the same row table — the loader sends string
   // typed_id values on the wire post-PR 3, but the fixtures here key
@@ -46,41 +63,40 @@ function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Erro
     },
     collection(_name: string) {
       return {
-        async findOne(filter: AnyRec, o: AnyRec) {
-          calls.findOne.push({ filter, opts: o });
-          // Match by id when present, otherwise return the first row
-          // whose field map matches every filter key. Good enough for
-          // tests that probe a small fixed row table.
-          const id = filter.id;
-          if (typeof id === "number" || typeof id === "string") {
-            return stringIndex[String(id)] ?? null;
+        async find(filter: AnyRec, o: AnyRec) {
+          calls.find.push({ filter, opts: o });
+          const idClause = filter.id;
+          // `{id: {$in: [...]}}` — IdLoader batched path. Bucketed
+          // BEFORE the throw so error-path tests can still assert on
+          // the dispatch shape.
+          const isBatched =
+            idClause !== null &&
+            typeof idClause === "object" &&
+            Array.isArray((idClause as AnyRec).$in);
+          if (isBatched) {
+            calls.findBatched.push({ filter, opts: o });
+          } else if (o && (o as AnyRec).limit === 1) {
+            calls.findSingle.push({ filter, opts: o });
+          }
+          if (opts?.findThrows) throw opts.findThrows;
+          if (isBatched) {
+            const ids = (idClause as { $in: (string | number)[] }).$in;
+            return ids.map((i) => stringIndex[String(i)]).filter(Boolean);
+          }
+          // Single-row resolve: match by id when present, otherwise
+          // return the first row whose field map matches every filter
+          // key. Good enough for tests that probe a small fixed row
+          // table.
+          if (typeof idClause === "number" || typeof idClause === "string") {
+            const r = stringIndex[String(idClause)];
+            return r ? [r] : [];
           }
           for (const r of Object.values(rows)) {
             let ok = true;
             for (const [k, v] of Object.entries(filter)) {
               if (r[k] !== v) { ok = false; break; }
             }
-            if (ok) return r;
-          }
-          return null;
-        },
-        async find(filter: AnyRec, o: AnyRec) {
-          calls.find.push({ filter, opts: o });
-          if (opts?.findThrows) throw opts.findThrows;
-          // `{id: {$in: [...]}}` from the loader path.
-          const idClause = filter.id;
-          if (
-            idClause !== null &&
-            typeof idClause === "object" &&
-            Array.isArray((idClause as AnyRec).$in)
-          ) {
-            const ids = (idClause as { $in: (string | number)[] }).$in;
-            return ids.map((i) => stringIndex[String(i)]).filter(Boolean);
-          }
-          // Fallback — flat id equality (unusual in this suite).
-          if (typeof idClause === "number" || typeof idClause === "string") {
-            const r = stringIndex[String(idClause)];
-            return r ? [r] : [];
+            if (ok) return [r];
           }
           return [];
         },
@@ -114,16 +130,16 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.equal(a.data?.email, "a@b.com");
     assert.equal(b.data?.email, "b@b.com");
 
-    assert.equal(calls.find.length, 1, "expected exactly one underlying find");
-    assert.equal(calls.findOne.length, 0, "findOne should not be called");
+    assert.equal(calls.findBatched.length, 1, "expected exactly one batched find");
+    assert.equal(calls.findSingle.length, 0, "no single-row find expected");
     // **P7 PR 3** — the loader sends typed_id strings on the wire;
     // `Collection.get(1)` is `String(1) === "1"` going into `$in`.
-    const idClause = calls.find[0].filter.id as { $in: string[] };
+    const idClause = calls.findBatched[0].filter.id as { $in: string[] };
     assert.ok(idClause && Array.isArray(idClause.$in));
     assert.deepEqual([...idClause.$in].sort(), ["1", "2"]);
   });
 
-  test("filter object falls through to direct dispatch (findOne)", async () => {
+  test("filter object falls through to direct dispatch (find with limit:1)", async () => {
     const { native, calls } = makeMockNative({
       1: { id: 1, email: "a@b.com", name: "Alice" },
     });
@@ -146,8 +162,8 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.equal(byFilter.data?.email, "a@b.com");
 
     // The two numeric gets coalesce; the filter call dispatches directly.
-    assert.equal(calls.find.length, 1, "one batched find for numeric ids");
-    assert.equal(calls.findOne.length, 1, "filter call uses findOne directly");
+    assert.equal(calls.findBatched.length, 1, "one batched find for numeric ids");
+    assert.equal(calls.findSingle.length, 1, "filter call uses find with limit:1");
   });
 
   test("get(id, {select: [...]}) bypasses the loader", async () => {
@@ -165,8 +181,8 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
     const { data } = await Users.get(1, { select: ["email"] });
     assert.ok(data);
-    assert.equal(calls.find.length, 0);
-    assert.equal(calls.findOne.length, 1, "select narrows → direct findOne");
+    assert.equal(calls.findBatched.length, 0);
+    assert.equal(calls.findSingle.length, 1, "select narrows → direct find with limit:1");
   });
 
   test("get(id) for missing row resolves to null", async () => {
@@ -186,7 +202,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.equal(hit.data?.email, "a@b.com");
     assert.equal(miss.error, null);
     assert.equal(miss.data, null);
-    assert.equal(calls.find.length, 1);
+    assert.equal(calls.findBatched.length, 1);
   });
 
   test("an error in the batched find rejects every queued caller", async () => {
@@ -215,10 +231,10 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.equal(a.error!.message, "batched fetch failed");
     assert.equal(b.error!.message, "batched fetch failed");
     assert.equal(c.error!.message, "batched fetch failed");
-    assert.equal(calls.find.length, 1, "one batched call, all 3 rejected");
+    assert.equal(calls.findBatched.length, 1, "one batched call, all 3 rejected");
   });
 
-  test("inside db.transaction(...) the loader is bypassed (each get uses findOne)", async () => {
+  test("inside db.transaction(...) the loader is bypassed (each get uses find with limit:1)", async () => {
     const { native, calls } = makeMockNative({
       1: { id: 1, email: "a@b.com", name: "Alice" },
       2: { id: 2, email: "b@b.com", name: "Bob" },
@@ -241,8 +257,8 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.ok(data);
     assert.equal(data!.u1?.email, "a@b.com");
     assert.equal(data!.u2?.email, "b@b.com");
-    assert.equal(calls.findOne.length, 2, "tx-active reads dispatch directly");
-    assert.equal(calls.find.length, 0);
+    assert.equal(calls.findSingle.length, 2, "tx-active reads dispatch directly with limit:1");
+    assert.equal(calls.findBatched.length, 0);
   });
 
   test("pre-tx batched reads complete BEFORE beginTransaction runs", async () => {
@@ -270,17 +286,22 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       },
       collection(name: string) {
         return {
-          async findOne(filter: AnyRec, _o: AnyRec) {
-            events.push(`findOne(${name},${JSON.stringify(filter)})`);
-            const id = filter.id;
-            if (typeof id === "number") return rowsByTable[name]?.[id] ?? null;
-            return null;
-          },
-          async find(filter: AnyRec, _o: AnyRec) {
+          async find(filter: AnyRec, o: AnyRec) {
             events.push(`find(${name},${JSON.stringify(filter)})`);
             const idClause = filter.id as { $in?: number[] } | undefined;
             if (idClause && Array.isArray(idClause.$in)) {
               return idClause.$in.map((i) => rowsByTable[name]?.[i]).filter(Boolean);
+            }
+            // **P9 PR 1** — single-row `find(filter, {limit:1})`
+            // replaces the old `findOne` path. Resolve to a 1-element
+            // array (or empty) so the SDK's slice picks the row up.
+            const id = filter.id;
+            if (
+              (typeof id === "number" || typeof id === "string") &&
+              o && (o as AnyRec).limit === 1
+            ) {
+              const row = rowsByTable[name]?.[id as keyof typeof rowsByTable[string]];
+              return row ? [row] : [];
             }
             return [];
           },

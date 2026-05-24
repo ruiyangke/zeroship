@@ -87,10 +87,13 @@ interface Visitor {
 /**
  * Method names on a `Collection` that take a filter as their first arg
  * and are worth flagging for missing indexes. We deliberately skip
- * `updateOne` / `updateMany` / `findOneAndUpdate` because the proposal
- * scoped D1 to read-path queries (`.find` family) and bulk deletes.
+ * `update` / `updateMany` because the proposal scoped D1 to read-path
+ * queries (`.find` family) and bulk deletes.
+ *
+ * **P9 PR 1** — `findOne` was deleted from the SDK; cardinality is now
+ * picked on the Query terminal (`first()` / `unique()` / `last()`).
  */
-const FLAGGED_METHODS = new Set(["find", "findOne", "deleteMany"]);
+const FLAGGED_METHODS = new Set(["find", "deleteMany"]);
 
 /**
  * Property keys that we never warn on — they are auto-indexed by every
@@ -142,7 +145,7 @@ const rule: RuleModule = {
     type: "suggestion",
     docs: {
       description:
-        "Flag @zeroship/db `.find/.findOne/.deleteMany` calls whose filter " +
+        "Flag @zeroship/db `.find/.deleteMany` calls whose filter " +
         "appears to do a sequential scan (single-field equality without an " +
         "obvious index). Match the runtime warning emitted in dev mode.",
       recommended: true,

@@ -3736,7 +3736,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 // what this test pins — the orchestrator's CRUD entry today routes
 // through `exec.rs::run_sql` which is PG-only, so we exercise the
 // underlying helpers in the same shape `dispatch_insert` /
-// `dispatch_find_one` will once the SQLite CRUD route lands. The
+// `dispatch_find` will once the SQLite CRUD route lands. The
 // dialect-aware builder + sentinel-tagged bind is the load-bearing
 // piece this test proves correct.
 
@@ -5784,7 +5784,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
 //     audit row per call (the dispatch shape PR 7 ships for
 //     `db.users.bulkUnmask([...])`).
 //   * `per_query_unmask_hint_end_to_end` — wire-up gate for the
-//     `findOne(filter, { unmask: [...], actor })` hint. We can't
+//     `find(filter, { unmask: [...], actor })` hint. We can't
 //     stand up V8 here, so the test drives the lower-level
 //     `dispatch_unmask_for_query` directly against rows pre-wrapped
 //     by `wrap_row_on_read`.
@@ -6364,7 +6364,7 @@ fn per_query_unmask_hint_end_to_end() {
             .await
             .expect("set_mask_policy");
 
-        // Simulate the row shape `dispatch_find_one` would produce
+        // Simulate the row shape `dispatch_find` would produce
         // AFTER `apply_mask_wrap_on_read` has wrapped the masked
         // columns. We're driving `dispatch_unmask_for_query` directly
         // since the full V8 round-trip is out of scope for this

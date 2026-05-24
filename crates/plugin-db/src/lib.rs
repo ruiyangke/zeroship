@@ -4,8 +4,10 @@
 //! Every operation lives on the wrapper: `registerModel`,
 //! `collection(name)` (mints a [`v8_classes::collection::Collection`]),
 //! `beginTransaction(opts?)` (mints a [`v8_classes::transaction::Transaction`]),
-//! `openSubscription(name)` (mints a [`v8_classes::subscription::Subscription`]),
-//! `startReplicationConsumer(opts?)`. Two nested namespaces hang off
+//! `startReplicationConsumer(opts?)`. Subscriptions are minted via
+//! `collection(name).openSubscription()` (P9 PR 1 removed the
+//! duplicate `Db::openSubscription(name)` entry point). Two nested
+//! namespaces hang off
 //! the Db wrapper as cached `#[v8_getter]`s:
 //!
 //! - `db.migrations` — the [`v8_classes::migrations::Migrations`]
@@ -322,7 +324,7 @@ pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> serde_json::Value {
 }
 
 /// **Bench-only**: the full `&[Row] → JSON-string` path the SDK sees on
-/// a `findOne` (or any other `first_row_or_null`-resolving) call. Runs
+/// a `find().first()` (or any other `first_row_or_null`-resolving) call. Runs
 /// both halves the dispatcher executes between Postgres and V8:
 ///
 /// 1. `v8_bridge::rows_to_json_value` — decode every `Row` into a

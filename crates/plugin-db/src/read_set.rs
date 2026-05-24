@@ -32,7 +32,7 @@
 //!
 //! ## Capture site
 //!
-//! Capture happens inside `ctx.db.find / findOne / count / aggregate`.
+//! Capture happens inside `ctx.db.find / count / aggregate`.
 //! The B3 capability layer's thread-local
 //! [`current_kind`](zeroship_runtime::rpc::current_kind) marker gates
 //! it: read-set capture is enabled **only** when the active procedure
@@ -45,8 +45,8 @@
 //!   (`@zeroship/db`'s reactive-query helper) snapshots it into a
 //!   `Subscription` when the handler returns.
 //! - It doesn't talk to V8. All the V8-facing surface lives in
-//!   `crud.rs` (capture sites: dispatch_find / dispatch_find_one /
-//!   dispatch_count) and the broker's v8_class wrapper.
+//!   `crud.rs` (capture sites: dispatch_find / dispatch_count) and
+//!   the broker's v8_class wrapper.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -292,7 +292,7 @@ pub fn normalise_filter(filter: &Value) -> Option<Predicate> {
 // enabled only when an [`Active`] scope guard is in scope (set up by
 // the runtime's query-dispatch entry path). The API is split so:
 //
-// 1. find / findOne / count / aggregate callbacks can call
+// 1. find / count / aggregate callbacks can call
 //    [`record_if_active`] without checking themselves.
 // 2. Tests and the SDK layer can set the active scope explicitly.
 

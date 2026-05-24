@@ -10,8 +10,8 @@
  * 2. `Collection.restore()` and `restoreMany()` reach a new native
  *    `restore` / `restoreMany` op (clear `deleted_at`).
  * 3. `find(filter, { include_deleted: true })` threads the opt-out
- *    flag into the native `findOne` / `find` opts. The runtime then
- *    suppresses the `AND deleted_at IS NULL` auto-filter.
+ *    flag into the native `find` opts. The runtime then suppresses
+ *    the `AND deleted_at IS NULL` auto-filter.
  *
  * The runtime-side soft-delete is verified by the Rust integration
  * tests in `crates/plugin-db/tests/sqlite_integration.rs`; this file
@@ -35,7 +35,6 @@ function makeNativeRecording() {
     restoreFilter?: AnyRec;
     restoreManyFilter?: AnyRec;
     findOpts?: AnyRec;
-    findOneOpts?: AnyRec;
   } = {};
   const native = {
     registerModel: () => Promise.resolve(),
@@ -45,14 +44,10 @@ function makeNativeRecording() {
           captured.findOpts = opts;
           return [];
         },
-        async findOne(_filter: AnyRec, opts?: AnyRec) {
-          captured.findOneOpts = opts;
-          return null;
-        },
         async insert(doc: AnyRec) {
           return { id: "post_x", ...doc };
         },
-        async updateOne(_filter: AnyRec, _update: AnyRec) {
+        async update(_filter: AnyRec, _update: AnyRec) {
           return { id: "post_x", title: "x", version: 2 };
         },
         async purge(filter: AnyRec) {

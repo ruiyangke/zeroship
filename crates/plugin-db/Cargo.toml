@@ -128,9 +128,10 @@ harness = false
 name = "bench_row_to_json"
 harness = false
 
-# findOne lowering microbench — perf r13 forcing function for the
-# deferred [C3] redesign (`docs/reviews/plugin-db-deferred.md`). Measures
-# the full `&[Row] → JSON-string` path the SDK sees on a `findOne` call:
+# `find().first()` lowering microbench — perf r13 forcing function for
+# the deferred [C3] redesign (`docs/reviews/plugin-db-deferred.md`).
+# Measures the full `&[Row] → JSON-string` path the SDK sees on a
+# single-row read (`find` with `LIMIT 1`):
 # `v8_bridge::rows_to_json_value` composed with `crud::first_row_or_null`.
 # The downstream V8 `JSON.parse` cost is the structural piece [C3] would
 # have to redesign away; it lives in `zeroship-runtime` and is NOT part

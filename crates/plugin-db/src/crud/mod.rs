@@ -163,9 +163,9 @@ where
 }
 
 /// Lower a `Vec<Value>` result to a single JSON value: the first row,
-/// or `null` when the result was empty. Used by `findOne` / `insert` /
-/// `updateOne` / `deleteOne` / `upsert`, all of which the SDK expects
-/// to resolve to a single row or `null`.
+/// or `null` when the result was empty. Used by `insert` / `update` /
+/// `delete` / `upsert`, all of which the SDK expects to resolve to a
+/// single row or `null`.
 ///
 /// The `Vec<Value>` arrives already decoded from `compio_postgres::Row`
 /// — see [`crate::v8_bridge::rows_to_json_value`]. We serialise the
@@ -196,191 +196,14 @@ fn rows_as_json_array(rows: Vec<Value>) -> ResolveValue {
 }
 
 // ---------------------------------------------------------------------------
-// findOne / find — read paths
+// find — read path
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `findOne`, called by `Collection::find_one`
-/// (the `#[v8_method]`). Filter arrives already decoded into
-/// `serde_json::Value` via `v8_value_to_serde_json` — no JSON
-/// round-trip on the hot path.
-///
-/// Resolves with the row as a real JS object or real JS `null` if no
-/// row matched (via `ResolveValue::Json`); on error rejects with a
-/// coded `OpError`.
-///
-/// **P5.5 PR 7** — `opts.unmask`: optional `string[]` of columns to
-/// promote from `MaskedValue<T>` to plaintext. Authorisation is
-/// checked UPFRONT (before any SQL); a single unauthorised column
-/// refuses the whole find with `unmask_not_permitted`. The auth
-/// surface uses the same per-app `MaskPolicy` as the standalone
-/// unmask RPC. `opts.actor` carries the actor descriptor consumed by
-/// the policy check.
-pub(crate) fn dispatch_find_one<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
-    collection: &str,
-    filter: Value,
-    opts: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = runtime_state(scope);
-    // P8b — record into the active query's read-set so the broker can
-    // narrow events to this filter. No-op outside `query()` handlers.
-    crate::read_set::record_if_active(collection, &filter);
-
-    let order_by = opts.get("orderBy").cloned();
-    let select = opts.get("select").cloned();
-    let unmask_columns = parse_unmask_opt(opts.get("unmask"));
-    let unmask_actor = opts.get("actor").cloned().filter(|v| !v.is_null());
-    let unmask_reason = opts
-        .get("unmaskReason")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    // **P7 PR 5** — `include_deleted: true` opts out of the auto
-    // `AND deleted_at IS NULL` filter. Default = "filter out".
-    let include_deleted = opts
-        .get("include_deleted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    let app = app_id.to_string();
-    let coll = collection.to_string();
-
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // **P5.5 PR 7** — upfront auth fence for the unmask hint.
-        // Fail the find entirely on any unauthorised column rather
-        // than silently degrading to masked-only.
-        if !unmask_columns.is_empty() {
-            if let Err(e) = crate::crud::unmask::authorize_query_hint(
-                &app,
-                &coll,
-                &unmask_columns,
-                &unmask_actor,
-                &unmask_reason,
-            )
-            .await
-            {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        }
-
-        // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
-        // When the schema declares masked columns, the SELECT clause
-        // emits `"<col>_masked" AS "<col>"` so the ciphertext column
-        // never leaves Postgres on a default read.
-        let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
-        // **P7 PR 5** — gate the soft-delete auto-filter on the
-        // schema's `_systemFields` marker.
-        let filter_soft_deleted =
-            system_fields_pass::should_filter_soft_deleted(&app, &coll, include_deleted);
-        let built = query::build_find_with_schema_and_unmask_and_soft_delete(
-            &app,
-            &coll,
-            &filter,
-            Some(1),
-            None,
-            order_by.as_ref(),
-            select.as_ref(),
-            schema_hint.as_ref(),
-            &unmask_columns,
-            filter_soft_deleted,
-        );
-        let bq = match built {
-            Ok(bq) => bq,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
-                    request_id,
-                };
-            }
-        };
-        match exec_query(bq).await {
-            Ok(rows) => {
-                // **P5 PR 2** — decrypt encrypted columns on the
-                // returned row. No-op when the schema declares none
-                // OR when every encrypted column is also masked
-                // without an explicit `kind: "none"` opt-out (the
-                // aliased SELECT already returns the sibling, not the
-                // ciphertext — there's nothing to decrypt).
-                let rows = match apply_encryption_on_read(&app, &coll, rows).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                // **P5.5 PR 3** — wrap masked-column values in the
-                // `__zsmask__`-tagged wire shape so the SDK can
-                // construct `MaskedValue<T>`.
-                let mut rows = match apply_mask_wrap_on_read(&app, &coll, rows) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                // **P5.5 PR 7** — promote `MaskedValue<T>` → plaintext
-                // for every column on `opts.unmask`. The wrap pass
-                // above already attached the sentinel; this overwrites
-                // the listed columns in place with bare strings.
-                if !unmask_columns.is_empty() {
-                    if let Err(e) = crate::crud::unmask::dispatch_unmask_for_query(
-                        &app,
-                        &coll,
-                        &unmask_columns,
-                        &mut rows,
-                    )
-                    .await
-                    {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                    if let Err(e) = crate::crud::unmask::audit_query_hint_granted(
-                        &app,
-                        &coll,
-                        &unmask_columns,
-                        &unmask_actor,
-                        &unmask_reason,
-                    )
-                    .await
-                    {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                }
-                OpResult::JsValue {
-                    resolver,
-                    value: first_row_or_null(rows),
-                    request_id,
-                }
-            }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
-
-    promise
-}
+// P9 PR 1: `dispatch_find_one` was deleted along with `Collection.findOne`
+// (Convex-style consolidation). The SDK reaches the same "first matching
+// row" semantic via `find(filter).first()` / `.unique()` / `.last()` on
+// the Query terminal, which composes the existing `dispatch_find` with
+// `LIMIT 1` (or `LIMIT 2` for strict `.unique()`).
 
 /// **P5.5 PR 7** — extract `opts.unmask` into a `Vec<String>`. Returns
 /// empty when the field is absent, null, or not an array of strings —
@@ -396,10 +219,11 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-/// Shared dispatch for `find` — see [`dispatch_find_one`] for the
-/// rationale. Reads `limit`/`offset`/`orderBy`/`select`/`unmask`/`actor`
-/// out of `opts`. The per-query unmask hint (PR 7) honours the same
-/// authorisation fence as `dispatch_find_one`.
+/// Shared dispatch for `find`. Reads `limit`/`offset`/`orderBy`/
+/// `select`/`unmask`/`actor` out of `opts`. The per-query unmask hint
+/// (P5.5 PR 7) honours an upfront authorisation fence — a single
+/// unauthorised column refuses the whole find with
+/// `unmask_not_permitted`.
 pub(crate) fn dispatch_find<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -452,7 +276,9 @@ pub(crate) fn dispatch_find<'s>(
         }
 
         // **P5.5 PR 3** — fetch the cached schema BEFORE building SQL.
-        // See `dispatch_find_one` for the rationale.
+        // When the schema declares masked columns, the SELECT clause
+        // emits `"<col>_masked" AS "<col>"` so the ciphertext column
+        // never leaves Postgres on a default read.
         let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
         // **P7 PR 5** — soft-delete auto-filter gate.
         let filter_soft_deleted =
@@ -1453,7 +1279,7 @@ pub(crate) fn dispatch_count<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// upsert / findOrCreate — INSERT … ON CONFLICT paths
+// upsert — INSERT … ON CONFLICT path
 // ---------------------------------------------------------------------------
 
 /// Shared dispatch for `upsert`. See [`dispatch_insert`] for the
@@ -1963,57 +1789,10 @@ pub(crate) fn dispatch_near<'s>(
     promise
 }
 
-/// Shared dispatch for `findOrCreate`. Same SQL shape as upsert except
-/// the ON CONFLICT branch is a no-op self-assignment (so RETURNING
-/// fires without mutating the row) and the RETURNING list appends
-/// `(xmax = 0) AS __created` — true when the row was a fresh insert,
-/// false when the conflict path matched an existing row.
-///
-/// Resolves with a JSON object `{ "row": {...}, "created": bool }`;
-/// the SDK consumes both fields verbatim.
-pub(crate) fn dispatch_find_or_create<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
-    collection: &str,
-    doc: Value,
-    conflict_fields: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    let built = query::build_find_or_create(app_id, collection, &doc, &conflict_fields);
-    let coll = collection.to_string();
-    let app = app_id.to_string();
-
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        move |bq| async move {
-            // Tag as Insert — the broker reaction is the same as upsert
-            // (subscribers re-fetch), and tagging conservatively keeps
-            // us from missing wake-ups when the row really was created.
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
-        },
-        |rows: Vec<Value>| {
-            // `rows` is the pre-decoded result of the INSERT ... ON
-            // CONFLICT — typically a single row. Take it without a
-            // JSON round-trip; the `__created` flag rides in the row.
-            let mut row = rows.into_iter().next().unwrap_or(Value::Null);
-            let created = match row.as_object_mut() {
-                Some(obj) => obj
-                    .remove("__created")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                None => false,
-            };
-            let payload = serde_json::json!({ "row": row, "created": created });
-            ResolveValue::Json(payload.to_string())
-        },
-    )));
-
-    promise
-}
+// P9 PR 1: `dispatch_find_or_create` was deleted along with the
+// `Collection.findOrCreate` v8_method (absorbed by `upsert`). The
+// `query::build_find_or_create` SQL builder stays for now —
+// `upsert({where, create})` shape lands in a follow-up.
 
 // ===========================================================================
 // P5 PR 2 — transparent column encryption hooks
@@ -2287,7 +2066,7 @@ fn schema_has_encrypted_columns(schema: &Value) -> bool {
 ///
 /// Two row shapes are accepted (mirrors the `wrap_row_on_read` docs):
 ///
-/// 1. **Aliased-SELECT** (`find`, `findOne`): the SELECT clause already
+/// 1. **Aliased-SELECT** (`find`): the SELECT clause already
 ///    aliased `<col>_masked AS <col>` (via
 ///    `query::build_find_with_schema`). The parent slot carries the
 ///    masked string; no `<col>_masked` key is present on the row.

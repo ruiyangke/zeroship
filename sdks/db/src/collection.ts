@@ -865,7 +865,11 @@ export class Collection<
     }
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-      const nativeOpts: ZeroshipDbFindOpts = {};
+      // **P9 PR 1** — `Collection.findOne` was removed from the native
+      // surface (Convex-style consolidation). We reach the same "first
+      // matching row" semantic by composing `find` with `limit: 1` and
+      // taking the head of the result array.
+      const nativeOpts: ZeroshipDbFindOpts = { limit: 1 };
       if (opts.select !== undefined) {
         nativeOpts.select = opts.select.map((f) => this._toColumn(f));
       }
@@ -876,9 +880,9 @@ export class Collection<
         }
         nativeOpts.orderBy = mappedOrder;
       }
-      const result = await this._nativeCollection().findOne(mapped, nativeOpts);
-      if (result === null) return null;
-      const row = mapResultDoc(result as PlainObject, this._toField);
+      const rows = (await this._nativeCollection().find(mapped, nativeOpts)) ?? [];
+      if (rows.length === 0) return null;
+      const row = mapResultDoc(rows[0] as PlainObject, this._toField);
       if (opts.with !== undefined) {
         await this._loadRelations([row], opts.with);
       }
@@ -1074,70 +1078,12 @@ export class Collection<
     return q;
   }
 
-  /**
-   * Returns the row matching `filter`, or inserts `create` and returns
-   * the new row when no match exists. The single SQL statement is
-   * `INSERT ... ON CONFLICT DO UPDATE` with a no-op SET; the second
-   * return value flags whether the row was freshly created (`true`) or
-   * already existed (`false`).
-   *
-   * `opts.conflictFields` defaults to the unique single-key filter
-   * column when the filter has exactly one key and that column carries
-   * `.unique()` in the schema. Filters with multiple keys (or a key that
-   * isn't unique) require explicit `opts.conflictFields`.
-   */
-  async findOrCreate(
-    filter: Filter<S>,
-    create: RowInput<S>,
-    opts?: { conflictFields?: (string & keyof Row<S>)[] },
-  ): Promise<Result<{ row: Row<S>; created: boolean }>> {
-    // **P5 PR 2** — encrypted-column filter fence.
-    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
-    return this._run(async () => {
-      const filterKeys = Object.keys(filter as PlainObject).filter((k) => !k.startsWith("$"));
-      let conflictFields = opts?.conflictFields;
-      if (conflictFields === undefined || conflictFields.length === 0) {
-        if (filterKeys.length !== 1) {
-          throw Object.assign(
-            new TypeError(
-              `findOrCreate: opts.conflictFields is required when filter has ${filterKeys.length} keys (only single-key unique filters auto-infer)`,
-            ),
-            { code: "find_or_create_needs_conflict_fields" as const },
-          );
-        }
-        const k = filterKeys[0];
-        const def = this._schema[k];
-        if (!def || def.unique !== true) {
-          throw Object.assign(
-            new TypeError(
-              `findOrCreate: filter key "${k}" is not declared .unique() — pass opts.conflictFields explicitly`,
-            ),
-            { code: "find_or_create_key_not_unique" as const },
-          );
-        }
-        conflictFields = [k as string & keyof Row<S>];
-      }
-      // The persisted document is the filter merged into the create
-      // payload — filter values are the identity of the row we want, so
-      // they always win over `create` for the conflict columns.
-      const merged: PlainObject = { ...(create as PlainObject), ...(filter as PlainObject) };
-      const validated = validateDoc(merged, this._schema);
-      const outbound = mapDocOutbound(validated, this._toColumn);
-      const conflictCols = conflictFields.map((f) => this._toColumn(f as string));
-      const colAny = this._nativeCollection() as unknown as {
-        findOrCreate(
-          doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
-          opts: { conflictFields: string[] },
-        ): Promise<{ row: Record<string, unknown>; created: boolean }>;
-      };
-      const raw = await colAny.findOrCreate(
-        outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>,
-        { conflictFields: conflictCols },
-      );
-      const row = mapResultDoc(raw.row as PlainObject, this._toField) as Row<S>;
-      return { row, created: raw.created === true };
-    });
-  }
+  // **P9 PR 1** — `findOrCreate` was deleted; absorbed by `upsert`. Use
+  // `upsert(row, { conflictFields })` to insert-or-keep on the conflict
+  // target. If the SDK consumer needs to know "was this a fresh
+  // insert?", do an explicit `.get(filter).first()` first, branch on
+  // null, and decide. The `{row, created}` envelope was the only
+  // signal the deleted method provided.
 
   /**
    * Inserts a row or updates it if a conflict occurs on the specified fields.
@@ -1208,7 +1154,7 @@ export class Collection<
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
       let result;
       try {
-        result = await this._nativeCollection().updateOne(mappedFilter, mappedUpdate);
+        result = await this._nativeCollection().update(mappedFilter, mappedUpdate);
       } catch (e) {
         // **P7 PR 4** — runtime threw a typed error. Translate
         // `version_mismatch` to `OptimisticLockError` so existing
@@ -1283,12 +1229,12 @@ export class Collection<
    * argument is a number it is treated as `{ id: <n> }`.
    *
    * When the collection has `softDelete: true`, this sets `deletedAt`
-   * instead of removing the row; pass `{ hard: true }` to bypass and
-   * permanently remove the row.
+   * instead of removing the row. **P9 PR 1** — the legacy
+   * `{ hard: true }` opt was removed; callers needing an explicit
+   * hard-delete use `purge` (P7 PR 5).
    */
   async delete(
     idOrFilter: string | number | Filter<S>,
-    opts: { hard?: boolean } = {},
   ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
       // **P7 PR 3** — accept a bare typed_id string. Same migration-
@@ -1302,19 +1248,18 @@ export class Collection<
       if (!isBareId) {
         validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
       }
-      const hard = opts.hard === true;
       // Both branches honor CAS — versioning + `{ version: N }` in the
       // filter must reject a concurrent writer's lost update, soft or
       // hard. The patch on the soft-delete branch bumps version too.
       const casVersion = this._extractCasVersion(filter as PlainObject);
-      if (this._softDelete && !hard) {
+      if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
         const patch = this._augmentUpdateWithVersion(
           { [col]: Date.now() } as PlainObject,
           casVersion,
         );
-        const result = await this._nativeCollection().updateOne(mapped, patch as ZeroshipDbUpdate);
+        const result = await this._nativeCollection().update(mapped, patch as ZeroshipDbUpdate);
         if (result === null) {
           if (casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
           return null;
@@ -1322,7 +1267,7 @@ export class Collection<
         return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const result = await this._nativeCollection().deleteOne(mapped);
+      const result = await this._nativeCollection().delete(mapped);
       if (result === null) {
         if (casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
         return null;
@@ -1334,20 +1279,20 @@ export class Collection<
   /**
    * Deletes all documents matching `filter`. Returns
    * `{ deletedCount: N }`. When the collection has `softDelete: true`,
-   * sets `deletedAt` on each row; pass `{ hard: true }` to bypass.
+   * sets `deletedAt` on each row. **P9 PR 1** — the legacy
+   * `{ hard: true }` opt was removed; callers needing an explicit
+   * bulk hard-delete use `purgeMany` (P7 PR 5).
    */
   async deleteMany(
     filter: Filter<S> = {} as Filter<S>,
-    opts: { hard?: boolean } = {},
   ): Promise<Result<{ deletedCount: number }>> {
     // **P5 PR 2** — encrypted-column filter fence (synchronous so a
     // typed throw surfaces if the SDK consumer didn't wrap the call).
     validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     return this._run(async () => {
-      const hard = opts.hard === true;
       const casVersion = this._extractCasVersion(filter as PlainObject);
-      if (this._softDelete && !hard) {
+      if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
         const patch = this._augmentUpdateWithVersion(

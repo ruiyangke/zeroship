@@ -132,10 +132,12 @@ the SELECT, and the row carries plaintext for the hinted columns
 (masked for the rest):
 
 ```ts
-const { data: user } = await env.db.users.findOne(
-  { id },
-  { unmask: ["ssn"], actor: "tax_handler", reason: "1099 generation" },
-);
+const { data: user } = await env.db.users
+  .find(
+    { id },
+    { unmask: ["ssn"], actor: "tax_handler", reason: "1099 generation" } as never,
+  )
+  .first();
 console.log(user.ssn); // "123-45-6789" (plaintext, not MaskedValue)
 console.log(user.email); // MaskedValue { email: "f****@example.com" }
 ```
@@ -143,7 +145,8 @@ console.log(user.email); // MaskedValue { email: "f****@example.com" }
 The hint changes the wire SELECT: the parent ciphertext column is
 fetched and decrypted instead of the sibling. Useful when the
 plaintext is needed for `> 1` row at once — `find({}, { unmask:
-[...] })` decrypts every returned row in one pass.
+[...] } as never)` (awaited as an array) decrypts every returned row
+in one pass.
 
 ---
 
@@ -171,14 +174,16 @@ export const fetch = async (req: Request, env: Env) => {
 export const fetch = async (req: Request, env: Env) => {
   const { userId } = await req.json();
   const actor = env.user.id;  // gateway-injected
-  const { data: user } = await env.db.users.findOne(
-    { id: userId },
-    {
-      unmask: ["ssn", "dob"],
-      actor,
-      reason: `1099 generation for user ${userId}`,
-    },
-  );
+  const { data: user } = await env.db.users
+    .find(
+      { id: userId },
+      {
+        unmask: ["ssn", "dob"],
+        actor,
+        reason: `1099 generation for user ${userId}`,
+      } as never,
+    )
+    .first();
   if (!user) return new Response("not found", { status: 404 });
 
   return Response.json({
@@ -190,8 +195,8 @@ export const fetch = async (req: Request, env: Env) => {
 ```
 
 Two changes:
-1. Switch `get()` → `findOne(... , { unmask, actor, reason })`. The
-   hint authorizes upfront and decrypts before the row hits the
+1. Switch `get()` → `find(... , { unmask, actor, reason } as never).first()`.
+   The hint authorizes upfront and decrypts before the row hits the
    handler.
 2. Provide `actor` + `reason`. Both land in
    `__zeroship_audit_unmask`. `reason` should be a human-readable

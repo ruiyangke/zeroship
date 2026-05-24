@@ -221,22 +221,24 @@ interface ZeroshipCollection {
   /** Find multiple documents. Returns the row array. */
   find(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<Record<string, unknown>[]>;
 
-  /** Find one document. Returns the row object or `null` when nothing matches. */
-  findOne(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<Record<string, unknown> | null>;
-
   /** Insert one document. Returns the inserted row. */
   insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<Record<string, unknown>>;
 
   /** Insert multiple documents. Returns the inserted rows. */
   insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<Record<string, unknown>[]>;
 
-  /** Update one document. Returns the updated row or `null` when nothing matched. */
-  updateOne(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<Record<string, unknown> | null>;
+  /** Update one document. Returns the updated row or `null` when nothing matched.
+   *
+   *  **P9 PR 1** — renamed from `updateOne` to `update` to align with
+   *  the SDK and Prisma/Convex singular-default convention. */
+  update(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<Record<string, unknown> | null>;
 
   /** Update multiple documents. Returns the count of affected rows. */
   updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<number>;
 
   /** Delete one document. Returns the deleted row or `null` when nothing matched.
+   *
+   *  **P9 PR 1** — renamed from `deleteOne` to `delete`.
    *
    *  **P7 PR 5** — on post-migration tables (those carrying the
    *  platform `deleted_at` column) this performs a SOFT delete:
@@ -244,11 +246,11 @@ interface ZeroshipCollection {
    *  the populated `deleted_at`. On pre-migration tables it still
    *  performs a hard DELETE with an operator-side warning. Use
    *  `purge` for explicit hard-delete regardless of table state. */
-  deleteOne(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
+  delete(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
   /** Delete multiple documents. Returns the count of affected rows.
    *
-   *  **P7 PR 5** — same Path C semantics as `deleteOne`. */
+   *  **P7 PR 5** — same Path C semantics as `delete`. */
   deleteMany(filter: ZeroshipDbFilter): Promise<number>;
 
   /** **P7 PR 5** — explicit hard-delete. Always emits `DELETE FROM ...`,
@@ -269,20 +271,16 @@ interface ZeroshipCollection {
   /** Upsert a document (insert or update on conflict). Returns the row.
    *  `opts.conflictFields` names the ON CONFLICT target columns — must
    *  be a non-empty array of column names; missing / empty rejects
-   *  with `TypeError`. */
+   *  with `TypeError`.
+   *
+   *  **P9 PR 1** — `findOrCreate` was removed; callers use `upsert`
+   *  directly. If the SDK consumer needs the legacy `{row, created}`
+   *  envelope, do an explicit `find(filter).first()` first, branch on
+   *  `null`, and decide. */
   upsert(
     doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
     opts: { conflictFields: string[] },
   ): Promise<Record<string, unknown> | null>;
-
-  /** Find a row matching `opts.conflictFields` or insert `doc`.
-   *  Resolves with `{ row, created }` — `created` is `true` when the
-   *  insert path fired, `false` when an existing row was returned.
-   *  `opts.conflictFields` must be a non-empty array of column names. */
-  findOrCreate(
-    doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
-    opts: { conflictFields: string[] },
-  ): Promise<{ row: Record<string, unknown>; created: boolean }>;
 
   /** Count documents matching `filter`. `opts.include_deleted: true`
    *  (P7 PR 5) opts out of the auto soft-delete filter. */
@@ -427,7 +425,9 @@ type ZeroshipSubscriptionEvent =
   | { kind: "closed" };
 
 /**
- * A live subscription wrapper minted by `env.db.openSubscription(name)`.
+ * A live subscription wrapper minted by
+ * `env.db.<collection>.openSubscription()` (P9 PR 1: the duplicate
+ * `env.db.openSubscription(name)` entry point was removed).
  * Synchronous to mint — calling it does not allocate any Postgres state;
  * the wrapper merely registers a slot in the per-isolate broker routing
  * table. The wrapper's GC finalizer is the safety-net release.
@@ -590,18 +590,6 @@ interface ZeroshipDb {
    *   run.
    */
   migrations: ZeroshipMigrations;
-
-  /**
-   * Open a subscription on `collection`. Returns a Subscription wrapper.
-   * Synchronous — calling it does not allocate any Postgres state; the
-   * wrapper merely registers a slot in the per-isolate broker routing
-   * table.
-   *
-   * Today the events come from local mutations in the same isolate
-   * (coarse-grained, every change to `collection`). The proposal's
-   * read-set narrowing + cross-worker WAL pickup are P8b / P8a.2.
-   */
-  openSubscription(collection: string): ZeroshipSubscription;
 
   /**
    * Auto-spawn the supervised WAL consumer for this app. Idempotent.

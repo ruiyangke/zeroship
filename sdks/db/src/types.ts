@@ -650,7 +650,7 @@ function resolveBulkUnmaskFields(): (args: {
  *    authorization check, audit row emission, return plaintext
  *    (PR 4). This PR ships only the signature; the body throws
  *    `unmask_not_implemented`.
- * 2. The per-query unmask hint `db.users.findOne({ id }, { unmask: ["ssn"], actor })`
+ * 2. The per-query unmask hint `db.users.find({ id }, { unmask: ["ssn"], actor }).first()`
  *    — PR 7. Authorization check upfront; row returns plaintext
  *    directly for the listed columns.
  *

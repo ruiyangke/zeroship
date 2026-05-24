@@ -4,6 +4,11 @@
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils.js";
+import {
+  InvalidOperationError,
+  NotFoundError,
+  NotUniqueError,
+} from "./errors.js";
 import { PlainObject, Result, Row, type WithSpec, type WithRelations, ok, err } from "./types.js";
 
 type NativeFn = (
@@ -454,6 +459,98 @@ export class Query<
         } as ZeroshipDbFilter,
       ],
     } as ZeroshipDbFilter;
+  }
+
+  /**
+   * **P9 PR 1** — terminal returning the first matching row, or `null`
+   * when the query has no result. Loose semantics: a missing row is a
+   * normal outcome, not an error. Mirrors what `Collection.findOne`
+   * used to do — drop the old method's behaviour onto the Query
+   * builder.
+   *
+   * Implementation: applies `LIMIT 1` over the current query state and
+   * unwraps the single-row array. The orderBy / select / with / cursor
+   * settings carry through unchanged.
+   */
+  async first(): Promise<Result<P | null>> {
+    const prevLimit = this._limit;
+    this._limit = 1;
+    try {
+      const result = await this._exec();
+      if (result.error !== null) return err(result.error);
+      const list = result.data!;
+      return ok(list.length === 0 ? null : list[0]);
+    } finally {
+      this._limit = prevLimit;
+    }
+  }
+
+  /**
+   * **P9 PR 1** — strict terminal: exactly one matching row required.
+   * Returns `err(NotFoundError)` on 0 matches and `err(NotUniqueError)`
+   * on >1 matches. Use this for unique-constraint enforced lookups
+   * (e.g. `find({ email }).unique()` against a `.unique()` column)
+   * where ambiguity is a contract violation, not a normal outcome.
+   *
+   * Implementation: `LIMIT 2` so we can detect "more than one" without
+   * dragging the whole table; if exactly one row materialises, resolve
+   * with it.
+   */
+  async unique(): Promise<Result<P>> {
+    const prevLimit = this._limit;
+    this._limit = 2;
+    try {
+      const result = await this._exec();
+      if (result.error !== null) return err(result.error);
+      const list = result.data!;
+      if (list.length === 0) {
+        return err(new NotFoundError(this._collection));
+      }
+      if (list.length > 1) {
+        return err(new NotUniqueError(list.length, this._collection));
+      }
+      return ok(list[0]);
+    } finally {
+      this._limit = prevLimit;
+    }
+  }
+
+  /**
+   * **P9 PR 1** — terminal returning the last matching row in the
+   * current sort, or `null` when there are no matches. Implemented by
+   * reversing the configured `.sort(...)` and taking the first row;
+   * the original sort is restored before returning.
+   *
+   * Throws `InvalidOperationError("last_requires_sort")` (as
+   * `err(...)`) if no sort was set on the query — "last" without an
+   * ordering would return arbitrary rows from the storage layer.
+   */
+  async last(): Promise<Result<P | null>> {
+    if (this._sort === undefined || Object.keys(this._sort).length === 0) {
+      return err(
+        new InvalidOperationError(
+          "last_requires_sort",
+          "Query.last() requires a .sort(...) clause — 'last' is meaningless without an ordering",
+        ),
+      );
+    }
+    const prevSort = this._sort;
+    const prevLimit = this._limit;
+    const reversed: Record<string, number> = {};
+    for (const [k, v] of Object.entries(prevSort)) {
+      reversed[k] = v === 1 ? -1 : 1;
+    }
+    this._sort = reversed;
+    this._limit = 1;
+    try {
+      const result = await this._exec();
+      if (result.error !== null) return err(result.error);
+      const list = result.data!;
+      return ok(list.length === 0 ? null : list[0]);
+    } finally {
+      this._sort = prevSort;
+      this._limit = prevLimit;
+    }
   }
 
   /**

@@ -64,10 +64,14 @@ describe("D1 — no-unindexed-query rule", () => {
     assert.equal(reports[0].data?.keys, "name");
   });
 
-  test("flags findOne({ email: 'x' })", () => {
+  test("does NOT flag findOne (deleted in P9 PR 1)", () => {
+    // The native `Collection.findOne` v8_method was removed in P9 PR 1;
+    // cardinality is now expressed via Query terminals (`first()` /
+    // `unique()` / `last()`), which apply LIMIT on the existing `.find`
+    // call so the linter already catches the underlying filter via the
+    // `find` flag.
     const reports = runOn(callExpr("findOne", [["email", "a@b.com"]]));
-    assert.equal(reports.length, 1);
-    assert.equal(reports[0].data?.method, "findOne");
+    assert.equal(reports.length, 0);
   });
 
   test("flags deleteMany({ status: 'x' })", () => {

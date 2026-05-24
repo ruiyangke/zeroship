@@ -119,8 +119,8 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
   update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
-  delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }): Promise<Row<S> | null>;
-  deleteMany(filter: Filter<S>, opts?: { hard?: boolean }): Promise<{ deletedCount: number }>;
+  delete(idOrFilter: number | Filter<S>): Promise<Row<S> | null>;
+  deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
@@ -139,6 +139,15 @@ export type TxQuery<
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
   after(id: number): TxQuery<S, P, AllSchemas>;
   with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  /** **P9 PR 1** — terminal: first matching row or `null`. Throws inside
+   *  the tx callback on a native error (tx unwraps Result). */
+  first(): Promise<P | null>;
+  /** **P9 PR 1** — strict terminal: exactly one match. Throws
+   *  `NotFoundError` on 0 matches and `NotUniqueError` on >1. */
+  unique(): Promise<P>;
+  /** **P9 PR 1** — last matching row in the current sort, or `null`.
+   *  Throws `InvalidOperationError` if no sort was set. */
+  last(): Promise<P | null>;
   then<TResult1 = P[], TResult2 = never>(
     resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
     reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
@@ -194,7 +203,7 @@ export type DbExtensions<T extends Record<string, SchemaInput>> = {
    *
    * v1 is coarse-grained: every change to a watched table fires a
    * rerun (no row-level filter narrowing). The tables are auto-detected
-   * by observing which `Collection.find/findOne/get/...` methods the
+   * by observing which `Collection.find/get/...` methods the
    * `queryFn` calls during its first execution. Pass `{ tables: [...] }`
    * to bypass auto-detection (e.g. when the queryFn doesn't go through
    * a Collection).

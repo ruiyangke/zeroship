@@ -535,8 +535,10 @@ const { data } = await db.sessions.deleteMany({ expiresAt: { $lt: Date.now() } }
 // { deletedCount: N }
 
 // Soft delete: with `softDelete()` on the schema, delete sets deletedAt
-// Pass { hard: true } to permanently remove the row.
-await db.users.delete(1, { hard: true });
+// instead of removing the row. For an explicit hard-delete (regardless
+// of soft-delete state), use `purge` / `purgeMany`:
+await db.users.purge(1);
+await db.users.purgeMany({ email: { $like: "spam-%" } });
 ```
 
 ### Aggregate
@@ -882,7 +884,7 @@ Errors have a `.code` string property:
 ```ts
 import { env } from "zeroship";
 
-const sub = env.db.openSubscription("messages");
+const sub = env.db.messages.openSubscription();
 for await (const ev of sub) {
   // ev.kind === "change" | "resync" | "closed"
   if (ev.kind === "change") console.log(ev.op, ev.pk, ev.columns);
@@ -968,7 +970,7 @@ ops use it directly.
 
 - `env.db.collection(name)` → `Collection` wrapper
 - `env.db.beginTransaction({ isolationLevel? })` → `Transaction` wrapper
-- `env.db.openSubscription(name)` → `Subscription` wrapper
+- `env.db.<collection>.openSubscription()` → `Subscription` wrapper
 - `env.db.migrations.{start,status,cancel,reset}` → Migration ops
 - `env.db.registerModel(name, schema)` → idempotent DDL
 
@@ -1072,10 +1074,9 @@ await db.posts.delete(postId);
 // row.deleted_at is now a timestamp; row is no longer returned by find()
 ```
 
-`find()` / `findOne()` / `count()` / `exists()` / `distinct()` /
-`aggregate()` all auto-filter `WHERE deleted_at IS NULL`. To include
-soft-deleted rows, thread `{ include_deleted: true }` through the
-native query opts.
+`find()` / `count()` / `exists()` / `distinct()` / `aggregate()` all
+auto-filter `WHERE deleted_at IS NULL`. To include soft-deleted rows,
+thread `{ include_deleted: true }` through the native query opts.
 
 To remove a row from storage permanently (GDPR-erase, compliance), use
 `purge()`:
@@ -1279,10 +1280,12 @@ Per-query unmask hint (auth check runs once before the SELECT;
 hinted columns arrive as bare `T`, others as `MaskedValue<T>`):
 
 ```ts
-const { data: user } = await env.db.users.findOne(
-  { id },
-  { unmask: ["ssn"], actor, reason },
-);
+// Per-query unmask hint via the SDK Query — applies the `unmask`
+// authorisation upfront and the row carries plaintext for the listed
+// columns when allowed by the per-app mask policy.
+const { data: user } = await env.db.users
+  .find({ id }, { unmask: ["ssn"], actor, reason } as never)
+  .first();
 user.ssn;    // "123-45-6789"  (plaintext, hint applied)
 user.email;  // MaskedValue<string>  (not hinted)
 ```

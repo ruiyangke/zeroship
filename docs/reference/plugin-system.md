@@ -103,13 +103,12 @@ impl NativePlugin for DbPlugin {
     }
 
     fn register(&self, r: &mut NativeRegistrar) {
-        r.add("findOne", find_one_callback);
         r.add("find", find_callback);
         r.add("insert", insert_callback);
         r.add("insertMany", insert_many_callback);
-        r.add("updateOne", update_one_callback);
+        r.add("update", update_callback);
         r.add("updateMany", update_many_callback);
-        r.add("deleteOne", delete_one_callback);
+        r.add("delete", delete_callback);
         r.add("deleteMany", delete_many_callback);
         r.add("count", count_callback);
         r.add("aggregate", aggregate_callback);
@@ -226,11 +225,10 @@ impl NativePlugin for DbPlugin {
 
     fn register(&self, r: &mut NativeRegistrar) {
         r.add("find", callbacks::find);
-        r.add("findOne", callbacks::find_one);
         r.add("insert", callbacks::insert);
-        r.add("updateOne", callbacks::update_one);
+        r.add("update", callbacks::update);
         r.add("updateMany", callbacks::update_many);
-        r.add("deleteOne", callbacks::delete_one);
+        r.add("delete", callbacks::delete);
         r.add("deleteMany", callbacks::delete_many);
         r.add("count", callbacks::count);
         r.add("aggregate", callbacks::aggregate);
