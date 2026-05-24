@@ -22,22 +22,60 @@
 // config.json that put e.g. a number where CH expects a path cannot
 // be silently mis-substituted.
 //
-// C-7-LT-4 (2026-05-23): the bash wrapper's R15-S2 allow-list is
+// C-7-LT-4 (2026-05-23): the bash wrapper's R15-S2 allow-list was
 // ported here. After rewriting, every path-bearing field MUST resolve
-// to a path under `taskDir` (the alloc's NOMAD_TASK_DIR). A snapshot
-// whose `disks[].path` is something the rewriter could not anchor
-// (e.g. an attacker-supplied `/etc/shadow`, or a path containing `..`
-// components, or a relative path) is REJECTED with a clear error
-// rather than silently passing through to CH. Mirrors
-// `assert_under_task_dir` in nomad-vm-wrapper.sh:537-583.
+// to a path under `taskDir`.
 //
-// This was the C-7-LT-4 wedge: smoke-r15 caught CH's `--restore`
-// aborting at +3ms with `CreateConsoleDevice(ENOENT)` because the
-// driver bypasses the bash wrapper and was not enforcing the path
-// rewrite at all. Pre-C-7-LT-4 the rewriter was permissive on
-// "unmatched" paths (passed them through verbatim); post-C-7-LT-4 an
-// unmatched path is a hard failure with a precise error pointing at
-// both the offending field and the expected prefix.
+// C-7-LT-6 (2026-05-23): the single "under task_dir" invariant was
+// TOO STRICT for `disks[*].path`. The per-sandbox persistent workspace
+// lives at `/var/zeroship/ch/<sandbox_id>/workspace.img` — OUTSIDE the
+// alloc task_dir by design (must persist across alloc lifecycle /
+// restore). C-7-LT-4 rejected it as `possible malicious snapshot or
+// misrouted restore`, blocking every real wake-from-snapshot at the
+// driver before CH ever spawned (smoke-r16).
+//
+// Fix shape: a per-field allow-list keyed by the JSON field's *kind*:
+//
+//   - PathFieldRuntimeFile (serial.file, console.file): runtime files
+//     CH writes inside the alloc dir. MUST be under task_dir.
+//   - PathFieldDisk (disks[*].path): persistent block devices. MAY be
+//     under the per-sandbox prefix `/var/zeroship/ch/<sandbox_id>/`,
+//     OR under task_dir (e.g. a freshly-staged rootfs.img), OR under
+//     any caller-supplied content-addressed root (read-only base
+//     images shared across sandboxes).
+//   - PathFieldFsSocket (fs[*].socket): legacy virtio-fs sockets,
+//     scoped to the alloc dir like runtime files.
+//
+// Rewriting semantics:
+//   - The alloc-prefix rewriter (rewriteSnapshotPath) still runs on
+//     every path-bearing field. For disks this means: a disk that
+//     pointed at the OLD alloc's task_dir gets rewritten to the NEW
+//     alloc's task_dir; a disk that pointed at `/var/zeroship/ch/...`
+//     is left alone (the per-sandbox path is stable across alloc
+//     lifecycle and must NOT be rewritten — it survives the alloc).
+//
+// Cross-check with the bash wrapper (nomad-vm-wrapper.sh:476-624):
+// the wrapper's `assert_under_task_dir` enforces strict task_dir
+// containment for ALL fields including disks[*].path. The wrapper
+// would also fail on the persistent-workspace path; in production the
+// wrapper relies on the rootfs being copied INTO the alloc dir by
+// other steps (nomad-vm-wrapper.sh:300-305) and the workspace+userhome
+// paths being supplied via env vars resolved BEFORE the rewriter
+// runs. The Go driver bypasses the wrapper and consumes the
+// snapshot's config.json *as the snapshot recorded it* — which is
+// where the persistent workspace path leaks through. The per-field
+// allow-list is the contract the wrapper imposed implicitly via its
+// layout; we make it explicit in the Go port.
+//
+// Defence-in-depth properties retained from C-7-LT-4:
+//   - Per-tenant isolation: a snapshot that names another sandbox's
+//     prefix (`/var/zeroship/ch/sbx_OTHER/...`) is REJECTED. The
+//     per-sandbox prefix is the CURRENT alloc's sandbox_id, not a
+//     wildcard.
+//   - `..` traversal rejected as ANY path component.
+//   - Empty / non-absolute paths rejected.
+//   - Random absolute paths (`/etc/shadow`, `/run/attacker.sock`)
+//     rejected — they're under none of the allow-list roots.
 
 package ch
 
@@ -60,6 +98,43 @@ import (
 // prefixes like `/opt/nomad/data/alloc/x/y/localfoo` are NOT matched.
 var allocPrefixRe = regexp.MustCompile(`^/opt/nomad/data/alloc/[^/]+/[^/]+/local(/|$)`)
 
+// PathFieldKind classifies which allow-list applies to a given
+// config.json field.
+type PathFieldKind int
+
+const (
+	// PathFieldRuntimeFile covers serial.file + console.file: CH
+	// runtime files written inside the alloc dir. Validated under
+	// task_dir only.
+	PathFieldRuntimeFile PathFieldKind = iota
+	// PathFieldDisk covers disks[*].path: persistent block devices.
+	// Validated under per-sandbox prefix OR task_dir OR any
+	// content-addressed root.
+	PathFieldDisk
+	// PathFieldFsSocket covers fs[*].socket: legacy virtio-fs
+	// sockets, alloc-scoped like runtime files.
+	PathFieldFsSocket
+)
+
+// sandboxPrefix returns the per-sandbox persistent root for the given
+// sandbox id. Empty sandboxID returns "" — callers MUST treat that as
+// "no per-sandbox prefix available" (the validator falls back to
+// task_dir + content-addressed roots only).
+//
+// Layout: `/var/zeroship/ch/<sandbox_id>/` — matches the layout the
+// controller emits and the bash wrapper consumes
+// (crates/sandbox/src/backend/nomad_ch.rs § ZSBX_RESTORE_FROM, and
+// crates/sandbox/scripts/nomad-vm-wrapper.sh § ZSBX_WORKSPACE_IMG).
+// The trailing separator is included so the prefix check rejects
+// `/var/zeroship/ch/sbx_xyz_other/...` (a different sandbox whose id
+// happens to share a textual prefix).
+func sandboxPrefix(sandboxID string) string {
+	if sandboxID == "" {
+		return ""
+	}
+	return filepath.Join("/var/zeroship/ch", sandboxID) + string(filepath.Separator)
+}
+
 // rewriteSnapshotPath returns a rewritten string if value matches the
 // anchored alloc-prefix pattern, else returns value unchanged.
 //
@@ -80,73 +155,154 @@ func rewriteSnapshotPath(value, taskDir string) string {
 	return taskDir + sep + remainder
 }
 
-// rewriteAndAssertUnderTaskDir is the rewrite-plus-allow-list pipeline
-// for a single path-bearing field. It mirrors the bash wrapper's
-// `rewrite(value)` followed by `assert_under_task_dir(field, value)`
-// pair at nomad-vm-wrapper.sh:493-583.
+// hasPathPrefix reports whether `path` equals `prefix` (cleaned) or
+// has `prefix + separator` as its cleaned prefix. The cleaning step
+// collapses `.` segments and repeated separators so a value like
+// `<prefix>/./x` and `<prefix>//x` both normalise to `<prefix>/x`.
 //
-// Algorithm:
-//  1. If the input is the empty string, reject (an empty path is
-//     never a thing CH should open; this defends against a hand-edited
-//     config.json that wiped a path field).
-//  2. Apply the alloc-prefix rewrite (rewriteSnapshotPath above). On a
-//     match, the rewritten value is `taskDir + sep + remainder` and is
-//     guaranteed to live under taskDir by construction.
-//  3. R15-S2 allow-list — independently of (2), the post-rewrite path
-//     MUST:
-//     a. be absolute (start with `/`),
-//     b. contain no `..` components,
-//     c. live under `taskDir` (i.e. equal taskDir or have `taskDir/`
-//        as its filepath.Clean'd prefix).
+// Callers MUST ensure `..` components have been rejected upstream —
+// hasPathPrefix is a string-prefix check, not a realpath check.
 //
-// We deliberately do NOT call os.Stat / filepath.EvalSymlinks here:
-// the bash wrapper uses os.path.realpath which evaluates symlinks
-// against the live filesystem, but Go's filesystem state at rewrite
-// time may differ from CH's at open time (e.g. taskDir not yet
-// populated). A symlink-followed check belongs to the operator's
-// alloc-dir hygiene policy; the rewriter's job is to reject obvious
-// out-of-tree paths and traversal attempts before they reach CH. If
-// future hardening demands the realpath check, add it as a separate
-// layer with an explicit os.Stat seam tests can swap.
+// Returns false if either arg is empty.
+func hasPathPrefix(path, prefix string) bool {
+	if path == "" || prefix == "" {
+		return false
+	}
+	cleanedPath := filepath.Clean(path)
+	cleanedPrefix := filepath.Clean(prefix)
+	if cleanedPath == cleanedPrefix {
+		return true
+	}
+	return strings.HasPrefix(cleanedPath, cleanedPrefix+string(filepath.Separator))
+}
+
+// validatePathByKind enforces the allow-list appropriate to `kind` on
+// the already-rewritten `value`. Returns nil on success, or a
+// descriptive error naming both the offending value and the expected
+// prefix(es).
 //
-// Returns the rewritten value on success, or an error naming the
-// field, the offending value, and the expected prefix.
-func rewriteAndAssertUnderTaskDir(fieldName, value, taskDir string) (string, error) {
+// Common pre-checks (applied for every kind):
+//   - empty path → reject
+//   - relative path → reject (CH only accepts absolute paths)
+//   - any `..` component → reject (path-traversal defence in depth)
+//
+// Kind-specific checks:
+//   - PathFieldRuntimeFile / PathFieldFsSocket: MUST be under
+//     task_dir. Mirrors C-7-LT-4 verbatim for these kinds.
+//   - PathFieldDisk: MUST be under the per-sandbox prefix
+//     (/var/zeroship/ch/<sandbox_id>/), OR under task_dir, OR under
+//     any caller-supplied content-addressed root.
+//
+// Per-tenant isolation note: the per-sandbox prefix uses the CURRENT
+// alloc's sandbox_id. A snapshot that names another sandbox's prefix
+// fails this check — it's neither under THIS sandbox's prefix nor
+// under task_dir nor a content-addressed root, so it falls through to
+// the rejection branch.
+func validatePathByKind(
+	kind PathFieldKind,
+	fieldName, origValue, value, taskDir, sandboxID string,
+	contentAddressedRoots []string,
+) error {
+	if value == "" {
+		return fmt.Errorf("ch: rewriteConfigJSON: %s is empty; expected absolute path under %s", fieldName, taskDir)
+	}
+	if !strings.HasPrefix(value, "/") {
+		return fmt.Errorf("ch: rewriteConfigJSON: %s = %q is not absolute (expected a path under %s)", fieldName, origValue, taskDir)
+	}
+	// Path-component traversal defence: reject `..` as ANY component
+	// of the post-rewrite value. The controller's rewriter never emits
+	// one and CH never needs them; their presence is the red flag the
+	// bash wrapper rejects too. Mirrors the explicit component scan in
+	// assert_under_task_dir at nomad-vm-wrapper.sh:559-567.
+	for _, part := range strings.Split(value, "/") {
+		if part == ".." {
+			return fmt.Errorf("ch: rewriteConfigJSON: %s = %q contains a `..` component (path-traversal defence; expected a path under %s)", fieldName, origValue, taskDir)
+		}
+	}
+
+	cleaned := filepath.Clean(value)
+
+	switch kind {
+	case PathFieldRuntimeFile, PathFieldFsSocket:
+		if !hasPathPrefix(cleaned, taskDir) {
+			return fmt.Errorf("ch: rewriteConfigJSON: %s = %q resolves to %q, NOT under expected prefix %q (task_dir); possible malicious snapshot or misrouted restore", fieldName, origValue, cleaned, filepath.Clean(taskDir))
+		}
+		return nil
+	case PathFieldDisk:
+		// Allow-list, in order:
+		//   1. per-sandbox persistent prefix (the smoke-r16 case)
+		//   2. task_dir (staged disks like rootfs.img the driver
+		//      materialises at cold-boot, which a re-snap captures)
+		//   3. caller-supplied content-addressed roots (read-only
+		//      base images shared across sandboxes)
+		if sandboxID != "" {
+			if hasPathPrefix(cleaned, sandboxPrefix(sandboxID)) {
+				return nil
+			}
+		}
+		if hasPathPrefix(cleaned, taskDir) {
+			return nil
+		}
+		for _, root := range contentAddressedRoots {
+			if root == "" {
+				continue
+			}
+			if hasPathPrefix(cleaned, root) {
+				return nil
+			}
+		}
+		// Build a descriptive error naming the prefixes we DID check
+		// so an operator looking at the Nomad event can tell at a
+		// glance which allow-list slot the path missed.
+		var allowed []string
+		if sandboxID != "" {
+			allowed = append(allowed, fmt.Sprintf("sandbox=%s prefix %q", sandboxID, sandboxPrefix(sandboxID)))
+		}
+		allowed = append(allowed, fmt.Sprintf("task_dir %q", filepath.Clean(taskDir)))
+		for _, root := range contentAddressedRoots {
+			if root == "" {
+				continue
+			}
+			allowed = append(allowed, fmt.Sprintf("content-addressed root %q", filepath.Clean(root)))
+		}
+		return fmt.Errorf("ch: rewriteConfigJSON: %s = %q resolves to %q, NOT under any allow-list prefix [%s]; possible malicious snapshot or misrouted restore", fieldName, origValue, cleaned, strings.Join(allowed, "; "))
+	default:
+		return fmt.Errorf("ch: rewriteConfigJSON: %s: unknown PathFieldKind %d (internal bug)", fieldName, kind)
+	}
+}
+
+// rewriteAndValidatePath is the per-field pipeline: apply the
+// alloc-prefix rewrite (which is unconditional — it's a no-op on
+// already-correct paths and a substitution on old-alloc paths) and
+// then validate by kind.
+//
+// Per-sandbox `/var/zeroship/ch/<sbx>/...` paths do NOT match the
+// alloc-prefix regex (which anchors at `/opt/nomad/data/alloc/...`)
+// so they pass through rewriteSnapshotPath unchanged — preserving the
+// "stable across alloc lifecycle" property the smoke-r16 review
+// called out.
+//
+// Returns the (possibly rewritten) value on success, or an error.
+func rewriteAndValidatePath(
+	kind PathFieldKind,
+	fieldName, value, taskDir, sandboxID string,
+	contentAddressedRoots []string,
+) (string, error) {
 	if value == "" {
 		return "", fmt.Errorf("ch: rewriteConfigJSON: %s is empty; expected absolute path under %s", fieldName, taskDir)
 	}
 	rewritten := rewriteSnapshotPath(value, taskDir)
-
-	if !strings.HasPrefix(rewritten, "/") {
-		return "", fmt.Errorf("ch: rewriteConfigJSON: %s = %q is not absolute (expected a path under %s)", fieldName, value, taskDir)
-	}
-	// Path-component traversal defence: reject `..` as any component
-	// of the post-rewrite value. The controller's rewriter never emits
-	// one and CH never needs them; their presence is the red flag the
-	// bash wrapper rejects too. Mirrors the explicit component scan
-	// in assert_under_task_dir at nomad-vm-wrapper.sh:559-567.
-	for _, part := range strings.Split(rewritten, "/") {
-		if part == ".." {
-			return "", fmt.Errorf("ch: rewriteConfigJSON: %s = %q contains a `..` component (path-traversal defence; expected a path under %s)", fieldName, value, taskDir)
-		}
-	}
-	// Containment check. filepath.Clean collapses `.` segments and
-	// repeated separators so a value like `<taskDir>/./x` and
-	// `<taskDir>//x` both normalise to `<taskDir>/x`. We compare the
-	// cleaned form so the prefix check is robust against benign-but-
-	// surprising input shapes.
-	cleaned := filepath.Clean(rewritten)
-	cleanedTaskDir := filepath.Clean(taskDir)
-	if cleaned != cleanedTaskDir && !strings.HasPrefix(cleaned, cleanedTaskDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("ch: rewriteConfigJSON: %s = %q resolves to %q, NOT under expected prefix %q (task_dir); possible malicious snapshot or misrouted restore", fieldName, value, cleaned, cleanedTaskDir)
+	if err := validatePathByKind(kind, fieldName, value, rewritten, taskDir, sandboxID, contentAddressedRoots); err != nil {
+		return "", err
 	}
 	return rewritten, nil
 }
 
 // rewriteConfigJSON path-rewrites the snapshot's config.json so disk
-// paths + serial.file + console.file point at the NEW task dir, and
-// the net[0].tap is rewritten to the tap derived from the NEW vm
-// index (zsbx-nm-<idx>). MACs are NOT rewritten — the bash wrapper
+// paths + serial.file + console.file point at the NEW task dir (or
+// preserve their persistent per-sandbox location), and the
+// net[0].tap is rewritten to the tap derived from the NEW vm index
+// (zsbx-nm-<idx>). MACs are NOT rewritten — the bash wrapper
 // preserves them too; a stable MAC across snapshot/restore lets the
 // guest's eth0 keep its existing ARP cache.
 //
@@ -158,23 +314,29 @@ func rewriteAndAssertUnderTaskDir(fieldName, value, taskDir string) (string, err
 //     diagnostic clarity in the future; today the bash wrapper does
 //     not rewrite IPs because the snapshot's recorded kernel cmdline
 //     is replayed verbatim and CH `--restore` ignores --cmdline).
+//   - sandboxID: the current alloc's sandbox id (typed_id form, no
+//     prefix). Empty disables the per-sandbox allow-list entry
+//     (disks must then be under task_dir or a content-addressed
+//     root). C-7-LT-6: required for legitimate persistent
+//     workspace.img paths.
+//   - contentAddressedRoots: absolute paths under which read-only
+//     base images live (e.g. `/var/zeroship/ch/rootfs/`). May be
+//     nil/empty — that simply disables the content-addressed allow-
+//     list slot.
 //
 // Output:
 //   - rewritten bytes (json.Marshal output; compact, no trailing
 //     newline) on success.
 //   - Err on malformed input (non-JSON, unexpected types at known
-//     keys).
-//
-// The rewrite is idempotent on re-wakes — a prior wake's task dir
-// also matches the anchored prefix and is replaced with the current
-// one.
-//
-// Post virtio-blk pivot the rewriter is expected to touch
-// disks[].path and serial.file; older snapshots that carried
-// fs[].socket entries will get those rewritten too for diagnostic
-// clarity, but the restore would fail at CH level anyway (no
-// virtiofsd backing the socket).
-func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOctet uint8) ([]byte, error) {
+//     keys) OR on any path that fails the per-field allow-list.
+func rewriteConfigJSON(
+	orig []byte,
+	taskDir string,
+	vmIndex uint16,
+	subnetBaseOctet uint8,
+	sandboxID string,
+	contentAddressedRoots []string,
+) ([]byte, error) {
 	if len(orig) == 0 {
 		return nil, errors.New("ch: rewriteConfigJSON: empty input")
 	}
@@ -184,16 +346,14 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 
 	// We deliberately keep the document a generic map[string]any so
 	// any extra CH fields we don't care about round-trip unchanged.
-	// The chConfigDoc shape would be lossy on extras (CH tolerates
-	// extra fields gracefully but rejects unknown ones at restore
-	// time only if shape is wrong; the safest path is verbatim
-	// preservation).
 	var doc map[string]any
 	if err := json.Unmarshal(orig, &doc); err != nil {
 		return nil, fmt.Errorf("ch: rewriteConfigJSON: parse: %w", err)
 	}
 
 	// disks: []map[string]any. Each entry MAY have a "path" string.
+	// C-7-LT-6: validated as PathFieldDisk (allow-list: per-sandbox
+	// prefix OR task_dir OR content-addressed root).
 	if rawDisks, ok := doc["disks"]; ok && rawDisks != nil {
 		disks, ok := rawDisks.([]any)
 		if !ok {
@@ -206,7 +366,11 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 			}
 			if pv, ok := dm["path"]; ok {
 				if ps, ok := pv.(string); ok {
-					rew, err := rewriteAndAssertUnderTaskDir(fmt.Sprintf("disks[%d].path", i), ps, taskDir)
+					rew, err := rewriteAndValidatePath(
+						PathFieldDisk,
+						fmt.Sprintf("disks[%d].path", i),
+						ps, taskDir, sandboxID, contentAddressedRoots,
+					)
 					if err != nil {
 						return nil, err
 					}
@@ -218,12 +382,17 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 		doc["disks"] = disks
 	}
 
-	// serial: map[string]any with optional "file" string.
+	// serial: map[string]any with optional "file" string. Always
+	// under task_dir (CH writes the in-guest console log there).
 	if rawSerial, ok := doc["serial"]; ok && rawSerial != nil {
 		if sm, ok := rawSerial.(map[string]any); ok {
 			if fv, ok := sm["file"]; ok {
 				if fs, ok := fv.(string); ok {
-					rew, err := rewriteAndAssertUnderTaskDir("serial.file", fs, taskDir)
+					rew, err := rewriteAndValidatePath(
+						PathFieldRuntimeFile,
+						"serial.file",
+						fs, taskDir, sandboxID, contentAddressedRoots,
+					)
 					if err != nil {
 						return nil, err
 					}
@@ -239,7 +408,11 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 		if cm, ok := rawConsole.(map[string]any); ok {
 			if fv, ok := cm["file"]; ok {
 				if fs, ok := fv.(string); ok {
-					rew, err := rewriteAndAssertUnderTaskDir("console.file", fs, taskDir)
+					rew, err := rewriteAndValidatePath(
+						PathFieldRuntimeFile,
+						"console.file",
+						fs, taskDir, sandboxID, contentAddressedRoots,
+					)
 					if err != nil {
 						return nil, err
 					}
@@ -275,9 +448,9 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 
 	// fs[].socket — legacy virtio-fs sockets. Rewritten for diagnostic
 	// clarity; restore will still fail at CH level when virtiofsd
-	// isn't backing the socket. The allow-list applies here too: a
-	// snapshot whose fs[i].socket points outside the alloc dir is a
-	// security red flag regardless of the legacy status.
+	// isn't backing the socket. Validated under task_dir (the only
+	// place a virtio-fs socket would legitimately live in a CH
+	// alloc).
 	if rawFs, ok := doc["fs"]; ok && rawFs != nil {
 		if fsEntries, ok := rawFs.([]any); ok {
 			for i, e := range fsEntries {
@@ -287,7 +460,11 @@ func rewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOc
 				}
 				if sv, ok := em["socket"]; ok {
 					if ss, ok := sv.(string); ok {
-						rew, err := rewriteAndAssertUnderTaskDir(fmt.Sprintf("fs[%d].socket", i), ss, taskDir)
+						rew, err := rewriteAndValidatePath(
+							PathFieldFsSocket,
+							fmt.Sprintf("fs[%d].socket", i),
+							ss, taskDir, sandboxID, contentAddressedRoots,
+						)
 						if err != nil {
 							return nil, err
 						}

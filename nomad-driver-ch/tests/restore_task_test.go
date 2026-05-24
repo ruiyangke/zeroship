@@ -133,7 +133,7 @@ func TestRewriteConfigJSON_RewritesDiskPaths(t *testing.T) {
 	input := snapshotConfigFixture(srcAllocDir)
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
 
-	out, err := ch.RewriteConfigJSON(input, newTaskDir, 7, 99)
+	out, err := ch.RewriteConfigJSON(input, newTaskDir, 7, 99, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRewriteConfigJSON_RewritesNetTap(t *testing.T) {
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
 	newVMIndex := uint16(42)
 
-	out, err := ch.RewriteConfigJSON(input, newTaskDir, newVMIndex, 99)
+	out, err := ch.RewriteConfigJSON(input, newTaskDir, newVMIndex, 99, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestRewriteConfigJSON_PreservesMemoryRangesRef(t *testing.T) {
 	}
 
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
-	out, err := ch.RewriteConfigJSON(seeded, newTaskDir, 7, 99)
+	out, err := ch.RewriteConfigJSON(seeded, newTaskDir, 7, 99, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestRewriteConfigJSON_RejectsMalformedInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ch.RewriteConfigJSON(tc.in, "/opt/nomad/data/alloc/x/y/local", 1, 99)
+			_, err := ch.RewriteConfigJSON(tc.in, "/opt/nomad/data/alloc/x/y/local", 1, 99, "", nil)
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -314,7 +314,7 @@ func TestRewriteRestoreConfigPaths_AllPathFieldsRewritten(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 7, 99)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 7, 99, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestRewriteRestoreConfigPaths_PreservesNonPathFields(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestRewriteRestoreConfigPaths_RejectsPathOutsideAllocPrefix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
 			if err == nil {
 				t.Fatalf("expected RewriteConfigJSON to reject %s, got nil error", tc.name)
 			}
@@ -513,7 +513,7 @@ func TestRewriteRestoreConfigPaths_RejectsParentTraversal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
 			if err == nil {
 				t.Fatalf("expected RewriteConfigJSON to reject path %q, got nil", tc.path)
 			}
@@ -538,7 +538,7 @@ func TestRewriteRestoreConfigPaths_HandlesMissingOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON (missing-optional-fields): %v", err)
 	}
@@ -1365,5 +1365,240 @@ func mustContainTest(t *testing.T, label, haystack, needle string) {
 	if !strings.Contains(haystack, needle) {
 		t.Errorf("%s: missing %q in %q", label, needle, haystack)
 	}
+}
+
+// -- C-7-LT-6 per-field path allow-list tests ------------------------
+//
+// Smoke-r16 caught C-7-LT-4's "all paths under task_dir" invariant
+// rejecting the legitimate per-sandbox persistent workspace.img path
+// at /var/zeroship/ch/<sandbox_id>/workspace.img. C-7-LT-6 replaces
+// the single invariant with a per-field allow-list:
+//
+//   - PathFieldRuntimeFile (serial.file, console.file): under task_dir
+//   - PathFieldDisk (disks[*].path): under per-sandbox prefix OR
+//     task_dir OR caller-supplied content-addressed root
+//   - PathFieldFsSocket (fs[*].socket): under task_dir
+//
+// Each test below pins one branch of the new allow-list.
+
+// TestValidatePath_DiskUnderSandboxPrefix is the C-7-LT-6 happy path:
+// a disk under /var/zeroship/ch/<sbx>/ is accepted with the per-sandbox
+// allow-list active. Pin from smoke-r16's verbatim failure mode.
+func TestValidatePath_DiskUnderSandboxPrefix(t *testing.T) {
+	const sandboxID = "019e5979e2cc77c0934ca3afe37b06a4"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	diskPath := "/var/zeroship/ch/" + sandboxID + "/workspace.img"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[1].path", diskPath, taskDir, sandboxID, nil)
+	if err != nil {
+		t.Fatalf("disk under per-sandbox prefix rejected: %v", err)
+	}
+}
+
+// TestValidatePath_DiskUnderTaskDir confirms the task_dir branch of
+// the disk allow-list still works (e.g. a cold-boot-staged rootfs.img
+// the driver materialises into the alloc dir).
+func TestValidatePath_DiskUnderTaskDir(t *testing.T) {
+	const sandboxID = "sbx_test"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	diskPath := taskDir + "/rootfs.img"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", diskPath, taskDir, sandboxID, nil)
+	if err != nil {
+		t.Fatalf("disk under task_dir rejected: %v", err)
+	}
+}
+
+// TestValidatePath_DiskUnderContentAddressedRoot confirms the
+// content-addressed allow-list slot: a read-only base rootfs image
+// under an operator-configured root is accepted.
+func TestValidatePath_DiskUnderContentAddressedRoot(t *testing.T) {
+	const sandboxID = "sbx_test"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	diskPath := "/var/zeroship/ch/rootfs/sha256-abc123/rootfs.img"
+
+	err := ch.ValidatePathByKind(
+		ch.PathFieldDiskForTest,
+		"disks[0].path",
+		diskPath, taskDir, sandboxID,
+		[]string{"/var/zeroship/ch/rootfs"},
+	)
+	if err != nil {
+		t.Fatalf("disk under content-addressed root rejected: %v", err)
+	}
+}
+
+// TestValidatePath_DiskRejectsRandomAbsolute is the defence-in-depth
+// pin: an absolute path that matches none of the allow-list prefixes
+// (e.g. /etc/shadow) is REJECTED. The malicious-snapshot scenario.
+func TestValidatePath_DiskRejectsRandomAbsolute(t *testing.T) {
+	const sandboxID = "019e5979e2cc77c0934ca3afe37b06a4"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", "/etc/shadow", taskDir, sandboxID, []string{"/var/zeroship/ch/rootfs"})
+	if err == nil {
+		t.Fatal("/etc/shadow accepted as disk path; allow-list bypassed")
+	}
+	mustContainTest(t, "random-absolute reject", err.Error(), "/etc/shadow")
+	mustContainTest(t, "random-absolute reject", err.Error(), "disks[0].path")
+}
+
+// TestValidatePath_DiskRejectsWrongSandbox is the per-tenant isolation
+// pin: a disk path under ANOTHER sandbox's prefix is REJECTED. The
+// per-sandbox allow-list keys on the CURRENT alloc's sandbox_id, not
+// any sandbox.
+func TestValidatePath_DiskRejectsWrongSandbox(t *testing.T) {
+	const ourSandbox = "019e5979e2cc77c0934ca3afe37b06a4"
+	const otherSandbox = "022ffffff2cc77c0934ca3afe37bDEAD"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	otherPath := "/var/zeroship/ch/" + otherSandbox + "/workspace.img"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[1].path", otherPath, taskDir, ourSandbox, nil)
+	if err == nil {
+		t.Fatalf("disk under other sandbox %q accepted while current sandbox is %q (per-tenant isolation bypassed)", otherSandbox, ourSandbox)
+	}
+	mustContainTest(t, "wrong-sandbox reject", err.Error(), "disks[1].path")
+	mustContainTest(t, "wrong-sandbox reject", err.Error(), otherSandbox)
+}
+
+// TestValidatePath_SerialFileMustBeUnderTaskDir is the runtime-file
+// kind pin: serial.file (and console.file) MUST be under task_dir
+// even if it textually matches a per-sandbox prefix. The runtime kind
+// is alloc-scoped — a serial.log under /var/zeroship/ch/<sbx>/ is a
+// red flag (the snapshot's recorded serial path should always have
+// been under the OLD alloc's task_dir, which the rewriter then
+// rewrites to the NEW alloc's task_dir).
+func TestValidatePath_SerialFileMustBeUnderTaskDir(t *testing.T) {
+	const sandboxID = "019e5979e2cc77c0934ca3afe37b06a4"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	weird := "/var/zeroship/ch/" + sandboxID + "/serial.log"
+
+	err := ch.ValidatePathByKind(ch.PathFieldRuntimeFileForTest, "serial.file", weird, taskDir, sandboxID, nil)
+	if err == nil {
+		t.Fatal("serial.file under per-sandbox prefix accepted; runtime-file kind must enforce task_dir only")
+	}
+	mustContainTest(t, "serial.file-prefix reject", err.Error(), "serial.file")
+	mustContainTest(t, "serial.file-prefix reject", err.Error(), "task_dir")
+}
+
+// TestValidatePath_ParentTraversalRejected confirms `..` components
+// are caught for the disk kind too — even when the prefix textually
+// looks like a per-sandbox path, `..` is a red flag we reject before
+// the containment check runs.
+func TestValidatePath_ParentTraversalRejected(t *testing.T) {
+	const sandboxID = "019e5979e2cc77c0934ca3afe37b06a4"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	traversal := "/var/zeroship/ch/" + sandboxID + "/../" + "escape"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", traversal, taskDir, sandboxID, nil)
+	if err == nil {
+		t.Fatal("path with `..` component accepted; traversal defence bypassed")
+	}
+	mustContainTest(t, "traversal reject", err.Error(), "..")
+}
+
+// TestRewriteRestoreConfigPaths_PreservesPersistentWorkspace is the
+// full integration witness for C-7-LT-6: a snapshot config.json whose
+// disks[].path mixes (a) the OLD alloc's task_dir paths (must rewrite)
+// and (b) the per-sandbox persistent workspace.img (must PRESERVE
+// verbatim) rewrites cleanly. The serial.file (alloc-scoped) gets
+// rewritten to the NEW task_dir.
+func TestRewriteRestoreConfigPaths_PreservesPersistentWorkspace(t *testing.T) {
+	const sandboxID = "019e5979e2cc77c0934ca3afe37b06a4"
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	persistentWorkspace := "/var/zeroship/ch/" + sandboxID + "/workspace.img"
+	persistentUserHome := "/var/zeroship/ch/" + sandboxID + "/userhome.img"
+
+	doc := map[string]any{
+		"disks": []any{
+			// disk[0]: staged rootfs under OLD alloc's task_dir →
+			// rewriter substitutes to NEW task_dir.
+			map[string]any{"path": srcAlloc + "/rootfs.img"},
+			// disk[1]: per-sandbox persistent workspace → MUST be
+			// preserved verbatim (the smoke-r16 failure mode).
+			map[string]any{"path": persistentWorkspace},
+			// disk[2]: per-sandbox persistent userhome → likewise.
+			map[string]any{"path": persistentUserHome},
+		},
+		"serial": map[string]any{"file": srcAlloc + "/serial.log"},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, nil)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	disks := got["disks"].([]any)
+	if d0 := disks[0].(map[string]any); d0["path"] != newTaskDir+"/rootfs.img" {
+		t.Errorf("disks[0].path = %v, want %v (rewritten to new task_dir)", d0["path"], newTaskDir+"/rootfs.img")
+	}
+	if d1 := disks[1].(map[string]any); d1["path"] != persistentWorkspace {
+		t.Errorf("disks[1].path = %v, want %v (persistent path preserved)", d1["path"], persistentWorkspace)
+	}
+	if d2 := disks[2].(map[string]any); d2["path"] != persistentUserHome {
+		t.Errorf("disks[2].path = %v, want %v (persistent path preserved)", d2["path"], persistentUserHome)
+	}
+	if s := got["serial"].(map[string]any); s["file"] != newTaskDir+"/serial.log" {
+		t.Errorf("serial.file = %v, want %v (rewritten to new task_dir)", s["file"], newTaskDir+"/serial.log")
+	}
+}
+
+// TestRewriteRestoreConfigPaths_DifferentiatesDiskFromSerial confirms
+// the per-field allow-list dispatch: a disk under /var/zeroship/ch/
+// passes (PathFieldDisk allow-list), while a serial.file under the
+// same prefix is REJECTED (PathFieldRuntimeFile is task_dir only).
+// Both fields share the same config; the rewriter must apply the
+// right kind to each.
+func TestRewriteRestoreConfigPaths_DifferentiatesDiskFromSerial(t *testing.T) {
+	const sandboxID = "019e5979e2cc77c0934ca3afe37b06a4"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	persistentDisk := "/var/zeroship/ch/" + sandboxID + "/workspace.img"
+
+	// Case 1: disk under per-sandbox prefix + serial under task_dir →
+	// both pass.
+	docOK := map[string]any{
+		"disks":  []any{map[string]any{"path": persistentDisk}},
+		"serial": map[string]any{"file": newTaskDir + "/serial.log"},
+	}
+	in, err := json.Marshal(docOK)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, nil)
+	if err != nil {
+		t.Fatalf("disk-under-prefix + serial-under-task_dir should pass: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if d := got["disks"].([]any)[0].(map[string]any); d["path"] != persistentDisk {
+		t.Errorf("disks[0].path = %v, want %v", d["path"], persistentDisk)
+	}
+
+	// Case 2: serial under per-sandbox prefix → REJECTED (runtime
+	// files must be alloc-scoped).
+	docBad := map[string]any{
+		"disks":  []any{map[string]any{"path": persistentDisk}},
+		"serial": map[string]any{"file": "/var/zeroship/ch/" + sandboxID + "/serial.log"},
+	}
+	in, err = json.Marshal(docBad)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, nil)
+	if err == nil {
+		t.Fatal("serial.file under per-sandbox prefix accepted; runtime-file kind not enforced")
+	}
+	mustContainTest(t, "differentiation reject", err.Error(), "serial.file")
 }
 

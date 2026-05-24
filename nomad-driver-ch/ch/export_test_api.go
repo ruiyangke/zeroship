@@ -123,8 +123,48 @@ func CallRealTeardownTap(tapName string) error {
 
 // RewriteConfigJSON is the test entry point for the T-6 restore-path
 // config.json rewriter. Pure function; no side effects.
-func RewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOctet uint8) ([]byte, error) {
-	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet)
+//
+// C-7-LT-6 signature: adds sandboxID + contentAddressedRoots to drive
+// the per-field disk allow-list. Pre-C-7-LT-6 callers pass "" / nil
+// for both, which restricts disks[*].path to task_dir only (the prior
+// strict invariant).
+func RewriteConfigJSON(
+	orig []byte,
+	taskDir string,
+	vmIndex uint16,
+	subnetBaseOctet uint8,
+	sandboxID string,
+	contentAddressedRoots []string,
+) ([]byte, error) {
+	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet, sandboxID, contentAddressedRoots)
+}
+
+// PathFieldKind re-exports the field-kind enum so tests can exercise
+// validatePathByKind directly. C-7-LT-6.
+type PathFieldKindForTest = PathFieldKind
+
+const (
+	PathFieldRuntimeFileForTest = PathFieldRuntimeFile
+	PathFieldDiskForTest        = PathFieldDisk
+	PathFieldFsSocketForTest    = PathFieldFsSocket
+)
+
+// ValidatePathByKind is the test entry point for the per-field
+// validator. C-7-LT-6 — exposed so tests can pin each allow-list
+// branch without round-tripping the whole config.json.
+func ValidatePathByKind(
+	kind PathFieldKind,
+	fieldName, value, taskDir, sandboxID string,
+	contentAddressedRoots []string,
+) error {
+	return validatePathByKind(kind, fieldName, value, value, taskDir, sandboxID, contentAddressedRoots)
+}
+
+// SandboxPrefixForTest re-exports sandboxPrefix so tests can assert
+// the per-sandbox layout convention without re-implementing the
+// filepath join. C-7-LT-6.
+func SandboxPrefixForTest(sandboxID string) string {
+	return sandboxPrefix(sandboxID)
 }
 
 // WaitForCHSocketReady is the test entry point for the C-7-LT-3-PR1

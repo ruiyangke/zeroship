@@ -141,6 +141,23 @@ type Config struct {
 	VirtiofsdBin       string `codec:"virtiofsd_bin"`
 	VMIndexLockDir     string `codec:"vm_index_lockdir"`
 	RunDir             string `codec:"run_dir"`
+
+	// ContentAddressedRootfsRoots is the list of absolute path
+	// prefixes under which read-only base rootfs images live. The
+	// restore-path config rewriter (C-7-LT-6) accepts `disks[*].path`
+	// values under any of these roots in addition to the per-sandbox
+	// persistent root (`/var/zeroship/ch/<sandbox_id>/`) and the
+	// current alloc's task_dir. Empty/unset disables the
+	// content-addressed allow-list slot (disks must then be under
+	// task_dir or the per-sandbox prefix only).
+	//
+	// Operator stanza example:
+	//   config {
+	//     content_addressed_rootfs_roots = [
+	//       "/var/zeroship/ch/rootfs",
+	//     ]
+	//   }
+	ContentAddressedRootfsRoots []string `codec:"content_addressed_rootfs_roots"`
 }
 
 // configSpec is the HCL schema for the driver-level config block. Returned
@@ -166,6 +183,11 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		hclspec.NewAttr("run_dir", "string", false),
 		hclspec.NewLiteral(`"/var/lib/zsbx/run"`),
 	),
+	// C-7-LT-6: list of absolute path prefixes for content-addressed
+	// read-only base rootfs images. Optional; empty default disables
+	// the content-addressed allow-list slot in the restore-path
+	// config.json rewriter.
+	"content_addressed_rootfs_roots": hclspec.NewAttr("content_addressed_rootfs_roots", "list(string)", false),
 })
 
 // NewPlugin returns a drivers.DriverPlugin ready to be served via

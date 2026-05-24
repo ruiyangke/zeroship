@@ -337,7 +337,17 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	if base == 0 {
 		base = defaultSubnetBaseOctet
 	}
-	rewritten, err := rewriteConfigJSON(origConfig, runDir, driverConfig.VMIndex, base)
+	// C-7-LT-6: per-field path allow-list. The rewriter MUST know
+	// the current sandbox_id so disks[*].path under
+	// /var/zeroship/ch/<sbx>/ (the per-sandbox persistent workspace)
+	// is accepted; and it MAY accept disks under any operator-
+	// configured content-addressed root (e.g. read-only base
+	// rootfs.img). Both come from the driver Config.
+	var contentRoots []string
+	if p.config != nil {
+		contentRoots = p.config.ContentAddressedRootfsRoots
+	}
+	rewritten, err := rewriteConfigJSON(origConfig, runDir, driverConfig.VMIndex, base, driverConfig.SandboxId, contentRoots)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: rewrite config: %w", err)
 	}
