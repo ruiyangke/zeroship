@@ -2409,6 +2409,7 @@ pub(crate) fn build_nomad_job_json_with(
             //   memory_mb         uint32
             //   restore_from      string  (empty for cold-boot)
             //   sandbox_id        string  (32-hex, no hyphens)
+            //   user_id           string  (typed_id `usr_...`, C-7-LT-7)
             //   workspace_img     string  (host path)
             //   user_home_img     string  (host path)
             //   pubkey_hex        string  (64-hex, no `0x`)
@@ -2441,6 +2442,13 @@ pub(crate) fn build_nomad_job_json_with(
                     "memory_mb": cfg.memory_mb as u32,
                     "restore_from": restore_str,
                     "sandbox_id": sandbox_id,
+                    // C-7-LT-7: user_id feeds the driver's per-user-home
+                    // path allow-list. Without this, the restore-branch
+                    // rewriter rejects /var/zeroship/ch/users/<usr>/home.img
+                    // (smoke-r17 verbatim failure mode). Cross-tenant
+                    // isolation is preserved on the driver side via
+                    // strict user_id equality in the prefix check.
+                    "user_id": user_id,
                     "workspace_img": workspace_img.display().to_string(),
                     "user_home_img": user_home_img.display().to_string(),
                     "pubkey_hex": pubkey_hex,
@@ -4478,6 +4486,13 @@ mod tests {
         assert_eq!(
             config["sandbox_id"].as_str(),
             Some("abcdef0123456789abcdef0123456789"),
+        );
+        // C-7-LT-7: user_id feeds the driver's per-user-home path
+        // allow-list. Without this, the restore-branch rewriter
+        // rejects /var/zeroship/ch/users/<usr>/home.img.
+        assert_eq!(
+            config["user_id"].as_str(),
+            Some("alice"),
         );
         assert_eq!(
             config["workspace_img"].as_str(),
