@@ -182,8 +182,21 @@ if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
   # alongside /etc/nomad.d/nomad.hcl (Nomad concatenates everything
   # in /etc/nomad.d/*.hcl), so writing it BEFORE `systemctl enable
   # --now nomad` below means we don't need a restart afterwards.
+  #
+  # The explicit `plugin "nomad-driver-ch" { config {} }` stanza is
+  # REQUIRED on Nomad 2.0.2 — `plugin_dir` alone makes the loader emit
+  #   [WARN] agent.plugin_loader: plugin not referenced in the agent
+  #                                configuration file, loading skipped
+  # and skip the driver entirely. The empty `config {}` block is
+  # mandatory; Nomad refuses to load plugins it doesn't see configured,
+  # even with empty config. Confirmed via T-8b-smoke FAIL r1 — see
+  # docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r1.md.
   cat > /etc/nomad.d/plugin-dir.hcl <<EOF
 plugin_dir = "/etc/zeroship/nomad-plugins"
+
+plugin "nomad-driver-ch" {
+  config {}
+}
 EOF
 fi
 
@@ -322,6 +335,43 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
+
+# ───── 4b. ch driver-health gate (T-8b-prereqs-config) ──────────
+# When INSTALL_CH_PLUGIN_DRIVER=1 we MUST confirm the ch driver is
+# both detected and healthy before letting startup proceed. Without
+# this gate `zsbx-worker-ready` was emitted even when the plugin
+# loader silently skipped the driver (Nomad 2.0.2 WARN: plugin not
+# referenced in agent config), so the failure only surfaced on the
+# first sandbox-create — many minutes later, far from the actual
+# cause. Surface plugin-load failures at provision time instead.
+#
+# Probe: `nomad node status -self -verbose` lists drivers as
+#   <name>  <detected>  <healthy>  <message>  <time>
+# We match `^ch\s+true\s+true` (whitespace-tolerant), with 10x 3s
+# retries (30s total) before failing the worker startup. raw_exec
+# path (INSTALL_CH_PLUGIN_DRIVER unset/0) is unchanged.
+if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
+  echo "[startup] probing ch driver health (Detected=true, Healthy=true) ..."
+  CH_OK=0
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if nomad node status -self -verbose 2>/dev/null \
+         | grep -E '^ch[[:space:]]+true[[:space:]]+true' >/dev/null; then
+      CH_OK=1
+      echo "[startup] ch driver healthy (attempt $attempt)"
+      break
+    fi
+    echo "[startup] ch driver not yet healthy (attempt $attempt/10); retry in 3s"
+    sleep 3
+  done
+  if [ "$CH_OK" -ne 1 ]; then
+    echo "[startup] FATAL: ch driver did not reach Detected=true,Healthy=true within 30s" >&2
+    echo "[startup] last node status:" >&2
+    nomad node status -self -verbose 2>&1 | tail -40 >&2 || true
+    echo "[startup] nomad agent logs (tail):" >&2
+    journalctl -u nomad --no-pager -n 80 2>&1 | tail -80 >&2 || true
+    exit 1
+  fi
+fi
 
 # ───── 5. token files (mode 0o400, owned by root) ───────────────
 umask 077
