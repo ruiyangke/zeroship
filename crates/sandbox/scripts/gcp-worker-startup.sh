@@ -18,7 +18,11 @@
 #          guest's frozen-at-snapshot CLOCK_REALTIME post-CH-restore.)
 #        - zeroship-sandbox (controller, from metadata `controller-object`)
 #        - nomad-vm-wrapper.sh
-#        - stress harness (stress_one.py, snapshot_stress.py, typed_id.py)
+#        - stress harness:
+#            * snapshot_stress.py — SHA-pinned (R24-T1); canonical
+#              source is `crates/sandbox/scripts/snapshot_stress.py`,
+#              the GCS object is a mirror, SHA mismatch is FATAL.
+#            * stress_one.py, typed_id.py — best-effort, missing OK.
 #   3. set up 12 taps on 10.99.10X.1/30  (X = vm index, see wrapper)
 #   4. write Nomad client config pointing at the server fleet
 #   5. write /etc/zeroship/{sandbox-token,sandbox-admin-token,sandbox-admin-token.env}
@@ -200,9 +204,22 @@ plugin "nomad-driver-ch" {
 EOF
 fi
 
-# Stress harness (best-effort: a missing file is non-fatal for cluster
-# bringup; the provisioner uses `gsutil cp` directly to push these too).
-for f in stress_one.py snapshot_stress.py typed_id.py; do
+# Stress harness.
+#
+# `snapshot_stress.py` is the canonical T-8b-cutover gating workload —
+# its in-repo source lives at `crates/sandbox/scripts/snapshot_stress.py`
+# (R24-T1, 2026-05-25). The GCS object is a MIRROR of the in-repo file;
+# we SHA-pin the download against the literal below so any drift between
+# the in-repo source and the GCS mirror fails worker boot loudly. To
+# update the harness see the "UPDATE PROCEDURE" docstring at the top
+# of `crates/sandbox/scripts/snapshot_stress.py` — the in-repo file,
+# the GCS object, and this SHA literal must all move together.
+SNAPSHOT_STRESS_SHA256="89ba229e2c8544bc648b46f4963e57cf524cd7edfd7af82093a1217afb123d43"
+
+# `stress_one.py` and `typed_id.py` are companion files — best-effort
+# pull, missing-file is non-fatal for cluster bringup; the provisioner
+# pushes these out-of-band too.
+for f in stress_one.py typed_id.py; do
   if gsutil -q stat "gs://$ARTIFACT_BUCKET/stress/$f" 2>/dev/null; then
     gsutil -q cp "gs://$ARTIFACT_BUCKET/stress/$f" "/opt/stress/$f"
     chmod 0755 "/opt/stress/$f"
@@ -210,6 +227,26 @@ for f in stress_one.py snapshot_stress.py typed_id.py; do
     echo "[startup] WARN: /opt/stress/$f not on GCS — skipping"
   fi
 done
+
+# snapshot_stress.py: REQUIRED with SHA verification (R24-T1).
+# A SHA mismatch is FATAL — operator must reconcile the in-repo source,
+# the GCS mirror, and the SNAPSHOT_STRESS_SHA256 pin above.
+if gsutil -q stat "gs://$ARTIFACT_BUCKET/stress/snapshot_stress.py" 2>/dev/null; then
+  gsutil -q cp "gs://$ARTIFACT_BUCKET/stress/snapshot_stress.py" /opt/stress/snapshot_stress.py
+  chmod 0755 /opt/stress/snapshot_stress.py
+  got=$(sha256sum /opt/stress/snapshot_stress.py | awk '{print $1}')
+  if [ "$got" != "$SNAPSHOT_STRESS_SHA256" ]; then
+    echo "[startup] FATAL: snapshot_stress.py SHA mismatch" >&2
+    echo "[startup]   expected: $SNAPSHOT_STRESS_SHA256" >&2
+    echo "[startup]   got:      $got" >&2
+    echo "[startup]   In-repo source: crates/sandbox/scripts/snapshot_stress.py" >&2
+    echo "[startup]   See R24-T1 / UPDATE PROCEDURE in that file's docstring." >&2
+    exit 1
+  fi
+  echo "[startup] snapshot_stress.py SHA OK ($SNAPSHOT_STRESS_SHA256)"
+else
+  echo "[startup] WARN: /opt/stress/snapshot_stress.py not on GCS — skipping"
+fi
 
 # Ensure the rootfs image is the virtio-blk variant the wrapper
 # expects (`$ZSBX_ARTIFACT_DIR/rootfs-slim.img`). gs_pull dropped it

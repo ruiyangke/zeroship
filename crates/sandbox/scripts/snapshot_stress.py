@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """T-8b-stress: polling-aware snapshot/wake stress driver.
 
+PURPOSE
+  Drive CREATE → SNAPSHOT → WAKE → STOP cycles at configurable
+  concurrency against a sandbox controller. Used as the gating
+  workload for the T-8b nomad-driver-ch cutover stress runs.
+
 C-7-LT migrated the admin wake endpoint to async polling. This rewrite
 replaces the legacy synchronous `POST /admin/sandboxes/{id}/wake` with
 the documented two-step contract:
@@ -13,6 +18,48 @@ Lifecycle measured per cycle: CREATE → SNAPSHOT → WAKE (post+poll) → STOP.
 Targets the controller's local listener on http://127.0.0.1:9091 and
 uses the sandbox bearer for tenant calls + the admin bearer for
 snapshot/wake.
+
+------------------------------------------------------------------
+CANONICAL LOCATION (R24-T1, 2026-05-25)
+
+  In-repo:  crates/sandbox/scripts/snapshot_stress.py   (this file)
+  Mirror:   gs://suger-dev-zsbx-artifacts/stress/snapshot_stress.py
+
+The in-repo copy is canonical. The GCS object is a mirror that
+worker VMs pull from at boot (the worker is bare GCE; no repo
+checkout). `crates/sandbox/scripts/gcp-worker-startup.sh` verifies
+the downloaded blob against a SHA256 literal pinned at the top of
+that script — any drift between the in-repo source and the GCS
+mirror will fail worker boot loudly, surfacing the divergence at
+the next stress run instead of silently letting an un-reviewed
+harness gate T-8b-cutover.
+
+Prior to R24-T1 the GCS object was the only copy. The harness was
+un-reviewable and un-diff-able. This file restores reviewability.
+
+UPDATE PROCEDURE
+  1. Edit this file in-repo.
+  2. Recompute the SHA256:
+       sha256sum crates/sandbox/scripts/snapshot_stress.py
+  3. Re-upload to GCS:
+       gsutil cp crates/sandbox/scripts/snapshot_stress.py \\
+                 gs://suger-dev-zsbx-artifacts/stress/snapshot_stress.py
+  4. Update `SNAPSHOT_STRESS_SHA256` in
+       crates/sandbox/scripts/gcp-worker-startup.sh
+     AND the "Last validated SHA256" line below to the new value.
+  5. Commit all three edits (this file, the startup-script pin, and
+     this docstring's SHA line) in the SAME PR — they MUST move in
+     lockstep or worker boots will fail the SHA check.
+
+Last validated SHA256: 89ba229e2c8544bc648b46f4963e57cf524cd7edfd7af82093a1217afb123d43
+  (^ SHA of the harness BEFORE this R24-T1 provenance header was
+   appended; that bit-exact-byte version is what currently lives at
+   gs://...stress/snapshot_stress.py and what the startup-script
+   pin verifies against. The CURRENT in-repo file — with this
+   header — has a different SHA; the GCS mirror needs a re-upload
+   plus a startup-script pin bump per the procedure above before
+   the in-repo and GCS SHAs realign.)
+------------------------------------------------------------------
 """
 import argparse
 import json
