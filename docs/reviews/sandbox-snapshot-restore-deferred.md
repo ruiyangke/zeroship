@@ -740,6 +740,14 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Tests added**: 3 wire-shape tests in `handlers::tests` (`r10_q1_backend_{stop,exec,file_tree}_sanitizes_raw_driver_error`) feed sentinel-bearing raw errors and assert (a) wire `message` is the fixed public string and (b) sentinel substrings are absent. Sandbox lib: 305 → 308.
 - **Verification post-fix**: `grep -nE 'err\(500.*\{e\}' crates/sandbox/src/*.rs` is empty — no other raw-leak sites of this shape remain in the crate.
 
+### [R10-Q5] (CLOSED at `0cc7af52`) proxy.rs `_ref_imports` dead-by-design fn deleted (3-round carry: r9 #6 → r10 → r11 → r12)
+- **Source**: 2026-05-25 code-quality-r10 (carry from r9 #6, surfaced again in r11 and r12)
+- **File**: `crates/sandbox-agent/src/proxy.rs:547-561` (pre-fix)
+- **Symptom**: 15-line `#[allow(dead_code)] fn _ref_imports() { … }` block whose entire purpose was "keep `sig` / `HeaderName` / `Uri` / `CanonicalKind` imports legal for a future rev." A comment in code form. Zero callers across `crates/sandbox-agent/src/` and `crates/sandbox/src/`.
+- **Fix**: deleted the function + its 3-line comment block + `#[allow(dead_code)]` attr. Audited which imports actually became unused: `use ntex::http::header::HeaderName;` (only used by the dead fn) and the `, Uri` half of `use ntex::http::{StatusCode, Uri};` were dropped at module scope. `use crate::sig::{self, CanonicalKind};` moved from module scope into `#[cfg(test)] mod tests { … }` since the only remaining callers (`sig::sign_kind` at the v1.1 sign helper, `CanonicalKind::V1_1` at the same site, `crate::sig::sign` in the v1-on-proxy reject test) all live inside the test module and reach the parent's `use` solely via `use super::*`.
+- **Verification**: `cargo check -p zeroship-sandbox-agent --tests` clean (0 warnings, 0 errors). `cargo test -p zeroship-sandbox-agent --lib` → 242 passed / 0 failed / 0 ignored — no test count change.
+- **Net diff**: -19 / +2 (net -17 LOC; brief estimated 14 LOC delete — close, the extra few lines come from the two module-scope import lines we had to clean up plus the 1 line added inside the tests module for `use crate::sig::{self, CanonicalKind};`).
+
 ### [R10-Q3] registry.rs has 35 bare `RwLock::{read,write}().unwrap()` sites with no poison-recover (MAJOR, code-quality-r10)
 - **Source**: 2026-05-25 code-quality-r10
 - **File**: `crates/sandbox/src/registry.rs` (35 sites); also k8s.rs (10) and docker.rs (6)
