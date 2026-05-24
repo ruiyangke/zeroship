@@ -162,6 +162,18 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/readyz").route(web::get().to(handlers::readyz)),
             )
+            // R26-API2: Prometheus text-exposition exporter over the
+            // atomic counters in `crate::metrics`. Mounted at the
+            // conventional `/metrics` path (root, NOT under /admin/*)
+            // because Prometheus scrapers default to that location;
+            // auth is `AdminRole::ReadOnly` so the bearer-leak threat
+            // model stays symmetric with the rest of the operator API.
+            // See `admin_handlers::metrics_endpoint` for the §10.0
+            // envelope contract on 401/403/503.
+            .service(
+                web::resource("/metrics")
+                    .route(web::get().to(admin_handlers::metrics_endpoint)),
+            )
             .service(
                 web::resource("/sandboxes")
                     .route(web::post().to(handlers::create_sandbox))

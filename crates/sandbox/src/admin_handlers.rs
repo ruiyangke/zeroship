@@ -2031,6 +2031,39 @@ pub async fn cold_boot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// GET /metrics — Prometheus text exposition (R26-API2)
+// ────────────────────────────────────────────────────────────────────
+
+/// `GET /metrics` — Prometheus text-exposition body over the atomic
+/// counters in `crate::metrics`. R26-API2: the "Phase 3 wires the
+/// exporter" TODO has carried for multiple rounds; this is its landing.
+///
+/// Auth: `AdminRole::ReadOnly` — accepts EITHER the full or the
+/// read-only admin bearer. Counter values are operator-facing telemetry
+/// (fleet topology, takeover rate, leak rate); gating them mirrors the
+/// rest of the `/admin/*` surface and keeps the bearer-leak threat
+/// model symmetric. (Prometheus convention often leaves `/metrics`
+/// open and relies on firewall, but the platform's existing posture is
+/// admin-bearer gating; we follow that.)
+///
+/// 401 / 403 / 503 responses follow the §10.0 JSON error envelope; the
+/// 200 path returns `text/plain; version=0.0.4` — the Prometheus
+/// content-type negotiation hint scrapers expect.
+///
+/// `Cache-Control: no-store` is set so an intermediate cache can never
+/// stash a stale snapshot of a metric value that's racing forward.
+pub async fn metrics_endpoint(req: HttpRequest, state: State) -> HttpResponse {
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
+        return r;
+    }
+    let body = crate::metrics_export::render();
+    HttpResponse::Ok()
+        .header("Content-Type", "text/plain; version=0.0.4")
+        .header("Cache-Control", "no-store")
+        .body(body)
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────
 

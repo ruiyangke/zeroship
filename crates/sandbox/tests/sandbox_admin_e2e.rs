@@ -136,6 +136,12 @@ macro_rules! make_app {
                 .service(
                     web::resource("/admin/sandboxes/{id}/wake")
                         .route(web::post().to(admin_handlers::wake_sandbox)),
+                )
+                // R26-API2: Prometheus text exporter mounted at `/metrics`
+                // (root, mirroring `main.rs`); auth is `AdminRole::ReadOnly`.
+                .service(
+                    web::resource("/metrics")
+                        .route(web::get().to(admin_handlers::metrics_endpoint)),
                 ),
         )
         .await
@@ -1155,4 +1161,229 @@ async fn admin_ro_bearer_rejected_on_export_with_403() {
     let body = test::read_body(resp).await;
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["error"], "insufficient_role");
+}
+
+// ────────────────────────────────────────────────────────────────────
+// R26-API2 — GET /metrics (Prometheus text exporter)
+// ────────────────────────────────────────────────────────────────────
+
+#[ntex::test]
+async fn admin_ro_bearer_accepted_on_metrics() {
+    // R26-API2: GET /metrics is a read endpoint (operator scrape).
+    // The RO bearer is sufficient; the body is Prometheus text-exposition
+    // format starting with `# HELP`.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "RO bearer must authorize /metrics (got {})",
+        resp.status()
+    );
+    // Content-Type must be the Prometheus exposition hint scrapers expect.
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/plain"),
+        "Content-Type must be text/plain (version=...); got {ct}"
+    );
+    let body = test::read_body(resp).await;
+    let s = std::str::from_utf8(&body).expect("metrics body is utf-8");
+    assert!(
+        s.starts_with("# HELP "),
+        "Prometheus text body MUST start with `# HELP`; got:\n{s}"
+    );
+}
+
+#[ntex::test]
+async fn admin_full_bearer_accepted_on_metrics() {
+    // Full ⊇ ReadOnly — the full bearer also satisfies the /metrics gate.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_FULL_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[ntex::test]
+async fn unknown_bearer_rejected_on_metrics_with_401() {
+    // A bearer matching NEITHER configured token must 401 (NOT 403, NOT
+    // 503, NOT 200). The /metrics endpoint's role gate is identical to
+    // every other read endpoint's.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", "Bearer unknown-bearer-cccccccccc")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unknown bearer on /metrics must 401; got {}",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "unauthorized", "§10.0 envelope on 401");
+    assert!(
+        v["message"].is_string(),
+        "§10.0 envelope must carry a message field"
+    );
+}
+
+#[ntex::test]
+async fn no_bearer_rejected_on_metrics_with_401() {
+    // Missing `Authorization:` header → 401 (NOT 200 like Prometheus's
+    // open-by-default convention — see metrics_endpoint rustdoc for the
+    // posture rationale).
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "no bearer on /metrics must 401"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "unauthorized");
+}
+
+#[ntex::test]
+async fn metrics_body_contains_all_production_counters() {
+    // Every counter name promised by `crate::metrics_export::render` must
+    // appear in the response body. This is the route-level mirror of the
+    // unit test `render_emits_every_production_counter_name`; if a future
+    // refactor moves the rendering out of admin_handlers, this test will
+    // still catch a counter dropping off the wire.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = test::read_body(resp).await;
+    let s = std::str::from_utf8(&body).expect("utf-8 body");
+
+    for name in [
+        "sandbox_corrupt_id_total",
+        "sandbox_ha_clock_rewind_total",
+        "sandbox_ha_dead_hosts_observed_total",
+        "sandbox_ha_lost_leadership_total",
+        "sandbox_ha_takeover_corrupt_total",
+        "sandbox_ha_takeover_mismatched_total",
+        "sandbox_ha_takeover_orphan_total",
+        "sandbox_ha_takeover_total",
+        "sandbox_ha_takeover_unreachable_total",
+        "sandbox_nomad_node_id_lookup_failures_total",
+        "sandbox_vm_index_leaks_total",
+        "sandbox_wake_sync_uses_total",
+        "sandbox_wake_terminal_overwrite_blocked_total",
+        "sandbox_ha_heartbeat_lag_seconds",
+    ] {
+        assert!(
+            s.contains(name),
+            "/metrics body missing counter {name}; got:\n{s}"
+        );
+    }
+}
+
+#[ntex::test]
+async fn metrics_body_prometheus_format() {
+    // The body MUST be valid Prometheus text-exposition: each metric has
+    // a `# HELP ...` + `# TYPE ... counter|gauge` header and at least one
+    // value line. Spot-check a handful of metric names to keep the test
+    // robust to additions; the unit-test counterpart pins every name.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Cache-Control: no-store — the metrics body races forward; an
+    // intermediate cache stashing it would surface stale counters.
+    let cc = resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(cc, "no-store", "Cache-Control must be no-store; got {cc}");
+
+    let body = test::read_body(resp).await;
+    let s = std::str::from_utf8(&body).expect("utf-8 body");
+
+    // Counter blocks: HELP + TYPE counter + value line.
+    assert!(
+        s.contains("# HELP sandbox_ha_takeover_total "),
+        "missing HELP for takeover counter:\n{s}"
+    );
+    assert!(
+        s.contains("# TYPE sandbox_ha_takeover_total counter\n"),
+        "missing TYPE counter for takeover:\n{s}"
+    );
+    assert!(
+        s.contains("sandbox_ha_takeover_total{reason=\"lease_expiration\"} "),
+        "missing labelled value line for takeover:\n{s}"
+    );
+
+    // Gauge block: HELP + TYPE gauge + NaN-or-number value.
+    assert!(
+        s.contains("# TYPE sandbox_ha_heartbeat_lag_seconds gauge\n"),
+        "heartbeat-lag must be a gauge:\n{s}"
+    );
+
+    // Body MUST end with a newline (Prometheus parsers require this).
+    assert!(
+        s.ends_with('\n'),
+        "/metrics body must end with newline (Prometheus parser requirement)"
+    );
 }
