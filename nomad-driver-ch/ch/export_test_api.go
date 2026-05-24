@@ -314,6 +314,35 @@ func SetHandleTapForTest(p *Plugin, taskID, tap string) error {
 	return nil
 }
 
+// OFDLockProbeResultForTest re-exports the ofdLockProbeResult enum so
+// tests can drive the F_OFD_SETLK probe seam (T-8b-stress-r5 r5-A)
+// without re-deriving the internal classification. Tests return one
+// of the OFDLockProbe*ForTest constants below; the production probe
+// loop selects on the same values.
+type OFDLockProbeResultForTest = ofdLockProbeResult
+
+const (
+	// OFDLockProbeAcquiredForTest signals the F_OFD_SETLK write lock
+	// was granted (and immediately released). The probe loop treats
+	// this as the success condition: `__fput` ran for any prior
+	// holder, so the next StartTask is safe to acquire.
+	OFDLockProbeAcquiredForTest = ofdLockProbeAcquired
+
+	// OFDLockProbeBusyForTest signals EAGAIN/EACCES — the expected
+	// retry condition during the deferred-__fput window.
+	OFDLockProbeBusyForTest = ofdLockProbeBusy
+
+	// OFDLockProbeFileGoneForTest signals ENOENT — the path no
+	// longer exists; no lock is possible. The probe loop treats this
+	// as success (the lock state we cared about is moot).
+	OFDLockProbeFileGoneForTest = ofdLockProbeFileGone
+
+	// OFDLockProbeErrorForTest signals an unexpected syscall error.
+	// The probe loop aborts immediately on this; the caller
+	// surfaces it as a probe failure (NOT a normal retry).
+	OFDLockProbeErrorForTest = ofdLockProbeError
+)
+
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing
 // to spawn a real CH process. Mirrors the minimal shape RecoverTask

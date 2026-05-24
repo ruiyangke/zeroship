@@ -779,6 +779,260 @@ func TestDestroyTask_NoOpWhenAlreadyReaped(t *testing.T) {
 	}
 }
 
+// ─── T-8b-stress-r5 r5-A: DestroyTask OFD-lock-probe ────────────────
+//
+// Per the r5-A design (closes the residual 5% rootfs.img
+// DiskLockError window observed at stress-r5 RED 3/60): r4-A's
+// reap predicate (Go's `cmd.Wait()` returning) is necessary but not
+// sufficient. Linux's `__fput` runs in a deferred kernel workqueue
+// triggered from the LAST `close()`/`exit()` on a `struct file`;
+// until it completes, the OFD write lock on `rootfs.img` persists
+// (attributed to PID=-1 — no live owner). `wait4()` reaps the
+// zombie, but the workqueue runs separately.
+//
+// The strictly-stronger predicate is: try to ACQUIRE the OFD write
+// lock ourselves. If we succeed, `__fput` ran (the kernel grants
+// only one OFD write lock per inode/range). Tests verify:
+//
+//   1. Probe returns Busy three times then Acquired → exactly 3
+//      probe calls + 3 sleep cycles before DestroyTask returns;
+//      counter NOT bumped.
+//   2. Probe returns Busy for the full budget → counter bumps by
+//      one; DestroyTask returns nil (mirrors r4-A tolerance).
+//   3. Probe returns Acquired on the first call → sleep seam never
+//      fires; counter stays at baseline.
+//   4. Probe returns FileGone (ENOENT) → treated as success (no
+//      lock possible on a non-existent file); counter at baseline.
+
+// TestDestroyTask_WaitsForOFDLockRelease pins the load-bearing case:
+// the OFD probe must poll until the lock can be acquired. Wired by
+// installing a probe seam that returns Busy three times then
+// Acquired; the helper observes exactly 3 sleep cycles between the
+// first call and the final success and asserts the counter stays at
+// baseline.
+func TestDestroyTask_WaitsForOFDLockRelease(t *testing.T) {
+	ch.ResetDestroyTaskLockHeldForTest()
+	t.Cleanup(ch.ResetDestroyTaskLockHeldForTest)
+
+	// 25-attempt budget keeps the production shape; the seam drives
+	// the sequence so we don't need real wall time.
+	prevA, prevI := ch.SetDestroyLockPollForTest(25, 200*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyLockPollForTest(prevA, prevI) })
+
+	// Count sleeps and probe calls to confirm the exact poll cadence.
+	sleepHit := &atomic.Int32{}
+	prevSleep := ch.SetSleepForOFDLockPollForTest(func(time.Duration) {
+		sleepHit.Add(1)
+	})
+	t.Cleanup(func() { ch.SetSleepForOFDLockPollForTest(prevSleep) })
+
+	probeCalls := &atomic.Int32{}
+	prevProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		n := probeCalls.Add(1)
+		if n <= 3 {
+			return ch.OFDLockProbeBusyForTest, nil
+		}
+		return ch.OFDLockProbeAcquiredForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevProbe) })
+
+	// Skip the r4-A reap-wait so we isolate the r5-A path; a no-op
+	// reap-wait sleep ensures it doesn't add wall time either.
+	prevReapA, prevReapI := ch.SetDestroyReapWaitForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevReapA, prevReapI) })
+	prevReapSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevReapSleep) })
+
+	f := newStopFixture(t, nil)
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskLockHeldTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	// 4 probe calls total: 3 Busy + 1 Acquired. The helper does NOT
+	// sleep after the final attempt (mirrors r4-A waitForReap), so
+	// we expect 3 sleeps between the 4 probes — per disk path.
+	//
+	// taskDiskPathsForLockProbe synthesises 3 paths here
+	// (rootfs.img + workspace + userhome from the fixture's cold-boot
+	// config). The seam's counter is process-global, so 4 + 1 + 1 =
+	// 6 probe calls (first disk consumes the 3-Busy preamble; the
+	// subsequent two disks acquire on the first attempt each).
+	if got := probeCalls.Load(); got != 6 {
+		t.Errorf("probe call count = %d, want 6 (3 Busy + 1 Acquired on disk[0], 1 Acquired each on disk[1..2])", got)
+	}
+	// 3 sleeps for disk[0]'s busy preamble. disk[1..2] acquire on
+	// first attempt with no sleeps. Production poll cadence is
+	// sleep-before-retry, not sleep-after-success.
+	if got := sleepHit.Load(); got != 3 {
+		t.Errorf("sleep hit count = %d, want 3 (only between disk[0]'s 3 Busy returns)", got)
+	}
+	if post := ch.DestroyTaskLockHeldTotal(); post != pre {
+		t.Errorf("lock-held counter spuriously bumped on observe-acquire: pre=%d post=%d", pre, post)
+	}
+}
+
+// TestDestroyTask_ProceedsOnLockHeldBudgetExhausted pins the
+// budget-exhaustion branch: the probe returns Busy for every attempt.
+// DestroyTask still returns nil (Nomad gets a definitive terminal
+// signal), the counter bumps by one, and a WARN is emitted. Mirrors
+// r4-A's tolerance shape.
+func TestDestroyTask_ProceedsOnLockHeldBudgetExhausted(t *testing.T) {
+	ch.ResetDestroyTaskLockHeldForTest()
+	t.Cleanup(ch.ResetDestroyTaskLockHeldForTest)
+
+	// Match the production 25-attempt budget but with a 1ms cadence
+	// and a no-op sleep seam — exhausts in <1ms wall.
+	prevA, prevI := ch.SetDestroyLockPollForTest(25, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyLockPollForTest(prevA, prevI) })
+	prevSleep := ch.SetSleepForOFDLockPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForOFDLockPollForTest(prevSleep) })
+
+	prevProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		return ch.OFDLockProbeBusyForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevProbe) })
+
+	// Bypass r4-A reap-wait so we isolate the r5-A budget-exhaust
+	// branch (otherwise we'd also bump *_unreaped_total on a force=true
+	// path with no runner exit).
+	prevReapA, prevReapI := ch.SetDestroyReapWaitForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevReapA, prevReapI) })
+	prevReapSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevReapSleep) })
+
+	f := newStopFixture(t, nil)
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskLockHeldTotal()
+	t0 := time.Now()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask should be tolerant of OFD-lock budget exhaustion (got err=%v)", err)
+	}
+	elapsed := time.Since(t0)
+
+	// Budget exhaustion on the FIRST disk path aborts the iteration
+	// (waitForOFDLockRelease returns on first error), so the counter
+	// bumps exactly once even when 3 disks were enumerated.
+	if post := ch.DestroyTaskLockHeldTotal(); post != pre+1 {
+		t.Errorf("lock-held counter: pre=%d post=%d, want +1", pre, post)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("DestroyTask OFD budget exhaustion took %v; expected <2s with no-op sleep seam", elapsed)
+	}
+}
+
+// TestDestroyTask_NoOpWhenLockImmediatelyAcquired pins the happy
+// path: the first probe returns Acquired; the helper returns
+// immediately without sleeping. Sleep seam hit count = 0 across all
+// 3 enumerated disks; counter stays at baseline.
+func TestDestroyTask_NoOpWhenLockImmediatelyAcquired(t *testing.T) {
+	ch.ResetDestroyTaskLockHeldForTest()
+	t.Cleanup(ch.ResetDestroyTaskLockHeldForTest)
+
+	prevA, prevI := ch.SetDestroyLockPollForTest(25, 200*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyLockPollForTest(prevA, prevI) })
+
+	// Make the sleep seam fail the test loudly if it ever fires.
+	sleepHit := &atomic.Int32{}
+	prevSleep := ch.SetSleepForOFDLockPollForTest(func(time.Duration) {
+		sleepHit.Add(1)
+	})
+	t.Cleanup(func() { ch.SetSleepForOFDLockPollForTest(prevSleep) })
+
+	prevProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		return ch.OFDLockProbeAcquiredForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevProbe) })
+
+	prevReapA, prevReapI := ch.SetDestroyReapWaitForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevReapA, prevReapI) })
+	prevReapSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevReapSleep) })
+
+	f := newStopFixture(t, nil)
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskLockHeldTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	if got := sleepHit.Load(); got != 0 {
+		t.Errorf("OFD probe slept %d times on first-attempt-acquire path; want 0", got)
+	}
+	if post := ch.DestroyTaskLockHeldTotal(); post != pre {
+		t.Errorf("lock-held counter spuriously bumped on first-attempt-acquire: pre=%d post=%d", pre, post)
+	}
+}
+
+// TestDestroyTask_FileGoneTolerantWhenProbing pins the file-gone
+// branch: the probe returns FileGone (ENOENT) — treated as success
+// because no lock is possible on a non-existent file. Counter stays
+// at baseline; the helper returns nil and DestroyTask proceeds.
+//
+// This shape covers the case where the runDir was already scrubbed
+// by a peer process (rare, but possible under aggressive controller-
+// driven force-purge before DestroyTask fires).
+func TestDestroyTask_FileGoneTolerantWhenProbing(t *testing.T) {
+	ch.ResetDestroyTaskLockHeldForTest()
+	t.Cleanup(ch.ResetDestroyTaskLockHeldForTest)
+
+	prevA, prevI := ch.SetDestroyLockPollForTest(25, 200*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyLockPollForTest(prevA, prevI) })
+
+	sleepHit := &atomic.Int32{}
+	prevSleep := ch.SetSleepForOFDLockPollForTest(func(time.Duration) {
+		sleepHit.Add(1)
+	})
+	t.Cleanup(func() { ch.SetSleepForOFDLockPollForTest(prevSleep) })
+
+	prevProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		return ch.OFDLockProbeFileGoneForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevProbe) })
+
+	prevReapA, prevReapI := ch.SetDestroyReapWaitForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevReapA, prevReapI) })
+	prevReapSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevReapSleep) })
+
+	f := newStopFixture(t, nil)
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskLockHeldTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	// FileGone is success — no sleeps, no counter bump. All 3
+	// enumerated disks short-circuit to the same outcome.
+	if got := sleepHit.Load(); got != 0 {
+		t.Errorf("OFD probe slept %d times on file-gone path; want 0", got)
+	}
+	if post := ch.DestroyTaskLockHeldTotal(); post != pre {
+		t.Errorf("lock-held counter spuriously bumped on file-gone: pre=%d post=%d", pre, post)
+	}
+}
+
 // atomicStringSlice is a minimal goroutine-safe accumulator the new
 // defensive-cleanup tests use to observe the ORDER of removeTapFn
 // calls (the existing fixture only stores the LAST tap). Kept local

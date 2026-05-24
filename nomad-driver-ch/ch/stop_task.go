@@ -22,12 +22,15 @@ package ch
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"golang.org/x/sys/unix"
 )
 
 // Default per-step timeouts for the StopTask ladder. The brief calls for
@@ -76,6 +79,26 @@ var (
 	// pattern (poll on a single observable kernel state transition).
 	destroyReapPollAttempts = 25
 	destroyReapPollInterval = 200 * time.Millisecond
+
+	// T-8b-stress-r5 r5-A: DestroyTask OFD-lock-probe budget. r4-A's
+	// reap-wait predicate (Go's `cmd.Wait()` returning) is necessary
+	// but not sufficient: Linux's `__fput` runs in a deferred kernel
+	// workqueue after the last `close()`/`exit()`, so the OFD write
+	// lock on `rootfs.img` persists (attributed to PID=-1) until the
+	// workqueue runs. `/proc/locks` evidence at stress-r5 RED 3/60
+	// (5%) showed `OFDLCK WRITE 0 fd:01:<inode> 0 EOF` with
+	// owner=-1 — the strictly-stronger predicate is to try to
+	// acquire the OFD write lock ourselves; if we succeed, `__fput`
+	// has run (the kernel grants only one OFD write lock per
+	// inode/range).
+	//
+	// Budget: 5 s wall at 200 ms cadence (25 attempts) — same shape
+	// as the r4-A reap-wait. `__fput` workqueue latency is sub-ms on
+	// a healthy host; the 5 s ceiling is generous against a backed-
+	// up workqueue but short enough that a stuck deferred-fput
+	// surfaces in operator logs within one stress-loop iteration.
+	destroyLockPollAttempts = 25
+	destroyLockPollInterval = 200 * time.Millisecond
 )
 
 // SetDestroyReapWaitForTest overrides the reap-wait poll budget so tests
@@ -86,6 +109,17 @@ func SetDestroyReapWaitForTest(attempts int, interval time.Duration) (int, time.
 	prevI := destroyReapPollInterval
 	destroyReapPollAttempts = attempts
 	destroyReapPollInterval = interval
+	return prevA, prevI
+}
+
+// SetDestroyLockPollForTest overrides the OFD-lock-probe poll budget so
+// tests don't sleep 5 s. Returns the previous (attempts, interval) pair
+// so the caller can restore them on cleanup. Mirrors SetDestroyReapWaitForTest.
+func SetDestroyLockPollForTest(attempts int, interval time.Duration) (int, time.Duration) {
+	prevA := destroyLockPollAttempts
+	prevI := destroyLockPollInterval
+	destroyLockPollAttempts = attempts
+	destroyLockPollInterval = interval
 	return prevA, prevI
 }
 
@@ -306,6 +340,231 @@ func (p *Plugin) waitForReap(h *taskHandle, taskID string) bool {
 	return false
 }
 
+// sleepForOFDLockPoll is the package-level seam tests swap so the
+// DestroyTask OFD-lock-probe loop doesn't add real wall time. Default
+// is time.Sleep — production callers block while the kernel `__fput`
+// workqueue catches up after `wait4()` reaps the CH process.
+//
+// Mirrors the v15 r3-B sleepForTapPoll + r4-A sleepForReapPoll seam
+// shape so the test ergonomics are uniform across the three
+// defense-in-depth poll loops.
+var sleepForOFDLockPoll = func(d time.Duration) {
+	time.Sleep(d)
+}
+
+// SetSleepForOFDLockPollForTest swaps the OFD-lock-probe sleep seam.
+// Returns the previous fn so the caller can restore it on cleanup.
+// Tests typically install a no-op so the poll loop spins through its
+// budget instantly rather than waiting real wall time.
+func SetSleepForOFDLockPollForTest(fn func(d time.Duration)) func(d time.Duration) {
+	prev := sleepForOFDLockPoll
+	if fn != nil {
+		sleepForOFDLockPoll = fn
+	}
+	return prev
+}
+
+// tryAcquireOFDLock is the package-level seam tests swap so the OFD
+// probe loop can be driven without touching real filesystem locks.
+// Default is the real unix.FcntlFlock(F_OFD_SETLK) path. Returns one
+// of:
+//
+//   - ofdLockProbeAcquired — the F_OFD_SETLK write lock was granted
+//     (we released it immediately; `__fput` must have run for this to
+//     succeed).
+//   - ofdLockProbeBusy — EAGAIN/EACCES; the lock is held elsewhere
+//     (deferred `__fput` still pending, or another writer holds it).
+//   - ofdLockProbeFileGone — ENOENT; the file no longer exists, so no
+//     lock is possible. Treated as success by the caller.
+//   - ofdLockProbeError — any other syscall error; the caller surfaces
+//     this as an unexpected probe failure (NOT a normal retry).
+type ofdLockProbeResult int
+
+const (
+	ofdLockProbeAcquired ofdLockProbeResult = iota
+	ofdLockProbeBusy
+	ofdLockProbeFileGone
+	ofdLockProbeError
+)
+
+// tryAcquireOFDLockFn is the actual function variable behind the seam.
+// Tests swap it via SetTryAcquireOFDLockForTest; the production
+// default delegates to realTryAcquireOFDLock.
+var tryAcquireOFDLockFn = realTryAcquireOFDLock
+
+// SetTryAcquireOFDLockForTest swaps the OFD-lock probe seam. Returns
+// the previous fn so the caller can restore it on cleanup. Tests
+// drive the probe loop by returning a canned sequence of
+// (busy, busy, …, acquired) without engineering real file locks.
+func SetTryAcquireOFDLockForTest(fn func(path string) (ofdLockProbeResult, error)) func(string) (ofdLockProbeResult, error) {
+	prev := tryAcquireOFDLockFn
+	if fn != nil {
+		tryAcquireOFDLockFn = fn
+	}
+	return prev
+}
+
+// realTryAcquireOFDLock opens the path O_RDONLY (sufficient to test
+// for F_WRLCK conflict via F_OFD_SETLK), tries to acquire the OFD
+// write lock on the whole file, releases on success, and returns the
+// classified outcome. Always closes the FD before returning.
+//
+// The OFD lock semantics (Linux's F_OFD_SETLK, kernel 3.15+, glibc
+// 2.20+): each `struct file` (kernel name for an open FD) carries at
+// most one OFD lock per range. Two distinct opens of the same inode
+// CAN both attempt to acquire — but the kernel grants only the first;
+// subsequent attempts get EAGAIN. After `__fput` releases the lock
+// (deferred workqueue), the next acquire succeeds.
+//
+// This is the predicate r5-A needs: we successfully acquire ⇔ no
+// other open file description holds the lock ⇔ `__fput` ran on the
+// last open that DID hold it. The released lock leaves no residual
+// kernel state, so it's safe to issue from cleanup paths.
+func realTryAcquireOFDLock(path string) (ofdLockProbeResult, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+			return ofdLockProbeFileGone, nil
+		}
+		return ofdLockProbeError, fmt.Errorf("open: %w", err)
+	}
+	defer unix.Close(fd)
+
+	// F_OFD_SETLK with F_WRLCK on the whole file (Start=0, Len=0).
+	flk := unix.Flock_t{
+		Type:   unix.F_WRLCK,
+		Whence: int16(unix.SEEK_SET),
+		Start:  0,
+		Len:    0, // whole file
+	}
+	if lockErr := unix.FcntlFlock(uintptr(fd), unix.F_OFD_SETLK, &flk); lockErr != nil {
+		if errors.Is(lockErr, unix.EAGAIN) || errors.Is(lockErr, unix.EACCES) {
+			return ofdLockProbeBusy, nil
+		}
+		return ofdLockProbeError, fmt.Errorf("F_OFD_SETLK F_WRLCK: %w", lockErr)
+	}
+	// Got the lock. Release immediately — we're just probing.
+	flk.Type = unix.F_UNLCK
+	if unlockErr := unix.FcntlFlock(uintptr(fd), unix.F_OFD_SETLK, &flk); unlockErr != nil {
+		// Best-effort: the FD close on defer also releases the OFD lock.
+		// Log via the result error so the caller can surface the
+		// unusual case. Still report Acquired so the loop progresses
+		// (the lock IS gone — we successfully detected `__fput` ran).
+		return ofdLockProbeAcquired, fmt.Errorf("F_OFD_SETLK F_UNLCK (lock acquired but unlock failed; fd close will release): %w", unlockErr)
+	}
+	return ofdLockProbeAcquired, nil
+}
+
+// pollAcquireOFDLock retries the OFD-lock probe up to
+// `destroyLockPollAttempts × destroyLockPollInterval` against a single
+// disk path. Returns nil on observed acquire (or file-gone), and a
+// descriptive error on budget exhaustion. Unexpected syscall errors
+// (anything other than EAGAIN/EACCES) abort the loop immediately.
+//
+// The caller (DestroyTask via waitForOFDLockRelease) tolerates the
+// returned error as a "best-effort: we tried, kernel still busy"
+// signal: bumps the counter, WARN-logs, proceeds with cleanup.
+// Surfacing an error to Nomad would loop the destroy forever; the
+// operator's diagnostic is the metric + log line.
+func pollAcquireOFDLock(path string) error {
+	attempts := destroyLockPollAttempts
+	interval := destroyLockPollInterval
+	for attempt := 0; attempt < attempts; attempt++ {
+		result, err := tryAcquireOFDLockFn(path)
+		switch result {
+		case ofdLockProbeAcquired:
+			// `__fput` ran (or never had to). We held the lock briefly
+			// and released it; if `err != nil` it's an unlock-failed
+			// edge case the defer close handles.
+			return nil
+		case ofdLockProbeFileGone:
+			// File doesn't exist — no lock possible. r5-A treats this
+			// as success (the lock state we cared about is moot).
+			return nil
+		case ofdLockProbeError:
+			return fmt.Errorf("probe error on attempt %d: %w", attempt+1, err)
+		case ofdLockProbeBusy:
+			// Expected during the deferred-fput window. Sleep + retry.
+		}
+		if attempt+1 < attempts {
+			sleepForOFDLockPoll(interval)
+		}
+	}
+	return fmt.Errorf("OFD write lock still held after %d × %v poll budget; kernel __fput may be stuck",
+		attempts, interval)
+}
+
+// taskDiskPathsForLockProbe enumerates the host-side disk paths a
+// DestroyTask should OFD-probe before declaring the task terminal.
+// The rule, derived from the StartTask staging code:
+//
+//   - If h.driverConfig.Disks is non-empty (operator-supplied or
+//     restore-branch-rewritten), iterate every Path.
+//   - Otherwise (cold-boot synthesised path), the canonical three
+//     disks are: `<runDir>/rootfs.img`, the workspace image, and
+//     the per-user-home image. Skip empties.
+//
+// Empty paths are filtered (defensive — a half-populated handle
+// shouldn't make us syscall a "" path). Duplicates are kept (cost
+// is one syscall per duplicate, which is in the noise).
+//
+// The mandate's r5-A evidence calls out `rootfs.img` specifically;
+// probing the other disks costs ~1 ms per disk on the happy path
+// (first acquire succeeds) and surfaces a wedged `__fput` on
+// workspace/userhome images too — same defense-in-depth shape as the
+// `incTapsOrphaned` defensive cleanup pass.
+func taskDiskPathsForLockProbe(h *taskHandle, runDir string) []string {
+	if h == nil {
+		return nil
+	}
+	if h.driverConfig != nil && len(h.driverConfig.Disks) > 0 {
+		paths := make([]string, 0, len(h.driverConfig.Disks))
+		for _, d := range h.driverConfig.Disks {
+			if d.Path != "" {
+				paths = append(paths, d.Path)
+			}
+		}
+		return paths
+	}
+	// Cold-boot synthesised three-disk list. rootfs.img is always
+	// staged at runDir/rootfs.img by materializeRootfs (start_task.go)
+	// or stageRootfsForRestore (restore_task.go); workspace and
+	// userhome paths come straight from driverConfig.
+	paths := make([]string, 0, 3)
+	if runDir != "" {
+		paths = append(paths, filepath.Join(runDir, chRootfsName))
+	}
+	if h.driverConfig != nil {
+		if h.driverConfig.WorkspaceImg != "" {
+			paths = append(paths, h.driverConfig.WorkspaceImg)
+		}
+		if h.driverConfig.UserHomeImg != "" {
+			paths = append(paths, h.driverConfig.UserHomeImg)
+		}
+	}
+	return paths
+}
+
+// waitForOFDLockRelease iterates the task's disk paths and polls
+// F_OFD_SETLK acquisition on each one. Returns nil on success; on the
+// first probe budget exhaustion or unexpected syscall error, returns a
+// descriptive error naming the offending path.
+//
+// Best-effort: the caller bumps the metric + WARN-logs and proceeds
+// with cleanup regardless. r5-A's strictly-stronger predicate is the
+// OFD-lock acquire; if we got it, `__fput` has run. If we DIDN'T get
+// it within budget, the next alloc's `--restore` is at risk of
+// `DiskLockError → AlreadyLocked` — but holding up the destroy doesn't
+// help (the kernel workqueue isn't waiting on us).
+func waitForOFDLockRelease(diskPaths []string) error {
+	for i, path := range diskPaths {
+		if err := pollAcquireOFDLock(path); err != nil {
+			return fmt.Errorf("disk[%d] %q: %w", i, path, err)
+		}
+	}
+	return nil
+}
+
 // waitForExit blocks up to `d` for the handle's supervisor goroutine to
 // signal exit (closes h.exitDone). Returns true if the supervisor exited
 // within the window.
@@ -354,6 +613,12 @@ func (p *Plugin) waitForExit(h *taskHandle, d time.Duration) bool {
 //     rootfs.img hits `DiskLockError → AlreadyLocked` until the kernel
 //     finishes reaping. waitForReap selects on h.exitDone, which
 //     superviseCH closes AFTER runner.Wait() returns (cmd.Wait reaps).
+//  4b. **T-8b-stress-r5 r5-A**: AFTER reap, bounded poll on
+//      `F_OFD_SETLK F_WRLCK` acquire against each disk path. The
+//      strictly-stronger predicate: reap removes the zombie but
+//      Linux's deferred `__fput` workqueue still holds the file open
+//      (OFD write lock attributed to PID=-1) until it runs. We
+//      succeed acquiring ⇔ `__fput` ran. See `pollAcquireOFDLock`.
 //  5. Cancel handle.ctx so any per-task supervision goroutines (TaskStats,
 //     future WaitTask monitors) exit.
 //  6. Best-effort tap removal — failure is logged, not surfaced; the tap
@@ -404,6 +669,45 @@ func (p *Plugin) DestroyTask(taskID string, force bool) error {
 	// see the residual lock; the operator's diagnostic is the metric +
 	// WARN line.
 	p.waitForReap(h, taskID)
+
+	// T-8b-stress-r5 r5-A: AFTER the reap-wait above, poll
+	// F_OFD_SETLK acquire on every disk path to ensure the kernel's
+	// `__fput` workqueue has actually released the OFD write lock.
+	//
+	// Why this layer exists: r4-A's predicate (Go's `cmd.Wait()`
+	// returning) is necessary but not sufficient. Linux's `__fput`
+	// runs in a deferred workqueue triggered from the LAST `close()`/
+	// `exit()` on a `struct file`; until it completes, the OFD write
+	// lock on `rootfs.img` persists with `owner=-1` (the dead task).
+	// `wait4()` reaps the zombie, but the workqueue runs separately —
+	// `/proc/locks` evidence at stress-r5 RED 3/60 (5%) showed
+	// `OFDLCK WRITE 0 fd:01:<inode> 0 EOF` with owner=-1 for hundreds
+	// of milliseconds after Go's `cmd.Wait()` returned.
+	//
+	// The strictly-stronger predicate is the inverse: try to ACQUIRE
+	// the OFD write lock ourselves. If we succeed, `__fput` ran (the
+	// kernel grants only one OFD write lock per inode/range). Acquire-
+	// and-release per disk path gives us the actual kernel guarantee.
+	//
+	// Best-effort: on budget exhaustion we bump
+	// `nomad_driver_ch_destroy_task_lock_held_total`, WARN-log, and
+	// proceed — mirroring r4-A's tolerance. The operator's
+	// diagnostic is the metric + WARN line; an alert on the rate of
+	// this counter signals a backed-up kernel `__fput` workqueue
+	// (orthogonal to the driver — but only the driver is positioned
+	// to observe it cheaply).
+	runDir := taskRunDir(h.taskConfig, p.config)
+	diskPaths := taskDiskPathsForLockProbe(h, runDir)
+	if len(diskPaths) > 0 {
+		if err := waitForOFDLockRelease(diskPaths); err != nil {
+			incDestroyTaskLockHeld()
+			p.logger.Warn("ch: DestroyTask: OFD write lock not released within budget; deferred __fput may be stuck",
+				"task_id", taskID,
+				"ch_pid", h.chPid,
+				"err", err,
+				"destroy_task_lock_held_total", DestroyTaskLockHeldTotal())
+		}
+	}
 
 	// Stop the per-task ctx (cancels any background goroutines T-5
 	// introduces; safe even if cancelFn is a no-op).
