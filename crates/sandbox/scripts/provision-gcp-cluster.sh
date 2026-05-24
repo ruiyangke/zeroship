@@ -56,6 +56,10 @@ CONTROLLER_OBJECT=${CONTROLLER_OBJECT:-zeroship-sandbox.snapshot-v6}
 SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
 VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
 DATACENTER=${DATACENTER:-$PREFIX}
+# Optional extra worker metadata, comma-separated key=value pairs.
+# Appended to the worker --metadata line as-is. Empty by default.
+# Example: EXTRA_WORKER_METADATA="install-ch-plugin-driver=1"
+EXTRA_WORKER_METADATA=${EXTRA_WORKER_METADATA:-}
 
 NETWORK=${NETWORK:-${PREFIX}-net}
 SUBNET=${SUBNET:-${PREFIX}-subnet}
@@ -263,6 +267,11 @@ create_worker() {
     return 0
   fi
   echo "[provision] creating $name ($WORKER_MACHINE, nested-virt enabled)"
+  local meta="role=worker,datacenter=$DATACENTER,pg-host=$PG_HOST_IP,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT,vm-index-ceil=$VM_INDEX_CEIL,snapshot-bucket=$SNAPSHOT_BUCKET"
+  if [ -n "$EXTRA_WORKER_METADATA" ]; then
+    meta="${meta},${EXTRA_WORKER_METADATA}"
+    echo "[provision] extra worker metadata: $EXTRA_WORKER_METADATA"
+  fi
   gcloud compute instances create "$name" \
     --project "$PROJECT" \
     --zone "$ZONE" \
@@ -276,8 +285,7 @@ create_worker() {
     --enable-nested-virtualization \
     --scopes=storage-ro,logging-write,monitoring-write \
     --metadata-from-file "startup-script=$WORKER_STARTUP,server-ips=$SERVER_IPS_FILE" \
-    --metadata \
-      "role=worker,datacenter=$DATACENTER,pg-host=$PG_HOST_IP,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT,vm-index-ceil=$VM_INDEX_CEIL,snapshot-bucket=$SNAPSHOT_BUCKET" \
+    --metadata "$meta" \
     --quiet >/dev/null
 }
 
