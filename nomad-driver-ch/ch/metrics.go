@@ -13,6 +13,14 @@
 //     record (i.e., a leftover from a prior alloc that StartTask's tap-
 //     setup half-completed for, or a tap that survived a prior crash).
 //     Operators rate-graph this; a healthy fleet trends to zero.
+//   - `nomad_driver_ch_destroy_task_unreaped_total` — bumped when
+//     DestroyTask's bounded reap-wait exhausts without observing the
+//     supervisor close h.exitDone (i.e. the CH process didn't get
+//     reaped within the budget after SIGKILL). The kernel still holds
+//     fcntl write locks on the zombie's rootfs.img until reap, so the
+//     next alloc's CH `--restore` will hit `DiskLockError: AlreadyLocked`
+//     until init/runner finally reaps. Operators rate-graph this; a
+//     healthy fleet trends to zero. See T-8b-stress-r4 r4-A.
 
 package ch
 
@@ -44,4 +52,30 @@ func TapsOrphanedTotal() int64 {
 // only seams.
 func ResetTapsOrphanedForTest() {
 	tapsOrphanedTotal.Store(0)
+}
+
+// destroyTaskUnreapedTotal is the process-global counter behind
+// `nomad_driver_ch_destroy_task_unreaped_total`. Bumped when DestroyTask's
+// bounded reap-wait exhausts without observing the supervisor close
+// h.exitDone — i.e. the CH process didn't get reaped within the budget
+// after SIGKILL. See `ch/stop_task.go::DestroyTask` (T-8b-stress-r4 r4-A).
+var destroyTaskUnreapedTotal atomic.Int64
+
+// incDestroyTaskUnreaped bumps `nomad_driver_ch_destroy_task_unreaped_total`
+// by one. Goroutine-safe; the atomic Int64 carries its own ordering.
+func incDestroyTaskUnreaped() {
+	destroyTaskUnreapedTotal.Add(1)
+}
+
+// DestroyTaskUnreapedTotal returns the current counter value. Exported for
+// tests (asserts the reap-wait budget-exhaustion branch fires); a future
+// `/metrics` exporter would also use this read path.
+func DestroyTaskUnreapedTotal() int64 {
+	return destroyTaskUnreapedTotal.Load()
+}
+
+// ResetDestroyTaskUnreapedForTest zeroes the counter so a test can pin
+// its own baseline without depending on sibling-test ordering.
+func ResetDestroyTaskUnreapedForTest() {
+	destroyTaskUnreapedTotal.Store(0)
 }
