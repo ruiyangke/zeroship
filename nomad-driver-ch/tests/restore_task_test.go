@@ -133,7 +133,7 @@ func TestRewriteConfigJSON_RewritesDiskPaths(t *testing.T) {
 	input := snapshotConfigFixture(srcAllocDir)
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
 
-	out, err := ch.RewriteConfigJSON(input, newTaskDir, 7, 99, "", nil)
+	out, err := ch.RewriteConfigJSON(input, newTaskDir, 7, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRewriteConfigJSON_RewritesNetTap(t *testing.T) {
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
 	newVMIndex := uint16(42)
 
-	out, err := ch.RewriteConfigJSON(input, newTaskDir, newVMIndex, 99, "", nil)
+	out, err := ch.RewriteConfigJSON(input, newTaskDir, newVMIndex, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestRewriteConfigJSON_PreservesMemoryRangesRef(t *testing.T) {
 	}
 
 	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
-	out, err := ch.RewriteConfigJSON(seeded, newTaskDir, 7, 99, "", nil)
+	out, err := ch.RewriteConfigJSON(seeded, newTaskDir, 7, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestRewriteConfigJSON_RejectsMalformedInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ch.RewriteConfigJSON(tc.in, "/opt/nomad/data/alloc/x/y/local", 1, 99, "", nil)
+			_, err := ch.RewriteConfigJSON(tc.in, "/opt/nomad/data/alloc/x/y/local", 1, 99, "", "", nil)
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -314,7 +314,7 @@ func TestRewriteRestoreConfigPaths_AllPathFieldsRewritten(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 7, 99, "", nil)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 7, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestRewriteRestoreConfigPaths_PreservesNonPathFields(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestRewriteRestoreConfigPaths_RejectsPathOutsideAllocPrefix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
+			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 			if err == nil {
 				t.Fatalf("expected RewriteConfigJSON to reject %s, got nil error", tc.name)
 			}
@@ -513,7 +513,7 @@ func TestRewriteRestoreConfigPaths_RejectsParentTraversal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
+			_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 			if err == nil {
 				t.Fatalf("expected RewriteConfigJSON to reject path %q, got nil", tc.path)
 			}
@@ -538,7 +538,7 @@ func TestRewriteRestoreConfigPaths_HandlesMissingOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", nil)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, "", "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON (missing-optional-fields): %v", err)
 	}
@@ -1389,7 +1389,7 @@ func TestValidatePath_DiskUnderSandboxPrefix(t *testing.T) {
 	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
 	diskPath := "/var/zeroship/ch/" + sandboxID + "/workspace.img"
 
-	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[1].path", diskPath, taskDir, sandboxID, nil)
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[1].path", diskPath, taskDir, sandboxID, "", nil)
 	if err != nil {
 		t.Fatalf("disk under per-sandbox prefix rejected: %v", err)
 	}
@@ -1403,7 +1403,7 @@ func TestValidatePath_DiskUnderTaskDir(t *testing.T) {
 	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
 	diskPath := taskDir + "/rootfs.img"
 
-	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", diskPath, taskDir, sandboxID, nil)
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", diskPath, taskDir, sandboxID, "", nil)
 	if err != nil {
 		t.Fatalf("disk under task_dir rejected: %v", err)
 	}
@@ -1420,7 +1420,7 @@ func TestValidatePath_DiskUnderContentAddressedRoot(t *testing.T) {
 	err := ch.ValidatePathByKind(
 		ch.PathFieldDiskForTest,
 		"disks[0].path",
-		diskPath, taskDir, sandboxID,
+		diskPath, taskDir, sandboxID, "",
 		[]string{"/var/zeroship/ch/rootfs"},
 	)
 	if err != nil {
@@ -1435,7 +1435,7 @@ func TestValidatePath_DiskRejectsRandomAbsolute(t *testing.T) {
 	const sandboxID = "019e5979e2cc77c0934ca3afe37b06a4"
 	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
 
-	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", "/etc/shadow", taskDir, sandboxID, []string{"/var/zeroship/ch/rootfs"})
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", "/etc/shadow", taskDir, sandboxID, "", []string{"/var/zeroship/ch/rootfs"})
 	if err == nil {
 		t.Fatal("/etc/shadow accepted as disk path; allow-list bypassed")
 	}
@@ -1453,7 +1453,7 @@ func TestValidatePath_DiskRejectsWrongSandbox(t *testing.T) {
 	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
 	otherPath := "/var/zeroship/ch/" + otherSandbox + "/workspace.img"
 
-	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[1].path", otherPath, taskDir, ourSandbox, nil)
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[1].path", otherPath, taskDir, ourSandbox, "", nil)
 	if err == nil {
 		t.Fatalf("disk under other sandbox %q accepted while current sandbox is %q (per-tenant isolation bypassed)", otherSandbox, ourSandbox)
 	}
@@ -1473,7 +1473,7 @@ func TestValidatePath_SerialFileMustBeUnderTaskDir(t *testing.T) {
 	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
 	weird := "/var/zeroship/ch/" + sandboxID + "/serial.log"
 
-	err := ch.ValidatePathByKind(ch.PathFieldRuntimeFileForTest, "serial.file", weird, taskDir, sandboxID, nil)
+	err := ch.ValidatePathByKind(ch.PathFieldRuntimeFileForTest, "serial.file", weird, taskDir, sandboxID, "", nil)
 	if err == nil {
 		t.Fatal("serial.file under per-sandbox prefix accepted; runtime-file kind must enforce task_dir only")
 	}
@@ -1490,7 +1490,7 @@ func TestValidatePath_ParentTraversalRejected(t *testing.T) {
 	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
 	traversal := "/var/zeroship/ch/" + sandboxID + "/../" + "escape"
 
-	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", traversal, taskDir, sandboxID, nil)
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[0].path", traversal, taskDir, sandboxID, "", nil)
 	if err == nil {
 		t.Fatal("path with `..` component accepted; traversal defence bypassed")
 	}
@@ -1528,7 +1528,7 @@ func TestRewriteRestoreConfigPaths_PreservesPersistentWorkspace(t *testing.T) {
 		t.Fatalf("marshal seed: %v", err)
 	}
 
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, nil)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
 	if err != nil {
 		t.Fatalf("RewriteConfigJSON: %v", err)
 	}
@@ -1573,7 +1573,7 @@ func TestRewriteRestoreConfigPaths_DifferentiatesDiskFromSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, nil)
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
 	if err != nil {
 		t.Fatalf("disk-under-prefix + serial-under-task_dir should pass: %v", err)
 	}
@@ -1595,10 +1595,171 @@ func TestRewriteRestoreConfigPaths_DifferentiatesDiskFromSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, nil)
+	_, err = ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, "", nil)
 	if err == nil {
 		t.Fatal("serial.file under per-sandbox prefix accepted; runtime-file kind not enforced")
 	}
 	mustContainTest(t, "differentiation reject", err.Error(), "serial.file")
+}
+
+// -- C-7-LT-7 per-user-home prefix tests -----------------------------
+//
+// Smoke-r17 caught C-7-LT-6's per-sandbox allow-list rejecting the
+// legitimate per-user persistent `home.img` at
+// /var/zeroship/ch/users/<user_id>/home.img — one home shared across
+// every sandbox a user owns, so it lives OUTSIDE the per-sandbox
+// prefix by design. C-7-LT-7 extends the allow-list with a fourth
+// entry keyed on the current alloc's user_id.
+
+// TestValidatePath_UserHomePrefix_OK is the C-7-LT-7 happy path: a
+// disk under /var/zeroship/ch/users/<usr>/ is accepted when the
+// per-user allow-list is active. Pin from smoke-r17's verbatim
+// failure mode.
+func TestValidatePath_UserHomePrefix_OK(t *testing.T) {
+	const userID = "usr_033MDp768TZVdYSaq2M14o"
+	const sandboxID = "019e5993440570939fcc8fbfde705022"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	diskPath := "/var/zeroship/ch/users/" + userID + "/home.img"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[2].path", diskPath, taskDir, sandboxID, userID, nil)
+	if err != nil {
+		t.Fatalf("disk under per-user home prefix rejected: %v", err)
+	}
+}
+
+// TestValidatePath_UserHomePrefix_CrossUser_Rejected is the per-user
+// isolation pin: a disk path under ANOTHER user's home prefix is
+// REJECTED. The per-user allow-list keys on the CURRENT alloc's
+// user_id, not any user — mirrors the sandbox-isolation property of
+// C-7-LT-6's per-sandbox check.
+func TestValidatePath_UserHomePrefix_CrossUser_Rejected(t *testing.T) {
+	const ourUser = "usr_033MDp768TZVdYSaq2M14o"
+	const otherUser = "usr_DEADBEEF8TZVdYSaq2M14o"
+	const sandboxID = "019e5993440570939fcc8fbfde705022"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	otherPath := "/var/zeroship/ch/users/" + otherUser + "/home.img"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[2].path", otherPath, taskDir, sandboxID, ourUser, nil)
+	if err == nil {
+		t.Fatalf("disk under other user %q accepted while current user is %q (per-tenant isolation bypassed)", otherUser, ourUser)
+	}
+	mustContainTest(t, "cross-user reject", err.Error(), "disks[2].path")
+	mustContainTest(t, "cross-user reject", err.Error(), otherUser)
+}
+
+// TestValidatePath_UserHomePrefix_EmptyUserId_Rejected guards against
+// misconfig: when user_id is empty (i.e. the controller failed to
+// emit it or the driver upgraded against an older controller), a
+// disk under a user-home-shaped path MUST NOT be silently accepted.
+// Empty user_id disables the per-user slot entirely.
+func TestValidatePath_UserHomePrefix_EmptyUserId_Rejected(t *testing.T) {
+	const sandboxID = "019e5993440570939fcc8fbfde705022"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	diskPath := "/var/zeroship/ch/users/usr_033MDp768TZVdYSaq2M14o/home.img"
+
+	err := ch.ValidatePathByKind(ch.PathFieldDiskForTest, "disks[2].path", diskPath, taskDir, sandboxID, "", nil)
+	if err == nil {
+		t.Fatal("disk under per-user prefix accepted with empty user_id; misconfig defence bypassed")
+	}
+	mustContainTest(t, "empty-userid reject", err.Error(), "disks[2].path")
+	// The error message MUST NOT mention a user-home prefix when
+	// user_id was disabled — otherwise an operator would chase a
+	// phantom mismatch instead of fixing the missing user_id.
+	if errMsg := err.Error(); strings.Contains(errMsg, "user=") {
+		t.Errorf("error message references user= prefix while user_id was empty: %q", errMsg)
+	}
+}
+
+// TestValidatePath_UserHomePrefix_NotADisk_RejectsAtRuntimeKind is the
+// kind-dispatch pin: a path that LOOKS like a per-user-home path but
+// is being validated as a runtime file (serial.file) MUST be REJECTED
+// — the per-user-home allow-list applies ONLY to disks, not to
+// runtime files. Mirrors TestValidatePath_SerialFileMustBeUnderTaskDir
+// for the per-sandbox prefix.
+func TestValidatePath_UserHomePrefix_NotADisk_RejectsAtRuntimeKind(t *testing.T) {
+	const userID = "usr_033MDp768TZVdYSaq2M14o"
+	const sandboxID = "019e5993440570939fcc8fbfde705022"
+	const taskDir = "/opt/nomad/data/alloc/AAAA/ch/local"
+	weird := "/var/zeroship/ch/users/" + userID + "/serial.log"
+
+	err := ch.ValidatePathByKind(ch.PathFieldRuntimeFileForTest, "serial.file", weird, taskDir, sandboxID, userID, nil)
+	if err == nil {
+		t.Fatal("serial.file under per-user home prefix accepted; runtime-file kind must enforce task_dir only")
+	}
+	mustContainTest(t, "serial-under-user-home reject", err.Error(), "serial.file")
+	mustContainTest(t, "serial-under-user-home reject", err.Error(), "task_dir")
+}
+
+// TestRewriteRestoreConfigPaths_AcceptsUserHomeAndSandboxAndTaskDir is
+// the full integration witness for C-7-LT-7: a snapshot config.json
+// with disks across all three layout-stable namespaces (rootfs under
+// OLD task_dir → rewritten to NEW; workspace under per-sandbox prefix
+// → preserved; home under per-user prefix → preserved) rewrites
+// cleanly. This is the byte-for-byte shape smoke-r17 surfaced from
+// production.
+func TestRewriteRestoreConfigPaths_AcceptsUserHomeAndSandboxAndTaskDir(t *testing.T) {
+	const sandboxID = "019e5993440570939fcc8fbfde705022"
+	const userID = "usr_033MDp768TZVdYSaq2M14o"
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	newTaskDir := "/opt/nomad/data/alloc/BBBB-new/task/local"
+	persistentWorkspace := "/var/zeroship/ch/" + sandboxID + "/workspace.img"
+	persistentUserHome := "/var/zeroship/ch/users/" + userID + "/home.img"
+
+	doc := map[string]any{
+		"disks": []any{
+			// disks[0]: staged rootfs under OLD alloc's task_dir →
+			// rewriter substitutes to NEW task_dir.
+			map[string]any{"path": srcAlloc + "/rootfs.img"},
+			// disks[1]: per-sandbox persistent workspace (the C-7-LT-6
+			// case) → MUST be preserved verbatim.
+			map[string]any{"path": persistentWorkspace},
+			// disks[2]: per-user persistent home (the C-7-LT-7 case,
+			// smoke-r17 failure mode) → MUST be preserved verbatim.
+			map[string]any{"path": persistentUserHome},
+		},
+		"serial": map[string]any{"file": srcAlloc + "/serial.log"},
+	}
+	in, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+
+	out, err := ch.RewriteConfigJSON(in, newTaskDir, 1, 99, sandboxID, userID, nil)
+	if err != nil {
+		t.Fatalf("RewriteConfigJSON: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	disks := got["disks"].([]any)
+	if d0 := disks[0].(map[string]any); d0["path"] != newTaskDir+"/rootfs.img" {
+		t.Errorf("disks[0].path = %v, want %v (rewritten to new task_dir)", d0["path"], newTaskDir+"/rootfs.img")
+	}
+	if d1 := disks[1].(map[string]any); d1["path"] != persistentWorkspace {
+		t.Errorf("disks[1].path = %v, want %v (per-sandbox persistent path preserved)", d1["path"], persistentWorkspace)
+	}
+	if d2 := disks[2].(map[string]any); d2["path"] != persistentUserHome {
+		t.Errorf("disks[2].path = %v, want %v (per-user persistent path preserved)", d2["path"], persistentUserHome)
+	}
+	if s := got["serial"].(map[string]any); s["file"] != newTaskDir+"/serial.log" {
+		t.Errorf("serial.file = %v, want %v (rewritten to new task_dir)", s["file"], newTaskDir+"/serial.log")
+	}
+}
+
+// TestUserHomePrefixForTest pins the layout convention so a future
+// rename of the per-user-home root (e.g. `users/` → `homes/`) surfaces
+// here at compile/test time rather than at the next cluster smoke.
+// C-7-LT-7.
+func TestUserHomePrefixForTest(t *testing.T) {
+	const userID = "usr_033MDp768TZVdYSaq2M14o"
+	want := "/var/zeroship/ch/users/" + userID + "/"
+	if got := ch.UserHomePrefixForTest(userID); got != want {
+		t.Errorf("UserHomePrefixForTest(%q) = %q, want %q", userID, got, want)
+	}
+	if got := ch.UserHomePrefixForTest(""); got != "" {
+		t.Errorf("UserHomePrefixForTest(\"\") = %q, want empty (signals per-user slot disabled)", got)
+	}
 }
 

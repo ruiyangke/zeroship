@@ -34,15 +34,25 @@
 // misrouted restore`, blocking every real wake-from-snapshot at the
 // driver before CH ever spawned (smoke-r16).
 //
+// C-7-LT-7 (2026-05-23): C-7-LT-6 was correct but ONE ENTRY SHORT.
+// The per-user persistent home image lives at
+// `/var/zeroship/ch/users/<user_id>/home.img` — OUTSIDE the per-
+// sandbox prefix by design (one home shared across many sandboxes
+// owned by the same user; package caches and dotfiles persist).
+// Smoke-r17 surfaced this as `disks[2].path = ".../users/<usr>/home.img"
+// NOT under any allow-list prefix`; the rewriter failed-fast on
+// `disks[1]` (workspace) in r16, then on `disks[2]` (home) in r17.
+//
 // Fix shape: a per-field allow-list keyed by the JSON field's *kind*:
 //
 //   - PathFieldRuntimeFile (serial.file, console.file): runtime files
 //     CH writes inside the alloc dir. MUST be under task_dir.
 //   - PathFieldDisk (disks[*].path): persistent block devices. MAY be
 //     under the per-sandbox prefix `/var/zeroship/ch/<sandbox_id>/`,
-//     OR under task_dir (e.g. a freshly-staged rootfs.img), OR under
-//     any caller-supplied content-addressed root (read-only base
-//     images shared across sandboxes).
+//     OR under the per-user home prefix `/var/zeroship/ch/users/<user_id>/`
+//     (C-7-LT-7), OR under task_dir (e.g. a freshly-staged rootfs.img),
+//     OR under any caller-supplied content-addressed root (read-only
+//     base images shared across sandboxes).
 //   - PathFieldFsSocket (fs[*].socket): legacy virtio-fs sockets,
 //     scoped to the alloc dir like runtime files.
 //
@@ -67,15 +77,30 @@
 // allow-list is the contract the wrapper imposed implicitly via its
 // layout; we make it explicit in the Go port.
 //
-// Defence-in-depth properties retained from C-7-LT-4:
+// Defence-in-depth properties retained from C-7-LT-4 / extended in
+// C-7-LT-7:
 //   - Per-tenant isolation: a snapshot that names another sandbox's
 //     prefix (`/var/zeroship/ch/sbx_OTHER/...`) is REJECTED. The
 //     per-sandbox prefix is the CURRENT alloc's sandbox_id, not a
 //     wildcard.
+//   - Per-user isolation (C-7-LT-7): a snapshot that names another
+//     user's home prefix (`/var/zeroship/ch/users/usr_OTHER/...`) is
+//     REJECTED. The per-user prefix uses the CURRENT alloc's user_id,
+//     not a wildcard. Empty user_id disables the per-user slot
+//     entirely (mismatch is rejected, NOT silently accepted).
 //   - `..` traversal rejected as ANY path component.
 //   - Empty / non-absolute paths rejected.
 //   - Random absolute paths (`/etc/shadow`, `/run/attacker.sock`)
 //     rejected — they're under none of the allow-list roots.
+//
+// Future-direction note (per smoke-r17 review): the recommended
+// long-term shape is to enumerate the snapshot's `disks[]` and accept
+// each path AFTER validating its prefix against a known zeroship-
+// managed sub-namespace (approach A). This file currently implements
+// the simpler per-namespace allow-list (approach B): three layout-
+// stable prefixes (sandbox + user_home + task_dir + optional content-
+// addressed roots). If a fourth legitimate namespace surfaces,
+// migrate to approach A rather than chaining C-7-LT-8/9/10.
 
 package ch
 
@@ -135,6 +160,24 @@ func sandboxPrefix(sandboxID string) string {
 	return filepath.Join("/var/zeroship/ch", sandboxID) + string(filepath.Separator)
 }
 
+// userHomePrefix returns the per-user persistent home root for the
+// given user id. Empty userID returns "" — callers MUST treat that as
+// "no per-user prefix available" (the validator falls back to per-
+// sandbox + task_dir + content-addressed roots only).
+//
+// Layout: `/var/zeroship/ch/users/<user_id>/` — matches the layout
+// the controller's `user_home_image_path` emits
+// (crates/sandbox/src/backend/nomad_ch.rs § user_home_image_path).
+// The trailing separator is included so the prefix check rejects
+// `/var/zeroship/ch/users/usr_xyz_other/...` (a different user whose
+// id happens to share a textual prefix). C-7-LT-7.
+func userHomePrefix(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	return filepath.Join("/var/zeroship/ch/users", userID) + string(filepath.Separator)
+}
+
 // rewriteSnapshotPath returns a rewritten string if value matches the
 // anchored alloc-prefix pattern, else returns value unchanged.
 //
@@ -190,17 +233,19 @@ func hasPathPrefix(path, prefix string) bool {
 //   - PathFieldRuntimeFile / PathFieldFsSocket: MUST be under
 //     task_dir. Mirrors C-7-LT-4 verbatim for these kinds.
 //   - PathFieldDisk: MUST be under the per-sandbox prefix
-//     (/var/zeroship/ch/<sandbox_id>/), OR under task_dir, OR under
-//     any caller-supplied content-addressed root.
+//     (/var/zeroship/ch/<sandbox_id>/), OR under the per-user home
+//     prefix (/var/zeroship/ch/users/<user_id>/, C-7-LT-7), OR under
+//     task_dir, OR under any caller-supplied content-addressed root.
 //
 // Per-tenant isolation note: the per-sandbox prefix uses the CURRENT
-// alloc's sandbox_id. A snapshot that names another sandbox's prefix
-// fails this check — it's neither under THIS sandbox's prefix nor
-// under task_dir nor a content-addressed root, so it falls through to
-// the rejection branch.
+// alloc's sandbox_id and the per-user prefix uses the CURRENT alloc's
+// user_id. A snapshot that names another sandbox/user's prefix fails
+// this check — it's neither under THIS sandbox's prefix nor THIS
+// user's home nor task_dir nor a content-addressed root, so it falls
+// through to the rejection branch.
 func validatePathByKind(
 	kind PathFieldKind,
-	fieldName, origValue, value, taskDir, sandboxID string,
+	fieldName, origValue, value, taskDir, sandboxID, userID string,
 	contentAddressedRoots []string,
 ) error {
 	if value == "" {
@@ -231,12 +276,18 @@ func validatePathByKind(
 	case PathFieldDisk:
 		// Allow-list, in order:
 		//   1. per-sandbox persistent prefix (the smoke-r16 case)
-		//   2. task_dir (staged disks like rootfs.img the driver
+		//   2. per-user home prefix (C-7-LT-7, the smoke-r17 case)
+		//   3. task_dir (staged disks like rootfs.img the driver
 		//      materialises at cold-boot, which a re-snap captures)
-		//   3. caller-supplied content-addressed roots (read-only
+		//   4. caller-supplied content-addressed roots (read-only
 		//      base images shared across sandboxes)
 		if sandboxID != "" {
 			if hasPathPrefix(cleaned, sandboxPrefix(sandboxID)) {
+				return nil
+			}
+		}
+		if userID != "" {
+			if hasPathPrefix(cleaned, userHomePrefix(userID)) {
 				return nil
 			}
 		}
@@ -257,6 +308,9 @@ func validatePathByKind(
 		var allowed []string
 		if sandboxID != "" {
 			allowed = append(allowed, fmt.Sprintf("sandbox=%s prefix %q", sandboxID, sandboxPrefix(sandboxID)))
+		}
+		if userID != "" {
+			allowed = append(allowed, fmt.Sprintf("user=%s home prefix %q", userID, userHomePrefix(userID)))
 		}
 		allowed = append(allowed, fmt.Sprintf("task_dir %q", filepath.Clean(taskDir)))
 		for _, root := range contentAddressedRoots {
@@ -285,14 +339,14 @@ func validatePathByKind(
 // Returns the (possibly rewritten) value on success, or an error.
 func rewriteAndValidatePath(
 	kind PathFieldKind,
-	fieldName, value, taskDir, sandboxID string,
+	fieldName, value, taskDir, sandboxID, userID string,
 	contentAddressedRoots []string,
 ) (string, error) {
 	if value == "" {
 		return "", fmt.Errorf("ch: rewriteConfigJSON: %s is empty; expected absolute path under %s", fieldName, taskDir)
 	}
 	rewritten := rewriteSnapshotPath(value, taskDir)
-	if err := validatePathByKind(kind, fieldName, value, rewritten, taskDir, sandboxID, contentAddressedRoots); err != nil {
+	if err := validatePathByKind(kind, fieldName, value, rewritten, taskDir, sandboxID, userID, contentAddressedRoots); err != nil {
 		return "", err
 	}
 	return rewritten, nil
@@ -319,6 +373,11 @@ func rewriteAndValidatePath(
 //     (disks must then be under task_dir or a content-addressed
 //     root). C-7-LT-6: required for legitimate persistent
 //     workspace.img paths.
+//   - userID: the current alloc's user id (typed_id form, no
+//     prefix). Empty disables the per-user-home allow-list entry
+//     (disks must then be under per-sandbox/task_dir/content-
+//     addressed roots only). C-7-LT-7: required for legitimate
+//     per-user home.img paths under `/var/zeroship/ch/users/<id>/`.
 //   - contentAddressedRoots: absolute paths under which read-only
 //     base images live (e.g. `/var/zeroship/ch/rootfs/`). May be
 //     nil/empty — that simply disables the content-addressed allow-
@@ -334,7 +393,7 @@ func rewriteConfigJSON(
 	taskDir string,
 	vmIndex uint16,
 	subnetBaseOctet uint8,
-	sandboxID string,
+	sandboxID, userID string,
 	contentAddressedRoots []string,
 ) ([]byte, error) {
 	if len(orig) == 0 {
@@ -352,8 +411,9 @@ func rewriteConfigJSON(
 	}
 
 	// disks: []map[string]any. Each entry MAY have a "path" string.
-	// C-7-LT-6: validated as PathFieldDisk (allow-list: per-sandbox
-	// prefix OR task_dir OR content-addressed root).
+	// C-7-LT-6 + C-7-LT-7: validated as PathFieldDisk (allow-list:
+	// per-sandbox prefix OR per-user home prefix OR task_dir OR
+	// content-addressed root).
 	if rawDisks, ok := doc["disks"]; ok && rawDisks != nil {
 		disks, ok := rawDisks.([]any)
 		if !ok {
@@ -369,7 +429,7 @@ func rewriteConfigJSON(
 					rew, err := rewriteAndValidatePath(
 						PathFieldDisk,
 						fmt.Sprintf("disks[%d].path", i),
-						ps, taskDir, sandboxID, contentAddressedRoots,
+						ps, taskDir, sandboxID, userID, contentAddressedRoots,
 					)
 					if err != nil {
 						return nil, err
@@ -391,7 +451,7 @@ func rewriteConfigJSON(
 					rew, err := rewriteAndValidatePath(
 						PathFieldRuntimeFile,
 						"serial.file",
-						fs, taskDir, sandboxID, contentAddressedRoots,
+						fs, taskDir, sandboxID, userID, contentAddressedRoots,
 					)
 					if err != nil {
 						return nil, err
@@ -411,7 +471,7 @@ func rewriteConfigJSON(
 					rew, err := rewriteAndValidatePath(
 						PathFieldRuntimeFile,
 						"console.file",
-						fs, taskDir, sandboxID, contentAddressedRoots,
+						fs, taskDir, sandboxID, userID, contentAddressedRoots,
 					)
 					if err != nil {
 						return nil, err
@@ -463,7 +523,7 @@ func rewriteConfigJSON(
 						rew, err := rewriteAndValidatePath(
 							PathFieldFsSocket,
 							fmt.Sprintf("fs[%d].socket", i),
-							ss, taskDir, sandboxID, contentAddressedRoots,
+							ss, taskDir, sandboxID, userID, contentAddressedRoots,
 						)
 						if err != nil {
 							return nil, err

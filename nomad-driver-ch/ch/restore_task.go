@@ -343,11 +343,17 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	// is accepted; and it MAY accept disks under any operator-
 	// configured content-addressed root (e.g. read-only base
 	// rootfs.img). Both come from the driver Config.
+	//
+	// C-7-LT-7 (smoke-r17): the rewriter ALSO needs the current
+	// user_id so disks[*].path under /var/zeroship/ch/users/<usr>/
+	// (the per-user persistent home image, shared across every
+	// sandbox a user owns) is accepted. Cross-tenant isolation is
+	// preserved via strict user_id equality in the prefix check.
 	var contentRoots []string
 	if p.config != nil {
 		contentRoots = p.config.ContentAddressedRootfsRoots
 	}
-	rewritten, err := rewriteConfigJSON(origConfig, runDir, driverConfig.VMIndex, base, driverConfig.SandboxId, contentRoots)
+	rewritten, err := rewriteConfigJSON(origConfig, runDir, driverConfig.VMIndex, base, driverConfig.SandboxId, driverConfig.UserId, contentRoots)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: rewrite config: %w", err)
 	}

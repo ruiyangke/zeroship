@@ -128,15 +128,19 @@ func CallRealTeardownTap(tapName string) error {
 // the per-field disk allow-list. Pre-C-7-LT-6 callers pass "" / nil
 // for both, which restricts disks[*].path to task_dir only (the prior
 // strict invariant).
+//
+// C-7-LT-7 signature: adds userID to drive the per-user-home allow-
+// list entry. Pass "" to disable that slot (mismatches a user-home
+// path → rejected, just like pre-C-7-LT-7 behaviour).
 func RewriteConfigJSON(
 	orig []byte,
 	taskDir string,
 	vmIndex uint16,
 	subnetBaseOctet uint8,
-	sandboxID string,
+	sandboxID, userID string,
 	contentAddressedRoots []string,
 ) ([]byte, error) {
-	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet, sandboxID, contentAddressedRoots)
+	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet, sandboxID, userID, contentAddressedRoots)
 }
 
 // PathFieldKind re-exports the field-kind enum so tests can exercise
@@ -152,12 +156,15 @@ const (
 // ValidatePathByKind is the test entry point for the per-field
 // validator. C-7-LT-6 — exposed so tests can pin each allow-list
 // branch without round-tripping the whole config.json.
+//
+// C-7-LT-7 signature: adds userID. Tests that don't care about the
+// per-user-home slot should pass "".
 func ValidatePathByKind(
 	kind PathFieldKind,
-	fieldName, value, taskDir, sandboxID string,
+	fieldName, value, taskDir, sandboxID, userID string,
 	contentAddressedRoots []string,
 ) error {
-	return validatePathByKind(kind, fieldName, value, value, taskDir, sandboxID, contentAddressedRoots)
+	return validatePathByKind(kind, fieldName, value, value, taskDir, sandboxID, userID, contentAddressedRoots)
 }
 
 // SandboxPrefixForTest re-exports sandboxPrefix so tests can assert
@@ -165,6 +172,13 @@ func ValidatePathByKind(
 // filepath join. C-7-LT-6.
 func SandboxPrefixForTest(sandboxID string) string {
 	return sandboxPrefix(sandboxID)
+}
+
+// UserHomePrefixForTest re-exports userHomePrefix so tests can assert
+// the per-user-home layout convention without re-implementing the
+// filepath join. C-7-LT-7.
+func UserHomePrefixForTest(userID string) string {
+	return userHomePrefix(userID)
 }
 
 // WaitForCHSocketReady is the test entry point for the C-7-LT-3-PR1
