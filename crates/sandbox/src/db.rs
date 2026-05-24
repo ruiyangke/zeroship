@@ -179,13 +179,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "wake_jobs error_code CHECK accepts `staging_path_missing` for the controller-side preflight (R23-API1 / R25-S1 / R25-I1 / R25-I2)",
         sql: include_str!("../migrations/0013_wake_jobs_staging_path_missing_code.sql"),
     },
+    Migration {
+        version: 14,
+        description: "wake_jobs error_code CHECK accepts `agent_version_mismatch` for the restore-path agent /version fingerprint check (T5)",
+        sql: include_str!("../migrations/0014_wake_jobs_agent_version_mismatch_code.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 13;
+pub const LATEST_MIGRATION_VERSION: i64 = 14;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
@@ -1636,6 +1641,22 @@ pub enum WakeErrorCode {
     /// host path is logged via tracing on the controller and never
     /// crosses the wire.
     StagingPathMissing,
+    /// T5: the restored agent's `/version` endpoint reported a
+    /// `git_commit` that does not match the controller's own
+    /// `BUILD_GIT_SHA`. Catches partial-rollout / version-skew on the
+    /// restore path — a wake that lands on the wrong agent binary
+    /// (e.g. one node not yet upgraded during a fleet rollout) is
+    /// distinct from `livez_timeout` ("agent never came up") and
+    /// `restore_backend_failed` ("alloc-level failure"). Operator
+    /// action: confirm fleet version, re-attempt wake after the rollout
+    /// completes. Mapped to wire code `agent_version_mismatch`.
+    ///
+    /// Option A (per T5 spec): expected fingerprint is hard-coded to
+    /// the controller's own `BUILD_GIT_SHA` (both binaries deployed
+    /// together). A future per-sandbox typed fingerprint stored at
+    /// snapshot time would catch cross-version restore drift; not
+    /// needed for v1.
+    AgentVersionMismatch,
 }
 
 impl WakeErrorCode {
@@ -1664,6 +1685,11 @@ impl WakeErrorCode {
             // code describes the FAILED RESOURCE ("an image was
             // missing") in operator-facing language.
             Self::StagingPathMissing => "staging_path_missing",
+            // T5: distinct internal name from `livez_timeout` so the
+            // SLO dashboard / pg query layer can split rollout-skew
+            // failures from agent-never-up. Pg CHECK constraint extended
+            // by migration 0014 to admit this value.
+            Self::AgentVersionMismatch => "agent_version_mismatch",
         }
     }
 
@@ -1678,6 +1704,7 @@ impl WakeErrorCode {
             "internal" => Self::Internal,
             "wake_worker_aborted" => Self::WakeWorkerAborted,
             "staging_path_missing" => Self::StagingPathMissing,
+            "agent_version_mismatch" => Self::AgentVersionMismatch,
             _ => return None,
         })
     }
@@ -1739,6 +1766,14 @@ impl WakeErrorCode {
             // and runbooks read in domain language. Snake_case per
             // §10.0.
             Self::StagingPathMissing => "staging_image_missing",
+            // T5: distinct from `livez_timeout` so the SLO dashboard
+            // can route "controller-vs-agent build SHA mismatch during
+            // partial rollout" (operator: wait for fleet rollout to
+            // complete, then retry wake) separately from "agent never
+            // came up at all" (alloc-level failure). Snake_case per
+            // §10.0. Same operator-facing resource name as the internal
+            // form — both sides read in domain language here.
+            Self::AgentVersionMismatch => "agent_version_mismatch",
         }
     }
 }
@@ -3720,6 +3755,8 @@ mod tests {
             WakeErrorCode::WakeWorkerAborted,
             // R23-API1 / R25-S1: controller-side staging preflight.
             WakeErrorCode::StagingPathMissing,
+            // T5: restored agent /version git_commit mismatch.
+            WakeErrorCode::AgentVersionMismatch,
         ] {
             let s = variant.as_str();
             let parsed = WakeErrorCode::from_str_opt(s)
@@ -3761,6 +3798,11 @@ mod tests {
             // (resource name) — pinned together here so a future rename
             // of either side breaks one of these test cases.
             (WakeErrorCode::StagingPathMissing, "staging_image_missing"),
+            // T5: restored agent /version git_commit mismatch. Both
+            // sides ("internal" pg-column form + "wire" HTTP form) read
+            // the same `agent_version_mismatch` here — operator and code
+            // language coincide for this variant.
+            (WakeErrorCode::AgentVersionMismatch, "agent_version_mismatch"),
         ];
         for (variant, wire) in cases {
             assert_eq!(
@@ -3844,6 +3886,8 @@ mod tests {
             WakeErrorCode::RegisterFailed,
             WakeErrorCode::Internal,
             WakeErrorCode::WakeWorkerAborted,
+            WakeErrorCode::StagingPathMissing,
+            WakeErrorCode::AgentVersionMismatch,
         ] {
             assert!(
                 WakeErrorCode::from_str_opt(variant.as_str()).is_some(),

@@ -2514,6 +2514,11 @@ mod tests {
             // classification) where the typed-id form is composed
             // path-free.
             WakeErrorCode::StagingPathMissing,
+            // T5: restore-path /version git_commit mismatch. Distinct
+            // wire code so the SLO dashboard can route rollout-skew
+            // failures away from the `livez_timeout` and
+            // `restore_backend_failed` buckets.
+            WakeErrorCode::AgentVersionMismatch,
         ] {
             let mut row = make_wake_row(WakeJobState::Failed);
             row.error_code = Some(code);
