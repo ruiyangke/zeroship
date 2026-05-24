@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -328,6 +329,18 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	// re-wakes of the same snapshot should each see a pristine
 	// source — the rewrite is idempotent across attempts but
 	// touching the staged dir is a smell.
+	//
+	// C-7-LT-10 (smoke-r20): runDir is now the source-of-truth dir we
+	// hand CH via --restore source_url=file://<runDir>. The rewritten
+	// config.json lives in runDir; state.json and memory-ranges
+	// (immutable artifacts CH consumes verbatim) are symlinked from
+	// <RestoreFrom> into runDir below so CH sees all three files
+	// under one directory. The read-only source dir is referenced
+	// only through the symlinks — we still never write into it.
+	// Pre-fix the rewritten config never reached CH because the
+	// invocation pointed at <RestoreFrom> where the un-rewritten
+	// config.json still lived — three smoke cycles (r15/r19/r20) all
+	// failed at CreateConsoleDevice ENOENT before this was caught.
 	snapshotConfigPath := filepath.Join(driverConfig.RestoreFrom, snapshotConfigFile)
 	origConfig, err := os.ReadFile(snapshotConfigPath)
 	if err != nil {
@@ -359,6 +372,36 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	}
 	if err := os.WriteFile(rewrittenConfigPath, rewritten, 0o600); err != nil {
 		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: write rewritten config %s: %w", rewrittenConfigPath, err)
+	}
+
+	// C-7-LT-10 (smoke-r20): symlink the immutable snapshot artifacts
+	// (state.json, memory-ranges) from <RestoreFrom> into <runDir> so
+	// CH `--restore source_url=file://<runDir>` sees them next to the
+	// rewritten config.json. Without this hop CH consults whichever
+	// directory the `source_url` names — pre-fix that was the source
+	// dir whose config.json is still the un-rewritten copy pointing
+	// at the OLD alloc's task_dir. The fix routes CH through runDir
+	// for ALL three files: config.json (rewritten, written above)
+	// plus state.json and memory-ranges (symlinks into the read-only
+	// source dir, so the immutable artifacts stay untouched).
+	//
+	// Mode: an `os.Symlink` here creates the link with default
+	// (mode-irrelevant) permissions; CH opens the target via the
+	// symlink and inherits the source's permission bits, which is
+	// what we want.
+	//
+	// Idempotency: a re-attempt of a previously-failed restore will
+	// find the symlinks already in place. `fs.ErrExist` is the
+	// expected outcome of the second call and is tolerated; any
+	// other error surfaces (e.g. EPERM on a noexec mount, target
+	// missing — though the earlier validateSnapshotDir step already
+	// asserted those exist).
+	for _, name := range []string{snapshotStateFile, snapshotMemoryFile} {
+		src := filepath.Join(driverConfig.RestoreFrom, name)
+		dst := filepath.Join(runDir, name)
+		if err := os.Symlink(src, dst); err != nil && !errors.Is(err, fs.ErrExist) {
+			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: symlink %s -> %s: %w", src, dst, err)
+		}
 	}
 
 	// C-7-LT-9 (smoke-r19): pre-create each runtime file the rewriter
@@ -413,11 +456,19 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	// URL). The trailing dir is the staged snapshot dir; CH reads
 	// state.json + config.json + memory-ranges from that location.
 	//
+	// C-7-LT-10 (smoke-r20): point CH at runDir, NOT RestoreFrom.
+	// runDir now holds (a) the rewritten config.json written above
+	// and (b) symlinks to state.json + memory-ranges in the read-only
+	// source dir. Pre-fix this said `RestoreFrom` and CH read the
+	// un-rewritten config from the snapshot dir; three smoke cycles
+	// failed at CreateConsoleDevice ENOENT before the writer/reader
+	// asymmetry was caught.
+	//
 	// CRITICAL: per CH docs, --restore is INCOMPATIBLE with --kernel
 	// / --cmdline / --disk / --net / --memory / --cpus / --serial.
 	// Those would conflict with the snapshot's embedded config. We
 	// pass ONLY --api-socket + --restore.
-	restoreURL := "source_url=file://" + driverConfig.RestoreFrom
+	restoreURL := "source_url=file://" + runDir
 	argv := []string{
 		chBin,
 		"--api-socket", apiSocket,

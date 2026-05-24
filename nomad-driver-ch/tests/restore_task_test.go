@@ -783,7 +783,8 @@ func TestStartTaskRestore_SpawnsWithRestoreFlag(t *testing.T) {
 	capturedPtr, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
 
 	cfg := validRestoreConfig(staged)
-	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
 
 	handle, _, err := p.StartTask(taskCfg)
 	if err != nil {
@@ -812,8 +813,19 @@ func TestStartTaskRestore_SpawnsWithRestoreFlag(t *testing.T) {
 	if !strings.HasPrefix(restoreVal, wantPrefix) {
 		t.Errorf("--restore arg = %q, want prefix %q", restoreVal, wantPrefix)
 	}
-	if !strings.HasSuffix(restoreVal, staged) {
-		t.Errorf("--restore arg = %q, want suffix %q (staged dir)", restoreVal, staged)
+	// C-7-LT-10 (smoke-r20): --restore must point at runDir, NOT the
+	// snapshot source dir. Pre-fix this expected `staged` and CH was
+	// reading the un-rewritten config; the rewritten config in runDir
+	// was being ignored. runDir is taskDir/local (Nomad's per-task
+	// local-dir convention; see newDriversTaskConfig in helpers_test).
+	runDir := filepath.Join(taskDir, "local")
+	if !strings.HasSuffix(restoreVal, runDir) {
+		t.Errorf("--restore arg = %q, want suffix %q (runDir, NOT staged source dir)", restoreVal, runDir)
+	}
+	// And the source dir MUST NOT appear in the argv — pre-fix that
+	// was the symptom of C-7-LT-10.
+	if strings.Contains(restoreVal, staged) && staged != runDir {
+		t.Errorf("--restore arg = %q must NOT reference the staged source dir %q (C-7-LT-10)", restoreVal, staged)
 	}
 	// Cold-boot-only flags MUST be absent — they'd conflict with
 	// --restore (per CH docs).
@@ -2018,6 +2030,258 @@ func TestStartTaskRestoreBranch_PreCreatesConsoleLog(t *testing.T) {
 	serialPath := filepath.Join(runDir, "serial.log")
 	if _, err := os.Stat(serialPath); err != nil {
 		t.Errorf("serial.log not pre-created alongside console.log at %s: %v", serialPath, err)
+	}
+}
+
+// -- C-7-LT-10 route-CH-through-runDir tests -------------------------
+//
+// Smoke-r20 caught a writer/reader asymmetry: the driver wrote the
+// rewritten config.json into <runDir> but invoked CH with `--restore
+// source_url=file://<RestoreFrom>`. CH dutifully read the
+// un-rewritten config from the source dir, ignoring the rewrite
+// entirely — three smoke cycles (r15/r19/r20) all aborted at
+// `CreateConsoleDevice ENOENT` because the path-rewritten serial.log
+// in runDir was unreachable: CH was looking under <RestoreFrom>'s
+// (stale, source-alloc) serial.log path. Fixes for C-7-LT-4
+// (rewriter) and C-7-LT-9 (pre-create) were correct but invisible
+// because their output never reached CH.
+//
+// Shape A fix (per smoke-r20 review): symlink state.json +
+// memory-ranges from <RestoreFrom> into <runDir>, route --restore
+// through <runDir>. The rewritten config.json (already in runDir)
+// is then the source of truth; immutable snapshot artifacts are
+// reachable via symlink (no write to the read-only source dir).
+
+// TestStartTaskRestoreBranch_PassesRunDirToCH is the argv-level pin
+// that prevents a regression to the C-7-LT-10 shape (--restore
+// pointing at the snapshot source dir). The brief witness: the
+// `source_url=file://...` suffix MUST be runDir, NOT RestoreFrom.
+func TestStartTaskRestoreBranch_PassesRunDirToCH(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	capturedPtr, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+	captured := *capturedPtr
+	if captured == nil {
+		t.Fatal("runner factory not invoked")
+	}
+
+	restoreVal := argvAfter(captured.argv, "--restore")
+	runDir := filepath.Join(taskDir, "local")
+	wantSuffix := "file://" + runDir
+	if !strings.HasSuffix(restoreVal, wantSuffix) {
+		t.Errorf("--restore arg = %q, want suffix %q (runDir, NOT snapshot source dir)", restoreVal, wantSuffix)
+	}
+	// The snapshot source dir must NOT appear anywhere in the argv —
+	// the source dir is referenced only via symlinks under runDir.
+	for _, arg := range captured.argv {
+		if strings.Contains(arg, staged) {
+			t.Errorf("argv arg %q references the snapshot source dir %q (C-7-LT-10 regression)", arg, staged)
+		}
+	}
+}
+
+// TestStartTaskRestoreBranch_SymlinksImmutableArtifacts pins the
+// second half of Shape A: state.json and memory-ranges from
+// <RestoreFrom> are symlinked into <runDir> so CH (now pointed at
+// runDir) can read all three files (rewritten config.json +
+// state.json + memory-ranges) from one directory.
+func TestStartTaskRestoreBranch_SymlinksImmutableArtifacts(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+
+	runDir := filepath.Join(taskDir, "local")
+
+	// state.json must be a symlink whose target is the file under
+	// <staged>. Use Lstat — Stat would dereference and miss the
+	// symlink kind.
+	stateLink := filepath.Join(runDir, "state.json")
+	stateInfo, err := os.Lstat(stateLink)
+	if err != nil {
+		t.Fatalf("state.json not present at %s: %v", stateLink, err)
+	}
+	if stateInfo.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("state.json at %s is not a symlink (mode=%v); Shape A requires symlinks, not copies", stateLink, stateInfo.Mode())
+	}
+	stateTarget, err := os.Readlink(stateLink)
+	if err != nil {
+		t.Fatalf("readlink state.json: %v", err)
+	}
+	wantStateTarget := filepath.Join(staged, "state.json")
+	if stateTarget != wantStateTarget {
+		t.Errorf("state.json symlink target = %q, want %q", stateTarget, wantStateTarget)
+	}
+
+	// memory-ranges: same expectations, separate file.
+	memLink := filepath.Join(runDir, "memory-ranges")
+	memInfo, err := os.Lstat(memLink)
+	if err != nil {
+		t.Fatalf("memory-ranges not present at %s: %v", memLink, err)
+	}
+	if memInfo.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("memory-ranges at %s is not a symlink (mode=%v)", memLink, memInfo.Mode())
+	}
+	memTarget, err := os.Readlink(memLink)
+	if err != nil {
+		t.Fatalf("readlink memory-ranges: %v", err)
+	}
+	wantMemTarget := filepath.Join(staged, "memory-ranges")
+	if memTarget != wantMemTarget {
+		t.Errorf("memory-ranges symlink target = %q, want %q", memTarget, wantMemTarget)
+	}
+
+	// Defence-in-depth: the symlinks must resolve to readable files
+	// (Stat follows the link). A broken symlink would leave CH at
+	// the same ENOENT it was hitting pre-fix.
+	if _, err := os.Stat(stateLink); err != nil {
+		t.Errorf("state.json symlink does not resolve: %v", err)
+	}
+	if _, err := os.Stat(memLink); err != nil {
+		t.Errorf("memory-ranges symlink does not resolve: %v", err)
+	}
+}
+
+// TestStartTaskRestoreBranch_SymlinkIdempotentOnRetry pins that a
+// re-invocation of the restore branch (e.g. Nomad replays StartTask
+// after a transient host glitch) does NOT error on the symlinks
+// that the prior attempt already laid down. The fix uses
+// `errors.Is(err, fs.ErrExist)` to tolerate the second call.
+//
+// Witness: pre-stage the runDir with both symlinks (matching what a
+// prior attempt would have left), then drive StartTask and assert no
+// error surfaces. The argv must still point at runDir.
+func TestStartTaskRestoreBranch_SymlinkIdempotentOnRetry(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+
+	// Pre-stage runDir with the symlinks a prior attempt would have
+	// created. MkdirAll is safe (StartTask is idempotent on that
+	// step already) and the symlinks point at the same source files.
+	runDir := filepath.Join(taskDir, "local")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("pre-stage mkdir runDir: %v", err)
+	}
+	for _, name := range []string{"state.json", "memory-ranges"} {
+		src := filepath.Join(staged, name)
+		dst := filepath.Join(runDir, name)
+		if err := os.Symlink(src, dst); err != nil {
+			t.Fatalf("pre-stage symlink %s -> %s: %v", src, dst, err)
+		}
+	}
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore) on retry: %v (should be idempotent over pre-existing symlinks)", err)
+	}
+
+	// Symlinks must still exist and resolve.
+	for _, name := range []string{"state.json", "memory-ranges"} {
+		dst := filepath.Join(runDir, name)
+		info, err := os.Lstat(dst)
+		if err != nil {
+			t.Errorf("%s missing post-retry: %v", dst, err)
+			continue
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("%s is not a symlink post-retry (mode=%v)", dst, info.Mode())
+		}
+	}
+}
+
+// TestStartTaskRestoreBranch_RewriteConfigAndSymlinksCoexist is the
+// integration witness: a single StartTask call lands ALL THREE files
+// CH needs under runDir. config.json is a regular file (the rewriter
+// output); state.json and memory-ranges are symlinks into the source
+// dir. The shape mirrors what the bash wrapper achieves implicitly
+// (it rewrites config.json in-place inside the source dir, so all
+// three files are in the same dir by construction).
+func TestStartTaskRestoreBranch_RewriteConfigAndSymlinksCoexist(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+
+	runDir := filepath.Join(taskDir, "local")
+
+	// config.json is a REGULAR FILE (the rewriter materialised it
+	// directly into runDir; a symlink would defeat the rewrite).
+	configPath := filepath.Join(runDir, "config.json")
+	configInfo, err := os.Lstat(configPath)
+	if err != nil {
+		t.Fatalf("config.json missing at %s: %v", configPath, err)
+	}
+	if configInfo.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("config.json at %s is a symlink (mode=%v); must be a regular file containing the rewriter output", configPath, configInfo.Mode())
+	}
+	// And the rewriter must have run — the rewritten config must NOT
+	// still reference the source-alloc dir.
+	rewritten, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read rewritten config: %v", err)
+	}
+	if strings.Contains(string(rewritten), srcAlloc) {
+		t.Errorf("rewritten config still references source-alloc dir %q (rewrite did not run before CH spawn)", srcAlloc)
+	}
+
+	// state.json + memory-ranges are SYMLINKS (the Shape A fix —
+	// avoid writing into the read-only source dir).
+	for _, name := range []string{"state.json", "memory-ranges"} {
+		dst := filepath.Join(runDir, name)
+		info, err := os.Lstat(dst)
+		if err != nil {
+			t.Errorf("%s missing at %s: %v", name, dst, err)
+			continue
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("%s at %s is not a symlink (mode=%v); Shape A requires symlinks to the source dir's immutable artifacts", name, dst, info.Mode())
+		}
 	}
 }
 
