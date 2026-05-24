@@ -2349,6 +2349,13 @@ fn build_restore_nomad_job_json(
                     "memory_mb": memory_mb,
                     "restore_from": alloc_dir.display().to_string(),
                     "sandbox_id": sandbox_id.simple().to_string(),
+                    // C-7-LT-7 / r21-A1: user_id feeds the driver's
+                    // per-user-home path allow-list. Restore is the only
+                    // builder invoked during WAKE; without this field the
+                    // driver sees empty user_id and rejects
+                    // /var/zeroship/ch/users/<user_id>/home.img.
+                    // Mirrors cold-boot builder (nomad_ch.rs:2451).
+                    "user_id": user_id,
                     "workspace_img": workspace_img.display().to_string(),
                     "user_home_img": user_home_img.display().to_string(),
                     // Empty: CH ignores --cmdline on --restore.
@@ -3594,6 +3601,15 @@ mod r12_i1_tests {
         assert_eq!(config["cpus"].as_u64(), Some(2));
         assert_eq!(config["memory_mb"].as_u64(), Some(1024));
         assert_eq!(config["subnet_base_octet"].as_u64(), Some(99));
+        // r21-A1: user_id MUST appear in the restore-path Config so the
+        // driver's per-user-home allow-list accepts the disk path.
+        // This assertion is what was missing and masked the gap.
+        assert_eq!(
+            config["user_id"].as_str(),
+            Some("usr_alice"),
+            "restore-path ChPlugin Config MUST carry user_id — driver \
+             v8 allow-list rejects home.img without it (r21-A1)"
+        );
     }
 
     /// raw_exec's `Config.command` field MUST NOT appear under
