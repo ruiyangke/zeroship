@@ -11,7 +11,7 @@
  * Errors from the underlying call propagate to every queued promise.
  *
  * Scope and limits are enforced by the caller (`Collection.get`):
- *   - numeric id only (not a Filter object)
+ *   - typed_id string only (not a Filter object)
  *   - no `opts.select` (would force per-projection bucketing)
  *   - no `opts.orderBy` (irrelevant for id reads; falls through to be safe)
  *   - skipped while a transaction is active on the collection (we don't
@@ -28,11 +28,17 @@
  * before-begin in `db.transaction` closes the common window, but a
  * second-microtask enqueue between the drain and `beginTransaction`'s
  * resolution remains observable.
+ *
+ * **P7 PR 3** — id keyspace widened from `number` to `string` (typed_id)
+ * in lockstep with the Rust-side `id TEXT PRIMARY KEY` + auto-mint
+ * pass (`crud::system_fields_pass::apply_system_fields_on_insert`).
+ * Dedupe + map lookups now use string keys; the `Map<string, R>` value
+ * type is unchanged structurally.
  */
 
 /** A queued request waiting for the next microtask flush. */
 interface QueuedLoad<R> {
-  id: number;
+  id: string;
   resolve: (row: R | null) => void;
   reject: (err: unknown) => void;
   txDepthAtEnqueue: number;
@@ -43,7 +49,7 @@ interface QueuedLoad<R> {
  * fetch. Construct one per Collection and reuse — it's stateless across
  * batches.
  */
-export class IdLoader<R extends { id: number }> {
+export class IdLoader<R extends { id: string }> {
   private queue: QueuedLoad<R>[] = [];
   private scheduled = false;
 
@@ -57,7 +63,7 @@ export class IdLoader<R extends { id: number }> {
    *                    time so we can detect a tx opening mid-batch.
    */
   constructor(
-    private flush: (ids: number[]) => Promise<Map<number, R>>,
+    private flush: (ids: string[]) => Promise<Map<string, R>>,
     private getTxDepth: () => number = () => 0,
   ) {}
 
@@ -69,7 +75,7 @@ export class IdLoader<R extends { id: number }> {
    * the entry will be rejected with a clear race error instead of being
    * silently routed onto the tx connection.
    */
-  load(id: number, txDepthSnapshot: number = 0): Promise<R | null> {
+  load(id: string, txDepthSnapshot: number = 0): Promise<R | null> {
     return new Promise<R | null>((resolve, reject) => {
       this.queue.push({ id, resolve, reject, txDepthAtEnqueue: txDepthSnapshot });
       if (!this.scheduled) {
@@ -121,10 +127,10 @@ export class IdLoader<R extends { id: number }> {
     }
     if (liveBatch.length === 0) return;
 
-    // Dedupe ids before the underlying call — N concurrent `get(7)` calls
-    // resolve from the same row without N copies on the wire.
-    const ids: number[] = [];
-    const seen = new Set<number>();
+    // Dedupe ids before the underlying call — N concurrent `get("post_X")`
+    // calls resolve from the same row without N copies on the wire.
+    const ids: string[] = [];
+    const seen = new Set<string>();
     for (const q of liveBatch) {
       if (!seen.has(q.id)) {
         seen.add(q.id);
@@ -141,9 +147,9 @@ export class IdLoader<R extends { id: number }> {
   }
 }
 
-function resolve<R extends { id: number }>(
+function resolve<R extends { id: string }>(
   q: QueuedLoad<R>,
-  map: Map<number, R>,
+  map: Map<string, R>,
 ): void {
   const row = map.get(q.id);
   q.resolve(row === undefined ? null : row);

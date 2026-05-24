@@ -28,7 +28,13 @@ type CallLog = {
 };
 
 /** Mock native that returns rows by table. The find handler understands
- *  `{ id: { $in: [...] } }` so the relation loader's batched IN works. */
+ *  `{ id: { $in: [...] } }` so the relation loader's batched IN works.
+ *
+ *  **P7 PR 3** — FK columns cascade to TEXT typed_id; the loader sends
+ *  stringified ids on the wire. The mock accepts both shapes by
+ *  stringifying on the way in (the row tables stay number-keyed for
+ *  readability — JS object indexing coerces both `rows[1]` and
+ *  `rows["1"]` to the same slot). */
 function makeMock(
   tables: Record<string, Record<number, AnyRec>>,
 ): { native: ZeroshipDb; calls: CallLog } {
@@ -45,7 +51,9 @@ function makeMock(
           calls.findOne.push({ collection: name, filter, opts });
           const rows = tables[name] ?? {};
           const id = filter.id;
-          if (typeof id === "number") return rows[id] ?? null;
+          if (typeof id === "number" || typeof id === "string") {
+            return (rows as Record<string, AnyRec>)[String(id)] ?? null;
+          }
           for (const r of Object.values(rows)) {
             let ok = true;
             for (const [k, v] of Object.entries(filter)) {
@@ -58,17 +66,23 @@ function makeMock(
         async find(filter: AnyRec, opts: AnyRec) {
           calls.find.push({ collection: name, filter, opts });
           const rows = tables[name] ?? {};
-          const idClause = filter.id as { $in?: number[] } | number | undefined;
+          const idClause = filter.id as
+            | { $in?: (string | number)[] }
+            | string
+            | number
+            | undefined;
           if (
             idClause !== null &&
             typeof idClause === "object" &&
             Array.isArray((idClause as AnyRec).$in)
           ) {
-            const ids = (idClause as { $in: number[] }).$in;
-            return ids.map((i) => rows[i]).filter(Boolean);
+            const ids = (idClause as { $in: (string | number)[] }).$in;
+            return ids
+              .map((i) => (rows as Record<string, AnyRec>)[String(i)])
+              .filter(Boolean);
           }
-          if (typeof idClause === "number") {
-            const r = rows[idClause];
+          if (typeof idClause === "number" || typeof idClause === "string") {
+            const r = (rows as Record<string, AnyRec>)[String(idClause)];
             return r ? [r] : [];
           }
           // Whole-table scan with optional field-eq filter.
@@ -153,8 +167,10 @@ describe("with: { fk: true } — relation-aware reads", () => {
     // The relation fired exactly ONE find against `users` (batch IN of distinct ids).
     const userFinds = calls.find.filter((c) => c.collection === "users");
     assert.equal(userFinds.length, 1, "expected exactly one batched find against users");
-    const idClause = userFinds[0].filter.id as { $in: number[] };
-    assert.deepEqual([...idClause.$in].sort((a, b) => a - b), [1, 2]);
+    // **P7 PR 3** — FK columns are TEXT typed_ids on the wire; the
+    // loader stringifies legacy-number FK values before the `$in`.
+    const idClause = userFinds[0].filter.id as { $in: string[] };
+    assert.deepEqual([...idClause.$in].sort(), ["1", "2"]);
   });
 
   test("chainable .with(...) on Query produces the same result", async () => {
@@ -218,12 +234,13 @@ describe("with: { fk: true } — relation-aware reads", () => {
     assert.ok(data);
     const userFinds = calls.find.filter((c) => c.collection === "users");
     assert.equal(userFinds.length, 1);
-    const idClause = userFinds[0].filter.id as { $in: number[] };
+    // **P7 PR 3** — typed_id string wire shape.
+    const idClause = userFinds[0].filter.id as { $in: string[] };
     // Only the distinct non-null user ids should appear: 1 and 2 (104's 9999 too).
     const seen = new Set(idClause.$in);
     assert.equal(seen.size, idClause.$in.length, "ids must be deduped");
-    assert.ok(seen.has(1));
-    assert.ok(seen.has(2));
+    assert.ok(seen.has("1"));
+    assert.ok(seen.has("2"));
   });
 
   test("empty result set → no relation fetch fires", async () => {
@@ -476,19 +493,23 @@ describe("Query.with — guards against direct Query construction", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FK coercion: non-numeric strings used to silently null out joined rows;
-// the new contract is loud failure (TypeError with a clear message).
-// bigint values coerce to number for the IN clause.
+// FK coercion: post-PR 3 the FK column type cascaded to TEXT typed_id,
+// so a string FK value is the canonical shape (not an error). The loader
+// still rejects values that are neither string, number, nor bigint — a
+// JSON object or array can never round-trip as a row id.
+// bigint values coerce via `.toString()` so 64-bit ids stay lossless.
 // ---------------------------------------------------------------------------
 
 describe("with: non-numeric FK coercion + loud failure", () => {
-  test("string FK value triggers a clear error, not a silent null", async () => {
+  test("string FK value joins successfully (typed_id wire shape)", async () => {
+    // **P7 PR 3** — Pre-PR 3 this same test asserted a string FK threw
+    // `with_fk_not_numeric`; PR 3 widened the contract so a string FK
+    // is the canonical shape (the FK column type cascaded to TEXT). The
+    // value "1" matches the `users[1]` row through the mock's
+    // string-aware lookup.
     const tables: Record<string, Record<number, AnyRec>> = {
       users: { 1: { id: 1, name: "Alice" } },
       todos: {
-        // userId is a STRING — used to silently null out the joined
-        // userId field; the new contract is to throw loudly so the
-        // schema mismatch (a string-typed FK column) surfaces.
         100: { id: 100, userId: "1" as unknown as number, title: "buy milk" },
       },
     };
@@ -505,9 +526,41 @@ describe("with: non-numeric FK coercion + loud failure", () => {
     );
 
     const { data, error } = await db.todos.find({}, { with: { userId: true } });
-    assert.equal(data, null, "string FK must NOT yield a silent join result");
+    assert.equal(error, null);
+    assert.ok(data);
+    const t100 = data!.find((r) => r.id === 100) as AnyRec;
+    assert.deepEqual(t100.userId, { id: 1, name: "Alice" });
+  });
+
+  test("non-id-shaped FK value (object) throws with_fk_not_id_shaped", async () => {
+    // **P7 PR 3** — only string / number / bigint are valid id shapes;
+    // an object / array / boolean FK value still throws because no
+    // typed_id or numeric id can ever serialise as one of those.
+    const tables: Record<string, Record<number, AnyRec>> = {
+      users: { 1: { id: 1, name: "Alice" } },
+      todos: {
+        100: { id: 100, userId: { malformed: true } as unknown as number, title: "buy milk" },
+      },
+    };
+    const mock = makeMock(tables);
+    const db = installSchemaForTest(
+      {
+        users: { name: t.string().required() },
+        todos: {
+          userId: t.ref("users"),
+          title: t.string().required(),
+        },
+      },
+      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
+    );
+
+    const { data, error } = await db.todos.find({}, { with: { userId: true } });
+    assert.equal(data, null, "object FK must surface as a typed error");
     assert.ok(error);
-    assert.match(error!.message, /_loadRelations: FK value for field 'userId' is not a number-like value \(got string\)/);
+    assert.match(
+      error!.message,
+      /_loadRelations: FK value for field 'userId' is not a string \/ number \/ bigint \(got object\)/,
+    );
   });
 
   test("bigint FK value coerces and joins successfully", async () => {
@@ -690,9 +743,10 @@ describe("with: self-referencing FK", () => {
     // First find is the outer `db.users.find({})`; the relation loader's
     // batched IN is the second.
     assert.equal(userFinds.length, 2);
-    const idClause = userFinds[1].filter.id as { $in: number[] };
+    // **P7 PR 3** — typed_id string wire shape for FK ids.
+    const idClause = userFinds[1].filter.id as { $in: string[] };
     const seen = new Set(idClause.$in);
     assert.equal(seen.size, idClause.$in.length, "ids must be deduped");
-    assert.deepEqual([...seen].sort((a, b) => a - b), [1, 5]);
+    assert.deepEqual([...seen].sort(), ["1", "5"]);
   });
 });

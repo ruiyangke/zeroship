@@ -110,19 +110,25 @@ export type InferSchema<S> = S extends infer T
  * in `validate_field_name_for_declaration` enforce the fence at
  * register-model time.
  *
- * Wire types (PR 1 — type-only; backing runtime stays on legacy
- * shapes until PR 2/3/5 ship the DDL + auto-populate paths):
- * - `id` — kept as `number` to match the pre-P7 `IdLoader`/CAS
- *   infrastructure. PR 3 will widen to `string` (typed_id) when the
- *   auto-mint pass lands and `IdLoader` is updated to key on string.
- *   Pre-P7 callers continue to see the legacy `number` shape.
- * - `created_at` / `updated_at` — Unix-ms `number` for back-compat
- *   with the pre-P7 `createdAt`/`updatedAt` shape. PR 2/3 will
- *   surface ISO 8601 strings on the wire; this type alias evolves
- *   in lockstep.
+ * Wire types (PR 3 — canonical typed_id + ISO-8601-friendly shape;
+ * PR 1 stub of `number` for `id` is widened here in lockstep with
+ * the Rust `dispatch_insert` auto-mint pass):
+ * - `id` — `string` typed_id (`<prefix>_<22 base62 chars>`); the
+ *   `dispatch_insert` path on the Rust side mints fresh ids via
+ *   `zeroship_core::typed_id::generate(prefix)` when the inbound
+ *   row omits one. Pre-P7 collections that still store integer ids
+ *   migrate via PR 6's one-time ALTER pass; until then the SDK's
+ *   `Collection._loadById` accepts either shape on the wire but
+ *   exposes `string` on `Row<S>`.
+ * - `created_at` / `updated_at` — Unix-ms `number` for continuity
+ *   with the pre-P7 `createdAt` / `updatedAt` shape. The wire
+ *   widens to ISO 8601 strings in a later PR (P7.5 / P8); the
+ *   current shape stays a number to avoid a Date-parse cost on
+ *   every read.
  * - `created_by` / `updated_by` — nullable actor typed_id string,
  *   `null` for system-initiated writes (migrations, background
- *   jobs). PR 3 wires the auto-populate from `SessionMinter.actor_id`.
+ *   jobs). PR 3 wires the auto-populate from the per-request
+ *   user context (`RuntimeState::per_request_user`).
  * - `version` — monotonic integer; starts at 1, bumped by 1 on every
  *   UPDATE. PR 4 wires the bump + optimistic-concurrency CAS.
  * - `deleted_at` — nullable timestamp `number`; `null` for live rows.
@@ -133,17 +139,9 @@ export type InferSchema<S> = S extends infer T
  * on the inferred row see the user shape first (matches the source
  * order: every creator table gets the system fields as
  * platform-injected, not creator-declared).
- *
- * **Type widening deferred**: the canonical wire format (per
- * `docs/proposals/platform-system-fields.md` §4) uses string IDs and
- * ISO 8601 timestamps. PR 1 preserves the legacy number-shaped
- * fields so existing `Collection` infrastructure (`IdLoader`,
- * `_loadById`, the `with` join machinery) keeps compiling without
- * a downstream cascade. PR 3 (INSERT auto-populate) is the natural
- * widening point because it introduces the typed_id mint.
  */
 export type SystemFields = {
-  id: number;
+  id: string;
   created_at: number;
   updated_at: number;
   created_by: string | null;
@@ -163,13 +161,17 @@ export type SystemFields = {
  * version? }` shape. The two legacy camelCase aliases (`createdAt`,
  * `updatedAt`) stay alongside the snake_case canonical names so
  * existing callers (`db.users.find({ createdAt: ... })`) continue
- * to type-check during the migration window. PR 3 will drop the
- * aliases once the typed_id mint lands.
+ * to type-check during the migration window.
+ *
+ * **P7 PR 3** — `id` widened from `number` to `string` (typed_id)
+ * now that the Rust-side `dispatch_insert` auto-mint pass is wired.
+ * The camelCase aliases stay for back-compat with existing creator
+ * code paths during the rolling migration; a later PR removes them
+ * once every active app has redeployed against the post-PR 3 SDK.
  *
  * PR 5 lands the runtime change (`crud::dispatch_find` emitting the
  * new fields); PR 6 lands the migration that backfills these columns
- * on pre-P7 tables. PR 1 ships the type-only inference so
- * type-checking surfaces the new shape immediately.
+ * on pre-P7 tables.
  */
 export type Row<S> = InferSchema<S> & SystemFields & {
   /** @deprecated alias of `created_at` retained for the P7 migration window. */
@@ -903,18 +905,25 @@ export interface RefOptions {
 }
 
 /**
- * Cross-table typed ID (B2). Stored as an integer at the DB layer but
- * brand-tagged at the type layer so `Id<"users">` and `Id<"posts">`
- * are mutually incompatible — typos like
- * `db.posts.get({ authorId: postId })` (where `postId` is `Id<"posts">`)
- * become compile errors.
+ * Cross-table typed ID (B2). Stored as a TEXT typed_id (`<prefix>_<22
+ * base62 chars>`) at the DB layer but brand-tagged at the type layer
+ * so `Id<"users">` and `Id<"posts">` are mutually incompatible — typos
+ * like `db.posts.get({ authorId: postId })` (where `postId` is
+ * `Id<"posts">`) become compile errors.
  *
  * Modelled after Convex's `Id<TableName>` brand
  * ([docs.convex.dev/database/document-ids]). The brand is a phantom
  * property typed but never assigned at runtime; the runtime value is
- * just a number, so JSON serialisation is unchanged.
+ * just a string, so JSON serialisation is unchanged.
+ *
+ * **P7 PR 3** — widened from `number & { __zeroshipTable }` to
+ * `string & { __zeroshipTable }` in lockstep with the Rust-side
+ * `id TEXT PRIMARY KEY` DDL and the `dispatch_insert` auto-mint pass
+ * (which calls `zeroship_core::typed_id::generate(prefix)`). FK
+ * columns also cascade to TEXT (`def_to_pg_type` for `Some("ref")`),
+ * so a brand-typed `authorId: Id<"users">` round-trips faithfully.
  */
-export type Id<T extends string> = number & {
+export type Id<T extends string> = string & {
   readonly __zeroshipTable: T;
 };
 

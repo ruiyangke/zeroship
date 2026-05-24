@@ -6018,6 +6018,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "v8",
+ "zeroship-core",
  "zeroship-runtime",
  "zeroship-runtime-macros",
 ]

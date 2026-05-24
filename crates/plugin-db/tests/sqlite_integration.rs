@@ -6734,3 +6734,221 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
         assert_eq!(row[3].as_deref(), Some("1"), "created_at IS NOT NULL default");
     });
 }
+
+// ---------------------------------------------------------------------------
+// P7 PR 3 — INSERT auto-populates `id` + `created_by` / `updated_by`
+// ---------------------------------------------------------------------------
+
+/// End-to-end: the `apply_system_fields_on_insert` pass mints a typed_id
+/// and the subsequent `build_insert_with_dialect` INSERT lands a row
+/// with the canonical 7 system fields populated. Mirrors what the
+/// `dispatch_insert` hot path does at request time but without standing
+/// up V8 — exercises the SQL builder + SQLite engine round-trip.
+#[test]
+fn insert_end_to_end_populates_system_fields_sqlite() {
+    use zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_insert;
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect, FkEmission,
+        SqlDialect,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        // 1. Stand up the table with the 7 system-field columns.
+        let ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({
+                "title": {"type": "string", "required": true},
+            }),
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build sqlite DDL");
+        for stmt in ddl.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend
+                .pool_exec(trimmed, &[])
+                .await
+                .unwrap_or_else(|e| panic!("DDL: {trimmed}\n{e:?}"));
+        }
+
+        // 2. Build the inbound doc — creator passes ONLY the user
+        // field. The auto-mint pass injects `id`, `created_by`,
+        // `updated_by`; the DB fires its DEFAULT for the timestamps +
+        // version.
+        let mut doc = serde_json::json!({ "title": "PR 3 hello" });
+        apply_system_fields_on_insert(&mut doc, "app_demo", "posts", Some("usr_actor_e2e"));
+
+        // The minted id must carry the `post_` prefix (collection-name
+        // derived since the schema didn't declare an `idPrefix`).
+        let minted_id = doc
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("id minted by auto-mint pass")
+            .to_string();
+        assert!(
+            minted_id.starts_with("post_"),
+            "expected post_ prefix, got: {minted_id}"
+        );
+
+        // 3. Build + execute the INSERT. `RETURNING *` returns rows,
+        // so route through the dedicated client's `query` path (the
+        // pool's `pool_exec` rejects result-bearing statements).
+        let built = build_insert_with_dialect("app_demo", "posts", &doc, SqlDialect::Sqlite)
+            .expect("build_insert");
+        let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client (insert)");
+        let returning_rows = client
+            .query(&built.sql, &params)
+            .await
+            .unwrap_or_else(|e| panic!("INSERT: {}\n{e:?}", built.sql));
+        assert_eq!(returning_rows.len(), 1, "INSERT RETURNING * gives one row");
+
+        // 4. Round-trip via SELECT: every system field must be the
+        // canonical shape.
+        let rows = client
+            .query(
+                "SELECT id, title, created_by, updated_by, version, \
+                        deleted_at IS NULL AS dn, \
+                        created_at IS NOT NULL AS cn, \
+                        updated_at IS NOT NULL AS un \
+                 FROM \"app_demo\".\"posts\"",
+                &[],
+            )
+            .await
+            .expect("SELECT ok");
+        assert_eq!(rows.len(), 1, "exactly one row");
+        let row = &rows[0];
+        assert_eq!(row[0].as_deref(), Some(minted_id.as_str()), "id round-trip");
+        assert_eq!(row[1].as_deref(), Some("PR 3 hello"), "title preserved");
+        assert_eq!(
+            row[2].as_deref(),
+            Some("usr_actor_e2e"),
+            "created_by from actor"
+        );
+        assert_eq!(
+            row[3].as_deref(),
+            Some("usr_actor_e2e"),
+            "updated_by from actor (== created_by on INSERT)"
+        );
+        assert_eq!(row[4].as_deref(), Some("1"), "version default = 1");
+        assert_eq!(row[5].as_deref(), Some("1"), "deleted_at IS NULL");
+        assert_eq!(row[6].as_deref(), Some("1"), "created_at NOT NULL");
+        assert_eq!(row[7].as_deref(), Some("1"), "updated_at NOT NULL");
+    });
+}
+
+/// FK type cascade end-to-end: a `t.ref(...)` column now emits TEXT
+/// (not INTEGER per PR 1/2) so the column accepts typed_id string
+/// values without storage-class mismatch.
+///
+/// **Scope note**: the actual `FOREIGN KEY ... REFERENCES "app"."tbl"`
+/// constraint clause uses a schema-qualified target name that SQLite's
+/// CREATE TABLE parser refuses (a pre-existing PG-only path). This
+/// test stands up the posts table WITHOUT the FK clause (skipping the
+/// constraint with `FkEmission::Deferred` + empty existing set) and
+/// asserts the column TYPE is TEXT — which is the PR 3 cascade
+/// surface. End-to-end FK constraint validation on SQLite remains a
+/// PG-only path until the cross-app FK rework lands.
+#[test]
+fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
+    use zeroship_plugin_db::crud::system_fields_pass::apply_system_fields_on_insert;
+    use zeroship_plugin_db::query::{
+        build_create_table_with_fks_for_dialect, build_insert_with_dialect, FkEmission,
+        SqlDialect,
+    };
+
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        // Stand up the posts table with an `authorId` ref column. The
+        // PR 3 cascade emits TEXT for the column type. We use
+        // `FkEmission::Deferred(empty)` so the FK clause is omitted —
+        // SQLite refuses schema-qualified REFERENCES targets, a
+        // pre-existing PG-only path that PR 3 is not chartered to fix.
+        let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let posts_ddl = build_create_table_with_fks_for_dialect(
+            "app_demo",
+            "posts",
+            &serde_json::json!({
+                "title": {"type": "string", "required": true},
+                "authorId": {"type": "ref", "refTarget": "users"},
+            }),
+            &FkEmission::Deferred(&empty),
+            SqlDialect::Sqlite,
+        )
+        .expect("build posts DDL");
+        // Pin the FK column type to TEXT (PR 3 cascade — was INTEGER
+        // pre-PR 3).
+        assert!(
+            posts_ddl.contains("\"authorId\" TEXT"),
+            "expected TEXT FK column, got DDL: {posts_ddl}"
+        );
+        for stmt in posts_ddl.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend
+                .pool_exec(trimmed, &[])
+                .await
+                .unwrap_or_else(|e| panic!("posts DDL: {trimmed}\n{e:?}"));
+        }
+
+        // Insert a post whose authorId is a typed_id string. Pre-PR 3
+        // the column was INTEGER and a typed_id string would round-trip
+        // as the literal string under SQLite's permissive storage
+        // model but assert against the declared INTEGER affinity at
+        // introspection. Post-PR 3 the affinity is TEXT — no surprise
+        // on read-back.
+        let mut post_doc = serde_json::json!({
+            "title": "fk-ok",
+            "authorId": "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
+        });
+        apply_system_fields_on_insert(&mut post_doc, "app_demo", "posts", None);
+        let built = build_insert_with_dialect("app_demo", "posts", &post_doc, SqlDialect::Sqlite)
+            .expect("build posts insert");
+        let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("client");
+        client
+            .query(&built.sql, &params)
+            .await
+            .unwrap_or_else(|e| panic!("post INSERT: {}\n{e:?}", built.sql));
+
+        // Round-trip: the authorId on the row equals the typed_id we
+        // inserted. Confirms TEXT storage preserves the typed_id
+        // verbatim (no integer-coercion).
+        let rows = client
+            .query(
+                "SELECT authorId FROM \"app_demo\".\"posts\" WHERE title = 'fk-ok'",
+                &[],
+            )
+            .await
+            .expect("SELECT");
+        assert_eq!(rows.len(), 1, "exactly one row");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("usr_01HXY3Z9PQR2STUV4WXY5Z6789"),
+            "FK round-trip preserves typed_id string"
+        );
+    });
+}

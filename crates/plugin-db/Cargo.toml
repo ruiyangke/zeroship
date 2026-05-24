@@ -7,6 +7,12 @@ description = "Database plugin — zeroship.db.* native primitives"
 [dependencies]
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
+# **P7 PR 3** — typed_id minter for INSERT auto-populated `id` column.
+# The dispatch_insert path calls `zeroship_core::typed_id::generate(prefix)`
+# when the inbound doc omits `id`. Cargo dep is in-workspace path-only
+# (no external crate) — flagged in the PR 3 commit body per the
+# "new Cargo dep" disclosure rule.
+zeroship-core = { workspace = true }
 compio-postgres = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }

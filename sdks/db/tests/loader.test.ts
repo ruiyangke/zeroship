@@ -20,10 +20,21 @@ type CallLog = {
 };
 
 /** A mock native that records every `find` / `findOne` call and returns
- *  rows from the provided row table keyed by id. */
+ *  rows from the provided row table keyed by id.
+ *
+ *  **P7 PR 3** — `Collection.get(N)` stringifies the numeric id on the
+ *  way into the IdLoader (`String(idOrFilter)`); the mock now accepts
+ *  both `number` and `string` lookups by coercing via `String()` so
+ *  pre-PR 3 row tables keyed by `number` still match the new wire shape
+ *  without rewriting every fixture. */
 function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Error }) {
   const calls: CallLog = { find: [], findOne: [] };
   let beginCount = 0;
+  // String-keyed view onto the same row table — the loader sends string
+  // typed_id values on the wire post-PR 3, but the fixtures here key
+  // by number for readability. Pre-build the string→row index once.
+  const stringIndex: Record<string, AnyRec> = {};
+  for (const [k, v] of Object.entries(rows)) stringIndex[k] = v;
   const native = {
     registerModel: () => Promise.resolve(),
     beginTransaction: async (_o?: { isolationLevel?: string }) => {
@@ -41,7 +52,9 @@ function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Erro
           // whose field map matches every filter key. Good enough for
           // tests that probe a small fixed row table.
           const id = filter.id;
-          if (typeof id === "number") return rows[id] ?? null;
+          if (typeof id === "number" || typeof id === "string") {
+            return stringIndex[String(id)] ?? null;
+          }
           for (const r of Object.values(rows)) {
             let ok = true;
             for (const [k, v] of Object.entries(filter)) {
@@ -61,12 +74,12 @@ function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Erro
             typeof idClause === "object" &&
             Array.isArray((idClause as AnyRec).$in)
           ) {
-            const ids = (idClause as { $in: number[] }).$in;
-            return ids.map((i) => rows[i]).filter(Boolean);
+            const ids = (idClause as { $in: (string | number)[] }).$in;
+            return ids.map((i) => stringIndex[String(i)]).filter(Boolean);
           }
           // Fallback — flat id equality (unusual in this suite).
-          if (typeof idClause === "number") {
-            const r = rows[idClause];
+          if (typeof idClause === "number" || typeof idClause === "string") {
+            const r = stringIndex[String(idClause)];
             return r ? [r] : [];
           }
           return [];
@@ -103,9 +116,11 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
     assert.equal(calls.find.length, 1, "expected exactly one underlying find");
     assert.equal(calls.findOne.length, 0, "findOne should not be called");
-    const idClause = calls.find[0].filter.id as { $in: number[] };
+    // **P7 PR 3** — the loader sends typed_id strings on the wire;
+    // `Collection.get(1)` is `String(1) === "1"` going into `$in`.
+    const idClause = calls.find[0].filter.id as { $in: string[] };
     assert.ok(idClause && Array.isArray(idClause.$in));
-    assert.deepEqual([...idClause.$in].sort((x, y) => x - y), [1, 2]);
+    assert.deepEqual([...idClause.$in].sort(), ["1", "2"]);
   });
 
   test("filter object falls through to direct dispatch (findOne)", async () => {
@@ -297,10 +312,12 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // find lands on TX_CONN. The fix: drain awaits the flush before
     // beginTransaction is called.
     const usersCol = (db as unknown as Record<string, unknown>).users as {
-      _idLoader: { load(id: number): Promise<unknown> } | null;
+      _idLoader: { load(id: string): Promise<unknown> } | null;
     };
     assert.ok(usersCol._idLoader !== null, "loader must be primed");
-    const preTxGet = usersCol._idLoader!.load(1);
+    // **P7 PR 3** — loader API is keyed by typed_id string. Pass "1"
+    // so the underlying Map lookup matches the stringified row id.
+    const preTxGet = usersCol._idLoader!.load("1");
 
     const txResult = db.transaction(async (tx) => {
       const got = await tx.users.get(2);
@@ -316,7 +333,16 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
     // Critical: the batched find for the pre-tx get must precede
     // beginTransaction in the event log.
-    const batchedFindIdx = events.findIndex((e) => e.startsWith("find(users,") && e.includes('"$in":[1]'));
+    // **P7 PR 3** — wire shape is `$in:["1"]` (typed_id string), not
+    // `$in:[1]`. The pre-tx loader.load(1) call below stays on the
+    // number-keyed loader API; the outer Collection.get path stringifies
+    // before reaching loader.load, so the events string match must
+    // accept either shape during the migration window.
+    const batchedFindIdx = events.findIndex(
+      (e) =>
+        e.startsWith("find(users,") &&
+        (e.includes('"$in":[1]') || e.includes('"$in":["1"]')),
+    );
     const beginIdx = events.indexOf("beginTransaction");
     assert.ok(batchedFindIdx >= 0, `expected a batched find, got events=${JSON.stringify(events)}`);
     assert.ok(beginIdx >= 0, `expected beginTransaction, got events=${JSON.stringify(events)}`);
@@ -337,17 +363,20 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const { IdLoader } = await import("../src/loader.js");
     let currentDepth = 0;
     let flushCalls = 0;
-    const loader = new IdLoader<{ id: number; v: string }>(
+    // **P7 PR 3** — IdLoader is generic over `R extends { id: string }`;
+    // the test row uses a typed_id-shaped id string so the Map<string,_>
+    // lookup matches.
+    const loader = new IdLoader<{ id: string; v: string }>(
       async (ids) => {
         flushCalls += 1;
-        const m = new Map<number, { id: number; v: string }>();
+        const m = new Map<string, { id: string; v: string }>();
         for (const i of ids) m.set(i, { id: i, v: `row-${i}` });
         return m;
       },
       () => currentDepth,
     );
     // Enqueue at depth 0 (caller is outside any tx).
-    const p = loader.load(42, 0);
+    const p = loader.load("usr_42", 0);
     // Before the microtask fires, a tx opens on the owning collection.
     currentDepth = 1;
     let caught: unknown = null;
@@ -364,25 +393,26 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
   test("tx-race: snapshot==current (both 0 or both > 0) resolves normally", async () => {
     const { IdLoader } = await import("../src/loader.js");
     let currentDepth = 0;
-    const loader = new IdLoader<{ id: number; v: string }>(
+    // **P7 PR 3** — typed_id string key (see sibling test).
+    const loader = new IdLoader<{ id: string; v: string }>(
       async (ids) => {
-        const m = new Map<number, { id: number; v: string }>();
+        const m = new Map<string, { id: string; v: string }>();
         for (const i of ids) m.set(i, { id: i, v: `row-${i}` });
         return m;
       },
       () => currentDepth,
     );
     // Both enqueue-time and flush-time depth are 0 — normal path.
-    const r0 = await loader.load(1, 0);
-    assert.equal(r0?.v, "row-1");
+    const r0 = await loader.load("row1", 0);
+    assert.equal(r0?.v, "row-row1");
     // Entries enqueued inside a tx that flush inside the same tx are
     // honoured — the caller asked for tx routing and that's what they
     // get. (This branch is unusual in practice because Collection.get
     // bypasses the loader when _txDepth > 0, but the loader stays
     // correct under direct use.)
     currentDepth = 1;
-    const r1 = await loader.load(2, 1);
-    assert.equal(r1?.v, "row-2");
+    const r1 = await loader.load("row2", 1);
+    assert.equal(r1?.v, "row-row2");
   });
 
   test("repeated id in one microtask is deduped before the wire call", async () => {
@@ -401,7 +431,8 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     const results = await Promise.all([Users.get(7), Users.get(7), Users.get(7)]);
     for (const r of results) assert.equal(r.data?.email, "x@y.com");
     assert.equal(calls.find.length, 1);
-    const ids = (calls.find[0].filter.id as { $in: number[] }).$in;
-    assert.deepEqual(ids, [7], "duplicate ids removed before dispatch");
+    // **P7 PR 3** — typed_id string wire shape.
+    const ids = (calls.find[0].filter.id as { $in: string[] }).$in;
+    assert.deepEqual(ids, ["7"], "duplicate ids removed before dispatch");
   });
 });

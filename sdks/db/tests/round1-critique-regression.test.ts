@@ -471,16 +471,22 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
       collection: (n: string) => ({
         async find(filter: AnyRec) {
           callLog.push({ table: n, filter });
-          const idClause = filter.id as { $in?: number[] } | undefined;
+          // **P7 PR 3** — FK ids cascade to TEXT typed_ids on the wire;
+          // the loader sends `["1"]`-shaped lists for legacy number FKs.
+          // Compare via `String(r.id)` so both shapes match.
+          const idClause = filter.id as { $in?: (string | number)[] } | undefined;
           if (idClause && Array.isArray(idClause.$in)) {
-            return rowsByTable[n].filter((r) => idClause.$in!.includes(r.id as number));
+            const wanted = new Set(idClause.$in.map(String));
+            return rowsByTable[n].filter((r) => wanted.has(String(r.id)));
           }
           return rowsByTable[n] ?? [];
         },
         async findOne(filter: AnyRec) {
           callLog.push({ table: n, filter });
-          if (typeof filter.id === "number") {
-            return rowsByTable[n]?.find((r) => r.id === filter.id) ?? null;
+          if (typeof filter.id === "number" || typeof filter.id === "string") {
+            return (
+              rowsByTable[n]?.find((r) => String(r.id) === String(filter.id)) ?? null
+            );
           }
           return rowsByTable[n]?.[0] ?? null;
         },

@@ -94,6 +94,16 @@ pub(crate) mod mask_drift;
 #[cfg(feature = "test-helpers")]
 pub mod mask_drift;
 
+// **P7 PR 3** — INSERT-time auto-population of platform system fields
+// (`id`, `created_by`, `updated_by`). Same visibility pattern as the
+// sibling encryption / mask passes so the integration tests can drive
+// `apply_system_fields_on_insert*` directly under the `test-helpers`
+// gate.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod system_fields_pass;
+#[cfg(feature = "test-helpers")]
+pub mod system_fields_pass;
+
 // ---------------------------------------------------------------------------
 // dispatch_op template
 // ---------------------------------------------------------------------------
@@ -543,6 +553,15 @@ pub(crate) fn dispatch_insert<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
 
+    // **P7 PR 3** — read the request-bound actor id at the synchronous
+    // boundary BEFORE the async tail starts. The runtime's
+    // `executing_request_id` is only guaranteed-set on the pump turn
+    // that initiates the dispatch; once we `.await` (e.g. the
+    // encryption pass's `resolve_key` round-trip), the pump may rotate
+    // the slot. Reading here pins the actor to the request that
+    // originated the insert.
+    let actor_id = system_fields_pass::current_actor_id(&state);
+
     // **P5 PR 2** — async tail so the encryption pass can `.await` the
     // backend's `resolve_key` (PG SECURITY DEFINER round-trip) before
     // `build_insert` consumes the doc. The non-encrypted hot path stays
@@ -550,6 +569,18 @@ pub(crate) fn dispatch_insert<'s>(
     // cached schema has no `t.encrypted(...)` columns.
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let mut doc = doc;
+        // **P7 PR 3** — populate `id` (auto-mint when absent) and
+        // `created_by` / `updated_by` (from the session actor when
+        // present). Runs BEFORE the encryption pass so encrypted
+        // columns declared on the same row see a fully-populated doc;
+        // runs BEFORE `build_insert` so the SQL `RETURNING *` carries
+        // every system field back to the SDK.
+        system_fields_pass::apply_system_fields_on_insert(
+            &mut doc,
+            &app,
+            &coll,
+            actor_id.as_deref(),
+        );
         if let Err(e) = apply_encryption_on_write(&app, &coll, &mut doc).await {
             return OpResult::JsValue {
                 resolver,
@@ -617,6 +648,20 @@ pub(crate) fn dispatch_insert_many<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    // **P7 PR 3** — populate `id` per-row + `created_by` / `updated_by`
+    // for the whole batch under one actor stamp BEFORE `build_insert_many`
+    // collects column unions. Same actor-binding rationale as
+    // `dispatch_insert`: pin to the originating request's actor at the
+    // sync boundary.
+    let actor_id = system_fields_pass::current_actor_id(&state);
+    let mut docs = docs;
+    system_fields_pass::apply_system_fields_on_insert_many(
+        &mut docs,
+        app_id,
+        collection,
+        actor_id.as_deref(),
+    );
 
     let built = query::build_insert_many(app_id, collection, &docs);
     let coll = collection.to_string();

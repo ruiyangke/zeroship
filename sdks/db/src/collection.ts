@@ -632,49 +632,46 @@ export class Collection<
             { code: "with_target_not_found" as const },
           );
         }
-        // Collect distinct FK values for this relation. The previous
-        // `typeof v === "number"` gate silently nulled bigint / string
-        // FKs; now we accept number + bigint (coerced to number for the
-        // IN clause) and throw loudly on a non-numeric string so the
-        // caller learns about the schema mismatch instead of seeing a
-        // mysterious null in the joined field.
+        // Collect distinct FK values for this relation.
         //
-        // bigint coercion fence: `Number(bigint)` loses precision above
-        // 2^53. A precision-loss here would surface much later as
-        // "wrong row joined" since the id→row map below keys on the
-        // truncated number. Round-trip via `BigInt(Number(v)) === v`
-        // and throw if the value can't fit losslessly — same TypeError
-        // class as the non-numeric branch so callers get one code path.
-        const ids: number[] = [];
-        const seen = new Set<number>();
+        // **P7 PR 3** — id keyspace widened to TEXT typed_ids
+        // (`<prefix>_<22 base62>`); the FK column type cascaded to
+        // TEXT in `def_to_pg_type` for ref fields. The loader now
+        // accepts a typed_id string directly. The legacy number /
+        // bigint branches stay for the migration window so a pre-P7
+        // collection that still stores integer ids continues to
+        // batch-load — both shapes are stringified on the way into
+        // the `$in` clause so the Map keyspace is uniform.
+        //
+        // bigint coercion fence: `Number(bigint)` loses precision
+        // above 2^53. We stringify the bigint directly so legacy
+        // 64-bit integer ids round-trip losslessly through the
+        // string keyspace.
+        const ids: string[] = [];
+        const seen = new Set<string>();
         for (const r of rows) {
           const v = r[field];
           if (v === null || v === undefined) continue;
-          let n: number;
-          if (typeof v === "number") {
+          let key: string;
+          if (typeof v === "string") {
+            if (v.length === 0) continue;
+            key = v;
+          } else if (typeof v === "number") {
             if (!Number.isFinite(v)) continue;
-            n = v;
+            key = String(v);
           } else if (typeof v === "bigint") {
-            n = Number(v);
-            if (BigInt(n) !== v) {
-              throw Object.assign(
-                new TypeError(
-                  `_loadRelations: FK value for field '${field}' (${String(v)}n) exceeds Number.MAX_SAFE_INTEGER — joining would lose precision`,
-                ),
-                { code: "with_fk_precision_loss" as const },
-              );
-            }
+            key = v.toString();
           } else {
             throw Object.assign(
               new TypeError(
-                `_loadRelations: FK value for field '${field}' is not a number-like value (got ${typeof v})`,
+                `_loadRelations: FK value for field '${field}' is not a string / number / bigint (got ${typeof v})`,
               ),
-              { code: "with_fk_not_numeric" as const },
+              { code: "with_fk_not_id_shaped" as const },
             );
           }
-          if (!seen.has(n)) {
-            seen.add(n);
-            ids.push(n);
+          if (!seen.has(key)) {
+            seen.add(key);
+            ids.push(key);
           }
         }
         if (ids.length === 0) {
@@ -684,24 +681,32 @@ export class Collection<
         }
         const { data: targetRows, error } = await targetCol.find({ id: { $in: ids } } as Filter<unknown>);
         if (error) throw error;
-        const byId = new Map<number, PlainObject>();
+        const byId = new Map<string, PlainObject>();
         for (const tr of (targetRows ?? []) as PlainObject[]) {
           const tid = tr.id;
-          if (typeof tid === "number") byId.set(tid, tr);
+          if (typeof tid === "string") {
+            byId.set(tid, tr);
+          } else if (typeof tid === "number") {
+            byId.set(String(tid), tr);
+          } else if (typeof tid === "bigint") {
+            byId.set(tid.toString(), tr);
+          }
         }
         for (const r of rows) {
           const v = r[field];
           if (v === null || v === undefined) {
             r[field] = null;
-          } else if (typeof v === "number" && Number.isFinite(v)) {
-            r[field] = byId.get(v) ?? null;
-          } else if (typeof v === "bigint") {
-            r[field] = byId.get(Number(v)) ?? null;
-          } else {
-            // We threw above for non-numeric strings; anything reaching
-            // here would be an impossible mid-iteration type flip.
-            r[field] = null;
+            continue;
           }
+          let key: string | null = null;
+          if (typeof v === "string") {
+            key = v.length === 0 ? null : v;
+          } else if (typeof v === "number") {
+            if (Number.isFinite(v)) key = String(v);
+          } else if (typeof v === "bigint") {
+            key = v.toString();
+          }
+          r[field] = key === null ? null : (byId.get(key) ?? null);
         }
       }),
     );
@@ -801,44 +806,53 @@ export class Collection<
    * have to widen back to `Row<S>`.
    */
   async get<K extends string & keyof Row<S>>(
-    idOrFilter: number | Id<N> | Filter<S>,
+    idOrFilter: string | number | Id<N> | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<Pick<Row<S>, K> | null>>;
   async get<W extends WithSpec>(
-    idOrFilter: number | Id<N> | Filter<S>,
+    idOrFilter: string | number | Id<N> | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<(Row<S> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
-    idOrFilter: number | Id<N> | Filter<S>,
+    idOrFilter: string | number | Id<N> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<Row<S> | null>>;
   async get(
-    idOrFilter: number | Id<N> | Filter<S>,
+    idOrFilter: string | number | Id<N> | Filter<S>,
     opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1>; with?: WithSpec } = {},
   ): Promise<Result<Row<S> | null>> {
     trackCollectionAccess(this._name);
-    // DataLoader path: a bare numeric id with no projection / ordering /
-    // relation-loading and no active tx. Coalesces concurrent `get(id)`
-    // calls in one microtask into a single `WHERE id IN (...)` fetch.
+    // DataLoader path: a bare id (typed_id string post-P7 PR 3; the
+    // legacy number shape still routes here during the migration
+    // window so pre-P7 collections keep batching) with no projection
+    // / ordering / relation-loading and no active tx. Coalesces
+    // concurrent `get(id)` calls in one microtask into a single
+    // `WHERE id IN (...)` fetch.
     //
     // Snapshot `_txDepth` BEFORE any await so the loader can detect a
     // tx opening between this call and the next-microtask flush — the
     // loader rejects entries whose snapshot was 0 but find current
     // depth > 0 at flush time. See `loader.ts`.
     const txDepthAtCall = this._txDepth;
+    const isBareId =
+      typeof idOrFilter === "string" || typeof idOrFilter === "number";
     if (
-      typeof idOrFilter === "number" &&
+      isBareId &&
       opts.select === undefined &&
       opts.orderBy === undefined &&
       opts.with === undefined &&
       txDepthAtCall === 0
     ) {
-      return this._run(() => this._loadById(idOrFilter, txDepthAtCall));
+      // Stringify on the way into the loader so the post-PR 3
+      // `IdLoader<R extends { id: string }>` sees a uniform keyspace
+      // even when a legacy caller passes a numeric id from an
+      // un-migrated table. The Rust side stringifies on the wire too.
+      return this._run(() => this._loadById(String(idOrFilter), txDepthAtCall));
     }
-    const filter = (typeof idOrFilter === "number"
+    const filter = (isBareId
       ? ({ id: idOrFilter } as Filter<S>)
       : idOrFilter);
-    if (typeof idOrFilter !== "number") {
+    if (!isBareId) {
       // **P5 PR 2** — encrypted-column filter fence.
       validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
       _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
@@ -872,8 +886,14 @@ export class Collection<
    *  in Rust for free. Entries whose enqueue-time snapshot was 0 but
    *  encounter `_txDepth > 0` at flush time are rejected by the loader
    *  (see `loader.ts`) so a non-tx batched read never leaks into a tx
-   *  opened mid-batch. */
-  private async _loadById(id: number, txDepthAtCall: number): Promise<Row<S> | null> {
+   *  opened mid-batch.
+   *
+   *  **P7 PR 3** — `id` is a typed_id string (`<prefix>_<22 base62>`);
+   *  the Rust-side `dispatch_insert` mints these via
+   *  `zeroship_core::typed_id::generate`. The DataLoader's `Map<string,
+   *  Row<S>>` and the row's `mapped.id` already line up via the
+   *  `Row<S>['id']: string` widening in `types.ts`. */
+  private async _loadById(id: string, txDepthAtCall: number): Promise<Row<S> | null> {
     await this.ensureReady();
     if (this._idLoader === null) {
       this._idLoader = new IdLoader<Row<S>>(
@@ -885,10 +905,17 @@ export class Collection<
             ),
           );
           const rows = (await this._nativeCollection().find(filter, {})) ?? [];
-          const map = new Map<number, Row<S>>();
+          const map = new Map<string, Row<S>>();
           for (const r of rows) {
             const mapped = mapResultDoc(r as PlainObject, this._toField) as Row<S>;
-            map.set(mapped.id, mapped);
+            // **P7 PR 3** — key the lookup map by `String(id)` so the
+            // map handles both new typed_id (`string`) and legacy
+            // numeric (`number`) row shapes during the migration
+            // window without a type cast. The `IdLoader<R extends
+            // { id: string }>` typing assumes string keys, but pre-PR 3
+            // collections still emit number ids until PR 6's table
+            // backfill runs.
+            map.set(String(mapped.id), mapped);
           }
           return map;
         },
@@ -1140,17 +1167,23 @@ export class Collection<
    * Returns the updated row (or `null` if no row matched).
    */
   async update(
-    idOrFilter: number | Filter<S>,
+    idOrFilter: string | number | Filter<S>,
     patch: UpdateExpression<S>
   ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
-      const filter = (typeof idOrFilter === "number"
+      // **P7 PR 3** — accept a bare typed_id string or the legacy
+      // numeric id during the migration window. The pre-P7
+      // `typeof === "number"` branch stays for un-migrated apps
+      // until PR 6 lands the table backfill.
+      const isBareId =
+        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const filter = (isBareId
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
       // **P5 PR 2** — encrypted-column filter fence. We refuse only on
       // the filter, not on the patch — writing to an encrypted column
       // is the whole point.
-      if (typeof idOrFilter !== "number") {
+      if (!isBareId) {
         validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
       }
       const updateObj = patch as PlainObject;
@@ -1218,15 +1251,19 @@ export class Collection<
    * permanently remove the row.
    */
   async delete(
-    idOrFilter: number | Filter<S>,
+    idOrFilter: string | number | Filter<S>,
     opts: { hard?: boolean } = {},
   ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
-      const filter = (typeof idOrFilter === "number"
+      // **P7 PR 3** — accept a bare typed_id string. Same migration-
+      // window rationale as `update()`.
+      const isBareId =
+        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const filter = (isBareId
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
       // **P5 PR 2** — encrypted-column filter fence.
-      if (typeof idOrFilter !== "number") {
+      if (!isBareId) {
         validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
       }
       const hard = opts.hard === true;
