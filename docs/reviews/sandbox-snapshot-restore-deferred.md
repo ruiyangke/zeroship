@@ -89,6 +89,16 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox/src/restore_handler.rs` (helper + trait method + stub hooks + 4 new unit tests).
 - **Tests**: 4 new tests pin the wake-vs-teardown race semantics (`c4_wake_retries_until_source_slot_frees`, `c4_wake_fails_if_slot_never_frees_within_budget`, `c4_wake_uses_single_attempt_when_slot_free`, `c4_default_policy_envelopes_observed_teardown`). Sandbox lib: 328 → 332 passing.
 
+### [C-6] (INVESTIGATION-IN-PROGRESS at `8e7f0b53`) Wake handler silent stall — pg row wedged in `restoring` with no controller logs
+- **Source**: T-8b-smoke-r6 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r6.md`); the NEW critical bug after C-4 closed. Surfaced on the C-4 validation cycle.
+- **Symptom**: CREATE OK + SNAPSHOT OK (C-4 fix validated, no 503). WAKE client times out at 60060 ms (`TimeoutError: timed out`). The pg row reads `status=restoring, generation=3, vm_index=1`. A re-wake at +4 min returns `409 state_mismatch: expected snapshotted/snapshotted_suspect, current restoring`. The controller log (`/tmp/zsbx-ctl-r6.log`) contains ZERO restore-related log lines for the wedged sandbox between snapshot-teardown completion (02:26:16) and the re-wake's state_mismatch surface (02:30:34). Last sandbox-related log before the stall: `sandbox/nomad-ch stop: complete elapsed_ms="90191"` at 02:26:16 (detached source-teardown).
+- **Root cause**: UNKNOWN. Investigation deferred to smoke-r7. Initial hypothesis (`store.get` blocks ntex worker) ruled out by code inspection — R5-P1b's `compio::runtime::spawn_blocking` wrap is still in place at `restore_handler.rs:553-561`. Every other long-running operation in `do_restore_inner` (`submit_restore_job`, `wait_for_livez`, `clock_resync_post_restore`, rollback `teardown_restore`, `Persistence::unseal`) is also wrapped per R8-A3-5 / R10-C2 / R7-P1. The wedge is therefore EITHER (a) inside one of the existing spawn_blocking dispatches taking unbounded wall time, (b) the still-sync `std::fs::remove_dir_all` / `create_dir_all` of `alloc_dir`, (c) pg-pool churn in `update_sandbox_status` hitting `max_connections=100` (R11-P1 deferred), or (d) future-drop on the wake handler leaving the row in `restoring` per C3 (already deferred).
+- **Action shape**: phase-boundary tracing landed at `8e7f0b53` — `restore_sandbox` and `do_restore_inner` now emit `restore: phase=<name>` INFO lines at 14 sites covering every async/sync boundary (entry, row_read_ok, read_snapshot_row_ok, cas_restoring_ok, pre/post_reserve_vm_index, alloc_dir_ready, pre/post_store_get, config_rewritten, pre/post_submit_restore_job, pre/post_wait_for_livez, pre/post_unseal, pre/post_clock_resync, post_register_restored, pre/post_cas_running). The next cluster smoke (smoke-r7) localizes the stall by grepping for the LAST `restore: phase=*` line printed before the 60 s client timeout — that phase is the stall site.
+- **Files**: `crates/sandbox/src/restore_handler.rs` (tracing-only, +126 LOC, no behaviour change).
+- **Tests**: 332 pass / 0 fail (unchanged; tracing-only). No new tests — the current suite doesn't drive `restore_sandbox` end-to-end (R13-A1 / R13-T2 carry); a unit-level reproduction of a wake stall is not tractable until those land.
+- **Recommend smoke-r7**: same shape as smoke-r6 (c=1 stress, controller v21 + this tracing commit). Look in the controller log for the wedged sandbox's last `restore: phase=*` line before the 60 s wake timeout. Likely candidates per code review: `pre_store_get` (stall = store.get hangs on GCS; check L1 vs L2 path), `pre_submit_restore_job` (stall = Nomad POST hangs), `pre_wait_for_livez` (stall = agent never answers /livez within deadline), `pre_unseal` (stall = sealed-record fs read hangs), `pre_clock_resync` (stall = ureq POST to agent hangs), `pre_cas_running` (stall = pg pool exhaustion). If even `entry` doesn't fire, the stall is in the handler dispatcher (admin_check / typed_id::parse / state.snapshot_store wiring).
+- **Blocked**: full C-6 fix landing depends on smoke-r7's localization output.
+
 ### [C-5] (CLOSED at `d7740b03`) Worker VM GCS scope too narrow — L2 upload 403 "Provided scope(s) are not authorized"
 - **Source**: T-8b-smoke-r5 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r5.md` § "C-5 (minor, non-blocking) — GCS scope 403"); minor, but must close before T-8b-stress (c=20) or every L2 upload silently drops to GCS.
 - **Symptom**: Detached L2 upload runs cleanly as code (no compio panic — C-3 already closed that surface), but the HTTPS call returns 403: `GCS single-shot upload snapshots/v1/.../config.json: status 403, … Provided scope(s) are not authorized`. Fire-and-forget detach masks the failure in smoke (CREATE/SNAPSHOT/WAKE assertions still pass), but at c=20 stress every L2 upload would fail silently — defeating the snapshot-tier purpose.
@@ -1312,3 +1322,66 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [C-3] CLOSED at `c890c015` — confirmed by architecture r13 as architecturally inverted but tactically working. Follow-up R13-A2 sprint will lift detach to handler layer.
 - [C-4] CLOSED at `b2892368` — wake-path bounded retry (60×2s = 120s budget). +4 tests (328→332).
 - [C-5] CLOSED at `d7740b03` — worker storage-rw scope. Half-credit per R13-S1.
+- [C-6] INVESTIGATION-IN-PROGRESS at `8e7f0b53` — phase-boundary tracing at 14 sites in `do_restore_inner` + `restore_sandbox` (tracing-only, no behaviour change; +126 LOC; 332 pass unchanged). Smoke-r7 will localize the wedge by grepping for the LAST `restore: phase=*` line before the 60 s client timeout.
+
+---
+
+## NEW r14 ROUND FINDINGS (added by pilot cycle 2026-05-25 r12 — code-quality r14, test-coverage r14, performance r14)
+
+### [R14-Q1 / R14-T1] (CRITICAL, 6TH-ROUND CROSS-LENS CONSENSUS) Integration coverage gap empirically validated
+- **Source**: 2026-05-25 code-quality-r14 + test-coverage-r14 (3rd lens confirmation; arch r13 R13-A1 = 1st, test-cov r10-r13 = 2nd)
+- **Files**: `restore_handler.rs:517` (do_restore_inner call site untested), `restore_handler.rs:1060-1186` (all 4 C-4 tests use the helper directly), `restore_handler.rs:855-856` (StubRestoreBackend fail_submit/fail_livez fields declared but UNUSED for 6 rounds)
+- **Symptom**: C-1 through C-6 cluster bugs (5 of 6 smoke cycles found new bugs) all preventable by a ~80-LOC integration test using StubRestoreBackend. Cluster smoke-r6 halt-rule fired.
+- **Action**: dedicated R13-A1 integration sprint — `crates/sandbox/src/restore_handler.rs::tests::driven` module that constructs a fake compio runtime + drives `restore_sandbox` with `StubRestoreBackend` configured to fail at each step. Closes 6+ rounds of testing carry-forwards.
+
+### [R14-Q2] (MAJOR) `seal_filename_for_str` dead_code warning emits on default cargo build
+- **Source**: 2026-05-25 code-quality-r14
+- **File**: `crates/sandbox/src/persist.rs:281` (was demoted to pub(crate) at f50c95da R10-API3 partial)
+- **Symptom**: all 3 callers are `#[cfg(test)]`. R10-API3 demoted to pub(crate) but never followed through to either delete or `#[cfg(test)]`-gate. `cargo build` (default profile) emits `warning: function seal_filename_for_str is never used`.
+- **Action**: either `#[cfg(test)] pub(crate) fn` OR delete (R10-Q5 precedent for orphan delete). Mechanical 1-line decision.
+
+### [R14-Q3] (MINOR) C-3 thread name builder over-engineered + misleading
+- **Source**: 2026-05-25 code-quality-r14
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs::tier_l2_upload_thread_name` (introduced by c890c015)
+- **Symptom**: chars/rev/take/rev dance for last-8-chars + Linux `pr_set_name` truncates at 15 chars (the tail is invisible anyway). Doc comment misleads.
+- **Action**: 1-line fix: `&s[s.len().saturating_sub(8)..]`. Drop misleading doc.
+
+### [R14-Q4] (MINOR) C-4 `VmIndexRetryPolicy::default` doc off-by-one
+- **Source**: 2026-05-25 code-quality-r14
+- **File**: `crates/sandbox/src/restore_handler.rs::VmIndexRetryPolicy::default`
+- **Symptom**: doc says "60 × 2 s = ~120 s" but actual sleep budget is `(60-1) × 2 s = 118 s` (first attempt has no sleep before it).
+- **Action**: 1-line doc-fix.
+
+### [R14-P1] (INFO, performance-r14) C-4 wake-path tail latency
+- **Source**: 2026-05-25 performance-r14
+- **Budget update**: c=1 no-contention = ~10 s; c=1 max-contention ~100 s (cluster-r6 observed); c=20 with sync teardown races ~100-120 s; some 503s expected when host_fence extends >118 s.
+- **Action**: track in cluster-r7+ data. No code change.
+
+### [R14-P2] (MINOR, performance-r14, dup of R14-Q3) snap-l2-upload thread name allocation
+- Same finding via code-quality. Single fix.
+
+### [R14-P3] (INFO, performance-r14) std::thread::Builder::spawn unbounded vs compio::spawn_blocking
+- **Source**: 2026-05-25 performance-r14
+- **Symptom**: per-snapshot ~5-20 µs vs ~50-500 ns. At c=20 sustained, ~20 live snap-l2-upload threads, ~160 MiB VSZ / ~80 MiB RSS — irrelevant on n2-standard-32. GCS network bandwidth is the practical ceiling.
+- **Status**: noted; subsumed by R13-A2 (C-3 layering inversion) when handler-layer detach replaces inner spawn.
+
+### [R14-P4 thundering herd from C-4 retry] (INFO, performance-r14)
+- **Source**: 2026-05-25 performance-r14
+- **Symptom**: all retry-satisfied wakes (at c≥10) hit post-reserve DB calls near-synchronously when host_fence releases all slots at once. R11-P1's c≥10 conn cliff more likely to fire all at once, not less.
+- **Action**: per-bearer rate-limit (R13-S2) on snapshot/wake would scatter the herd. Also closes the R13-S2 DoS surface.
+
+### Wake-path latency budget r14 (calibrated against cluster data)
+- reserve_vm_index_with_retry: 0-118 s (C-4 add)
+- read_snapshot_row: ~50-200 ms (pg open_pool dominates)
+- store.get (AEAD off, L1 hit): ~0.5-1.0 s
+- submit_restore_job: ~2.0-3.5 s
+- wait_for_livez: ~1.0-3.0 s
+- clock_resync_post_restore: ~0.05-0.2 s
+- register_restored: ~0.05-0.2 s
+- update_sandbox_status(Running): ~50-200 ms
+- Total c=1 no-contention: ~7.5-10.5 s + retry tail (~0-118 s under contention)
+
+### Closures this cycle
+- [R14-API1] CLOSED at `00161cea` — with_nomad_handle + with_shared_allocator pub→pub(crate)
+- [R11-API1 expanded] CLOSED at `370fdbba` — 3 orphan #[doc(hidden)] pub fns deleted from sandbox/src/metrics.rs (path correction: were in sandbox not sandbox-agent)
+- [C-6] INVESTIGATION-IN-PROGRESS at `8e7f0b53` — phase-boundary tracing added to do_restore_inner. Smoke-r7 will localize the stall point.
