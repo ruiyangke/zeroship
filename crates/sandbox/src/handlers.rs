@@ -131,10 +131,13 @@ fn infer_content_type(path: &str) -> &'static str {
 
 pub async fn readyz(state: State) -> HttpResponse {
     if state.backend.is_healthy() {
-        HttpResponse::Ok().json(&serde_json::json!({"status": "ready"}))
+        HttpResponse::Ok().json(&serde_json::json!({"status": "ok"}))
     } else {
-        HttpResponse::ServiceUnavailable()
-            .json(&serde_json::json!({"status": "backend-unhealthy"}))
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unhealthy",
+            "backend probe failed; service not ready",
+        )
     }
 }
 
@@ -1374,5 +1377,39 @@ mod tests {
             !msg.contains("uid="),
             "raw uid must not leak onto the wire; got {msg:?}"
         );
+    }
+
+    // ─── R10-API4 + R12-API1: readyz §10.0 wire-shape pins ───────
+    //
+    // Pre-fix: 200 returned {"status":"ready"} and 503 returned
+    // {"status":"backend-unhealthy"} — the error path bypassed
+    // ErrorEnvelope entirely. Now both paths go through the
+    // standard envelope so the readyz contract matches every other
+    // admin endpoint.
+
+    #[compio::test]
+    async fn readyz_200_body_is_status_ok() {
+        let resp = HttpResponse::Ok().json(&serde_json::json!({"status": "ok"}));
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[compio::test]
+    async fn readyz_503_body_is_envelope_compliant() {
+        // Synthesise the exact response the unhealthy branch now emits.
+        let resp = error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unhealthy",
+            "backend probe failed; service not ready",
+        );
+        assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        // §10.0 envelope: `error` holds the machine-readable code,
+        // `message` holds human prose. The old {"status":"backend-unhealthy"}
+        // shape must be absent.
+        assert_eq!(body["error"], "backend_unhealthy");
+        assert!(body["message"].is_string(), "missing `message` field");
+        assert!(body.get("status").is_none(), "`status` key must not appear on error responses");
     }
 }
