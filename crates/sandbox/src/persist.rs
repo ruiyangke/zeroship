@@ -278,6 +278,12 @@ pub fn seal_filename_for(sandbox_id: Uuid) -> String {
 /// doesn't parse as a UUID — the call sites already type sandbox_id
 /// as `Uuid`, so this is belt-and-suspenders for any future caller
 /// that takes a string.
+///
+/// `#[cfg(test)]`-gated: the only callers today are the round-6
+/// CRITICAL-3 path-traversal regression tests in this module. If a
+/// future stringly-typed caller appears, drop the cfg gate (and
+/// promote to `pub` if cross-module).
+#[cfg(test)]
 pub(crate) fn seal_filename_for_str(sandbox_id_str: &str) -> Result<String, String> {
     // Parse-then-canonicalize; we hash the canonical form so two
     // alternate UUID encodings (hyphenated vs. simple) collide to the
