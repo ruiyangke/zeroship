@@ -6597,3 +6597,271 @@ async fn p55_pr1_register_model_refuses_reserved_classification_field() {
         "expected reserved-name message, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P6a-1 — F1 sweeper-half (orphan `Running`-row reaper).
+//
+// The warn-half (r12) only fires on graceful failure paths; a hard
+// crash leaves the audit row in `running` with the owning session's
+// advisory lock auto-released by Postgres. These tests drive the
+// sweeper (`crate::migration_sweeper`) against real Postgres to prove
+// it (a) transitions a stale, lock-free row to `failed` with the
+// `orphan_running_row_swept` marker, (b) leaves a fresh row alone, (c)
+// leaves a row whose advisory lock is still held alone, and (d) is
+// idempotent under repeated / concurrent invocation.
+// ---------------------------------------------------------------------------
+
+/// Insert a `backfill` / `running` audit row with a controllable
+/// `last_heartbeat_at`. `heartbeat_age_secs` is subtracted from NOW():
+/// a large value (> the sweep threshold) makes the row a stale
+/// candidate; 0 makes it fresh.
+async fn seed_running_backfill_row(
+    pool: &Pool,
+    app: &str,
+    collection: &str,
+    name: &str,
+    heartbeat_age_secs: i64,
+) -> i64 {
+    let sql = format!(
+        r#"INSERT INTO "{app}"."__zeroship_migrations"
+            (collection, phase, change_class, change_kind, details,
+             applied_by_kind, deploy_id, schema_version, status,
+             owner_session_id, last_heartbeat_at)
+           VALUES ($1, 'backfill', 'additive', $2, '{{}}'::jsonb,
+                   'auto', 'sweep_seed', 1, 'running',
+                   '999999', NOW() - make_interval(secs => $3::double precision))
+           RETURNING id"#
+    );
+    let age_s = heartbeat_age_secs.to_string();
+    let rows = pool
+        .query_text_params(&sql, &[collection, name, age_s.as_str()])
+        .await
+        .expect("seed running backfill row");
+    rows[0].get::<_, i64>("id")
+}
+
+async fn read_status_and_error(pool: &Pool, app: &str, id: i64) -> (String, Option<String>) {
+    let sql = format!(
+        r#"SELECT status, error FROM "{app}"."__zeroship_migrations" WHERE id = $1::bigint"#
+    );
+    let rows = pool
+        .query_text_params(&sql, &[id.to_string().as_str()])
+        .await
+        .expect("read status/error");
+    let r = &rows[0];
+    (r.get::<_, String>("status"), r.try_get::<_, String>("error").ok())
+}
+
+#[compio::test]
+async fn sweeper_transitions_stale_running_row_to_failed() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_stale";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    // Stale: heartbeat 600s ago, well past the 300s default threshold.
+    let id = seed_running_backfill_row(&pool, app, "users", "backfill_users", 600).await;
+
+    let swept = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("sweep should succeed");
+
+    assert_eq!(swept.len(), 1, "exactly one candidate examined");
+    assert_eq!(swept[0].audit_id, id);
+    assert_eq!(
+        swept[0].outcome,
+        zeroship_plugin_db::migration_sweeper::SweepOutcome::Swept,
+        "stale lock-free row must be swept"
+    );
+
+    let (status, error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "failed", "row must be transitioned to failed");
+    assert_eq!(
+        error.as_deref(),
+        Some("orphan_running_row_swept"),
+        "error must carry the sweep marker"
+    );
+}
+
+#[compio::test]
+async fn sweeper_skips_fresh_running_row() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_fresh";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    // Fresh: heartbeat just now (0s ago) — NOT a candidate.
+    let id = seed_running_backfill_row(&pool, app, "users", "backfill_users", 0).await;
+
+    let swept = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("sweep should succeed");
+
+    assert!(
+        swept.is_empty(),
+        "fresh row must not even be a candidate, got {swept:?}"
+    );
+    let (status, _error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "running", "fresh row must stay running");
+}
+
+#[compio::test]
+async fn sweeper_skips_row_with_live_lock() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_livelock";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    // Stale heartbeat — would be a candidate — BUT a live session holds
+    // the migration advisory lock (simulating a worker mid-run whose
+    // heartbeat write is lagging). The sweeper must NOT reap it.
+    let name = "backfill_users";
+    let id = seed_running_backfill_row(&pool, app, "users", name, 600).await;
+
+    // Open a dedicated connection and take the SAME advisory lock the
+    // migration run would hold. Keys come from `LockScope::migration`:
+    // (`{app}:mig:{name}`, `mig:{name}`).
+    let (holder, holder_conn) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    compio::runtime::spawn(async move {
+        let _ = holder_conn.run().await;
+    })
+    .detach();
+    let key1 = format!("{app}:mig:{name}");
+    let key2 = format!("mig:{name}");
+    let got = holder
+        .query_text_params(
+            "SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)",
+            &[key1.as_str(), key2.as_str()],
+        )
+        .await;
+    assert!(got.is_ok(), "holder should acquire the migration lock");
+
+    let swept = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("sweep should succeed");
+
+    assert_eq!(swept.len(), 1, "candidate examined");
+    assert_eq!(
+        swept[0].outcome,
+        zeroship_plugin_db::migration_sweeper::SweepOutcome::LiveLockHeld,
+        "row with a live advisory-lock holder must be skipped"
+    );
+    let (status, _error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "running", "live-lock row must stay running");
+
+    // Release + close the holder so the test connection cleans up.
+    let _ = holder
+        .query_text_params(
+            "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)",
+            &[key1.as_str(), key2.as_str()],
+        )
+        .await;
+    drop(holder);
+}
+
+#[compio::test]
+async fn sweeper_idempotent_concurrent() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_idem";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    let id = seed_running_backfill_row(&pool, app, "users", "backfill_users", 600).await;
+
+    // First sweep transitions it.
+    let first = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("first sweep");
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].outcome,
+        zeroship_plugin_db::migration_sweeper::SweepOutcome::Swept
+    );
+
+    // Second sweep finds NO candidate (row is now `failed`, not
+    // `running`) — proving idempotency: a doubled sweep is a no-op.
+    let second = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("second sweep");
+    assert!(
+        second.is_empty(),
+        "second sweep must find no candidate (row already terminal), got {second:?}"
+    );
+
+    // Status unchanged; error marker still present (not doubled / not
+    // overwritten by the second pass since it never touched the row).
+    let (status, error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "failed");
+    assert_eq!(error.as_deref(), Some("orphan_running_row_swept"));
+
+    // Concurrent variant: two sweepers racing the SAME fresh stale row.
+    // The `pg_try_advisory_lock` gate guarantees at most one wins the
+    // transition; the loser sees the lock held OR an already-terminal
+    // row. Either way the row ends `failed` exactly once.
+    let id2 = seed_running_backfill_row(&pool, app, "orders", "backfill_orders", 600).await;
+    let pool_a = std::rc::Rc::clone(&pool);
+    let pool_b = std::rc::Rc::clone(&pool);
+    let app_a = app.to_string();
+    let app_b = app.to_string();
+    let h1 = compio::runtime::spawn(async move {
+        zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool_a, &app_a, 300).await
+    });
+    let h2 = compio::runtime::spawn(async move {
+        zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool_b, &app_b, 300).await
+    });
+    let r1 = h1.await.expect("join sweep A").expect("sweep A ok");
+    let r2 = h2.await.expect("join sweep B").expect("sweep B ok");
+
+    // Count how many of the two sweeps reported `Swept` for id2.
+    let swept_count = [r1, r2]
+        .iter()
+        .flatten()
+        .filter(|s| {
+            s.audit_id == id2
+                && s.outcome == zeroship_plugin_db::migration_sweeper::SweepOutcome::Swept
+        })
+        .count();
+    assert_eq!(
+        swept_count, 1,
+        "exactly one of two concurrent sweepers must claim+transition the row"
+    );
+    let (status2, error2) = read_status_and_error(&pool, app, id2).await;
+    assert_eq!(status2, "failed");
+    assert_eq!(error2.as_deref(), Some("orphan_running_row_swept"));
+}
