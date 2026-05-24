@@ -342,6 +342,65 @@ impl VmIndexAllocator {
         }
     }
 
+    /// T-8b-stress-r8 r24-A2-S3: same release semantics as
+    /// [`Self::release`], but delayed by `delay` to give the host
+    /// kernel time to evict the tap netdev / drain fcntl locks from
+    /// the previous tenant before a fresh CREATE picks up the same
+    /// slot. Spawned as a detached compio task so the caller
+    /// doesn't block on the delay.
+    ///
+    /// The driver's r24-A2-S2 verify gate closes the tuntap-add
+    /// window on the worker side; this controller-side delay adds
+    /// defense-in-depth for the rest of the per-VM state (host_dir
+    /// GC, sweeper races, etc.). 5 s is the default in production
+    /// config; 0 disables the delay (tests).
+    ///
+    /// Behaviour at `delay == 0`: still spawns the task but skips
+    /// the sleep call — semantically equivalent to a direct
+    /// `release()` but goes through the same code path so a test
+    /// pinning "release fires" sees the spawn the same way
+    /// production does.
+    pub fn spawn_delayed_release(
+        allocator: Arc<Mutex<Self>>,
+        i: u16,
+        delay: Duration,
+        reason: &'static str,
+        sandbox_id: Uuid,
+    ) {
+        compio::runtime::spawn(async move {
+            if !delay.is_zero() {
+                compio::time::sleep(delay).await;
+            }
+            allocator
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .release(i);
+            tracing::info!(
+                vm_index = i,
+                reason = %reason,
+                sandbox_id = %sandbox_id,
+                delay_ms = delay.as_millis() as u64,
+                "sandbox/nomad-ch vm_index released (r24-A2-S3 delayed)"
+            );
+        })
+        .detach();
+    }
+
+    /// Non-destructive read of the `freed` set so tests can pin
+    /// "was slot N released?" without consuming the slot via
+    /// `alloc()`. The r24-A2-S3 release happens asynchronously
+    /// (detached compio task); a destructive `alloc()` poll could
+    /// race against `next` and return a different slot, masking
+    /// the release.
+    ///
+    /// Test-only because the freed set is a private implementation
+    /// detail — production code should only call `alloc` /
+    /// `release` / `reserve`.
+    #[cfg(test)]
+    pub fn freed_for_test(&self) -> &BTreeSet<u16> {
+        &self.freed
+    }
+
     /// Mark `i` as in-use without taking it from the free list. Used
     /// by the controller's restart-restore path (preview-URL § II.0):
     /// a sealed record's `vm_index` must be claimed in the allocator
@@ -635,6 +694,9 @@ impl NomadCHBackend {
             job_id.clone(),
             host_dir.clone(),
             sandbox_id,
+            Duration::from_secs(
+                self.cfg.nomad_ch.vm_index_release_delay_secs,
+            ),
         );
 
         let result = self
@@ -1251,14 +1313,22 @@ impl NomadCHBackend {
         }
 
         if fence_passed {
-            self.vm_index_allocator
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .release(sandbox.vm_index);
-            tracing::info!(
-                vm_index = sandbox.vm_index,
-                sandbox_id = %sandbox_id,
-                "sandbox/nomad-ch vm_index released"
+            // T-8b-stress-r8 r24-A2-S3: delay the release so the
+            // host kernel has time to evict the tap netdev / drain
+            // fcntl locks from this tenant's CH process before a
+            // fresh CREATE picks up the same vm_index. The driver's
+            // r24-A2-S2 closes the worker-side tuntap-add window;
+            // this controller-side delay adds defense-in-depth.
+            // Production default 5 s; 0 in tests via the
+            // vm_index_release_delay_secs config knob.
+            VmIndexAllocator::spawn_delayed_release(
+                Arc::clone(&self.vm_index_allocator),
+                sandbox.vm_index,
+                Duration::from_secs(
+                    self.cfg.nomad_ch.vm_index_release_delay_secs,
+                ),
+                "stop-fence-passed",
+                sandbox_id,
             );
         } else if !job_confirmed_gone {
             // C-7-LT-2-PR2 defense-in-depth: bump the per-reason leak
@@ -2072,6 +2142,11 @@ struct CreateGuard {
     pub vm_index: Option<u16>,
     pub host_dir_created: bool,
     pub job_submitted: bool,
+    /// T-8b-stress-r8 r24-A2-S3: the configured delay before
+    /// releasing `vm_index` back to the allocator. Captured at
+    /// guard construction so the detached drop task doesn't need
+    /// to re-read the cfg; production default 5 s, 0 in tests.
+    release_delay: Duration,
     armed: bool,
 }
 
@@ -2082,6 +2157,7 @@ impl CreateGuard {
         job_id: String,
         host_dir: PathBuf,
         sandbox_id: Uuid,
+        release_delay: Duration,
     ) -> Self {
         Self {
             vm_index_allocator,
@@ -2092,6 +2168,7 @@ impl CreateGuard {
             vm_index: None,
             host_dir_created: false,
             job_submitted: false,
+            release_delay,
             armed: true,
         }
     }
@@ -2121,6 +2198,7 @@ impl Drop for CreateGuard {
         let vm_index_allocator = self.vm_index_allocator.clone();
         let vm_index_opt = self.vm_index.take();
         let sandbox_id = self.sandbox_id;
+        let release_delay = self.release_delay;
 
         // R17-A5: dispatch through `detach_isolated` so the cleanup
         // tail runs on a dedicated OS thread with its own private
@@ -2185,16 +2263,18 @@ impl Drop for CreateGuard {
                 //    leak.
                 if purge_ok {
                     if let Some(i) = vm_index_opt {
-                        vm_index_allocator
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .release(i);
-                        tracing::info!(
-                            vm_index = i,
-                            reason = "create-failure-cleanup",
-                            sandbox_id = %sandbox_id,
-                            job = %job_id,
-                            "sandbox/nomad-ch vm_index released"
+                        // T-8b-stress-r8 r24-A2-S3: delay release
+                        // same as the stop path so a retry-CREATE
+                        // doesn't pick up an index whose kernel
+                        // state is still being torn down. Tagged
+                        // `reason=create-failure-cleanup` to keep
+                        // FM-B's failed-create attribution.
+                        VmIndexAllocator::spawn_delayed_release(
+                            vm_index_allocator.clone(),
+                            i,
+                            release_delay,
+                            "create-failure-cleanup",
+                            sandbox_id,
                         );
                     }
                 } else if let Some(i) = vm_index_opt {
@@ -4335,6 +4415,7 @@ mod tests {
                 "zsbx-test-no-purge".to_string(),
                 PathBuf::from("/tmp/zsbx-c1-test"),
                 Uuid::nil(),
+                Duration::ZERO, // r24-A2-S3: no delay in this test
             );
             g.vm_index = Some(allocated);
             g.job_submitted = false; // skip http_delete entirely
@@ -4392,6 +4473,7 @@ mod tests {
                 "zsbx-test-leak".to_string(),
                 PathBuf::from("/tmp/zsbx-c1-leak"),
                 Uuid::nil(),
+                Duration::ZERO, // r24-A2-S3: no delay in this test
             );
             g.vm_index = Some(allocated);
             g.job_submitted = true;
@@ -4440,6 +4522,7 @@ mod tests {
                 "zsbx-test-no-runtime".to_string(),
                 PathBuf::from("/tmp/zsbx-r17a5-test"),
                 Uuid::nil(),
+                Duration::ZERO, // r24-A2-S3: no delay in this test
             );
             g.vm_index = Some(allocated);
             g.job_submitted = false; // skip http_delete; purge_ok = true
@@ -4487,6 +4570,90 @@ mod tests {
             j2, j1,
             "second alloc must NOT hand back the same index — \
              double-release must not double-insert"
+        );
+    }
+
+    // ─── T-8b-stress-r8 r24-A2-S3 spawn_delayed_release ───────
+
+    /// Zero-delay path: the release task fires "immediately" (one
+    /// runtime yield). The slot reappears in the freed set within a
+    /// short polling budget.
+    #[compio::test]
+    async fn spawn_delayed_release_with_zero_delay_releases_immediately() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(11, 11)));
+        let i = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(i, 11);
+
+        // Spawn with zero delay. Even with zero sleep, the task
+        // runs asynchronously — poll for the slot to land in
+        // freed.
+        VmIndexAllocator::spawn_delayed_release(
+            Arc::clone(&pool),
+            i,
+            Duration::ZERO,
+            "test-zero-delay",
+            Uuid::nil(),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut observed = false;
+        while Instant::now() < deadline {
+            if pool.lock().unwrap().freed_for_test().contains(&11) {
+                observed = true;
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            observed,
+            "spawn_delayed_release(ZERO) did not release within 1 s"
+        );
+    }
+
+    /// Non-zero delay path: the release task waits the configured
+    /// delay before releasing. We pin (a) the slot is NOT in freed
+    /// before the delay elapses, and (b) IS in freed after.
+    #[compio::test]
+    async fn spawn_delayed_release_honors_configured_delay() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(22, 22)));
+        let i = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(i, 22);
+
+        let delay = Duration::from_millis(200);
+        VmIndexAllocator::spawn_delayed_release(
+            Arc::clone(&pool),
+            i,
+            delay,
+            "test-honor-delay",
+            Uuid::nil(),
+        );
+
+        // Before the delay elapses, slot 22 MUST still be allocated
+        // (not in freed). Wait half the delay then check — gives a
+        // robust margin against scheduler jitter without making the
+        // test slow.
+        compio::time::sleep(delay / 2).await;
+        let halfway_present = pool.lock().unwrap().freed_for_test().contains(&22);
+        assert!(
+            !halfway_present,
+            "spawn_delayed_release fired before the configured delay \
+             ({delay:?} elapsed 50%) — r24-A2-S3 release MUST be deferred"
+        );
+
+        // Wait the rest of the delay plus a small margin for the
+        // task to actually run after sleep returns.
+        let deadline = Instant::now() + delay + Duration::from_millis(500);
+        let mut observed = false;
+        while Instant::now() < deadline {
+            if pool.lock().unwrap().freed_for_test().contains(&22) {
+                observed = true;
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            observed,
+            "spawn_delayed_release did not fire after delay ({delay:?}) elapsed"
         );
     }
 
@@ -5007,6 +5174,7 @@ mod tests {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -7251,6 +7419,34 @@ mod tests {
         // Slot 4 must be back in the allocator's free list. Round-
         // trip via alloc(): it should hand out 4 first (freed slots
         // win over `next`).
+        //
+        // T-8b-stress-r8 r24-A2-S3: release is now spawned as a
+        // detached compio task so the controller can delay release
+        // in production without blocking the stop ACK. The test
+        // config sets `vm_index_release_delay_secs=0` so the task
+        // still fires fast — poll for slot 4 to appear in the
+        // freed set before consuming via alloc(). A direct alloc()
+        // race against the release task could return 5 (next slot)
+        // while the freed set is still empty.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut freed_observed = false;
+        while Instant::now() < deadline {
+            let has_4 = {
+                let a = allocator.lock().unwrap();
+                a.freed_for_test().contains(&4)
+            };
+            if has_4 {
+                freed_observed = true;
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            freed_observed,
+            "B19 regression: slot 4 not present in freed set after \
+             stop within 2 s budget — r24-A2-S3 delayed-release task \
+             never fired"
+        );
         let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
         assert_eq!(
             reclaimed, 4,

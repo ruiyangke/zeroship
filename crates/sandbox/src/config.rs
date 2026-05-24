@@ -441,6 +441,23 @@ pub struct NomadCHConfig {
     /// produce unreachable IPs.
     /// `SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET` (default 99).
     pub subnet_second_octet: u8,
+
+    /// **T-8b-stress-r8 r24-A2-S3**: how long to wait, after a stop
+    /// ACK from Nomad, before releasing the `vm_index` back into the
+    /// allocator's free list. Closes the residual stress-r8 race
+    /// where a CREATE picks up an index whose tap netdev / fcntl
+    /// locks the kernel hasn't finished evicting from the previous
+    /// tenant. The driver's r24-A2-S2 verify gate closes the
+    /// tuntap-add window in the same release; this controller-side
+    /// delay adds defense-in-depth.
+    ///
+    /// Default 5 s — matches the driver's tap-deletion-verify
+    /// budget ceiling so the controller doesn't release the index
+    /// until the driver has finished its synchronous netdev
+    /// cleanup. Set to 0 to disable (NOT recommended in production).
+    ///
+    /// `SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS` (default 5).
+    pub vm_index_release_delay_secs: u64,
 }
 
 /// r27-S1 Guard A: reject any `nomad_addr` whose host is NOT a
@@ -807,6 +824,7 @@ impl SandboxConfig {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 5,
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -933,6 +951,10 @@ impl SandboxConfig {
             subnet_second_octet: parse_env(
                 "SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET",
                 99u8,
+            )?,
+            vm_index_release_delay_secs: parse_env(
+                "SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS",
+                5u64,
             )?,
         };
 
@@ -1453,6 +1475,7 @@ mod tests {
             host_fence_timeout_secs: 30,
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
+            vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
         }
     }
 

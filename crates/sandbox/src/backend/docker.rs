@@ -834,6 +834,7 @@ mod tests {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,

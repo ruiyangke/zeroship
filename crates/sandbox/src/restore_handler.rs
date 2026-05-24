@@ -3319,6 +3319,7 @@ mod real_backend_tests {
             host_fence_timeout_secs: 30,
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
+            vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
         }
     }
 
@@ -4442,6 +4443,7 @@ mod r12_i1_tests {
             host_fence_timeout_secs: 30,
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
+            vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
         }
     }
 
