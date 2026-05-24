@@ -2655,6 +2655,14 @@ fn build_restore_nomad_job_json(
                     // Empty: CH ignores --cmdline on --restore.
                     "pubkey_hex": "",
                     "subnet_base_octet": cfg.subnet_second_octet,
+                    // Option C Phase 2 (2026-05-25 staging-locality
+                    // ADR): the restore branch never re-stages
+                    // workspace.img / home.img (it consumes the
+                    // persistent images from the snapshot artifacts
+                    // per ADR Phase 3). Emit `false` here so the
+                    // ChPlugin Config field-list stays symmetric with
+                    // the cold-boot emitter (R22-T1 parity test).
+                    "stage_disk_images": false,
                     // Block-lists: empty triggers driver-side
                     // auto-synthesis from the typed fields above
                     // (matches T-3 default behaviour + nomad_ch.rs
@@ -4342,6 +4350,46 @@ mod r12_i1_tests {
              \n\
              Only {{\"rootfs_source\"}} is the documented intentional divergence.\n\
              See R22-T1 / R21-API2 for the contract history.",
+        );
+    }
+
+    /// Option C Phase 2 (2026-05-25 staging-locality ADR): the
+    /// restore-path emitter is unaffected by the controller's
+    /// `driver_stages_disk_images` flag. The restore branch always
+    /// emits `stage_disk_images=false` because rootfs.img comes from
+    /// the snapshot's RootfsSource (hardlink/copy at C-7-LT-12a) and
+    /// workspace.img / home.img come from the persistent paths the
+    /// snapshot already references — there's nothing to re-mkfs.
+    ///
+    /// This test pins the contract by exercising the restore-builder
+    /// and asserting `stage_disk_images=false` regardless. Phase 3
+    /// will revisit the restore-side staging model; in Phase 2 the
+    /// invariant is "restore branch ignores the flag entirely."
+    #[test]
+    fn restore_jobspec_unchanged_by_stage_disks_flag() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-stage-restore/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-stage-flag-noop",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            TaskDriverMode::ChPlugin,
+            None,
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert_eq!(
+            config["stage_disk_images"], false,
+            "restore-path Config.stage_disk_images MUST be false: \
+             restore branch consumes rootfs via RootfsSource hardlink/copy \
+             and workspace/home.img from persistent snapshot artifacts — \
+             nothing to re-mkfs. The controller's driver_stages_disk_images \
+             flag is cold-boot only (ADR Phase 2)."
         );
     }
 

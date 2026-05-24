@@ -771,26 +771,54 @@ impl NomadCHBackend {
         //    `user_home_img` cross the spawn_blocking boundary. This
         //    keeps guard ownership trivial — no Send/Sync threading
         //    through the closure required.
-        let host_dir_owned = host_dir.to_path_buf();
-        let user_home_img_owned = user_home_img.to_path_buf();
-        let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
-        let workspace_img = compio::runtime::spawn_blocking(move || -> Result<PathBuf, String> {
-            std::fs::create_dir_all(&host_dir_owned)
-                .map_err(|e| format!("mkdir {}: {}", host_dir_owned.display(), e))?;
-            if let Some(parent) = user_home_img_owned.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
-            }
-            let workspace_img = workspace_image_path(&host_dir_owned);
-            create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
-                .map_err(|e| format!("workspace.img: {e}"))?;
-            create_ext4_image_if_missing(&user_home_img_owned, workspace_img_size_gb)
-                .map_err(|e| format!("home.img: {e}"))?;
-            Ok(workspace_img)
-        })
-        .await
-        .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))?;
-        guard.host_dir_created = true;
+        // Option C Phase 2 (2026-05-25 staging-locality ADR): if the
+        // operator has flipped `driver_stages_disk_images=true`, we
+        // BYPASS the spawn_blocking truncate+mkfs.ext4 block below
+        // and let the driver materialize the images on the worker
+        // that runs the alloc. The jobspec carries a typed meta
+        // field (`zsbx_stage_disks`) plus the typed driver Config
+        // field (`stage_disk_images`) the Go driver decodes from
+        // its TaskConfig HCL schema.
+        //
+        // The workspace_img path itself is STILL derived
+        // declaratively here so the existing `build_nomad_job_json`
+        // signature is unchanged — the path is what the driver
+        // creates an image at, regardless of which side does the
+        // mkfs.ext4. `guard.host_dir_created` stays FALSE in this
+        // branch (the driver owns the dirent's lifecycle now;
+        // CreateGuard's host_dir rollback is a no-op under
+        // driver-side staging, per the ADR Phase 2 plan).
+        //
+        // When the flag is false (Phase 2 default), the legacy
+        // spawn_blocking block runs verbatim — controller stages,
+        // driver consumes pre-staged paths via preflightDiskPaths.
+        // Phase 4 cluster validation flips the default; Phase 3
+        // deletes the spawn_blocking branch entirely.
+        let workspace_img: PathBuf = if self.cfg.driver_stages_disk_images {
+            workspace_image_path(host_dir)
+        } else {
+            let host_dir_owned = host_dir.to_path_buf();
+            let user_home_img_owned = user_home_img.to_path_buf();
+            let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
+            let staged = compio::runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+                std::fs::create_dir_all(&host_dir_owned)
+                    .map_err(|e| format!("mkdir {}: {}", host_dir_owned.display(), e))?;
+                if let Some(parent) = user_home_img_owned.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+                }
+                let workspace_img = workspace_image_path(&host_dir_owned);
+                create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
+                    .map_err(|e| format!("workspace.img: {e}"))?;
+                create_ext4_image_if_missing(&user_home_img_owned, workspace_img_size_gb)
+                    .map_err(|e| format!("home.img: {e}"))?;
+                Ok(workspace_img)
+            })
+            .await
+            .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))?;
+            guard.host_dir_created = true;
+            staged
+        };
 
         // 4. (was: write pubkey file — now baked into the cmdline by
         //    the wrapper, see step 5's ZSBX_PUBKEY_HEX env var.)
@@ -2517,6 +2545,18 @@ pub(crate) fn build_nomad_job_json_with(
             let restore_str = restore_from
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
+            // Option C Phase 2 (2026-05-25 staging-locality ADR):
+            // emit `stage_disk_images: true` ONLY when the operator
+            // has flipped the controller-side flag AND we're on the
+            // cold-boot branch (the restore branch stages rootfs
+            // via its own RootfsSource hardlink/copy and does not
+            // re-stage workspace.img / home.img). The Go driver's
+            // TaskConfig decodes this from the HCL schema; when
+            // false (Phase 2 default), the driver's StartTask
+            // skips its stageDiskImages op and the controller-side
+            // spawn_blocking block above retains responsibility.
+            let stage_disk_images = cfg.driver_stages_disk_images
+                && restore_from.is_none();
             (
                 "ch",
                 serde_json::json!({
@@ -2537,6 +2577,7 @@ pub(crate) fn build_nomad_job_json_with(
                     "user_home_img": user_home_img.display().to_string(),
                     "pubkey_hex": pubkey_hex,
                     "subnet_base_octet": cfg.nomad_ch.subnet_second_octet,
+                    "stage_disk_images": stage_disk_images,
                     // Block-lists — empty triggers driver-side
                     // auto-synthesis from the typed fields above
                     // (matches T-3 default behaviour).
@@ -2548,6 +2589,15 @@ pub(crate) fn build_nomad_job_json_with(
         }
     };
 
+    // Option C Phase 2: also propagate the staging-locality flag
+    // via job-level Meta. The driver reads `stage_disk_images` from
+    // its typed TaskConfig (above), so this Meta entry is observer-
+    // facing only (Nomad UI / `nomad job inspect` / log aggregators);
+    // it gives operators a one-glance signal that the alloc was
+    // submitted under driver-side staging. Cold-boot only (the
+    // restore branch sets stage_disk_images=false above).
+    let stage_disk_images_meta = cfg.driver_stages_disk_images
+        && restore_from.is_none();
     let mut job = serde_json::json!({
         "ID": job_id,
         "Name": job_id,
@@ -2558,6 +2608,7 @@ pub(crate) fn build_nomad_job_json_with(
             "zeroship.project": project_id,
             "zeroship.sandbox": sandbox_id,
             "zeroship.vm_index": vm_index.to_string(),
+            "zsbx_stage_disks": stage_disk_images_meta.to_string(),
         },
         "TaskGroups": [{
             "Name": "vm",
@@ -7385,6 +7436,135 @@ mod tests {
         assert!(
             err.contains("parse /v1/agent/self body"),
             "error message must name the source, got: {err}"
+        );
+    }
+
+    // ─── Option C Phase 2 — staging-locality flag emission ────
+    //
+    // Mirrors R22-T1 / r3-A node-affinity parity test shape: pin
+    // the cross-emitter behaviour of the new `stage_disk_images`
+    // ChPlugin Config field + `zsbx_stage_disks` job-level Meta.
+    // When the controller-side flag is true, every cold-boot
+    // jobspec MUST advertise driver-side staging via BOTH wire
+    // surfaces (typed Config for the driver, Meta for observability);
+    // when false, both surfaces fall back to the legacy false value.
+    // Restore-path emitter is unaffected by the flag (its
+    // `stage_disk_images` is hard-coded false per ADR Phase 2).
+
+    /// Cold-boot under `driver_stages_disk_images=true`: the ChPlugin
+    /// Config carries `stage_disk_images=true` (Go driver decodes it
+    /// from the HCL schema and runs `stageDiskImages` before CH
+    /// spawn) AND the job-level Meta carries `zsbx_stage_disks=true`
+    /// (operator-facing signal via `nomad job inspect`).
+    #[test]
+    fn cold_boot_jobspec_includes_stage_disks_meta_when_flag_set() {
+        let mut cfg = make_cfg();
+        cfg.driver_stages_disk_images = true;
+        let v = build_nomad_job_json_with(
+            "zsbx-stage-on",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "deadbeef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None, // cold-boot: no restore_from
+            TaskDriverMode::ChPlugin,
+            None,
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Config"]["stage_disk_images"], true,
+            "ChPlugin Config must carry stage_disk_images=true when \
+             SandboxConfig.driver_stages_disk_images=true on cold-boot \
+             (Option C Phase 2: driver materializes images in StartTask)",
+        );
+        assert_eq!(
+            v["Job"]["Meta"]["zsbx_stage_disks"], "true",
+            "Job-level Meta must advertise zsbx_stage_disks=true so \
+             operators see staging-locality at-a-glance via \
+             `nomad job inspect`",
+        );
+    }
+
+    /// Cold-boot under `driver_stages_disk_images=false` (Phase 2
+    /// default): both wire surfaces emit `false` so the driver's
+    /// StartTask retains its existing back-compat behaviour
+    /// (consumes pre-staged paths via preflightDiskPaths).
+    #[test]
+    fn cold_boot_jobspec_omits_stage_disks_meta_when_flag_unset() {
+        let cfg = make_cfg(); // flag defaults to false in fixture
+        assert!(
+            !cfg.driver_stages_disk_images,
+            "fixture sanity: flag MUST default to false (Phase 2 \
+             back-compat default; Phase 4 flips after stress validation)",
+        );
+        let v = build_nomad_job_json_with(
+            "zsbx-stage-off",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "deadbeef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            TaskDriverMode::ChPlugin,
+            None,
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Config"]["stage_disk_images"], false,
+            "ChPlugin Config must carry stage_disk_images=false when \
+             SandboxConfig.driver_stages_disk_images=false (Phase 2 default)",
+        );
+        assert_eq!(
+            v["Job"]["Meta"]["zsbx_stage_disks"], "false",
+            "Job-level Meta must advertise zsbx_stage_disks=false so \
+             operators can distinguish a missing-flag jobspec from one \
+             that opted out explicitly",
+        );
+    }
+
+    /// Even with the controller-side flag flipped to true, the
+    /// COLD-BOOT emitter MUST still fall back to false when the
+    /// `restore_from` arg is Some — the restore branch stages
+    /// rootfs via its own RootfsSource hardlink/copy and never
+    /// re-mkfs's workspace.img / home.img (ADR Phase 2).
+    #[test]
+    fn cold_boot_jobspec_with_restore_from_overrides_stage_flag_to_false() {
+        let mut cfg = make_cfg();
+        cfg.driver_stages_disk_images = true;
+        let restore_dir = Path::new("/var/zeroship/ch/snap-deadbeef/restore");
+        let v = build_nomad_job_json_with(
+            "zsbx-stage-restore-collision",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "deadbeef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            Some(restore_dir),
+            TaskDriverMode::ChPlugin,
+            None,
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Config"]["stage_disk_images"], false,
+            "ChPlugin Config stage_disk_images MUST be false under \
+             restore-with-flag-set (the restore branch stages rootfs \
+             via its own RootfsSource path and does not re-mkfs the \
+             ext4 images — ADR Phase 2 cold-boot-only contract)",
+        );
+        assert_eq!(
+            v["Job"]["Meta"]["zsbx_stage_disks"], "false",
+            "Job-level Meta MUST mirror the Config field (false on \
+             restore-with-flag-set)",
         );
     }
 }
