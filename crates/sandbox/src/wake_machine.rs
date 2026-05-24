@@ -801,7 +801,20 @@ const REDACT_TOKEN: &str = "[redacted]";
 /// 2. Strip bare RFC1918 IPv4 addresses (10/8, 172.16/12,
 ///    192.168/16), optionally followed by `:port`.
 /// 3. Strip IPv6 link-local prefixes (`fe80::/10`).
-/// 4. Truncate to [`ERROR_MESSAGE_MAX_BYTES`] (char-boundary safe).
+/// 4. R22-S1 Mode A: strip filesystem-path absolute prefixes
+///    (`/var/zeroship/...`, `/opt/nomad/...`, `/etc/zeroship/...`)
+///    as a unit. These are the only path roots the controller +
+///    driver write to that carry sandbox/tenant topology
+///    (workspace.img, home.img, alloc dirs, key material). Non-secret
+///    binary paths (`/usr/local/bin/...`, `/tmp/...`) are NOT redacted
+///    so operator triage of binary-path errors still works.
+/// 5. R22-S1 Mode A: strip typed-IDs (`[a-z]{3}_[A-Za-z0-9]{18,32}`)
+///    — matches the canonical `^[a-z]{3}_[A-Za-z0-9]{22}$` shape in
+///    `crates/core/src/typed_id.rs` (`sbx_<base62>`, `wak_<base62>`,
+///    `usr_<base62>`, `app_<base62>`, `ses_<base62>`). Length range
+///    18-32 is intentional drift-tolerance — if a future prefix
+///    changes encoding width the redaction still fires.
+/// 6. Truncate to [`ERROR_MESSAGE_MAX_BYTES`] (char-boundary safe).
 ///
 /// Implementation uses a byte-scan rather than `regex` to keep the
 /// crate-graph thin (the workspace deliberately avoids `regex` in
@@ -810,14 +823,21 @@ const REDACT_TOKEN: &str = "[redacted]";
 /// a hand-rolled scanner is comparable in cost and far simpler to
 /// audit.
 pub(crate) fn sanitize_error_message(msg: &str) -> String {
-    // Two passes: first replace agent URLs (longer matches), then
-    // bare IPs (shorter matches). The IPv6-LL pass is independent of
-    // the IPv4 ones; do it last.
+    // Composition order: longer/more-structured matches first so
+    // shorter matches don't pre-empt a multi-component pattern. URLs
+    // (which embed an IP) before bare IPs. Filesystem paths before
+    // typed-IDs (paths may embed typed-IDs as path segments — e.g.
+    // `/var/zeroship/ch/<sbx-typed-id>/workspace.img`; redacting the
+    // whole path is more informative than two adjacent `[redacted]`
+    // tokens, and the typed-id pass would otherwise match the
+    // embedded base62 segment).
     let pass1 = strip_agent_urls(msg);
     let pass2 = strip_rfc1918(&pass1);
     let pass3 = strip_ipv6_link_local(&pass2);
+    let pass4 = strip_filesystem_paths(&pass3);
+    let pass5 = strip_typed_ids(&pass4);
 
-    let s: &str = &pass3;
+    let s: &str = &pass5;
     if s.len() <= ERROR_MESSAGE_MAX_BYTES {
         return s.to_string();
     }
@@ -1047,6 +1067,124 @@ fn strip_ipv6_link_local(msg: &str) -> String {
             }
             if j > i + 6 {
                 out.push_str(REDACT_TOKEN);
+                i = j;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// R22-S1 Mode A: strip filesystem-path absolute prefixes that
+/// expose sandbox/tenant topology. Whitelist of secret-bearing
+/// roots ONLY — binary search paths (`/usr/local/bin/...`),
+/// temp dirs (`/tmp/...`), and the rest of the FS hierarchy are
+/// NOT touched so operator-debuggable error text (e.g. "ch-remote
+/// at /usr/local/bin/ch-remote exited 1") still reads cleanly.
+///
+/// Match shape: `/(var/zeroship|opt/nomad|etc/zeroship)` followed
+/// by any non-whitespace / non-quote character. The path body is
+/// consumed greedily so an embedded typed-id segment doesn't get
+/// double-redacted by the later `strip_typed_ids` pass.
+///
+/// Path roots:
+/// - `/var/zeroship/` — controller-owned state: `ch/<sbx>/workspace.img`,
+///   `ch/users/<usr>/home.img`, snapshot artifacts.
+/// - `/opt/nomad/` — Nomad client alloc dirs:
+///   `data/alloc/<alloc-id>/ch/local/rootfs.img`, task_dir, secrets.
+/// - `/etc/zeroship/` — controller config: keys/, certs/, TLS material.
+fn strip_filesystem_paths(msg: &str) -> String {
+    const ROOTS: &[&[u8]] = &[b"/var/zeroship/", b"/opt/nomad/", b"/etc/zeroship/"];
+    const REDACT_PATH: &str = "<redacted-path>";
+    let bytes = msg.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let mut matched_root_len = 0usize;
+        if bytes[i] == b'/' {
+            for root in ROOTS {
+                if bytes[i..].starts_with(root) {
+                    matched_root_len = root.len();
+                    break;
+                }
+            }
+        }
+        if matched_root_len == 0 {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        // Consume the path body: any non-whitespace / non-quote /
+        // non-comma character. Stop on common terminators so a
+        // sentence like "path /var/zeroship/x/y.img does not exist"
+        // doesn't swallow the trailing prose.
+        let mut j = i + matched_root_len;
+        while j < n {
+            let b = bytes[j];
+            if b.is_ascii_whitespace()
+                || matches!(b, b'"' | b'\'' | b'`' | b',' | b';' | b')' | b']')
+            {
+                break;
+            }
+            j += 1;
+        }
+        out.push_str(REDACT_PATH);
+        i = j;
+    }
+    out
+}
+
+/// R22-S1 Mode A: strip canonical typed-IDs to prevent tenant /
+/// sandbox / wake enumeration via repeat polling. Matches the
+/// global `^[a-z]{3}_[A-Za-z0-9]{18,32}$` shape from
+/// `crates/core/src/typed_id.rs` — three lowercase ASCII letters,
+/// underscore, then 18-32 base62 chars. The canonical length is
+/// 22 (pinned by `wake_prefix_is_three_chars` etc.); 18-32 is
+/// deliberate drift-tolerance.
+///
+/// Word-boundary semantics: the prefix MUST start at a non-alnum
+/// boundary (or string start), so `_sbx_<base62>` and `Xsbx_<base62>`
+/// do NOT match — substring matches inside larger identifiers are
+/// excluded. The trailing base62 run stops at the first non-alnum
+/// char, so trailing punctuation is preserved.
+fn strip_typed_ids(msg: &str) -> String {
+    const REDACT_ID: &str = "<redacted-typed-id>";
+    let bytes = msg.as_bytes();
+    let n = bytes.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let at_boundary = i == 0
+            || {
+                let p = bytes[i - 1];
+                !p.is_ascii_alphanumeric() && p != b'_'
+            };
+        if at_boundary
+            && i + 4 < n
+            && bytes[i].is_ascii_lowercase()
+            && bytes[i + 1].is_ascii_lowercase()
+            && bytes[i + 2].is_ascii_lowercase()
+            && bytes[i + 3] == b'_'
+        {
+            // Consume the trailing base62 run (`[A-Za-z0-9]`).
+            let mut j = i + 4;
+            while j < n && bytes[j].is_ascii_alphanumeric() {
+                j += 1;
+            }
+            let id_chars = j - (i + 4);
+            // Must be followed by a non-alnum / non-underscore
+            // terminator (or EOS) so e.g. `sbx_ABCDEFGHIJKLMNOPQRSTUV_extra`
+            // doesn't match — that's a longer identifier, not a typed-id.
+            let trailing_boundary = j >= n
+                || {
+                    let p = bytes[j];
+                    !p.is_ascii_alphanumeric() && p != b'_'
+                };
+            if (18..=32).contains(&id_chars) && trailing_boundary {
+                out.push_str(REDACT_ID);
                 i = j;
                 continue;
             }
@@ -1310,5 +1448,110 @@ mod tests {
     fn sanitize_preserves_100_128_above_cgnat() {
         let s = sanitize_error_message("host 100.128.0.1 is public");
         assert_eq!(s, "host 100.128.0.1 is public");
+    }
+
+    // ─── R22-S1 Mode A: filesystem paths + typed-IDs ─────────────────
+
+    /// Driver TaskEvent verbatim: `disk[1] /var/zeroship/ch/<sid>/
+    /// workspace.img does not exist` — the elevated wire path
+    /// R22-S1 identifies. Must redact the path; trailing prose must
+    /// stay intact.
+    #[test]
+    fn sanitize_strips_var_zeroship_path() {
+        let s = sanitize_error_message(
+            "disk[1] /var/zeroship/ch/abc-123/workspace.img does not exist",
+        );
+        assert_eq!(s, "disk[1] <redacted-path> does not exist");
+    }
+
+    /// Nomad alloc-dir leak via driver-side path-rewriter logs.
+    #[test]
+    fn sanitize_strips_opt_nomad_alloc_dir() {
+        let s = sanitize_error_message(
+            "Disk(NotFound): /opt/nomad/data/alloc/8f3a-xyz/ch/local/rootfs.img",
+        );
+        assert_eq!(s, "Disk(NotFound): <redacted-path>");
+    }
+
+    /// Controller config / key material path leak.
+    #[test]
+    fn sanitize_strips_etc_zeroship_config() {
+        let s = sanitize_error_message(
+            "open /etc/zeroship/keys/ed25519.pub failed",
+        );
+        assert_eq!(s, "open <redacted-path> failed");
+    }
+
+    /// Typed-IDs across all five canonical prefixes
+    /// (`sbx_`, `wak_`, `usr_`, `app_`, `ses_`). Each is 3 lowercase
+    /// chars + `_` + 22 base62 chars per `crates/core/src/typed_id.rs`.
+    #[test]
+    fn sanitize_strips_typed_ids() {
+        // 22 base62 chars each (canonical uuid_to_base62 output).
+        let s = sanitize_error_message(
+            "wake sbx_0Bk3Np4qR5sT7uV8wYz1A failed at wak_AbCdEfGhIjKlMnOpQrStUv",
+        );
+        assert_eq!(
+            s,
+            "wake <redacted-typed-id> failed at <redacted-typed-id>"
+        );
+        // Each of the well-known prefixes lands the same redaction.
+        for prefix in &["sbx", "wak", "usr", "app", "ses"] {
+            let input = format!("touched {prefix}_0123456789ABCDEFGHIJKL today");
+            let out = sanitize_error_message(&input);
+            assert_eq!(
+                out, "touched <redacted-typed-id> today",
+                "prefix {prefix} must redact (got {out})"
+            );
+        }
+    }
+
+    /// Whitelist-by-prefix: non-secret absolute paths must remain
+    /// intact so operator triage of binary / temp-dir errors works.
+    #[test]
+    fn sanitize_preserves_non_secret_paths() {
+        let s = sanitize_error_message(
+            "exec /usr/local/bin/ch-remote at /tmp/work failed",
+        );
+        assert_eq!(
+            s,
+            "exec /usr/local/bin/ch-remote at /tmp/work failed"
+        );
+    }
+
+    /// Compound case: one path + one typed-id + one RFC1918 IP in
+    /// the same message — all three classes must redact in one
+    /// pass without stepping on each other's tokens.
+    #[test]
+    fn sanitize_strips_combination() {
+        let s = sanitize_error_message(
+            "wak_AbCdEfGhIjKlMnOpQrStUv: /var/zeroship/ch/x.img on 10.0.0.7 missing",
+        );
+        assert_eq!(
+            s,
+            "<redacted-typed-id>: <redacted-path> on [redacted] missing"
+        );
+    }
+
+    /// Idempotency: re-sanitizing already-redacted output must be a
+    /// no-op. The redaction tokens themselves (`[redacted]`,
+    /// `<redacted-path>`, `<redacted-typed-id>`) must not match any
+    /// of the patterns and must not double-redact on repeat.
+    #[test]
+    fn sanitize_idempotent() {
+        let inputs = [
+            "wake sbx_0Bk3Np4qR5sT7uV8wYz1A on /var/zeroship/x.img via 10.0.0.7:7000",
+            "disk[1] /var/zeroship/ch/abc-123/workspace.img does not exist",
+            "primary 10.0.0.1 / fallback 192.168.1.5 / link fe80::1",
+            "plain prose with no secrets",
+        ];
+        for inp in inputs {
+            let once = sanitize_error_message(inp);
+            let twice = sanitize_error_message(&once);
+            assert_eq!(
+                once, twice,
+                "sanitize must be idempotent (input: {inp})"
+            );
+        }
     }
 }
