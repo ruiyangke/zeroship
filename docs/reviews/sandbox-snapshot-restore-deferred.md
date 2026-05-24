@@ -916,11 +916,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: all 5 pg_e2e callsites of `restore_sandbox` still pass `persist=None`. 3 cycles without progress on the integration-through-`restore_sandbox` requirement.
 - **Action**: integration test that constructs `RealRestoreBackend::with_nomad_handle(...)`, populates `persist` with sealed record + fake snapshot artifact, calls `restore_sandbox`, asserts unseal + clock_resync_post_restore + register_restored all invoked with correct args.
 
-### [R11-T3] (IMPORTANT, test-coverage-r11) R7-API2 capability pin covers only 1 of 3 tiers
+### [R11-T3] (IMPORTANT, test-coverage-r11) R7-API2 capability pin covers only 1 of 3 tiers — CLOSED eb26db31
 - **Source**: 2026-05-25 test-coverage-r11
 - **File**: `crates/sandbox-agent/src/version.rs` + the new `mandatory_clock_resync_v1_present` test
 - **Symptom**: `proxy.ws-v1` + `auth.ed25519-v1.1` (named as "feature-detected" by R7-API2 commit body) have no equivalent regression pins.
 - **Action**: add 2 more capability-presence tests in the same module.
+- **Resolution (eb26db31)**: Added `mandatory_proxy_ws_v1_present` and `mandatory_auth_ed25519_v1_1_present` mirroring the R7-API2 (c8000537) pattern. Const-presence asserts only, no wire-shape touch. Sandbox-agent lib tests 240 → 242.
 
 ### [R11-T4] (IMPORTANT, test-coverage-r11, drift evidence for R9-T6) derive_agent_url already drifted
 - **Source**: 2026-05-25 test-coverage-r11
