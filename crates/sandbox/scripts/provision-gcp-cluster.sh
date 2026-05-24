@@ -28,7 +28,7 @@
 #   SERVER_MACHINE                                  default: n2-standard-4
 #   WORKER_MACHINE                                  default: n2-standard-32
 #   ARTIFACT_BUCKET  (no gs:// prefix)              default: suger-dev-zsbx-artifacts
-#   CONTROLLER_OBJECT                               default: zeroship-sandbox.snapshot-v19
+#   CONTROLLER_OBJECT                               default: zeroship-sandbox.snapshot-v20
 #   SNAPSHOT_BUCKET  (L2 store)                     default: $ARTIFACT_BUCKET
 #   VM_INDEX_CEIL    (taps per worker)              default: 12
 #   PG_PASSWORD                                     default: auto-generated, written to /tmp/.zsbx-pg.pw
@@ -52,7 +52,7 @@ WORKER_COUNT=${WORKER_COUNT:-5}
 SERVER_MACHINE=${SERVER_MACHINE:-n2-standard-4}
 WORKER_MACHINE=${WORKER_MACHINE:-n2-standard-32}
 ARTIFACT_BUCKET=${ARTIFACT_BUCKET:-suger-dev-zsbx-artifacts}
-CONTROLLER_OBJECT=${CONTROLLER_OBJECT:-zeroship-sandbox.snapshot-v19}
+CONTROLLER_OBJECT=${CONTROLLER_OBJECT:-zeroship-sandbox.snapshot-v20}
 SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
 VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
 DATACENTER=${DATACENTER:-$PREFIX}
