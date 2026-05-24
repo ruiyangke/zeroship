@@ -1099,3 +1099,55 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### Closures this cycle
 - [R10-Q5] CLOSED at `0cc7af52` — sandbox-agent/proxy.rs dead _ref_imports deletion (3-round carry)
 - [R12-Q1] CLOSED at `46e0fa2a` — db.rs::Database::open_pool TODO refresh pointing to R11-P1
+
+---
+
+## NEW r13 ROUND FINDINGS (added by pilot cycle 2026-05-25 r9 — code-quality r13, api-surface r13, concurrency r13)
+
+### [R13-C1 / R13-Q1] (CRITICAL test-only) ENV_LOCK cross-module race CONFIRMED exploitable
+- **Source**: 2026-05-25 concurrency-r13 + code-quality-r13 (independent confirmation)
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:4073` (`T7_ENV_LOCK`) + `crates/sandbox/src/restore_handler.rs:2478` (`R12_I1_ENV_LOCK`)
+- **Symptom**: Two separate Mutex<()> statics guarding the SAME process-global env var `SANDBOX_TASK_DRIVER`. Both modules compile into the SAME `zeroship-sandbox` test binary; default `cargo test` parallelism runs them on different threads. 4 env-touching tests (nomad_job_spec_uses_* ×2 + nomad_restore_job_spec_uses_* ×2) can flip mode mid-execution. Silent assertion failures (not panics) — would surface as flaky CI.
+- **Action**: lift T7_ENV_LOCK to `pub(crate)` (or move to a new `tests_env` module). Have restore_handler use it. Delete R12_I1_ENV_LOCK. Subsumed by R12-A3 (struct-field for TaskDriverMode) — that's the structural fix; the env mutex disappears entirely.
+
+### [R13-I1] (IMPORTANT, concurrency-r13) R11-P1 pool churn = correctness risk under c≥10
+- **Source**: 2026-05-25 concurrency-r13 (reclassification of R11-P1 from perf to correctness)
+- **Files**: `crates/sandbox/src/db.rs::open_pool`, `crates/sandbox/src/restore_handler.rs:299-301` (rollback `update_sandbox_status` opens its own pool)
+- **Symptom**: `do_restore_inner` makes 5 separate `open_pool()` calls per wake. Each Pool eagerly opens `min_idle=2` conns. At c≥10 wakes, 100+ conns hit PG default `max_connections=100`. Rollback path competes for the same starved budget — compounds R11-C2 (2-await window) + R12-M1 (silent JoinError) into a wedged-row outcome.
+- **Action**: same as R11-P1 — per-compio-worker `thread_local!<RefCell<Option<Rc<Pool>>>>`. Now incident-class for c=20 stress.
+
+### [R13-Q2] (MAJOR, code-quality-r13) 5-site uid pattern has 2 incompatible error shapes — R11-A1 helper extract BLOCKED
+- **Source**: 2026-05-25 code-quality-r13
+- **Symptom**: 3 sites return `Result<_, String>` (snapshot_aead, persist, lib::load_admin_token); 2 sites return `Result<_, DatabaseError::Validation>` (db.rs::enforce_password_file_mode at 812, R11-S2's enforce_host_id_file_mode at 1161). R11-S2 introduced the divergence by NOT matching sibling shape.
+- **Action**: BEFORE extracting `read_root_owned_secret_file` (R11-A1/R11-Q2), harmonize the error shape. Options: (a) helper returns `Result<_, SecretFileError>` (new enum); callers map to local error; (b) helper takes a generic `E: From<SecretFileError>` parameter; (c) keep two helpers (one per error shape) — defeats DRY purpose. Recommend (a).
+
+### [R13-Q3] (MINOR, code-quality-r13) build_restore_nomad_job_json 181 LOC + 9 args + ~120 LOC dup
+- **Source**: 2026-05-25 code-quality-r13
+- **File**: `crates/sandbox/src/restore_handler.rs:1276`
+- **Symptom**: 181-LOC fn with `#[allow(clippy::too_many_arguments)]` (9 params). ~120 LOC duplicates `nomad_ch::build_nomad_job_json`. `format!("zsbx-restore-{}", sandbox_id.simple())` duplicated at L1108 + L1169.
+- **Action**: subsumed by R12-A1 / R10-A4 — collapse the dual builders into one + extract via R12-A3 struct field.
+
+### [R13-Q4] (MINOR, code-quality-r13) 10 path.display().to_string() sites — extract helper
+- **Source**: 2026-05-25 code-quality-r13
+- **Action**: `fn path_to_value(p: &Path) -> serde_json::Value` helper. ~30-LOC reduction.
+
+### [R13-Q5] (MINOR, code-quality-r13) Raw mode literals 0o400/0o600 — extract named consts
+- **Source**: 2026-05-25 code-quality-r13
+- **Files**: 5× `0o400` + 1× `0o600` across the 6 mode-check sites
+- **Action**: const SECRET_FILE_MODE_400: u32 = 0o400; SECRET_FILE_MODE_600: u32 = 0o600. Pairs with R11-A1 helper extract.
+
+### [R13-API1] (MINOR, api-surface-r13) handlers.rs:797 ExecBody over-pub — sibling of R10-API2
+- **Source**: 2026-05-25 api-surface-r13
+- **File**: `crates/sandbox/src/handlers.rs:797` (sandbox crate's ExecBody — separate from sandbox-agent's at R10-API2)
+- **Symptom**: zero external callers. Same anti-pattern as R10-API2.
+- **Action**: pub→pub(crate). Cluster with R10-API2 as 2-site fix.
+
+### [R13-V1] (VERIFICATION) `do_restore_inner` await count: 7 (unchanged through r10-r13)
+
+### sig.rs:120 + db.rs stale doc comments now 5TH-round carry-forward
+- sig.rs:120 hyphenated UUID example (B24-FOLLOWUP made the wire form `.simple()` 32-hex; example never updated)
+- db.rs comment moved to line 2917 (was 2859/2839 earlier); still references hyphenated form
+
+### Closures this cycle
+- [R12-P1] CLOSED at `94a8a043` — BufReader on download_to_disk READ side; symmetric to R11-P2 write-side
+- [R10-API3 partial] CLOSED at `f50c95da` — 3 of 5 persist:: fns pub→pub(crate) (seal, unseal_dir, seal_filename_for_str); kept pub: unseal_one + seal_filename_for (e2e test consumers)
