@@ -2661,13 +2661,24 @@ async fn seed_snapshotted_row(
         Uuid::now_v7().simple(),
     ));
     std::fs::create_dir_all(&stage).unwrap();
-    // Minimal config.json carrying the v1 rewrite shape.
+    // Minimal config.json carrying the v1 rewrite shape. Post-pivot
+    // (bug #11): keys/workspace/userhome are virtio-blk disks, not
+    // virtiofs sockets — so `fs[]` is absent and `disks[]` carries
+    // the rootfs.img + persistent-workspace + per-user-home triple.
+    // The rewriter (`rewrite_config_json`) still only touches
+    // `net[].tap` + `net[].mac`; the path-bearing entries below stay
+    // untouched, which is the invariant this fixture is designed to
+    // exercise.
     std::fs::write(
         stage.join("config.json"),
         r#"{
             "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
-            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
-            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+            "disks":[
+                {"path":"/opt/nomad/data/alloc/oldalloc/ch/local/rootfs.img"},
+                {"path":"/var/zeroship/ch/sbx-oldalloc/workspace.img"},
+                {"path":"/var/zeroship/ch/users/usr-oldalloc/home.img"}
+            ],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/ch/local/serial.log"}
         }"#,
     )
     .unwrap();
@@ -3312,15 +3323,24 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
     // shape it expects. The mock ch-remote in phase 1 writes a
     // placeholder; we overwrite it with a v1-shaped JSON before the
     // restore so the rewrite assertion succeeds. Real CH artifacts
-    // carry this shape natively.
+    // carry this shape natively. Post-pivot (bug #11): keys/workspace/
+    // userhome are virtio-blk disks, not virtiofs sockets — `fs[]`
+    // is absent and `disks[]` carries the rootfs.img + persistent-
+    // workspace + per-user-home triple. The rewriter (`rewrite_
+    // config_json`) still only touches `net[].tap` + `net[].mac`; the
+    // path-bearing entries below stay untouched.
     let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
     let cfg_path = store_root.join(&typed).join("config.json");
     std::fs::write(
         &cfg_path,
         r#"{
             "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
-            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
-            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+            "disks":[
+                {"path":"/opt/nomad/data/alloc/oldalloc/ch/local/rootfs.img"},
+                {"path":"/var/zeroship/ch/sbx-oldalloc/workspace.img"},
+                {"path":"/var/zeroship/ch/users/usr-oldalloc/home.img"}
+            ],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/ch/local/serial.log"}
         }"#,
     )
     .unwrap();
