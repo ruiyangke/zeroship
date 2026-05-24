@@ -26,6 +26,16 @@ pub enum QueryError {
     /// field reference). Carries a path-keyed message so the SDK can surface
     /// it back to the user without losing the offending input.
     InvalidIdent(String),
+    /// **P7 PR 1** — creator declared a field whose name collides with one
+    /// of the seven platform-managed system fields (`id`, `created_at`,
+    /// `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`).
+    /// Distinct from [`InvalidIdent`] so the SDK can surface a typed code
+    /// (`reserved_system_field_name`) that's distinguishable from the
+    /// generic `invalid_identifier` thrown by the `_*` / `__zs_*` prefix
+    /// reservations. Filter-time use of these names is unrestricted
+    /// (`db.users.find({ id: ... })` is the canonical query shape); the
+    /// fence only fires on declaration paths (`field_to_column`).
+    ReservedSystemFieldName(String),
 }
 
 impl std::fmt::Display for QueryError {
@@ -34,6 +44,9 @@ impl std::fmt::Display for QueryError {
             Self::InvalidFilter(msg) => write!(f, "invalid filter: {msg}"),
             Self::InvalidCollection(msg) => write!(f, "invalid collection: {msg}"),
             Self::InvalidIdent(msg) => write!(f, "invalid identifier: {msg}"),
+            Self::ReservedSystemFieldName(msg) => {
+                write!(f, "reserved system field name: {msg}")
+            }
         }
     }
 }
@@ -202,6 +215,36 @@ pub(crate) enum ReservedName {
     Suffix(&'static str),
 }
 
+/// **P7 PR 1** — the seven platform-managed system fields.
+///
+/// Every creator table receives these at CREATE TABLE time (PR 2 wires
+/// that); creators cannot declare their own field with any of these
+/// names. Filter-time use is unrestricted — `db.users.find({ id: "..." })`
+/// is the canonical query shape.
+///
+/// This list is intentionally separate from [`RESERVED_NAMES`] because
+/// the two categories enforce at different call sites:
+///
+/// - [`RESERVED_NAMES`] fires at BOTH schema-declaration time AND
+///   filter time (e.g. `_masked` suffix, `_*` prefix). Synthetic /
+///   sibling columns must never appear in user input at all.
+/// - `SYSTEM_FIELD_NAMES` fires ONLY at schema-declaration time. The
+///   names themselves (`id`, `created_at`, …) are the canonical
+///   query keys creators use every day.
+///
+/// The reservation produces [`QueryError::ReservedSystemFieldName`]
+/// (distinct from [`QueryError::InvalidIdent`]) so the SDK can branch
+/// on a stable code (`reserved_system_field_name`).
+pub(crate) const SYSTEM_FIELD_NAMES: &[&str] = &[
+    "id",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+    "version",
+    "deleted_at",
+];
+
 /// Platform-reserved field names. Centralised list — every new
 /// reserved prefix / suffix / exact-name lands here, exercised by
 /// both the schema-registration validator and the filter-time
@@ -254,6 +297,14 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// columns; the six default-classification names (`public`, `pii`,
 /// `spi`, `phi`, `pci`, `internal`) are reserved at the column-name
 /// level.
+///
+/// **P7 PR 1** — note this function does NOT fence the seven
+/// system-field names (`id`, `created_at`, `updated_at`, `created_by`,
+/// `updated_by`, `version`, `deleted_at`). Those names are reserved
+/// only at SCHEMA-DECLARATION time, not at filter time —
+/// `db.users.find({ id: "..." })` is the canonical query shape and
+/// must keep working. Declaration paths must call
+/// [`validate_field_name_for_declaration`] instead of this function.
 pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidIdent(
@@ -308,6 +359,35 @@ pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
                 "reserved field name '{name}': {hint}"
             )));
         }
+    }
+    Ok(())
+}
+
+/// **P7 PR 1** — declaration-time wrapper around [`validate_field_name`]
+/// that additionally fences the seven platform-managed system field
+/// names ([`SYSTEM_FIELD_NAMES`]).
+///
+/// Call this from every code path that translates a creator-declared
+/// schema field into DDL (currently `field_to_column`). Filter-time
+/// validators (`build_field_condition`, `build_vector_search`,
+/// `build_spatial_near`) must continue to call the underlying
+/// [`validate_field_name`] so creators can keep writing
+/// `db.users.find({ id: "..." })`.
+///
+/// On reservation hit returns [`QueryError::ReservedSystemFieldName`]
+/// — distinct from `InvalidIdent` so the SDK can branch on a stable
+/// `reserved_system_field_name` code. The message names the offending
+/// field; the hint enumerates all 7 system fields so the creator
+/// knows the full reserved set without consulting docs.
+pub(crate) fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
+    validate_field_name(name)?;
+    if SYSTEM_FIELD_NAMES.contains(&name) {
+        return Err(QueryError::ReservedSystemFieldName(format!(
+            "Field name '{name}' is reserved for platform system fields. \
+             System fields ({}) are managed by the platform and cannot be \
+             overridden.",
+            SYSTEM_FIELD_NAMES.join(", ")
+        )));
     }
     Ok(())
 }
@@ -1361,9 +1441,13 @@ pub fn build_mask_sentinel_comment_for_field(
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
 ///
-/// Validates the field name via [`validate_field_name`] before emitting DDL.
+/// Validates the field name via [`validate_field_name_for_declaration`]
+/// before emitting DDL. The declaration-time variant fences the 7
+/// platform system field names ([`SYSTEM_FIELD_NAMES`]); filter-time
+/// call sites stay on the underlying [`validate_field_name`] so creators
+/// can keep filtering by `id` / `created_at` / etc.
 fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, QueryError> {
-    validate_field_name(field)?;
+    validate_field_name_for_declaration(field)?;
     let pg_type_owned;
     let zs_type = def.get("type").and_then(|t| t.as_str());
     // **P5 PR 2** — `t.encrypted(...)`-declared columns always store the
@@ -5308,16 +5392,27 @@ mod tests {
     // INTEGER (well, NUMERIC) column at the DDL level. The SDK uses
     // model.ts to inject `version: { type: "number", default: 1 }`
     // so the DDL emission below matches.
+    //
+    // **P7 PR 1** — `version` is now a reserved system-field name
+    // (`SYSTEM_FIELD_NAMES`); the declaration-time validator refuses
+    // a creator-declared `version` column. PR 2 will rework
+    // `build_create_table_with_fks` to inject the seven system fields
+    // directly (not via a creator-shape entry), at which point this
+    // test transitions to asserting the system-field emission path.
+    // For PR 1 (foundation-only), the test uses a placeholder field
+    // name (`schema_revision`) to keep exercising the
+    // `t.number().default(N)` DDL path that produces `DOUBLE PRECISION
+    // ... DEFAULT 1`.
     // -----------------------------------------------------------------
 
     #[test]
     fn d4_version_column_default_one() {
         let schema = json!({
             "title": { "type": "string", "required": true },
-            "version": { "type": "number", "default": 1 },
+            "schema_revision": { "type": "number", "default": 1 },
         });
         let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
-        assert!(sql.contains("\"version\" DOUBLE PRECISION"), "{sql}");
+        assert!(sql.contains("\"schema_revision\" DOUBLE PRECISION"), "{sql}");
         assert!(sql.contains("DEFAULT 1"), "{sql}");
     }
 
@@ -5811,6 +5906,183 @@ mod tests {
             .expect("schema with _meta + a real field should build");
         assert!(sql.contains("\"name\""), "expected name column: {sql}");
         assert!(!sql.contains("\"_meta\""), "_meta must NOT be emitted as a column: {sql}");
+    }
+
+    // -----------------------------------------------------------------
+    // P7 PR 1 — platform system-field reservation (declaration-only)
+    // -----------------------------------------------------------------
+
+    /// Each of the 7 platform-managed system field names must be refused
+    /// by `validate_field_name_for_declaration`. Mirrors the seven names
+    /// in `SYSTEM_FIELD_NAMES`. Filter-time validators continue to
+    /// accept these names (covered by
+    /// `system_field_names_allowed_in_filter_path`).
+    #[test]
+    fn system_field_names_refused_at_declaration() {
+        for name in &[
+            "id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "version",
+            "deleted_at",
+        ] {
+            let err = validate_field_name_for_declaration(name).unwrap_err();
+            match err {
+                QueryError::ReservedSystemFieldName(msg) => {
+                    assert!(
+                        msg.contains(name) && msg.contains("reserved"),
+                        "expected reserved-system-field message naming {name:?}, got: {msg}"
+                    );
+                }
+                other => panic!(
+                    "expected ReservedSystemFieldName for {name:?}, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// Filter-time validation (`validate_field_name`) MUST continue to
+    /// accept all 7 system field names. `db.users.find({ id: "..." })`
+    /// is the canonical query shape — fencing `id` at filter time would
+    /// break the entire SDK. PR 1's reservation is declaration-only.
+    #[test]
+    fn system_field_names_allowed_in_filter_path() {
+        for name in SYSTEM_FIELD_NAMES {
+            assert!(
+                validate_field_name(name).is_ok(),
+                "system field {name:?} must be accepted by the filter-time validator"
+            );
+        }
+    }
+
+    /// Filter-time use of a system-field name flows end-to-end through
+    /// `build_where`: a query like `db.users.find({ id: "usr_01" })`
+    /// must build a WHERE clause, NOT raise an error. This pins the
+    /// "declaration-only" boundary at the call-site level.
+    #[test]
+    fn build_where_accepts_system_field_names_in_filter() {
+        for name in SYSTEM_FIELD_NAMES {
+            let mut filter_obj = serde_json::Map::new();
+            filter_obj.insert((*name).to_string(), serde_json::json!("any-value"));
+            let filter = serde_json::Value::Object(filter_obj);
+            let mut params: Vec<String> = Vec::new();
+            let clause = build_where(&filter, &mut params)
+                .unwrap_or_else(|e| panic!("filter on {name:?} must build, got {e:?}"));
+            assert!(
+                clause.contains(&format!("\"{name}\"")),
+                "WHERE clause must reference {name:?}; got: {clause}"
+            );
+        }
+    }
+
+    /// Non-system-field names continue to be accepted by the
+    /// declaration-time validator (regression fence for the
+    /// `validate_field_name_for_declaration` wrapper).
+    #[test]
+    fn non_system_field_names_accepted_at_declaration() {
+        for name in &["title", "content", "user_id", "createdAt", "first_name"] {
+            assert!(
+                validate_field_name_for_declaration(name).is_ok(),
+                "non-system field {name:?} must be accepted at declaration"
+            );
+        }
+    }
+
+    /// `SYSTEM_FIELD_NAMES` is the canonical list — every new addition
+    /// is a deliberate platform decision. Pinning the size to 7 surfaces
+    /// any drift in code review.
+    #[test]
+    fn system_field_names_has_exactly_seven_entries() {
+        assert_eq!(
+            SYSTEM_FIELD_NAMES.len(),
+            7,
+            "SYSTEM_FIELD_NAMES must list exactly 7 entries (id, created_at, \
+             updated_at, created_by, updated_by, version, deleted_at)"
+        );
+    }
+
+    /// The reservation lifts cleanly into the `DbError::ValidationFailed`
+    /// boundary with `code = "reserved_system_field_name"`. Distinct
+    /// from the generic `invalid_identifier` code the `_*` / `__zs_*`
+    /// prefix reservations carry — the SDK can branch on the new code.
+    #[test]
+    fn system_field_reservation_error_carries_correct_code() {
+        let err = validate_field_name_for_declaration("id").unwrap_err();
+        let db_err = crate::error::DbError::from(err);
+        match db_err {
+            crate::error::DbError::ValidationFailed { code, hint, .. } => {
+                assert_eq!(code, "reserved_system_field_name");
+                let hint = hint.expect("reservation hint required for SDK remediation");
+                for name in SYSTEM_FIELD_NAMES {
+                    assert!(
+                        hint.contains(name),
+                        "reservation hint must list all 7 system fields; missing {name:?}"
+                    );
+                }
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    /// `field_to_column` (the DDL builder for one column) must propagate
+    /// the system-field reservation. End-to-end check that the
+    /// declaration-time fence is wired at the right call site —
+    /// CREATE TABLE on a schema declaring `id` as a creator column
+    /// fails before any SQL is generated.
+    #[test]
+    fn build_create_table_refuses_creator_declared_system_field() {
+        for name in SYSTEM_FIELD_NAMES {
+            let mut schema_obj = serde_json::Map::new();
+            schema_obj.insert(
+                (*name).to_string(),
+                serde_json::json!({ "type": "string" }),
+            );
+            let schema = serde_json::Value::Object(schema_obj);
+            let err = build_create_table_with_fks(
+                "app1",
+                "posts",
+                &schema,
+                &FkEmission::Inline,
+            )
+            .unwrap_err();
+            match err {
+                QueryError::ReservedSystemFieldName(msg) => {
+                    assert!(
+                        msg.contains(name),
+                        "CREATE TABLE must refuse system-field {name:?}; got: {msg}"
+                    );
+                }
+                other => panic!(
+                    "expected ReservedSystemFieldName for {name:?}, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// `validate_field_name_for_declaration` MUST still enforce all
+    /// the underlying `validate_field_name` rules (ASCII allowlist,
+    /// length cap, null bytes, the `_*` / `__zs_*` / `_masked` reserved
+    /// shapes). Regression fence for the wrapper composition.
+    #[test]
+    fn validate_field_name_for_declaration_layers_underlying_rules() {
+        // Length cap inherited from `validate_field_name`.
+        let long = "f".repeat(64);
+        assert!(matches!(
+            validate_field_name_for_declaration(&long).unwrap_err(),
+            QueryError::InvalidIdent(_)
+        ));
+        // `_masked` suffix inherited from `RESERVED_NAMES`.
+        assert!(matches!(
+            validate_field_name_for_declaration("ssn_masked").unwrap_err(),
+            QueryError::InvalidIdent(_)
+        ));
+        // `_` prefix inherited from `RESERVED_NAMES`.
+        assert!(matches!(
+            validate_field_name_for_declaration("_rank").unwrap_err(),
+            QueryError::InvalidIdent(_)
+        ));
     }
 
     // -----------------------------------------------------------------

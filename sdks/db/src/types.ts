@@ -102,28 +102,96 @@ export type InferSchema<S> = S extends infer T
   : never;
 
 /**
- * The persisted row type: user fields + auto-generated `id`,
- * `createdAt`, `updatedAt`. Extends `InferSchema` so required fields
- * remain required.
+ * **P7 PR 1** — platform-managed system fields injected into every
+ * `Row<S>`. Mirrors `SYSTEM_FIELD_NAMES` on the Rust side
+ * (`crates/plugin-db/src/query.rs`). Creator schemas cannot declare
+ * fields with these names — the SDK-side reservation in
+ * `@zeroship/bootstrap/install-schema` and the Rust-side validator
+ * in `validate_field_name_for_declaration` enforce the fence at
+ * register-model time.
  *
- * `version` is included as optional because `SchemaBuilder.withVersioning()`
- * (D4) injects it at DDL time. Collections without versioning never
- * populate it; versioned collections treat it as a CAS guard key in
- * filters (see `Collection.update` and the `_extractCasVersion` helper).
+ * Wire types (PR 1 — type-only; backing runtime stays on legacy
+ * shapes until PR 2/3/5 ship the DDL + auto-populate paths):
+ * - `id` — kept as `number` to match the pre-P7 `IdLoader`/CAS
+ *   infrastructure. PR 3 will widen to `string` (typed_id) when the
+ *   auto-mint pass lands and `IdLoader` is updated to key on string.
+ *   Pre-P7 callers continue to see the legacy `number` shape.
+ * - `created_at` / `updated_at` — Unix-ms `number` for back-compat
+ *   with the pre-P7 `createdAt`/`updatedAt` shape. PR 2/3 will
+ *   surface ISO 8601 strings on the wire; this type alias evolves
+ *   in lockstep.
+ * - `created_by` / `updated_by` — nullable actor typed_id string,
+ *   `null` for system-initiated writes (migrations, background
+ *   jobs). PR 3 wires the auto-populate from `SessionMinter.actor_id`.
+ * - `version` — monotonic integer; starts at 1, bumped by 1 on every
+ *   UPDATE. PR 4 wires the bump + optimistic-concurrency CAS.
+ * - `deleted_at` — nullable timestamp `number`; `null` for live rows.
+ *   PR 5 wires `delete()` to set this field and `find()` to
+ *   auto-filter `deleted_at IS NULL`.
+ *
+ * The fields are appended after the user's schema so chain methods
+ * on the inferred row see the user shape first (matches the source
+ * order: every creator table gets the system fields as
+ * platform-injected, not creator-declared).
+ *
+ * **Type widening deferred**: the canonical wire format (per
+ * `docs/proposals/platform-system-fields.md` §4) uses string IDs and
+ * ISO 8601 timestamps. PR 1 preserves the legacy number-shaped
+ * fields so existing `Collection` infrastructure (`IdLoader`,
+ * `_loadById`, the `with` join machinery) keeps compiling without
+ * a downstream cascade. PR 3 (INSERT auto-populate) is the natural
+ * widening point because it introduces the typed_id mint.
  */
-export type Row<S> = InferSchema<S> & {
+export type SystemFields = {
   id: number;
+  created_at: number;
+  updated_at: number;
+  created_by: string | null;
+  updated_by: string | null;
+  version: number;
+  deleted_at: number | null;
+};
+
+/**
+ * The persisted row type: user fields + 7 platform-managed system
+ * fields (`id`, `created_at`, `updated_at`, `created_by`, `updated_by`,
+ * `version`, `deleted_at`). Extends `InferSchema` so required user
+ * fields remain required; system fields are always present at read
+ * time (auto-populated by the platform).
+ *
+ * **P7 PR 1** — supersedes the legacy `{ id, createdAt, updatedAt,
+ * version? }` shape. The two legacy camelCase aliases (`createdAt`,
+ * `updatedAt`) stay alongside the snake_case canonical names so
+ * existing callers (`db.users.find({ createdAt: ... })`) continue
+ * to type-check during the migration window. PR 3 will drop the
+ * aliases once the typed_id mint lands.
+ *
+ * PR 5 lands the runtime change (`crud::dispatch_find` emitting the
+ * new fields); PR 6 lands the migration that backfills these columns
+ * on pre-P7 tables. PR 1 ships the type-only inference so
+ * type-checking surfaces the new shape immediately.
+ */
+export type Row<S> = InferSchema<S> & SystemFields & {
+  /** @deprecated alias of `created_at` retained for the P7 migration window. */
   createdAt: number;
+  /** @deprecated alias of `updated_at` retained for the P7 migration window. */
   updatedAt: number;
-  version?: number;
 };
 
 /** Input type accepted by `insert()` / `upsert()` — required fields
- * stay required, auto-generated fields (`id` / `createdAt` /
- * `updatedAt`) are excluded. */
+ * stay required, auto-populated system fields are excluded so the
+ * platform mints them (PR 3). */
 export type RowInput<S> = InferSchema<S> & {
   id?: never;
+  created_at?: never;
+  updated_at?: never;
+  created_by?: never;
+  updated_by?: never;
+  version?: never;
+  deleted_at?: never;
+  /** @deprecated alias of `created_at` retained for the P7 migration window. */
   createdAt?: never;
+  /** @deprecated alias of `updated_at` retained for the P7 migration window. */
   updatedAt?: never;
 };
 
@@ -777,8 +845,14 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  * "object" (D2 nested validators), "calendarDate" (D3 — `YYYY-MM-DD`),
  * "literal" (C2 discriminator constant), and "union" (C2 discriminated
  * union document shape — proposal §C2).
+ *
+ * **P7 PR 1** — adds `"id"` (typed_id PK candidate) and `"actor"`
+ * (session.actor_id source for `created_by` / `updated_by` style
+ * columns). These shapes feed the PR 2 CREATE TABLE rewrite that
+ * injects the seven platform system fields; PR 1 ships the builders
+ * + wire discriminators only.
  */
-export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes";
+export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id" | "actor";
 
 /**
  * **P4 PR 2** — distance metric for `t.vector(...)` fields. The three
@@ -988,6 +1062,44 @@ export interface FieldDef {
     kind: MaskKind;
     classification: Classification;
   };
+  /**
+   * **P7 PR 1** — typed_id prefix discriminator for `t.id(prefix?)`.
+   * Present iff `type === "id"`. The SDK auto-mint pass (PR 3) will
+   * use this prefix to call `typed_id::new(prefix)` when the row is
+   * inserted without an explicit id. Absent / undefined means the
+   * collection name is used as the prefix (PR 3 deferred decision).
+   *
+   * Wire-format note: this is what makes `t.id("post")` distinguishable
+   * from `t.string()` at the runtime DDL emitter (PR 2) and the
+   * INSERT auto-populate pass (PR 3). The bare `type: "id"` discriminator
+   * is sufficient for the auto-mint candidate detection.
+   */
+  idPrefix?: string;
+  /**
+   * **P7 PR 1** — explicit nullability for `t.actor()` columns. Set
+   * to `true` by `.nullable()` (Q-SF-I in the proposal: explicit
+   * preferred). The default for `t.actor()` is nullable because
+   * system-initiated writes (migrations, background jobs) have no
+   * actor. Present iff `type === "actor"`.
+   */
+  actorNullable?: boolean;
+  /**
+   * **P7 PR 1** — timestamp auto-population modifier set by
+   * `.auto_now()` / `.auto_now_on_update()` on a `t.timestamp()` field.
+   *
+   * - `"now"` — DEFAULT NOW() at INSERT. Used for `created_at`-style
+   *   columns. Emitted as `TIMESTAMPTZ NOT NULL DEFAULT NOW()` on PG
+   *   (PR 2).
+   * - `"now_on_update"` — DEFAULT NOW() at INSERT AND bumped to NOW()
+   *   by every UPDATE (the UPDATE builder appends
+   *   `<col> = NOW()` to the SET clause — PR 4). Used for
+   *   `updated_at`-style columns.
+   *
+   * Present iff a chain method set it; absent on bare `t.timestamp()`.
+   * The chain method refuses any non-timestamp type at SDK time so
+   * the discriminator stays well-formed at register-model.
+   */
+  timestampAuto?: "now" | "now_on_update";
 }
 
 /**
@@ -1241,6 +1353,73 @@ export class TypeBuilder<
     }
     this._def.mask = { kind, classification };
     return this as unknown as TypeBuilder<T, R, K>;
+  }
+
+  /**
+   * **P7 PR 1** — mark the field as nullable. Today this is meaningful
+   * only on `t.actor()` (matches Q-SF-I in the proposal: explicit
+   * `.nullable()` preferred over implicit). Calling `.nullable()` on
+   * any other type sets the `actorNullable` discriminator only when
+   * `type === "actor"`; on other types it's a no-op so existing
+   * chain ergonomics aren't disturbed (PR 1 foundation only — wider
+   * nullability semantics are out of scope).
+   *
+   * The TS type-side effect (unwrapping non-nullable to nullable) is
+   * deferred to a later PR — PR 1 only ships the wire-format discriminator
+   * so PR 2's CREATE TABLE can emit `NULL` vs `NOT NULL` correctly.
+   */
+  nullable(): this {
+    if (this._def.type === "actor") {
+      this._def.actorNullable = true;
+    }
+    return this;
+  }
+
+  /**
+   * **P7 PR 1** — mark a `t.timestamp()` field as auto-populated to
+   * `NOW()` at INSERT. PR 2 emits the DDL as `DEFAULT NOW()`; the
+   * INSERT auto-populate pass (PR 3) lets the DB DEFAULT fire when
+   * the caller omits the column.
+   *
+   * Refused on non-timestamp types with code `auto_now_on_non_timestamp`
+   * so misuses fail loudly at schema-definition time rather than
+   * silently producing wrong DDL. The validator looks at the underlying
+   * `type === "date"` because `t.timestamp()` aliases to date today.
+   */
+  auto_now(): this {
+    if (this._def.type !== "date") {
+      throw Object.assign(
+        new Error(
+          `.auto_now(): only valid on t.timestamp() fields, got "${this._def.type}"`,
+        ),
+        { code: "auto_now_on_non_timestamp" as const },
+      );
+    }
+    this._def.timestampAuto = "now";
+    return this;
+  }
+
+  /**
+   * **P7 PR 1** — mark a `t.timestamp()` field as auto-populated to
+   * `NOW()` at INSERT AND bumped to `NOW()` by every UPDATE. PR 2
+   * emits the column as `DEFAULT NOW()`; PR 4 wires the UPDATE
+   * builder to append `<col> = NOW()` to every SET clause.
+   *
+   * Refused on non-timestamp types with code `auto_now_on_non_timestamp`
+   * (shares the code with `.auto_now()` since the misuse class is
+   * identical).
+   */
+  auto_now_on_update(): this {
+    if (this._def.type !== "date") {
+      throw Object.assign(
+        new Error(
+          `.auto_now_on_update(): only valid on t.timestamp() fields, got "${this._def.type}"`,
+        ),
+        { code: "auto_now_on_non_timestamp" as const },
+      );
+    }
+    this._def.timestampAuto = "now_on_update";
+    return this;
   }
 }
 
@@ -1659,6 +1838,69 @@ export const t = {
    * }
    * ```
    */
+  /**
+   * **P7 PR 1** — typed_id field. At the JS layer the field is exchanged
+   * as a string carrying the UUIDv7 + base62 + optional entity prefix
+   * (e.g. `"post_01HXYZ..."`). At the DB layer it's a TEXT column.
+   *
+   * The optional `prefix` argument names the entity tag the SDK
+   * auto-mint pass (PR 3) will pass to `typed_id::new(prefix)` on
+   * inserts that omit `id`. Omitting `prefix` defers the choice to
+   * PR 3 (default-to-collection-name).
+   *
+   * Wire shape: `{ type: "id", idPrefix?: string }`. The `type: "id"`
+   * discriminator is the signal the PR 3 auto-populate pass uses to
+   * find the auto-mint candidate without keying on the literal name
+   * `"id"` — so a model could in principle have a non-`id`-named
+   * primary key (though §2.1 of the proposal pins the seven names).
+   *
+   * PR 1 ships the builder + wire discriminator only. Auto-mint
+   * behaviour lands in PR 3; CREATE TABLE emission lands in PR 2.
+   */
+  id(prefix?: string): TypeBuilder<string> {
+    if (prefix !== undefined) {
+      if (typeof prefix !== "string" || prefix.length === 0) {
+        throw Object.assign(
+          new Error("t.id(prefix): prefix must be a non-empty string"),
+          { code: "id_invalid_prefix" as const },
+        );
+      }
+      if (!/^[a-z][a-z0-9_]*$/.test(prefix)) {
+        throw Object.assign(
+          new Error(
+            `t.id(prefix): prefix must match /^[a-z][a-z0-9_]*$/ (got "${prefix}")`,
+          ),
+          { code: "id_invalid_prefix" as const },
+        );
+      }
+    }
+    const def: FieldDef = { type: "id" };
+    if (prefix !== undefined) def.idPrefix = prefix;
+    return new TypeBuilder<string>(def);
+  },
+  /**
+   * **P7 PR 1** — actor field. Stores a typed_id at the DB layer
+   * (TEXT) sourced from the current request's `SessionMinter.actor_id`
+   * (P3). Used for `created_by` / `updated_by` system fields, and
+   * available to creators who want their own actor-tracking columns
+   * (e.g. `last_edited_by`).
+   *
+   * Nullable by convention (matches Q-SF-I in the proposal: explicit
+   * `.nullable()` is the canonical declaration form, but the default
+   * is nullable because system-initiated writes have no actor). The
+   * default is captured by `actorNullable = true` so the wire shape
+   * is unambiguous regardless of whether `.nullable()` was chained.
+   *
+   * PR 1 ships the builder + wire discriminator only. PR 3 wires the
+   * INSERT auto-populate from `SessionMinter.actor_id`; PR 4 wires
+   * the UPDATE-time bump.
+   */
+  actor(): TypeBuilder<string | null> {
+    // Default-nullable: written explicitly so the wire shape is
+    // unambiguous. `.nullable()` is a no-op (already true) for the
+    // explicit form callers may prefer.
+    return new TypeBuilder<string | null>({ type: "actor", actorNullable: true });
+  },
   union<V extends readonly TypeBuilder<any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
     if (variants.length < 2) {
       throw Object.assign(

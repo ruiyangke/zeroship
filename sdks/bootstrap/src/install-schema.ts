@@ -64,10 +64,38 @@ type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean>>;
 type SchemaInputOrUnion = SchemaFieldRecord | TypeBuilder<unknown, boolean>;
 
 /**
+ * **P7 PR 1** — SDK-side mirror of the Rust-side `SYSTEM_FIELD_NAMES`
+ * constant (`crates/plugin-db/src/query.rs`). The seven names are
+ * platform-managed system fields; creator schemas cannot declare
+ * fields with these names. Fences at schema-declaration time so the
+ * failure shows up immediately in `pnpm dev` (not at the first DB
+ * call), matching the spec's "throw at app-boot time" requirement.
+ *
+ * Drift between this list and the Rust constant would let creators
+ * declare a field the SDK accepts but the runtime refuses (or vice-
+ * versa); both lists MUST be updated together.
+ */
+const SYSTEM_FIELD_NAMES: readonly string[] = Object.freeze([
+  "id",
+  "created_at",
+  "updated_at",
+  "created_by",
+  "updated_by",
+  "version",
+  "deleted_at",
+]);
+
+/**
  * Converts a SchemaInput into a NormalizedSchema. Every field value
  * must be a `TypeBuilder` produced by the `t.*` API (or the whole
  * input may be a single top-level `t.union(...)` — proposal §C2).
  * Any other shape throws.
+ *
+ * **P7 PR 1** — refuses any field whose name collides with a
+ * platform system field. The Rust-side `field_to_column` would also
+ * refuse such schemas at register-model time; throwing here lets
+ * `pnpm dev` surface the error immediately on first build instead
+ * of waiting for the worker round-trip.
  */
 export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
   // C2 — top-level discriminated union.
@@ -86,6 +114,23 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
   const result: NormalizedSchema = {};
 
   for (const [key, rawVal] of Object.entries(input)) {
+    // **P7 PR 1** — refuse creator-declared fields whose names collide
+    // with the seven platform system fields. The Rust-side validator
+    // (`validate_field_name_for_declaration`) enforces the same fence
+    // at register-model; the SDK-side check surfaces the error at
+    // `pnpm dev` build time so creators don't wait for a worker
+    // round-trip. Error code mirrors the Rust-side
+    // `reserved_system_field_name`.
+    if (SYSTEM_FIELD_NAMES.includes(key)) {
+      throw Object.assign(
+        new Error(
+          `Field name "${key}" is reserved for platform system fields. ` +
+            `System fields (${SYSTEM_FIELD_NAMES.join(", ")}) are managed by ` +
+            `the platform and cannot be overridden.`,
+        ),
+        { code: "reserved_system_field_name" as const },
+      );
+    }
     if (!(rawVal instanceof TypeBuilder)) {
       throw Object.assign(
         new Error(

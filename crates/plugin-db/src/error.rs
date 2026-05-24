@@ -511,15 +511,30 @@ impl From<compio_postgres::Error> for DbError {
 impl From<crate::query::QueryError> for DbError {
     fn from(e: crate::query::QueryError) -> Self {
         use crate::query::QueryError;
-        let (code, msg) = match e {
-            QueryError::InvalidFilter(m) => ("invalid_filter", m),
-            QueryError::InvalidCollection(m) => ("invalid_collection", m),
-            QueryError::InvalidIdent(m) => ("invalid_identifier", m),
+        // **P7 PR 1** — `ReservedSystemFieldName` carries a fixed hint
+        // listing the seven system fields so SDK consumers see the same
+        // remediation message Rust prints in test failures. The other
+        // three variants carry no hint (builder errors are deterministic
+        // identifier shape complaints — the message is self-explanatory).
+        let (code, msg, hint) = match e {
+            QueryError::InvalidFilter(m) => ("invalid_filter", m, None),
+            QueryError::InvalidCollection(m) => ("invalid_collection", m, None),
+            QueryError::InvalidIdent(m) => ("invalid_identifier", m, None),
+            QueryError::ReservedSystemFieldName(m) => (
+                "reserved_system_field_name",
+                m,
+                Some(
+                    "System fields (id, created_at, updated_at, created_by, \
+                     updated_by, version, deleted_at) are managed by the \
+                     platform and cannot be overridden."
+                        .to_string(),
+                ),
+            ),
         };
         DbError::ValidationFailed {
             code,
             message: msg,
-            hint: None,
+            hint,
         }
     }
 }
@@ -884,9 +899,14 @@ mod tests {
         }
     }
 
-    /// `From<QueryError>` collapses the builder's three error kinds
+    /// `From<QueryError>` collapses the builder's four error kinds
     /// onto a `ValidationFailed` with a stable static code the SDK
     /// branches on. Each kind must map to a distinct code.
+    ///
+    /// **P7 PR 1** — the three legacy kinds carry no hint; the new
+    /// `ReservedSystemFieldName` variant carries a fixed hint listing
+    /// all seven system fields (covered separately by
+    /// `from_query_error_reserved_system_field_carries_hint`).
     #[test]
     fn from_query_error_assigns_distinct_codes() {
         let cases = [
@@ -912,6 +932,38 @@ mod tests {
                 }
                 other => panic!("expected ValidationFailed, got {other:?}"),
             }
+        }
+    }
+
+    /// **P7 PR 1** — `ReservedSystemFieldName` maps to a distinct
+    /// `reserved_system_field_name` code and carries a hint enumerating
+    /// the seven system fields.
+    #[test]
+    fn from_query_error_reserved_system_field_carries_hint() {
+        let qe = crate::query::QueryError::ReservedSystemFieldName(
+            "Field name 'id' is reserved".into(),
+        );
+        let db = DbError::from(qe);
+        match db {
+            DbError::ValidationFailed { code, hint, .. } => {
+                assert_eq!(code, "reserved_system_field_name");
+                let hint = hint.expect("reserved-system-field error must carry a hint");
+                for name in [
+                    "id",
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "updated_by",
+                    "version",
+                    "deleted_at",
+                ] {
+                    assert!(
+                        hint.contains(name),
+                        "hint must list system field {name:?}; got: {hint}"
+                    );
+                }
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
         }
     }
 }
