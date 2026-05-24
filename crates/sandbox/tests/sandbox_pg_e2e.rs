@@ -3689,7 +3689,13 @@ mod wake_jobs_crud {
         db.run_pending_migrations().await.unwrap();
 
         let row = sample_row("wak_test_round_trip", "sbx_test_rt_sandbox", "hst_test_owner");
-        db.insert_wake_job(&row).await.expect("insert");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.expect("insert"),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
 
         let loaded = db
             .get_wake_job("wak_test_round_trip")
@@ -3733,7 +3739,13 @@ mod wake_jobs_crud {
 
         // Happy path: pending → restoring → ok.
         let happy = sample_row("wak_happy", "sbx_happy", "hst_owner_a");
-        db.insert_wake_job(&happy).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&happy).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
         let after_insert = db
             .get_wake_job("wak_happy")
             .await
@@ -3782,7 +3794,13 @@ mod wake_jobs_crud {
 
         // Fail path: separate row, pending → failed with code + message.
         let bad = sample_row("wak_bad", "sbx_bad", "hst_owner_b");
-        db.insert_wake_job(&bad).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&bad).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
         let n = db
             .update_wake_job_state(
                 "wak_bad",
@@ -3835,7 +3853,13 @@ mod wake_jobs_crud {
 
         // Insert a pending row → find returns it.
         let row = sample_row("wak_idemp_first", sid, "hst_owner_a");
-        db.insert_wake_job(&row).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
         let found = db
             .find_pending_wake_for_sandbox(sid)
             .await
@@ -3862,7 +3886,13 @@ mod wake_jobs_crud {
 
         // Failed is also terminal.
         let row2 = sample_row("wak_idemp_second", sid, "hst_owner_a");
-        db.insert_wake_job(&row2).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&row2).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert after terminal must return Inserted"
+        );
         db.update_wake_job_state(
             "wak_idemp_second",
             WakeJobState::Failed,
@@ -3894,7 +3924,13 @@ mod wake_jobs_crud {
             ("wak_gc_pending", "sbx_gc_c"),
         ] {
             let row = sample_row(id, sid, "hst_gc_owner");
-            db.insert_wake_job(&row).await.unwrap();
+            assert!(
+                matches!(
+                    db.insert_wake_job(&row).await.unwrap(),
+                    InsertWakeJobOutcome::Inserted
+                ),
+                "fresh insert must return Inserted"
+            );
         }
         db.update_wake_job_state(
             "wak_gc_ok",
@@ -3957,7 +3993,13 @@ mod wake_jobs_crud {
         db.run_pending_migrations().await.unwrap();
 
         let row = sample_row("wak_lessee_bump", "sbx_lb", "hst_lb_owner");
-        db.insert_wake_job(&row).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
         let after_insert = db
             .get_wake_job("wak_lessee_bump")
             .await
@@ -4055,7 +4097,13 @@ mod wake_jobs_crud {
         db.run_pending_migrations().await.unwrap();
 
         let row = sample_row("wak_preserve", "sbx_preserve", "hst_p_owner");
-        db.insert_wake_job(&row).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
 
         // First transition: record full failure metadata (code +
         // message + leave agent_url as None — it was never set).
@@ -4160,7 +4208,13 @@ mod wake_jobs_crud {
         db.run_pending_migrations().await.unwrap();
 
         let row = sample_row("wak_url_check", "sbx_url_check", "hst_url");
-        db.insert_wake_job(&row).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
 
         // http://...:port → OK
         db.update_wake_job_state(
@@ -4620,7 +4674,7 @@ mod wake_machine_e2e {
     use super::*;
     use std::sync::Arc as StdArc;
     use std::time::Duration as StdDuration;
-    use zeroship_sandbox::db::{WakeErrorCode, WakeJobRow, WakeJobState};
+    use zeroship_sandbox::db::{InsertWakeJobOutcome, WakeErrorCode, WakeJobRow, WakeJobState};
     use zeroship_sandbox::restore_handler::{RestoreBackend, StubRestoreBackend};
     use zeroship_sandbox::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
     use zeroship_sandbox::wake_machine::WakeMachine;
@@ -4671,7 +4725,15 @@ mod wake_machine_e2e {
             lessee: lessee.clone(),
             lessee_updated_at_secs: 0,
         };
-        db.insert_wake_job(&row).await.unwrap();
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "make_machine: fresh wake_id insert must return Inserted; \
+             a Replay here means a stale non-terminal row leaked from a prior test \
+             and the machine would drive the wrong wake_id"
+        );
         let machine = WakeMachine {
             database: StdArc::clone(&db),
             backend,
