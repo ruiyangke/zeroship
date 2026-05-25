@@ -171,9 +171,11 @@ export class InvalidOperationError extends Error {
  * message alone, dropping `.code` along the way; this passes the original
  * Error through unchanged whenever it already carries a string `.code`.
  *
- * Back-compat fallback — for bare strings or Errors with no `.code`, the
- * legacy substring match on "unique"/"duplicate" still tags MongoDB code
- * 11000 so existing callers branching on numeric code keep working.
+ * Fallback behaviour — for bare strings or Errors with no structured
+ * `.code`, preserve the original Error when possible and otherwise wrap
+ * the message in a plain `Error`. The SDK does not mint synthetic DB-
+ * specific codes; native uniqueness violations already arrive as the
+ * coded string `unique_violation`.
  */
 export function mapNativeError(e: unknown): Error {
   // Already a coded Error from the native layer — pass through. Subtypes
@@ -183,12 +185,6 @@ export function mapNativeError(e: unknown): Error {
     return e;
   }
   const msg = e instanceof Error ? e.message : String(e);
-  const lower = msg.toLowerCase();
-  if (lower.includes("unique") || lower.includes("duplicate")) {
-    const err = new Error(msg, { cause: e instanceof Error ? e : undefined }) as Error & { code: number };
-    err.code = 11000;
-    return err;
-  }
   if (e instanceof Error) return e;
   return new Error(msg);
 }

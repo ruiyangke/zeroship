@@ -880,23 +880,11 @@ Errors have a `.code` string property:
 | `migration_not_cancellable`  | Audit row is already in a terminal state.                   |
 | `no_active_migration`        | Internal — `commitBatch`/`fetchBatch` outside of a run.     |
 
-## Reactive subscriptions
-
-```ts
-import { env } from "zeroship";
-
-const sub = env.db.messages.openSubscription();
-for await (const ev of sub) {
-  // ev.kind === "change" | "resync" | "closed"
-  if (ev.kind === "change") console.log(ev.op, ev.pk, ev.columns);
-}
-```
-
-Calling `openSubscription` is synchronous — it merely registers a slot
-in the per-isolate broker. The wrapper's GC finalizer releases the slot
-as a safety net; explicit `sub.close()` is preferred.
-
 ## Live queries (`db.live`)
+
+`db.live(queryFn)` is the creator-facing reactive API. The lower-level
+broker subscription primitive exists for framework-internal consumers;
+app code should use `db.live(...)`, not `openSubscription()`.
 
 `db.live(queryFn)` wraps the raw subscription stream into a
 query-shaped reactive primitive: it runs the `queryFn` once, yields the
@@ -949,7 +937,7 @@ Errors carry a `.code` property where applicable:
 | `error.code`                | When                                                |
 |-----------------------------|-----------------------------------------------------|
 | `ValidationError`           | Input fails schema validation.                      |
-| `11000`                     | Duplicate unique-key violation.                     |
+| `unique_violation`          | Duplicate unique-key violation.                     |
 | `OptimisticLockError`       | `update` with a CAS version that didn't match.     |
 | `migration_*` (see above)   | Migration lifecycle errors.                         |
 | `invalid_k`, `vector_extension_missing`, `postgis_extension_missing`, `vector_dimension_mismatch`, `polygon_ops_pg_only` | Vector / FTS / geo paths — see [Vector / Full-Text / Geo § Error codes](#error-codes). |
@@ -974,8 +962,6 @@ Rust DbPlugin. App code rarely needs it; SDK packages use it directly.
 - `env.db.transaction(fn, opts?)` → native transaction orchestrator
   (begin/commit/rollback/nested-savepoint owned in Rust; throw to abort,
   resolve to commit — see [Transactions](#transactions))
-- `env.db.<collection>.openSubscription()` → `Subscription` wrapper
-  (the internal pull-loop behind `env.db.live`)
 
 **Platform-internal — NOT on `env.db` (P9 §8 `__platform` capability gate):**
 

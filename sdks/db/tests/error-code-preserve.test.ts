@@ -5,8 +5,8 @@
  * `.code` (e.g. `"migration_already_running"`, `"unique_violation"`).
  * Earlier the SDK's `_run → catch → toResultError → mapNativeError(msg)`
  * path rebuilt the Error from the message alone, dropping `.code`. These
- * tests cover the four reachable call sites — insert, update, query (find),
- * and the back-compat unique/duplicate substring tagger.
+ * tests cover the reachable call sites — insert, update, query (find),
+ * plus the fallback for uncoded inputs.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -65,14 +65,16 @@ describe("native error .code preservation", () => {
     assert.equal(error?.message, "permission denied");
   });
 
-  test("back-compat: bare string with 'unique' substring still gets code 11000", () => {
+  test("bare string fallback becomes a plain Error with no synthetic code", () => {
     const out = mapNativeError("violated unique constraint x_email_idx");
-    assert.equal((out as Error & { code?: number }).code, 11000);
+    assert.equal(out.message, "violated unique constraint x_email_idx");
+    assert.equal(typeof (out as Error & { code?: unknown }).code, "undefined");
   });
 
-  test("back-compat: Error without .code with 'duplicate' substring still gets 11000", () => {
-    const out = mapNativeError(new Error("duplicate key value"));
-    assert.equal((out as Error & { code?: number }).code, 11000);
+  test("uncoded Error fallback preserves identity", () => {
+    const original = new Error("duplicate key value");
+    const out = mapNativeError(original);
+    assert.strictEqual(out, original);
   });
 
   test("pass-through: Error with .code is returned unchanged (same identity)", () => {

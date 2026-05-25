@@ -17,7 +17,8 @@
 // Wire conventions match the existing examples (hono-demo etc.):
 //   exports become RPC procedures at /_zs/v1/<name>.
 
-import { t, schema, type InferRowInput, subscribe } from "@zeroship/db";
+import { t, schema, type InferRowInput } from "@zeroship/db";
+import { subscribe } from "@zeroship/db/internal";
 import { env } from "zeroship";
 import { query, mutation, action, runQuery, stream } from "@zeroship/server";
 
@@ -154,11 +155,9 @@ export const listTodosWithUser = query(
 
 // ---------------------------------------------------------------------------
 // Subscriptions — long-lived streams; capability maps to action (no auto-tx).
-// The handler yields a SubscriptionEvent on every change to the "todos"
-// collection. Clients open `/_zs/v1/subscribeTodos` as an SSE stream;
-// the platform encodes each yielded value as `2:[value]\n` (AI-SDK object
-// lane). The stream terminates when the client closes or a "closed" event
-// arrives from the broker.
+// This example intentionally bridges the framework-internal broker stream
+// into an RPC SSE feed. Creator-facing reactive reads should prefer
+// `db.live(...)`; the low-level `subscribe()` primitive stays internal.
 // ---------------------------------------------------------------------------
 
 export const subscribeTodos = stream(

@@ -121,10 +121,10 @@ export type NormalizedSchema = Record<string, FieldDef>;
 
 /** Input form: a record of TypeBuilder instances. Field values must be
  *  produced by the `t.*` API (`t.string()`, `t.number()`, etc.). */
-type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean>>;
+type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean, any, any>>;
 
 /** Accepts either a record of fields OR a top-level union TypeBuilder. */
-type SchemaInputOrUnion = SchemaFieldRecord | TypeBuilder<unknown, boolean>;
+type SchemaInputOrUnion = SchemaFieldRecord | TypeBuilder<unknown, boolean, any, any>;
 
 /**
  * **P7 PR 1** — SDK-side mirror of the Rust-side `SYSTEM_FIELD_NAMES`
@@ -559,7 +559,7 @@ function topoSortByRefs(schemas: Record<string, unknown>): string[] {
 export type SchemaInput =
   | Record<string, unknown>
   | SchemaBuilder<Record<string, unknown>>
-  | TypeBuilder<unknown, any>;
+  | TypeBuilder<unknown, any, any, any>;
 
 /**
  * Schema-shape validator. When a user writes `{ name: "string" }`
@@ -568,13 +568,13 @@ export type SchemaInput =
  * validator walks each collection's field map and emits a
  * string-literal error type at the offending field.
  */
-type IsValidSchemaField<F> = F extends TypeBuilder<unknown, boolean> ? true : false;
+type IsValidSchemaField<F> = F extends TypeBuilder<unknown, boolean, any, any> ? true : false;
 
 export type ValidateSchemaShape<T> = {
   [K in keyof T]:
     T[K] extends SchemaBuilder<Record<string, unknown>>
       ? T[K]
-      : T[K] extends TypeBuilder<unknown, boolean>
+      : T[K] extends TypeBuilder<unknown, boolean, any, any>
         ? T[K]
         : T[K] extends Record<string, unknown>
           ? {
@@ -654,7 +654,7 @@ export interface TransactionOptions {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UnwrapSchema<T> =
   T extends SchemaBuilder<infer S> ? S :
-  T extends TypeBuilder<infer U, any> ? U :
+  T extends TypeBuilder<infer U, any, any, any> ? U :
   T;
 
 export type Collections<T extends Record<string, SchemaInput>> = {

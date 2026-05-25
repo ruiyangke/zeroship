@@ -20,6 +20,8 @@ export type { NativeDb, NativeCollection } from "./collection.js";
 export { Query } from "./query.js";
 export { createLive } from "./live.js";
 export type { LiveOptions, LiveQuery } from "./live.js";
+export { subscribe } from "./subscribe.js";
+export type { Subscription, SubscriptionEvent } from "./subscribe.js";
 export { naming, SchemaBuilder, TypeBuilder, ok, err } from "./types.js";
 export type {
   NamingStrategy,

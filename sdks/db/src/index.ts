@@ -17,8 +17,6 @@ export { defineMaskPolicy } from "./policy.js";
 export type { MaskPolicy } from "./policy.js";
 
 // C1 / P8a — reactive queries (in-process broker)
-export { subscribe } from "./subscribe.js";
-export type { Subscription, SubscriptionEvent } from "./subscribe.js";
 export type { LiveQuery, LiveOptions } from "./live.js";
 
 // Types — `Db`, `TxCollection`, `TxQuery`, `Collections`, `DbExtensions`,

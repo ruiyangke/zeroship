@@ -46,7 +46,13 @@ export function mapDocOutbound(doc: PlainObject, toColumn: (s: string) => string
 // Filter mapping (user → native)
 // ---------------------------------------------------------------------------
 
-/** @internal Convert JS field names in filter to column names. Recurses into $and/$or/$not. */
+/**
+ * @internal Convert JS field names in filter to column names. Recurses
+ * into `$and` / `$or` / `$not`.
+ *
+ * Operator objects are intentionally passed through unchanged; the
+ * native query builder validates + lowers `$like` / `$ilike` / `$search`.
+ */
 export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string) => string, depth = 0): ZeroshipDbFilter {
   if (depth > 20) {
     throw Object.assign(
