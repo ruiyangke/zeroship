@@ -86,6 +86,7 @@ export const listTodos = query(
     if (error) throw error;
     return data ?? [];
   },
+  { id: "listTodos" },
 );
 
 // Paginated variant — returns { page, continueCursor, isDone }. Pass back
@@ -109,6 +110,7 @@ export const listTodosPage = query(
     if (error) throw error;
     return data;
   },
+  { id: "listTodosPage" },
 );
 
 export const getTodo = query(
@@ -117,6 +119,7 @@ export const getTodo = query(
     if (error) throw error;
     return data;
   },
+  { id: "getTodo" },
 );
 
 export const todoCount = query(
@@ -125,6 +128,7 @@ export const todoCount = query(
     if (error) throw error;
     return data ?? 0;
   },
+  { id: "todoCount" },
 );
 
 // Smoke for the per-collection DataLoader: two `db.users.get(id)` calls
@@ -138,6 +142,7 @@ export const getUserPair = query(
     if (b.error) throw b.error;
     return { a: a.data, b: b.data };
   },
+  { id: "getUserPair" },
 );
 
 // Smoke for relation-aware reads: `find({}, { with: { userId: true } })`
@@ -152,6 +157,7 @@ export const listTodosWithUser = query(
     if (error) throw error;
     return data ?? [];
   },
+  { id: "listTodosWithUser" },
 );
 
 // ---------------------------------------------------------------------------
@@ -169,6 +175,7 @@ export const subscribeTodos = stream(
       yield event;
     }
   },
+  { id: "subscribeTodos" },
 );
 
 // ---------------------------------------------------------------------------
@@ -194,6 +201,7 @@ export const createTodo = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "createTodo" },
 );
 
 export const completeTodo = mutation(
@@ -202,6 +210,7 @@ export const completeTodo = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "completeTodo" },
 );
 
 export const archiveTodo = mutation(
@@ -210,6 +219,7 @@ export const archiveTodo = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "archiveTodo" },
 );
 
 export const deleteTodo = mutation(
@@ -218,6 +228,7 @@ export const deleteTodo = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "deleteTodo" },
 );
 
 // ---------------------------------------------------------------------------
@@ -243,6 +254,7 @@ export const shareToWebhook = action(
     });
     return { status: resp.status, ok: resp.ok };
   },
+  { id: "shareToWebhook" },
 );
 
 // Seed helper — used by smoke.sh to provision users.
@@ -254,6 +266,7 @@ export const seedUser = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "seedUser" },
 );
 
 // Shared "public ledger" user — every client writes into ONE list so the
@@ -281,6 +294,7 @@ export const publicUser = mutation(
     }
     return created.data;
   },
+  { id: "publicUser" },
 );
 
 // ---------------------------------------------------------------------------
