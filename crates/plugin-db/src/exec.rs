@@ -39,6 +39,36 @@ use crate::error::DbError;
 use crate::query::BuiltQuery;
 use crate::v8_bridge::rows_to_json_value;
 
+fn sqlite_shared_crud_unavailable() -> DbError {
+    DbError::Configuration {
+        code: "backend_unsupported",
+        message: "generic CRUD is not wired for the SQLite backend yet".to_string(),
+        hint: Some(
+            "SQLite generic CRUD/read parity lands in parity PR 3; backend installability lands in PR 1."
+                .to_string(),
+        ),
+    }
+}
+
+async fn ensure_postgres_pool_for_shared_sql() -> Result<Rc<compio_postgres::Pool>, DbError> {
+    if context::with(|c| c.backend().is_none()) {
+        crate::init_pool_async()
+            .await
+            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
+    }
+
+    if matches!(
+        context::with(|c| c.backend()),
+        Some(crate::backend::BackendHandle::Sqlite(_))
+    ) {
+        return Err(sqlite_shared_crud_unavailable());
+    }
+
+    context::with(|c| c.pool()).ok_or_else(|| {
+        DbError::config("not_configured", "db: pool not initialized".to_string())
+    })
+}
+
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
 pub(crate) async fn run_sql(
     sql: &str,
@@ -56,17 +86,10 @@ pub(crate) async fn run_sql(
         return result.map_err(|e| DbError::from_pg(&e));
     }
 
-    // No transaction — use pool
-    let has_pool = context::with(|c| c.pool_initialised());
-    if !has_pool {
-        crate::init_pool_async()
-            .await
-            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
-    }
-    let pool = context::with(|c| c.pool());
-    let pool = pool.ok_or_else(|| {
-        DbError::config("not_configured", "db: pool not initialized".to_string())
-    })?;
+    // No transaction — use pool. On the SQLite arm the shared CRUD
+    // row-returning path is not wired yet; surface a typed error
+    // instead of falling through to a misleading `pool not initialized`.
+    let pool = ensure_postgres_pool_for_shared_sql().await?;
     pool.query_text_params(sql, params)
         .await
         .map_err(|e| DbError::from_pg(&e))
@@ -310,16 +333,7 @@ pub(crate) fn clear_pending_emits() {
 /// connect + warm-up); subsequent calls clone the `Rc<Pool>` out of
 /// the per-thread cell.
 pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> {
-    let has_pool = context::with(|c| c.pool_initialised());
-    if !has_pool {
-        crate::init_pool_async()
-            .await
-            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
-    }
-    context::with(|c| c.pool())
-        .ok_or_else(|| {
-            DbError::config("not_configured", "db: pool not initialized".to_string())
-        })
+    ensure_postgres_pool_for_shared_sql().await
 }
 
 /// **Test-only**: end-to-end wrapper around [`exec_mutation_with_emit`]

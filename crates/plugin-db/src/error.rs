@@ -525,11 +525,9 @@ impl DbError {
     pub(crate) fn backend_unsupported(op: &str) -> Self {
         DbError::Configuration {
             code: "backend_unsupported",
-            message: format!(
-                "`{op}` requires the Postgres backend (SQLite arm lands in P1)"
-            ),
+            message: format!("`{op}` is not supported by the active database backend"),
             hint: Some(
-                "backend is single-arm PG in P0; SQLite arm re-introduced atomically in P1"
+                "SQLite↔Postgres parity is still being wired; some operations remain backend-specific."
                     .to_string(),
             ),
         }

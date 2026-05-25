@@ -27,6 +27,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -210,6 +211,50 @@ impl SqliteBackend {
         &self.db_dir
     }
 
+    /// Production constructor used by the runtime URL-scheme
+    /// dispatcher.
+    ///
+    /// `path` names the control database file for the backend. Per-app
+    /// files still live beside it as `zs-<app_id>.sqlite` and are
+    /// ATTACHed lazily by `ensure_app_schema`.
+    ///
+    /// If `path` points at an existing directory we place the control
+    /// session at `<dir>/zs-control.sqlite`. `:memory:` opens the
+    /// control session in SQLite's in-memory mode and uses a unique
+    /// temp directory as the parent for the per-app ATTACH files.
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        let path = path.as_ref();
+        let (db_dir, session_path) = if path == Path::new(":memory:") {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let db_dir = std::env::temp_dir()
+                .join(format!("zeroship-sqlite-memory-{}-{nonce}", std::process::id()));
+            (db_dir, PathBuf::from(":memory:"))
+        } else if path.is_dir() {
+            let db_dir = path.to_path_buf();
+            let session_path = db_dir.join("zs-control.sqlite");
+            (db_dir, session_path)
+        } else {
+            let session_path = path.to_path_buf();
+            let db_dir = session_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            (db_dir, session_path)
+        };
+
+        std::fs::create_dir_all(&db_dir).map_err(|e| {
+            DbError::internal(format!(
+                "SqliteBackend::open: failed to create SQLite directory {}: {e}",
+                db_dir.display()
+            ))
+        })?;
+
+        Self::open_with_session_path(db_dir, session_path)
+    }
+
     /// **Test helper** (P2 PR 4) — open a [`crate::backend::BrokerPauseGuard`]
     /// for `app_id`. While the returned guard is bound, the SQLite CDC
     /// publisher drops every packet whose `app_id` matches; on drop
@@ -249,6 +294,11 @@ impl SqliteBackend {
 
     #[allow(dead_code)]
     pub fn new(db_dir: PathBuf) -> Result<Self, DbError> {
+        let session_path = db_dir.join("zs-control.sqlite");
+        Self::open_with_session_path(db_dir, session_path)
+    }
+
+    fn open_with_session_path(db_dir: PathBuf, session_path: PathBuf) -> Result<Self, DbError> {
         // CDC packet channel — worker thread (producer, via commit
         // hook) → compio publisher task (consumer, calls
         // broker::publish on this thread).
@@ -259,7 +309,6 @@ impl SqliteBackend {
         // `app_id` argument is currently unused inside the dispatcher
         // (per-event app_id derives from the hook's `db_name`
         // parameter — see `cdc::install` rustdoc), so we pass `None`.
-        let session_path = db_dir.join("zs-control.sqlite");
         let session = Rc::new(SqliteSession::open(
             &session_path,
             None,
