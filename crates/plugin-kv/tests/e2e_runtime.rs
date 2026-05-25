@@ -358,3 +358,41 @@ fn e2e_dragonfly() {
     let (status, body) = run_e2e(Arc::new(backend));
     assert_ok(status, &body);
 }
+
+// ---------------------------------------------------------------------------
+// Dragonfly CLUSTER (live 3-node) — runs only when DRAGONFLY_CLUSTER_SEEDS is
+// set (comma-joined seed URLs, e.g.
+// redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002).
+// Skips (does not fail) when unset.
+//
+// This is the ONLY end-to-end coverage of the cluster code path through the
+// real runtime: hash-tag scoping keeps an app's keys in one slot, the `incr`
+// Lua EVAL routes to the right node, SCAN-based `list` routes correctly, and
+// SET NX / pexpire / pttl / persist all work through the cluster client. The
+// JS app + assertions are reused verbatim from `run_e2e`.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "redis")]
+#[test]
+fn e2e_dragonfly_cluster() {
+    let Ok(seeds) = std::env::var("DRAGONFLY_CLUSTER_SEEDS") else {
+        eprintln!(
+            "e2e_dragonfly_cluster: DRAGONFLY_CLUSTER_SEEDS unset — skipping live-cluster \
+             test. Set e.g. DRAGONFLY_CLUSTER_SEEDS=\
+             redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002 to run it."
+        );
+        return;
+    };
+    // Build the plugin-kv cluster URL exactly like
+    // redis_backend.rs::cluster_url(): base URL = first seed, plus
+    // ?cluster=true&seeds=<comma-joined seeds>.
+    let first = seeds.split(',').next().map(str::trim).unwrap_or("").to_string();
+    if first.is_empty() {
+        eprintln!("e2e_dragonfly_cluster: DRAGONFLY_CLUSTER_SEEDS empty — skipping.");
+        return;
+    }
+    let cluster_url = format!("{first}?cluster=true&seeds={seeds}");
+    let backend = Redis::new(cluster_url);
+    let (status, body) = run_e2e(Arc::new(backend));
+    assert_ok(status, &body);
+}
