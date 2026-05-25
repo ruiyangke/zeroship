@@ -54,7 +54,7 @@ fi
 echo "  seeded general=$GENERAL_ID random=$RANDOM_ID author=$AUTHOR_ID"
 
 # ---------------------------------------------------------------------------
-# Check 1: sendMessage to general (mutation auto-tx)
+# Check 1: sendMessage to general (mutation capability)
 # ---------------------------------------------------------------------------
 
 echo "[check 1] sendMessage — mutation in SERIALIZABLE tx"

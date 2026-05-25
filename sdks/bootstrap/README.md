@@ -23,7 +23,7 @@ lockstep.
   wrappers on `env.db`. Helpers: `model()`, `validateRefTargets()`,
   `topoSortByRefs()`, `normalizeSchema()`.
 - `dispatcher.ts` — `__zsDispatch(rpcDict, name, input, ctx)`. Owns
-  input parse / capability frame / auto-tx / stream framing / dev-only
+  input parse / capability frame / stream framing / dev-only
   output validation. Same logic for dev and prod.
 - `normalize.ts` — `normalizeUserModule(mod) → { schema, fetch, rpc }`.
   Turns a user module namespace into the standard ZS shape.

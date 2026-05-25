@@ -14,7 +14,7 @@
 //!    [`v8::PromiseResolver`] and returns its promise to JS immediately.
 //! 2. It reads the per-isolate tx state ([`crate::context`]) to decide
 //!    whether this is a **top-level** transaction (no tx active → emit
-//!    `BEGIN`) or a **nested** one (a tx — auto-tx or explicit — already
+//!    `BEGIN`) or a **nested** one (an explicit transaction already
 //!    holds the `tx_conn` slot → emit `SAVEPOINT zs_sp_<N>`). Nesting
 //!    beyond [`MAX_SAVEPOINT_DEPTH`] rejects with `savepoint_depth_exceeded`.
 //! 3. A spawned op runs the `BEGIN` / `SAVEPOINT` SQL against the pinned
@@ -60,10 +60,6 @@
 //! the SDK isolation-level hint (it has no `ISOLATION LEVEL` clause);
 //! the successful-path semantics remain Tier-1 parity, while
 //! concurrency/isolation nuance stays documented as a divergence.
-//!
-//! The sibling [`auto_tx`] module hosts the runtime-installed
-//! `__zsBeginAutoTx` / `__zsEndAutoTx` wrappers. Both surfaces share the
-//! same backend/client helpers in this module.
 
 #![allow(unsafe_code)]
 
@@ -76,8 +72,6 @@ use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 use crate::v8_bridge::runtime_state;
-
-pub mod auto_tx;
 
 /// Maximum nesting depth for `env.db.transaction(...)` calls — the
 /// outermost `BEGIN` plus this many `SAVEPOINT` levels. A `transaction()`
@@ -136,9 +130,6 @@ pub(crate) async fn client_exec_on_tx(
 /// call this — they stay on the platform role (the only connection
 /// crossing the per-app trust boundary).
 ///
-/// Shared by [`transaction_dispatch`] and [`auto_tx::exec_auto_begin`]
-/// so the role-application happens at exactly one logical site per tx
-/// flavour.
 pub(crate) async fn apply_per_app_role(
     client: &compio_postgres::Client,
     app_id: &str,
@@ -218,9 +209,9 @@ pub fn transaction_dispatch<'s>(
     let user_fn_global = v8::Global::new(scope, user_fn);
 
     // Decide BEGIN vs SAVEPOINT from the *current* tx state. `has_tx()`
-    // is true whenever any tx holds the slot — auto-tx (query/mutation
-    // wrapper) or an enclosing explicit `transaction()`. A nested call
-    // therefore emits `SAVEPOINT` and reuses the open connection.
+    // is true whenever an enclosing explicit `transaction()` holds the
+    // slot. A nested call therefore emits `SAVEPOINT` and reuses the open
+    // connection.
     let nested = crate::context::with(|c| c.has_tx());
 
     // Savepoint-depth cap: refuse the (MAX+1)-th level up front, before
@@ -433,8 +424,8 @@ fn savepoint_name(depth: u32) -> String {
     format!("zs_sp_{depth}")
 }
 
-/// Guard for a top-level tx settle / auto-tx end that has drained the
-/// client out of the slot and now owes a terminal COMMIT/ROLLBACK.
+/// Guard for a top-level tx settle that has drained the client out of the
+/// slot and now owes a terminal COMMIT/ROLLBACK.
 ///
 /// On cancellation, Postgres is safe to clean up by dropping the owned
 /// client (session ends, tx aborts). SQLite needs an explicit best-
@@ -941,7 +932,6 @@ mod tests {
         fn drop(&mut self) {
             crate::context::with_mut(|c| {
                 let _ = c.take_tx_client();
-                c.set_auto_tx_owned(false);
                 c.reset_savepoint_depth();
                 c.clear_pending_emits();
                 c.clear_pool();
@@ -957,7 +947,6 @@ mod tests {
         let reset = ContextReset;
         crate::context::with_mut(|c| {
             let _ = c.take_tx_client();
-            c.set_auto_tx_owned(false);
             c.reset_savepoint_depth();
             c.clear_pending_emits();
             c.set_sqlite_backend(Rc::clone(&backend));

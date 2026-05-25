@@ -7048,7 +7048,7 @@ async fn sweeper_idempotent_concurrent() {
 // `rolreplication` attribute. The per-app role is NOLOGIN (clients
 // connect as the platform login role, then `SET ROLE`), so these tests
 // drive it via `SET ROLE` from the superuser pool — which is exactly how
-// `exec_begin` / `exec_auto_begin` apply it to client SQL.
+// `exec_begin` applies it to client SQL.
 // ---------------------------------------------------------------------------
 
 /// Provision a schema + its per-app role for a test. Returns the role
@@ -7386,7 +7386,7 @@ async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
 
 #[compio::test]
 async fn client_sql_runs_under_per_app_role() {
-    // Proves the `SET LOCAL ROLE` shape `exec_begin` / `exec_auto_begin`
+    // Proves the `SET LOCAL ROLE` shape `exec_begin`
     // issue actually switches the effective role for the rest of the tx,
     // and reverts at COMMIT/ROLLBACK.
     let url = require_pg().await;
@@ -7845,7 +7845,7 @@ async fn wal_connection_stays_platform_role() {
     // assertion: the replication helpers (`ensure_publication_and_slot`,
     // `drop_abandoned_slots`, the §17.7 deprovision) run on the pool
     // directly with NO `SET ROLE` — only the transaction BEGIN paths
-    // (`exec_begin` / `exec_auto_begin`) apply the per-app role. We pin
+    // (`exec_begin`) applies the per-app role. We pin
     // that the role-application surface is exactly the two tx-begin
     // helpers by asserting `apply_per_app_role` is not invoked from the
     // replication/WAL code (verified at the source level — there is no

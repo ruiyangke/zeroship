@@ -19,9 +19,9 @@
 // because the package is bundle-resident.
 //
 // Guards:
-//   - `__zsBeginAutoTx` undefined → no DbPlugin registered on this
-//     runtime. `installSchema` would throw "env.db not available";
-//     skip silently to support dev runs without DATABASE_URL.
+//   - `__zs_env()?.db` missing → no DbPlugin registered on this runtime.
+//     `installSchema` would throw "env.db not available"; skip silently
+//     to support dev runs without DATABASE_URL.
 //   - `user.default.schema` not a plain object → skip; covers
 //     RPC-only / fetch-only apps and the dev-bootstrap (whose own
 //     `default` carries `{ fetch, rpc }` only — schema installs lazily
@@ -38,7 +38,6 @@ export {};
 
 declare const user: { default?: { schema?: unknown } };
 declare const globalThis: {
-  __zsBeginAutoTx?: unknown;
   __zs_env?: () => { db?: unknown } | undefined;
   // **P9 §8** — the capability-handle resolver the runtime installs.
   // `runtime-entry` is the sole legitimate caller: it resolves the
@@ -49,11 +48,23 @@ declare const globalThis: {
   [key: string]: unknown;
 };
 
-if (typeof globalThis.__zsBeginAutoTx === "function") {
-  const schema = (user && user.default && typeof user.default === "object")
-    ? (user.default as { schema?: unknown }).schema
+const schema = (user && user.default && typeof user.default === "object")
+  ? (user.default as { schema?: unknown }).schema
+  : undefined;
+if (schema && typeof schema === "object") {
+  // Resolve the live env.db handle off the runtime's composite env
+  // object. `__zs_env()` is the bootstrap-visible helper
+  // (`crates/runtime/src/core/init.rs::zs_env_callback`) that returns
+  // the same v8::Global the request-path passes as the second arg of
+  // `fetch(req, env, ctx)`. DbPlugin registration is observable here as
+  // the presence of `env.db`; `__zsDbPlatform` is intentionally not a
+  // sentinel because the runtime installs that resolver on every isolate.
+  const envObj = (typeof globalThis.__zs_env === "function")
+    ? globalThis.__zs_env()
     : undefined;
-  if (schema && typeof schema === "object") {
+  const envDb = envObj && envObj.db;
+
+  if (envDb != null) {
     const sdk = await import("@zeroship/bootstrap/install-schema") as {
       installSchema?: (
         schema: unknown,
@@ -62,17 +73,6 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
       ) => { collections: unknown; ready: Promise<void> };
     };
     if (typeof sdk.installSchema === "function") {
-      // Resolve the live env.db handle off the runtime's composite env
-      // object. `__zs_env()` is the bootstrap-visible helper
-      // (`crates/runtime/src/core/init.rs::zs_env_callback`) that
-      // returns the same v8::Global the request-path passes as the
-      // second arg of `fetch(req, env, ctx)`. Pulling the native db
-      // through it keeps the data-flow explicit.
-      const envObj = (typeof globalThis.__zs_env === "function")
-        ? globalThis.__zs_env()
-        : undefined;
-      const envDb = envObj && envObj.db;
-
       // **P9 §8** — resolve the platform capability handle via the
       // runtime resolver, BEFORE we delete the global below. The handle
       // is the carrier for `registerModel` / `setMaskPolicy` (those
@@ -149,7 +149,7 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
 // by `env.db`'s private symbol); only the JS-reachable resolver is
 // removed.
 //
-// Runs UNCONDITIONALLY (outside the `__zsBeginAutoTx` / schema guards):
+// Runs UNCONDITIONALLY (outside the `env.db` / schema guards):
 // the runtime installs `__zsDbPlatform` on every isolate, so it must be
 // cleared even on RPC-only / fetch-only apps that skipped the schema
 // install above. Idempotent: a no-op if the runtime never installed it

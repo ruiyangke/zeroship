@@ -7,7 +7,7 @@
 // `default = { schema?, fetch?, rpc? }` shape consumed by the runtime.
 //
 // `default.rpc` is a PLAIN OBJECT (dict-shape: `{ wireId: handler }`).
-// Dispatch (input validation, capability frame, auto-tx, stream framing,
+// Dispatch (input validation, capability frame, stream framing,
 // dev-only output validation) is owned by the runtime's `__zsDispatch`
 // (Stage 5a, `crates/runtime/src/bootstrap/rpc_dispatch.js`). The plugin
 // only normalises — no helpers, no dispatcher source in the bundle.
@@ -62,8 +62,8 @@ export function pickEntryWireId(p: {
  * Emits a normaliser that imports the user module and re-exports its
  * `default.{schema, fetch, rpc}` after rolling callable non-`default`
  * exports into the dict-shape `rpc`. No dispatch logic — the runtime's
- * `__zsDispatch` (Stage 5a) handles input validation, auto-tx, capability
- * frames, and stream framing.
+ * `__zsDispatch` (Stage 5a) handles input validation, capability frames,
+ * and stream framing.
  *
  * @param opts.userEntryRel  Specifier the synthetic entry should use to
  *                           import the user module.
@@ -96,7 +96,7 @@ export function buildServerEntrySource(opts: {
 //            export when no \`default\` object), or undefined.
 //   rpc      Dict-shape: { wireId: handler }. Dispatch is owned by the
 //            runtime's \`__zsDispatch\` (Stage 5a). The plugin only
-//            normalises — capability/auto-tx/Zod live in the runtime.
+//            normalises — capability/Zod/stream framing live in the runtime.
 
 // Side-effect import: forces the bundler to include the framework-
 // internal bootstrap package so the runtime can dynamically resolve

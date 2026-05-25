@@ -153,46 +153,21 @@ function getRequestContext() {
 // runQuery / runMutation — RPC composition primitives. Pass the
 // wrapped handler function (the value returned from query()/mutation()).
 // The handler runs with its declared kind on the capability stack — DB
-// write refusal, fetch refusal, auto-tx envelope, and downstream
-// capability checks see the inner kind, not the caller's kind.
+// write refusal, fetch refusal, and downstream capability checks see
+// the inner kind, not the caller's kind.
 async function _runWithKind(kind, fn, args) {
     if (typeof fn !== "function") {
         throw new TypeError("runQuery/runMutation: first arg must be a procedure function");
     }
     const ek = globalThis.__zsEnterKind;
     const xk = globalThis.__zsExitKind;
-    const bt = globalThis.__zsBeginAutoTx;
-    const et = globalThis.__zsEndAutoTx;
     const tok = (typeof ek === "function") ? ek(kind) : -1;
-    const cfg = fn.config;
-    const isolation = (cfg && typeof cfg.isolation === "string") ? cfg.isolation : "";
-    let token = 0;
-    const wantsAutoTx = typeof bt === "function" && typeof et === "function";
-    if (wantsAutoTx) {
-        try { token = await bt(kind, isolation); }
-        catch (e) {
-            if (tok >= 0 && typeof xk === "function") xk(tok);
-            throw e;
-        }
-    }
-    let result;
     try {
         const out = fn(args);
-        result = (out && typeof out.then === "function") ? await out : out;
-    } catch (handlerErr) {
-        if (wantsAutoTx) { try { await et(token, false); } catch (_e) {} }
+        return (out && typeof out.then === "function") ? await out : out;
+    } finally {
         if (tok >= 0 && typeof xk === "function") xk(tok);
-        throw handlerErr;
     }
-    if (wantsAutoTx) {
-        try { await et(token, true); }
-        catch (commitErr) {
-            if (tok >= 0 && typeof xk === "function") xk(tok);
-            throw commitErr;
-        }
-    }
-    if (tok >= 0 && typeof xk === "function") xk(tok);
-    return result;
 }
 function runQuery(fn, args) { return _runWithKind("query", fn, args); }
 function runMutation(fn, args) { return _runWithKind("mutation", fn, args); }
@@ -789,15 +764,15 @@ const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast =
 // Two shapes accepted (see `docs/reference/zs-standard.md`):
 //   - plain object (dict-shape, `{ [wireId]: handler }`): the canonical
 //     contract. Wrapped in `globalThis.__zsDispatch` so the runtime
-//     owns input validation, capability frame, auto-tx, stream
-//     framing, and dev-only output validation. The Vite plugin's
+//     owns input validation, capability frame, stream framing, and
+//     dev-only output validation. The Vite plugin's
 //     synthetic entry and `examples/raw-rpc.js`-style raw deploys both
 //     emit this.
 //   - function (`(name, input, ctx) => ...`): documented advanced /
 //     back-compat path. Used directly without the runtime dispatcher
-//     — the function owns its own validation/auto-tx. The dev-bootstrap
-//     consumes this because HMR re-resolves the user namespace per
-//     request; raw deploys may use it for dynamic routing.
+//     — the function owns its own validation. The dev-bootstrap consumes
+//     this because HMR re-resolves the user namespace per request; raw
+//     deploys may use it for dynamic routing.
 let USER_RPC = null;
 if (user && user.default && user.default.rpc != null) {
     const _rpc = user.default.rpc;

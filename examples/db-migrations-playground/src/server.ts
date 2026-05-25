@@ -176,13 +176,8 @@ function lookup(name: string) {
   return m;
 }
 
-// `action` (not `mutation`): the migration opens its own dedicated
-// session-scoped advisory-lock connection, so it must not run inside
-// the dispatcher's auto-tx — that would put the user-tx connection
-// and the migration's lock connection in two different windows on
-// the same Postgres backend, deadlocking pglite-socket's single-
-// instance serializer. Real long-running migrations don't belong in
-// a request-scope tx anyway.
+// `action` (not `mutation`): real long-running migrations may call
+// external services and should not inherit mutation capability limits.
 export const runMigration = action(
   async ({ name, dryRun }: { name: string; dryRun?: boolean }) => {
     const m = lookup(name);
@@ -192,10 +187,8 @@ export const runMigration = action(
 );
 
 // `action` (not `query`): `migrations.status` calls
-// `env.db.migrations.status({name, collection})` which uses its own
-// pooled connection. Under pglite-socket's per-tx serializer, a
-// read-only auto-tx would still pin the user-side connection and
-// stall the pool query. Status reads aren't tx-scoped reads anyway.
+// `env.db.migrations.status({name, collection})` and may need the
+// migration surface rather than query-only capability.
 export const migrationStatus = action(
   async ({ name }: { name: string }) => {
     const m = lookup(name);

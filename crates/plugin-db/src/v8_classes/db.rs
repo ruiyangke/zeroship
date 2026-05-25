@@ -157,9 +157,9 @@ impl Db {
     /// `tx.rollback()` — abort by throwing.
     ///
     /// A `transaction()` call made while a transaction is already active
-    /// for this isolate (an enclosing `transaction()` or the auto-tx
-    /// wrapper) opens a `SAVEPOINT` instead of a fresh `BEGIN`; the inner
-    /// callback's failure rolls back only to that savepoint. See
+    /// for this isolate (an enclosing `transaction()`) opens a
+    /// `SAVEPOINT` instead of a fresh `BEGIN`; the inner callback's
+    /// failure rolls back only to that savepoint. See
     /// [`crate::transaction`] for the full state machine.
     ///
     /// `opts` is `{ isolationLevel?: "readCommitted" | "repeatableRead"
@@ -319,8 +319,7 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 ///
 /// Called from `DbPlugin::build_instance` once per V8 isolate during
 /// `build_env_object`. The returned object becomes the `env.db`
-/// namespace value; the runtime then layers the auto-tx globals on top
-/// via the `NativeRegistrar` returned by `DbPlugin::register`.
+/// namespace value.
 ///
 /// **P9 PR 4** — before returning, this also mints a [`DbPlatform`]
 /// capability handle scoped to the same `app_id` and stashes it on the

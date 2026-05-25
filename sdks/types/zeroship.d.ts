@@ -62,8 +62,8 @@ declare module "zeroship" {
   /**
    * RPC composition primitive — invoke a `query()` procedure. Threads
    * the inner kind onto the capability stack so capability gates
-   * (auto-tx envelope, fetch refusal, DB-write refusal) see the inner
-   * procedure's kind, not the caller's.
+   * (fetch refusal, DB-write refusal) see the inner procedure's kind,
+   * not the caller's.
    */
   export function runQuery<TIn, TOut>(
     fn: (input: TIn) => Promise<TOut> | TOut,
@@ -71,11 +71,9 @@ declare module "zeroship" {
   ): Promise<TOut>;
 
   /**
-   * RPC composition primitive — invoke a `mutation()` procedure. The
-   * inner mutation runs inside its own auto-tx envelope (READ COMMITTED
-   * by default; honours `fn.config.isolation`). Each `runMutation`
-   * boundary commits independently — an action calling two
-   * `runMutation`s in sequence has two distinct atomic units.
+   * RPC composition primitive — invoke a `mutation()` procedure. Each
+   * database operation autocommits unless the handler opens an explicit
+   * `db.transaction()`.
    */
   export function runMutation<TIn, TOut>(
     fn: (input: TIn) => Promise<TOut> | TOut,

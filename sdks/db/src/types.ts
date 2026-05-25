@@ -12,9 +12,7 @@ export type PlainObject = Record<string, unknown>;
 /**
  * Postgres transaction isolation level. Alias of the ambient
  * `ZeroshipIsolationLevel` from `@zeroship/types/shared.d.ts` so the
- * `db.transaction({ isolationLevel })` option and the procedure
- * `config.isolation` field share one canonical type — drift between
- * the two would be a silent footgun.
+ * `db.transaction({ isolationLevel })` option has one canonical spelling.
  */
 export type IsolationLevel = ZeroshipIsolationLevel;
 

@@ -1,11 +1,10 @@
 //! P9 PR 3 — end-to-end tests for the native `Db.transaction(fn)`
 //! orchestrator against real Postgres.
 //!
-//! These dispatch through a real `Runtime` + the `DbPlugin` (the same
-//! harness shape as `auto_tx.rs`) and call `env.db.transaction(async tx
-//! => {...})` directly — the native v8_method, not the bootstrap
-//! wrapper. They exercise the full Rust→V8→Rust flow the orchestrator
-//! relies on:
+//! These dispatch through a real `Runtime` + the `DbPlugin` and call
+//! `env.db.transaction(async tx => {...})` directly — the native
+//! v8_method, not the bootstrap wrapper. They exercise the full
+//! Rust→V8→Rust flow the orchestrator relies on:
 //!
 //!   begin (spawned op) → Continuation (mint tx-view, call callback,
 //!   attach .then) → commit/rollback handler (spawned op) → settle outer.
@@ -24,15 +23,15 @@
 //! Requires: `docker start pg-test` (Postgres on port 5434).
 //! Run: `cargo test -p zeroship-plugin-db --test native_transaction -- --test-threads=1`
 //!
-//! NOTE (baseline): like the pre-existing `auto_tx.rs` suite, every test
-//! here runs `registerModel("notes", ...)` in `setup`. On a Postgres that
-//! enforces the single-command-per-extended-query rule, that DDL apply
+//! NOTE (baseline): every test here runs `registerModel("notes", ...)`
+//! in `setup`. On a Postgres that enforces the
+//! single-command-per-extended-query rule, that DDL apply
 //! fails with `cannot insert multiple commands into a prepared statement`
 //! (the collection's `CREATE TABLE` + implicit `CREATE INDEX` payload is
 //! issued via `pool_exec`'s extended protocol — a pre-existing DDL-layer
 //! issue, NOT specific to transactions). On such an instance these tests
-//! fail at `setup` exactly as `auto_tx.rs` does. The orchestrator logic
-//! itself is covered without a DB by the Rust unit tests + tx-view shape
+//! fail at `setup`. The orchestrator logic itself is covered without a
+//! DB by the Rust unit tests + tx-view shape
 //! tests in `crates/plugin-db/src/{orchestrator,v8_classes}/transaction.rs`,
 //! the `db_v8_class.rs` surface tests, the SQLite SAVEPOINT SQL tests in
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
@@ -107,8 +106,8 @@ fn count_notes(url: &str) -> i64 {
 }
 
 /// Self-contained dispatcher shim: a function-shape `default.rpc` that
-/// looks up `_procedures[name]` and runs it. No auto-tx envelope (these
-/// tests open transactions explicitly via `env.db.transaction`).
+/// looks up `_procedures[name]` and runs it. These tests open
+/// transactions explicitly via `env.db.transaction`.
 const SHIM: &str = r#"
 async function _shimRpc(name, input, ctx) {
     const fn = _procedures[name];

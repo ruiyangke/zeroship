@@ -10,9 +10,7 @@
  *   1. Lazy schema install via `installSchema(schema, env.db)` on first
  *      request. Going top-level-await on the user import would block
  *      dev startup on potentially-failing user code; lazy is the right
- *      tradeoff for dev. The auto-tx dispatcher's defense-in-depth
- *      await on the module-local `_schemaReady` survives both prod
- *      (eager) and dev (lazy) paths.
+ *      tradeoff for dev.
  *   2. Per-call normalization via `normalizeUserModule(mod, registry)`
  *      so HMR replacements land naturally — the registry captures the
  *      transform's `__register` side-effects and merges last
@@ -151,9 +149,9 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   // Module-local handle on the most recent install's `ready` promise.
   // Stage 6 of the @zeroship/db refactor replaced the cross-module
   // `globalThis.__zeroshipPlatformReady` with a per-isolate (per-
-  // module-load) variable. The auto-tx dispatch path captures it via
-  // closure below; HMR re-runs of `maybeRegisterSchema` overwrite the
-  // handle in place so the second request awaits the FRESH chain.
+  // module-load) variable. HMR re-runs of `maybeRegisterSchema`
+  // overwrite the handle in place so the second request awaits the
+  // FRESH chain.
   let schemaReady: Promise<unknown> | undefined;
 
   // Set once per ModuleRunner lifetime — schema auto-discovery is

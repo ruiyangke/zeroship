@@ -151,8 +151,8 @@ export function procedure<H extends Handler>(handler: H, config?: ProcedureConfi
  * `fetch`, `runMutation`. Enforced by the runtime capability gate
  * (`crates/runtime/src/rpc/capability.rs`); a query attempting a
  * forbidden op fails request-time with `code: "capability_violation"`.
- * The handler runs inside a `BEGIN ISOLATION LEVEL READ COMMITTED
- * READ ONLY` Postgres tx auto-opened by the SSR dispatcher.
+ * Handlers run without an implicit transaction. Use `db.transaction()`
+ * when multiple database operations must be atomic.
  */
 export function query<TIn, TOut>(
   handler: (input: TIn) => Promise<TOut> | TOut,
@@ -165,10 +165,9 @@ export function query<TIn, TOut>(
  * Side-effecting RPC procedure. Implies `kind: "mutation"`.
  *
  * Capability: read+write DB, call `runQuery`. NOT allowed: `fetch`,
- * `runMutation` (mutations are already atomic; nesting is a footgun).
- * Use `action` if you need external HTTP. The handler runs inside a
- * `BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE` Postgres tx
- * (override via `config.isolation`).
+ * `runMutation`. Use `action` if you need external HTTP. Handlers run
+ * without an implicit transaction; use `db.transaction()` when multiple
+ * database operations must be atomic.
  */
 export function mutation<TIn, TOut>(
   handler: (input: TIn) => Promise<TOut> | TOut,
@@ -180,10 +179,10 @@ export function mutation<TIn, TOut>(
 /**
  * Most-permissive RPC procedure. Implies `kind: "action"`.
  *
- * Capability: `fetch` (outbound HTTP), `runQuery`, `runMutation`. No
- * auto-tx — actions can hold open external I/O for minutes; wrapping
- * them in a Postgres tx would block other writers. Compose database
- * work via `runQuery` / `runMutation` so each step is its own tx.
+ * Capability: `fetch` (outbound HTTP), `runQuery`, `runMutation`.
+ * Handlers run without an implicit transaction. Compose database work
+ * with explicit `db.transaction()` when a multi-operation unit must be
+ * atomic.
  *
  *   import { action, runQuery, runMutation } from "@zeroship/server";
  *

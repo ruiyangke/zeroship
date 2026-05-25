@@ -834,17 +834,10 @@ const { data, error } = await db.transaction(async (tx) => {
   `transaction()` call doesn't throw.
 
 The procedure wrappers `query()`, `mutation()`, and `action()` from
-`@zeroship/server` auto-open a tx around each request:
-- `query()` runs the body in a `READ ONLY` tx.
-- `mutation()` runs it in a `SERIALIZABLE` tx.
-- `action()` runs it without a tx (actions are long-lived and may call
-  `fetch()`); use `runMutation`/`runQuery` from inside an action to write.
-
-Inside such a wrapper, all `db.<table>.*` calls are routed to the active
-tx connection via the Rust `IsolateDbContext::tx_conn` slot (formerly
-the `TX_CONN` thread-local, folded into `IsolateDbContext` in Stage
-8d-R4) — so the `Result`-shape surface keeps working without changing
-the calling convention.
+`@zeroship/server` do not open a transaction implicitly. Top-level
+`db.<table>.*` calls autocommit per operation. Use explicit
+`db.transaction()` when a handler needs multiple database operations to
+commit or roll back as a unit.
 
 ## Migrations (`@zeroship/migrations`)
 

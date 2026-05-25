@@ -15,7 +15,7 @@
 //!
 //! All four route through `run_sql`, which transparently uses the
 //! per-isolate TX client (`IsolateDbContext::tx_conn`) when an explicit
-//! `Transaction` / auto-tx is active and the pool otherwise.
+//! transaction is active and the pool otherwise.
 //!
 //! ## Error rail
 //!

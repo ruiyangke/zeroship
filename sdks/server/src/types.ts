@@ -37,10 +37,8 @@ export type AuthLevel = "anon" | "user" | "admin";
  * The five kinds split into two axes:
  *
  *  - **Capability** (B3 from `docs/proposals/zeroship-db.md`):
- *    - `query`     — DB reads only, no `fetch()`, runs inside a
- *                    read-only Postgres transaction.
- *    - `mutation`  — DB read + write, no `fetch()`, runs inside a
- *                    serialisable transaction.
+ *    - `query`     — DB reads only, no `fetch()`.
+ *    - `mutation`  — DB read + write, no `fetch()`.
  *    - `action`    — full surface: `fetch()`, `ctx.runQuery`,
  *                    `ctx.runMutation`. No surrounding transaction.
  *      `procedure()` (the generic wrapper) maps to the `action`
@@ -101,19 +99,6 @@ export interface ProcedureConfig<TIn = unknown, TOut = unknown> {
    * runtime middleware chain is wired.
    */
   middleware?: string[];
-  /**
-   * Postgres isolation level for the auto-tx envelope wrapping this
-   * procedure. Only meaningful for `mutation` (and ignored for the
-   * other kinds — queries always use `READ COMMITTED READ ONLY`,
-   * actions are not wrapped).
-   *
-   * Default: `"read committed"`. Bump to `"repeatable read"` for
-   * snapshot isolation (consistent re-reads inside the tx), or to
-   * `"serializable"` for write-skew prevention. Higher levels trade
-   * throughput for correctness — Postgres SSI may raise SQLSTATE
-   * 40001 on commit, requiring the SDK retry loop.
-   */
-  isolation?: ZeroshipIsolationLevel;
   /**
    * Zod schema (or any `.parse()`-shaped object) validating the first
    * argument. When set, the synthetic SSR entry calls

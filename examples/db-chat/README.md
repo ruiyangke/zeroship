@@ -62,8 +62,8 @@ npm run smoke         # in a third shell — exercises 5 named checks
 
 ## Smoke test checks
 
-1. `sendMessage` happy path (mutation auto-tx)
-2. `listMessages` returns rows (query auto-tx READ ONLY)
+1. `sendMessage` happy path (mutation capability)
+2. `listMessages` returns rows (query capability)
 3. **Read-set narrowing**: a message in #random doesn't appear in #general's list
 4. FK enforcement: sendMessage with non-existent channel fails (B2)
 5. WAL consumer status reachable

@@ -3,8 +3,8 @@
 // Demonstrates the ZS-standard contract introduced in Stage 5a of the
 // zs-standard-and-vite-v2 refactor: `default.rpc` is a plain object
 // mapping wireIds to handler functions. The runtime owns dispatch
-// (input validation, capability frames, auto-tx, stream framing) via
-// the embedded `__zsDispatch` dispatcher.
+// (input validation, capability frames, stream framing) via the embedded
+// `__zsDispatch` dispatcher.
 //
 // Run locally with:
 //   zeroship serve examples/raw-rpc.js --port 3000
@@ -22,10 +22,10 @@
 //        -H 'content-type: application/json' -d '{"json":[2,3]}'
 //   → {"json":5}
 //
-// A procedure may attach `.config = { kind, input, output, isolation }`.
-// The dispatcher reads `config.kind` to drive auto-tx (for "query" /
-// "mutation") and capability frames; `config.input.parse(...)` to
-// validate input pre-handler; `config.output` to tag string streams.
+// A procedure may attach `.config = { kind, input, output }`.
+// The dispatcher reads `config.kind` to drive capability frames;
+// `config.input.parse(...)` to validate input pre-handler; `config.output`
+// to tag string streams.
 
 const ping = (_input) => "pong";
 
@@ -42,9 +42,7 @@ const add = (input) => {
 };
 
 // Demonstrate the optional procedure-config surface. Attaching
-// `config.kind` lets the dispatcher apply the right capability frame —
-// in a real app with a db plugin loaded, "query" would also open a
-// READ ONLY transaction.
+// `config.kind` lets the dispatcher apply the right capability frame.
 const status = (_input) => ({ ok: true, ts: Date.now() });
 status.config = { kind: "query" };
 
