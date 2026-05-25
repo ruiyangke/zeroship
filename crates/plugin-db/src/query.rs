@@ -9733,6 +9733,95 @@ mod tests {
         assert!(matches!(aggregate_err, QueryError::InvalidIdent(_)));
     }
 
+    #[test]
+    fn find_limit_over_max_is_rejected() {
+        let schema = serde_json::json!({
+            "name": { "type": "string" },
+        });
+        let err = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            Some(MAX_QUERY_LIMIT + 1),
+            None,
+            None,
+            None,
+            Some(&schema),
+        )
+        .expect_err("find.limit over the cap must be rejected");
+        assert!(matches!(err, QueryError::InvalidFilter(_)));
+        assert!(
+            err.to_string().contains("find.limit"),
+            "limit error must name the bounded option: {err}"
+        );
+    }
+
+    #[test]
+    fn vector_search_k_over_max_is_rejected() {
+        let schema = serde_json::json!({
+            "embedding": { "type": "vector" },
+        });
+        let err = build_vector_search(
+            "app1",
+            "users",
+            "embedding",
+            &[0.1, 0.2],
+            MAX_SEARCH_LIMIT + 1,
+            crate::backend::VectorMetric::Cosine,
+            &serde_json::json!({}),
+            Some(&schema),
+        )
+        .expect_err("search.k over the cap must be rejected");
+        assert!(matches!(err, QueryError::InvalidFilter(_)));
+        assert!(
+            err.to_string().contains("search.k"),
+            "vector search error must name the bounded option: {err}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_filter_is_rejected() {
+        let schema = serde_json::json!({
+            "name": { "type": "string" },
+        });
+        let mut filter = serde_json::json!({ "name": "alice" });
+        for _ in 0..MAX_FILTER_NESTING_DEPTH {
+            filter = serde_json::json!({ "$and": [filter] });
+        }
+        let err = build_find_with_schema(
+            "app1",
+            "users",
+            &filter,
+            None,
+            None,
+            None,
+            None,
+            Some(&schema),
+        )
+        .expect_err("pathological nesting must be rejected");
+        assert!(matches!(err, QueryError::InvalidFilter(_)));
+        assert!(
+            err.to_string().contains("nesting depth"),
+            "deep filter error must mention the nesting cap: {err}"
+        );
+    }
+
+    #[test]
+    fn filter_clause_count_over_max_is_rejected() {
+        let mut filter = serde_json::Map::new();
+        for idx in 0..=MAX_FILTER_CLAUSE_COUNT {
+            filter.insert(format!("f{idx}"), serde_json::json!(idx));
+        }
+        let mut params = Vec::new();
+        let err = build_where(&Value::Object(filter), &mut params)
+            .expect_err("too many clauses must be rejected");
+        assert!(matches!(err, QueryError::InvalidFilter(_)));
+        assert!(
+            err.to_string().contains("clause count"),
+            "clause-count error must mention the cap: {err}"
+        );
+    }
+
     // ----------------------------------------------------------------
     // P7 PR 5 — soft-delete / restore SQL builders +
     // compose-where-with-soft-delete behaviour
