@@ -16,6 +16,15 @@ import {
 const PRIORITIES: Priority[] = ["low", "medium", "high"];
 const qk = (uid: string) => ["todos", uid] as const;
 
+// Demo seed: plausible-looking random tasks.
+const DEMO_VERBS = ["Review", "Ship", "Draft", "Refactor", "Test", "Deploy", "Sync", "Plan", "Polish", "Migrate", "Benchmark", "Triage"];
+const DEMO_NOUNS = ["the auth flow", "the API docs", "the landing page", "the billing webhook", "the search index", "onboarding", "the cache layer", "the CI pipeline", "the schema", "the dashboard", "the rate limiter", "the changelog"];
+const pick = <T,>(a: readonly T[]) => a[Math.floor(Math.random() * a.length)];
+const randomTask = () => ({
+  title: `${pick(DEMO_VERBS)} ${pick(DEMO_NOUNS)}`,
+  priority: pick(PRIORITIES),
+});
+
 function ago(ms: number): string {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
   if (s < 5) return "now";
@@ -44,6 +53,7 @@ export function App() {
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState<Priority>("low");
   const [removing, setRemoving] = useState<Set<string>>(new Set());
+  const [demoLeft, setDemoLeft] = useState(0); // >0 while the demo seeder runs
   const inputRef = useRef<HTMLInputElement>(null);
   const keyMap = useRef(new Map<string, string>());
   const keySeq = useRef(0);
@@ -164,6 +174,21 @@ export function App() {
     [title, priority, userId, createM],
   );
 
+  // Demo seeder: fire 10 random tasks, one every 500ms. Each goes through the
+  // same optimistic create path, so they cascade into the list (and into every
+  // other open window via realtime).
+  const runDemo = useCallback(async () => {
+    if (!userId || demoLeft > 0) return;
+    const N = 10;
+    for (let i = 0; i < N; i++) {
+      setDemoLeft(N - i);
+      const { title: t, priority: p } = randomTask();
+      createM.mutate({ userId, title: t, priority: p });
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    setDemoLeft(0);
+  }, [userId, demoLeft, createM]);
+
   const onComplete = useCallback(
     async (id: string) => {
       qc.setQueryData<Todo[]>(qk(uid), (old = []) =>
@@ -215,6 +240,14 @@ export function App() {
       <header className="top">
         <h1>Todos</h1>
         <div className="meta">
+          <button
+            className="ghost"
+            onClick={() => void runDemo()}
+            disabled={!userId || demoLeft > 0}
+            title="Create 10 random tasks, 500ms apart"
+          >
+            {demoLeft > 0 ? `seeding ${demoLeft}…` : "demo"}
+          </button>
           <span className="count">{active.length} open</span>
           <span className={`live ${live ? "on" : ""}`} key={pulse}>
             <i className="dot" />
