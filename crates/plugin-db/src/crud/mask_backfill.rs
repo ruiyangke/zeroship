@@ -55,10 +55,9 @@
 //! deploy by passing a different `BackfillOpts` (unused in PR 6 — the
 //! constant is exposed so a future PR can lift it).
 
-use std::collections::HashMap;
-
 use compio_postgres::Pool;
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::audit::{ActorKind, AuditRow, ChangeClass, InitialStatus, Phase, TerminalStatus};
 use crate::backend::EncryptedColumn;
@@ -889,7 +888,7 @@ pub fn compute_masked_for_plaintext(kind: MaskKind, plaintext: &str) -> String {
 pub fn compute_masked_pairs_for_row(
     schema: &Value,
     row: &Value,
-    plaintexts: &HashMap<String, String>,
+    plaintexts: &crate::crud::mask_pass::MaskPlaintextSidechannel,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Some(schema_obj) = schema.as_object() else {
@@ -909,15 +908,15 @@ pub fn compute_masked_pairs_for_row(
         let Some(kind) = MaskKind::from_sql(kind_str) else {
             continue;
         };
-        let plaintext = if let Some(pt) = plaintexts.get(col) {
+        let plaintext: Option<Zeroizing<String>> = if let Some(pt) = plaintexts.get(col) {
             Some(pt.clone())
         } else if let Some(v) = obj.get(col) {
             if v.is_null() {
                 None
             } else if let Some(s) = v.as_str() {
-                Some(s.to_string())
+                Some(Zeroizing::new(s.to_string()))
             } else if let Some(n) = v.as_i64() {
-                Some(n.to_string())
+                Some(Zeroizing::new(n.to_string()))
             } else {
                 None
             }
@@ -926,7 +925,7 @@ pub fn compute_masked_pairs_for_row(
         };
         if let Some(pt) = plaintext {
             let sibling = format!("{col}_masked");
-            out.push((sibling, apply_mask_kind(kind, &pt)));
+            out.push((sibling, apply_mask_kind(kind, pt.as_str())));
         }
     }
     out
@@ -1024,8 +1023,11 @@ mod tests {
             }
         });
         let row = serde_json::json!({ "id": "u1", "ssn": "BASE64CT" });
-        let mut pt = HashMap::new();
-        pt.insert("ssn".to_string(), "123-45-6789".to_string());
+        let mut pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
+        pt.insert(
+            "ssn".to_string(),
+            Zeroizing::new("123-45-6789".to_string()),
+        );
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("ssn_masked".to_string(), "***-**-6789".to_string()));
@@ -1040,7 +1042,7 @@ mod tests {
             }
         });
         let row = serde_json::json!({ "id": "u1", "email": "alice@example.com" });
-        let pt = HashMap::new();
+        let pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("email_masked".to_string(), "a***@example.com".to_string()));
@@ -1055,7 +1057,7 @@ mod tests {
             }
         });
         let row = serde_json::json!({ "id": "u1", "ssn": "123-45-6789" });
-        let pt = HashMap::new();
+        let pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert!(pairs.is_empty(), "kind=none must produce no pairs");
     }
@@ -1069,7 +1071,7 @@ mod tests {
             }
         });
         let row = serde_json::json!({ "id": "u1", "email": null });
-        let pt = HashMap::new();
+        let pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert!(pairs.is_empty(), "null parent must produce no pairs");
     }
@@ -1093,7 +1095,7 @@ mod tests {
             "email": "alice@example.com",
             "name": "alice"
         });
-        let pt = HashMap::new();
+        let pt = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
         let pairs = compute_masked_pairs_for_row(&schema, &row, &pt);
         assert_eq!(pairs.len(), 2);
         let mut sorted = pairs.clone();

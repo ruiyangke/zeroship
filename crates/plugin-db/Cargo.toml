@@ -41,6 +41,11 @@ hmac = { workspace = true }
 # / `encode("col", 'base64')` on read. Both legs need a hot-path
 # base64 codec; `base64` v0.22 is already a workspace dep.
 base64 = { workspace = true }
+# **P5 PR 2 follow-up** — zeroize root-key material, derived AEAD keys,
+# and transient plaintext buffers on drop. The plugin-db encryption
+# paths hold key/plaintext bytes in Rust-owned memory; `zeroize`
+# hardens those drop paths without changing the wire contract.
+zeroize = { version = "1", features = ["alloc", "derive"] }
 # SQLite backend dependencies — unconditional now that both backends
 # ship in every build.
 #

@@ -25,6 +25,7 @@ use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, KeyInit, Nonce};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::wire;
 use crate::error::DbError;
@@ -44,7 +45,8 @@ const NONCE_LEN: usize = 12;
 ///
 /// Both halves are produced by HKDF-SHA256 from the per-platform
 /// root key (see [`super::keys::KeyStore`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+#[repr(C)]
 pub struct AeadKey {
     pub k_enc: [u8; 32],
     pub k_siv: [u8; 32],
@@ -313,5 +315,26 @@ mod tests {
         let ct1 = encrypt_deterministic(&k1, pt, aad).expect("encrypt 1");
         let ct2 = encrypt_deterministic(&k2, pt, aad).expect("encrypt 2");
         assert_ne!(ct1, ct2);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn aead_key_zeroizes_on_drop() {
+        let mut slot = std::mem::MaybeUninit::new(AeadKey {
+            k_enc: [0xAB; 32],
+            k_siv: [0xCD; 32],
+        });
+        let ptr = slot.as_mut_ptr();
+        unsafe {
+            std::ptr::drop_in_place(ptr);
+            let bytes = std::slice::from_raw_parts(
+                ptr.cast::<u8>(),
+                std::mem::size_of::<AeadKey>(),
+            );
+            assert!(
+                bytes.iter().all(|b| *b == 0),
+                "AeadKey drop must zeroize both key halves"
+            );
+        }
     }
 }

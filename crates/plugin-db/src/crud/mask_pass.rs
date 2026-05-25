@@ -13,7 +13,8 @@
 //! Called from `crud::dispatch_insert` / `dispatch_update_one`
 //! **AFTER** [`crate::crud::encryption_pass::encrypt_row_on_write`]
 //! and **BEFORE** the `query::build_*` call. The encryption pass
-//! populates a [`MaskPlaintextSidechannel`] (a `HashMap<String, String>`)
+//! populates a [`MaskPlaintextSidechannel`] (a
+//! `HashMap<String, Zeroizing<String>>`)
 //! before swapping the plaintext for ciphertext so the mask pass can
 //! read the plaintext without re-decrypting.
 //!
@@ -46,18 +47,21 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::diff::MaskKind;
 use crate::error::DbError;
 
 /// Plaintext sidechannel populated by the encryption pass and consumed
 /// by the mask pass. Key = column name; value = the raw plaintext
-/// string (UTF-8 decode of the wrapped primitive's wire bytes).
+/// string (UTF-8 decode of the wrapped primitive's wire bytes),
+/// wrapped in [`Zeroizing`] so the transient plaintext is scrubbed on
+/// drop.
 ///
 /// The encryption pass populates this BEFORE replacing the row value
 /// with the base64 ciphertext, so the mask pass can derive the sibling
 /// column's masked output without a redundant decrypt round-trip.
-pub(crate) type MaskPlaintextSidechannel = HashMap<String, String>;
+pub(crate) type MaskPlaintextSidechannel = HashMap<String, Zeroizing<String>>;
 
 /// **P5.5 PR 2** — apply mask transforms to a row before INSERT/UPDATE.
 ///
@@ -112,18 +116,18 @@ pub(crate) fn apply_mask_on_write(
         // value MAY already be the base64 ciphertext if the encryption
         // pass ran first AND the sidechannel was not populated — that
         // would be a contract violation, so we prefer the sidechannel.
-        let plaintext: Option<String> = if let Some(pt) = plaintexts.get(col) {
+        let plaintext: Option<Zeroizing<String>> = if let Some(pt) = plaintexts.get(col) {
             Some(pt.clone())
         } else if let Some(value) = obj.get(col) {
             if value.is_null() {
                 // null → no sibling write (Q-MASK-L)
                 None
             } else if let Some(s) = value.as_str() {
-                Some(s.to_string())
+                Some(Zeroizing::new(s.to_string()))
             } else if let Some(n) = value.as_i64() {
-                Some(n.to_string())
+                Some(Zeroizing::new(n.to_string()))
             } else if let Some(f) = value.as_f64() {
-                Some(f.to_string())
+                Some(Zeroizing::new(f.to_string()))
             } else {
                 return Err(DbError::internal(format!(
                     "apply_mask_on_write: column '{col}': cannot serialize value for mask: {value:?}"
@@ -135,7 +139,7 @@ pub(crate) fn apply_mask_on_write(
         };
 
         if let Some(pt) = plaintext {
-            let masked = apply_mask_kind(kind, &pt);
+            let masked = apply_mask_kind(kind, pt.as_str());
             let sibling = format!("{col}_masked");
             to_insert.push((sibling, masked));
         }
@@ -483,6 +487,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn plaintext_sidechannel_stores_zeroizing_strings() {
+        let mut plaintexts = MaskPlaintextSidechannel::new();
+        plaintexts.insert(
+            "ssn".to_string(),
+            Zeroizing::new("123-45-6789".to_string()),
+        );
+        let got: &Zeroizing<String> = plaintexts.get("ssn").expect("sidechannel entry");
+        assert_eq!(got.as_str(), "123-45-6789");
+    }
+
     // -----------------------------------------------------------------
     // apply_mask_kind: per-kind transform unit tests
     // -----------------------------------------------------------------
@@ -619,7 +634,10 @@ mod tests {
         // Row's `ssn` is the base64 ciphertext (encryption pass ran first).
         let mut row = json!({ "id": "usr_01", "ssn": "BASE64CIPHERTEXT" });
         let mut plaintexts = MaskPlaintextSidechannel::new();
-        plaintexts.insert("ssn".to_string(), "123-45-6789".to_string());
+        plaintexts.insert(
+            "ssn".to_string(),
+            Zeroizing::new("123-45-6789".to_string()),
+        );
 
         apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
 
@@ -673,7 +691,10 @@ mod tests {
         });
         let mut row = json!({ "id": "usr_01", "ssn": "BASE64CT" });
         let mut plaintexts = MaskPlaintextSidechannel::new();
-        plaintexts.insert("ssn".to_string(), "123-45-6789".to_string());
+        plaintexts.insert(
+            "ssn".to_string(),
+            Zeroizing::new("123-45-6789".to_string()),
+        );
 
         apply_mask_on_write(&schema, &plaintexts, &mut row).unwrap();
 

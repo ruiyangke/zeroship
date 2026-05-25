@@ -60,6 +60,7 @@
 
 use base64::Engine as _;
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::backend::EncryptedColumn;
 use crate::error::DbError;
@@ -83,7 +84,7 @@ use crate::error::DbError;
 /// **P5.5 PR 2** — overload that captures plaintexts for the
 /// downstream mask pass. See [`encrypt_row_on_write_with_sidechannel`]
 /// for the version that populates a [`MaskPlaintextSidechannel`]
-/// (`HashMap<String, String>`) BEFORE replacing the plaintext with
+/// (`HashMap<String, Zeroizing<String>>`) BEFORE replacing the plaintext with
 /// ciphertext, so the mask pass can derive the sibling
 /// `<col>_masked` column without re-decrypting. The original
 /// signature stays for callers that don't care about mask integration.
@@ -161,8 +162,8 @@ where
         crate::backend::EncryptionMode,
         String,
         &'static str,
-        Vec<u8>,
-        String,
+        Zeroizing<Vec<u8>>,
+        Zeroizing<String>,
     )> = Vec::new();
     for (col, def) in schema_obj.iter() {
         let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
@@ -182,8 +183,8 @@ where
         if value.is_null() {
             continue; // NULL stays NULL — encrypting NULL has no semantic meaning
         }
-        let plaintext = serialise_wrapped(value, wraps)?;
-        let sidechannel_str = plaintext_to_sidechannel_string(value, wraps);
+        let plaintext = Zeroizing::new(serialise_wrapped(value, wraps)?);
+        let sidechannel_str = Zeroizing::new(plaintext_to_sidechannel_string(value, wraps));
         to_encrypt.push((col.clone(), mode, key_id, wraps, plaintext, sidechannel_str));
     }
 
@@ -320,7 +321,7 @@ where
                 crate::backend::EncryptionMode::Deterministic => None,
             },
         );
-        let plaintext = backend.decrypt(&key, mode, &blob, &aad)?;
+        let plaintext = Zeroizing::new(backend.decrypt(&key, mode, &blob, &aad)?);
         let value = deserialise_wrapped(&plaintext, wraps)?;
         let obj = row.as_object_mut().expect("checked above");
         obj.insert(col, value);
