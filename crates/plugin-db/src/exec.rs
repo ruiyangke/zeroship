@@ -170,6 +170,15 @@ async fn exec_postgres_autocommit_with_role(
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     let pool = ensure_postgres_pool_for_shared_sql().await?;
+    query_postgres_pool_with_autocommit_role(&pool, app_id, sql, params).await
+}
+
+pub(crate) async fn query_postgres_pool_with_autocommit_role(
+    pool: &Rc<compio_postgres::Pool>,
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<Vec<compio_postgres::Row>, DbError> {
     let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
     apply_autocommit_role(&client, app_id).await?;
     let query_result = client

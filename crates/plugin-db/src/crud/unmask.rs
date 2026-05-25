@@ -441,10 +441,9 @@ async fn fetch_and_decrypt(
             "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
             args.column, app_id, args.collection
         );
-        let rows = pool
-            .query_text_params(&sql, &[&args.row_pk])
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        let rows =
+            crate::exec::query_postgres_pool_with_autocommit_role(pool, app_id, &sql, &[&args.row_pk])
+                .await?;
         if rows.is_empty() {
             return Err(DbError::ValidationFailed {
                 code: "unmask_not_found",
@@ -543,10 +542,9 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
             "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
             args.column, app_id, args.collection
         );
-        let rows = pool
-            .query_text_params(&sql, &[&args.row_pk])
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        let rows =
+            crate::exec::query_postgres_pool_with_autocommit_role(pool, app_id, &sql, &[&args.row_pk])
+                .await?;
         if rows.is_empty() {
             return Err(DbError::ValidationFailed {
                 code: "unmask_not_found",
