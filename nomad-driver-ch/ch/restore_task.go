@@ -41,10 +41,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"golang.org/x/sys/unix"
 )
 
 // Snapshot artifact file names (the controller stages these into
@@ -149,34 +149,41 @@ const (
 	stageRootfsSourceMissing = "rootfs_source_missing"
 
 	// stageStageRootfs: stageRootfsForRestore failed materialising
-	// the rootfs into runDir. Hardlink + copy fallback both errored —
-	// disk-full / cross-device-link issues / permissions on the
-	// runtime_dir.
+	// the rootfs into runDir. Reflink (FICLONE) + copy fallback both
+	// errored — disk-full / permissions on the runtime_dir / a
+	// genuinely unreadable src. v22 supersedes the v21 hardlink
+	// shape: each wake now gets a UNIQUE inode (reflink CoW, or a
+	// distinct-inode byte copy on non-reflink filesystems).
 	stageStageRootfs = "stage_rootfs"
 
 	// stageWakeRootfsLockWait: after the rootfs is materialised into
-	// runDir (hardlink — shares inode + locks with the source alloc's
-	// rootfs.img) but BEFORE CH `--restore` spawns, the driver polls
-	// F_OFD_SETLK acquire on the rootfs path until the source alloc's
-	// CH process releases its OFD write lock (or the budget exhausts).
+	// runDir but BEFORE CH `--restore` spawns, the driver polls
+	// F_OFD_SETLK acquire on the rootfs path as defense-in-depth.
 	//
-	// T-8b-stress-r9-retry-6 (driver v21): c=4 cluster smoke saw 8/8
-	// CREATE + 8/8 SNAPSHOT but 0/8 WAKE, all failing at stage=resume
-	// with verbatim CH stderr `Can't get Write lock for .../rootfs.img
-	// as there is already a ExclusiveWrite lock` followed by `VM
-	// Restore failed: LockingError(DiskLockError(... AlreadyLocked
-	// ...))`. CH then returned HTTP 500 on vm.resume because the
-	// restore never happened. Root cause: kernel-deferred `__fput` on
-	// the source alloc's CH process hadn't run yet — the OFD write
-	// lock attributed to that struct file persisted across the wake
-	// alloc's hardlink + spawn. This stage closes the window with the
-	// destroy-side r5-A pattern flipped to wake: wait for the lock to
-	// become acquirable before forking CH.
+	// Driver v22: stageRootfsForRestore now produces a UNIQUE inode
+	// per wake alloc (reflink/FICLONE on ext4/xfs/btrfs, plain copy
+	// on non-reflink filesystems), so the wake's rootfs.img no
+	// longer shares inode-keyed OFD lock state with the source
+	// template. Under normal operation this probe acquires the
+	// lock immediately and is a no-op — its failure path now means
+	// the dst filesystem is non-reflink-capable AND something
+	// outside this driver is locking the dst inode (e.g. a
+	// re-entrant restore attempt on the same runDir, an external
+	// tool holding the file).
 	//
-	// Budget: 50 × 100ms = 5s wall, mirroring r5-A. Finer cadence than
-	// r5-A's 25 × 200ms because the source-side `__fput` typically
-	// completes sub-100ms once destroy returns (we don't want to
-	// over-sleep past the kernel grant).
+	// Driver v21 origin (kept here for context): pre-v22 the wake
+	// hardlinked `rootfs.img` from the source alloc's runDir.
+	// Hardlinks share inode; the kernel's POSIX/OFD lock table is
+	// keyed by inode. Under c>=2 wakes the second wake EAGAIN'd on
+	// F_OFD_SETLK F_WRLCK because the first wake's CH still held
+	// the lock for the VM lifetime. T-8b-stress-r9-retry-6 c=4
+	// saw 8/8 CREATE + 8/8 SNAPSHOT but 0/8 WAKE on this exact
+	// mechanism. v22's unique-inode-per-wake fixes the root cause;
+	// this probe remains as a low-cost belt-and-braces check.
+	//
+	// Budget: 50 × 100ms = 5s wall. Same shape as r5-A's destroy-
+	// side probe; finer cadence (100ms vs 200ms) because under v22
+	// the acquire is expected to succeed on the first attempt.
 	stageWakeRootfsLockWait = "wake_rootfs_lock_wait"
 
 	// stagePrecreateRuntimeFile: pre-creation of serial.file /
@@ -567,19 +574,50 @@ func SetResumeForTest(fn func(c *Client, socketPath string) error) func(*Client,
 }
 
 // stageRootfsForRestore materialises the source rootfs at the
-// destination path. Tries `os.Link` first (hardlink, O(1) regardless
-// of image size); falls back to a stdlib copy when the link errors
-// with EXDEV (cross-device — runtime_dir and the alloc dir live on
-// separate filesystems).
+// destination path with a UNIQUE inode per wake alloc. Tries
+// `ioctl(FICLONE)` first (reflink — O(1) block-level CoW on
+// ext4/xfs/btrfs); falls back to a stdlib byte copy when the kernel
+// returns EOPNOTSUPP / EXDEV / EINVAL (filesystem without reflink
+// support, or src and dst on separate filesystems / different
+// mounts).
+//
+// Why NOT hardlink (driver v22, supersedes v21's hardlink path):
+//
+// The previous shape used `os.Link(src, dst)` so the wake alloc's
+// `rootfs.img` shared an inode with the source alloc's template
+// `rootfs-slim.img`. Cloud-Hypervisor's `--restore` opens the disk
+// with an OFD F_WRLCK (`fcntl(F_OFD_SETLK)`). The kernel's POSIX +
+// OFD lock table is keyed by **inode**, not by file path or open
+// fd — so under c>=2 concurrent wakes that all hardlink the same
+// template inode, only ONE wake can acquire the exclusive write
+// lock. Subsequent wakes get EAGAIN ("already locked") for the
+// ENTIRE lifetime of the first VM, because CH holds the lock until
+// shutdown. The v21 wake_rootfs_lock_wait probe is unable to
+// resolve this — the lock never releases during the budget window —
+// so the budget exhausts and the wake fails with stage=
+// wake_rootfs_lock_wait. T-8b-stress-r9-retry-6 saw 0/8 WAKE at
+// c=4 on this exact mechanism (architecture review r30-A2).
+//
+// Reflink (FICLONE) gives each wake a **distinct inode** that
+// shares physical blocks via CoW — no shared lock state, no
+// per-inode lock contention. The plain-copy fallback also produces
+// a distinct inode (at higher wall-time cost, ~200ms per 200MB on
+// SSD), so the unique-inode invariant holds even on non-reflink-
+// capable filesystems (e.g. tmpfs in test). The v21 lock-wait
+// probe stays as defense-in-depth: under normal operation with
+// reflink/copy it observes the lock-acquirable state immediately
+// and is a no-op; if it ever fires under v22, the filesystem is
+// non-reflink-capable AND something outside this driver is locking
+// the inode.
 //
 // Idempotent: if the destination already exists, returns nil — a
 // re-attempt of a previously-failed restore should not error here.
 // (The rewriter validates the destination's path; the file's mere
 // presence is the invariant CH cares about.)
 //
-// Permissions on the copy fallback: 0o600 (rw owner only), matching
-// materializeRootfs on the cold-boot path. The hardlink path
-// inherits the source's mode by definition.
+// Permissions: 0o600 (rw owner only), matching materializeRootfs
+// on the cold-boot path. Reflink inherits the dst's mode (which
+// we set via OpenFile); plain-copy uses the same explicit mode.
 func stageRootfsForRestore(src, dst string) error {
 	if src == "" {
 		return errors.New("stageRootfsForRestore: empty src")
@@ -588,57 +626,90 @@ func stageRootfsForRestore(src, dst string) error {
 		return errors.New("stageRootfsForRestore: empty dst")
 	}
 	// Idempotency: a prior attempt may have already staged the
-	// rootfs. Re-staging would either be a no-op (hardlink to the
-	// same inode) or fail with EEXIST on the copy fallback — neither
-	// reflects a real error.
+	// rootfs. Re-staging would either be a no-op (existing file is
+	// already a unique-inode reflink/copy) or fail with EEXIST on
+	// the O_EXCL create below — neither reflects a real error.
 	if _, err := os.Stat(dst); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat dst %s: %w", dst, err)
 	}
-	// Hardlink first. EXDEV is the only error class we recover
-	// from — everything else (EACCES, EPERM, ENOENT on src) reflects
-	// a genuine config issue we want surfaced.
-	linkErr := os.Link(src, dst)
-	if linkErr == nil {
-		return nil
-	}
-	if !isCrossDeviceLinkErr(linkErr) {
-		return fmt.Errorf("hardlink %s -> %s: %w", src, dst, linkErr)
-	}
-	// EXDEV fallback: stdlib copy. Matches materializeRootfs on the
-	// cold-boot path (same O_EXCL atomicity, same partial-cleanup
-	// shape).
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("open src %s: %w", src, err)
 	}
 	defer in.Close()
+	// Create dst with O_EXCL — partner allocs racing the same wake
+	// must not silently overwrite each other. The reflink ioctl
+	// REPLACES dst's contents in place, so the dst file must exist
+	// and be open for write before FICLONE.
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create dst %s: %w", dst, err)
 	}
+	// Try reflink first. On success the dst inode is unique (a
+	// fresh inode allocated by the O_EXCL open above) but shares
+	// physical blocks with src via the filesystem's CoW machinery —
+	// O(1) regardless of image size, no inode-keyed lock collision
+	// with src or any other wake's reflink of the same template.
+	if reflinkErr := reflinkFileFn(out, in); reflinkErr == nil {
+		if closeErr := out.Close(); closeErr != nil {
+			_ = os.Remove(dst)
+			return fmt.Errorf("close dst %s (reflink): %w", dst, closeErr)
+		}
+		return nil
+	}
+	// Reflink failed. Fall back to a plain byte copy. The error
+	// classes we recover from here are filesystem-capability gaps
+	// (EOPNOTSUPP / ENOTSUP on tmpfs, ext2, vfat) and cross-device
+	// (EXDEV when src and dst are on different mounts). We do NOT
+	// distinguish — any reflink failure is treated as "fall back",
+	// since the byte copy is the strictly safer shape and the
+	// wall-time cost (~200ms per 200MB on SSD) is acceptable on
+	// filesystems where reflink isn't available.
 	if _, copyErr := io.Copy(out, in); copyErr != nil {
 		_ = out.Close()
 		_ = os.Remove(dst)
-		return fmt.Errorf("copy %s -> %s (EXDEV fallback): %w", src, dst, copyErr)
+		return fmt.Errorf("copy %s -> %s (reflink fallback): %w", src, dst, copyErr)
 	}
-	if err := out.Close(); err != nil {
+	if closeErr := out.Close(); closeErr != nil {
 		_ = os.Remove(dst)
-		return fmt.Errorf("close dst %s: %w", dst, err)
+		return fmt.Errorf("close dst %s (copy): %w", dst, closeErr)
 	}
 	return nil
 }
 
-// isCrossDeviceLinkErr returns true when err is a *os.LinkError
-// wrapping EXDEV (cross-device link). Used by stageRootfsForRestore
-// to decide between hardlink + copy-fallback.
-func isCrossDeviceLinkErr(err error) bool {
-	var linkErr *os.LinkError
-	if !errors.As(err, &linkErr) {
-		return false
+// reflinkFileFn is the seam tests swap to drive the FICLONE
+// failure path without engineering a non-reflink filesystem in
+// t.TempDir(). Default impl wraps unix.IoctlFileClone (FICLONE) —
+// the Linux ioctl for block-level copy-on-write between two open
+// file descriptors. Returns nil on success, the kernel errno (as
+// returned by ioctl) on failure.
+//
+// Tests install a stub returning a sentinel error to force the
+// copy-fallback branch.
+var reflinkFileFn = realReflinkFile
+
+// realReflinkFile is the production reflink implementation.
+// Delegates to unix.IoctlFileClone(destFd, srcFd), which performs
+// the FICLONE ioctl on Linux 4.5+. On filesystems without reflink
+// support (tmpfs, ext2, vfat), the kernel returns EOPNOTSUPP /
+// ENOTSUP and stageRootfsForRestore falls back to a byte copy.
+func realReflinkFile(dst, src *os.File) error {
+	return unix.IoctlFileClone(int(dst.Fd()), int(src.Fd()))
+}
+
+// SetReflinkFileForTest swaps the FICLONE seam. Returns the
+// previous fn so callers can restore it on cleanup. Tests
+// typically install a stub that returns syscall.EOPNOTSUPP to
+// pin the copy-fallback contract regardless of the underlying
+// filesystem's reflink capability.
+func SetReflinkFileForTest(fn func(dst, src *os.File) error) func(dst, src *os.File) error {
+	prev := reflinkFileFn
+	if fn != nil {
+		reflinkFileFn = fn
 	}
-	return errors.Is(linkErr.Err, syscall.EXDEV)
+	return prev
 }
 
 // startTaskRestoreBranch is the wake-from-snapshot StartTask flow.

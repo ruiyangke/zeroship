@@ -260,10 +260,12 @@ const ChRootfsSourceName = chRootfsSourceName
 const ChArtifactDirEnvVar = chArtifactDirEnvVar
 
 // StageRootfsForRestore is the test entry point for the C-7-LT-12a
-// restore-branch rootfs-stage helper. Tries `os.Link` first; falls
-// back to a stdlib copy on EXDEV. Idempotent on re-attempt of a
-// previously-staged dst (a re-invocation returns nil rather than
-// EEXIST'ing on the copy fallback).
+// restore-branch rootfs-stage helper. Tries FICLONE (reflink) first;
+// falls back to a stdlib copy on EOPNOTSUPP/EXDEV/other. Always
+// produces a UNIQUE inode per dst (v22, supersedes v21 hardlink).
+// Idempotent on re-attempt of a previously-staged dst (a
+// re-invocation returns nil rather than EEXIST'ing on the O_EXCL
+// open).
 func StageRootfsForRestore(src, dst string) error {
 	return stageRootfsForRestore(src, dst)
 }

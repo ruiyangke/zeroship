@@ -2440,8 +2440,8 @@ func TestStartTaskRestoreBranch_StagesRootfs(t *testing.T) {
 		t.Errorf("rootfs.img at %s is a directory, want regular file", rootfsDst)
 	}
 
-	// Contents must match the source — hardlink → same inode, copy
-	// → byte-identical. Either way ReadFile sees the source bytes.
+	// Contents must match the source — reflink CoW or byte copy,
+	// ReadFile sees the source bytes either way.
 	gotBytes, err := os.ReadFile(rootfsDst)
 	if err != nil {
 		t.Fatalf("read staged rootfs: %v", err)
@@ -2454,10 +2454,11 @@ func TestStartTaskRestoreBranch_StagesRootfs(t *testing.T) {
 		t.Errorf("staged rootfs contents mismatch source (got %q, want %q)", gotBytes, srcBytes)
 	}
 
-	// Default path is hardlink — under t.TempDir() src and dst share
-	// the same filesystem, so os.Link succeeds without EXDEV. Hardlink
-	// invariant: src and dst share an inode (Stat reports same
-	// Sys().Ino).
+	// v22 unique-inode invariant: stageRootfsForRestore MUST produce a
+	// DISTINCT inode for the dst, regardless of whether reflink (FICLONE)
+	// or the copy fallback ran. Under t.TempDir() (tmpfs, no reflink
+	// support) the copy path runs; both paths allocate a fresh inode via
+	// O_EXCL create, so the invariant holds unconditionally.
 	srcInfo, err := os.Stat(cfg.RootfsSource)
 	if err != nil {
 		t.Fatalf("stat source rootfs: %v", err)
@@ -2469,8 +2470,8 @@ func TestStartTaskRestoreBranch_StagesRootfs(t *testing.T) {
 	srcStat, srcOk := srcInfo.Sys().(*syscall.Stat_t)
 	dstStat, dstOk := dstInfo.Sys().(*syscall.Stat_t)
 	if srcOk && dstOk {
-		if srcStat.Ino != dstStat.Ino {
-			t.Errorf("rootfs not hardlinked: src.Ino=%d dst.Ino=%d (expected identical on same FS)", srcStat.Ino, dstStat.Ino)
+		if srcStat.Ino == dstStat.Ino {
+			t.Errorf("v22 unique-inode violated: src.Ino=%d == dst.Ino=%d (want distinct inodes)", srcStat.Ino, dstStat.Ino)
 		}
 	}
 }
@@ -2533,69 +2534,100 @@ func TestStartTaskRestoreBranch_RootfsSource_MissingErrors(t *testing.T) {
 	}
 }
 
-// TestStartTaskRestoreBranch_RootfsSource_EXDEV_FallsBackToCopy pins
-// the EXDEV recovery path. When os.Link errors with EXDEV (src and
-// dst on separate filesystems — e.g. runtime_dir on an artifact-image
-// loopback mount vs. the alloc dir on the host root), the driver
-// MUST fall back to a stdlib copy. Pre-fix this case (production
-// shape) would have surfaced as `hardlink … invalid cross-device
-// link`.
-//
-// We can't easily reproduce a real EXDEV under t.TempDir() (every
-// path is on the same tmpfs), so we exercise the helper directly via
-// the export_test surface. The integration is covered by the happy-
-// path `TestStartTaskRestoreBranch_StagesRootfs` above; this test
-// pins the helper's hardlink-vs-copy decision in isolation.
-func TestStartTaskRestoreBranch_RootfsSource_EXDEV_FallsBackToCopy(t *testing.T) {
-	// Drive the helper directly. Same-filesystem case: os.Link
-	// succeeds — the copy fallback is the fail-open path under EXDEV
-	// only. We pin the happy-path inode-sharing invariant and the
-	// pure-copy fallback as separate cases.
+// TestStageRootfsForRestore_ReflinkSucceeds pins the happy path: when
+// the FICLONE seam reports success, stageRootfsForRestore returns nil
+// and the dst inode is DISTINCT from the src inode (a new inode was
+// allocated by the O_EXCL open; reflink just clones the data blocks).
+// v22 (T-8b-driver-v22).
+func TestStageRootfsForRestore_ReflinkSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src.img")
-	if err := os.WriteFile(src, []byte("rootfs-bytes"), 0o644); err != nil {
+	if err := os.WriteFile(src, []byte("rootfs-bytes-v22"), 0o644); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
 
-	// Case 1: same-FS hardlink succeeds. Inode shared.
-	dstLink := filepath.Join(dir, "dst-link.img")
-	if err := ch.StageRootfsForRestore(src, dstLink); err != nil {
-		t.Fatalf("StageRootfsForRestore (hardlink): %v", err)
+	// Happy path: under t.TempDir() the kernel may return EOPNOTSUPP
+	// for FICLONE (tmpfs has no reflink). We don't override the seam
+	// here — the production function falls back to copy automatically,
+	// so either path is valid. What we assert is the v22 contract:
+	// unique inode and byte-identical contents.
+	dst := filepath.Join(dir, "dst.img")
+	if err := ch.StageRootfsForRestore(src, dst); err != nil {
+		t.Fatalf("StageRootfsForRestore: %v", err)
 	}
-	srcInfo, _ := os.Stat(src)
-	dstInfo, _ := os.Stat(dstLink)
-	srcStat, sok := srcInfo.Sys().(*syscall.Stat_t)
-	dstStat, dok := dstInfo.Sys().(*syscall.Stat_t)
-	if sok && dok && srcStat.Ino != dstStat.Ino {
-		t.Errorf("same-FS case: want shared inode (hardlink), got src=%d dst=%d", srcStat.Ino, dstStat.Ino)
-	}
-
-	// Case 2: idempotency — re-staging at a path that exists is a
-	// no-op (a previously-failed restore re-attempt must not error).
-	if err := ch.StageRootfsForRestore(src, dstLink); err != nil {
-		t.Errorf("StageRootfsForRestore (idempotent re-stage): %v", err)
-	}
-
-	// Case 3: pure-copy semantics. We can't fake EXDEV in-tree, but
-	// the copy branch is exercised via the export_test
-	// CopyRootfsForRestoreTest helper which forces the copy path
-	// regardless of FS. Contents must match the source.
-	dstCopy := filepath.Join(dir, "dst-copy.img")
-	if err := ch.CopyRootfsForRestoreTest(src, dstCopy); err != nil {
-		t.Fatalf("CopyRootfsForRestoreTest: %v", err)
-	}
-	got, err := os.ReadFile(dstCopy)
+	srcInfo, err := os.Stat(src)
 	if err != nil {
-		t.Fatalf("read dst-copy: %v", err)
+		t.Fatalf("stat src: %v", err)
 	}
-	if string(got) != "rootfs-bytes" {
-		t.Errorf("copy fallback contents mismatch: got %q want %q", got, "rootfs-bytes")
+	dstInfo, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
 	}
-	// Copy fallback produces a DISTINCT inode (no shared link).
-	dstCopyInfo, _ := os.Stat(dstCopy)
-	dstCopyStat, ok := dstCopyInfo.Sys().(*syscall.Stat_t)
-	if sok && ok && srcStat.Ino == dstCopyStat.Ino {
-		t.Errorf("copy fallback: want distinct inode, got shared src=%d dstCopy=%d", srcStat.Ino, dstCopyStat.Ino)
+	srcStat, srcOk := srcInfo.Sys().(*syscall.Stat_t)
+	dstStat, dstOk := dstInfo.Sys().(*syscall.Stat_t)
+	if srcOk && dstOk && srcStat.Ino == dstStat.Ino {
+		t.Errorf("v22: want dst_ino != src_ino (unique inode per wake), got both=%d", srcStat.Ino)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "rootfs-bytes-v22" {
+		t.Errorf("contents mismatch: got %q want %q", got, "rootfs-bytes-v22")
+	}
+}
+
+// TestStageRootfsForRestore_ReflinkFallsBackToCopy pins the fallback
+// path: when the FICLONE seam returns ENOTSUP (filesystem without
+// reflink support), stageRootfsForRestore MUST fall back to a plain
+// byte copy; the result MUST have a distinct inode and byte-identical
+// contents. v22 (T-8b-driver-v22).
+func TestStageRootfsForRestore_ReflinkFallsBackToCopy(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.img")
+	if err := os.WriteFile(src, []byte("rootfs-bytes-fallback"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	// Install a seam that always returns ENOTSUP to force the copy
+	// branch regardless of the underlying filesystem's reflink
+	// capability (avoids a dependency on a specific filesystem in CI).
+	prev := ch.SetReflinkFileForTest(func(_, _ *os.File) error {
+		return syscall.ENOTSUP
+	})
+	defer ch.SetReflinkFileForTest(prev)
+
+	dst := filepath.Join(dir, "dst-fallback.img")
+	if err := ch.StageRootfsForRestore(src, dst); err != nil {
+		t.Fatalf("StageRootfsForRestore (copy fallback): %v", err)
+	}
+
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("stat src: %v", err)
+	}
+	dstInfo, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat dst: %v", err)
+	}
+	srcStat, srcOk := srcInfo.Sys().(*syscall.Stat_t)
+	dstStat, dstOk := dstInfo.Sys().(*syscall.Stat_t)
+	// assert dst_ino != src_ino — the copy-fallback path allocates a
+	// fresh inode via the O_EXCL open; no shared inode-keyed OFD lock.
+	if srcOk && dstOk && srcStat.Ino == dstStat.Ino {
+		t.Errorf("copy fallback: want dst_ino != src_ino, got both=%d (shared inode — OFD lock collision risk)", srcStat.Ino)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "rootfs-bytes-fallback" {
+		t.Errorf("copy fallback: contents mismatch: got %q want %q", got, "rootfs-bytes-fallback")
+	}
+
+	// Idempotency: re-staging an already-present dst must return nil.
+	if err := ch.StageRootfsForRestore(src, dst); err != nil {
+		t.Errorf("idempotent re-stage (copy fallback): %v", err)
 	}
 }
 
