@@ -158,10 +158,10 @@ pub struct IsolateDbContext {
     /// emits `SAVEPOINT zs_sp_<depth+1>` and increments this; the matching
     /// `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT` decrements it.
     ///
-    /// The native orchestrator (`orchestrator::transaction`) is the only
+    /// The native transaction module (`transaction`) is the only
     /// writer: the savepoint name `zs_sp_<N>` is derived from this counter
     /// so RELEASE/ROLLBACK TO always target the savepoint the matching
-    /// nested call opened. Capped at [`crate::orchestrator::transaction::MAX_SAVEPOINT_DEPTH`]
+    /// nested call opened. Capped at [`crate::transaction::MAX_SAVEPOINT_DEPTH`]
     /// (a 9th level throws `savepoint_depth_exceeded`).
     savepoint_depth: u32,
 

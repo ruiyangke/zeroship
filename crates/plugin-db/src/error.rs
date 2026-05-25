@@ -10,7 +10,7 @@
 //! confined to a small set of deliberate hold-outs across three
 //! categories:
 //!
-//! 1. **Wire-contract envelopes**: `crate::orchestrator::register_model::validate`
+//! 1. **Wire-contract envelopes**: `crate::register_model::validate`
 //!    whose `Err` IS the `validation_refused` JSON envelope (a
 //!    documented SDK wire contract — `JSON.parse(err.message)`
 //!    recovers the payload). `run_pipeline` wraps it in
@@ -30,8 +30,8 @@
 //!    at the V8 boundary (these are TypeError-class, never need `.code`).
 //!
 //! 4. **Cold-init**: `lib.rs::init_pool_async` returns `Result<_, String>`;
-//!    the call sites at `orchestrator/register_model/mod.rs:120` and
-//!    `exec.rs::ensure_pool` synthesise `DbError::Configuration` with
+//!    the call sites at `register_model/mod.rs` and `exec.rs::ensure_pool`
+//!    synthesise `DbError::Configuration` with
 //!    code `lazy_init_failed` (unified at `7d0bc4c5`; same code at
 //!    every cold-init call site).
 //!
@@ -77,7 +77,7 @@ use zeroship_runtime::state::OpError;
 pub enum DbError {
     /// DDL deploy refused before any rows changed — typically a
     /// `validation_refused` envelope from
-    /// `orchestrator::register_model`. The full JSON envelope is in
+    /// `register_model`. The full JSON envelope is in
     /// `envelope_json`; the variant exists so callers know the wire
     /// payload is *already* a JSON object the SDK consumes verbatim.
     SchemaRefused {
@@ -321,7 +321,7 @@ impl DbError {
     /// without consuming `self`. Used by callers that need to embed the
     /// underlying error text in a wrapping message (e.g. the
     /// `begin_failed` / `commit_failed_indeterminate` wrappers in
-    /// [`crate::orchestrator::transaction`]) while keeping the original
+    /// [`crate::transaction`]) while keeping the original
     /// `DbError` available.
     pub fn message_str(&self) -> &str {
         match self {

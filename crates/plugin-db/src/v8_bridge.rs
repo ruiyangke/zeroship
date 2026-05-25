@@ -1,9 +1,10 @@
 //! V8 ↔ Rust marshaling layer for `zeroship.db.*` callbacks.
 //!
 //! This module is the seam between V8 and the rest of the plugin —
-//! nothing here knows about SQL or schema. Callers above (`crud`,
-//! `orchestrator::*`, `replication_ops`) parse args via these helpers,
-//! mint promises, and hand the work to the async layer.
+//! nothing here knows about SQL or schema. Callers above
+//! (`crud`, `register_model`, `transaction`, `drop_namespace`,
+//! `replication_ops`) parse args via these helpers, mint promises, and
+//! hand the work to the async layer.
 //!
 //! Contents:
 //!

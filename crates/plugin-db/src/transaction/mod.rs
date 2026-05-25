@@ -60,6 +60,10 @@
 //! the SDK isolation-level hint (it has no `ISOLATION LEVEL` clause);
 //! the successful-path semantics remain Tier-1 parity, while
 //! concurrency/isolation nuance stays documented as a divergence.
+//!
+//! The sibling [`auto_tx`] module hosts the runtime-installed
+//! `__zsBeginAutoTx` / `__zsEndAutoTx` wrappers. Both surfaces share the
+//! same backend/client helpers in this module.
 
 #![allow(unsafe_code)]
 
@@ -72,6 +76,8 @@ use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 use crate::v8_bridge::runtime_state;
+
+pub mod auto_tx;
 
 /// Maximum nesting depth for `env.db.transaction(...)` calls — the
 /// outermost `BEGIN` plus this many `SAVEPOINT` levels. A `transaction()`
@@ -90,6 +96,61 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
     "REPEATABLE READ",
     "SERIALIZABLE",
 ];
+
+/// Execute a control statement (`BEGIN`, `SAVEPOINT`, `COMMIT`,
+/// `ROLLBACK`, etc.) against the backend-specific pinned tx client.
+pub(crate) async fn client_exec_on_tx(
+    backend: &crate::backend::BackendHandle,
+    client: &crate::context::TxConnection,
+    sql: &str,
+    params: &[&str],
+) -> Result<u64, crate::error::DbError> {
+    use crate::backend::SqlExecutor;
+    use crate::context::TxConnection;
+
+    match (backend, client) {
+        (
+            crate::backend::BackendHandle::Postgres(pg),
+            TxConnection::Postgres(client),
+        ) => pg.client_exec(client, sql, params).await,
+        (crate::backend::BackendHandle::Sqlite(sq), TxConnection::Sqlite(client)) => {
+            sq.client_exec(client, sql, params).await
+        }
+        (crate::backend::BackendHandle::Postgres(_), TxConnection::Sqlite(_))
+        | (crate::backend::BackendHandle::Sqlite(_), TxConnection::Postgres(_)) => Err(
+            crate::error::DbError::internal("db: transaction backend/client mismatch"),
+        ),
+    }
+}
+
+/// Apply the §17.5 per-app PG role to a transaction's dedicated client.
+///
+/// Issues `SET LOCAL ROLE "<per-app role>"` on `client` so every
+/// statement in the surrounding transaction executes under the
+/// constrained per-app role rather than the platform login role. `SET
+/// LOCAL` auto-reverts at COMMIT / ROLLBACK, so a pooled / dedicated
+/// connection can never leak the role to a later use.
+///
+/// The per-app role is provisioned by `register_model`. The WAL
+/// consumer + §17.6 watchdog + §17.7 drop step 3 deliberately do NOT
+/// call this — they stay on the platform role (the only connection
+/// crossing the per-app trust boundary).
+///
+/// Shared by [`transaction_dispatch`] and [`auto_tx::exec_auto_begin`]
+/// so the role-application happens at exactly one logical site per tx
+/// flavour.
+pub(crate) async fn apply_per_app_role(
+    client: &compio_postgres::Client,
+    app_id: &str,
+) -> Result<(), crate::error::DbError> {
+    let sql = crate::auth::bootstrap::set_local_role_sql(app_id);
+    client.execute(&sql, &[]).await.map_err(|e| {
+        let mut err = crate::error::DbError::from_pg(&e);
+        crate::error::prefix_message(&mut err, "db: SET LOCAL ROLE (per-app §17.5): ");
+        err
+    })?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // TxFinalizer — heap state shared by the resolve / reject handlers
@@ -293,7 +354,7 @@ async fn exec_begin_or_savepoint(
             let begin_sql = build_begin_sql(isolation_level)?;
             let client = pg.acquire_dedicated_client().await?;
             let tx_client = TxConnection::Postgres(client);
-            super::client_exec_on_tx(&backend, &tx_client, &begin_sql, &[]).await?;
+            client_exec_on_tx(&backend, &tx_client, &begin_sql, &[]).await?;
             let TxConnection::Postgres(client) = tx_client else {
                 unreachable!("just constructed Postgres tx client")
             };
@@ -305,7 +366,7 @@ async fn exec_begin_or_savepoint(
             // does NOT call this: a savepoint reuses the open connection,
             // which already had the role applied at its enclosing
             // top-level BEGIN.
-            super::apply_per_app_role(&client, app_id).await?;
+            apply_per_app_role(&client, app_id).await?;
 
             crate::context::with_mut(|c| {
                 let _previous = c.install_tx_client(TxConnection::Postgres(client));
@@ -323,7 +384,7 @@ async fn exec_begin_or_savepoint(
             let _ = build_begin_sql(isolation_level)?;
             let client = sq.acquire_dedicated_client().await?;
             let tx_client = TxConnection::Sqlite(client);
-            super::client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
+            client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
             let TxConnection::Sqlite(client) = tx_client else {
                 unreachable!("just constructed SQLite tx client")
             };
@@ -381,7 +442,7 @@ async fn run_on_tx_conn(sql: &str) -> Result<(), DbError> {
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let client = crate::context::with_mut(|c| c.take_tx_client())
         .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
-    let result = super::client_exec_on_tx(&backend, &client, sql, &[]).await;
+    let result = client_exec_on_tx(&backend, &client, sql, &[]).await;
     // Put the client back regardless — savepoint statements keep the tx
     // open.
     crate::context::with_mut(|c| c.put_tx_client(client));
@@ -717,9 +778,9 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
     };
 
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let result = super::client_exec_on_tx(&backend, &client, cmd, &[]).await;
+    let result = client_exec_on_tx(&backend, &client, cmd, &[]).await;
     if success && result.is_err() && matches!(client, TxConnection::Sqlite(_)) {
-        let _ = super::client_exec_on_tx(&backend, &client, "ROLLBACK", &[]).await;
+        let _ = client_exec_on_tx(&backend, &client, "ROLLBACK", &[]).await;
     }
     drop(client);
 

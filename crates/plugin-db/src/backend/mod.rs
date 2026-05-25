@@ -542,7 +542,7 @@ pub trait LockManager: SqlExecutor {
 /// converged design at `docs/proposals/db-system-design.md` §7). Carries
 /// the single `ensure_app_schema` method that used to live on
 /// [`Backend`] directly; consumer bounds in
-/// `orchestrator/register_model/bootstrap.rs` will narrow onto this
+/// `register_model/bootstrap.rs` will narrow onto this
 /// trait in PR 3.
 ///
 /// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.

@@ -68,7 +68,7 @@ pub fn auto_begin_transaction(
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Route via the typed `OpResult::JsValue` channel so the COMMIT-
         // time error path preserves `DbError.code` / `.hint` (mirrors
-        // `orchestrator::transaction::transaction_dispatch`). The
+        // `transaction::transaction_dispatch`). The
         // legacy `OpResult::Failed { error: String }` rail flattened the
         // typed `DbError` and stripped the SDK's retry-by-code signal —
         // the exact site retry-by-code matters most.
@@ -122,7 +122,7 @@ pub fn auto_end_transaction(
 
 /// Convert an `exec_auto_begin` result into the `ResolveValue` that
 /// settles the promise handed to JS. Mirrors the
-/// `orchestrator::transaction::transaction_dispatch` pattern —
+/// `transaction::transaction_dispatch` pattern —
 /// success carries the u32 token, failure carries the *typed* `OpError`
 /// (code + hint preserved) instead of a flat string. Extracted as a
 /// standalone fn so tests can exercise the conversion without a V8
@@ -236,7 +236,7 @@ async fn exec_auto_begin(
 
     // §17.5 — constrain the auto-tx's client SQL to the per-app role.
     // `SET LOCAL ROLE` reverts at the auto-tx COMMIT/ROLLBACK. See
-    // `orchestrator::apply_per_app_role`.
+    // `transaction::apply_per_app_role`.
     super::apply_per_app_role(&client, app_id).await?;
 
     crate::context::with_mut(|c| {

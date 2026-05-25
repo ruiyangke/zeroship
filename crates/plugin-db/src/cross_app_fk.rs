@@ -20,7 +20,7 @@
 //! SQLite ATTACH design lives in the rustdoc here; the implementation
 //! is engine-agnostic (pure-Rust JSON walk, no SQL).
 //!
-//! Hook point: [`crate::orchestrator::register_model::bootstrap::build_ctx`]
+//! Hook point: [`crate::register_model::bootstrap::build_ctx`]
 //! invokes [`reject_cross_app_fk`] after the strictness read and BEFORE
 //! the advisory-lock acquire. The order is load-bearing: rejecting a
 //! malformed schema at parse time means we never take the per-app

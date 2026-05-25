@@ -45,7 +45,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::orchestrator::transaction::transaction_dispatch;
+use crate::transaction::transaction_dispatch;
 use crate::v8_bridge::v8_value_to_serde_json;
 use crate::v8_classes::collection::mint_collection;
 use crate::v8_classes::db_platform::mint_db_platform;
@@ -160,7 +160,7 @@ impl Db {
     /// for this isolate (an enclosing `transaction()` or the auto-tx
     /// wrapper) opens a `SAVEPOINT` instead of a fresh `BEGIN`; the inner
     /// callback's failure rolls back only to that savepoint. See
-    /// [`crate::orchestrator::transaction`] for the full state machine.
+    /// [`crate::transaction`] for the full state machine.
     ///
     /// `opts` is `{ isolationLevel?: "readCommitted" | "repeatableRead"
     /// | "serializable" }` (honoured only on the outermost `BEGIN`; a

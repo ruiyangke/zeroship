@@ -19,7 +19,7 @@
 //!   collections-only object handed to a `Db.transaction(fn)` callback.
 //!   The `Transaction` v8_class (`commit`/`rollback`/`collection` +
 //!   GC-auto-rollback) is gone; transaction orchestration lives entirely
-//!   in [`crate::orchestrator::transaction`]. CRUD on the view's
+//!   in [`crate::transaction`]. CRUD on the view's
 //!   collections routes through the open transaction connection
 //!   (`IsolateDbContext::tx_conn`) automatically, since the orchestrator
 //!   sets that slot for the transaction's duration.

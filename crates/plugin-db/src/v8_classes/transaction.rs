@@ -6,7 +6,7 @@
 //! The `Transaction` `#[v8_class]` (with its `commit`/`rollback`/
 //! `collection` methods and GC-driven auto-rollback finalizer) is
 //! **gone**. Transaction orchestration moved entirely into Rust
-//! ([`crate::orchestrator::transaction`]): begin/commit/rollback/
+//! ([`crate::transaction`]): begin/commit/rollback/
 //! savepoint are driven by the native `Db.transaction(fn)` orchestrator,
 //! never by JS-reachable methods. There is no `env.db.beginTransaction`
 //! and no `tx.commit()` / `tx.rollback()` anywhere in the object graph —
