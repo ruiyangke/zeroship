@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use serde_json::Value;
+use tempfile::TempDir;
 
 use crate::backend::{
     AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
@@ -131,6 +132,9 @@ use session::{SqliteSession, SqliteSessionHandle};
 ///   connection drops the hooks drops the sender drops the channel.
 #[allow(dead_code)]
 pub struct SqliteBackend {
+    // Held before `session` so drop order closes SQLite (and any
+    // ATTACH-ed per-app files) before TempDir cleanup runs.
+    memory_db_dir: Option<TempDir>,
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
     db_dir: PathBuf,
@@ -220,39 +224,15 @@ impl SqliteBackend {
     ///
     /// If `path` points at an existing directory we place the control
     /// session at `<dir>/zs-control.sqlite`. `:memory:` opens the
-    /// control session in SQLite's in-memory mode and uses a unique
-    /// temp directory as the parent for the per-app ATTACH files.
+    /// control session in SQLite's in-memory mode and keeps a
+    /// `tempfile::TempDir` alive for the lifetime of the backend so
+    /// the per-app ATTACH files stay ephemeral too.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
-        let path = path.as_ref();
-        let (db_dir, session_path) = if path == Path::new(":memory:") {
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default();
-            let db_dir = std::env::temp_dir()
-                .join(format!("zeroship-sqlite-memory-{}-{nonce}", std::process::id()));
-            (db_dir, PathBuf::from(":memory:"))
-        } else if path.is_dir() {
-            let db_dir = path.to_path_buf();
-            let session_path = db_dir.join("zs-control.sqlite");
-            (db_dir, session_path)
-        } else {
-            let session_path = path.to_path_buf();
-            let db_dir = session_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            (db_dir, session_path)
-        };
-
-        std::fs::create_dir_all(&db_dir).map_err(|e| {
-            DbError::internal(format!(
-                "SqliteBackend::open: failed to create SQLite directory {}: {e}",
-                db_dir.display()
-            ))
-        })?;
-
-        Self::open_with_session_path(db_dir, session_path)
+        let path = path.as_ref().to_path_buf();
+        let opened = compio::runtime::spawn_blocking(move || Self::open_blocking(path))
+            .await
+            .map_err(|_| DbError::internal("SqliteBackend::open: spawn_blocking task panicked"))??;
+        Ok(Self::finish_open(opened))
     }
 
     /// **Test helper** (P2 PR 4) — open a [`crate::backend::BrokerPauseGuard`]
@@ -298,7 +278,46 @@ impl SqliteBackend {
         Self::open_with_session_path(db_dir, session_path)
     }
 
+    fn open_blocking(path: PathBuf) -> Result<OpenedBackend, DbError> {
+        let (db_dir, session_path, memory_db_dir) = if path == Path::new(":memory:") {
+            let memory_db_dir = tempfile::tempdir().map_err(|e| {
+                DbError::internal(format!(
+                    "SqliteBackend::open: failed to create SQLite temp dir: {e}"
+                ))
+            })?;
+            (memory_db_dir.path().to_path_buf(), PathBuf::from(":memory:"), Some(memory_db_dir))
+        } else if path.is_dir() {
+            let session_path = path.join("zs-control.sqlite");
+            (path, session_path, None)
+        } else {
+            let session_path = path;
+            let db_dir = session_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            (db_dir, session_path, None)
+        };
+
+        std::fs::create_dir_all(&db_dir).map_err(|e| {
+            DbError::internal(format!(
+                "SqliteBackend::open: failed to create SQLite directory {}: {e}",
+                db_dir.display()
+            ))
+        })?;
+
+        Self::open_session(db_dir, session_path, memory_db_dir)
+    }
+
     fn open_with_session_path(db_dir: PathBuf, session_path: PathBuf) -> Result<Self, DbError> {
+        let opened = Self::open_session(db_dir, session_path, None)?;
+        Ok(Self::finish_open(opened))
+    }
+
+    fn open_session(
+        db_dir: PathBuf,
+        session_path: PathBuf,
+        memory_db_dir: Option<TempDir>,
+    ) -> Result<OpenedBackend, DbError> {
         // CDC packet channel — worker thread (producer, via commit
         // hook) → compio publisher task (consumer, calls
         // broker::publish on this thread).
@@ -309,11 +328,28 @@ impl SqliteBackend {
         // `app_id` argument is currently unused inside the dispatcher
         // (per-event app_id derives from the hook's `db_name`
         // parameter — see `cdc::install` rustdoc), so we pass `None`.
-        let session = Rc::new(SqliteSession::open(
+        let session = SqliteSession::open(
             &session_path,
             None,
             Some(packet_tx),
-        )?);
+        )?;
+
+        Ok(OpenedBackend {
+            session,
+            db_dir,
+            memory_db_dir,
+            packet_rx,
+        })
+    }
+
+    fn finish_open(opened: OpenedBackend) -> Self {
+        let OpenedBackend {
+            session,
+            db_dir,
+            memory_db_dir,
+            packet_rx,
+        } = opened;
+        let session = Rc::new(session);
 
         // Spawn the publisher task on the current compio runtime. The
         // task captures `Rc<SqliteSession>` (for lazy column-name
@@ -349,7 +385,8 @@ impl SqliteBackend {
             crate::encryption::KeySource::EnvVar,
         );
 
-        Ok(Self {
+        Self {
+            memory_db_dir,
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
@@ -359,7 +396,7 @@ impl SqliteBackend {
             minter_secret_prev,
             nonce_cache,
             key_store,
-        })
+        }
     }
 
     /// **P3 PR 3 test helper** — construct a backend with the
@@ -401,6 +438,7 @@ impl SqliteBackend {
         );
 
         Ok(Self {
+            memory_db_dir: None,
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
@@ -412,6 +450,13 @@ impl SqliteBackend {
             key_store,
         })
     }
+}
+
+struct OpenedBackend {
+    session: SqliteSession,
+    db_dir: PathBuf,
+    memory_db_dir: Option<TempDir>,
+    packet_rx: flume::Receiver<CommitPacket>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2735,6 +2780,24 @@ mod tests {
         AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
         SchemaIntrospect, SqlExecutor,
     };
+
+    #[test]
+    fn memory_backend_tempdir_is_removed_on_drop() {
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+        let temp_dir_path = runtime.block_on(async {
+            let backend = SqliteBackend::open(":memory:")
+                .await
+                .expect("open in-memory backend");
+            let temp_dir_path = backend.db_dir().to_path_buf();
+            assert!(temp_dir_path.exists(), "temp dir should exist while backend lives");
+            drop(backend);
+            temp_dir_path
+        });
+        assert!(
+            !temp_dir_path.exists(),
+            "TempDir-backed SQLite scratch dir should be cleaned on drop"
+        );
+    }
 
     /// P1 PR 5: `Backend` composition marker now lands on
     /// `SqliteBackend`. Pinning the bound here means a future change

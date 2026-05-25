@@ -545,6 +545,9 @@ fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
         return Ok(BackendUrl::Postgres);
     }
     if lower.starts_with("sqlite://") {
+        // SQLite URLs are always local-file selectors here, so any URI
+        // authority is folded into the filesystem path (`sqlite://host/db`
+        // becomes `host/db`, not a remote host lookup).
         return Ok(BackendUrl::Sqlite {
             path: PathBuf::from(&trimmed["sqlite://".len()..]),
         });
@@ -563,6 +566,8 @@ fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
     let has_scheme = trimmed
         .split_once(':')
         .map(|(scheme, _)| {
+            // Windows `C:\...` is rejected here as scheme `c`; that's
+            // acceptable because zeroship only targets Linux workers.
             let mut chars = scheme.chars();
             matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
                 && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
@@ -685,6 +690,12 @@ mod backend_url_tests {
             backend_for_url("./dev.sqlite").unwrap(),
             BackendUrl::Sqlite {
                 path: PathBuf::from("./dev.sqlite"),
+            }
+        );
+        assert_eq!(
+            backend_for_url("sqlite://host/db").unwrap(),
+            BackendUrl::Sqlite {
+                path: PathBuf::from("host/db"),
             }
         );
     }

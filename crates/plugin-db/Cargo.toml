@@ -56,6 +56,7 @@ flume = { workspace = true }
 # `sqlite3_auto_extension`. Unconditional now that the SQLite arm is
 # always compiled in. The PG arm still never touches this crate.
 sqlite-vec = { workspace = true }
+tempfile = { workspace = true }
 # **P3 PR 3** — SQLite SessionMinter uses HMAC-SHA256. `sha2` is
 # already an unconditional dep (used for the auto-generated index
 # name suffix). The previous `hmac = { ... optional = true }` line
@@ -89,11 +90,6 @@ criterion = { workspace = true }
 # 7c6bd2ec drift in cycle 13:17 — a snapshot test would have caught
 # it pre-commit.
 tracing-subscriber = { workspace = true }
-# P1 PR 2: per-test temp directory for the SQLite integration target
-# (`tests/sqlite_integration.rs`). `SqliteBackend::new(db_dir)` opens
-# `<db_dir>/zs-control.sqlite`; the dir auto-cleans on drop so the
-# tests leave no on-disk artefacts.
-tempfile = { workspace = true }
 # P3 PR 4: cross-backend session-payload equivalence test in
 # `tests/sqlite_integration.rs` needs to recompute HMAC-SHA256 over
 # the canonical payload independently of the production code path so
