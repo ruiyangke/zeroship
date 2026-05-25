@@ -30,5 +30,53 @@
 //! consumer moved to its canonical import.
 
 pub mod auto_tx;
+pub mod drop_namespace;
 pub mod register_model;
 pub mod transaction;
+
+/// Apply the §17.5 per-app PG role to a transaction's dedicated client.
+///
+/// Issues `SET LOCAL ROLE "<per-app role>"` on `client` so every
+/// statement in the surrounding transaction executes under the
+/// constrained per-app role rather than the platform login role. `SET
+/// LOCAL` auto-reverts at COMMIT / ROLLBACK, so a pooled / dedicated
+/// connection can never leak the role to a later use.
+///
+/// **Production-only.** Without the `hardening` Cargo feature this is a
+/// no-op: the per-app role is not provisioned (the provisioning call in
+/// `register_model` shares the same gate), so there is no role to set,
+/// and client SQL runs under the platform login role exactly as it did
+/// before this landed. The WAL consumer + §17.6 watchdog + §17.7 drop
+/// step 3 deliberately do NOT call this — they stay on the platform role
+/// (the only connection crossing the per-app trust boundary).
+///
+/// Shared by [`transaction::exec_begin`] and [`auto_tx::exec_auto_begin`]
+/// so the role-application happens at exactly one logical site per tx
+/// flavour.
+#[cfg(feature = "hardening")]
+pub(crate) async fn apply_per_app_role(
+    client: &compio_postgres::Client,
+    app_id: &str,
+) -> Result<(), crate::error::DbError> {
+    let sql = crate::auth::bootstrap::set_local_role_sql(app_id);
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| {
+            let mut err = crate::error::DbError::from_pg(&e);
+            crate::error::prefix_message(&mut err, "db: SET LOCAL ROLE (per-app §17.5): ");
+            err
+        })?;
+    Ok(())
+}
+
+/// No-op stand-in when `hardening` is off — see the gated variant's
+/// docs. Keeps the call sites unconditional (no `#[cfg]` scattered
+/// across `exec_begin` / `exec_auto_begin`).
+#[cfg(not(feature = "hardening"))]
+pub(crate) async fn apply_per_app_role(
+    _client: &compio_postgres::Client,
+    _app_id: &str,
+) -> Result<(), crate::error::DbError> {
+    Ok(())
+}

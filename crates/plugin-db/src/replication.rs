@@ -631,6 +631,148 @@ pub(crate) async fn slot_status(
 }
 
 // ---------------------------------------------------------------------------
+// Drop-namespace teardown (§17.7 PG steps — slot + publication)
+// ---------------------------------------------------------------------------
+
+/// Default grace before the drop sequence force-terminates the slot's
+/// replication backend. §17.7: "after a 5s grace, … `pg_terminate_backend`".
+pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
+
+/// Tear down the per-app publication + replication slot, in the §17.7
+/// PG order. Idempotent — each step is a no-op when its precondition is
+/// already met (slot/publication absent ⇒ skip), so it is safe to retry
+/// after a partial failure.
+///
+/// Steps (the consumer-cancellation courtesy of §17.7 step 2 happens in
+/// the caller's [`crate::backend::ChangeStream::deprovision`]; by the
+/// time we run, the consumer has been asked to exit):
+///
+/// 1. **Force the slot inactive.** `pg_drop_replication_slot` refuses an
+///    active slot and there is no FORCE flag. If a replication backend is
+///    still attached (the consumer's connection hasn't closed within the
+///    grace), `pg_terminate_backend(active_pid)` against the slot's
+///    listed backend forces the connection closed. "Killed" means
+///    `pg_terminate_backend`, NOT OS SIGKILL (§17.7) — only the one
+///    replication connection dies, never the worker process.
+/// 2. **`pg_drop_replication_slot(slot)`** — now guaranteed inactive.
+/// 3. **`DROP PUBLICATION <pub>`** — after the slot, so nothing is
+///    decoding the publication when it disappears.
+///
+/// `terminate_grace` is honoured by the CALLER (it awaits the consumer
+/// exit + grace before invoking this). We re-check `active` here and
+/// terminate only if still attached, so a slow consumer exit doesn't
+/// wedge the drop.
+///
+/// Runs under the platform-role `pool` (§17.5) — the only role that may
+/// terminate a replication backend and drop a slot.
+pub async fn drop_publication_and_slot(pool: &Pool, app_id: &str) -> Result<(), DbError> {
+    let pub_name = publication_name(app_id)?;
+    let slot = slot_name(app_id)?;
+
+    // 1. If the slot exists AND is still active, terminate its backend.
+    //    `active_pid` is NULL when no consumer is attached.
+    let active_rows = pool
+        .query_text_params(
+            "SELECT active, active_pid FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(&mut err, "replication: drop: probe slot active: ");
+            err
+        })?;
+    if let Some(row) = active_rows.first() {
+        let active: bool = row.try_get::<_, bool>("active").unwrap_or(false);
+        if active {
+            // active_pid is an Int4 (PID). Read defensively — if it's
+            // NULL despite active=true (a race), skip the terminate and
+            // let the drop's own inactive-check surface the contention.
+            if let Ok(pid) = row.try_get::<_, i32>("active_pid") {
+                // pg_terminate_backend takes the pid; we bind it as text
+                // and cast in-SQL to avoid threading an i32 param type.
+                let _ = pool
+                    .query_text_params(
+                        "SELECT pg_terminate_backend($1::int4)",
+                        &[&pid.to_string()],
+                    )
+                    .await
+                    .map_err(|e| {
+                        let mut err = DbError::from_pg(&e);
+                        prefix_message(
+                            &mut err,
+                            "replication: drop: pg_terminate_backend: ",
+                        );
+                        err
+                    })?;
+            }
+        }
+    }
+    // else: slot already gone — idempotent skip to the publication drop.
+
+    // 2. Drop the slot (now inactive). `pg_drop_replication_slot` errors
+    //    if the slot doesn't exist, so guard on the probe above: only
+    //    attempt the drop when the slot row was present.
+    if !active_rows.is_empty() {
+        match pool
+            .query_text_params("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                let err = DbError::from_pg(&e);
+                // 55006 object_in_use ⇒ the backend hasn't fully detached
+                // yet. Surface as LockContention so the caller can retry
+                // from step 3 (§17.7 "retry from step 3 on partial
+                // failure"); the slot is still there for the next pass.
+                if matches!(err, DbError::LockContention { .. }) {
+                    let mut err = err;
+                    prefix_message(
+                        &mut err,
+                        &format!(
+                            "replication: drop: slot {slot} still active (retry): "
+                        ),
+                    );
+                    return Err(err);
+                }
+                // "does not exist" (a concurrent dropper won) is benign —
+                // idempotent. Postgres raises undefined_object (42704).
+                if !err_is_undefined_object(&e) {
+                    let mut err = err;
+                    prefix_message(
+                        &mut err,
+                        &format!("replication: drop: pg_drop_replication_slot({slot}): "),
+                    );
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    // 3. Drop the publication. `DROP PUBLICATION IF EXISTS` is idempotent.
+    pool.query_text_params(&format!("DROP PUBLICATION IF EXISTS {pub_name}"), &[])
+        .await
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(
+                &mut err,
+                &format!("replication: drop: DROP PUBLICATION {pub_name}: "),
+            );
+            err
+        })?;
+
+    Ok(())
+}
+
+/// True if the PG error is SQLSTATE 42704 (undefined_object) — e.g.
+/// `pg_drop_replication_slot` on a slot a concurrent dropper already
+/// removed. Treated as benign (idempotent) by [`drop_publication_and_slot`].
+fn err_is_undefined_object(e: &compio_postgres::Error) -> bool {
+    use compio_postgres::error::SqlState;
+    e.code() == Some(&SqlState::UNDEFINED_OBJECT)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -658,6 +800,13 @@ mod tests {
     fn names_use_stable_prefix() {
         assert_eq!(publication_name("alpha").unwrap(), "__zs_pub_alpha");
         assert_eq!(slot_name("alpha").unwrap(), "__zs_slot_alpha");
+    }
+
+    #[test]
+    fn drop_terminate_grace_matches_spec() {
+        // §17.7: "after a 5s grace, … pg_terminate_backend". Pin the
+        // constant so an edit that loosens the grace trips a test.
+        assert_eq!(DROP_TERMINATE_GRACE_SECS, 5);
     }
 
     /// C1 regression guard: the publication SQL must reference the schema with

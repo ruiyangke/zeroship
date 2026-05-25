@@ -290,6 +290,21 @@ where
         .await
         .map_err(map_audit_bootstrap_err)?;
 
+    // §17.5 per-app PG role hardening — production-only, behind the
+    // `hardening` Cargo feature (same gate as the rest of `auth/*`).
+    // Provision the constrained per-app role + scope its grants to THIS
+    // schema immediately after the schema exists. The role is
+    // NOREPLICATION (the §17.5 non-negotiable: slot ownership stays
+    // platform-side). Idempotent — re-running register_model on a hot
+    // app is a no-op (`CREATE ROLE` is existence-probed; GRANTs are
+    // idempotent). New schemas get the role at creation; there is NO
+    // ALTER/backfill path for pre-existing schemas (pre-launch, no
+    // production schemas — AGENTS.md).
+    #[cfg(feature = "hardening")]
+    crate::auth::bootstrap::ensure_per_app_role(backend.pool_handle().as_ref(), app_id)
+        .await
+        .map_err(|e| coded_db("ensure per-app role", e))?;
+
     let client = backend
         .acquire_dedicated_client()
         .await

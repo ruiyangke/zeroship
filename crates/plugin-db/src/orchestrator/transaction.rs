@@ -193,7 +193,7 @@ pub fn transaction_dispatch<'s>(
         // The Rust-side broker `pending_emits` queue is cleared on every
         // top-level BEGIN inside `exec_begin` so a prior tx's residue
         // never leaks into this one.
-        match exec_begin_or_savepoint(nested, isolation_level.as_deref()).await {
+        match exec_begin_or_savepoint(nested, isolation_level.as_deref(), &app_id).await {
             Ok(savepoint) => {
                 // Hand back a continuation that mints the tx-view, calls
                 // the creator callback, and attaches commit/rollback
@@ -265,6 +265,7 @@ fn reject_outer_now(
 async fn exec_begin_or_savepoint(
     nested: bool,
     isolation_level: Option<&str>,
+    app_id: &str,
 ) -> Result<Option<String>, DbError> {
     if nested {
         // A savepoint reuses the open connection. The depth counter is
@@ -301,6 +302,17 @@ async fn exec_begin_or_savepoint(
         .execute(&begin_sql, &[])
         .await
         .map_err(|e| DbError::from_pg(&e))?;
+
+    // §17.5 — constrain client SQL to the per-app role for the lifetime of
+    // this transaction. `SET LOCAL ROLE` auto-reverts at COMMIT / ROLLBACK,
+    // so the dedicated tx connection never leaks the role. Production-only
+    // (`hardening`): without the feature the per-app role isn't provisioned
+    // and this is a no-op — client SQL runs under the platform login role.
+    // The nested SAVEPOINT arm above deliberately does NOT call this: a
+    // savepoint reuses the open connection, which already had the role
+    // applied at its enclosing top-level BEGIN. See
+    // `orchestrator::apply_per_app_role`.
+    super::apply_per_app_role(&client, app_id).await?;
 
     crate::context::with_mut(|c| {
         let _previous = c.install_tx_client(client);

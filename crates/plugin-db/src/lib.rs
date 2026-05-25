@@ -163,6 +163,15 @@ pub(crate) mod migrations;
 #[cfg(feature = "test-helpers")]
 pub mod migrations;
 
+// F1 sweeper-half (P6a-1) — orphan `Running`-row reaper. Exposed to
+// downstream test crates under `test-helpers` like the other
+// orchestration modules; the in-crate unit tests reach it via
+// `#[cfg(test)]`.
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod migration_sweeper;
+#[cfg(feature = "test-helpers")]
+pub mod migration_sweeper;
+
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod orchestrator;
 #[cfg(feature = "test-helpers")]

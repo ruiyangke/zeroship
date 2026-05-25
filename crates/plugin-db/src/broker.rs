@@ -599,6 +599,25 @@ impl Broker {
             .sum()
     }
 
+    /// Count live (not-yet-closed) subscriptions for a single `app_id`
+    /// on this thread's broker. Used by the §17.7 drop-namespace
+    /// subscription gate: a non-zero count means a subscriber is still
+    /// observable, so the drop defers (or, under `--force`, the broker
+    /// is drained first).
+    ///
+    /// Per-isolate / per-thread like the rest of the broker — the
+    /// control plane aggregates across workers via the admin endpoint;
+    /// this is the in-process source for the single-worker / dev path.
+    pub fn app_subscription_count(&self, app_id: &str) -> usize {
+        let Some(by_collection) = self.by_key.get(app_id) else {
+            return 0;
+        };
+        by_collection
+            .values()
+            .map(|v| v.iter().filter(|s| !s.is_closed()).count())
+            .sum()
+    }
+
     /// Drop subscribers for a given app — used by the per-app slot GC
     /// when the app is deleted. Each affected subscription is sent a
     /// `Closed` message.
@@ -764,6 +783,14 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
 /// wrapper.
 pub fn live_subscription_count() -> usize {
     BROKER.with(|b| b.borrow().subscription_count())
+}
+
+/// Live subscription count for a single `app_id` on this thread's
+/// broker. The §17.7 drop-namespace subscription gate reads this for
+/// the in-process / single-worker path. See
+/// [`Broker::app_subscription_count`].
+pub fn app_subscription_count(app_id: &str) -> usize {
+    BROKER.with(|b| b.borrow().app_subscription_count(app_id))
 }
 
 /// Drop ALL subscribers (for an app, or globally with `None`). Tests

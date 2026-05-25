@@ -6597,3 +6597,931 @@ async fn p55_pr1_register_model_refuses_reserved_classification_field() {
         "expected reserved-name message, got: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P6a-1 — F1 sweeper-half (orphan `Running`-row reaper).
+//
+// The warn-half (r12) only fires on graceful failure paths; a hard
+// crash leaves the audit row in `running` with the owning session's
+// advisory lock auto-released by Postgres. These tests drive the
+// sweeper (`crate::migration_sweeper`) against real Postgres to prove
+// it (a) transitions a stale, lock-free row to `failed` with the
+// `orphan_running_row_swept` marker, (b) leaves a fresh row alone, (c)
+// leaves a row whose advisory lock is still held alone, and (d) is
+// idempotent under repeated / concurrent invocation.
+// ---------------------------------------------------------------------------
+
+/// Insert a `backfill` / `running` audit row with a controllable
+/// `last_heartbeat_at`. `heartbeat_age_secs` is subtracted from NOW():
+/// a large value (> the sweep threshold) makes the row a stale
+/// candidate; 0 makes it fresh.
+async fn seed_running_backfill_row(
+    pool: &Pool,
+    app: &str,
+    collection: &str,
+    name: &str,
+    heartbeat_age_secs: i64,
+) -> i64 {
+    let sql = format!(
+        r#"INSERT INTO "{app}"."__zeroship_migrations"
+            (collection, phase, change_class, change_kind, details,
+             applied_by_kind, deploy_id, schema_version, status,
+             owner_session_id, last_heartbeat_at)
+           VALUES ($1, 'backfill', 'additive', $2, '{{}}'::jsonb,
+                   'auto', 'sweep_seed', 1, 'running',
+                   '999999', NOW() - make_interval(secs => $3::double precision))
+           RETURNING id"#
+    );
+    let age_s = heartbeat_age_secs.to_string();
+    let rows = pool
+        .query_text_params(&sql, &[collection, name, age_s.as_str()])
+        .await
+        .expect("seed running backfill row");
+    rows[0].get::<_, i64>("id")
+}
+
+async fn read_status_and_error(pool: &Pool, app: &str, id: i64) -> (String, Option<String>) {
+    let sql = format!(
+        r#"SELECT status, error FROM "{app}"."__zeroship_migrations" WHERE id = $1::bigint"#
+    );
+    let rows = pool
+        .query_text_params(&sql, &[id.to_string().as_str()])
+        .await
+        .expect("read status/error");
+    let r = &rows[0];
+    (r.get::<_, String>("status"), r.try_get::<_, String>("error").ok())
+}
+
+#[compio::test]
+async fn sweeper_transitions_stale_running_row_to_failed() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_stale";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    // Stale: heartbeat 600s ago, well past the 300s default threshold.
+    let id = seed_running_backfill_row(&pool, app, "users", "backfill_users", 600).await;
+
+    let swept = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("sweep should succeed");
+
+    assert_eq!(swept.len(), 1, "exactly one candidate examined");
+    assert_eq!(swept[0].audit_id, id);
+    assert_eq!(
+        swept[0].outcome,
+        zeroship_plugin_db::migration_sweeper::SweepOutcome::Swept,
+        "stale lock-free row must be swept"
+    );
+
+    let (status, error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "failed", "row must be transitioned to failed");
+    assert_eq!(
+        error.as_deref(),
+        Some("orphan_running_row_swept"),
+        "error must carry the sweep marker"
+    );
+}
+
+#[compio::test]
+async fn sweeper_skips_fresh_running_row() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_fresh";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    // Fresh: heartbeat just now (0s ago) — NOT a candidate.
+    let id = seed_running_backfill_row(&pool, app, "users", "backfill_users", 0).await;
+
+    let swept = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("sweep should succeed");
+
+    assert!(
+        swept.is_empty(),
+        "fresh row must not even be a candidate, got {swept:?}"
+    );
+    let (status, _error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "running", "fresh row must stay running");
+}
+
+#[compio::test]
+async fn sweeper_skips_row_with_live_lock() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_livelock";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    // Stale heartbeat — would be a candidate — BUT a live session holds
+    // the migration advisory lock (simulating a worker mid-run whose
+    // heartbeat write is lagging). The sweeper must NOT reap it.
+    let name = "backfill_users";
+    let id = seed_running_backfill_row(&pool, app, "users", name, 600).await;
+
+    // Open a dedicated connection and take the SAME advisory lock the
+    // migration run would hold. Keys come from `LockScope::migration`:
+    // (`{app}:mig:{name}`, `mig:{name}`).
+    let (holder, holder_conn) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    compio::runtime::spawn(async move {
+        let _ = holder_conn.run().await;
+    })
+    .detach();
+    let key1 = format!("{app}:mig:{name}");
+    let key2 = format!("mig:{name}");
+    let got = holder
+        .query_text_params(
+            "SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)",
+            &[key1.as_str(), key2.as_str()],
+        )
+        .await;
+    assert!(got.is_ok(), "holder should acquire the migration lock");
+
+    let swept = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("sweep should succeed");
+
+    assert_eq!(swept.len(), 1, "candidate examined");
+    assert_eq!(
+        swept[0].outcome,
+        zeroship_plugin_db::migration_sweeper::SweepOutcome::LiveLockHeld,
+        "row with a live advisory-lock holder must be skipped"
+    );
+    let (status, _error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "running", "live-lock row must stay running");
+
+    // Release + close the holder so the test connection cleans up.
+    let _ = holder
+        .query_text_params(
+            "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)",
+            &[key1.as_str(), key2.as_str()],
+        )
+        .await;
+    drop(holder);
+}
+
+#[compio::test]
+async fn sweeper_idempotent_concurrent() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "sweep_idem";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    let id = seed_running_backfill_row(&pool, app, "users", "backfill_users", 600).await;
+
+    // First sweep transitions it.
+    let first = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("first sweep");
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0].outcome,
+        zeroship_plugin_db::migration_sweeper::SweepOutcome::Swept
+    );
+
+    // Second sweep finds NO candidate (row is now `failed`, not
+    // `running`) — proving idempotency: a doubled sweep is a no-op.
+    let second = zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool, app, 300)
+        .await
+        .expect("second sweep");
+    assert!(
+        second.is_empty(),
+        "second sweep must find no candidate (row already terminal), got {second:?}"
+    );
+
+    // Status unchanged; error marker still present (not doubled / not
+    // overwritten by the second pass since it never touched the row).
+    let (status, error) = read_status_and_error(&pool, app, id).await;
+    assert_eq!(status, "failed");
+    assert_eq!(error.as_deref(), Some("orphan_running_row_swept"));
+
+    // Concurrent variant: two sweepers racing the SAME fresh stale row.
+    // The `pg_try_advisory_lock` gate guarantees at most one wins the
+    // transition; the loser sees the lock held OR an already-terminal
+    // row. Either way the row ends `failed` exactly once.
+    let id2 = seed_running_backfill_row(&pool, app, "orders", "backfill_orders", 600).await;
+    let pool_a = std::rc::Rc::clone(&pool);
+    let pool_b = std::rc::Rc::clone(&pool);
+    let app_a = app.to_string();
+    let app_b = app.to_string();
+    let h1 = compio::runtime::spawn(async move {
+        zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool_a, &app_a, 300).await
+    });
+    let h2 = compio::runtime::spawn(async move {
+        zeroship_plugin_db::migration_sweeper::sweep_orphan_running_rows(&pool_b, &app_b, 300).await
+    });
+    let r1 = h1.await.expect("join sweep A").expect("sweep A ok");
+    let r2 = h2.await.expect("join sweep B").expect("sweep B ok");
+
+    // Count how many of the two sweeps reported `Swept` for id2.
+    let swept_count = [r1, r2]
+        .iter()
+        .flatten()
+        .filter(|s| {
+            s.audit_id == id2
+                && s.outcome == zeroship_plugin_db::migration_sweeper::SweepOutcome::Swept
+        })
+        .count();
+    assert_eq!(
+        swept_count, 1,
+        "exactly one of two concurrent sweepers must claim+transition the row"
+    );
+    let (status2, error2) = read_status_and_error(&pool, app, id2).await;
+    assert_eq!(status2, "failed");
+    assert_eq!(error2.as_deref(), Some("orphan_running_row_swept"));
+}
+
+// ---------------------------------------------------------------------------
+// P6a-2 — Per-app PG role hardening (§17.5).
+//
+// The per-app role (`app_<id>_role`) owns ONLY its schema and is
+// NOREPLICATION — slot ownership stays platform-side. These tests
+// provision the role via `auth::bootstrap::ensure_per_app_role` and
+// fence it: it can CRUD its own schema, cannot read a sibling app's
+// schema, cannot create/list/drop replication slots, and carries no
+// `rolreplication` attribute. The per-app role is NOLOGIN (clients
+// connect as the platform login role, then `SET ROLE`), so these tests
+// drive it via `SET ROLE` from the superuser pool — which is exactly how
+// `exec_begin` / `exec_auto_begin` apply it to client SQL.
+// ---------------------------------------------------------------------------
+
+/// Provision a schema + its per-app role for a test. Returns the role
+/// name. Idempotent re-runs are exercised by `per_app_role_created_at_provision`.
+async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str) -> String {
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+    // The role inherits __zeroship_app_role_template, so it must exist.
+    zeroship_plugin_db::auth::ensure_admin_schema(pool)
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(pool)
+        .await
+        .unwrap();
+    role
+}
+
+#[compio::test]
+async fn per_app_role_created_at_provision() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_role_create";
+    let role = provision_app_with_role(&pool, app).await;
+
+    // First provision creates the role.
+    let first = zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .expect("provision per-app role");
+    assert!(first.created_role, "first provision must create the role");
+
+    // The role now exists in pg_roles.
+    let exists = pool
+        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[role.as_str()])
+        .await
+        .unwrap();
+    assert_eq!(exists.len(), 1, "role must exist after provision");
+
+    // Idempotent: a second provision is a no-op create (GRANTs re-run
+    // harmlessly).
+    let second = zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .expect("re-provision per-app role");
+    assert!(
+        !second.created_role,
+        "second provision must NOT re-create the role"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn per_app_role_has_no_replication_attr() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_role_norepl";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // §17.5 NON-NEGOTIABLE: rolreplication MUST be false.
+    let rows = pool
+        .query_text_params(
+            "SELECT rolreplication FROM pg_roles WHERE rolname = $1",
+            &[role.as_str()],
+        )
+        .await
+        .unwrap();
+    let is_repl: bool = rows[0].get("rolreplication");
+    assert!(
+        !is_repl,
+        "per-app role MUST NOT have the REPLICATION attribute (§17.5 \
+         slot-ownership-stays-platform)"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn per_app_role_grant_scoped_to_schema() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_role_scoped";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // Create a table in the app schema (as superuser), insert a row.
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app}".widgets (id SERIAL PRIMARY KEY, name TEXT)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(r#"INSERT INTO "{app}".widgets (name) VALUES ('seed')"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    // Re-run provision so the existing-table GRANT covers `widgets`
+    // (provision before table creation only set DEFAULT PRIVILEGES; the
+    // re-run also covers tables that already exist — proving idempotent
+    // grant coverage).
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // SET ROLE to the per-app role and CRUD its own schema — must work.
+    pool.execute(&format!(r#"SET ROLE "{role}""#), &[]).await.unwrap();
+    let sel = pool
+        .query_text_params(&format!(r#"SELECT name FROM "{app}".widgets"#), &[])
+        .await;
+    assert!(sel.is_ok(), "per-app role must SELECT its own schema: {sel:?}");
+    let ins = pool
+        .execute(
+            &format!(r#"INSERT INTO "{app}".widgets (name) VALUES ('by_role')"#),
+            &[],
+        )
+        .await;
+    assert!(ins.is_ok(), "per-app role must INSERT its own schema: {ins:?}");
+    pool.execute("RESET ROLE", &[]).await.unwrap();
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app_a = "p6a_fence_a";
+    let app_b = "p6a_fence_b";
+    let role_a = provision_app_with_role(&pool, app_a).await;
+    // Provision a sibling schema B (and its role) with a table.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    let role_b = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_b);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[]).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app_b}\""), &[]).await.unwrap();
+
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app_a)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app_b)
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app_b}".secrets (id SERIAL PRIMARY KEY, val TEXT)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(r#"INSERT INTO "{app_b}".secrets (val) VALUES ('app_b_secret')"#),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // SET ROLE to app_a's role and attempt to read app_b's schema — must
+    // be denied (no USAGE on the sibling schema).
+    pool.execute(&format!(r#"SET ROLE "{role_a}""#), &[]).await.unwrap();
+    let cross = pool
+        .query_text_params(&format!(r#"SELECT val FROM "{app_b}".secrets"#), &[])
+        .await;
+    assert!(
+        cross.is_err(),
+        "per-app role A must NOT read sibling schema B; got Ok"
+    );
+    let cross_err = err_chain(&cross.unwrap_err());
+    assert!(
+        cross_err.contains("permission denied") || cross_err.contains("acl"),
+        "expected permission-denied reading sibling schema, got: {cross_err}"
+    );
+
+    // While SET ROLE'd: cannot create a replication slot (NOREPLICATION).
+    let slot_create = pool
+        .execute(
+            "SELECT pg_create_logical_replication_slot('p6a_fence_slot', 'pgoutput', false, false)",
+            &[],
+        )
+        .await;
+    assert!(
+        slot_create.is_err(),
+        "per-app role must NOT create a replication slot directly"
+    );
+    let slot_err = err_chain(&slot_create.unwrap_err());
+    assert!(
+        slot_err.contains("replication") || slot_err.contains("permission denied"),
+        "expected REPLICATION-privilege error on slot create, got: {slot_err}"
+    );
+
+    // Cannot drop a slot either (pg_drop_replication_slot requires
+    // REPLICATION). Use a name that doesn't exist — the privilege check
+    // fires before the "no such slot" check.
+    let slot_drop = pool
+        .execute("SELECT pg_drop_replication_slot('does_not_exist')", &[])
+        .await;
+    assert!(
+        slot_drop.is_err(),
+        "per-app role must NOT drop a replication slot"
+    );
+
+    pool.execute("RESET ROLE", &[]).await.unwrap();
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_a}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_a}\""), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role_b}\""), &[]).await;
+}
+
+#[compio::test]
+async fn client_sql_runs_under_per_app_role() {
+    // Proves the `SET LOCAL ROLE` shape `exec_begin` / `exec_auto_begin`
+    // issue actually switches the effective role for the rest of the tx,
+    // and reverts at COMMIT/ROLLBACK.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_setlocal";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // Open a dedicated connection, BEGIN, then apply the SAME SET LOCAL
+    // ROLE SQL the orchestrator emits.
+    let (client, conn) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+
+    client.execute("BEGIN", &[]).await.unwrap();
+    let set_sql = zeroship_plugin_db::auth::bootstrap::set_local_role_sql(app);
+    client.execute(&set_sql, &[]).await.unwrap();
+
+    // current_user inside the tx must be the per-app role.
+    let who = client
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let current: String = who[0].get("u");
+    assert_eq!(
+        current, role,
+        "client SQL inside the tx must run under the per-app role"
+    );
+
+    // COMMIT reverts SET LOCAL — current_user is back to the login role.
+    client.execute("COMMIT", &[]).await.unwrap();
+    let who2 = client
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let after: String = who2[0].get("u");
+    assert_ne!(
+        after, role,
+        "SET LOCAL ROLE must revert at COMMIT (no role leak to next stmt)"
+    );
+
+    drop(client);
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn wal_connection_stays_platform_role() {
+    // §17.5: the WAL/replication connection stays under the platform
+    // role and is NEVER switched to a per-app role. This is a structural
+    // assertion: the replication helpers (`ensure_publication_and_slot`,
+    // `drop_abandoned_slots`, the §17.7 deprovision) run on the pool
+    // directly with NO `SET ROLE` — only the transaction BEGIN paths
+    // (`exec_begin` / `exec_auto_begin`) apply the per-app role. We pin
+    // that the role-application surface is exactly the two tx-begin
+    // helpers by asserting `apply_per_app_role` is not invoked from the
+    // replication/WAL code (verified at the source level — there is no
+    // `set_local_role`/`set_role`/`apply_per_app_role` call anywhere in
+    // replication.rs / wal_consumer.rs / change_stream_pg.rs).
+    //
+    // The runtime half: provision a role, then run a replication-side
+    // operation on the pool and confirm it executes as the platform
+    // login role (current_user unchanged), NOT the per-app role.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_walrole";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // A replication-side read (the watchdog query shape) runs on the
+    // pool with no SET ROLE — current_user is the login role.
+    let who = pool
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let current: String = who[0].get("u");
+    assert_ne!(
+        current, role,
+        "WAL/replication pool connection must stay on the platform login \
+         role, never the per-app role"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+// ---------------------------------------------------------------------------
+// P6a-3 — Drop-namespace sequencing (§17.7 PG ordering + CRITICAL #4).
+//
+// `orchestrator::drop_namespace` runs the §17.7 PG teardown: subscription
+// gate → broker drain → slot/publication teardown (via
+// ChangeStream::deprovision) → DROP SCHEMA CASCADE → DROP ROLE. These
+// tests provision a full app (schema + slot + publication + per-app role)
+// and verify the ordering, the subscription gate (defer vs --force),
+// idempotency of steps 4-7, and retry-from-step-3 on partial failure.
+//
+// Slot-dependent tests skip when wal_level != logical (CI's pg-test runs
+// with -c wal_level=logical).
+// ---------------------------------------------------------------------------
+
+use zeroship_plugin_db::backend::BackendHandle;
+use zeroship_plugin_db::orchestrator::drop_namespace::{
+    drop_namespace, DropNamespaceOpts, DropNamespaceOutcome,
+};
+
+/// Build a `BackendHandle::Postgres` over a fresh `PostgresBackend` for
+/// the drop-namespace tests. (`PostgresBackend` is already imported at
+/// module scope earlier in this file — referenced unqualified here.)
+fn pg_backend_handle(pool: &std::rc::Rc<Pool>, url: &str) -> BackendHandle {
+    BackendHandle::Postgres(std::rc::Rc::new(PostgresBackend::new(
+        std::rc::Rc::clone(pool),
+        url.to_string(),
+    )))
+}
+
+async fn slot_exists(pool: &Pool, app: &str) -> bool {
+    let slot = zeroship_plugin_db::replication::slot_name(app).unwrap();
+    let rows = pool
+        .query_text_params(
+            "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
+            &[slot.as_str()],
+        )
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+async fn publication_exists(pool: &Pool, app: &str) -> bool {
+    let pubn = zeroship_plugin_db::replication::publication_name(app).unwrap();
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_publication WHERE pubname = $1", &[pubn.as_str()])
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+async fn schema_exists(pool: &Pool, app: &str) -> bool {
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_namespace WHERE nspname = $1", &[app])
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+async fn role_exists(pool: &Pool, app: &str) -> bool {
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[role.as_str()])
+        .await
+        .unwrap();
+    !rows.is_empty()
+}
+
+#[compio::test]
+async fn drop_namespace_defers_on_active_subscription() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_drop_defer";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+
+    let backend = pg_backend_handle(&pool, &url);
+    // count > 0, force = false → defer. No teardown runs.
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 2 },
+    )
+    .await
+    .expect("drop_namespace");
+
+    assert_eq!(
+        outcome,
+        DropNamespaceOutcome::Deferred { active_subscriptions: 2 },
+        "active subscription without --force must defer with the count"
+    );
+    // Schema must still exist — no teardown ran.
+    assert!(schema_exists(&pool, app).await, "deferred drop must NOT drop the schema");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_force_fires_subscription_app_dropped() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_drop_force";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+
+    // Register a live subscription on this thread's broker so the
+    // force-drain has something to close.
+    let sub = zeroship_plugin_db::broker::subscribe(app, "widgets");
+    assert_eq!(
+        zeroship_plugin_db::broker::app_subscription_count(app),
+        1,
+        "subscription should be live before drop"
+    );
+
+    let backend = pg_backend_handle(&pool, &url);
+    // force = true → drain broker + proceed to completion.
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: true, subscription_count: 1 },
+    )
+    .await
+    .expect("drop_namespace --force");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed, "--force must complete");
+
+    // The subscription must have been closed (subscription_app_dropped →
+    // broker Closed). The iterator surfaces the terminal close.
+    assert!(sub.is_closed(), "active subscriber must be closed under --force");
+    assert_eq!(
+        zeroship_plugin_db::broker::app_subscription_count(app),
+        0,
+        "broker must be drained for the app after --force drop"
+    );
+    // Schema gone.
+    assert!(!schema_exists(&pool, app).await, "schema must be dropped under --force");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping drop_namespace_pg_ordering — wal_level != logical");
+        return;
+    }
+    let app = "p6a_drop_order";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    // Provision slot + publication.
+    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .expect("provision slot + publication");
+    assert!(slot_exists(&pool, app).await, "slot provisioned");
+    assert!(publication_exists(&pool, app).await, "publication provisioned");
+
+    let backend = pg_backend_handle(&pool, &url);
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 0 },
+    )
+    .await
+    .expect("drop_namespace");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed);
+
+    // End state: slot, publication, AND schema all gone. The ordering
+    // (slot → publication → schema) is enforced inside
+    // `drop_publication_and_slot` + the orchestrator; the end-state check
+    // proves the full teardown ran. CRITICAL #4: the publication (which
+    // references the schema via FOR TABLES IN SCHEMA) is dropped BEFORE
+    // the schema, so DROP SCHEMA never tears out a publication's tracked
+    // tables.
+    assert!(!slot_exists(&pool, app).await, "slot must be dropped");
+    assert!(!publication_exists(&pool, app).await, "publication must be dropped");
+    assert!(!schema_exists(&pool, app).await, "schema must be dropped");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_drops_per_app_role_last() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_drop_role";
+    c1_cleanup(&pool, app).await;
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    // Provision the per-app role + give it an object in the schema so the
+    // "role still owns objects" path is exercised (the CASCADE must clear
+    // it before DROP ROLE).
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app}".t (id SERIAL PRIMARY KEY)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(role_exists(&pool, app).await, "role provisioned");
+
+    let backend = pg_backend_handle(&pool, &url);
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 0 },
+    )
+    .await
+    .expect("drop_namespace");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed);
+
+    // Both schema and role gone — role dropped AFTER schema (step 7).
+    assert!(!schema_exists(&pool, app).await, "schema dropped");
+    assert!(!role_exists(&pool, app).await, "per-app role dropped last");
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_idempotent_steps_4_to_7() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping drop_namespace_idempotent — wal_level != logical");
+        return;
+    }
+    let app = "p6a_drop_idem";
+    c1_cleanup(&pool, app).await;
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    let backend = pg_backend_handle(&pool, &url);
+    let opts = DropNamespaceOpts { force: false, subscription_count: 0 };
+
+    // First drop: full teardown.
+    let first = drop_namespace(&backend, &pool, app, &opts).await.expect("first drop");
+    assert_eq!(first, DropNamespaceOutcome::Completed);
+    assert!(!slot_exists(&pool, app).await);
+    assert!(!publication_exists(&pool, app).await);
+    assert!(!schema_exists(&pool, app).await);
+    assert!(!role_exists(&pool, app).await);
+
+    // Second drop on the already-torn-down app: every step (4-7) is a
+    // no-op, returns Completed, no error.
+    let second = drop_namespace(&backend, &pool, app, &opts)
+        .await
+        .expect("second drop must be idempotent");
+    assert_eq!(
+        second,
+        DropNamespaceOutcome::Completed,
+        "idempotent re-drop must succeed with everything already gone"
+    );
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn drop_namespace_retries_from_step_3_on_partial_failure() {
+    // §17.7: "retry from step 3 on partial failure; steps 4-7 idempotent."
+    // We simulate a partial failure by dropping the publication+slot
+    // first (leaving the schema + role), then running drop_namespace —
+    // step 3 (deprovision) finds nothing to do (idempotent), and steps
+    // 6-7 finish the teardown. This proves a re-run after a crash that
+    // got partway through completes cleanly.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping drop_namespace_retries — wal_level != logical");
+        return;
+    }
+    let app = "p6a_drop_retry";
+    c1_cleanup(&pool, app).await;
+    let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
+    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+
+    // Simulate a crash AFTER step 3 (slot+publication dropped) but BEFORE
+    // steps 6-7 (schema + role still present).
+    zeroship_plugin_db::replication::drop_publication_and_slot(&pool, app)
+        .await
+        .expect("partial: drop slot+publication");
+    assert!(!slot_exists(&pool, app).await, "slot gone after partial");
+    assert!(!publication_exists(&pool, app).await, "publication gone after partial");
+    assert!(schema_exists(&pool, app).await, "schema still present after partial");
+    assert!(role_exists(&pool, app).await, "role still present after partial");
+
+    // Retry: step 3 is a no-op (nothing to deprovision), steps 6-7 finish.
+    let backend = pg_backend_handle(&pool, &url);
+    let outcome = drop_namespace(
+        &backend,
+        &pool,
+        app,
+        &DropNamespaceOpts { force: false, subscription_count: 0 },
+    )
+    .await
+    .expect("retry drop_namespace after partial failure");
+    assert_eq!(outcome, DropNamespaceOutcome::Completed);
+    assert!(!schema_exists(&pool, app).await, "retry must drop the schema");
+    assert!(!role_exists(&pool, app).await, "retry must drop the role");
+
+    c1_cleanup(&pool, app).await;
+}

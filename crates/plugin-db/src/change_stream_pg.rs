@@ -112,24 +112,28 @@ impl ChangeStream for PgChangeStream {
         Ok(())
     }
 
-    /// Idempotently tear down CDC state for `app_id`.
+    /// Idempotently tear down CDC state for `app_id` — the §17.7 PG
+    /// drop-namespace teardown for THIS worker's slot + publication.
     ///
-    /// **PR 1**: PG has no explicit deprovision helper in
-    /// `replication.rs` today (the closest is
-    /// [`crate::replication::drop_abandoned_slots`], which targets
-    /// abandoned slots cluster-wide, not a single `app_id`'s
-    /// publication+slot pair). Returning `Ok(())` here matches the
-    /// pre-P2 behaviour — no production caller deprovisions per-app
-    /// today (app deletion does not exist as a control-plane
-    /// operation), so an empty body keeps PG behaviour unchanged.
-    /// A future PR that introduces app deletion grows the matching
-    /// `replication::drop_publication_and_slot(pool, app_id)` helper
-    /// and wires it here.
-    async fn deprovision(&self, _app_id: &str) -> Result<(), DbError> {
-        // No-op — see rustdoc above. The trait surface is stable; the
-        // body grows in lockstep with whichever control-plane PR
-        // lands app deletion.
-        Ok(())
+    /// **P6a-3**: routes through
+    /// [`crate::replication::drop_publication_and_slot`], which runs the
+    /// §17.7 PG order: force the slot inactive
+    /// (`pg_terminate_backend` against the listed backend after the
+    /// caller's grace), `pg_drop_replication_slot`, then
+    /// `DROP PUBLICATION`. Idempotent — a missing slot/publication is a
+    /// no-op, so a retry after partial failure is safe (§17.7 "retry
+    /// from step 3").
+    ///
+    /// The consumer-cancellation courtesy of §17.7 step 2 (cancel the
+    /// in-process WAL consumer + await its exit) happens in the
+    /// drop-namespace orchestrator BEFORE this is called; by the time we
+    /// reach the slot teardown the consumer has been asked to stop and
+    /// the grace has elapsed.
+    ///
+    /// Runs under the platform-role pool (§17.5) — the only role that
+    /// may terminate a replication backend and drop a slot.
+    async fn deprovision(&self, app_id: &str) -> Result<(), DbError> {
+        crate::replication::drop_publication_and_slot(self.backend.pool(), app_id).await
     }
 
     /// Spawn the supervised WAL consumer for `app_id`.
