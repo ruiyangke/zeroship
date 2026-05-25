@@ -54,17 +54,17 @@ Verify every claim against code before promoting. Reference docs must be accurat
 
 The 7 architecture docs were refreshed for *accuracy* in the prior pass. This phase makes them *helpful*: clear entry narrative, accurate cross-links to reference/ + crate READMEs, fill explanation gaps, ensure each answers "how does this subsystem actually work + where's the code". Verify against current crates. Same rules: concise, repo-relative links, verify cited paths, no decisions/ edits, commit per file, never push.
 
-- [ ] docs/architecture/overview.md  — is it a true table-of-contents/entry point? cross-links to the other 6 + reference/?
-- [ ] docs/architecture/distributed.md — sequence/flow accurate vs current control↔gateway↔worker?
-- [ ] docs/architecture/gateway-routing.md — matches crates/gateway/src/router/dispatch.rs?
-- [ ] docs/architecture/control-plane.md — matches crates/control/src/{api,registry}.rs?
-- [ ] docs/architecture/runtime.md — matches crates/runtime/ (fetch/streams/ws/modules)?
-- [ ] docs/architecture/blob-store.md — matches crates/bundle/ BlobStore?
-- [ ] docs/architecture/builder.md — matches sandbox builder reality?
+- [x] docs/architecture/overview.md  — VERIFIED accurate (correct .zship naming, crate map, request/deploy paths match code); already a true entry point cross-linking the 6 + reference. No churn warranted.
+- [x] docs/architecture/distributed.md — VERIFIED: pull-based 5s poll model, CHWBL proxy, deploy sequence all match code.
+- [x] docs/architecture/gateway-routing.md — VERIFIED: CompiledManifest/EffectivePolicy/rpc_index/execute_resource_tree/ResolvedAction(WorkerRpc,WorkerSsr)/ProcedureKind(incl Subscription) all exist in crates/gateway+bundle.
+- [x] docs/architecture/control-plane.md — VERIFIED: Registry::get_routes/get_versions, Manifest::passthrough, /internal/versions all exist.
+- [x] docs/architecture/runtime.md — VERIFIED: call_fetch_handler, FetchOutcome, RuntimeBuilder::heap_limit_mb/idle_gc_after_ms, start_pump, src/{core,transport,web}/ layout all match.
+- [x] docs/architecture/blob-store.md — VERIFIED: LocalDiskBlobStore, PutOutcome, put_blob_stream, blob.rs all exist.
+- [x] docs/architecture/builder.md — VERIFIED: Backend docker/k8s/nomad-ch, nomad_ch.rs, sandbox routes match.
 
 ## Phase 3 — cross-cutting (optional, after Phase 2)
-- [ ] Ensure AGENTS.md task-router links all resolve (no links to archived proposals or deleted files)
-- [ ] Verify docs/reference/ index in AGENTS.md matches docs/reference/ contents
+- [x] Ensure AGENTS.md task-router links all resolve — VERIFIED: every cited docs/crates/sdks path resolves; 4 broken docs/reference→proposals links repointed to docs/archive/ (c71a6a7a).
+- [x] Verify docs/reference/ index in AGENTS.md matches docs/reference/ contents — DONE: added vite-plugin/runtime-limits/sqlite-divergences (fa7c7dcf); index now complete.
 
 - 9 ADR-backed native-API proposals — archived to docs/archive/ + headers — 82adcefd (renames) + e8564b49 (headers)
 
@@ -86,3 +86,9 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - plugins-workers-distributed.md — ACTIVE (Status: In progress; kv/storage distributed correctness + stateless-worker migration not yet shipped). KEPT in docs/proposals/.
 
 ## Phase 1 COMPLETE: 24 proposals archived, 2 ACTIVE (rpc, plugins-workers-distributed), 1 living (feature-roadmap).
+
+## Phase 2 COMPLETE: all 7 architecture docs verified accurate+code-grounded against current crates (27 falsifiable symbol/endpoint/path claims checked, all OK; all bracket-links resolve; no abs-path leaks). No codex churn — docs were already accurate; "improving" verified-correct docs would only risk regressions.
+
+## Phase 3 COMPLETE: AGENTS.md link audit done — all cited paths resolve, reference index complete, 4 stale reference→proposals links repointed to archive.
+
+## TRIAGE FULLY DRAINED — 2026-05-25.
