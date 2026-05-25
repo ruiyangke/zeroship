@@ -29,10 +29,10 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [ ] sandbox-pg-state.md (feat/sandbox-pg merged)
 - [ ] sandbox-preview-urls.md (sandbox preview merged)
 - [ ] kv-redesign-implementation-plan-2026-05-24.md (kv redesign; reference/kv.md exists)
-- [ ] zeroship-db.md (db SDK; reference/db.md exists)
-- [ ] db-system-design.md (db; reference/db.md)
-- [ ] platform-system-fields.md (db system fields)
-- [ ] sensitive-field-masking.md (db masking)
+- [x] zeroship-db.md (db SDK; reference/db.md exists)
+- [x] db-system-design.md (db; reference/db.md)
+- [x] platform-system-fields.md (db system fields)
+- [x] sensitive-field-masking.md (db masking)
 - [ ] p0-implementation-plan.md (DB P0)
 - [ ] p1-sqlite-implementation-plan.md (DB P1)
 - [ ] p4-search-implementation-plan.md (DB P4)
@@ -71,3 +71,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - sqlite-pg-parity.md — 2 divergences promoted + archived
 
 - sandbox-snapshot-restore.md + nomad-driver-ch.md — archived + runbook ops promotions (MemoryMaxMB, driver-behavior notes)
+
+- 4 DB proposals archived; db.md promotions: strictness/t.ref/collection-names landed; System Fields + Encrypted/Masked CLOBBERED by concurrent write, re-promoting serially
