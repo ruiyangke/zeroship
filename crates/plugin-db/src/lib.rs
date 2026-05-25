@@ -460,7 +460,7 @@ pub async fn install_tx_marker_for_tests(url: &str) {
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
     ctx_mut(|c| {
-        let _previous = c.install_tx_client(client);
+        let _previous = c.install_tx_client(crate::context::TxConnection::Postgres(client));
         debug_assert!(_previous.is_none(), "install_tx_marker_for_tests: slot already occupied");
     });
 }
@@ -485,10 +485,18 @@ pub async fn install_tx_marker_for_tests(url: &str) {
 #[doc(hidden)]
 pub async fn uninstall_tx_marker_for_tests() {
     if let Some(client) = ctx_mut(|c| c.take_tx_client()) {
-        // Best-effort: a connection already torn down (panic recovery)
-        // is fine — drop closes the fd.
-        let _ = client.batch_execute("ROLLBACK").await;
-        drop(client);
+        match client {
+            crate::context::TxConnection::Postgres(client) => {
+                // Best-effort: a connection already torn down (panic recovery)
+                // is fine — drop closes the fd.
+                let _ = client.batch_execute("ROLLBACK").await;
+                drop(client);
+            }
+            crate::context::TxConnection::Sqlite(client) => {
+                let _ = client.exec("ROLLBACK", &[]).await;
+                drop(client);
+            }
+        }
     }
 }
 

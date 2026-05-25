@@ -33,6 +33,7 @@ use std::rc::Rc;
 
 use compio_postgres::{Client, Pool};
 
+use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, BrokerPauseGuard, PostgresBackend};
 use crate::broker::ChangeEvent;
 
@@ -94,6 +95,17 @@ pub(crate) struct MigrationLock {
     pub(crate) broker_pause: Option<BrokerPauseGuard>,
 }
 
+/// Pinned transaction client parked in the per-isolate tx slot.
+///
+/// Postgres keeps a dedicated libpq connection alive for the lifetime of
+/// the transaction; SQLite keeps a handle to the shared session actor and
+/// drives `BEGIN` / `SAVEPOINT` / `COMMIT` / `ROLLBACK` over that single
+/// worker-owned connection.
+pub(crate) enum TxConnection {
+    Postgres(Client),
+    Sqlite(SqliteSessionHandle),
+}
+
 /// Per-isolate DB plug-in state. One instance per worker thread, held
 /// by the [`ISOLATE_CTX`] thread-local.
 ///
@@ -115,16 +127,17 @@ pub struct IsolateDbContext {
     /// redundant DDL on subsequent cold starts within the same deploy.
     registered_models: HashSet<String>,
 
-    /// Active transaction connection. Only one transaction at a time
-    /// per isolate (V8 is single-threaded). If `Some`, all CRUD ops
-    /// route through this connection instead of the pool.
+    /// Active transaction client. Only one transaction at a time per
+    /// isolate (V8 is single-threaded). If `Some`, CRUD routes through
+    /// this pinned client instead of the pool/backend autocommit path.
     ///
-    /// We hold a raw [`Client`] (not a `compio_postgres::Transaction`)
-    /// because the lifetime of `Transaction<'a>` is tied to its parent
-    /// `Client` — which cannot live inside a thread-local. Instead we
-    /// issue `BEGIN`/`COMMIT`/`ROLLBACK` via `client.execute(...)`
-    /// directly.
-    tx_conn: Option<Client>,
+    /// Postgres stores a raw [`Client`] rather than
+    /// `compio_postgres::Transaction<'_>` because the latter borrows the
+    /// former and cannot live in thread-local state. SQLite stores a
+    /// [`SqliteSessionHandle`] pointing at the single writer actor; the
+    /// actor outlives the handle, so rollback on reject must be explicit
+    /// rather than relying on handle drop.
+    tx_conn: Option<TxConnection>,
 
     /// True when the active [`Self::tx_conn`] was opened by the
     /// auto-tx wrapper (`__zsBeginAutoTx`) — defense-in-depth
@@ -437,7 +450,7 @@ impl IsolateDbContext {
 
     /// `true` if a transaction connection is currently parked in the
     /// slot (`tx_conn = Some`). Note: returns `true` even between an
-    /// in-flight take/return on the same Client (`take_tx_client` →
+    /// in-flight take/return on the same tx client (`take_tx_client` →
     /// `put_tx_client`), because callers wrap the await in those two
     /// calls and the slot is conceptually still "active". See
     /// [`Self::has_tx`] for the conservative caller-facing predicate.
@@ -448,7 +461,10 @@ impl IsolateDbContext {
     /// Park a connection in the transaction slot. Returns the
     /// previous occupant, if any (callers should ensure this is `None`
     /// — every begin path checks [`Self::has_tx`] first).
-    pub(crate) fn install_tx_client(&mut self, client: Client) -> Option<Client> {
+    pub(crate) fn install_tx_client(
+        &mut self,
+        client: TxConnection,
+    ) -> Option<TxConnection> {
         self.tx_conn.replace(client)
     }
 
@@ -456,12 +472,12 @@ impl IsolateDbContext {
     /// either return it via [`Self::put_tx_client`] (when the await
     /// is short and the slot should remain "in transaction") or drop
     /// the client (when settling the tx).
-    pub(crate) fn take_tx_client(&mut self) -> Option<Client> {
+    pub(crate) fn take_tx_client(&mut self) -> Option<TxConnection> {
         self.tx_conn.take()
     }
 
     /// Return a client previously taken via [`Self::take_tx_client`].
-    pub(crate) fn put_tx_client(&mut self, client: Client) {
+    pub(crate) fn put_tx_client(&mut self, client: TxConnection) {
         self.tx_conn = Some(client);
     }
 
@@ -706,18 +722,20 @@ mod tests {
     //!
     //! ## Why some accessors aren't covered here
     //!
-    //! The slots that store a `compio_postgres::Client` (`tx_conn`,
-    //! `MigrationLock::client`) need a value of that type to exercise.
-    //! `compio_postgres::Client::new` is `pub(crate)` on the driver, so
-    //! we cannot mint one outside `compio-postgres` — and the task brief
-    //! is explicit that these unit tests must not touch real Postgres.
+    //! The slots that store a live transaction/migration client
+    //! (`tx_conn`, `MigrationLock::client`) need a real backend handle to
+    //! exercise. The Postgres side still needs a `compio_postgres::Client`
+    //! (`Client::new` is `pub(crate)` on the driver), and the SQLite side
+    //! would need a live session actor. These unit tests stay pure-state;
+    //! end-to-end slot round-trips live in the integration targets.
     //!
     //! Concretely, the following can only be exercised by
     //! `tests/integration.rs` (which spins up a real PG):
     //!
     //! * [`IsolateDbContext::install_tx_client`] /
     //!   [`IsolateDbContext::take_tx_client`] /
-    //!   [`IsolateDbContext::put_tx_client`] round-trip.
+    //!   [`IsolateDbContext::put_tx_client`] round-trip with a real
+    //!   backend client.
     //! * The `debug_assert!` inside
     //!   [`IsolateDbContext::set_auto_tx_owned`] that `owned = true`
     //!   requires `tx_conn = Some` — we only test the `false` branch.

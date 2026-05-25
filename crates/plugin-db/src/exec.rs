@@ -35,6 +35,7 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use crate::backend::BackendHandle;
+use crate::context::TxConnection;
 use crate::context;
 use crate::error::DbError;
 use crate::query::BuiltQuery;
@@ -87,7 +88,13 @@ pub(crate) async fn run_sql(
         // Use transaction connection
         let client = context::with_mut(|c| c.take_tx_client())
             .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
-        let result = client.query_text_params(sql, params).await;
+        let result = match &client {
+            TxConnection::Postgres(client) => client.query_text_params(sql, params).await,
+            TxConnection::Sqlite(_) => {
+                context::with_mut(|c| c.put_tx_client(client));
+                return Err(sqlite_shared_crud_unavailable());
+            }
+        };
         // Put it back
         context::with_mut(|c| c.put_tx_client(client));
         return result.map_err(|e| DbError::from_pg(&e));

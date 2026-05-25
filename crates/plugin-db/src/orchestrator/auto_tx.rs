@@ -38,6 +38,7 @@ use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 use crate::backend::SqlExecutor;
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
+use crate::context::TxConnection;
 use crate::v8_bridge::{get_i64_arg, get_string_arg, setup_js_promise};
 
 /// `globalThis.__zsBeginAutoTx(kindStr)` — see module comment above.
@@ -239,7 +240,7 @@ async fn exec_auto_begin(
     super::apply_per_app_role(&client, app_id).await?;
 
     crate::context::with_mut(|c| {
-        let _previous = c.install_tx_client(client);
+        let _previous = c.install_tx_client(TxConnection::Postgres(client));
         debug_assert!(
             _previous.is_none(),
             "exec_auto_begin: tx_conn slot already occupied"
@@ -278,8 +279,10 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), DbError> {
         return Ok(());
     };
 
+    let backend = crate::context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let result = client.execute(cmd, &[]).await;
+    let result = super::client_exec_on_tx(&backend, &client, cmd, &[]).await;
     drop(client); // explicit — terminates the spawned connection task.
 
     // Settle the deferred broker queue. On a successful COMMIT, fire
@@ -295,7 +298,7 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), DbError> {
     // `from_pg` walks the source chain so deferred-FK / unique
     // violations surface with their SQLSTATE-classified code instead
     // of a bare "db error".
-    result.map(|_| ()).map_err(|e| DbError::from_pg(&e))
+    result.map(|_| ())
 }
 
 /// Install `__zsBeginAutoTx` / `__zsEndAutoTx` on `globalThis`. Called
