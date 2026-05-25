@@ -249,6 +249,352 @@ export default {
 };
 "#;
 
+// ---------------------------------------------------------------------------
+// Validation / type-error app — drives MALFORMED inputs through `env.kv.*`
+// and pins each synchronous throw's message / `.code`.
+// ---------------------------------------------------------------------------
+//
+// These throws fire in the v8_class method body (key shape, value type +
+// size, option ranges) BEFORE any async op is dispatched, so they're
+// backend-agnostic — redb is enough to exercise them. The handler runs a
+// table of cases; each calls a malformed op inside try/catch, captures the
+// thrown error, and asserts (a) it threw and (b) the message substring or
+// `.code` matches. On the first mismatch it returns
+// {ok:false, step, detail} at 500; if all pass it returns {ok:true}.
+const KV_VALIDATION_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const kv = env.kv;
+        const trace = [];
+
+        // Run `fn` (which awaits a malformed kv op), assert it threw, and
+        // assert the thrown error's `.message` contains `wantMsg` (when
+        // given) and `.code === wantCode` (when given). Records the step.
+        async function expectThrow(step, fn, { wantMsg, wantCode } = {}) {
+            trace.push(step);
+            let threw = false;
+            let err = null;
+            try { await fn(); }
+            catch (e) { threw = true; err = e; }
+            if (!threw) {
+                return { step, detail: "did not throw" };
+            }
+            const msg = err && err.message ? String(err.message) : "";
+            if (wantMsg != null && !msg.includes(wantMsg)) {
+                return { step, detail: "message mismatch: got=" + msg + " want~=" + wantMsg };
+            }
+            if (wantCode != null && (err && err.code) !== wantCode) {
+                return {
+                    step,
+                    detail: "code mismatch: got=" + (err && err.code) + " want=" + wantCode,
+                };
+            }
+            return null;
+        }
+
+        try {
+            const cases = [
+                // --- value type errors (extract_value + js_type_name arms) ---
+                ["set.value.number", () => kv.set("k", 123),
+                    { wantMsg: "value must be a string" }],
+                ["set.value.object", () => kv.set("k", { a: 1 }),
+                    { wantMsg: "value must be a string" }],
+                ["set.value.array", () => kv.set("k", [1, 2]),
+                    { wantMsg: "value must be a string" }],
+                ["set.value.boolean", () => kv.set("k", true),
+                    { wantMsg: "value must be a string" }],
+                // js_type_name boolean/array arms specifically surface in the
+                // message tail "got <type>".
+                ["set.value.boolean.typename", () => kv.set("k", true),
+                    { wantMsg: "got boolean" }],
+                ["set.value.array.typename", () => kv.set("k", [1, 2]),
+                    { wantMsg: "got array" }],
+                ["set.value.number.typename", () => kv.set("k", 123),
+                    { wantMsg: "got number" }],
+                ["set.value.function.typename", () => kv.set("k", function () {}),
+                    { wantMsg: "got function" }],
+
+                // --- value required (null/undefined) ---
+                ["set.value.null", () => kv.set("k", null),
+                    { wantMsg: "value must be provided" }],
+                ["set.value.undefined", () => kv.set("k", undefined),
+                    { wantMsg: "value must be provided" }],
+
+                // --- incr options type errors (opt_number arms) ---
+                ["incr.by.notnumber", () => kv.incr("k", { by: "x" }),
+                    { wantMsg: "options.by must be a number" }],
+                ["incr.by.notnumber.typename", () => kv.incr("k", { by: "x" }),
+                    { wantMsg: "got string" }],
+                ["incr.opts.notobject", () => kv.incr("k", 5),
+                    { wantMsg: "options must be an object" }],
+                ["incr.opts.notobject.typename", () => kv.incr("k", 5),
+                    { wantMsg: "got number" }],
+                ["incr.opts.boolean.typename", () => kv.incr("k", true),
+                    { wantMsg: "got boolean" }],
+
+                // --- set ttlMs option type error (opt_number via read_ttl_ms) ---
+                ["set.ttlMs.notnumber", () => kv.set("k", "v", { ttlMs: "x" }),
+                    { wantMsg: "options.ttlMs must be a number" }],
+
+                // --- expire ttlMs not a number (dedicated expire arm) ---
+                ["expire.ttlMs.notnumber", () => kv.expire("k", "x"),
+                    { wantMsg: "ttlMs must be a number" }],
+                ["expire.ttlMs.notnumber.typename", () => kv.expire("k", "x"),
+                    { wantMsg: "got string" }],
+
+                // --- list type errors (prefix + opts + cursor arms) ---
+                ["list.prefix.notstring", () => kv.list(123),
+                    { wantMsg: "prefix must be a string" }],
+                ["list.prefix.notstring.typename", () => kv.list(123),
+                    { wantMsg: "got number" }],
+                ["list.opts.notobject", () => kv.list("p", "x"),
+                    { wantMsg: "options must be an object" }],
+                ["list.cursor.notstring", () => kv.list("p", { cursor: 5 }),
+                    { wantMsg: "options.cursor must be a string" }],
+
+                // --- invalid key (validate_key) ---
+                ["key.empty", () => kv.get(""),
+                    { wantMsg: "non-empty string" }],
+                ["key.brace.open", () => kv.get("a{b"),
+                    { wantMsg: "must not contain" }],
+                ["key.brace.close", () => kv.get("a}b"),
+                    { wantMsg: "must not contain" }],
+                ["key.nul", () => kv.get("a" + String.fromCharCode(0) + "b"),
+                    { wantMsg: "must not contain" }],
+                ["key.control", () => kv.get("a" + String.fromCharCode(7) + "b"),
+                    { wantMsg: "must not contain" }],
+                ["key.toolong", () => kv.get("x".repeat(513)),
+                    { wantMsg: "exceeds 512 bytes" }],
+
+                // --- invalid value (size cap, validate_value) ---
+                ["value.toolarge", () => kv.set("k", "x".repeat(300000)),
+                    { wantMsg: "exceeds" }],
+
+                // --- invalid delta (validate_delta) ---
+                ["incr.by.fractional", () => kv.incr("k", { by: 1.5 }),
+                    { wantMsg: "integer" }],
+                ["incr.by.nan", () => kv.incr("k", { by: NaN }),
+                    { wantMsg: "finite number" }],
+                ["incr.by.outofrange", () => kv.incr("k", { by: 1e19 }),
+                    { wantMsg: "out of i64 range" }],
+
+                // --- invalid ttlMs (validate_ttl_ms) ---
+                ["ttl.zero", () => kv.set("k", "v", { ttlMs: 0 }),
+                    { wantMsg: "greater than 0" }],
+                ["ttl.negative", () => kv.set("k", "v", { ttlMs: -1 }),
+                    { wantMsg: "must not be negative" }],
+                ["ttl.fractional", () => kv.set("k", "v", { ttlMs: 1.5 }),
+                    { wantMsg: "must be an integer" }],
+                ["ttl.toobig", () => kv.set("k", "v", { ttlMs: 1e30 }),
+                    { wantMsg: "maximum" }],
+                // expire path goes through the same validate_ttl_ms.
+                ["expire.ttl.zero", () => kv.expire("k", 0),
+                    { wantMsg: "greater than 0" }],
+
+                // --- direct construction rejected (#[v8_constructor]) ---
+                // `env.kv` is minted internally; calling the class
+                // constructor directly must throw "Illegal constructor".
+                ["construct.illegal", () => { new kv.constructor(); },
+                    { wantMsg: "Illegal constructor" }],
+            ];
+
+            for (const [step, fn, opts] of cases) {
+                const fail = await expectThrow(step, fn, opts);
+                if (fail) {
+                    return Response.json({ ok: false, ...fail, trace }, { status: 500 });
+                }
+            }
+
+            return Response.json({ ok: true, count: cases.length, trace });
+        } catch (e) {
+            return Response.json({
+                ok: false,
+                step: trace.length ? trace[trace.length - 1] : "<none>",
+                detail: "unexpected throw: " + String(e && e.message ? e.message : e),
+                trace,
+            }, { status: 500 });
+        }
+    }
+};
+"#;
+
+// ---------------------------------------------------------------------------
+// Backend edge-branch app — drives the "negative" backend results (missing
+// key, no-TTL, already-present, empty prefix, single-page list) that the
+// happy-path app doesn't reach. Backend-agnostic shape; redb runs it.
+// ---------------------------------------------------------------------------
+const KV_EDGE_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const kv = env.kv;
+        const P = "edge:" + Math.random().toString(36).slice(2) + ":";
+        const k = (s) => P + s;
+        const trace = [];
+        function fail(step, got, want) {
+            const e = new Error("step failed: " + step);
+            e.zsStep = step; e.zsGot = got; e.zsWant = want; throw e;
+        }
+        function eq(step, got, want) {
+            trace.push(step);
+            if (got !== want) fail(step, got, want);
+        }
+        function truthy(step, got) {
+            trace.push(step);
+            if (!got) fail(step, got, "truthy");
+        }
+
+        try {
+            // delete of a missing key → {deleted:false}
+            {
+                const d = await kv.delete(k("never"));
+                eq("delete.missing.deleted", d && d.deleted, false);
+            }
+            // expire of a missing key → {updated:false}
+            {
+                const ex = await kv.expire(k("never"), 1000);
+                eq("expire.missing.updated", ex && ex.updated, false);
+            }
+            // persist of a key with no TTL → {updated:false}
+            {
+                await kv.set(k("nottl"), "v");
+                const pe = await kv.persist(k("nottl"));
+                eq("persist.nottl.updated", pe && pe.updated, false);
+            }
+            // setIfAbsent when present → {stored:false}
+            {
+                const a = await kv.setIfAbsent(k("sia"), "a");
+                eq("sia.first.stored", a && a.stored, true);
+                const b = await kv.setIfAbsent(k("sia"), "b");
+                eq("sia.second.stored", b && b.stored, false);
+            }
+            // ttl of a missing key → null
+            {
+                eq("ttl.missing.null", await kv.ttl(k("never")), null);
+            }
+            // list of an empty prefix range → {keys:[], cursor:null}
+            {
+                const res = await kv.list(k("emptyprefix:"));
+                truthy("list.empty.keys.arr", res && Array.isArray(res.keys));
+                eq("list.empty.keys.len", res.keys.length, 0);
+                eq("list.empty.cursor", res.cursor, null);
+            }
+            // single-page list (fewer keys than limit) → cursor stays null
+            {
+                await kv.set(k("sp:1"), "x");
+                await kv.set(k("sp:2"), "x");
+                const res = await kv.list(k("sp:"), { limit: 100 });
+                truthy("list.single.keys.arr", res && Array.isArray(res.keys));
+                eq("list.single.keys.len", res.keys.length, 2);
+                eq("list.single.cursor", res.cursor, null);
+            }
+            // list with no prefix arg → defaults to "" (list everything for app)
+            {
+                const res = await kv.list();
+                truthy("list.noprefix.keys.arr", res && Array.isArray(res.keys));
+                // at least the keys we set above are present
+                truthy("list.noprefix.nonempty", res.keys.length >= 2);
+            }
+
+            return Response.json({ ok: true, trace });
+        } catch (e) {
+            if (e && e.zsStep) {
+                return Response.json({
+                    ok: false, step: e.zsStep,
+                    got: e.zsGot === undefined ? null : e.zsGot,
+                    want: e.zsWant === undefined ? null : e.zsWant,
+                    trace,
+                }, { status: 500 });
+            }
+            return Response.json({
+                ok: false,
+                step: trace.length ? trace[trace.length - 1] : "<none>",
+                error: String(e && e.message ? e.message : e),
+                code: e && e.code ? e.code : null,
+                trace,
+            }, { status: 500 });
+        }
+    }
+};
+"#;
+
+// ---------------------------------------------------------------------------
+// Realistic-scenario app — a fixed-window rate limiter and an ephemeral lock,
+// both built only from the public `env.kv.*` surface. Doubles as end-to-end
+// confidence that incr+ttl and setIfAbsent+delete compose correctly.
+// ---------------------------------------------------------------------------
+const KV_SCENARIO_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const kv = env.kv;
+        const P = "scn:" + Math.random().toString(36).slice(2) + ":";
+        const k = (s) => P + s;
+        const trace = [];
+        function fail(step, got, want) {
+            const e = new Error("step failed: " + step);
+            e.zsStep = step; e.zsGot = got; e.zsWant = want; throw e;
+        }
+        function eq(step, got, want) {
+            trace.push(step);
+            if (got !== want) fail(step, got, want);
+        }
+        function truthy(step, got) {
+            trace.push(step);
+            if (!got) fail(step, got, "truthy");
+        }
+
+        try {
+            // Fixed-window rate limiter: incr(window, {by:1, ttlMs}) N times.
+            // The count increments 1..N and the TTL is set on create and stays
+            // set across subsequent increments.
+            {
+                const win = k("rl:user42:window");
+                for (let i = 1; i <= 5; i++) {
+                    const n = await kv.incr(win, { by: 1, ttlMs: 60000 });
+                    eq("rl.count." + i, n, i);
+                    const t = await kv.ttl(win);
+                    truthy("rl.ttl.set." + i,
+                        t && typeof t.ttlMs === "number" && t.ttlMs > 0 && t.ttlMs <= 60000);
+                }
+            }
+
+            // Ephemeral lock: setIfAbsent acquires; a second caller fails;
+            // delete releases; re-acquire succeeds.
+            {
+                const lock = k("lock:job7");
+                const a = await kv.setIfAbsent(lock, "owner-a", { ttlMs: 30000 });
+                eq("lock.acquire", a && a.stored, true);
+                const b = await kv.setIfAbsent(lock, "owner-b", { ttlMs: 30000 });
+                eq("lock.contended", b && b.stored, false);
+                eq("lock.owner", await kv.get(lock), "owner-a");
+                const rel = await kv.delete(lock);
+                eq("lock.release", rel && rel.deleted, true);
+                const c = await kv.setIfAbsent(lock, "owner-c", { ttlMs: 30000 });
+                eq("lock.reacquire", c && c.stored, true);
+                eq("lock.newowner", await kv.get(lock), "owner-c");
+            }
+
+            return Response.json({ ok: true, trace });
+        } catch (e) {
+            if (e && e.zsStep) {
+                return Response.json({
+                    ok: false, step: e.zsStep,
+                    got: e.zsGot === undefined ? null : e.zsGot,
+                    want: e.zsWant === undefined ? null : e.zsWant,
+                    trace,
+                }, { status: 500 });
+            }
+            return Response.json({
+                ok: false,
+                step: trace.length ? trace[trace.length - 1] : "<none>",
+                error: String(e && e.message ? e.message : e),
+                code: e && e.code ? e.code : null,
+                trace,
+            }, { status: 500 });
+        }
+    }
+};
+"#;
+
 /// Single module-entry list from a JS source string (replicates
 /// runtime test-common's `m()`).
 fn module(source: &str) -> Vec<ModuleEntry> {
@@ -264,6 +610,14 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 /// `Pending` and the pump delivers the final `SettledFetch` via the
 /// receiver — same idiom as `call_fetch_handler.rs::async_response`.
 fn run_e2e(backend: Arc<dyn Backend>) -> (u16, String) {
+    run_app(backend, KV_E2E_APP)
+}
+
+/// Generalised harness: build a Runtime around `app` JS + `backend`, pump it,
+/// call the fetch handler, and return `(status, body)`. `run_e2e` is the
+/// happy-path specialisation; the validation / edge / scenario tests pass
+/// their own app source.
+fn run_app(backend: Arc<dyn Backend>, app: &'static str) -> (u16, String) {
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
 
@@ -275,7 +629,7 @@ fn run_e2e(backend: Arc<dyn Backend>) -> (u16, String) {
         let plugin: Arc<dyn NativePlugin> = Arc::new(KvPlugin::with_backend(backend));
 
         let runtime = Runtime::builder()
-            .modules(module(KV_E2E_APP))
+            .modules(module(app))
             .env_vars(env_vars)
             .plugins(vec![plugin])
             .build();
@@ -335,6 +689,50 @@ fn e2e_redb() {
     let path = dir.path().join("kv.redb");
     let backend = RedbBackend::open(&path).expect("open redb backend");
     let (status, body) = run_e2e(Arc::new(backend));
+    assert_ok(status, &body);
+}
+
+/// Open a fresh redb-backed backend in a tempdir. The `_dir` guard must
+/// stay alive for the duration of the test (dropping it removes the file).
+#[cfg(feature = "redb")]
+fn redb_backend() -> (tempfile::TempDir, Arc<dyn Backend>) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("kv.redb");
+    let backend = RedbBackend::open(&path).expect("open redb backend");
+    (dir, Arc::new(backend))
+}
+
+/// Synchronous argument-validation throws (key shape, value type + size,
+/// option ranges). These fire in the v8_class method body before any
+/// dispatch, so they're backend-agnostic — redb runs them. Pins each
+/// throw's message substring (and `.code` where applicable).
+#[cfg(feature = "redb")]
+#[test]
+fn e2e_validation_errors() {
+    let (_dir, backend) = redb_backend();
+    let (status, body) = run_app(backend, KV_VALIDATION_APP);
+    assert_ok(status, &body);
+}
+
+/// Backend "negative result" edge branches: delete/expire of a missing
+/// key, persist of a no-TTL key, setIfAbsent when present, ttl of a
+/// missing key, list of an empty prefix, and a single-page list whose
+/// cursor stays null.
+#[cfg(feature = "redb")]
+#[test]
+fn e2e_backend_edges() {
+    let (_dir, backend) = redb_backend();
+    let (status, body) = run_app(backend, KV_EDGE_APP);
+    assert_ok(status, &body);
+}
+
+/// Realistic compositions over the public surface: a fixed-window rate
+/// limiter (incr + ttlMs) and an ephemeral lock (setIfAbsent + delete).
+#[cfg(feature = "redb")]
+#[test]
+fn e2e_scenarios() {
+    let (_dir, backend) = redb_backend();
+    let (status, body) = run_app(backend, KV_SCENARIO_APP);
     assert_ok(status, &body);
 }
 
