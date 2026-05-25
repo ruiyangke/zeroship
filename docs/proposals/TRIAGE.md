@@ -49,3 +49,19 @@ Verify every claim against code before promoting. Reference docs must be accurat
 
 ## Done log
 (loop appends: PROPOSAL — action — commit)
+
+## Phase 2 — architecture docs improvement (after proposals queue drains, OR interleave 1/cycle)
+
+The 7 architecture docs were refreshed for *accuracy* in the prior pass. This phase makes them *helpful*: clear entry narrative, accurate cross-links to reference/ + crate READMEs, fill explanation gaps, ensure each answers "how does this subsystem actually work + where's the code". Verify against current crates. Same rules: concise, repo-relative links, verify cited paths, no decisions/ edits, commit per file, never push.
+
+- [ ] docs/architecture/overview.md  — is it a true table-of-contents/entry point? cross-links to the other 6 + reference/?
+- [ ] docs/architecture/distributed.md — sequence/flow accurate vs current control↔gateway↔worker?
+- [ ] docs/architecture/gateway-routing.md — matches crates/gateway/src/router/dispatch.rs?
+- [ ] docs/architecture/control-plane.md — matches crates/control/src/{api,registry}.rs?
+- [ ] docs/architecture/runtime.md — matches crates/runtime/ (fetch/streams/ws/modules)?
+- [ ] docs/architecture/blob-store.md — matches crates/bundle/ BlobStore?
+- [ ] docs/architecture/builder.md — matches sandbox builder reality?
+
+## Phase 3 — cross-cutting (optional, after Phase 2)
+- [ ] Ensure AGENTS.md task-router links all resolve (no links to archived proposals or deleted files)
+- [ ] Verify docs/reference/ index in AGENTS.md matches docs/reference/ contents
