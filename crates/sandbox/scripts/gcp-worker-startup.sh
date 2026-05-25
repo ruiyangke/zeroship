@@ -81,7 +81,7 @@ SANDBOX_TOKEN=$(md sandbox-token)
 SANDBOX_ADMIN_TOKEN=$(md sandbox-admin-token)
 ARTIFACT_BUCKET=$(md artifact-bucket)
 CONTROLLER_OBJECT=$(md controller-object)
-VM_INDEX_CEIL=$(md vm-index-ceil); VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
+VM_INDEX_CEIL=$(md vm-index-ceil); VM_INDEX_CEIL=${VM_INDEX_CEIL:-20}
 SNAPSHOT_BUCKET=$(md snapshot-bucket); SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
 
 : "${SERVER_IPS:?missing server-ips}"

@@ -444,12 +444,14 @@ pub struct NomadCHConfig {
     /// tuntap-add window in the same release; this controller-side
     /// delay adds defense-in-depth.
     ///
-    /// Default 5 s — matches the driver's tap-deletion-verify
-    /// budget ceiling so the controller doesn't release the index
-    /// until the driver has finished its synchronous netdev
-    /// cleanup. Set to 0 to disable (NOT recommended in production).
+    /// Default reduced 5 s → 2 s after v24 OFD-probe fix verified
+    /// `destroy_task_lock_held_total=0` in cluster validation. The
+    /// 5 s margin was a safety budget against the broken probe; with
+    /// the probe working correctly, 2 s is ample (tap-cleanup max
+    /// observed at <1 s). Set to 0 to disable (NOT recommended in
+    /// production).
     ///
-    /// `SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS` (default 5).
+    /// `SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS` (default 2).
     pub vm_index_release_delay_secs: u64,
 
     /// **r30-A1 (concurrency-r30 CRITICAL #A1)**: global cap on
@@ -926,7 +928,7 @@ impl SandboxConfig {
                     .unwrap_or_else(|_| "/var/zeroship/ch/users".to_string()),
             ),
             vm_index_floor: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_FLOOR", 1u16)?,
-            vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 155u16)?,
+            vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 20u16)?,
             alloc_running_timeout_secs: parse_env(
                 "SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS",
                 120u64,
@@ -949,7 +951,7 @@ impl SandboxConfig {
             )?,
             vm_index_release_delay_secs: parse_env(
                 "SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS",
-                5u64,
+                2u64,
             )?,
             // r30-A1: global Nomad /shutdown concurrency cap. Default 16
             // matches the architecture decision (see the field's rustdoc

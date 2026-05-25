@@ -30,7 +30,7 @@
 #   ARTIFACT_BUCKET  (no gs:// prefix)              default: suger-dev-zsbx-artifacts
 #   CONTROLLER_OBJECT                               default: zeroship-sandbox.snapshot-v36
 #   SNAPSHOT_BUCKET  (L2 store)                     default: $ARTIFACT_BUCKET
-#   VM_INDEX_CEIL    (taps per worker)              default: 12
+#   VM_INDEX_CEIL    (taps per worker)              default: 20
 #   PG_PASSWORD                                     default: auto-generated, written to /tmp/.zsbx-pg.pw
 #   SANDBOX_TOKEN                                   default: auto-generated 48-byte base64
 #   SANDBOX_ADMIN_TOKEN                             default: auto-generated 48-byte base64
@@ -54,7 +54,7 @@ WORKER_MACHINE=${WORKER_MACHINE:-n2-standard-32}
 ARTIFACT_BUCKET=${ARTIFACT_BUCKET:-suger-dev-zsbx-artifacts}
 CONTROLLER_OBJECT=${CONTROLLER_OBJECT:-zeroship-sandbox.snapshot-v38}
 SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
-VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
+VM_INDEX_CEIL=${VM_INDEX_CEIL:-20}
 DATACENTER=${DATACENTER:-$PREFIX}
 # Optional extra worker metadata, comma-separated key=value pairs.
 # Appended to the worker --metadata line as-is. Default installs the
