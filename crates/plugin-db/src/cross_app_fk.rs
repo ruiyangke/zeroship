@@ -12,7 +12,7 @@
 //! which storage engine an app is running on.
 //!
 //! **Why not under `backend/sqlite/`?** P1 PR 5 lifted this module out
-//! of the `#[cfg(feature = "sqlite")]` subtree: the rule applies on
+//! of the old SQLite-only subtree: the rule applies on
 //! the PG build too (where the orchestrator's `register_model` pipeline
 //! enforces it for every deploy), so gating the file behind the
 //! optional `sqlite` Cargo feature would mean PG-only builds never run

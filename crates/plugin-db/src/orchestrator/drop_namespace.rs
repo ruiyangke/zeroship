@@ -198,7 +198,6 @@ async fn deprovision_change_stream(
     if let Some(pg) = backend.as_change_stream_pg() {
         return pg.deprovision(app_id).await;
     }
-    #[cfg(feature = "sqlite")]
     if let Some(sq) = backend.as_change_stream_sqlite() {
         return sq.deprovision(app_id).await;
     }

@@ -121,11 +121,9 @@ pub mod encryption;
 // `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
 // capability declared in `crate::backend::mod`. Crate-private — the
 // stable consumer surface is the `BackendHandle::as_change_stream_pg`
-// accessor (mirroring the `as_postgres` / `as_sqlite` shape). Behind
-// `cfg(feature = "pg")` because the adapter borrows `PostgresBackend`
-// and the underlying replication helpers (`replication.rs` /
-// `wal_consumer.rs`) are PG-only.
-#[cfg(feature = "pg")]
+// accessor (mirroring the `as_postgres` / `as_sqlite` shape). The
+// adapter borrows `PostgresBackend` and the underlying replication
+// helpers (`replication.rs` / `wal_consumer.rs`) are PG-only.
 pub(crate) mod change_stream_pg;
 
 // Crate-private in release, pub under `test-helpers` (for tests/integration.rs):
@@ -370,7 +368,7 @@ pub fn set_db_url_for_tests(url: &str) {
 /// Production code reaches the SQLite arm through the
 /// `DbPlugin::build_instance` path; this helper short-circuits that
 /// for SQLite-only integration tests in `tests/sqlite_integration.rs`.
-#[cfg(all(any(test, feature = "test-helpers"), feature = "sqlite"))]
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBackend>) {
     ctx_mut(|c| c.set_sqlite_backend(backend));

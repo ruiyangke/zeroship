@@ -297,7 +297,7 @@ impl IsolateDbContext {
     ///
     /// The matching public entry point lives at
     /// `crate::set_sqlite_backend_for_tests`.
-    #[cfg(all(any(test, feature = "test-helpers"), feature = "sqlite"))]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn set_sqlite_backend(
         &mut self,
         backend: Rc<crate::backend::sqlite::SqliteBackend>,

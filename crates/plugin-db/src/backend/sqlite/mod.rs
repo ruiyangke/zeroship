@@ -2230,7 +2230,6 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 //       SQLite has no WAL-archive PITR. Returns
 //       `Configuration { code: "pitr_pg_only" }` unconditionally.
 
-#[cfg(feature = "sqlite")]
 impl crate::backend::Backup for SqliteBackend {
     async fn snapshot(
         &self,
@@ -2277,7 +2276,6 @@ impl crate::backend::Backup for SqliteBackend {
 ///
 /// `pub(super)` so the trait methods above can call in; the helpers
 /// stay private to this file.
-#[cfg(feature = "sqlite")]
 mod backup_sqlite {
     use std::io::Read;
     use std::path::{Path, PathBuf};

@@ -1459,36 +1459,17 @@ pub(crate) fn dispatch_search<'s>(
                 // PG path so a build with both arms compiled in
                 // dispatches based on which arm the runtime is bound
                 // to, not on Cargo-feature ordering.
-                #[cfg(feature = "sqlite")]
-                {
-                    if let Some(sq) = backend.as_sqlite() {
-                        use crate::backend::FullTextIndex as _;
-                        return sq
-                            .fts_search(&app, &coll, &text_query, &filter, limit)
-                            .await;
-                    }
-                }
-                #[cfg(feature = "pg")]
-                {
-                    let pg = backend
-                        .as_postgres()
-                        .ok_or_else(|| DbError::backend_unsupported("fts_search"))?;
+                if let Some(sq) = backend.as_sqlite() {
                     use crate::backend::FullTextIndex as _;
-                    return pg.fts_search(&app, &coll, &text_query, &filter, limit).await;
+                    return sq
+                        .fts_search(&app, &coll, &text_query, &filter, limit)
+                        .await;
                 }
-                #[cfg(not(feature = "pg"))]
-                {
-                    Err(DbError::Configuration {
-                        code: "fts_unsupported",
-                        message:
-                            "db: full-text search requires the `pg` Cargo feature on this build"
-                                .to_string(),
-                        hint: Some(
-                            "rebuild with `--features pg` or use the SQLite arm (P4 PR 5)"
-                                .to_string(),
-                        ),
-                    })
-                }
+                let pg = backend
+                    .as_postgres()
+                    .ok_or_else(|| DbError::backend_unsupported("fts_search"))?;
+                use crate::backend::FullTextIndex as _;
+                pg.fts_search(&app, &coll, &text_query, &filter, limit).await
             }
             .await;
 
@@ -1596,31 +1577,13 @@ pub(crate) fn dispatch_search<'s>(
             let backend = backend.ok_or_else(|| {
                 DbError::config("not_configured", "db: backend not initialized".to_string())
             })?;
-            #[allow(unused_variables)]
             let pg_path = || async {
-                #[cfg(feature = "pg")]
-                {
-                    let pg = backend
-                        .as_postgres()
-                        .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
-                    use crate::backend::VectorIndex as _;
-                    return pg
-                        .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
-                        .await;
-                }
-                #[cfg(not(feature = "pg"))]
-                {
-                    Err(DbError::Configuration {
-                        code: "vector_unsupported",
-                        message:
-                            "db: vector search requires the `pg` Cargo feature on this build"
-                                .to_string(),
-                        hint: Some(
-                            "rebuild with `--features pg` or use the SQLite arm (P4 PR 4)"
-                                .to_string(),
-                        ),
-                    })
-                }
+                let pg = backend
+                    .as_postgres()
+                    .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
+                use crate::backend::VectorIndex as _;
+                pg.vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                    .await
             };
             // **P4 PR 4** — SQLite arm routes through the pure-Rust
             // flat-scan `VectorIndex` impl on `SqliteBackend`. We
@@ -1628,14 +1591,11 @@ pub(crate) fn dispatch_search<'s>(
             // arms compiled in (`--features "pg sqlite"` for tests)
             // dispatches based on which arm the runtime is bound to,
             // not on Cargo-feature ordering.
-            #[cfg(feature = "sqlite")]
-            {
-                if let Some(sq) = backend.as_sqlite() {
-                    use crate::backend::VectorIndex as _;
-                    return sq
-                        .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
-                        .await;
-                }
+            if let Some(sq) = backend.as_sqlite() {
+                use crate::backend::VectorIndex as _;
+                return sq
+                    .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                    .await;
             }
             pg_path().await
         }
@@ -1768,38 +1728,18 @@ pub(crate) fn dispatch_near<'s>(
             // `SqliteBackend`. Short-circuit BEFORE the PG path so a
             // build with both arms compiled in dispatches based on
             // which arm the runtime is bound to.
-            #[cfg(feature = "sqlite")]
-            {
-                if let Some(sq) = backend.as_sqlite() {
-                    use crate::backend::SpatialIndex as _;
-                    return sq
-                        .spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
-                        .await;
-                }
-            }
-            #[cfg(feature = "pg")]
-            {
-                let pg = backend
-                    .as_postgres()
-                    .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
+            if let Some(sq) = backend.as_sqlite() {
                 use crate::backend::SpatialIndex as _;
-                return pg
+                return sq
                     .spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
                     .await;
             }
-            #[cfg(not(feature = "pg"))]
-            {
-                Err(DbError::Configuration {
-                    code: "spatial_unsupported",
-                    message:
-                        "db: spatial search requires the `pg` Cargo feature on this build"
-                            .to_string(),
-                    hint: Some(
-                        "rebuild with `--features pg` or use the SQLite arm (P4 PR 5)"
-                            .to_string(),
-                    ),
-                })
-            }
+            let pg = backend
+                .as_postgres()
+                .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
+            use crate::backend::SpatialIndex as _;
+            pg.spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
+                .await
         }
         .await;
 
@@ -1976,40 +1916,33 @@ async fn apply_encryption_on_read(
     }
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_encrypted_column_pg() {
-            for row in rows.iter_mut() {
-                crate::crud::encryption_pass::decrypt_row_on_read(
-                    pg, app_id, collection, &schema, row,
-                )
-                .await?;
-            }
-            return Ok(rows);
+    if let Some(pg) = backend.as_encrypted_column_pg() {
+        for row in rows.iter_mut() {
+            crate::crud::encryption_pass::decrypt_row_on_read(
+                pg, app_id, collection, &schema, row,
+            )
+            .await?;
         }
+        return Ok(rows);
     }
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_encrypted_column_sqlite() {
-            // Convert each encrypted column's base64-wire shape (the
-            // SQLite CRUD path's BLOB → JSON transport encoding) back
-            // to the PG-style `\x`-hex shape `decrypt_row_on_read`
-            // already understands, so we don't fork the decryption
-            // helper. Then dispatch through the shared helper.
-            crate::crud::encryption_pass::rewrite_sqlite_encrypted_row_blobs_to_hex(
-                &schema,
-                &mut rows,
-            )?;
-            for row in rows.iter_mut() {
-                crate::crud::encryption_pass::decrypt_row_on_read(
-                    sq, app_id, collection, &schema, row,
-                )
-                .await?;
-            }
-            return Ok(rows);
+    if let Some(sq) = backend.as_encrypted_column_sqlite() {
+        // Convert each encrypted column's base64-wire shape (the
+        // SQLite CRUD path's BLOB → JSON transport encoding) back
+        // to the PG-style `\x`-hex shape `decrypt_row_on_read`
+        // already understands, so we don't fork the decryption
+        // helper. Then dispatch through the shared helper.
+        crate::crud::encryption_pass::rewrite_sqlite_encrypted_row_blobs_to_hex(
+            &schema,
+            &mut rows,
+        )?;
+        for row in rows.iter_mut() {
+            crate::crud::encryption_pass::decrypt_row_on_read(
+                sq, app_id, collection, &schema, row,
+            )
+            .await?;
         }
+        return Ok(rows);
     }
-    let _ = backend; // silence unused under feature combinations
     Ok(rows)
 }
 
@@ -2034,7 +1967,6 @@ async fn apply_encryption_on_read(
 /// schema declares an encrypted column, surface a typed Configuration
 /// error so the SDK can branch on `.code` rather than silently writing
 /// plaintext to the BYTEA/BLOB column.
-#[allow(unused_variables)]
 async fn encryption_pass_dispatch(
     app_id: &str,
     collection: &str,
@@ -2045,36 +1977,23 @@ async fn encryption_pass_dispatch(
 ) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_encrypted_column_pg() {
-            return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-                pg, app_id, collection, schema, row_pk, doc, sidechannel,
-            )
-            .await;
-        }
+    if let Some(pg) = backend.as_encrypted_column_pg() {
+        return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+            pg, app_id, collection, schema, row_pk, doc, sidechannel,
+        )
+        .await;
     }
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_encrypted_column_sqlite() {
-            return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-                sq, app_id, collection, schema, row_pk, doc, sidechannel,
-            )
-            .await;
-        }
+    if let Some(sq) = backend.as_encrypted_column_sqlite() {
+        return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+            sq, app_id, collection, schema, row_pk, doc, sidechannel,
+        )
+        .await;
     }
-    // No backend-arm with an `EncryptedColumn` CRUD-path wire compiled
-    // in (a build with neither `pg` nor `sqlite`). Encrypted columns
-    // declared in the schema would reach a write site that has no
-    // encryption surface — surface a typed Configuration error so the
-    // SDK can branch on `.code` rather than silently writing plaintext.
     if schema_has_encrypted_columns(schema) {
         return Err(DbError::Configuration {
             code: "column_encryption_unavailable",
-            message:
-                "db: column encryption CRUD path requires a backend feature (`pg` or `sqlite`) on this build"
-                    .to_string(),
-            hint: Some("rebuild with `--features pg` or `--features sqlite`".to_string()),
+            message: "db: no backend arm available for column encryption CRUD path".to_string(),
+            hint: None,
         });
     }
     Ok(())

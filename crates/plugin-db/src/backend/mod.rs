@@ -78,15 +78,14 @@ pub mod postgres;
 // `backend::PostgresBackend` (re-exported below); the SQLite arm has
 // session-actor internals worth pinning at the integration level, so
 // the full sub-module is visible under the same gate.
-#[cfg(all(feature = "sqlite", not(feature = "test-helpers")))]
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod sqlite;
-#[cfg(all(feature = "sqlite", feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 pub mod sqlite;
 
 pub(crate) use lock_guard::LockGuard;
 pub(crate) use owned_lock_guard::OwnedLockGuard;
 pub use postgres::PostgresBackend;
-#[cfg(feature = "sqlite")]
 pub use sqlite::SqliteBackend;
 
 /// SQL execution capability — the "connection lifecycle + run a
@@ -866,7 +865,7 @@ pub trait DialectBuilder: 'static {
 /// §"PR 2" + §3 Q1 and `docs/proposals/db-system-design.md` §7.
 ///
 /// **Feature gating**: this trait is unconditional at HEAD. P0 PR 5 will
-/// move the `impl` side under `#[cfg(feature = "pg")]`; a hypothetical
+/// move the `impl` side onto the PG backend only; a hypothetical
 /// `SqliteBackend` would not implement this trait — it would have its
 /// own audit-helper signatures (a `SqliteExecutor` accessor returning
 /// `&sqlite::Connection`, etc.).
@@ -1722,7 +1721,6 @@ pub enum BackendHandle {
     /// cloning the enum stays cheap (Rc-clone of the inner pointer);
     /// every consumer site previously holding an `Rc<PostgresBackend>`
     /// migrates to this arm one-to-one.
-    #[cfg(feature = "pg")]
     Postgres(Rc<PostgresBackend>),
 
     /// SQLite backend handle. Re-introduced in **P1 PR 1** alongside
@@ -1733,7 +1731,6 @@ pub enum BackendHandle {
     /// bodies are stubs returning `DbError::Internal { … "P1 PR2+ stub" … }`;
     /// PR 2-5 backfill behaviour per
     /// `docs/proposals/p1-sqlite-implementation-plan.md` §9.
-    #[cfg(feature = "sqlite")]
     Sqlite(Rc<SqliteBackend>),
 }
 
@@ -1755,11 +1752,9 @@ impl BackendHandle {
     /// `handle.with_postgres(|pg| …)` now write
     /// `handle.with_postgres(|pg| …).ok_or_else(|| backend_unsupported_err())?`
     /// — the same shape `as_postgres()` consumers already use.
-    #[cfg(feature = "pg")]
     pub fn with_postgres<R>(&self, f: impl FnOnce(&PostgresBackend) -> R) -> Option<R> {
         match self {
             Self::Postgres(b) => Some(f(b)),
-            #[cfg(feature = "sqlite")]
             Self::Sqlite(_) => None,
         }
     }
@@ -1791,11 +1786,9 @@ impl BackendHandle {
     /// so the existing `ok_or_else(...)?` consumer sites map the
     /// non-PG case to a typed `backend_unsupported` error rather than
     /// a panic. See the P0 mop-up commit and MAJOR-R14-1.
-    #[cfg(feature = "pg")]
     pub fn as_postgres(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
-            #[cfg(feature = "sqlite")]
             Self::Sqlite(_) => None,
         }
     }
@@ -1804,11 +1797,8 @@ impl BackendHandle {
     /// `Some(R)` on the SQLite arm or `None` otherwise.
     ///
     /// **P1 PR 1**: symmetric counterpart to [`Self::with_postgres`].
-    /// Stays `#[cfg(feature = "sqlite")]` so default-feature builds
-    /// don't pick up the SQLite arm at all — the `Option`-shaped
-    /// return makes the consumer code style identical whether the
-    /// caller's compiled-in arm set is `{pg}`, `{pg, sqlite}`, or
-    /// `{sqlite}`.
+    /// The `Option`-shaped return makes the consumer code style
+    /// identical across backend arms.
     ///
     /// Consumers still on the PG arm pattern at PR 1 typically write:
     ///
@@ -1817,10 +1807,8 @@ impl BackendHandle {
     /// ```
     ///
     /// — the same shape works for SQLite via this accessor.
-    #[cfg(feature = "sqlite")]
     pub fn with_sqlite<R>(&self, f: impl FnOnce(&SqliteBackend) -> R) -> Option<R> {
         match self {
-            #[cfg(feature = "pg")]
             Self::Postgres(_) => None,
             Self::Sqlite(b) => Some(f(b)),
         }
@@ -1835,10 +1823,8 @@ impl BackendHandle {
     /// migration has a stable accessor to migrate onto. PR 1 has no
     /// production caller — the orchestrator / migrations / register-model
     /// paths continue to use `as_postgres()?` against the PG arm only.
-    #[cfg(feature = "sqlite")]
     pub fn as_sqlite(&self) -> Option<&SqliteBackend> {
         match self {
-            #[cfg(feature = "pg")]
             Self::Postgres(_) => None,
             Self::Sqlite(b) => Some(b),
         }
@@ -1861,11 +1847,9 @@ impl BackendHandle {
     /// The adapter holds an `Rc<PostgresBackend>` (Rc-cloned from the
     /// arm's inner value); see [`crate::change_stream_pg::PgChangeStream`]
     /// for the lifetime / ownership rationale.
-    #[cfg(feature = "pg")]
     pub fn as_change_stream_pg(&self) -> Option<crate::change_stream_pg::PgChangeStream> {
         match self {
             Self::Postgres(b) => Some(crate::change_stream_pg::PgChangeStream::new(b.clone())),
-            #[cfg(feature = "sqlite")]
             Self::Sqlite(_) => None,
         }
     }
@@ -1886,12 +1870,10 @@ impl BackendHandle {
     /// arm's inner value); see
     /// [`crate::backend::sqlite::cdc::SqliteChangeStream`] for the
     /// lifetime / ownership rationale.
-    #[cfg(feature = "sqlite")]
     pub fn as_change_stream_sqlite(
         &self,
     ) -> Option<crate::backend::sqlite::cdc::SqliteChangeStream> {
         match self {
-            #[cfg(feature = "pg")]
             Self::Postgres(_) => None,
             Self::Sqlite(b) => Some(crate::backend::sqlite::cdc::SqliteChangeStream::new(b.clone())),
         }
@@ -1916,11 +1898,9 @@ impl BackendHandle {
     /// DEFINER getter for `column_keys`. PR 2 backfills the real body.
     ///
     /// Returns `Some` on the PG arm; `None` on the SQLite arm.
-    #[cfg(feature = "pg")]
     pub fn as_encrypted_column_pg(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
-            #[cfg(feature = "sqlite")]
             Self::Sqlite(_) => None,
         }
     }
@@ -1933,10 +1913,8 @@ impl BackendHandle {
     /// real body.
     ///
     /// Returns `Some` on the SQLite arm; `None` on the PG arm.
-    #[cfg(feature = "sqlite")]
     pub fn as_encrypted_column_sqlite(&self) -> Option<&SqliteBackend> {
         match self {
-            #[cfg(feature = "pg")]
             Self::Postgres(_) => None,
             Self::Sqlite(b) => Some(b),
         }
@@ -1950,11 +1928,9 @@ impl BackendHandle {
     /// Mirrors the [`Self::as_encrypted_column_pg`] shape.
     ///
     /// Returns `Some` on the PG arm; `None` on the SQLite arm.
-    #[cfg(feature = "pg")]
     pub fn as_backup_pg(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
-            #[cfg(feature = "sqlite")]
             Self::Sqlite(_) => None,
         }
     }
@@ -1966,10 +1942,8 @@ impl BackendHandle {
     /// restore + `pitr_pg_only` refusal.
     ///
     /// Returns `Some` on the SQLite arm; `None` on the PG arm.
-    #[cfg(feature = "sqlite")]
     pub fn as_backup_sqlite(&self) -> Option<&SqliteBackend> {
         match self {
-            #[cfg(feature = "pg")]
             Self::Postgres(_) => None,
             Self::Sqlite(b) => Some(b),
         }
@@ -2099,7 +2073,6 @@ mod tests {
     /// shape — trips compilation here rather than at the
     /// `BackendHandle::as_change_stream_pg()` accessor or its
     /// consumers.
-    #[cfg(feature = "pg")]
     fn assert_pg_change_stream_impls_change_stream() {
         fn assert_impl<
             T: ChangeStream<ConsumerHandle = crate::change_stream_pg::WalConsumerHandle>,
@@ -2151,7 +2124,6 @@ mod tests {
     /// [`EncryptedColumn`] (PR 1 stub impl returned `p5_pr2_stub`;
     /// PR 2 backfilled the SECURITY DEFINER body).
     #[allow(dead_code)]
-    #[cfg(feature = "pg")]
     fn _assert_postgres_backend_impls_encrypted_column() {
         fn assert_impl<T: EncryptedColumn>() {}
         assert_impl::<PostgresBackend>();
@@ -2162,7 +2134,6 @@ mod tests {
     /// impl returns `p5_pr2_stub`; PR 3 backfills the real body
     /// against env-var key sourcing.
     #[allow(dead_code)]
-    #[cfg(feature = "sqlite")]
     fn _assert_sqlite_backend_impls_encrypted_column() {
         fn assert_impl<T: EncryptedColumn>() {}
         assert_impl::<SqliteBackend>();
@@ -2174,7 +2145,6 @@ mod tests {
     /// table. Mirrors the
     /// `_assert_postgres_backend_impls_encrypted_column` shape above.
     #[allow(dead_code)]
-    #[cfg(feature = "pg")]
     fn _assert_postgres_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}
         assert_impl::<PostgresBackend>();
@@ -2183,7 +2153,6 @@ mod tests {
     /// Compile-time (P5 PR 1): `SqliteBackend` satisfies [`Backup`].
     /// PR 5 backfills the `VACUUM INTO` body.
     #[allow(dead_code)]
-    #[cfg(feature = "sqlite")]
     fn _assert_sqlite_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}
         assert_impl::<SqliteBackend>();
@@ -2239,7 +2208,6 @@ mod tests {
     /// Skipped under `--cfg miri` (the only sandbox where the PG
     /// `Rc<…>` construction below would be problematic): the test
     /// never connects, but the constructor path still exists.
-    #[cfg(feature = "pg")]
     #[test]
     fn backend_handle_postgres_arm_round_trip() {
         // We deliberately can't call `PostgresBackend::new` here
@@ -2527,7 +2495,6 @@ mod tests {
         let _ = assert_postgres_backend_impls_pg_sql_executor as fn();
         let _ = assert_postgres_backend_impls_pg_lock_manager as fn();
         let _ = assert_postgres_backend_impls_register_backend as fn();
-        #[cfg(feature = "pg")]
         let _ = assert_pg_change_stream_impls_change_stream as fn();
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();

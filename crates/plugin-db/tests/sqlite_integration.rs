@@ -1,7 +1,6 @@
 //! SQLite-side integration tests.
 //!
-//! Behind `required-features = ["sqlite", "test-helpers"]` so the
-//! default-feature build never compiles this file. **P1 PR 2** adds
+//! Behind `required-features = ["test-helpers"]`. **P1 PR 2** adds
 //! the first four behaviour tests — they exercise the
 //! `SqliteSession` actor end-to-end:
 //!
