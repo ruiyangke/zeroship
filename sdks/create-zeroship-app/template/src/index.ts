@@ -9,7 +9,7 @@
 // into RPC calls.
 //
 // Three SDKs demonstrate the platform's shape:
-//   - @zeroship/db        typed CRUD over Postgres (PGlite in dev)
+//   - @zeroship/db        typed CRUD over the app database (SQLite by default in dev)
 //   - @zeroship/storage   file uploads / object storage
 //   - @zeroship/kv        in-memory cache / counters
 //

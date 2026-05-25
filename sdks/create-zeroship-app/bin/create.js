@@ -65,6 +65,6 @@ console.log(`  cd ${projectName}`);
 console.log("  npm install");
 console.log("  npm run dev");
 console.log("");
-console.log("  → PGlite boots automatically (zero-config Postgres)");
+console.log("  → SQLite boots automatically (zero-config local db)");
 console.log("  → Files persist in .zeroship/ (already git-ignored)");
 console.log("  → open http://localhost:5173");

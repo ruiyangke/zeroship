@@ -24,7 +24,7 @@ import {
 } from "./environment.js";
 import { findServerEntry } from "./build.js";
 import type { TransformState } from "./transform.js";
-import { startDevPostgres, type DevPostgres } from "./dev-db.js";
+import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ export function devServerPlugin(
   let root = "";
   let isDev = false;
   let serverProcess: ChildProcess | null = null;
-  let devDb: DevPostgres | null = null;
+  let devDb: DevDatabase | null = null;
 
   // Accumulates file paths changed since the last HMR poll. The V8 runtime
   // polls GET /__zeroship_hmr_check every 500ms via setInterval + fetch().
@@ -265,19 +265,20 @@ export function devServerPlugin(
             }
           }
 
-          // Zero-setup Postgres: boot a PGlite-backed server when the
-          // creator hasn't provided DATABASE_URL via .env or the parent
-          // environment. Boot once; reused across runtime restarts.
+          // Default to a project-local SQLite file when the creator
+          // hasn't provided DATABASE_URL via .env or the parent
+          // environment. The runtime dispatches by scheme, so the same
+          // `DATABASE_URL` escape hatch still works for real Postgres.
           const hasUserDbUrl = !!(dotenvVars.DATABASE_URL || process.env.DATABASE_URL);
           if (!hasUserDbUrl && !devDb) {
             try {
-              devDb = await startDevPostgres(root);
+              devDb = resolveDevDatabase(root);
               console.log(
-                `[zeroship] dev db ready (pglite) — ${devDb.databaseUrl.replace(/postgres:\/\/[^@]+@/, "postgres://*****@")}`
+                `[zeroship] dev db ready (sqlite) — ${devDb.databaseUrl}`
               );
             } catch (err) {
               console.warn(
-                `[zeroship] failed to start pglite dev db: ${(err as Error).message} — zeroship.db.* will be unavailable`
+                `[zeroship] failed to prepare sqlite dev db: ${(err as Error).message} — zeroship.db.* will be unavailable`
               );
             }
           }
@@ -346,15 +347,7 @@ export function devServerPlugin(
               }
             }, 3000).unref();
           }
-          // Best-effort: stop the dev PGlite instance. Fire-and-forget — we
-          // don't await since Vite's close path is synchronous in several
-          // entry points (e.g. process.exit). The data is already durable
-          // on disk under .zeroship/dev.db/, so a skipped close just costs
-          // a next-start WAL replay.
-          if (devDb) {
-            void devDb.stop();
-            devDb = null;
-          }
+          devDb = null;
         };
 
         // Signal handlers — stored so they can be removed on server close

@@ -1,8 +1,8 @@
 // @zeroship/storage — object-storage SDK.
 //
 // Wraps the `zeroship.storage.*` native primitives in a typed, ergonomic
-// Bucket interface. Same shape your app will use in dev (PGlite-style
-// auto-backend: local FS) and prod (S3/R2 once those land behind the
+// Bucket interface. Same shape your app will use in dev (SQLite-backed
+// local state plus local FS) and prod (S3/R2 once those land behind the
 // same native interface).
 
 import { env } from "zeroship";
