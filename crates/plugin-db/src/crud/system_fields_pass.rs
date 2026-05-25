@@ -45,14 +45,6 @@ use crate::query::SYSTEM_FIELD_NAMES;
 /// owned by `delete()` / `restore()` — PR 5).
 pub(crate) const IMMUTABLE_SYSTEM_FIELDS: &[&str] = &["id", "created_at", "created_by"];
 
-/// **P7 PR 4** — cached-schema marker key the orchestrator stamps after
-/// the four-phase DDL pipeline succeeds (see `register_model::mod`).
-/// Its presence promises the table carries the seven system-field
-/// columns. Pre-PR-2 (legacy P0-P5-era) tables won't have the marker;
-/// the CRUD update pass refuses with `system_fields_missing` until PR 6
-/// ALTERs them in.
-pub(crate) const SYSTEM_FIELDS_MARKER_KEY: &str = "_systemFields";
-
 /// Maximum typed_id prefix length. Matches the convention used by
 /// `crates/core/src/typed_id.rs` for well-known prefixes
 /// (`usr`, `app`, `ses` — all 3 chars; we cap at 4 to allow `post`-
@@ -307,21 +299,14 @@ pub struct UpdateAutoBumpHints {
 
 /// Run the UPDATE-time validation pass over an UPDATE patch.
 ///
-/// Three rejections, one inspection:
+/// Two rejections, one inspection:
 ///
 /// 1. **Immutable fields** — the patch must not carry `id`,
 ///    `created_at`, or `created_by`. Those are auto-populated at
 ///    INSERT (PR 3) and write-once. Returns a typed
 ///    `DbError::ValidationFailed { code: "immutable_system_field" }`
 ///    via `QueryError::ImmutableSystemField`.
-/// 2. **Pre-migration table** — the cached schema for this collection
-///    must carry the [`SYSTEM_FIELDS_MARKER_KEY`] marker (stamped by
-///    the orchestrator after PR 2's DDL emitter ran). Absent →
-///    `system_fields_missing`. When the cached schema is itself
-///    absent (the collection wasn't registered on this isolate yet),
-///    the pass is permissive — the downstream `build_update_*` will
-///    surface whatever the SQL exec returns.
-/// 3. **Creator-supplied overrides** — `version` / `updated_at` /
+/// 2. **Creator-supplied overrides** — `version` / `updated_at` /
 ///    `updated_by` are inspected (not refused). The returned
 ///    [`UpdateAutoBumpHints`] tells the SQL builder whether to skip
 ///    each auto-bump.
@@ -351,25 +336,9 @@ pub fn apply_system_fields_on_update(
 
 fn apply_system_fields_on_update_impl(
     patch: &Value,
-    app_id: &str,
-    collection: &str,
+    _app_id: &str,
+    _collection: &str,
 ) -> Result<UpdateAutoBumpHints, DbError> {
-    // Pre-migration table guard: if the cached schema exists but lacks
-    // the marker, we refuse early. A missing cache entry (cold isolate
-    // / never-registered) is permissive — letting the SQL surface the
-    // failure preserves test-helpers-driven flows that bypass
-    // `registerModel`.
-    if let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) {
-        let marker = schema
-            .as_object()
-            .and_then(|o| o.get(SYSTEM_FIELDS_MARKER_KEY))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !marker {
-            return Err(DbError::system_fields_missing(collection));
-        }
-    }
-
     let Some(obj) = patch.as_object() else {
         // Non-object patches are the SQL builder's problem (they get a
         // typed `InvalidFilter` there). The pass has nothing to do.
@@ -541,157 +510,24 @@ fn filter_has_nested_version_predicate(filter: &Value) -> bool {
 // ---------------------------------------------------------------------------
 // **P7 PR 5** — soft-delete dispatch helpers.
 //
-// `delete()` becomes soft-delete on post-migration tables (Path C from
-// §11 of the proposal): the dispatch path inspects the schema cache for
-// the marker stamped by `register_model` (PR 4) and routes to either a
-// soft-delete `UPDATE ... SET deleted_at = NOW()` or the legacy hard
-// `DELETE` (with a `tracing::warn!`). Pre-PR-2 tables can't tell from
-// the cached schema alone whether `deleted_at` is present; the marker is
-// the discriminator because PR 6's ALTER pass restamps the schema after
-// it brings the column in.
+// `delete()` is implemented as a soft-delete `UPDATE ... SET deleted_at
+// = NOW()`. `purge()` remains the explicit hard-delete escape hatch,
+// and `restore()` clears `deleted_at`.
 //
 // Two new methods land in this PR — `purge` (explicit hard-delete) and
 // `restore` (clear `deleted_at`). Both are direct verbs in the SDK and
 // reach the dispatch layer through their own helpers below.
 // ---------------------------------------------------------------------------
 
-/// **P7 PR 5** — does the cached schema for `(app_id, collection)`
-/// promise the table carries the seven system-field columns?
-///
-/// Reads the `_systemFields: true` marker stamped by `register_model`
-/// after the four-phase DDL pipeline succeeds (PR 4). Returns `true`
-/// when the marker is present AND set; `false` when:
-///
-/// - the marker is missing (pre-PR-2 table cached by P0-P5-era flows),
-/// - the marker is `false` (defensive — current emitter only writes
-///   `true`, but a future ALTER pass might toggle while migration runs),
-/// - the cached schema is absent (cold isolate / never-registered).
-///
-/// The third case (no cache entry) is the one the proposal calls out
-/// for the "raw `default = { fetch }` against an existing table" path
-/// where the orchestrator never minted a marker on this isolate. The
-/// dispatch helpers route those to legacy hard-delete with a warning —
-/// the SDK consumer will see hard-delete semantics on a cold isolate
-/// the same way they would on a pre-PR-2 table. PR 6's ALTER pass
-/// re-registers and re-stamps; once the marker lands the next dispatch
-/// soft-deletes.
-pub(crate) fn schema_has_system_fields_marker(app_id: &str, collection: &str) -> bool {
-    crate::context::with(|c| {
-        c.schema_for(app_id, collection)
-            .as_ref()
-            .and_then(|schema| schema.as_object())
-            .and_then(|o| o.get(SYSTEM_FIELDS_MARKER_KEY))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-    })
-}
-
-/// **P7 PR 5** — per-process dedupe set for the legacy-find warning.
-/// Module-scoped so the test reset hook
-/// (`reset_legacy_warning_dedupe_for_tests`) can clear the SAME
-/// `OnceLock<Mutex<HashSet<...>>>` the warning path inserts into. A
-/// function-local static would be a different instance and the reset
-/// would silently no-op.
-static LEGACY_FIND_WARNED: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
-> = std::sync::OnceLock::new();
-
-/// **P7 PR 5** — one-time-per-(isolate, app, collection) warning when
-/// the find / count / aggregate path runs against a pre-migration
-/// table (no `_systemFields` marker on the cached schema). The auto-
-/// filter for `deleted_at IS NULL` cannot fire on those tables (the
-/// column doesn't exist), so soft-deleted rows would be invisible —
-/// but here there are none to hide. The warning surfaces the legacy
-/// state so operators can spot tables awaiting PR 6's ALTER pass
-/// without spamming the log on every dispatch.
-///
-/// `OnceLock<Mutex<HashSet<(String, String)>>>` is the per-process
-/// dedupe — see the proposal's "RECOMMEND ... `OnceCell<HashSet<...>>`
-/// is fine" design call. The lock is uncontended in the steady state
-/// (the first dispatch per `(app, collection)` wins; subsequent
-/// dispatches `.contains()`-check and skip).
-fn warn_legacy_find_once(app_id: &str, collection: &str) {
-    use std::collections::HashSet;
-    use std::sync::Mutex;
-    let warned = LEGACY_FIND_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
-    let key = (app_id.to_string(), collection.to_string());
-    let mut guard = warned.lock().expect("warn-legacy mutex poisoned");
-    if guard.insert(key) {
-        tracing::warn!(
-            target: "zeroship_plugin_db::soft_delete_legacy",
-            app_id = %app_id,
-            collection = %collection,
-            "find/count/aggregate on pre-migration table; \
-             `deleted_at IS NULL` auto-filter is skipped because the \
-             column does not exist. Run `zeroship migrate` (PR 6) to \
-             enable soft-delete semantics."
-        );
-    }
-}
-
 /// **P7 PR 5** — should this collection's SELECTs auto-append
 /// `AND deleted_at IS NULL`?
 ///
-/// Returns `true` on post-migration tables (marker present in cache)
-/// AND when the caller hasn't opted out via `include_deleted: true`.
-///
-/// On pre-migration tables (no marker or no cache entry), returns
-/// `false` AND emits a one-time-per-isolate `tracing::warn!` so
-/// operators notice the unfiltered read path. The legacy table has no
-/// `deleted_at` column, so the auto-filter would produce a SQL error —
-/// the legacy contract is the safe fallback.
+/// When `include_deleted: true` is set, the caller explicitly opts out
+/// of the platform's default soft-delete filter.
 pub(crate) fn should_filter_soft_deleted(
-    app_id: &str,
-    collection: &str,
     include_deleted: bool,
 ) -> bool {
-    if include_deleted {
-        return false;
-    }
-    let has_marker = schema_has_system_fields_marker(app_id, collection);
-    if !has_marker {
-        warn_legacy_find_once(app_id, collection);
-        return false;
-    }
-    true
-}
-
-/// **P7 PR 5** — emit the deprecation `tracing::warn!` when the
-/// dispatch layer falls back to legacy hard-delete because the table
-/// lacks the system-fields marker. Path C from §11 of the proposal:
-/// `delete()` does hard-delete on pre-PR-2 tables; future major
-/// version flips this to a hard error.
-///
-/// The target / fields are picked so operators can grep logs for
-/// `zeroship_plugin_db::soft_delete_legacy` to find the call sites
-/// that need migrating.
-pub(crate) fn warn_legacy_hard_delete(app_id: &str, collection: &str) {
-    tracing::warn!(
-        target: "zeroship_plugin_db::soft_delete_legacy",
-        app_id = %app_id,
-        collection = %collection,
-        "delete() on pre-migration table; falling back to hard DELETE. \
-         Run `zeroship migrate` (PR 6) to enable soft-delete semantics, \
-         or call `purge()` explicitly to silence this warning."
-    );
-}
-
-/// **P7 PR 5** — test-only reset of the per-process "we already warned
-/// about this legacy table" dedupe set. The integration suite drives
-/// many `(app, collection)` pairs through the same process; without
-/// this hook the first test's pair would lock out every subsequent
-/// test's "warning fired" assertion.
-///
-/// `#[cfg(any(test, feature = "test-helpers"))]`-gated so production
-/// builds don't expose the internal cache.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn reset_legacy_warning_dedupe_for_tests() {
-    use std::collections::HashSet;
-    use std::sync::Mutex;
-    let warned = LEGACY_FIND_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
-    if let Ok(mut g) = warned.lock() {
-        g.clear();
-    }
+    !include_deleted
 }
 
 #[cfg(test)]
@@ -981,39 +817,8 @@ mod tests {
 
     // ---- P7 PR 4 — UPDATE pass: immutable fields, CAS extraction --
 
-    /// Stamp the cached schema with the `_systemFields` marker so the
-    /// UPDATE pass treats the collection as post-PR-2. Used by every
-    /// UPDATE-pass test that needs a "modern" table; the pre-PR-2
-    /// pre-migration scenario is exercised by the bespoke
-    /// `update_against_table_without_version_column_returns_system_fields_missing`
-    /// test which explicitly caches a marker-less schema.
-    fn install_marked_schema(app_id: &str, collection: &str) {
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                app_id,
-                collection,
-                json!({
-                    SYSTEM_FIELDS_MARKER_KEY: true,
-                }),
-            );
-        });
-    }
-
-    /// Drop the cached schema entry so a follow-up test sees a cold
-    /// isolate. Tests that mutate the cache MUST end with this.
-    fn clear_schema_cache(_app_id: &str, _collection: &str) {
-        // The cache is per-isolate and per-test-process. The schemas
-        // map has no public `remove`, but overwriting with an empty
-        // object is sufficient for our pass — `apply_system_fields_on_update`
-        // reads the `_systemFields` key, which an empty object lacks
-        // (and the test that runs next is presumed to set its own
-        // schema before reading). To keep tests independent we don't
-        // share state across tests beyond what the pass reads.
-    }
-
     #[test]
     fn update_refuses_creator_supplied_id_change() {
-        install_marked_schema("app1", "posts_imid");
         let patch = json!({ "id": "post_other", "title": "x" });
         let err = apply_system_fields_on_update(&patch, "app1", "posts_imid")
             .expect_err("UPDATE must refuse id overwrite");
@@ -1023,12 +828,10 @@ mod tests {
             }
             other => panic!("expected ValidationFailed, got {other:?}"),
         }
-        clear_schema_cache("app1", "posts_imid");
     }
 
     #[test]
     fn update_refuses_creator_supplied_created_at_change() {
-        install_marked_schema("app1", "posts_imca");
         let patch = json!({ "created_at": 1700000000000_i64 });
         let err = apply_system_fields_on_update(&patch, "app1", "posts_imca")
             .expect_err("UPDATE must refuse created_at overwrite");
@@ -1038,12 +841,10 @@ mod tests {
             }
             other => panic!("expected ValidationFailed, got {other:?}"),
         }
-        clear_schema_cache("app1", "posts_imca");
     }
 
     #[test]
     fn update_refuses_creator_supplied_created_by_change() {
-        install_marked_schema("app1", "posts_imcb");
         let patch = json!({ "created_by": "usr_other" });
         let err = apply_system_fields_on_update(&patch, "app1", "posts_imcb")
             .expect_err("UPDATE must refuse created_by overwrite");
@@ -1053,14 +854,12 @@ mod tests {
             }
             other => panic!("expected ValidationFailed, got {other:?}"),
         }
-        clear_schema_cache("app1", "posts_imcb");
     }
 
     #[test]
     fn update_refuses_immutable_fields_under_dollar_set() {
         // Nested $set form must be caught too — the SDK can produce
         // either shape.
-        install_marked_schema("app1", "posts_imset");
         let patch = json!({ "$set": { "id": "post_other" } });
         let err = apply_system_fields_on_update(&patch, "app1", "posts_imset")
             .expect_err("UPDATE must refuse id overwrite inside $set");
@@ -1070,36 +869,10 @@ mod tests {
             }
             other => panic!("expected ValidationFailed, got {other:?}"),
         }
-        clear_schema_cache("app1", "posts_imset");
-    }
-
-    #[test]
-    fn update_against_table_without_version_column_returns_system_fields_missing() {
-        // Cache a schema WITHOUT the `_systemFields` marker → pass
-        // refuses with `system_fields_missing`.
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "legacy_posts",
-                json!({
-                    "title": { "type": "string" },
-                }),
-            );
-        });
-        let patch = json!({ "title": "x" });
-        let err = apply_system_fields_on_update(&patch, "app1", "legacy_posts")
-            .expect_err("pre-migration table UPDATE must refuse");
-        match err {
-            DbError::ValidationFailed { code, .. } => {
-                assert_eq!(code, "system_fields_missing");
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
     }
 
     #[test]
     fn update_respects_creator_supplied_version() {
-        install_marked_schema("app1", "posts_csv");
         let patch = json!({ "title": "x", "version": 42 });
         let hints = apply_system_fields_on_update(&patch, "app1", "posts_csv")
             .expect("passes immutable check");
@@ -1107,27 +880,22 @@ mod tests {
             hints.creator_supplied_version,
             "explicit version on patch must set the hint"
         );
-        clear_schema_cache("app1", "posts_csv");
     }
 
     #[test]
     fn update_respects_creator_supplied_updated_at() {
-        install_marked_schema("app1", "posts_csua");
         let patch = json!({ "title": "x", "updated_at": "2026-01-01T00:00:00Z" });
         let hints = apply_system_fields_on_update(&patch, "app1", "posts_csua")
             .expect("passes immutable check");
         assert!(hints.creator_supplied_updated_at);
-        clear_schema_cache("app1", "posts_csua");
     }
 
     #[test]
     fn update_respects_creator_supplied_updated_by() {
-        install_marked_schema("app1", "posts_csub");
         let patch = json!({ "title": "x", "updated_by": "usr_explicit" });
         let hints = apply_system_fields_on_update(&patch, "app1", "posts_csub")
             .expect("passes immutable check");
         assert!(hints.creator_supplied_updated_by);
-        clear_schema_cache("app1", "posts_csub");
     }
 
     #[test]
@@ -1135,7 +903,6 @@ mod tests {
         // Pre-PR-4 SDK shape: `{ $inc: { version: 1 } }`. The pass must
         // set `creator_supplied_version` so the SQL builder skips its
         // own auto-bump (otherwise a double-bump lands version at +2).
-        install_marked_schema("app1", "posts_legacyinc");
         let patch = json!({ "$inc": { "version": 1 } });
         let hints = apply_system_fields_on_update(&patch, "app1", "posts_legacyinc")
             .expect("passes");
@@ -1143,14 +910,12 @@ mod tests {
             hints.creator_supplied_version,
             "legacy $inc.version must mark creator-supplied to avoid double-bump"
         );
-        clear_schema_cache("app1", "posts_legacyinc");
     }
 
     #[test]
     fn update_refuses_immutable_field_under_dollar_inc() {
         // Defence-in-depth: $inc.id / $inc.created_at / $inc.created_by
         // should be refused for the same reason as top-level overwrites.
-        install_marked_schema("app1", "posts_immut_inc");
         let patch = json!({ "$inc": { "created_by": 1 } });
         let err = apply_system_fields_on_update(&patch, "app1", "posts_immut_inc")
             .expect_err("immutable field under $inc must refuse");
@@ -1160,19 +925,16 @@ mod tests {
             }
             other => panic!("expected ValidationFailed, got {other:?}"),
         }
-        clear_schema_cache("app1", "posts_immut_inc");
     }
 
     #[test]
     fn update_creator_hints_default_to_false() {
-        install_marked_schema("app1", "posts_defaults");
         let patch = json!({ "title": "x" });
         let hints = apply_system_fields_on_update(&patch, "app1", "posts_defaults")
             .expect("passes");
         assert!(!hints.creator_supplied_version);
         assert!(!hints.creator_supplied_updated_at);
         assert!(!hints.creator_supplied_updated_by);
-        clear_schema_cache("app1", "posts_defaults");
     }
 
     #[test]
@@ -1263,131 +1025,15 @@ mod tests {
         assert!(!filter_has_id_predicate(&json!("scalar")));
     }
 
-    // ---- P7 PR 5 — schema marker check + soft-delete filter gate -----
+    // ---- P7 PR 5 — soft-delete filter gate -----
 
     #[test]
-    fn schema_has_system_fields_marker_true_for_marked_schema() {
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "posts_sf_mark_t",
-                json!({ SYSTEM_FIELDS_MARKER_KEY: true }),
-            );
-        });
-        assert!(schema_has_system_fields_marker("app1", "posts_sf_mark_t"));
-    }
-
-    #[test]
-    fn schema_has_system_fields_marker_false_for_legacy_schema() {
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "posts_sf_mark_legacy",
-                json!({ "title": { "type": "string" } }),
-            );
-        });
-        assert!(!schema_has_system_fields_marker(
-            "app1",
-            "posts_sf_mark_legacy"
-        ));
-    }
-
-    #[test]
-    fn schema_has_system_fields_marker_false_for_uncached() {
-        // Never registered — cold-isolate / raw fetch path.
-        assert!(!schema_has_system_fields_marker(
-            "app1",
-            "posts_sf_mark_unknown"
-        ));
-    }
-
-    #[test]
-    fn schema_has_system_fields_marker_false_for_explicit_false() {
-        // Defensive: an emitter that writes `false` (or a future ALTER
-        // pass mid-migration) must NOT count as marked.
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "posts_sf_mark_explicit_false",
-                json!({ SYSTEM_FIELDS_MARKER_KEY: false }),
-            );
-        });
-        assert!(!schema_has_system_fields_marker(
-            "app1",
-            "posts_sf_mark_explicit_false"
-        ));
-    }
-
-    #[test]
-    fn should_filter_soft_deleted_true_for_marked_schema() {
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "posts_filter_y",
-                json!({ SYSTEM_FIELDS_MARKER_KEY: true }),
-            );
-        });
-        assert!(should_filter_soft_deleted("app1", "posts_filter_y", false));
+    fn should_filter_soft_deleted_by_default() {
+        assert!(should_filter_soft_deleted(false));
     }
 
     #[test]
     fn should_filter_soft_deleted_false_when_include_deleted_true() {
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "posts_filter_inc",
-                json!({ SYSTEM_FIELDS_MARKER_KEY: true }),
-            );
-        });
-        // Even with the marker, opt-out wins.
-        assert!(!should_filter_soft_deleted(
-            "app1",
-            "posts_filter_inc",
-            true
-        ));
-    }
-
-    #[test]
-    fn should_filter_soft_deleted_false_for_legacy_table_and_warns() {
-        reset_legacy_warning_dedupe_for_tests();
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "posts_filter_legacy",
-                json!({ "title": { "type": "string" } }),
-            );
-        });
-        // Legacy table — auto-filter must NOT fire (no `deleted_at`
-        // column) and a warning is emitted.
-        assert!(!should_filter_soft_deleted(
-            "app1",
-            "posts_filter_legacy",
-            false
-        ));
-    }
-
-    #[test]
-    fn should_filter_soft_deleted_warn_dedupes_per_pair() {
-        // Same `(app, collection)` pair the test above used the dedupe
-        // would silence a second warning. Reset; drive twice and
-        // confirm the dedupe set records the pair.
-        use std::collections::HashSet;
-        use std::sync::Mutex;
-        reset_legacy_warning_dedupe_for_tests();
-        crate::context::with_mut(|c| {
-            c.cache_schema(
-                "app1",
-                "posts_filter_dedupe",
-                json!({ "title": { "type": "string" } }),
-            );
-        });
-        let _ = should_filter_soft_deleted("app1", "posts_filter_dedupe", false);
-        let _ = should_filter_soft_deleted("app1", "posts_filter_dedupe", false);
-        let warned = LEGACY_FIND_WARNED.get_or_init(|| Mutex::new(HashSet::new()));
-        let g = warned.lock().unwrap();
-        assert!(
-            g.contains(&("app1".to_string(), "posts_filter_dedupe".to_string())),
-            "dedupe set must record the warned pair"
-        );
+        assert!(!should_filter_soft_deleted(true));
     }
 }
