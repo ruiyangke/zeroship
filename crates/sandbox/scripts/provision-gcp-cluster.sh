@@ -256,8 +256,13 @@ create_server() {
     --quiet >/dev/null
 }
 
+server_pids=()
 for i in $(seq 1 "$SERVER_COUNT"); do
-  create_server "${SERVER_NAMES[i-1]}" "$i"
+  create_server "${SERVER_NAMES[i-1]}" "$i" &
+  server_pids+=($!)
+done
+for pid in "${server_pids[@]}"; do
+  wait "$pid" || { echo "[provision] FATAL: server create failed (pid $pid)" >&2; exit 1; }
 done
 
 # ────────── Worker creation ──────────
@@ -291,8 +296,13 @@ create_worker() {
     --quiet >/dev/null
 }
 
+worker_pids=()
 for n in "${WORKER_NAMES[@]}"; do
-  create_worker "$n"
+  create_worker "$n" &
+  worker_pids+=($!)
+done
+for pid in "${worker_pids[@]}"; do
+  wait "$pid" || { echo "[provision] FATAL: worker create failed (pid $pid)" >&2; exit 1; }
 done
 
 # ────────── Wait for sentinels ──────────
