@@ -7241,6 +7241,51 @@ async fn client_sql_runs_under_per_app_role() {
 }
 
 #[compio::test]
+async fn exec_autocommit_query_runs_under_per_app_role() {
+    // I2 regression: the shared autocommit exec path must switch to the
+    // per-app role before running the statement, not just explicit/auto tx.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_exec_autocommit_role";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+
+    let rows = zeroship_plugin_db::exec::exec_query_for_tests(
+        app,
+        zeroship_plugin_db::query::BuiltQuery {
+            sql: "SELECT current_user AS u".to_string(),
+            params: vec![],
+        },
+    )
+    .await
+    .expect("autocommit exec query");
+    let current = rows[0]
+        .get("u")
+        .and_then(Value::as_str)
+        .expect("current_user string");
+    assert_eq!(
+        current, role,
+        "autocommit exec query must run under the per-app role",
+    );
+
+    let who = pool
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let after: String = who[0].get("u");
+    assert_ne!(
+        after, role,
+        "RESET ROLE must run before the pooled autocommit connection returns",
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
 async fn wal_connection_stays_platform_role() {
     // §17.5: the WAL/replication connection stays under the platform
     // role and is NEVER switched to a per-app role. This is a structural

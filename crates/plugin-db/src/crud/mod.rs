@@ -489,7 +489,7 @@ pub(crate) fn dispatch_find<'s>(
                 };
             }
         };
-        match exec_query(bq).await {
+        match exec_query(&app, bq).await {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
                     &app,
@@ -1445,7 +1445,7 @@ pub(crate) fn dispatch_aggregate<'s>(
         request_id,
         built,
         move |bq| async move {
-            let rows = exec_query(bq).await?;
+            let rows = exec_query(&app, bq).await?;
             read_pipeline::apply(
                 &app,
                 &coll,
@@ -1502,7 +1502,7 @@ pub(crate) fn dispatch_distinct<'s>(
         request_id,
         built,
         move |bq| async move {
-            let rows = exec_query(bq).await?;
+            let rows = exec_query(&app, bq).await?;
             read_pipeline::apply(
                 &app,
                 &coll,
@@ -1560,6 +1560,7 @@ pub(crate) fn dispatch_count<'s>(
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    let app = app_id.to_string();
     let built =
         query::build_count_with_soft_delete(app_id, collection, &filter, filter_soft_deleted);
 
@@ -1567,7 +1568,7 @@ pub(crate) fn dispatch_count<'s>(
         resolver,
         request_id,
         built,
-        exec_count,
+        move |bq| async move { exec_count(&app, bq).await },
         |n: i64| {
             #[allow(clippy::cast_precision_loss)]
             ResolveValue::F64(n as f64)
@@ -2319,7 +2320,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         Some(&select),
     )
     .map_err(DbError::from)?;
-    let rows = exec_query(built).await?;
+    let rows = exec_query(app_id, built).await?;
     let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
         Some(Value::String(id)) => Some(id.clone()),
         Some(Value::Number(n)) => Some(n.to_string()),

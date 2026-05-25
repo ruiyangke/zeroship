@@ -79,6 +79,7 @@ async fn ensure_postgres_pool_for_shared_sql() -> Result<Rc<compio_postgres::Poo
 
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
 pub(crate) async fn run_sql(
+    app_id: &str,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
@@ -103,10 +104,7 @@ pub(crate) async fn run_sql(
     // No transaction — use pool. On the SQLite arm the shared CRUD
     // row-returning path is not wired yet; surface a typed error
     // instead of falling through to a misleading `pool not initialized`.
-    let pool = ensure_postgres_pool_for_shared_sql().await?;
-    pool.query_text_params(sql, params)
-        .await
-        .map_err(|e| DbError::from_pg(&e))
+    exec_postgres_autocommit_with_role(app_id, sql, params).await
 }
 
 /// Execute a built query via pool (or TX conn) and return the
@@ -117,12 +115,12 @@ pub(crate) async fn run_sql(
 /// take a single row without paying for an intermediate serialise +
 /// reparse round-trip. The final JSON string is materialised once at
 /// the V8 boundary (`ResolveValue::Json`).
-pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub(crate) async fn exec_query(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
         return exec_sqlite_json(&sq, &bq.sql, &param_refs).await;
     }
-    let rows = run_sql(&bq.sql, &param_refs).await?;
+    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
     Ok(rows_to_json_value(&rows))
 }
 
@@ -131,7 +129,7 @@ pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
 /// Returns the raw integer; callers wrap into the appropriate
 /// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
 /// `number`).
-pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, DbError> {
+pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
         let rows = exec_sqlite_json(&sq, &bq.sql, &param_refs).await?;
@@ -141,7 +139,7 @@ pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, DbError> {
             .and_then(Value::as_i64)
             .unwrap_or(0));
     }
-    let rows = run_sql(&bq.sql, &param_refs).await?;
+    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
 
     Ok(rows
         .first()
@@ -157,13 +155,61 @@ pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, DbError> {
 /// to build broker events without paying for a JSON parse of its own
 /// output; the CRUD resolver chain then serialises once at the V8
 /// boundary.
-pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub(crate) async fn exec_mutation(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
         return exec_sqlite_json(&sq, &bq.sql, &param_refs).await;
     }
-    let rows = run_sql(&bq.sql, &param_refs).await?;
+    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
     Ok(rows_to_json_value(&rows))
+}
+
+async fn exec_postgres_autocommit_with_role(
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<Vec<compio_postgres::Row>, DbError> {
+    let pool = ensure_postgres_pool_for_shared_sql().await?;
+    let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
+    apply_autocommit_role(&client, app_id).await?;
+    let query_result = client
+        .query_text_params(sql, params)
+        .await
+        .map_err(|e| DbError::from_pg(&e));
+    let reset_result = reset_autocommit_role(&client).await;
+    if let Err(reset_err) = reset_result {
+        client.__private_api_close();
+        return Err(match query_result {
+            Ok(_) => reset_err,
+            Err(query_err) => query_err,
+        });
+    }
+    query_result
+}
+
+async fn apply_autocommit_role(
+    client: &compio_postgres::Client,
+    app_id: &str,
+) -> Result<(), DbError> {
+    let sql = crate::auth::bootstrap::set_role_sql(app_id);
+    client.execute(&sql, &[]).await.map_err(|e| {
+        let mut err = DbError::from_pg(&e);
+        crate::error::prefix_message(&mut err, "db: SET ROLE (per-app §17.5 autocommit): ");
+        err
+    })?;
+    Ok(())
+}
+
+async fn reset_autocommit_role(client: &compio_postgres::Client) -> Result<(), DbError> {
+    client
+        .execute(crate::auth::bootstrap::reset_role_sql(), &[])
+        .await
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            crate::error::prefix_message(&mut err, "db: RESET ROLE (per-app §17.5 autocommit): ");
+            err
+        })?;
+    Ok(())
 }
 
 async fn exec_sqlite_json(
@@ -225,7 +271,7 @@ pub(crate) async fn exec_mutation_with_emit(
     // iterate the live `Value`s directly. The CRUD resolver in
     // `crud.rs` does the final `Value::Array(rows).to_string()` once
     // at the V8 boundary.
-    let rows = exec_mutation(bq).await?;
+    let rows = exec_mutation(app_id, bq).await?;
     emit_for_rows(&rows, app_id, collection, op);
     Ok(rows)
 }
@@ -412,6 +458,18 @@ pub async fn exec_mutation_with_emit_for_tests(
     exec_mutation_with_emit(bq, app_id, collection, op)
         .await
         .map_err(DbError::into_string)
+}
+
+/// **Test-only**: exec a read query through the same shared
+/// pool-or-tx path production CRUD uses, including the Postgres
+/// autocommit per-app role fence.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub async fn exec_query_for_tests(
+    app_id: &str,
+    bq: crate::query::BuiltQuery,
+) -> Result<Vec<Value>, String> {
+    exec_query(app_id, bq).await.map_err(DbError::into_string)
 }
 
 #[cfg(test)]
@@ -764,7 +822,7 @@ mod tests {
             });
 
             reset_sqlite_route();
-            let inserted = exec_mutation(BuiltQuery {
+            let inserted = exec_mutation("app_exec", BuiltQuery {
                 sql: r#"INSERT INTO "app_exec"."notes" (id, title)
                         VALUES (1, 'tx-row') RETURNING *"#
                     .to_string(),
@@ -783,7 +841,7 @@ mod tests {
             );
 
             reset_sqlite_route();
-            let count = exec_count(BuiltQuery {
+            let count = exec_count("app_exec", BuiltQuery {
                 sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
                 params: vec![],
             })
@@ -797,7 +855,7 @@ mod tests {
             assert_eq!(count, 1);
 
             reset_sqlite_route();
-            let rows = exec_query(BuiltQuery {
+            let rows = exec_query("app_exec", BuiltQuery {
                 sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
                 params: vec![],
             })
