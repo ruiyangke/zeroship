@@ -168,3 +168,41 @@ Auto-maintained by the 10-minute cron + sprint fixers.
   The DESIGN.md goal state is REACHED. Future cron fires for this
   driver may legitimately report "no action — goal achieved" until a
   new driver work item is opened.
+
+- T-9-perf-prewarm-validation (2026-05-25 ~04:45 UTC): **COMPLETE.**
+  Driver v25 (FADV_WILLNEED prewarm) validated on fresh cluster
+  (3-server + 3-worker zone asia-northeast3-a). Controller v39 built
+  via `cargo zigbuild --target x86_64-unknown-linux-gnu.2.34` (v38
+  was pre-T-8-cutover and still emitted raw_exec — first-fire of v39
+  pin in sandbox/scripts/provision-gcp-cluster.sh at sandbox commit
+  `729f22dd`).
+
+  **Results**:
+  - c=1 WAKE p50: **49.1s** vs v24 baseline **50.7s** = **-1.6s (-3.2%)**
+    (3/3 CREATE, 3/3 SNAPSHOT, 3/3 WAKE, 3/3 STOP)
+  - c=4 CREATE OK ratio: **18/20** vs v24 baseline **12/20** =
+    **+50% throughput** (R31-P1 allocator tuning ceil=20 confirmed
+    working; sandbox-side change at `b75728ce`)
+  - `nomad_driver_ch_prewarm_memory_ranges_bytes_total` absent from
+    prom file (counter is lazy-registered, absent = zero or
+    not-yet-emitted; `unix.Fadvise` + `incPrewarmMemoryRangesBytes`
+    symbols confirmed in binary; no "prewarm failed" logs;
+    memory-ranges files (~1GB each) present)
+  - Teardown: 6 instances + 3 addresses deleted, 0 remaining
+
+  **Verdict**: Prewarm moved wake p50 by -1.6s, far below the
+  hypothesised 5-15s. The wake bottleneck is CH-internal restore
+  state reconstruction (~42 of 49 seconds — confirms the
+  wake-path latency investigation at sandbox `17fc24b8`). FADV_WILLNEED
+  only eliminates disk-read latency for the first wake on a cold
+  page cache; subsequent wakes hit warm cache regardless. R31-P1
+  allocator tuning is the bigger win (+50% CREATE throughput at
+  c=4). The driver v25 binary stays; prewarm is a no-op-when-cache-
+  warm safety net, not the latency lever it was hypothesised to be.
+
+  Next driver work: paused. The remaining wake-path latency (~42s)
+  lives inside CH itself and is out of scope for this driver. To
+  attack it further would require CH-internal investigation
+  (which restore phases dominate the 42s?). Tracking: out-of-scope
+  for nomad-driver-ch crate; reopens only if cluster behavior
+  regresses.
