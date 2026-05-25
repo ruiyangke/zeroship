@@ -3407,7 +3407,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
         app,
         "messages",
         zeroship_plugin_db::broker::ChangeOp::Insert,
-        Some(7),
+        Some("usr_02HXINTEGRATIONSUBPK".to_string()),
         vec!["title".into()],
         std::collections::HashMap::new(),
     );
@@ -3416,7 +3416,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
     match msg {
         zeroship_plugin_db::broker::SubscriptionMessage::Change(ev) => {
             assert_eq!(ev.collection, "messages");
-            assert_eq!(ev.pk, Some(7));
+            assert_eq!(ev.pk.as_deref(), Some("usr_02HXINTEGRATIONSUBPK"));
             assert_eq!(ev.op, zeroship_plugin_db::broker::ChangeOp::Insert);
         }
         other => panic!("unexpected: {other:?}"),
@@ -3442,7 +3442,7 @@ fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_plugin_db::broker::
         app_id: app.to_string(),
         collection: collection.to_string(),
         op: zeroship_plugin_db::broker::ChangeOp::Insert,
-        pk: Some(pk),
+        pk: Some(pk.to_string()),
         changed_columns: vec![],
         new_tuple: std::collections::HashMap::new(),
         old_tuple: None,
@@ -3464,11 +3464,11 @@ async fn gap_b_commit_drains_pending_emits_to_broker() {
 
     zeroship_plugin_db::drain_pending_emits_for_tests();
 
-    let mut pks: Vec<i64> = Vec::new();
+    let mut pks: Vec<String> = Vec::new();
     while let Some(zeroship_plugin_db::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
-        pks.push(ev.pk.unwrap());
+        pks.push(ev.pk.as_deref().unwrap().to_string());
     }
-    assert_eq!(pks, vec![1, 2]);
+    assert_eq!(pks, vec!["1".to_string(), "2".to_string()]);
 
     sub.close();
     zeroship_plugin_db::broker::drop_app(None);
@@ -4855,7 +4855,7 @@ fn p8a2_per_app_emit_suppression_integration() {
         "multi_a",
         "messages",
         ChangeOp::Insert,
-        Some(1),
+        Some("1".to_string()),
         vec![],
         std::collections::HashMap::new(),
     );
@@ -4863,14 +4863,14 @@ fn p8a2_per_app_emit_suppression_integration() {
         "multi_b",
         "messages",
         ChangeOp::Insert,
-        Some(2),
+        Some("2".to_string()),
         vec![],
         std::collections::HashMap::new(),
     );
 
     assert!(sub_a.pop().is_none(), "app A's emit must be suppressed");
     match sub_b.pop() {
-        Some(SubscriptionMessage::Change(ev)) => assert_eq!(ev.pk, Some(2)),
+        Some(SubscriptionMessage::Change(ev)) => assert_eq!(ev.pk.as_deref(), Some("2")),
         other => panic!("app B must still receive its emit, got {other:?}"),
     }
 

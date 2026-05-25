@@ -257,8 +257,9 @@ async fn exec_sqlite_json(
 /// `build_delete_one`, etc. so we don't try to infer it from the SQL.
 ///
 /// Future read-set narrowing (P8b) extends this helper to populate
-/// `changed_columns` from the SET clause and `pk` from the RETURNING
-/// row. For P8a we collect what's already in the result `Value`.
+/// `changed_columns` from the SET clause and the logical `id` from the
+/// RETURNING row. For P8a we collect what's already in the result
+/// `Value`.
 pub(crate) async fn exec_mutation_with_emit(
     bq: BuiltQuery,
     app_id: &str,
@@ -332,8 +333,8 @@ fn emit_for_rows(
     for row in rows {
         let pk = row
             .get("id")
-            .and_then(|v| v.as_i64())
-            .or_else(|| row.get("_id").and_then(|v| v.as_i64()));
+            .and_then(value_to_logical_id)
+            .or_else(|| row.get("_id").and_then(value_to_logical_id));
         // changed_columns: the keys present in the returned row,
         // minus the system columns we never want to report. For
         // INSERT this is "every declared column" — for UPDATE it's
@@ -384,7 +385,7 @@ fn queue_or_emit(
     app_id: &str,
     collection: &str,
     op: crate::broker::ChangeOp,
-    pk: Option<i64>,
+    pk: Option<String>,
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
@@ -403,6 +404,14 @@ fn queue_or_emit(
         old_tuple: None,
     };
     context::with_mut(|c| c.push_pending_emit(ev));
+}
+
+fn value_to_logical_id(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 /// Drain the per-isolate `pending_emits` queue and fire every queued
@@ -561,6 +570,17 @@ mod tests {
         )
     }
 
+    fn synthetic_typed_id_row() -> Value {
+        Value::Object(
+            [
+                ("id".to_string(), Value::from("usr_02HXTESTSUBSCRIPTIONID")),
+                ("title".to_string(), Value::from("hi")),
+            ]
+            .into_iter()
+            .collect::<serde_json::Map<_, _>>(),
+        )
+    }
+
     #[test]
     fn exec_mutation_with_emit_skips_build_when_app_suppressed() {
         reset_world();
@@ -646,14 +666,14 @@ mod tests {
             "app_active",
             "messages",
             ChangeOp::Insert,
-            Some(9),
+            Some("9".to_string()),
             vec!["id".to_string()],
             tuple,
         );
 
         match sub.pop() {
             Some(crate::broker::SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.pk, Some(9));
+                assert_eq!(ev.pk.as_deref(), Some("9"));
                 assert_eq!(ev.op, ChangeOp::Insert);
             }
             other => panic!("expected immediate Change event, got {other:?}"),
@@ -675,7 +695,7 @@ mod tests {
             app_id: "app_active".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
-            pk: Some(pk),
+            pk: Some(pk.to_string()),
             changed_columns: vec!["id".to_string()],
             new_tuple: {
                 let mut m = HashMap::new();
@@ -697,11 +717,11 @@ mod tests {
         let mut pks = Vec::new();
         while let Some(msg) = sub.pop() {
             if let crate::broker::SubscriptionMessage::Change(ev) = msg {
-                pks.push(ev.pk.unwrap());
+                pks.push(ev.pk.as_deref().unwrap().to_string());
             }
         }
         pks.sort();
-        assert_eq!(pks, vec![1, 2, 3], "drain must publish every queued event");
+        assert_eq!(pks, vec!["1", "2", "3"], "drain must publish every queued event");
 
         // Drain a second time → nothing left (queue is consumed, not
         // copied).
@@ -722,7 +742,7 @@ mod tests {
             app_id: "app_active".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
-            pk: Some(99),
+            pk: Some("99".to_string()),
             changed_columns: vec!["id".to_string()],
             new_tuple: HashMap::new(),
             old_tuple: None,
@@ -761,7 +781,7 @@ mod tests {
                 assert_eq!(ev.app_id, "app_active");
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
-                assert_eq!(ev.pk, Some(7));
+                assert_eq!(ev.pk.as_deref(), Some("7"));
                 // changed_columns excludes `created_at`/`updated_at`
                 // (none here) and surfaces every other RETURNING
                 // column; order isn't part of the contract.
@@ -774,6 +794,27 @@ mod tests {
                 expected.insert("id".to_string(), "7".to_string());
                 expected.insert("title".to_string(), "hi".to_string());
                 assert_eq!(ev.new_tuple, expected);
+            }
+            other => panic!("expected Change variant, got {other:?}"),
+        }
+        reset_world();
+    }
+
+    #[test]
+    fn exec_mutation_with_emit_uses_logical_typed_id_for_pk() {
+        reset_world();
+        let sub = crate::broker::subscribe("app_active", "messages");
+
+        let rows = vec![synthetic_typed_id_row()];
+        emit_for_rows(&rows, "app_active", "messages", ChangeOp::Insert);
+
+        match sub.pop() {
+            Some(crate::broker::SubscriptionMessage::Change(ev)) => {
+                assert_eq!(ev.pk.as_deref(), Some("usr_02HXTESTSUBSCRIPTIONID"));
+                assert_eq!(
+                    ev.new_tuple.get("id").map(String::as_str),
+                    Some("usr_02HXTESTSUBSCRIPTIONID")
+                );
             }
             other => panic!("expected Change variant, got {other:?}"),
         }

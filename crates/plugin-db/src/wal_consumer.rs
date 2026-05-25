@@ -206,7 +206,7 @@ pub fn emit_local(
     app_id: &str,
     collection: &str,
     op: ChangeOp,
-    pk: Option<i64>,
+    pk: Option<String>,
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
@@ -586,7 +586,7 @@ impl WalConsumer {
 
         let pk = rel.primary_key_index().and_then(|idx| {
             tuple.columns.get(idx).and_then(|col| match col {
-                TupleColumn::Text(s) => s.parse::<i64>().ok(),
+                TupleColumn::Text(s) => Some(s.clone()),
                 _ => None,
             })
         });
@@ -811,7 +811,7 @@ mod tests {
             "xapp",
             "messages",
             ChangeOp::Insert,
-            Some(99),
+            Some("99".to_string()),
             vec!["title".into()],
             HashMap::new(),
         );
@@ -820,7 +820,7 @@ mod tests {
                 assert_eq!(ev.app_id, "xapp");
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
-                assert_eq!(ev.pk, Some(99));
+                assert_eq!(ev.pk.as_deref(), Some("99"));
                 assert_eq!(ev.changed_columns, vec!["title".to_string()]);
             }
             other => panic!("expected Change variant, got {other:?}"),
@@ -853,7 +853,7 @@ mod tests {
             "xapp",
             "messages",
             ChangeOp::Insert,
-            Some(1),
+            Some("1".to_string()),
             vec!["title".into()],
             HashMap::new(),
         );
@@ -865,7 +865,7 @@ mod tests {
             "xapp",
             "messages",
             ChangeOp::Insert,
-            Some(2),
+            Some("2".to_string()),
             vec!["title".into()],
             HashMap::new(),
         );
@@ -882,11 +882,25 @@ mod tests {
         crate::broker::drop_app(None);
         let sub = crate::broker::subscribe("legacy_app", "m");
         set_local_emit_suppressed(true);
-        emit_local("legacy_app", "m", ChangeOp::Insert, Some(1), vec![], HashMap::new());
+        emit_local(
+            "legacy_app",
+            "m",
+            ChangeOp::Insert,
+            Some("1".to_string()),
+            vec![],
+            HashMap::new(),
+        );
         assert!(sub.pop().is_none(), "legacy thread-wide flag must suppress");
         set_local_emit_suppressed(false);
         // Drain the sentinel and confirm following emits go through.
-        emit_local("legacy_app", "m", ChangeOp::Insert, Some(2), vec![], HashMap::new());
+        emit_local(
+            "legacy_app",
+            "m",
+            ChangeOp::Insert,
+            Some("2".to_string()),
+            vec![],
+            HashMap::new(),
+        );
         assert!(matches!(sub.pop(), Some(SubscriptionMessage::Change(_))));
         crate::broker::drop_app(None);
     }
@@ -1058,8 +1072,40 @@ mod tests {
                 assert_eq!(ev.app_id, "myapp");
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
-                assert_eq!(ev.pk, Some(42));
+                assert_eq!(ev.pk.as_deref(), Some("42"));
                 assert_eq!(ev.changed_columns, vec!["id".to_string(), "title".into()]);
+            }
+            other => panic!("expected Change, got {other:?}"),
+        }
+        crate::broker::drop_app(None);
+    }
+
+    #[test]
+    fn dispatch_emits_typed_id_pk_for_text_primary_key() {
+        crate::broker::drop_app(None);
+        let sub = crate::broker::subscribe("myapp", "messages");
+        let c = make_consumer("myapp");
+        let mut rels = HashMap::new();
+
+        c.dispatch(
+            &mut rels,
+            &make_relation_msg(16384, "myapp", "messages", &[(1, "id"), (0, "title")]),
+        );
+        c.dispatch(
+            &mut rels,
+            &make_insert_msg(
+                16384,
+                &[Some("usr_02HXWALSUBSCRIPTIONPK"), Some("hello")],
+            ),
+        );
+
+        match sub.pop() {
+            Some(SubscriptionMessage::Change(ev)) => {
+                assert_eq!(ev.pk.as_deref(), Some("usr_02HXWALSUBSCRIPTIONPK"));
+                assert_eq!(
+                    ev.new_tuple.get("id").map(String::as_str),
+                    Some("usr_02HXWALSUBSCRIPTIONPK")
+                );
             }
             other => panic!("expected Change, got {other:?}"),
         }
@@ -1146,9 +1192,9 @@ mod tests {
                 SubscriptionMessage::Change(d),
             ) => {
                 assert_eq!(u.op, ChangeOp::Update);
-                assert_eq!(u.pk, Some(7));
+                assert_eq!(u.pk.as_deref(), Some("7"));
                 assert_eq!(d.op, ChangeOp::Delete);
-                assert_eq!(d.pk, Some(7));
+                assert_eq!(d.pk.as_deref(), Some("7"));
             }
             other => panic!("expected two Change events, got {other:?}"),
         }
@@ -1208,7 +1254,7 @@ mod tests {
             "app_a",
             "messages",
             ChangeOp::Insert,
-            Some(1),
+            Some("1".to_string()),
             vec!["title".into()],
             HashMap::new(),
         );
@@ -1219,7 +1265,7 @@ mod tests {
             "app_b",
             "messages",
             ChangeOp::Insert,
-            Some(2),
+            Some("2".to_string()),
             vec!["title".into()],
             HashMap::new(),
         );
