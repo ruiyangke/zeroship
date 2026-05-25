@@ -25,7 +25,7 @@ Verify every claim against code before promoting. Reference docs must be accurat
 ### SHIPPED — merged to main, no ADR (promote any reference-grade content, then archive)
 - [ ] nomad-driver-ch.md (merged dde08ca2; ops covered by runbooks/sandbox-nomad-ch.md)
 - [ ] sandbox-snapshot-restore.md (merged d1054adb)
-- [ ] sqlite-pg-parity.md (merged; reference/sqlite-divergences.md exists)
+- [x] sqlite-pg-parity.md (merged; reference/sqlite-divergences.md exists)
 - [ ] sandbox-pg-state.md (feat/sandbox-pg merged)
 - [ ] sandbox-preview-urls.md (sandbox preview merged)
 - [ ] kv-redesign-implementation-plan-2026-05-24.md (kv redesign; reference/kv.md exists)
@@ -67,3 +67,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - [ ] Verify docs/reference/ index in AGENTS.md matches docs/reference/ contents
 
 - 9 ADR-backed native-API proposals — archived to docs/archive/ + headers — 82adcefd (renames) + e8564b49 (headers)
+
+- sqlite-pg-parity.md — 2 divergences promoted + archived
