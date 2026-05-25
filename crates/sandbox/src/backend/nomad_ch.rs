@@ -47,11 +47,12 @@
 //! ```
 //!
 //! The controller's signing pubkey is no longer a file on the host —
-//! it's hex-encoded into `ZSBX_PUBKEY_HEX` and the wrapper injects
-//! it into the guest's kernel cmdline as `zsbx_pubkey=<hex>`. The
-//! guest's /sbin/init decodes it back into 32 raw bytes at
-//! `/run/keys/controller-pubkey`, which is the path the agent's
-//! `auth.rs::DEFAULT_PUBKEY_PATH` already points at.
+//! it's hex-encoded into `ZSBX_PUBKEY_HEX` and the ch driver injects
+//! it into the guest's kernel cmdline as `zsbx_pubkey=<hex>` (legacy:
+//! pre-T-8 cutover the deleted bash wrapper did this; the Go driver
+//! took over). The guest's /sbin/init decodes it back into 32 raw
+//! bytes at `/run/keys/controller-pubkey`, which is the path the
+//! agent's `auth.rs::DEFAULT_PUBKEY_PATH` already points at.
 //!
 //! ## Network
 //!
@@ -101,7 +102,8 @@
 //!   for the sweeper to reap.** The vm_index is intentionally NOT
 //!   released until the Nomad purge confirms — releasing it earlier
 //!   risks a retry-`create` for the same user grabbing the same index
-//!   and racing the still-alive prior wrapper for `tap=zsbx-nm-<idx>`.
+//!   and racing the still-alive prior ch driver task for
+//!   `tap=zsbx-nm-<idx>`.
 //!   "release on confirmed purge; leak otherwise; orphan-prune mops
 //!   up later."
 //! - On controller crash or runtime-shutdown the cleanup task may
@@ -156,8 +158,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// `<NOMAD_ALLOC_ROOT>/<alloc-id>/ch/local/ch.sock` to reach
 /// cloud-hypervisor's API socket on the same worker. This matches
 /// Nomad's default `data_dir = /opt/nomad/data`; the path is wired
-/// here as a const because (a) it's already implicit in the wrapper's
-/// `ZSBX_RUNTIME=${NOMAD_TASK_DIR}` expansion that the controller
+/// here as a const because (a) it's already implicit in the ch
+/// driver's `NOMAD_TASK_DIR`-rooted runtime layout (the driver
+/// writes the CH API socket at `<task_dir>/ch.sock`) that the
+/// controller
 /// reads back, and (b) the wider Nomad agent config isn't surfaced
 /// to the controller crate.
 const NOMAD_ALLOC_ROOT: &str = "/opt/nomad/data/alloc";
@@ -222,7 +226,8 @@ pub struct NomadCHBackend {
 ///
 /// All three fields are derived from the live Nomad alloc:
 ///   - `api_socket` — path to cloud-hypervisor's HTTP API UDS,
-///     `<alloc_dir>/ch/local/ch.sock` (the wrapper's `${ZSBX_RUNTIME}/ch.sock`).
+///     `<alloc_dir>/ch/local/ch.sock` (the ch driver writes it at
+///     `<NOMAD_TASK_DIR>/ch.sock`).
 ///   - `vm_index` — pulled from the in-memory backend record (NOT from
 ///     Nomad meta) so it stays consistent with the registry's view of
 ///     the IP/MAC/tap derivation.
@@ -945,7 +950,7 @@ impl NomadCHBackend {
         // raw ext4 image file rather than a directory. The file lives
         // at `<user_home_dir_root>/<user_id>/home.img` and is reused
         // across all of that user's sandboxes (package caches, dotfiles
-        // persist). The wrapper attaches it as the guest's /dev/vdc.
+        // persist). The ch driver attaches it as the guest's /dev/vdc.
         let user_home_img = user_home_image_path(
             &self.cfg.nomad_ch.user_home_dir_root,
             user_id,
@@ -1017,7 +1022,7 @@ impl NomadCHBackend {
         let pubkey = signing_key.verifying_key();
         // virtio-blk pivot (bug #11): the pubkey no longer travels
         // through a virtiofs-mounted file; we hex-encode it and the
-        // wrapper injects it into the guest's kernel cmdline as
+        // ch driver injects it into the guest's kernel cmdline as
         // `zsbx_pubkey=<hex>`. The guest's /sbin/init decodes the
         // hex back to 32 raw bytes at /run/keys/controller-pubkey,
         // which is the path the agent's auth loader reads. base64
@@ -1057,7 +1062,7 @@ impl NomadCHBackend {
         );
 
         // 3. Materialize host disk images for the two virtio-blk
-        //    devices the wrapper attaches:
+        //    devices the ch driver attaches:
         //      - `<host_dir>/workspace.img` — per-sandbox; freshly
         //        created (sparse `truncate -s … + mkfs.ext4`).
         //      - `<user_home_dir_root>/<user>/home.img` — per-user;
@@ -1195,9 +1200,9 @@ impl NomadCHBackend {
 
         // 6. Poll until at least one alloc reaches running. Bounded
         //    by the Nomad-scheduling budget (alloc_running_timeout_secs);
-        //    "running" here means the wrapper script started, NOT that
-        //    the VM is up — the agent /livez wait below covers the
-        //    in-VM boot path.
+        //    "running" here means the ch driver task started, NOT
+        //    that the VM is up — the agent /livez wait below covers
+        //    the in-VM boot path.
         wait_for_alloc_running(
             &self.cfg.nomad_ch.nomad_addr,
             job_id,
@@ -1221,16 +1226,17 @@ impl NomadCHBackend {
             "sandbox/nomad-ch create alloc running"
         );
 
-        // 7. Wait for the in-VM agent to come up. The wrapper boots
-        //    CH; CH boots Linux; init.sh execs sandbox-agent. Bound
+        // 7. Wait for the in-VM agent to come up. The ch driver
+        //    starts CH; CH boots Linux; init.sh execs sandbox-agent.
+        //    Bound
         //    this with its own budget (agent_livez_timeout_secs) so
         //    operators can tell apart "Nomad slow to schedule" from
         //    "VM/kernel/agent slow to boot".
         // M6: second octet is configurable so an operator with a
         // corp 10.99/16 collision can shift to a different private
-        // /16. Both the controller and the wrapper read the same
+        // /16. Both the controller and the ch driver read the same
         // value (controller from `cfg.nomad_ch.subnet_second_octet`,
-        // wrapper from `ZSBX_SUBNET_BASE_OCTET` env var passed by
+        // ch driver from `ZSBX_SUBNET_BASE_OCTET` env var passed by
         // build_nomad_job_json).
         //
         // FM-A: also pass `key_fp` + signing_key so wait_for_agent_livez
@@ -1238,8 +1244,9 @@ impl NomadCHBackend {
         // our pubkey on /version), not a stale tenant whose CH is
         // still alive after Nomad already reported the prior alloc
         // terminal. Without this, a fresh create() racing the prior
-        // wrapper's process tree returns 201 in 0.25 s pointing at
-        // an agent that dies seconds later → "No route to host" on
+        // ch driver's CH process tree returns 201 in 0.25 s pointing
+        // at an agent that dies seconds later → "No route to host"
+        // on
         // every subsequent /exec.
         let agent_url = format!(
             "http://10.{}.{}.2:{AGENT_PORT}",
@@ -1404,8 +1411,11 @@ impl NomadCHBackend {
     ///
     /// Bug #15 fix (`docs/reviews/sandbox-snapshot-restore-cluster-
     /// 2026-05-23-r1.md`): the prior code called `stop` directly,
-    /// which deleted `host_dir/workspace.img`, and the next wake's
-    /// wrapper `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then tripped. C2
+    /// which deleted `host_dir/workspace.img`, and the next wake
+    /// failed because the ch driver received a missing disk path
+    /// (`TaskConfig.Disks`) and CH refused to start. (legacy: pre-T-8
+    /// this surfaced as the deleted bash wrapper's
+    /// `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate tripping.) C2
     /// (deferred 2026-05-24): the B15 fix only gated the host_dir
     /// rm; `persist.delete` still fired unconditionally. Now both
     /// share the gate.
@@ -1431,9 +1441,10 @@ impl NomadCHBackend {
     /// [`Self::stop_preserving_state`]) both are skipped: the
     /// per-sandbox `workspace.img` AND its sealed record survive
     /// across the snapshot → wake gap. Wiping either would silently
-    /// break wake — `workspace.img` because the wrapper's
-    /// `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate trips (bug #15), the
-    /// sealed record because the moment wake plumbs sealed-record-
+    /// break wake — `workspace.img` because the ch driver hands the
+    /// missing disk path to CH at StartTask and CH refuses to boot
+    /// (bug #15), the sealed record because the moment wake plumbs
+    /// sealed-record-
     /// based key recovery the agent becomes unreachable (deferred
     /// item C2).
     async fn stop_inner(
@@ -1523,7 +1534,7 @@ impl NomadCHBackend {
         // 3. Wait for the job to actually be gone before we hand the
         //    vm_index back to the pool. Otherwise a follow-up
         //    `create` for the same user races a still-running
-        //    wrapper script binding the same tap device + IP.
+        //    ch driver task binding the same tap device + IP.
         let job_gone = wait_for_job_gone(
             &self.cfg.nomad_ch.nomad_addr,
             &sandbox.job_id,
@@ -2319,10 +2330,11 @@ impl NomadCHBackend {
         })?;
 
         // 3. Derive alloc_dir + api_socket. Same convention used by
-        //    Phase 3's stop path and the wrapper's `ZSBX_RUNTIME =
-        //    ${NOMAD_TASK_DIR}` expansion: the task is named "ch", so
-        //    the per-task dir is `<alloc_dir>/ch/local/`, and the
-        //    wrapper writes its API socket as `${ZSBX_RUNTIME}/ch.sock`.
+        //    Phase 3's stop path and the ch driver's
+        //    `NOMAD_TASK_DIR`-rooted runtime layout: the task is
+        //    named "ch", so the per-task dir is
+        //    `<alloc_dir>/ch/local/`, and the ch driver writes its
+        //    API socket at `<NOMAD_TASK_DIR>/ch.sock`.
         let alloc_dir = PathBuf::from(NOMAD_ALLOC_ROOT).join(&alloc_id);
         let api_socket = alloc_dir.join("ch").join("local").join("ch.sock");
 
@@ -2330,7 +2342,7 @@ impl NomadCHBackend {
         //    per-worker model puts the alloc on the same host as us;
         //    a missing socket means either (a) the alloc is on a
         //    different worker (peer-owned via lease-takeover), or
-        //    (b) the wrapper has already torn down. Either case is
+        //    (b) the ch driver has already torn down. Either case is
         //    a snapshot-impossible signal.
         match std::fs::metadata(&api_socket) {
             Ok(md) => {
@@ -2417,7 +2429,7 @@ impl Drop for ReleaseCreating {
 /// the Nomad purge HTTP call confirms (status 200/404). Mirrors the
 /// `stop` path's policy: a follow-up `create` for the same user
 /// could otherwise reuse the index and race the still-alive prior
-/// `raw_exec` wrapper for `tap=zsbx-nm-<idx>`. Up to ~10s elapse
+/// ch driver task for `tap=zsbx-nm-<idx>`. Up to ~10s elapse
 /// between "Drop fires" and "purge confirms"; releasing the index
 /// inline (as a previous revision did) reopened the same window the
 /// `stop`-path I1 fix was guarding against. On purge failure (5xx,
@@ -2503,7 +2515,7 @@ impl Drop for CreateGuard {
         // index inline (before the Nomad purge confirms) is a race
         // window: a retry-`create` for the same user could grab the
         // same index and bind a tap device the still-alive prior
-        // wrapper is using.
+        // ch driver task is using.
         let job_submitted = self.job_submitted;
         let nomad_addr = std::mem::take(&mut self.nomad_addr);
         let job_id = std::mem::take(&mut self.job_id);
@@ -3385,7 +3397,7 @@ fn allocs_all_terminal(allocs: Option<&Vec<serde_json::Value>>) -> bool {
 }
 
 /// Block until the job's allocations are all in a terminal client
-/// state (the wrapper script has exited → tap device + IP + virtiofsd
+/// state (the ch driver task has exited → tap device + IP + virtiofsd
 /// sockets released). Returns Ok on:
 ///
 ///   - `GET /v1/job/<id>` → 404 (Nomad GC removed the record), OR
@@ -3394,9 +3406,9 @@ fn allocs_all_terminal(allocs: Option<&Vec<serde_json::Value>>) -> bool {
 ///     empty / 404).
 ///
 /// We previously short-circuited on `Status == "dead" && Stop == true`
-/// at the *job* level, but that races the wrapper-script teardown:
+/// at the *job* level, but that races the ch driver teardown:
 /// the job record is dead while individual alloc tasks (the
-/// `raw_exec` wrapper, virtiofsd children) are still reaping. A
+/// ch driver's CH + virtiofsd children) are still reaping. A
 /// follow-up `create` reusing the released vm_index can collide on
 /// the still-bound tap device. Polling the allocation client-status
 /// instead catches the actual underlying-process termination.
@@ -3802,7 +3814,7 @@ fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
 ///
 /// **Why both checks?** During N=8 rapid-recycle stress testing the
 /// host-side process tree (cloud-hypervisor + 3× virtiofsd + the
-/// bash wrapper + the tap binding) was observed to lag Nomad's view
+/// ch driver task + the tap binding) was observed to lag Nomad's view
 /// of alloc-terminal by 0.5–2 s. A fresh `create()` for the same VM
 /// index could land while a *previous* tenant's agent was still
 /// answering `/livez=200` on the same IP — the controller would
@@ -3969,7 +3981,7 @@ async fn wait_for_agent_livez(
     if let Some(actual_fp) = last_fp {
         Err(format!(
             "stale agent at {base_url}: expected pubkey_fingerprint={expected_fp}, \
-             got {actual_fp}; previous tenant's wrapper still owns the IP"
+             got {actual_fp}; previous tenant's ch driver task still owns the IP"
         ))
     } else if last_version_status == Some(401) {
         Err(format!(
@@ -3986,7 +3998,7 @@ async fn wait_for_agent_livez(
 ///
 /// `wait_for_job_gone` returns Ok when Nomad reports the alloc
 /// terminal + job purged, but that lags the host process tree
-/// (cloud-hypervisor + 3× virtiofsd + the bash wrapper) by 0.5–60 s
+/// (cloud-hypervisor + 3× virtiofsd + the ch driver task) by 0.5–60 s
 /// under N=8 concurrent stop+create cycles. Releasing the vm_index
 /// inside that window hands the same `10.99.<100+idx>.2:7777` IP to
 /// a fresh tenant whose `/livez=200` probe succeeds — but against
@@ -4103,7 +4115,7 @@ async fn wait_for_agent_silent(
             probe_agent_reachable_tcp(probe_addr, CONNECT_TIMEOUT).await;
         probe_count += 1;
         // C-7-LT-2-PR1: classify is now connect-only. Reachable =>
-        // socket alive (the agent OR the wrapper's tap is still
+        // socket alive (the agent OR the ch driver's tap is still
         // ACKing SYN); not reachable => miss (connect-refused,
         // connect-unreachable, or our 150 ms connect-timeout
         // exceeded — all three classify identically).
@@ -5985,7 +5997,7 @@ mod tests {
 
     /// `workspace_image_path` derivation: per-sandbox image lives
     /// inside the sandbox's host_dir, always named `workspace.img`.
-    /// The wrapper attaches this as /dev/vdb.
+    /// The ch driver attaches this as /dev/vdb.
     #[test]
     fn workspace_image_path_is_host_dir_join_workspace_img() {
         let host_dir = Path::new("/var/zeroship/ch/abc123");
@@ -5996,7 +6008,7 @@ mod tests {
     }
 
     /// `user_home_image_path` derivation: per-user image lives
-    /// under <user_home_dir_root>/<user_id>/home.img. The wrapper
+    /// under <user_home_dir_root>/<user_id>/home.img. The ch driver
     /// attaches this as /dev/vdc. The path is reused across the
     /// user's sandboxes; the controller idempotently mkfs's it
     /// on first use only.
@@ -7328,8 +7340,8 @@ mod tests {
         assert!(
             host_dir.exists(),
             "B15 regression: stop_preserving_state removed host_dir; \
-             the next wake's wrapper [ ! -f $ZSBX_WORKSPACE_IMG ] gate \
-             will exit 1"
+             the next wake's ch driver will receive a missing \
+             TaskConfig.Disks path and CH will refuse to start"
         );
         assert!(
             sentinel.exists(),

@@ -483,9 +483,10 @@ impl Backend {
     /// runs the Nomad-job purge + host-fence + vm_index release +
     /// in-memory map removal, but **DOES NOT remove the per-sandbox
     /// `host_dir`**. That dir holds `workspace.img`, which the next
-    /// wake re-mounts as durable per-sandbox storage; deleting it
-    /// here trips the wrapper's `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate
-    /// on the next wake (bug #15 — see
+    /// wake re-attaches as a virtio-blk disk via the ch driver's
+    /// `TaskConfig.Disks` field; deleting it here causes the next
+    /// wake's `TaskConfig.Disks` path to be missing and CH to
+    /// refuse to start (bug #15 — see
     /// `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md`).
     /// The host_dir is finally reaped by the next real [`Self::stop`]
     /// call (operator delete, or terminal-not-restorable transition).
