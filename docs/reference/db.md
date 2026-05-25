@@ -1172,8 +1172,7 @@ The full design lives in `docs/archive/platform-system-fields.md` (shipped; arch
 sibling concerns and compose: an `t.encrypted(...)` column without
 an explicit `.mask(...)` declaration is treated as `.mask({ kind:
 "full", classification: "pii" })` by default. The full design lives
-in `docs/archive/sensitive-field-masking.md` (shipped; archived); the migration
-walkthrough is `docs/reference/migration/p5-to-masked-decrypt.md`.
+in `docs/archive/sensitive-field-masking.md` (shipped; archived).
 
 ### Mental model
 
