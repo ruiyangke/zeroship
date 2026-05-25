@@ -57,6 +57,10 @@ describe("probeUserDefaultExport", () => {
       ),
       true,
     );
+    assert.equal(
+      probeUserDefaultExport(`export default { "fetch": (req) => new Response("hi") };`),
+      true,
+    );
   });
 
   test("export default { rpc: ... } (no fetch) → false (RPC-only app)", () => {
@@ -108,6 +112,17 @@ describe("probeUserDefaultExport", () => {
       probeUserDefaultExport(
         `/* example fetch: ... */\nexport default { rpc: {} };`,
       ),
+      false,
+    );
+  });
+
+  test("fetch-like property names stay false when the default has no fetch handler", () => {
+    assert.equal(
+      probeUserDefaultExport(`export default { fetchTimeout: 1, rpc: {} };`),
+      false,
+    );
+    assert.equal(
+      probeUserDefaultExport(`export default { "fetch-ish": 1, rpc: {} };`),
       false,
     );
   });

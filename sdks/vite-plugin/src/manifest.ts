@@ -481,7 +481,10 @@ async function loadDefineAppResources(
  * Approach: locate the `defineApp(` call, parse the matched-paren
  * region, then `Function`-eval the slice as a JS expression in a
  * scope where references to non-literal identifiers throw a useful
- * error. This is enough for the current happy path (literal trees).
+ * error. This intentionally supports only literal trees today.
+ * Regex literals, template interpolation, and other computed
+ * expressions are outside the contract and should be flattened
+ * before they reach `defineApp({ resources })`.
  */
 export function extractDefineAppLiteral(
   src: string,

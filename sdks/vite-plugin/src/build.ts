@@ -240,8 +240,8 @@ export function probeUserDefaultExport(source: string): boolean {
   if (defaultBlock) {
     const block = defaultBlock[1];
     // Top-level keys: `fetch:` (property), `fetch(` (method shorthand),
-    // `fetch,` / `fetch}` (shorthand from a binding).
-    if (/(?:^|[,{\s])fetch\s*[:(,}]/.test(block)) return true;
+    // `fetch,` / `fetch}` (shorthand from a binding), or `"fetch":`.
+    if (/(?:^|[,{\s])(?:fetch|["']fetch["'])\s*[:(,}]/.test(block)) return true;
     // No fetch key in the default object — RPC-only / schema-only app.
     return false;
   }

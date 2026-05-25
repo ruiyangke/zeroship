@@ -5,7 +5,7 @@
 // bidirectional transport is opened from V8 back to Vite.
 
 import * as vite from "vite";
-import type { FetchFunctionOptions } from "vite/module-runner";
+import type { FetchFunctionOptions, FetchResult } from "vite/module-runner";
 import { getNodeCompatId, getCustomPolyfillCode, isRuntimeNative } from "./node-compat.js";
 
 const NODEISH_IMPORT_RE = /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/;
@@ -24,6 +24,9 @@ const NODEISH_IMPORT_RE = /^(crypto|buffer|path|util|events|stream|os|url|http|h
  * a HotChannel socket.
  */
 export class ZeroshipDevEnvironment extends vite.DevEnvironment {
+  private readonly builtinFetchCache = new Map<string, FetchResult>();
+  private readonly builtinTransformCache = new Map<string, Promise<FetchResult | null>>();
+
   constructor(name: string, config: vite.ResolvedConfig) {
     super(name, config, { hot: true });
   }
@@ -40,12 +43,21 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
   override async fetchModule(
     id: string,
     importer?: string,
-    _options?: FetchFunctionOptions,
+    options?: FetchFunctionOptions,
   ): Promise<vite.FetchResult> {
     // Check if this is a node:* or bare builtin we can polyfill
     const isNodeish = id.startsWith("node:") || NODEISH_IMPORT_RE.test(id);
 
     if (isNodeish) {
+      if (options?.cached) {
+        return { cache: true } as vite.FetchResult;
+      }
+
+      const cached = this.builtinFetchCache.get(id);
+      if (cached) {
+        return cached;
+      }
+
       // Runtime-native specifiers (`node:async_hooks`, `node:crypto`)
       // are owned by the V8 runtime's SyntheticModule loader. In dev,
       // ModuleRunner can't issue native imports — bridge through the
@@ -57,7 +69,9 @@ const m = globalThis.__zeroshipNodeBuiltin && globalThis.__zeroshipNodeBuiltin($
 if (!m) throw new Error(${JSON.stringify(`${id}: runtime native module helper missing`)});
 Object.assign(__vite_ssr_exports__, m, { default: m.default ?? m });
 `;
-        return { id, url: id, code, file: id } as vite.FetchResult;
+        const result = { id, url: id, code, file: id } as vite.FetchResult;
+        this.builtinFetchCache.set(id, result);
+        return result;
       }
 
       const compatId = getNodeCompatId(id);
@@ -65,19 +79,42 @@ Object.assign(__vite_ssr_exports__, m, { default: m.default ?? m });
         // Custom polyfill (e.g. crypto) → return code directly
         const code = getCustomPolyfillCode(compatId);
         if (code) {
-          return { id, url: id, code, file: id } as vite.FetchResult;
+          const result = { id, url: id, code, file: id } as vite.FetchResult;
+          this.builtinFetchCache.set(id, result);
+          return result;
         }
         // unenv polyfill → resolve and transform through Vite's pipeline.
         // We use transformRequest() which runs resolveId → load → transform,
         // converting the unenv module to SSR-compatible code.
-        const transformed = await this.transformRequest(compatId);
+        let pending = this.builtinTransformCache.get(id);
+        if (!pending) {
+          pending = this.transformRequest(compatId)
+            .then((transformed) => {
+              if (!transformed) return null;
+              const result = {
+                id,
+                url: compatId,
+                code: transformed.code,
+                file: compatId,
+              } as vite.FetchResult;
+              this.builtinFetchCache.set(id, result);
+              return result;
+            })
+            .finally(() => {
+              if (!this.builtinFetchCache.has(id)) {
+                this.builtinTransformCache.delete(id);
+              }
+            });
+          this.builtinTransformCache.set(id, pending);
+        }
+        const transformed = await pending;
         if (transformed) {
-          return { id, url: compatId, code: transformed.code, file: compatId } as vite.FetchResult;
+          return transformed;
         }
       }
     }
 
-    return super.fetchModule(id, importer, _options);
+    return super.fetchModule(id, importer, options);
   }
 }
 

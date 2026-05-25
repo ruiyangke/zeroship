@@ -6,11 +6,12 @@
  *   export default defineConfig({ plugins: [react(), zeroship()] })
  *
  * How it works:
- *   1. transform: discovers server modules by path (src/server.{ts,tsx,js,jsx}
- *      or anywhere under src/server/**) and rewrites them into RPC stubs
- *      in the client environment + bare exports in the ssr environment
+ *   1. transform: discovers `"use server"` modules, rewrites RPC exports
+ *      into client stubs, and appends the dev registry hooks the runtime
+ *      bootstrap consumes
  *   2. environment: registers zeroship DevEnvironment with Vite
- *   3. dev-server: spawns V8 runtime, WS bridge, proxy middleware
+ *   3. dev-server: spawns the dev runtime, exposes HTTP module fetch +
+ *      HMR poll endpoints, and proxies runtime-bound requests
  *   4. build: bundles server code for production via esbuild
  */
 

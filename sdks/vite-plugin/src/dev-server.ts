@@ -34,6 +34,10 @@ export interface DevServerOptions {
 
 type FetchMethod = "fetchModule" | "getBuiltins";
 type DatabaseUrlSource = "shell" | "dotenv" | "default";
+interface FetchInvokePayload {
+  name: string;
+  data: unknown;
+}
 
 const MAX_FETCH_BODY_BYTES = 64 * 1024;
 const ALLOWED_FETCH_METHODS = new Set<FetchMethod>(["fetchModule", "getBuiltins"]);
@@ -53,6 +57,10 @@ function writeJson(
 
 function httpError(statusCode: number, message: string): Error & { statusCode: number } {
   return Object.assign(new Error(message), { statusCode });
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function parseDotenvVars(root: string): Record<string, string> {
@@ -105,6 +113,67 @@ function isAllowedFetchMethod(methodName: string): methodName is FetchMethod {
   return ALLOWED_FETCH_METHODS.has(methodName as FetchMethod);
 }
 
+function assertJsonRequest(req: http.IncomingMessage): void {
+  const contentType = headerValue(req.headers["content-type"]);
+  if (!contentType || contentType.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+    throw httpError(415, "zeroship fetch requests must use Content-Type: application/json");
+  }
+}
+
+function assertFetchBodyLength(req: http.IncomingMessage): void {
+  const raw = headerValue(req.headers["content-length"]);
+  if (!raw) return;
+
+  const bytes = Number(raw);
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    throw httpError(400, "invalid Content-Length header");
+  }
+  if (bytes > MAX_FETCH_BODY_BYTES) {
+    throw httpError(413, `zeroship fetch body exceeds ${MAX_FETCH_BODY_BYTES} bytes`);
+  }
+}
+
+function parseFetchInvoke(body: string): FetchInvokePayload {
+  if (body.trim() === "") {
+    throw httpError(400, "zeroship fetch body is empty");
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw httpError(400, "invalid zeroship fetch JSON");
+  }
+
+  if (!payload || typeof payload !== "object") {
+    throw httpError(400, "invalid zeroship fetch payload");
+  }
+
+  const envelope = payload as {
+    type?: unknown;
+    event?: unknown;
+    data?: unknown;
+  };
+  if (
+    envelope.type !== "custom" ||
+    envelope.event !== "vite:invoke" ||
+    !envelope.data ||
+    typeof envelope.data !== "object"
+  ) {
+    throw httpError(400, "invalid zeroship fetch payload");
+  }
+
+  const invoke = envelope.data as { name?: unknown; data?: unknown };
+  if (typeof invoke.name !== "string") {
+    throw httpError(400, "invalid zeroship fetch payload");
+  }
+
+  return {
+    name: invoke.name,
+    data: invoke.data,
+  };
+}
+
 // ── Plugin factory ─────────────────────────────────────────────────────────
 
 export function devServerPlugin(
@@ -117,6 +186,7 @@ export function devServerPlugin(
   let isDev = false;
   let serverProcess: ChildProcess | null = null;
   let devDb: DevDatabase | null = null;
+  let disposeRuntime: (() => void) | null = null;
 
   // Accumulates file paths changed since the last HMR poll. The V8 runtime
   // polls GET /__zeroship_hmr_check every 500ms via setInterval + fetch().
@@ -185,6 +255,9 @@ export function devServerPlugin(
           }
 
           try {
+            assertJsonRequest(req);
+            assertFetchBodyLength(req);
+
             const chunks: Buffer[] = [];
             let bodySize = 0;
             for await (const chunk of req) {
@@ -202,17 +275,12 @@ export function devServerPlugin(
             }
 
             const body = Buffer.concat(chunks).toString("utf8");
-            const data = JSON.parse(body);
             // The ModuleRunner sends vite:invoke calls via the transport.
             // Format: { type: "custom", event: "vite:invoke",
             //           data: { id: correlationId, name: methodName, data: args[] } }
-            const invoke = data.data ?? data;
-            if (!invoke || typeof invoke !== "object") {
-              throw httpError(400, "invalid zeroship fetch payload");
-            }
-
-            const methodName = (invoke as { name?: unknown }).name;
-            const args = (invoke as { data?: unknown }).data;
+            const invoke = parseFetchInvoke(body);
+            const methodName = invoke.name;
+            const args = invoke.data;
             if (typeof methodName !== "string" || !isAllowedFetchMethod(methodName)) {
               throw httpError(400, `unsupported zeroship fetch method: ${String(methodName)}`);
             }
@@ -293,11 +361,11 @@ export function devServerPlugin(
         );
       } else {
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
-        let shouldRestart = true;
+        let tornDown = false;
 
         const attachRestartHandler = (child: ChildProcess) => {
           child.once("exit", (code, signal) => {
-            if (!shouldRestart || signal === "SIGTERM" || signal === "SIGKILL") return;
+            if (tornDown || signal === "SIGTERM" || signal === "SIGKILL") return;
             console.warn(
               `[zeroship] runtime exited unexpectedly (code=${code}, signal=${signal}) — restarting in 1s`
             );
@@ -310,7 +378,7 @@ export function devServerPlugin(
         };
 
         const killChild = () => {
-          shouldRestart = false;
+          tornDown = true;
           if (restartTimer) {
             clearTimeout(restartTimer);
             restartTimer = null;
@@ -329,6 +397,8 @@ export function devServerPlugin(
         };
 
         const spawnRuntime = async () => {
+          if (tornDown) return;
+
           // Resolve the actual listening port from the HTTP server.
           const addr = server.httpServer?.address();
           const vitePort =
@@ -363,7 +433,6 @@ export function devServerPlugin(
           };
 
           try {
-            shouldRestart = true;
             const child = spawn(
               cmd,
               ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
@@ -396,9 +465,12 @@ export function devServerPlugin(
 
         // Defer spawn until server is listening. spawnRuntime is async —
         // wrap with a void handler so unhandled rejections surface in logs.
-        const runSpawn = () => { spawnRuntime().catch((err) => {
-          console.warn(`[zeroship] runtime spawn failed: ${(err as Error).message}`);
-        }); };
+        const runSpawn = () => {
+          if (tornDown) return;
+          spawnRuntime().catch((err) => {
+            console.warn(`[zeroship] runtime spawn failed: ${(err as Error).message}`);
+          });
+        };
         if (server.httpServer?.listening) {
           runSpawn();
         } else {
@@ -419,7 +491,16 @@ export function devServerPlugin(
           process.removeListener("SIGINT", onSigint);
           process.removeListener("SIGTERM", onSigterm);
         };
-        server.httpServer?.on("close", () => { killChild(); cleanupListeners(); });
+        let disposed = false;
+        const dispose = () => {
+          if (disposed) return;
+          disposed = true;
+          killChild();
+          cleanupListeners();
+          disposeRuntime = null;
+        };
+        disposeRuntime = dispose;
+        server.httpServer?.once("close", dispose);
       }
 
       // 4. Proxy middleware (returned as pre-middleware) ─────────────────────
@@ -491,10 +572,7 @@ export function devServerPlugin(
     },
 
     buildEnd() {
-      if (serverProcess) {
-        serverProcess.kill("SIGTERM");
-        serverProcess = null;
-      }
+      disposeRuntime?.();
     },
   };
 
