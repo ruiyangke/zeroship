@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped (merged d1054adb). Live ops: docs/runbooks/sandbox-nomad-ch.md. Design: docs/decisions/2026-05-25-{kernel-state-surface-inventory,staging-locality,vm-index-retry-policy,restore-debug-playbook}.md.
+
 # Sandbox snapshot/restore eviction
 
 **Date:** 2026-05-05
