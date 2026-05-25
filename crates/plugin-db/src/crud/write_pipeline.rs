@@ -53,7 +53,7 @@ pub(crate) async fn apply(
             );
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_row(app_id, collection, &row_pk, payload)
+                .apply_to_doc(app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -69,15 +69,14 @@ pub(crate) async fn apply(
             };
             for doc in docs.iter_mut() {
                 let row_pk = row_pk_from_doc(doc);
-                stages.apply_to_row(app_id, collection, &row_pk, doc).await?;
+                stages.apply_to_doc(app_id, collection, &row_pk, doc).await?;
             }
             Ok(())
         }
         ApplyMode::Update { filter } => {
             let row_pk = row_pk_from_filter(filter);
-            let target = update_target(payload);
             stages
-                .apply_to_row(app_id, collection, &row_pk, target)
+                .apply_to_update(app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -101,7 +100,7 @@ pub(crate) async fn apply(
             .await?;
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_row(app_id, collection, &row_pk, payload)
+                .apply_to_doc(app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -112,6 +111,7 @@ struct WriteStages<'a> {
     schema: Option<&'a Value>,
     has_encrypted: bool,
     has_masked: bool,
+    has_sqlite_binary: bool,
 }
 
 impl<'a> WriteStages<'a> {
@@ -119,11 +119,12 @@ impl<'a> WriteStages<'a> {
         Self {
             has_encrypted: schema.is_some_and(super::schema_has_encrypted_columns),
             has_masked: schema.is_some_and(super::schema_has_masked_columns),
+            has_sqlite_binary: schema.is_some_and(super::schema_has_sqlite_binary_columns),
             schema,
         }
     }
 
-    async fn apply_to_row(
+    async fn apply_to_doc(
         &self,
         app_id: &str,
         collection: &str,
@@ -133,7 +134,7 @@ impl<'a> WriteStages<'a> {
         let Some(schema) = self.schema else {
             return Ok(());
         };
-        if !self.has_encrypted && !self.has_masked {
+        if !self.has_encrypted && !self.has_masked && !self.has_sqlite_binary {
             return Ok(());
         }
 
@@ -151,6 +152,45 @@ impl<'a> WriteStages<'a> {
         }
         if self.has_masked {
             super::mask_pass::apply_mask_on_write(schema, &sidechannel, row)?;
+        }
+        if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
+            super::encode_sqlite_binary_doc_with_schema(schema, row)?;
+        }
+        Ok(())
+    }
+
+    async fn apply_to_update(
+        &self,
+        app_id: &str,
+        collection: &str,
+        row_pk: &str,
+        patch: &mut Value,
+    ) -> Result<(), DbError> {
+        let Some(schema) = self.schema else {
+            return Ok(());
+        };
+        if !self.has_encrypted && !self.has_masked && !self.has_sqlite_binary {
+            return Ok(());
+        }
+
+        let target = update_target(patch);
+        let mut sidechannel = super::mask_pass::MaskPlaintextSidechannel::new();
+        if self.has_encrypted {
+            super::encryption_pass_dispatch(
+                app_id,
+                collection,
+                schema,
+                row_pk,
+                target,
+                &mut sidechannel,
+            )
+            .await?;
+        }
+        if self.has_masked {
+            super::mask_pass::apply_mask_on_write(schema, &sidechannel, target)?;
+        }
+        if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
+            super::encode_sqlite_binary_update_with_schema(schema, patch)?;
         }
         Ok(())
     }

@@ -1,5 +1,5 @@
 import {
-  requireNativeCapability,
+  requireBoundNativeCapability,
   type NativeCollection,
 } from "../native.js";
 import type { Result, Row, Actor } from "../types.js";
@@ -29,8 +29,9 @@ export function bulkUnmaskCollection<S>(
   opts: { actor: Actor; reason?: string },
 ): Promise<Result<Map<string, Record<string, unknown>>>> {
   return self._run(async () => {
-    const bulkUnmask = requireNativeCapability(
-      self._nativeCollection().bulkUnmask,
+    const bulkUnmask = requireBoundNativeCapability(
+      self._nativeCollection(),
+      "bulkUnmask",
       {
         code: "BULK_UNMASK_NOT_AVAILABLE",
         message:

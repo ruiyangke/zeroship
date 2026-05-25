@@ -1,0 +1,23 @@
+{
+  "name": "db-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "e2e": "node e2e/run.mjs"
+  },
+  "dependencies": {
+    "@zeroship/bootstrap": "workspace:*",
+    "@zeroship/db": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "@zeroship/types": "workspace:*",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "zeroship": "workspace:*"
+  }
+}

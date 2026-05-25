@@ -644,7 +644,6 @@ pub async fn init_pool_async() -> Result<(), String> {
     let Some(url) = url else {
         return Ok(()); // No URL configured — DB plugin is disabled
     };
-
     // SQLite installs only a backend handle (no pool), so the old
     // `pool_initialised()` idempotency check is not enough on its own.
     // Once any backend is installed for the current URL, repeated lazy
@@ -653,7 +652,8 @@ pub async fn init_pool_async() -> Result<(), String> {
         return Ok(());
     }
 
-    match backend_for_url(&url).map_err(DbError::into_string)? {
+    let backend = backend_for_url(&url).map_err(DbError::into_string)?;
+    match backend {
         BackendUrl::Postgres => {
             let pool = Pool::connect(&url, 8)
                 .await

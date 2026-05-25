@@ -26,3 +26,17 @@ export interface Env {
 export const env: Env;
 export function waitUntil(promise: Promise<unknown>): void;
 export function getRequest(): Request;
+export function runQuery<TIn, TOut>(
+  fn: (input: TIn) => Promise<TOut> | TOut,
+  input: TIn,
+): Promise<TOut>;
+export function runMutation<TIn, TOut>(
+  fn: (input: TIn) => Promise<TOut> | TOut,
+  input: TIn,
+): Promise<TOut>;
+export function currentUser(): unknown | null;
+export function currentRequestId(): string;
+export function currentTraceId(): string;
+export function currentSignal(): AbortSignal;
+export function currentHeaders(): Headers;
+export function currentIdempotencyKey(): string | undefined;

@@ -6,6 +6,7 @@ import {
 import { trackCollectionAccess } from "../live.js";
 import { IdLoader } from "../loader.js";
 import {
+  requireBoundNativeCapability,
   requireNativeCapability,
   type NativeCollection,
 } from "../native.js";
@@ -26,6 +27,7 @@ import {
   isParseableDateString,
 } from "../validate.js";
 import {
+  type Actor,
   type Filter,
   type Id,
   type NamedIndexSpec,
@@ -234,8 +236,11 @@ export function getCollection<
   self: CrudCollectionInternals<S, N, AllSchemas>,
   idOrFilter: string | Id<N> | Filter<S>,
   opts: {
+    actor?: Actor;
     select?: (string & keyof Row<S>)[];
     orderBy?: Record<string, 1 | -1>;
+    unmask?: (string & keyof Row<S>)[];
+    unmaskReason?: string;
     with?: WithSpec;
   } = {},
 ): Promise<Result<Row<S> | null>> {
@@ -246,6 +251,9 @@ export function getCollection<
     isBareId &&
     opts.select === undefined &&
     opts.orderBy === undefined &&
+    opts.unmask === undefined &&
+    opts.actor === undefined &&
+    opts.unmaskReason === undefined &&
     opts.with === undefined &&
     txDepthAtCall === 0
   ) {
@@ -277,6 +285,15 @@ export function getCollection<
         mappedOrder[self._toColumn(k)] = v as 1 | -1;
       }
       nativeOpts.orderBy = mappedOrder;
+    }
+    if (opts.unmask !== undefined) {
+      nativeOpts.unmask = opts.unmask.map((f) => self._toColumn(f));
+    }
+    if (opts.actor !== undefined) {
+      nativeOpts.actor = opts.actor;
+    }
+    if (opts.unmaskReason !== undefined) {
+      nativeOpts.unmaskReason = opts.unmaskReason;
     }
     const rows = (await self._nativeCollection().find(mapped, nativeOpts)) ?? [];
     if (rows.length === 0) return null;
@@ -353,7 +370,12 @@ export function findCollection<
 >(
   self: CrudCollectionInternals<S, N, AllSchemas>,
   filter: Filter<S> = {} as Filter<S>,
-  opts?: { with?: WithSpec },
+  opts?: {
+    actor?: Actor;
+    unmask?: (string & keyof Row<S>)[];
+    unmaskReason?: string;
+    with?: WithSpec;
+  },
 ): Query<S, Row<S>, AllSchemas> {
   trackCollectionAccess(self._name);
   validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
@@ -378,6 +400,13 @@ export function findCollection<
     self._toField,
     self._toColumn,
     (rows, spec) => self._loadRelations(rows, spec),
+    opts?.unmask !== undefined || opts?.actor !== undefined || opts?.unmaskReason !== undefined
+      ? {
+          unmask: opts.unmask?.map((f) => self._toColumn(f)),
+          actor: opts.actor,
+          unmaskReason: opts.unmaskReason,
+        }
+      : undefined,
   );
   if (opts?.with !== undefined) q.with(opts.with);
   return q;
@@ -568,7 +597,7 @@ export function purgeCollection<S, N extends string, AllSchemas extends Record<s
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const purge = requireNativeCapability(self._nativeCollection().purge, {
+    const purge = requireBoundNativeCapability(self._nativeCollection(), "purge", {
       code: "PURGE_NOT_AVAILABLE",
       message:
         "@zeroship/db: env.db.<collection>.purge not available — " +
@@ -593,8 +622,9 @@ export function purgeManyCollection<S, N extends string, AllSchemas extends Reco
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const purgeMany = requireNativeCapability(
-      self._nativeCollection().purgeMany,
+    const purgeMany = requireBoundNativeCapability(
+      self._nativeCollection(),
+      "purgeMany",
       {
         code: "PURGE_NOT_AVAILABLE",
         message:
@@ -618,7 +648,7 @@ export function restoreCollection<S, N extends string, AllSchemas extends Record
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const restore = requireNativeCapability(self._nativeCollection().restore, {
+    const restore = requireBoundNativeCapability(self._nativeCollection(), "restore", {
       code: "RESTORE_NOT_AVAILABLE",
       message:
         "@zeroship/db: env.db.<collection>.restore not available — " +
@@ -643,8 +673,9 @@ export function restoreManyCollection<S, N extends string, AllSchemas extends Re
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const restoreMany = requireNativeCapability(
-      self._nativeCollection().restoreMany,
+    const restoreMany = requireBoundNativeCapability(
+      self._nativeCollection(),
+      "restoreMany",
       {
         code: "RESTORE_NOT_AVAILABLE",
         message:

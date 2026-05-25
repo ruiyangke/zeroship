@@ -9,7 +9,16 @@ import {
   NotFoundError,
   NotUniqueError,
 } from "./errors.js";
-import { PlainObject, Result, Row, type WithSpec, type WithRelations, ok, err } from "./types.js";
+import {
+  PlainObject,
+  Result,
+  Row,
+  type Actor,
+  type WithRelations,
+  type WithSpec,
+  ok,
+  err,
+} from "./types.js";
 
 type NativeFn = (
   collection: string,
@@ -123,6 +132,9 @@ export class Query<
   private _select: string[] | undefined;
   private _afterId: string | undefined;
   private _with: WithSpec | undefined;
+  private _unmask: string[] | undefined;
+  private _actor: Actor | undefined;
+  private _unmaskReason: string | undefined;
 
   /** @internal */
   constructor(
@@ -132,6 +144,11 @@ export class Query<
     toField?: (s: string) => string,
     toColumn?: (s: string) => string,
     loadRelations?: (rows: PlainObject[], spec: WithSpec) => Promise<void>,
+    readHints?: {
+      unmask?: string[];
+      actor?: Actor;
+      unmaskReason?: string;
+    },
   ) {
     this._collection = collection;
     this._filter = filter;
@@ -139,6 +156,9 @@ export class Query<
     this._toField = toField ?? (s => s);
     this._toColumn = toColumn ?? (s => s);
     this._loadRelations = loadRelations ?? null;
+    this._unmask = readHints?.unmask;
+    this._actor = readHints?.actor;
+    this._unmaskReason = readHints?.unmaskReason;
   }
 
   /**
@@ -305,6 +325,15 @@ export class Query<
     };
     if (this._select !== undefined) {
       opts2.select = this._select.map((f) => this._toColumn(f));
+    }
+    if (this._unmask !== undefined) {
+      opts2.unmask = this._unmask.map((f) => this._toColumn(f));
+    }
+    if (this._actor !== undefined) {
+      opts2.actor = this._actor;
+    }
+    if (this._unmaskReason !== undefined) {
+      opts2.unmaskReason = this._unmaskReason;
     }
 
     let filter: ZeroshipDbFilter = this._filter;
@@ -521,6 +550,9 @@ export class Query<
     if (this._limit !== undefined) opts.limit = this._limit;
     if (this._skip !== undefined) opts.offset = this._skip;
     if (this._select !== undefined) opts.select = this._select.map(f => this._toColumn(f));
+    if (this._unmask !== undefined) opts.unmask = this._unmask.map(f => this._toColumn(f));
+    if (this._actor !== undefined) opts.actor = this._actor;
+    if (this._unmaskReason !== undefined) opts.unmaskReason = this._unmaskReason;
 
     // Merge cursor condition into filter
     let filter: ZeroshipDbFilter = this._filter;

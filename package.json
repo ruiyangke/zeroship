@@ -19,7 +19,7 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "build": "pnpm -r --filter './sdks/*' build",
+    "build": "pnpm --filter @zeroship/db build && pnpm --filter @zeroship/bootstrap build && pnpm -r --filter './sdks/*' --filter '!@zeroship/db' --filter '!@zeroship/bootstrap' build",
     "test": "pnpm -r --filter './sdks/*' test",
     "check": "pnpm -r --filter './sdks/*' check"
   }

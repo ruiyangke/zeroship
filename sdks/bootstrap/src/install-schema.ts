@@ -131,6 +131,22 @@ type SchemaFieldRecord = Record<string, TypeBuilder<unknown, boolean, any, any>>
 /** Accepts either a record of fields OR a top-level union TypeBuilder. */
 type SchemaInputOrUnion = SchemaFieldRecord | TypeBuilder<unknown, boolean, any, any>;
 
+function isTypeBuilder(value: unknown): value is TypeBuilder<unknown, boolean, any, any> {
+  return value instanceof TypeBuilder;
+}
+
+function isSchemaBuilder(value: unknown): value is SchemaBuilder<Record<string, unknown>> {
+  return value instanceof SchemaBuilder;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function isFieldDef(value: unknown): value is FieldDef {
+  return isPlainRecord(value) && typeof value.type === "string";
+}
+
 /**
  * **P7 PR 1** — SDK-side mirror of the Rust-side `SYSTEM_FIELD_NAMES`
  * constant (`crates/plugin-db/src/query.rs`). The seven names are
@@ -167,7 +183,7 @@ const SYSTEM_FIELD_NAMES: readonly string[] = Object.freeze([
  */
 export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
   // C2 — top-level discriminated union.
-  if (input instanceof TypeBuilder) {
+  if (isTypeBuilder(input)) {
     const def = input.toFieldDef();
     if (def.type === "union") {
       return expandUnionToFlatColumns(def);
@@ -181,7 +197,8 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
   }
   const result: NormalizedSchema = {};
 
-  for (const [key, rawVal] of Object.entries(input)) {
+  const fields = input as SchemaFieldRecord;
+  for (const [key, rawVal] of Object.entries(fields)) {
     // **P7 PR 1** — refuse creator-declared fields whose names collide
     // with the seven platform system fields. The Rust-side validator
     // (`validate_field_name_for_declaration`) enforces the same fence
@@ -199,7 +216,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
         { code: "RESERVED_SYSTEM_FIELD_NAME" as const },
       );
     }
-    if (!(rawVal instanceof TypeBuilder)) {
+    if (!isTypeBuilder(rawVal)) {
       throw Object.assign(
         new Error(
           `unrecognized schema field "${key}": every field must be a t.* builder ` +
@@ -231,7 +248,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
     );
   }
   const discriminator = def.discriminator;
-  const variants = def.variants;
+  const variants = def.variants as Record<string, FieldDef>[];
   const result: NormalizedSchema = {};
 
   const discValues: (string | number | boolean)[] = [];
@@ -287,25 +304,27 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
     required: true,
     enum: discValues as (string | number)[],
     discriminator: "__discriminator__",
-    variants: variants.map((v) => {
+    variants: variants.map((variant) => {
       const cloned: Record<string, FieldDef> = {};
-      for (const [k, fd] of Object.entries(v)) cloned[k] = { ...fd };
+      for (const [k, fieldDef] of Object.entries(variant)) {
+        cloned[k] = { ...fieldDef };
+      }
       return cloned;
     }),
   };
 
   for (const variant of variants) {
-    for (const [field, fd] of Object.entries(variant)) {
+    for (const [field, fieldDef] of Object.entries(variant)) {
       if (field === discriminator) continue;
       const existing = result[field];
       if (existing === undefined) {
-        const expanded: FieldDef = { ...fd, required: false };
+        const expanded: FieldDef = { ...fieldDef, required: false };
         result[field] = expanded;
       } else {
-        if (existing.type !== fd.type) {
+        if (existing.type !== fieldDef.type) {
           throw Object.assign(
             new Error(
-              `expandUnionToFlatColumns: field "${field}" has incompatible types across variants ("${existing.type}" vs "${fd.type}")`,
+              `expandUnionToFlatColumns: field "${field}" has incompatible types across variants ("${existing.type}" vs "${fieldDef.type}")`,
             ),
             { code: "UNION_FIELD_TYPE_MISMATCH" as const },
           );
@@ -370,7 +389,7 @@ export function validateRefTargets(
   };
 
   for (const [collectionName, rawSchema] of Object.entries(schemas)) {
-    if (rawSchema instanceof TypeBuilder) {
+    if (isTypeBuilder(rawSchema)) {
       const fd = rawSchema.toFieldDef();
       if (fd.type === "union" && fd.variants !== undefined) {
         for (const variant of fd.variants) {
@@ -382,19 +401,15 @@ export function validateRefTargets(
       continue;
     }
     const fields =
-      rawSchema instanceof SchemaBuilder
+      isSchemaBuilder(rawSchema)
         ? (rawSchema as SchemaBuilder<Record<string, unknown>>).fields
         : rawSchema;
     if (fields === null || typeof fields !== "object") continue;
     for (const [field, def] of Object.entries(fields as PlainObject)) {
-      if (def instanceof TypeBuilder) {
+      if (isTypeBuilder(def)) {
         walkFieldDef(collectionName, field, def.toFieldDef());
-      } else if (
-        def !== null &&
-        typeof def === "object" &&
-        "type" in (def as PlainObject)
-      ) {
-        walkFieldDef(collectionName, field, def as unknown as FieldDef);
+      } else if (isFieldDef(def)) {
+        walkFieldDef(collectionName, field, def);
       }
     }
   }
@@ -521,12 +536,16 @@ function topoSortByRefs(schemas: Record<string, unknown>): string[] {
   for (const name of names) {
     deps.set(name, new Set());
     const raw = schemas[name];
-    const fields = (raw instanceof SchemaBuilder ? raw.fields : raw) as Record<string, unknown> | unknown;
-    if (!fields || typeof fields !== "object") continue;
-    for (const fd of Object.values(fields as Record<string, unknown>)) {
-      const def = fd instanceof TypeBuilder ? fd.toFieldDef() : (fd as { type?: string; refTarget?: string });
-      if (def && (def as { type?: string }).type === "ref") {
-        const target = (def as { refTarget?: string }).refTarget;
+    const fields = isSchemaBuilder(raw) ? raw.fields : raw;
+    if (!isPlainRecord(fields)) continue;
+    for (const rawFieldDef of Object.values(fields)) {
+      const def = isTypeBuilder(rawFieldDef)
+        ? rawFieldDef.toFieldDef()
+        : isFieldDef(rawFieldDef)
+          ? rawFieldDef
+          : null;
+      if (def?.type === "ref") {
+        const target = def.refTarget;
         if (target && target !== name && names.includes(target)) {
           deps.get(name)!.add(target);
         }
@@ -1023,14 +1042,14 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     if (!col) continue;
     const rawSchema = schemas[name as keyof T];
     const fields =
-      rawSchema instanceof SchemaBuilder ? rawSchema.fields : rawSchema;
+      isSchemaBuilder(rawSchema) ? rawSchema.fields : rawSchema;
     const normalized = normalizeSchema(fields as Parameters<typeof normalizeSchema>[0]);
     const dbSchema: ZeroshipDbSchema = {};
     for (const [key, def] of Object.entries(normalized)) {
       dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
     }
-    const declaredIndexes =
-      rawSchema instanceof SchemaBuilder ? rawSchema.indexes : [];
+    const declaredIndexes: readonly NamedIndexSpec[] =
+      isSchemaBuilder(rawSchema) ? rawSchema.indexes : [];
     const wireIndexes: ZeroshipDbNamedIndex[] = declaredIndexes.map((idx) => ({
       name: idx.name,
       fields: idx.fields.map((f) => namingStrategy.toColumn(f)),
