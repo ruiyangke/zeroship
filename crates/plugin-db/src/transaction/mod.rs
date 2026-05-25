@@ -433,6 +433,62 @@ fn savepoint_name(depth: u32) -> String {
     format!("zs_sp_{depth}")
 }
 
+/// Guard for a top-level tx settle / auto-tx end that has drained the
+/// client out of the slot and now owes a terminal COMMIT/ROLLBACK.
+///
+/// On cancellation, Postgres is safe to clean up by dropping the owned
+/// client (session ends, tx aborts). SQLite needs an explicit best-
+/// effort `ROLLBACK` enqueued back onto the session actor because the
+/// handle itself is just an `Rc` clone of the actor and dropping it does
+/// not touch the live transaction on the worker thread.
+pub(super) struct TxTeardownGuard {
+    client: Option<TxConnection>,
+}
+
+impl TxTeardownGuard {
+    pub(super) fn new(client: TxConnection) -> Self {
+        Self { client: Some(client) }
+    }
+
+    pub(super) fn client(&self) -> &TxConnection {
+        self.client
+            .as_ref()
+            .expect("TxTeardownGuard::client called after into_inner")
+    }
+
+    pub(super) fn into_inner(mut self) -> TxConnection {
+        self.client
+            .take()
+            .expect("TxTeardownGuard::into_inner called twice")
+    }
+}
+
+impl Drop for TxTeardownGuard {
+    fn drop(&mut self) {
+        let Some(client) = self.client.take() else {
+            return;
+        };
+
+        match &client {
+            TxConnection::Sqlite(handle) => {
+                if let Err(err) = handle.try_exec_detached("ROLLBACK", &[]) {
+                    tracing::warn!(
+                        error = %err,
+                        "sqlite tx teardown cancelled before completion; failed to enqueue \
+                         fallback ROLLBACK, restoring tx slot for reuse"
+                    );
+                    crate::context::with_mut(|c| c.put_tx_client(TxConnection::Sqlite(handle.clone())));
+                    return;
+                }
+            }
+            TxConnection::Postgres(_) => {}
+        }
+
+        clear_pending_emits();
+        drop(client);
+    }
+}
+
 /// Run a single non-returning statement (`SAVEPOINT` / `RELEASE` /
 /// `ROLLBACK TO` / `COMMIT` / `ROLLBACK`) against the pinned tx
 /// connection, holding the client across the await and putting it back.
@@ -440,12 +496,8 @@ fn savepoint_name(depth: u32) -> String {
 async fn run_on_tx_conn(sql: &str) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let client = crate::context::with_mut(|c| c.take_tx_client())
-        .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
-    let result = client_exec_on_tx(&backend, &client, sql, &[]).await;
-    // Put the client back regardless — savepoint statements keep the tx
-    // open.
-    crate::context::with_mut(|c| c.put_tx_client(client));
+    let client = crate::context::TxClientSlotGuard::take()?;
+    let result = client_exec_on_tx(&backend, client.client(), sql, &[]).await;
     result.map(|_| ())
 }
 
@@ -768,24 +820,26 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
             return SettleOutcome::Ok;
         }
     };
-    let client_opt = crate::context::with_mut(|c| c.take_tx_client());
+    let client_opt = crate::context::with_mut(|c| {
+        let client = c.take_tx_client();
+        c.reset_savepoint_depth();
+        client
+    });
     let Some(client) = client_opt else {
         // Slot already drained (e.g. a concurrent teardown). Treat as
         // settled — clear residual state.
-        crate::context::with_mut(|c| c.reset_savepoint_depth());
         clear_pending_emits();
         return SettleOutcome::Ok;
     };
 
+    let teardown = TxTeardownGuard::new(client);
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let result = client_exec_on_tx(&backend, &client, cmd, &[]).await;
-    if success && result.is_err() && matches!(client, TxConnection::Sqlite(_)) {
-        let _ = client_exec_on_tx(&backend, &client, "ROLLBACK", &[]).await;
+    let result = client_exec_on_tx(&backend, teardown.client(), cmd, &[]).await;
+    if success && result.is_err() && matches!(teardown.client(), TxConnection::Sqlite(_)) {
+        let _ = client_exec_on_tx(&backend, teardown.client(), "ROLLBACK", &[]).await;
     }
+    let client = teardown.into_inner();
     drop(client);
-
-    // Clear the tx slot bookkeeping now that the connection is gone.
-    crate::context::with_mut(|c| c.reset_savepoint_depth());
 
     match (success, result) {
         (true, Ok(_)) => {

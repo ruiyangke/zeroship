@@ -42,6 +42,8 @@
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Once;
+#[cfg(any(test, feature = "test-helpers"))]
+use std::sync::Mutex;
 
 use rusqlite::Connection;
 
@@ -405,6 +407,11 @@ impl SqliteSession {
             //    sender side surfaces as `Err(_)` and ends the loop
             //    just like `Shutdown`.
             while let Ok(cmd) = rx.recv() {
+                #[cfg(any(test, feature = "test-helpers"))]
+                if let Some(gate) = take_next_command_gate_for_worker() {
+                    let _ = gate.entered_tx.send(());
+                    let _ = gate.release_rx.recv();
+                }
                 match cmd {
                     Command::Exec { sql, params, reply } => {
                         let result = run_exec(&conn, &sql, &params);
@@ -594,6 +601,20 @@ impl SqliteSession {
             DbError::internal("SqliteSession: worker thread is dead (queue receiver dropped)")
         })
     }
+
+    pub(crate) fn try_exec_detached(&self, sql: &str, params: &[&str]) -> Result<(), DbError> {
+        let (reply_tx, _reply_rx) = flume::bounded::<Result<u64, DbError>>(1);
+        let cmd = Command::Exec {
+            sql: sql.to_string(),
+            params: params.iter().map(|s| s.to_string()).collect(),
+            reply: reply_tx,
+        };
+        self.tx.try_send(cmd).map_err(|e| {
+            DbError::internal(format!(
+                "SqliteSession: failed to enqueue detached exec command: {e}"
+            ))
+        })
+    }
 }
 
 async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
@@ -666,6 +687,10 @@ impl SqliteSessionHandle {
         self.0.exec(sql, params).await
     }
 
+    pub(crate) fn try_exec_detached(&self, sql: &str, params: &[&str]) -> Result<(), DbError> {
+        self.0.try_exec_detached(sql, params)
+    }
+
     /// Forward a `query` through the underlying session.
     ///
     /// `pub` under the `test-helpers` feature so the integration
@@ -720,6 +745,63 @@ impl SqliteSessionHandle {
         params: &[&str],
     ) -> Result<TypedRows, DbError> {
         self.0.query_typed(sql, params).await
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+struct NextCommandGateWorker {
+    entered_tx: flume::Sender<()>,
+    release_rx: flume::Receiver<()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+static NEXT_COMMAND_GATE: Mutex<Option<NextCommandGateWorker>> = Mutex::new(None);
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn take_next_command_gate_for_worker() -> Option<NextCommandGateWorker> {
+    NEXT_COMMAND_GATE
+        .lock()
+        .expect("NEXT_COMMAND_GATE mutex poisoned")
+        .take()
+}
+
+/// Test helper: stall the next worker command before execution until the
+/// returned gate is released.
+#[cfg(any(test, feature = "test-helpers"))]
+pub struct NextCommandGate {
+    entered_rx: flume::Receiver<()>,
+    release_tx: flume::Sender<()>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl NextCommandGate {
+    pub async fn wait_until_blocked(&self) -> Result<(), DbError> {
+        self.entered_rx.recv_async().await.map_err(|_| {
+            DbError::internal("SqliteSession test gate: worker dropped entered signal")
+        })
+    }
+
+    pub fn release(self) {
+        let _ = self.release_tx.send(());
+    }
+}
+
+/// Install a one-shot worker gate for the next SQLite session command.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn arm_next_command_gate_for_tests() -> NextCommandGate {
+    let (entered_tx, entered_rx) = flume::bounded(1);
+    let (release_tx, release_rx) = flume::bounded(1);
+    let mut slot = NEXT_COMMAND_GATE
+        .lock()
+        .expect("NEXT_COMMAND_GATE mutex poisoned");
+    assert!(slot.is_none(), "NEXT_COMMAND_GATE already armed");
+    *slot = Some(NextCommandGateWorker {
+        entered_tx,
+        release_rx,
+    });
+    NextCommandGate {
+        entered_rx,
+        release_tx,
     }
 }
 

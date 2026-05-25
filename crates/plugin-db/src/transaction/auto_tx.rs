@@ -282,7 +282,9 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let result = super::client_exec_on_tx(&backend, &client, cmd, &[]).await;
+    let teardown = super::TxTeardownGuard::new(client);
+    let result = super::client_exec_on_tx(&backend, teardown.client(), cmd, &[]).await;
+    let client = teardown.into_inner();
     drop(client); // explicit — terminates the spawned connection task.
 
     // Settle the deferred broker queue. On a successful COMMIT, fire
@@ -333,7 +335,17 @@ mod tests {
     //! (`Transient` — connection drops, class 08; `LockContention` —
     //! 55P03 from `SELECT … FOR UPDATE NOWAIT`).
     use super::*;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    use crate::backend::sqlite::SqliteBackend;
     use zeroship_runtime::state::OpErrorKind;
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
+    }
 
     /// Extract `(code, hint)` from a `ResolveValue::RejectError` produced
     /// by the conversion helpers. Panics on any other shape — the
@@ -414,5 +426,80 @@ mod tests {
             ResolveValue::Undefined => {}
             _ => panic!("expected ResolveValue::Undefined for Ok(())"),
         }
+    }
+
+    #[test]
+    fn dropping_in_flight_sqlite_auto_end_rolls_back_and_clears_slot() {
+        run(async {
+            use crate::backend::sqlite::session::arm_next_command_gate_for_tests;
+            use crate::backend::SqlExecutor;
+            use std::time::Duration;
+
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+            );
+
+            crate::context::with_mut(|c| {
+                let _ = c.take_tx_client();
+                c.set_auto_tx_owned(false);
+                c.clear_pending_emits();
+                c.clear_pool();
+                c.set_sqlite_backend(Rc::clone(&backend));
+            });
+
+            let client = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire dedicated client");
+            backend
+                .client_exec(&client, "BEGIN", &[])
+                .await
+                .expect("BEGIN");
+            crate::context::with_mut(|c| {
+                let prev = c.install_tx_client(TxConnection::Sqlite(client));
+                assert!(prev.is_none(), "tx slot should start empty");
+                c.set_auto_tx_owned(true);
+            });
+
+            let gate = arm_next_command_gate_for_tests();
+            let task = compio::runtime::spawn(async { exec_auto_end(1, false).await });
+            gate.wait_until_blocked()
+                .await
+                .expect("worker must block on test gate");
+            drop(task);
+            gate.release();
+            compio::time::sleep(Duration::from_millis(20)).await;
+
+            assert!(
+                !crate::context::with(|c| c.has_tx()),
+                "cancelled auto-end must not leave the tx slot empty while the actor keeps \
+                 a live tx"
+            );
+            assert!(
+                !crate::context::with(|c| c.auto_tx_owned()),
+                "auto_tx_owned must clear before the await and stay cleared on cancellation"
+            );
+
+            let fresh = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire fresh client after cancelled auto-end");
+            backend
+                .client_exec(&fresh, "BEGIN", &[])
+                .await
+                .expect("BEGIN after cancelled auto-end must succeed");
+            backend
+                .client_exec(&fresh, "ROLLBACK", &[])
+                .await
+                .expect("cleanup rollback on fresh client");
+
+            crate::context::with_mut(|c| {
+                let _ = c.take_tx_client();
+                c.set_auto_tx_owned(false);
+                c.clear_pending_emits();
+                c.clear_pool();
+            });
+        });
     }
 }
