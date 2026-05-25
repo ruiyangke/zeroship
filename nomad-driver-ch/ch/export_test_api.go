@@ -429,6 +429,34 @@ func RealTryAcquireOFDLockForTest(path string) (OFDLockProbeResultForTest, error
 	return realTryAcquireOFDLock(path)
 }
 
+// -- T-9-perf-prewarm: memory-ranges page-cache prewarming seam --------
+
+// SetPrewarmFileFnForTestExport swaps the prewarm seam from the tests/
+// package. Returns the previous fn so the caller can restore it on
+// cleanup. Delegates to the package-level SetPrewarmFileFnForTest.
+//
+// Naming: the in-package SetPrewarmFileFnForTest already exists; this
+// re-exports it so the external tests/ package can call it with the
+// same signature pattern used by all other seam-swapping helpers in
+// this file.
+func SetPrewarmFileFnForTestExport(fn func(path string) error) func(string) error {
+	return SetPrewarmFileFnForTest(fn)
+}
+
+// PrewarmMemoryRangesBytesTotalForTest re-exports the counter read for
+// tests/ assertions. Tests can pin that a successful prewarm increments
+// the counter by the file size, and that a failing prewarm leaves it
+// unchanged.
+func PrewarmMemoryRangesBytesTotalForTest() int64 {
+	return PrewarmMemoryRangesBytesTotal()
+}
+
+// ResetPrewarmMemoryRangesBytesForTestExport zeroes the counter so a
+// test can pin its own baseline.
+func ResetPrewarmMemoryRangesBytesForTestExport() {
+	ResetPrewarmMemoryRangesBytesForTest()
+}
+
 // -- T-8b-stress-r9-retry-4: per-stage restore failure observability --
 
 // StartTaskRestoreBranchForTest is the test entry point for the

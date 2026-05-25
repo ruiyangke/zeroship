@@ -142,6 +142,16 @@ const (
 	// EPERM on a noexec mount, or a stale fs-cache. C-7-LT-10.
 	stageSymlinkSnapshotArtifact = "symlink_snapshot_artifact"
 
+	// stagePrewarmMemoryRanges: best-effort posix_fadvise(FADV_WILLNEED)
+	// hint on the memory-ranges artifact after symlinks resolve but
+	// before CH `--restore` spawns. Tells the kernel to populate the
+	// page cache asynchronously so CH's mmap+page-fault-in sequence
+	// (typically 35-43s cold) benefits from warm-cache reads. The
+	// stage is non-blocking: fadvise returns immediately and the kernel
+	// does the I/O in parallel with CH startup. Errors here do NOT fail
+	// the wake — log WARN and continue. T-9-perf-prewarm.
+	stagePrewarmMemoryRanges = "prewarm_memory_ranges"
+
 	// stageRootfsSourceMissing: RootfsSource was empty OR the path
 	// it pointed at couldn't be stat'd. The controller MUST emit a
 	// valid Config.rootfs_source on every restore alloc — a failure
@@ -735,6 +745,55 @@ func SetReflinkFileForTest(fn func(dst, src *os.File) error) func(dst, src *os.F
 	return prev
 }
 
+// prewarmFileFn is the package-level seam tests swap to drive prewarm
+// outcomes without touching real files or syscalls. The default
+// implementation calls prewarmFile. Tests install a stub to exercise
+// the "missing file → WARN + continue" and "success → counter
+// increments" paths. T-9-perf-prewarm.
+var prewarmFileFn = prewarmFile
+
+// SetPrewarmFileFnForTest swaps the prewarm seam. Returns the previous
+// fn so the caller can restore it on cleanup.
+func SetPrewarmFileFnForTest(fn func(path string) error) func(string) error {
+	prev := prewarmFileFn
+	if fn != nil {
+		prewarmFileFn = fn
+	}
+	return prev
+}
+
+// prewarmFile issues posix_fadvise(2) POSIX_FADV_WILLNEED on the
+// named file, hinting the kernel to populate the page cache
+// asynchronously. This is non-blocking: the syscall returns
+// immediately and the kernel performs readahead in the background
+// while CH spawns. On kernels or filesystems that ignore
+// FADV_WILLNEED the syscall still succeeds (POSIX: "advisory only").
+//
+// Errors are expected to be transient (ENOENT if the symlink target
+// disappeared between the symlink stage and here, EPERM on exotic
+// seccomp profiles). Callers should WARN-log and continue — prewarm
+// is an optimisation, not a correctness requirement.
+func prewarmFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	size := fi.Size()
+	if size <= 0 {
+		return nil
+	}
+	if err := unix.Fadvise(int(f.Fd()), 0, size, unix.FADV_WILLNEED); err != nil {
+		return err
+	}
+	incPrewarmMemoryRangesBytes(size)
+	return nil
+}
+
 // startTaskRestoreBranch is the wake-from-snapshot StartTask flow.
 // Invoked from StartTask when cfg.RestoreFrom != "" (see start_task.go).
 // Mirrors the bash wrapper's restore branch line-for-line; see
@@ -889,6 +948,25 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 		if err := os.Symlink(src, dst); err != nil && !errors.Is(err, fs.ErrExist) {
 			return nil, nil, restoreErrorf(stageSymlinkSnapshotArtifact, "symlink %s -> %s: %v", src, dst, err)
 		}
+	}
+
+	// T-9-perf-prewarm: hint the kernel to populate the page cache for
+	// memory-ranges before CH `--restore` spawns. fadvise is non-
+	// blocking: the syscall returns immediately and the kernel does the
+	// readahead asynchronously in parallel with CH startup, so the
+	// 35-43s cold mmap+page-fault-in cost is partially hidden behind
+	// CH's own startup sequence. Best-effort: any error (e.g. ENOENT
+	// if the source dir was GC'd between validateSnapshotDir and here,
+	// EPERM on exotic seccomp) is WARN-logged and the wake continues —
+	// a failed prewarm is a missed optimisation, not a correctness
+	// failure. The symlinks above ensure the real file is reachable at
+	// the runDir path passed here.
+	memRangesPath := filepath.Join(driverConfig.RestoreFrom, snapshotMemoryFile)
+	if err := prewarmFileFn(memRangesPath); err != nil {
+		p.logger.Warn("ch: startTaskRestoreBranch: prewarm memory-ranges failed; continuing",
+			"stage", stagePrewarmMemoryRanges,
+			"path", memRangesPath,
+			"err", err)
 	}
 
 	// C-7-LT-12a (smoke-r22): stage rootfs.img into runDir so the

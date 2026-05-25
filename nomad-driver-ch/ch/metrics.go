@@ -400,3 +400,36 @@ func WakeRootfsLockHeldTotal() int64 {
 func ResetWakeRootfsLockHeldForTest() {
 	wakeRootfsLockHeldTotal.Store(0)
 }
+
+// prewarmMemoryRangesBytesTotal is the process-global counter behind
+// `nomad_driver_ch_prewarm_memory_ranges_bytes_total`. Accumulates the
+// sum of memory-ranges file sizes for which prewarmFile issued a
+// FADV_WILLNEED hint to the kernel. Each successful call to
+// prewarmFile adds the file's size (bytes) to this counter.
+//
+// Operators rate-graph this against wake-path alloc counts to confirm
+// the prewarm hint is firing on production workers: counter / allocs =
+// average memory-ranges size per wake. A fleet that consistently reads
+// 0 here has the syscall path broken (e.g. exotic seccomp filtering
+// fadvise). T-9-perf-prewarm.
+var prewarmMemoryRangesBytesTotal atomic.Int64
+
+// incPrewarmMemoryRangesBytes adds `n` bytes to the prewarm counter.
+// Goroutine-safe; the atomic Int64 carries its own ordering.
+func incPrewarmMemoryRangesBytes(n int64) {
+	prewarmMemoryRangesBytesTotal.Add(n)
+}
+
+// PrewarmMemoryRangesBytesTotal returns the current counter value.
+// Exported for tests (asserts the counter increments on a successful
+// prewarm call); a future /metrics exporter would also use this read
+// path.
+func PrewarmMemoryRangesBytesTotal() int64 {
+	return prewarmMemoryRangesBytesTotal.Load()
+}
+
+// ResetPrewarmMemoryRangesBytesForTest zeroes the counter so a test
+// can pin its own baseline without depending on sibling-test ordering.
+func ResetPrewarmMemoryRangesBytesForTest() {
+	prewarmMemoryRangesBytesTotal.Store(0)
+}
