@@ -3429,6 +3429,7 @@ mod real_backend_tests {
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
             vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+            nomad_stop_concurrency: 16,     // r30-A1: prod default
         }
     }
 
@@ -4895,6 +4896,7 @@ mod r12_i1_tests {
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
             vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+            nomad_stop_concurrency: 16,     // r30-A1: prod default
         }
     }
 

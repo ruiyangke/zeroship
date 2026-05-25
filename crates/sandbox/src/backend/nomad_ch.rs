@@ -200,6 +200,18 @@ pub struct NomadCHBackend {
     /// `crate::AppState::from_config`; tests construct `None` by
     /// default and exercise the `Some` shape via the builder.
     local_nomad_node_id: Option<String>,
+    /// r30-A1: global cap on in-flight `stop_inner` calls, shared with
+    /// `AppState::nomad_stop_permits`. Set via
+    /// [`Self::install_nomad_stop_permits`] from `AppState::from_config`
+    /// after the semaphore is sized from `SANDBOX_NOMAD_STOP_CONCURRENCY`.
+    /// `OnceLock` (not `Option`) so the install is observable from
+    /// `&self` paths (`stop_inner`) without taking a write-lock on the
+    /// whole backend; uninstalled → `stop_inner` runs without the cap
+    /// (the unit-test default + the legacy single-tenant binary path).
+    /// In production the cap is always installed because
+    /// `AppState::from_config` is the only construction path that reaches
+    /// the HTTP server.
+    nomad_stop_permits: std::sync::OnceLock<Arc<NomadStopPermits>>,
 }
 
 /// Phase B / snapshot wiring: resolved source-VM identity for a
@@ -498,6 +510,164 @@ impl VmIndexAllocator {
     }
 }
 
+// ─── NomadStopPermits ────────────────────────────────────────────
+//
+// r30-A1 (concurrency-r30 CRITICAL #A1): global semaphore gating
+// concurrent `stop_inner` calls — and thereby every in-flight Nomad
+// `/shutdown` ladder. Shared across all 7 production teardown call
+// sites (`AppStateGcStopper`, snap-idle-evict, snap-idle-gc, admin
+// snapshot teardown, transient-state takeover, registry GC, restore-
+// failure rollback) so per-loop caps don't compound on the same
+// downstream (Nomad RPC queue + host CH process budget).
+//
+// **Why a flume bounded channel and not `compio::sync::Semaphore`**:
+// `compio` 0.18 (this workspace's pin) does not ship a `sync::Semaphore`.
+// `tokio::sync::Semaphore` is off-limits — this workspace is zero-tokio
+// (see AGENTS.md "Key invariants"). flume is already in the dep graph
+// (`crates/sandbox/src/db.rs` Phase-1 worker queue), its `async`
+// feature is runtime-agnostic by design, and a bounded channel of N
+// `()` tokens IS the canonical async-semaphore pattern in
+// zero-tokio Rust: `acquire = recv_async()`, `release =
+// guard-Drop-try_send(())`. Capacity-bounded by construction, never
+// negative, no busy spin.
+//
+// **Lifecycle**:
+//
+// 1. `AppState::from_config` reads `SANDBOX_NOMAD_STOP_CONCURRENCY`
+//    (default 16), constructs `Arc<NomadStopPermits>` with that
+//    capacity, calls `crate::metrics::set_nomad_stop_permits_total`,
+//    holds it on `AppState.nomad_stop_permits`, and calls
+//    `nomad_ch_backend.install_nomad_stop_permits(perms.clone())`.
+//
+// 2. Every `stop_inner` invocation calls `permits.acquire().await`
+//    BEFORE the `/shutdown` ladder; the returned `NomadStopPermitGuard`
+//    holds the permit for the full `/shutdown` → Nomad-purge →
+//    host-fence → vm_index-release tail. The guard's Drop releases
+//    the permit + decrements the gauge.
+//
+// 3. Tests assert N permits is enforced by spawning N+1 concurrent
+//    `acquire()` calls and verifying exactly N complete before any
+//    guard drops.
+//
+// Per-loop caps (`GC_STOP_CONCURRENCY=8` in registry.rs, the snap-
+// idle-evict default-4 in sweep.rs) stay in place as defense-in-depth
+// soft caps — they bound runaway fan-out BEFORE it ever reaches the
+// semaphore. The load-bearing global cap is here.
+#[derive(Debug)]
+pub struct NomadStopPermits {
+    /// The token pool. Each `recv_async()` ≡ acquire one permit;
+    /// each `try_send(())` on the matching Sender ≡ release.
+    tokens: flume::Receiver<()>,
+    /// Refill channel — the guard's Drop calls `try_send(())` to put
+    /// the permit back. `Sender` is Clone (cheap; refcounts the inner
+    /// flume state), so the guard owns a clone and the semaphore can
+    /// outlive any individual guard.
+    refill: flume::Sender<()>,
+    /// Configured capacity. Pinned at construction; `permits_available()`
+    /// + `in_use()` derive from this and the live channel state.
+    capacity: usize,
+}
+
+impl NomadStopPermits {
+    /// Construct a semaphore pre-loaded with `capacity` permits. Panics
+    /// on `capacity == 0` (a zero-permit semaphore would deadlock every
+    /// caller); production config validation rejects 0 at boot —
+    /// `crate::config::NomadCHConfig::validate` — so this panic is the
+    /// belt-and-suspenders backstop for an in-process bug, not a user-
+    /// facing failure mode.
+    pub fn new(capacity: usize) -> Arc<Self> {
+        assert!(
+            capacity > 0,
+            "NomadStopPermits capacity must be ≥ 1 (got 0); a zero-permit \
+             semaphore deadlocks every teardown path. Boot-time config \
+             validation rejects 0 at the env-parse layer — reaching this \
+             panic means an in-process caller built a Self with capacity=0.",
+        );
+        let (tx, rx) = flume::bounded::<()>(capacity);
+        for _ in 0..capacity {
+            // bounded channel cap == capacity ⇒ first `capacity` sends
+            // always succeed. `try_send` is the right primitive because
+            // we never want this to block (we're in `new`, not on a
+            // hot path); the `expect` is the assertion this invariant
+            // holds for the lifetime of the cargo build.
+            tx.try_send(())
+                .expect("flume::bounded(N) accepts first N try_sends");
+        }
+        Arc::new(Self {
+            tokens: rx,
+            refill: tx,
+            capacity,
+        })
+    }
+
+    /// Acquire one permit. Awaits if the pool is exhausted; resolves
+    /// (and bumps `sandbox_nomad_stop_permits_in_use`) once a permit is
+    /// available. The returned guard releases the permit on Drop —
+    /// callers should hold it for exactly the lifetime of the
+    /// downstream operation (the full `stop_inner` `/shutdown` ladder).
+    pub async fn acquire(&self) -> NomadStopPermitGuard {
+        // `recv_async()` resolves to `Err` only if the channel is
+        // disconnected (every Sender dropped). The semaphore holds its
+        // own `Sender` clone (`refill`), so disconnection is impossible
+        // for the lifetime of `self` — `expect` documents that invariant
+        // explicitly rather than silently swallowing the result.
+        self.tokens
+            .recv_async()
+            .await
+            .expect(
+                "NomadStopPermits tokens channel is never disconnected — \
+                 the semaphore holds the matching Sender for its lifetime",
+            );
+        crate::metrics::inc_nomad_stop_permits_in_use();
+        NomadStopPermitGuard {
+            refill: self.refill.clone(),
+        }
+    }
+
+    /// Number of permits currently available (not in flight). Cheap —
+    /// `flume::Receiver::len()` reads the channel's pending-item count.
+    /// Used by tests + `metrics_export` (the live in-use gauge is
+    /// derived as `capacity - permits_available`).
+    pub fn permits_available(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Boot-resolved capacity (does not change at runtime). Pair with
+    /// `permits_available()` to compute in-use: `capacity - available`.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+/// RAII guard returned by [`NomadStopPermits::acquire`]. Drop releases
+/// the permit back to the pool AND decrements
+/// `sandbox_nomad_stop_permits_in_use`. The guard holds a clone of the
+/// refill `Sender` (not a borrow) so the caller can stash it on the
+/// stack across awaits without lifetime gymnastics.
+///
+/// `must_use`: dropping a permit guard without using it (`let _ =
+/// permits.acquire().await`) IS the release-it-immediately shape and
+/// is legal — `must_use` would flag legitimate test patterns. The
+/// guard does its work in `Drop`, not via a method call.
+#[derive(Debug)]
+pub struct NomadStopPermitGuard {
+    refill: flume::Sender<()>,
+}
+
+impl Drop for NomadStopPermitGuard {
+    fn drop(&mut self) {
+        // `try_send(())` on a bounded channel of capacity N MUST succeed
+        // for the first N sends — and we never send more than `capacity`
+        // tokens (every send is paired 1:1 with an acquire-recv). The
+        // only failure mode would be a programming error (someone
+        // smuggled an extra `Sender` outside this module and over-sent);
+        // even then we'd rather lose a permit than panic in a Drop on
+        // a teardown path.
+        let _ = self.refill.try_send(());
+        crate::metrics::dec_nomad_stop_permits_in_use();
+    }
+}
+
 impl NomadCHBackend {
     pub fn new(
         cfg: SandboxConfig,
@@ -520,7 +690,43 @@ impl NomadCHBackend {
             // `AppState::from_config` after the boot-time
             // `/v1/agent/self` lookup succeeds.
             local_nomad_node_id: None,
+            // r30-A1: empty by default; production installs the shared
+            // semaphore via `install_nomad_stop_permits` from
+            // `AppState::from_config`. Unit tests that don't exercise
+            // the cap leave it empty (stop_inner skips the acquire).
+            nomad_stop_permits: std::sync::OnceLock::new(),
         })
+    }
+
+    /// r30-A1: install the shared `Arc<NomadStopPermits>` semaphore.
+    /// Called exactly once from `AppState::from_config`, after the
+    /// boot-time parse of `SANDBOX_NOMAD_STOP_CONCURRENCY` sizes the
+    /// pool. Idempotent — a second install attempt is a silent no-op
+    /// (the `OnceLock::set` Err arm), because the shared semaphore is
+    /// process-global and there is exactly one `AppState` per process.
+    ///
+    /// Why `&self` (not `&mut self`) + `OnceLock`: the backend is held
+    /// behind `Arc<NomadCHBackend>` inside the `Backend::NomadCh(arc)`
+    /// enum variant, so the post-construction install can't take
+    /// `&mut self`. `OnceLock` gives a publish-once, read-many shape
+    /// that `stop_inner` consults from `&self` without contending the
+    /// rest of the backend's locks.
+    pub fn install_nomad_stop_permits(&self, permits: Arc<NomadStopPermits>) {
+        // Silent on duplicate-install: the only legitimate caller is
+        // `AppState::from_config`, and that path runs once. A test
+        // re-install would be a footgun (the second semaphore is
+        // dropped, leaving the first wired) — but explicit panic /
+        // error here would break the `from_config` reentrancy the
+        // sandbox_pg_e2e fixtures lean on.
+        let _ = self.nomad_stop_permits.set(permits);
+    }
+
+    /// r30-A1: read-side accessor for the installed semaphore. Returns
+    /// `None` when the cap is uninstalled (unit-test / single-tenant
+    /// binary path). Used by `stop_inner` to acquire a permit before
+    /// the `/shutdown` ladder, and by tests to inspect the live cap.
+    pub fn nomad_stop_permits(&self) -> Option<&Arc<NomadStopPermits>> {
+        self.nomad_stop_permits.get()
     }
 
     /// r3-A (T-8b-stress-r3 fix): install the cached local Nomad
@@ -1233,6 +1439,32 @@ impl NomadCHBackend {
         {
             Some(s) => s,
             None => return Ok(()), // idempotent
+        };
+        // r30-A1 (concurrency-r30 CRITICAL #A1): acquire one permit
+        // from the global `NomadStopPermits` semaphore BEFORE the
+        // `/shutdown` ladder fires. All 7 production teardown call sites
+        // funnel here; without the global cap the per-loop caps (snap-
+        // idle-gc=8, snap-idle-evict default 4, three serial loops, two
+        // unbounded admin paths) don't compose against the single
+        // downstream (Nomad /shutdown RPC queue + host CH process
+        // budget). Acquired inside stop_inner (not at the call sites)
+        // so the cap is structurally impossible to bypass — even a
+        // future teardown caller that forgets the convention still
+        // contends for the global pool.
+        //
+        // The acquire happens AFTER the in-memory state remove so an
+        // idempotent re-stop (Ok branch above) doesn't burn a permit.
+        // The guard binds to `_permit` so its Drop runs at the END of
+        // this function (post host_dir leak log + persist.delete tail),
+        // covering every observable downstream interaction.
+        //
+        // `nomad_stop_permits().is_none()` is the unit-test +
+        // single-tenant binary path; in those builds the field is
+        // uninstalled, and the cap is a no-op (matches the legacy
+        // behaviour those paths already tolerate).
+        let _permit: Option<NomadStopPermitGuard> = match self.nomad_stop_permits() {
+            Some(p) => Some(p.acquire().await),
+            None => None,
         };
         let stop_started = Instant::now();
         tracing::info!(
@@ -5449,6 +5681,7 @@ mod tests {
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
                 vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -8036,5 +8269,275 @@ mod tests {
             "Job-level Meta MUST mirror the Config field (false on \
              restore-with-flag-set)",
         );
+    }
+
+    // ─── r30-A1: global Nomad /shutdown semaphore ──────────────────
+    //
+    // Three load-bearing tests for the `NomadStopPermits` semaphore
+    // (the global cap shared across all 7 production teardown call
+    // paths). The architecture review (concurrency r30 CRITICAL #A1)
+    // flagged that per-loop caps don't compose against the single
+    // downstream (Nomad /shutdown RPC queue + host CH process budget);
+    // these tests pin the new global cap's invariants.
+    //
+    // The tests exercise the semaphore type directly rather than
+    // through `stop_inner` to keep the assertions independent of the
+    // /shutdown ladder's many other concerns (Nomad mock setup, fence
+    // timeouts, host_dir bookkeeping). The integration shape — that
+    // stop_inner DOES acquire a permit when the field is installed —
+    // is covered by the call-site test `stop_inner_acquires_permit_
+    // when_installed` below.
+
+    /// r30-A1: a single acquire claims a permit (in-use bumps,
+    /// available drops by one); the guard's Drop releases it (both
+    /// counters return to baseline). The fundamental contract of any
+    /// semaphore — broken silently if the gauge stops tracking the
+    /// underlying flume channel.
+    #[compio::test]
+    async fn nomad_stop_permits_acquire_release_balance() {
+        // Capacity 4 — small enough to assert exact deltas, large
+        // enough that one acquire doesn't exhaust the pool (catches a
+        // regression where exhaust + recover collapse).
+        let permits = NomadStopPermits::new(4);
+        assert_eq!(permits.capacity(), 4);
+        assert_eq!(permits.permits_available(), 4);
+        // Capture pre-test in-use baseline. Process-global gauge: other
+        // tests may have left it at any value; we assert deltas, not
+        // absolutes.
+        let pre_in_use = crate::metrics::nomad_stop_permits_in_use_value();
+
+        // Scope the guard so Drop fires at the closing brace.
+        {
+            let _g = permits.acquire().await;
+            assert_eq!(
+                permits.permits_available(),
+                3,
+                "after one acquire, exactly one permit must be in flight"
+            );
+            assert_eq!(
+                crate::metrics::nomad_stop_permits_in_use_value(),
+                pre_in_use + 1,
+                "in-use gauge MUST bump by 1 on acquire"
+            );
+        }
+        // Drop ran.
+        assert_eq!(
+            permits.permits_available(),
+            4,
+            "after guard drop, all permits must be back in the pool"
+        );
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre_in_use,
+            "in-use gauge MUST decrement by 1 on guard drop"
+        );
+    }
+
+    /// r30-A1 / **load-bearing**: with capacity N, at most N concurrent
+    /// `acquire().await` calls resolve; the N+1th MUST block until a
+    /// permit is released. This is the entire reason the global cap
+    /// exists — if this assertion regresses, the per-loop caps can
+    /// re-compound on the downstream and the architecture review's
+    /// CRITICAL #A1 reopens.
+    ///
+    /// Test shape: spawn N+1 acquire futures; poll them with a tight
+    /// `compio::time::sleep` ceiling; assert exactly N have resolved
+    /// before any guard drops. Then drop one guard and assert the
+    /// (N+1)th unblocks within the same ceiling.
+    #[compio::test]
+    async fn nomad_stop_permits_cap_enforced_n_plus_one_blocks() {
+        const N: usize = 3;
+        let permits = NomadStopPermits::new(N);
+
+        // Acquire N permits inline — must all complete immediately
+        // (no pending await).
+        let g0 = permits.acquire().await;
+        let g1 = permits.acquire().await;
+        let g2 = permits.acquire().await;
+        assert_eq!(
+            permits.permits_available(),
+            0,
+            "after N acquires, pool MUST be empty"
+        );
+
+        // The (N+1)th acquire MUST block. Race it against a sleep
+        // ceiling; if the acquire wins, the cap leaked.
+        //
+        // Use `futures::pin_mut!` + `select!` so we don't allocate a
+        // task (the workspace ban on tokio means we'd otherwise need
+        // `compio::runtime::spawn` and join). `futures` is already in
+        // the workspace dep graph.
+        use futures::future::FutureExt;
+        let acquire_fut = permits.acquire().fuse();
+        let timeout_fut =
+            compio::time::sleep(std::time::Duration::from_millis(100)).fuse();
+        futures::pin_mut!(acquire_fut, timeout_fut);
+        let blocked = futures::select! {
+            _ = acquire_fut => false,  // resolved before timeout = cap leaked
+            _ = timeout_fut => true,    // timeout fired first = correctly blocking
+        };
+        assert!(
+            blocked,
+            "r30-A1 CRITICAL: the (N+1)th acquire on a capacity-{N} semaphore \
+             MUST block; resolving immediately means the cap is not enforced \
+             and concurrent teardowns can overload Nomad /shutdown."
+        );
+
+        // Drop one guard — pool now has 1 permit. The previously-
+        // blocked acquire should resolve within the same ceiling.
+        drop(g1);
+        let acquire_after = permits.acquire();
+        let timeout2 =
+            compio::time::sleep(std::time::Duration::from_millis(500)).fuse();
+        futures::pin_mut!(acquire_after, timeout2);
+        let unblocked = futures::select! {
+            _g3 = acquire_after.fuse() => true,
+            _ = timeout2 => false,
+        };
+        assert!(
+            unblocked,
+            "after one guard drop, a fresh acquire MUST resolve within the \
+             ceiling (the released permit feeds the next waiter)"
+        );
+        drop(g0);
+        drop(g2);
+    }
+
+    /// r30-A1: the `sandbox_nomad_stop_permits_in_use` gauge tracks
+    /// guard lifetime 1:1 even under multiple concurrent acquires.
+    /// Without this, the metric would diverge from the underlying
+    /// semaphore state and the operator-facing saturation view
+    /// (`in_use / total`) would silently lie. Pair with the metrics
+    /// crate's saturating-underflow test.
+    #[compio::test]
+    async fn nomad_stop_permits_in_use_gauge_decrements_on_release() {
+        let permits = NomadStopPermits::new(2);
+        let pre = crate::metrics::nomad_stop_permits_in_use_value();
+
+        let g_a = permits.acquire().await;
+        let g_b = permits.acquire().await;
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre + 2,
+            "two concurrent acquires MUST raise the in-use gauge by 2"
+        );
+
+        drop(g_a);
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre + 1,
+            "dropping one guard MUST decrement the gauge by exactly 1 \
+             (Drop on NomadStopPermitGuard calls dec_nomad_stop_permits_in_use)"
+        );
+
+        drop(g_b);
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre,
+            "dropping the second guard MUST return the gauge to its baseline"
+        );
+    }
+
+    /// r30-A1 integration: when the semaphore is installed on a
+    /// `NomadCHBackend`, `stop_inner` actually acquires it. Asserted
+    /// indirectly: capacity=1; install on the backend; race two
+    /// `stop` calls; verify the in-use gauge held a non-zero value
+    /// during the race (the second `stop` waits behind the first).
+    ///
+    /// We use the same 404-mock Nomad agent the b15 tests use so the
+    /// `/shutdown` + Nomad-purge + wait-for-job-gone chain completes
+    /// fast (404 = "job is gone" for purge, and the agent_url stop
+    /// is best-effort). With `host_fence_timeout_secs=0` the fence
+    /// is bypassed too, so stop_inner runs in single-digit ms.
+    #[compio::test]
+    async fn stop_inner_acquires_permit_when_installed() {
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0; // skip fence loop
+        cfg.nomad_ch.vm_index_release_delay_secs = 0; // skip post-fence delay
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let permits = NomadStopPermits::new(1);
+        backend.install_nomad_stop_permits(permits.clone());
+        assert!(
+            backend.nomad_stop_permits().is_some(),
+            "install_nomad_stop_permits MUST be observable via the \
+             accessor (the OnceLock::set must have succeeded)"
+        );
+
+        // Hand-insert two sandbox records so we have two stop targets.
+        let id_a = Uuid::now_v7();
+        let id_b = Uuid::now_v7();
+        let host_dir_a = fresh_host_dir("permit-a");
+        let host_dir_b = fresh_host_dir("permit-b");
+        for (id, host_dir) in [(id_a, host_dir_a.clone()), (id_b, host_dir_b.clone())]
+        {
+            backend.state.write().unwrap().insert(
+                id,
+                NomadChSandbox {
+                    user_id: "usr_r30_a1".into(),
+                    job_id: format!("zsbx-r30-a1-{}", id.simple()),
+                    vm_index: 42,
+                    host_dir,
+                    // Unreachable; /shutdown errors are best-effort.
+                    agent_url: "http://127.0.0.1:1".into(),
+                    signing_key: make_sk(),
+                },
+            );
+        }
+
+        // Pre-acquire the only permit on a separate task to model
+        // "another teardown is mid-flight". The first stop will then
+        // have to wait for our held permit to drop.
+        let held_guard = permits.acquire().await;
+        assert_eq!(permits.permits_available(), 0);
+
+        // Race a single stop against a sleep ceiling — must block on
+        // the permit (we hold it).
+        use futures::future::FutureExt;
+        let stop_fut = backend.stop(id_a).fuse();
+        let timeout = compio::time::sleep(std::time::Duration::from_millis(100)).fuse();
+        futures::pin_mut!(stop_fut, timeout);
+        let stop_blocked = futures::select! {
+            _ = stop_fut => false,
+            _ = timeout => true,
+        };
+        assert!(
+            stop_blocked,
+            "r30-A1: backend.stop() MUST block when the global semaphore \
+             is exhausted — the permit is held by another teardown caller. \
+             Resolving immediately means stop_inner skipped the acquire \
+             and the global cap is not load-bearing."
+        );
+
+        // Drop the held permit; the in-flight stop should now make
+        // progress. Don't assert success (the unreachable agent_url
+        // makes /shutdown Err) — assert the function RETURNS within
+        // a generous budget, which means the acquire unblocked.
+        drop(held_guard);
+        let final_timeout =
+            compio::time::sleep(std::time::Duration::from_secs(5)).fuse();
+        futures::pin_mut!(final_timeout);
+        let stop_completed = futures::select! {
+            _ = stop_fut => true,
+            _ = final_timeout => false,
+        };
+        assert!(
+            stop_completed,
+            "after releasing the held permit, the pending stop MUST \
+             complete (the released permit feeds the waiter)"
+        );
+
+        // Clean up the second sandbox record so the mock + state are
+        // tidy; also bumps coverage that stop runs with a free pool.
+        let _ = backend.stop(id_b).await;
+
+        // Tidy up the mock thread + tempdirs.
+        stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&host_dir_a);
+        let _ = std::fs::remove_dir_all(&host_dir_b);
     }
 }

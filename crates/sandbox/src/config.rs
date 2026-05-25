@@ -458,6 +458,37 @@ pub struct NomadCHConfig {
     ///
     /// `SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS` (default 5).
     pub vm_index_release_delay_secs: u64,
+
+    /// **r30-A1 (concurrency-r30 CRITICAL #A1)**: global cap on
+    /// in-flight Nomad `/shutdown` ladders. The controller has seven
+    /// production teardown call paths (`AppStateGcStopper`,
+    /// snap-idle-evict, snap-idle-gc, admin snapshot teardown,
+    /// transient-state takeover, registry GC, restore-failure rollback)
+    /// that each call `backend.stop(id)` → `stop_inner` →
+    /// `POST /shutdown` against ONE downstream resource (the local
+    /// Nomad agent's RPC queue + host CH process budget). Each call
+    /// path historically chose its own concurrency (constant 8, env-
+    /// default 4, three serial, two unbounded); those per-loop caps
+    /// don't compose. A cluster cycle exercising two simultaneously
+    /// can overload the downstream — observed as Nomad `/shutdown`
+    /// timeouts + CH OOM at peak.
+    ///
+    /// This field is the **single global cap** enforced inside
+    /// `stop_inner` via an `Arc<NomadStopPermits>` semaphore. Every
+    /// teardown path now competes for the same permit pool. The per-
+    /// loop caps stay in place as **defense-in-depth soft caps** —
+    /// they bound runaway fan-out before it ever reaches the
+    /// semaphore — but the load-bearing cap is here.
+    ///
+    /// `SANDBOX_NOMAD_STOP_CONCURRENCY` (default 16). Must be ≥ 1
+    /// (zero would deadlock every teardown). Sized at 16 to absorb
+    /// the worst-case overlap of the 7 paths while staying well under
+    /// the empirical Nomad-`/shutdown` saturation point on a single-
+    /// worker host (≈ 30-way concurrent stop drives p99 fence past
+    /// 30s — see `host_fence_timeout_secs` rustdoc). Operators on
+    /// multi-worker hosts MAY raise this; consult the
+    /// `sandbox_nomad_stop_permits_in_use` gauge for sizing data.
+    pub nomad_stop_concurrency: usize,
 }
 
 /// r27-S1 Guard A: reject any `nomad_addr` whose host is NOT a
@@ -726,6 +757,20 @@ impl NomadCHConfig {
                 self.host_state_dir.display(),
             ));
         }
+        // r30-A1: a zero-cap semaphore would deadlock every teardown
+        // path (every `stop_inner` await would block forever on the
+        // permit recv). Catch the misconfig at boot; the lower bound
+        // is the cheapest invariant that turns "controller mysteriously
+        // never stops anything" into a one-line startup error.
+        if self.nomad_stop_concurrency == 0 {
+            return Err(
+                "SANDBOX_NOMAD_STOP_CONCURRENCY must be ≥ 1 (got 0); a \
+                 zero-permit semaphore would deadlock every teardown path. \
+                 Default is 16; raise only after profiling \
+                 sandbox_nomad_stop_permits_in_use against the cap."
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 }
@@ -825,6 +870,7 @@ impl SandboxConfig {
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
                 vm_index_release_delay_secs: 5,
+                nomad_stop_concurrency: 16,
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -955,6 +1001,13 @@ impl SandboxConfig {
             vm_index_release_delay_secs: parse_env(
                 "SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS",
                 5u64,
+            )?,
+            // r30-A1: global Nomad /shutdown concurrency cap. Default 16
+            // matches the architecture decision (see the field's rustdoc
+            // on NomadCHConfig). Validated in `validate()` below.
+            nomad_stop_concurrency: parse_env(
+                "SANDBOX_NOMAD_STOP_CONCURRENCY",
+                16usize,
             )?,
         };
 
@@ -1476,6 +1529,7 @@ mod tests {
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
             vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+            nomad_stop_concurrency: 16,     // r30-A1: prod default
         }
     }
 

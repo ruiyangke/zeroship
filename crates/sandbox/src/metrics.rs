@@ -170,6 +170,31 @@ static NOMAD_NODE_ID_LOOKUP_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// back. NaN sentinel for "never read yet".
 static HEARTBEAT_LAG_BITS: AtomicU64 = AtomicU64::new(f64::NAN.to_bits());
 
+/// `sandbox_nomad_stop_permits_total`. Gauge — the boot-time capacity
+/// of the global `NomadStopPermits` semaphore (one permit ≡ one
+/// in-flight `/shutdown` ladder against the local Nomad agent). Set
+/// once in `AppState::from_config` from `SANDBOX_NOMAD_STOP_CONCURRENCY`
+/// (default 16); zero until that boot writes the configured value.
+///
+/// r30-A1: the 7 per-loop concurrency caps (`GC_STOP_CONCURRENCY=8`,
+/// snap-idle-evict's `default=4`, three serial loops, two unbounded
+/// admin paths) don't compose — a cluster cycle that exercises two
+/// simultaneously can overload the single downstream `/shutdown` RPC
+/// queue + host CH process budget. This gauge surfaces the global cap
+/// so operators can size `SANDBOX_NOMAD_STOP_CONCURRENCY` against
+/// observed `_in_use` peaks.
+static NOMAD_STOP_PERMITS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// `sandbox_nomad_stop_permits_in_use`. Gauge — currently-held permits
+/// (= `total - permits_available()`). Bumped by `NomadStopPermits::
+/// acquire` BEFORE the `/shutdown` ladder runs; decremented by the
+/// `NomadStopPermitGuard` Drop on stop_inner exit. Steady-state ≈ 0;
+/// sustained > `total` is impossible; sustained ≈ `total` means the
+/// semaphore is the bottleneck and the operator should consider raising
+/// `SANDBOX_NOMAD_STOP_CONCURRENCY` (after confirming the downstream
+/// Nomad/CH budget tolerates the higher fan-out).
+static NOMAD_STOP_PERMITS_IN_USE: AtomicU64 = AtomicU64::new(0);
+
 // ────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────
@@ -444,6 +469,65 @@ pub fn heartbeat_lag_value() -> f64 {
     f64::from_bits(HEARTBEAT_LAG_BITS.load(Ordering::Relaxed))
 }
 
+// ────────────────────────────────────────────────────────────────────
+// r30-A1: global Nomad /shutdown concurrency cap (semaphore)
+// ────────────────────────────────────────────────────────────────────
+
+/// Set `sandbox_nomad_stop_permits_total` to the boot-resolved capacity.
+/// Called exactly once from `AppState::from_config` after
+/// `SANDBOX_NOMAD_STOP_CONCURRENCY` is parsed. Idempotent w.r.t. value;
+/// subsequent calls overwrite (used by test fixtures that reset the
+/// process-global gauge between cases).
+pub fn set_nomad_stop_permits_total(n: u64) {
+    NOMAD_STOP_PERMITS_TOTAL.store(n, Ordering::Relaxed);
+}
+
+/// Read-side accessor for the `sandbox_nomad_stop_permits_total` gauge.
+/// Consumed by `metrics_export::render()` + tests.
+pub fn nomad_stop_permits_total_value() -> u64 {
+    NOMAD_STOP_PERMITS_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Bump `sandbox_nomad_stop_permits_in_use` by 1. Called inside
+/// `NomadStopPermits::acquire` AFTER the flume token recv succeeds and
+/// BEFORE the guard is returned, so the gauge is monotonically tied to
+/// the lifetime of the guard. Pair: every `inc_*` MUST be followed by
+/// exactly one `dec_*` (the `NomadStopPermitGuard` Drop guarantees this).
+pub fn inc_nomad_stop_permits_in_use() {
+    NOMAD_STOP_PERMITS_IN_USE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Decrement `sandbox_nomad_stop_permits_in_use` by 1. Saturating —
+/// underflow folds to 0 rather than wrapping to `u64::MAX`, which would
+/// poison the gauge until process restart. Called from the
+/// `NomadStopPermitGuard` Drop impl; tests can call it directly to
+/// model a guard-drop without spinning up an acquire.
+pub fn dec_nomad_stop_permits_in_use() {
+    // CAS loop: saturating_sub on AtomicU64 (fetch_sub wraps on
+    // underflow). The window is microscopic — only the acquire / drop
+    // pair writes this counter — but the saturating shape is the
+    // defensible default for an observability surface.
+    let mut cur = NOMAD_STOP_PERMITS_IN_USE.load(Ordering::Relaxed);
+    loop {
+        let next = cur.saturating_sub(1);
+        match NOMAD_STOP_PERMITS_IN_USE.compare_exchange_weak(
+            cur,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => cur = observed,
+        }
+    }
+}
+
+/// Read-side accessor for the `sandbox_nomad_stop_permits_in_use` gauge.
+/// Consumed by `metrics_export::render()` + tests.
+pub fn nomad_stop_permits_in_use_value() -> u64 {
+    NOMAD_STOP_PERMITS_IN_USE.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +682,45 @@ mod tests {
         inc_nomad_node_id_lookup_failure();
         let post = nomad_node_id_lookup_failures_value();
         assert!(post >= pre + 2, "got {pre} -> {post}");
+    }
+
+    /// r30-A1: `set_nomad_stop_permits_total` writes the boot-resolved
+    /// capacity and overwrites on a subsequent call (test fixtures may
+    /// reset the process-global gauge between cases).
+    #[test]
+    fn nomad_stop_permits_total_set_round_trips() {
+        set_nomad_stop_permits_total(16);
+        assert_eq!(nomad_stop_permits_total_value(), 16);
+        set_nomad_stop_permits_total(32);
+        assert_eq!(nomad_stop_permits_total_value(), 32);
+        // Restore the default-ish value so other tests in the same
+        // process see a sensible reading; the gauge is set at boot in
+        // production and never decremented in steady state.
+        set_nomad_stop_permits_total(16);
+    }
+
+    /// r30-A1: `dec_nomad_stop_permits_in_use` saturates at 0 — the
+    /// gauge MUST NOT wrap to u64::MAX on an underflow, which would
+    /// poison the metric until process restart. Pair with the
+    /// integration test in nomad_ch.rs that asserts the gauge tracks
+    /// acquire / drop one-to-one.
+    #[test]
+    fn nomad_stop_permits_in_use_saturating_on_underflow() {
+        // Force the counter to 0, then dec — must still be 0.
+        // (Process-global state: we can only test that an EXTRA dec
+        // past whatever steady state holds doesn't wrap; we can't
+        // assert == 0 because parallel test runs may have an in-flight
+        // acquire. The contract is "saturating, never wraps".)
+        let pre = nomad_stop_permits_in_use_value();
+        // Pull it down to a known floor by matched inc/dec, then a
+        // single extra dec — saturating sub keeps it at 0 minimum.
+        for _ in 0..pre + 4 {
+            dec_nomad_stop_permits_in_use();
+        }
+        assert_eq!(
+            nomad_stop_permits_in_use_value(),
+            0,
+            "dec past zero MUST saturate (no wrap to u64::MAX)"
+        );
     }
 }

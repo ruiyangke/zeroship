@@ -185,6 +185,27 @@ pub fn render() -> String {
         metrics::heartbeat_lag_value(),
     );
 
+    // r30-A1: global Nomad /shutdown concurrency cap. Emit both the
+    // total (boot-resolved capacity from SANDBOX_NOMAD_STOP_CONCURRENCY)
+    // and the live in-use count so operators can plot saturation against
+    // the cap. f64 cast is safe — the configured capacity is bounded by
+    // operator sanity (default 16, max realistically O(64)) and the live
+    // counter is bounded by the cap.
+    #[allow(clippy::cast_precision_loss)]
+    write_gauge(
+        &mut out,
+        "sandbox_nomad_stop_permits_total",
+        "configured cap of the global Nomad /shutdown semaphore (r30-A1; SANDBOX_NOMAD_STOP_CONCURRENCY)",
+        metrics::nomad_stop_permits_total_value() as f64,
+    );
+    #[allow(clippy::cast_precision_loss)]
+    write_gauge(
+        &mut out,
+        "sandbox_nomad_stop_permits_in_use",
+        "permits currently held by in-flight stop_inner calls (total - permits_available)",
+        metrics::nomad_stop_permits_in_use_value() as f64,
+    );
+
     out
 }
 
@@ -291,6 +312,8 @@ mod tests {
             "sandbox_wake_sync_uses_total",
             "sandbox_wake_terminal_overwrite_blocked_total",
             "sandbox_ha_heartbeat_lag_seconds",
+            "sandbox_nomad_stop_permits_total",
+            "sandbox_nomad_stop_permits_in_use",
         ] {
             assert!(
                 body.contains(name),

@@ -228,6 +228,35 @@ pub struct AppState {
     /// Field is `pub` (no security sensitivity — a node-id is the
     /// local agent's self-reported identifier, not a credential).
     pub local_nomad_node_id: Option<String>,
+
+    /// **r30-A1 (concurrency-r30 CRITICAL #A1)**: global semaphore
+    /// capping concurrent Nomad `/shutdown` ladders across every
+    /// teardown call path (`AppStateGcStopper`, snap-idle-evict,
+    /// snap-idle-gc, admin snapshot teardown, transient-state takeover,
+    /// registry GC, restore-failure rollback). Sized from
+    /// `SANDBOX_NOMAD_STOP_CONCURRENCY` (default 16) in
+    /// [`Self::from_config`]. The same `Arc` is installed on the inner
+    /// `NomadCHBackend` via
+    /// [`crate::backend::nomad_ch::NomadCHBackend::install_nomad_stop_permits`]
+    /// so `stop_inner` can acquire a permit before the `/shutdown`
+    /// ladder runs — structurally impossible to bypass, even from a
+    /// future teardown call site that forgets the convention.
+    ///
+    /// **Why on `AppState` and not just on the backend**: the cap is a
+    /// process-global resource budget, not a backend-implementation
+    /// detail. Plumbing it through `AppState` makes its lifecycle
+    /// observable (one place to read for `metrics_export`, one place
+    /// to size at boot, one place for future ops/test fixtures to
+    /// inject a smaller cap for chaos testing).
+    ///
+    /// Field is `pub(crate)` for the same reason as `database` /
+    /// `persist` — a `state.nomad_stop_permits = attacker_perms` swap
+    /// from out-of-crate code could plant a capacity-0 semaphore that
+    /// silently deadlocks every teardown path (denying the cluster's
+    /// ability to reap idle sandboxes). Out-of-crate callers are
+    /// expected to go through `from_config`.
+    pub(crate) nomad_stop_permits:
+        Arc<crate::backend::nomad_ch::NomadStopPermits>,
 }
 
 impl AppState {
@@ -265,6 +294,19 @@ impl AppState {
     /// iteration to decide whether to break out.
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// r30-A1: read-only accessor for the global Nomad /shutdown
+    /// semaphore. Returned `Arc` is cheap to clone; intended for tests
+    /// + future call sites that want to inspect `permits_available()`
+    /// or `capacity()` for monitoring / chaos-test injection. Production
+    /// `stop_inner` does NOT read through this — it goes through the
+    /// `OnceLock` installed on the `NomadCHBackend` directly so the
+    /// hot teardown path doesn't take an extra `Arc::clone` per stop.
+    pub fn nomad_stop_permits(
+        &self,
+    ) -> &Arc<crate::backend::nomad_ch::NomadStopPermits> {
+        &self.nomad_stop_permits
     }
 
     /// A5 (api-surface-2026-05-24-r1): safe builder for
@@ -497,6 +539,17 @@ impl AppState {
     ///
     /// Production code uses [`AppState::from_config`], not this.
     pub fn new_fixture(config: SandboxConfig, backend: Backend) -> Self {
+        // r30-A1: build a permits pool sized from config (default 16
+        // unless the fixture caller pre-mutated `nomad_stop_concurrency`).
+        // The fixture does NOT install the permits on the inner
+        // NomadCHBackend — unit tests that need the install go through
+        // `backend.nomad_ch_handle().install_nomad_stop_permits(...)`
+        // explicitly. Holding the Arc on AppState is enough to satisfy
+        // the field's `pub(crate)` invariant and gives test fixtures a
+        // live handle if they want one.
+        let nomad_stop_permits = crate::backend::nomad_ch::NomadStopPermits::new(
+            config.nomad_ch.nomad_stop_concurrency.max(1),
+        );
         Self {
             config,
             sandboxes: SandboxRegistry::new(),
@@ -522,6 +575,7 @@ impl AppState {
             // can set the field via plain assignment on the returned
             // `Self`.
             local_nomad_node_id: None,
+            nomad_stop_permits,
         }
     }
 }
@@ -712,6 +766,36 @@ impl AppState {
             }
             b.build()?
         };
+        // r30-A1 (concurrency-r30 CRITICAL #A1): size + install the
+        // global Nomad /shutdown semaphore. The cap is read once at
+        // boot from `SANDBOX_NOMAD_STOP_CONCURRENCY` (default 16,
+        // validated > 0 by `NomadCHConfig::validate`); the SAME
+        // `Arc<NomadStopPermits>` is held on `AppState` AND installed
+        // on the inner `NomadCHBackend` so that every `stop_inner`
+        // invocation — regardless of which of the 7 teardown call
+        // paths triggered it — competes for the same permit pool.
+        //
+        // Set BEFORE the backend's first `stop_inner` could fire (the
+        // probe + cleanup_orphans_at_startup calls below DO touch
+        // backend state but none invoke stop_inner: probe is a
+        // health-check only; cleanup_orphans tears down Nomad jobs via
+        // a different code path that doesn't go through stop_inner).
+        // No race: the install happens before any HTTP handler is
+        // registered.
+        let nomad_stop_permits = crate::backend::nomad_ch::NomadStopPermits::new(
+            config.nomad_ch.nomad_stop_concurrency,
+        );
+        crate::metrics::set_nomad_stop_permits_total(
+            config.nomad_ch.nomad_stop_concurrency as u64,
+        );
+        if let Some(nch) = backend.nomad_ch_handle() {
+            nch.install_nomad_stop_permits(Arc::clone(&nomad_stop_permits));
+            tracing::info!(
+                cap = config.nomad_ch.nomad_stop_concurrency,
+                "sandbox/nomad-ch r30-A1: installed global Nomad /shutdown \
+                 semaphore (SANDBOX_NOMAD_STOP_CONCURRENCY)"
+            );
+        }
         backend.probe().await?;
         // Clean up orphan Pods + ConfigMaps from a previous run.
         // Errors here are non-fatal — operators may want to keep
@@ -1034,6 +1118,7 @@ impl AppState {
             wake_response_mode,
             wake_lifecycle,
             local_nomad_node_id,
+            nomad_stop_permits,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
@@ -2241,6 +2326,7 @@ mod admin_token_setter_tests {
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
                 vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -2448,6 +2534,7 @@ mod persist_setter_tests {
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
                 vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -2591,6 +2678,7 @@ mod field_setter_tests {
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
                 vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
