@@ -45,9 +45,14 @@
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
-use crate::backend::RegisterBackend;
+use crate::backend::{
+    AuditWriter, DialectBuilder, FullTextIndex, IndexBuilder, LockManager, LockScope,
+    RegisterBackend, SpatialIndex, SqlExecutor, SqliteBackend, VectorIndex,
+};
 use crate::context;
+use crate::diff::{ChangeClass, ChangeKind};
 use crate::error::DbError;
+use crate::query::IndexKind;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
 pub(crate) mod apply;
@@ -159,14 +164,16 @@ async fn exec_register_model(
     // `backend_unsupported` `DbError::Configuration` so a future SQLite
     // arm surfaces a coded SDK-visible error rather than aborting the
     // spawned compio task via `.expect()` panic.
-    let pg = backend
-        .as_postgres()
-        .ok_or_else(|| DbError::backend_unsupported("register_model"))?;
-
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
 
-    run_pipeline(pg, app_id, collection, schema, indexes, &deploy_id).await
+    match (backend.as_postgres(), backend.as_sqlite()) {
+        (Some(pg), _) => run_pipeline(pg, app_id, collection, schema, indexes, &deploy_id).await,
+        (_, Some(sqlite)) => {
+            run_sqlite_pipeline(sqlite, app_id, collection, schema, indexes, &deploy_id).await
+        }
+        _ => Err(DbError::backend_unsupported("register_model")),
+    }
 }
 
 /// Backend-driven variant of `exec_register_model`. Public so
@@ -194,7 +201,7 @@ async fn exec_register_model(
 /// `apply` but no concrete-type leak remains in this signature. Open
 /// Q5 resolution per `docs/proposals/p0-implementation-plan.md`
 /// §"PR 3" + §3 Q5 and `docs/proposals/db-system-design.md` §7.
-pub async fn run_pipeline<B: RegisterBackend>(
+pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(
     backend: &B,
     app_id: &str,
     collection: &str,
@@ -261,6 +268,234 @@ pub async fn run_pipeline<B: RegisterBackend>(
     //    release and run CIC unlocked (pass 2). Each op writes an audit
     //    row. The guard's release lives inside apply().
     apply::apply(backend, ctx, lock_guard, approved).await
+}
+
+async fn run_sqlite_pipeline(
+    backend: &SqliteBackend,
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    indexes: &Value,
+    deploy_id: &str,
+) -> Result<(), DbError> {
+    crate::cross_app_fk::reject_cross_app_fk(schema, app_id)?;
+
+    let strictness = schema
+        .get("_meta")
+        .and_then(|m| m.get("strictness"))
+        .and_then(Value::as_str)
+        .unwrap_or("strict")
+        .to_string();
+
+    let lock_client = backend.acquire_dedicated_client().await?;
+    let scope = LockScope::GlobalApp {
+        app_id: app_id.to_string(),
+        name: bootstrap::LOCK_TAG.to_string(),
+    };
+    backend.acquire(&lock_client, &scope).await?;
+
+    let ctx = match bootstrap::build_ctx(
+        backend,
+        app_id,
+        collection,
+        schema,
+        indexes,
+        deploy_id,
+        strictness,
+    )
+    .await
+    {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            let _ = backend.release(&lock_client, &scope).await;
+            return Err(e);
+        }
+    };
+
+    let approved_res = match plan::compute_plan(backend, &ctx, collection, schema).await {
+        Ok(plan) => validate::validate(backend, &ctx, plan)
+            .await
+            .map_err(|envelope_json| DbError::SchemaRefused {
+                code: "validation_refused",
+                envelope_json,
+            }),
+        Err(e) => Err(e),
+    };
+    let approved = match approved_res {
+        Ok(approved) => approved,
+        Err(e) => {
+            let _ = backend.release(&lock_client, &scope).await;
+            return Err(e);
+        }
+    };
+
+    let apply_result = apply_sqlite(backend, &ctx, &approved).await;
+    let _ = backend.release(&lock_client, &scope).await;
+    apply_result
+}
+
+async fn apply_sqlite(
+    backend: &SqliteBackend,
+    ctx: &bootstrap::RegisterContext,
+    approved: &validate::ApprovedPlan,
+) -> Result<(), DbError> {
+    for op in &approved.ops {
+        if op.class == ChangeClass::Destructive {
+            continue;
+        }
+
+        let audit_id = match backend
+            .write_audit_row_returning_id(
+                &ctx.app_id,
+                &crate::audit::AuditRow {
+                    collection: op.collection.clone(),
+                    phase: crate::audit::Phase::Ddl,
+                    change_class: op.class.as_audit(),
+                    change_kind: op.change_kind.as_sql().to_string(),
+                    details: op.details.clone(),
+                    ddl_sql: op.sql.clone(),
+                    status: crate::audit::InitialStatus::Running,
+                    deploy_id: ctx.deploy_id.clone(),
+                    schema_version: ctx.schema_version,
+                    actor: crate::audit::ActorKind::Auto,
+                },
+            )
+            .await
+        {
+            Ok(id) => Some(id),
+            Err(audit_err) => {
+                tracing::warn!(
+                    app_id = %ctx.app_id,
+                    collection = %op.collection,
+                    transition = "Running/insert_failed",
+                    audit_err = %audit_err,
+                    "audit: failed to insert running row",
+                );
+                None
+            }
+        };
+
+        let result = match &op.change_kind {
+            ChangeKind::CreateTable
+            | ChangeKind::AddColumn
+            | ChangeKind::AddForeignKey
+            | ChangeKind::DropForeignKey => {
+                if let Some(sql) = &op.sql {
+                    backend.exec_batch(sql).await
+                } else {
+                    Ok(())
+                }
+            }
+            ChangeKind::AddIndex => {
+                let spec = ctx
+                    .declared_indexes
+                    .iter()
+                    .find(|s| {
+                        op.details.get("index_name").and_then(Value::as_str)
+                            == Some(s.name.as_str())
+                    })
+                    .cloned();
+                if let Some(spec) = spec {
+                    match &spec.kind {
+                        IndexKind::BTree => {
+                            backend
+                                .create_index_with_recovery(
+                                    &ctx.app_id,
+                                    &op.collection,
+                                    &spec,
+                                    &ctx.deploy_id,
+                                    ctx.schema_version,
+                                )
+                                .await
+                        }
+                        IndexKind::Vector { dims, metric } => {
+                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
+                            backend
+                                .ensure_vector_index(
+                                    &ctx.app_id,
+                                    &op.collection,
+                                    column,
+                                    *dims,
+                                    *metric,
+                                )
+                                .await
+                        }
+                        IndexKind::Fts { language } => {
+                            backend
+                                .ensure_fts_index(
+                                    &ctx.app_id,
+                                    &op.collection,
+                                    &spec.columns,
+                                    language,
+                                )
+                                .await
+                        }
+                        IndexKind::Spatial => {
+                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
+                            backend
+                                .ensure_spatial_index(&ctx.app_id, &op.collection, column)
+                                .await
+                        }
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            ChangeKind::MaskBackfill { .. }
+            | ChangeKind::MaskRewrite { .. }
+            | ChangeKind::MaskRemove { .. } => Err(DbError::backend_unsupported("register_model")),
+            ChangeKind::DropColumn | ChangeKind::DropIndex => continue,
+        };
+
+        if let Some(id) = audit_id {
+            match &result {
+                Ok(_) => {
+                    if let Err(audit_err) = backend
+                        .update_audit_status(
+                            &ctx.app_id,
+                            id,
+                            crate::audit::TerminalStatus::Applied,
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            app_id = %ctx.app_id,
+                            audit_id = id,
+                            transition = "Applied",
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
+                        );
+                    }
+                }
+                Err(e) => {
+                    let msg = e.clone().into_string();
+                    if let Err(audit_err) = backend
+                        .update_audit_status(
+                            &ctx.app_id,
+                            id,
+                            crate::audit::TerminalStatus::Failed,
+                            Some(msg.as_str()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            app_id = %ctx.app_id,
+                            audit_id = id,
+                            transition = "Failed",
+                            ddl_err = %msg,
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
+                        );
+                    }
+                }
+            }
+        }
+
+        result?;
+    }
+
+    Ok(())
 }
 
 /// Pool-driven entry retained for integration tests that hand in a

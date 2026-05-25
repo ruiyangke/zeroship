@@ -34,6 +34,32 @@ pub mod drop_namespace;
 pub mod register_model;
 pub mod transaction;
 
+/// Execute a control statement (`BEGIN`, `SAVEPOINT`, `COMMIT`,
+/// `ROLLBACK`, etc.) against the backend-specific pinned tx client.
+pub(crate) async fn client_exec_on_tx(
+    backend: &crate::backend::BackendHandle,
+    client: &crate::context::TxConnection,
+    sql: &str,
+    params: &[&str],
+) -> Result<u64, crate::error::DbError> {
+    use crate::backend::SqlExecutor;
+    use crate::context::TxConnection;
+
+    match (backend, client) {
+        (
+            crate::backend::BackendHandle::Postgres(pg),
+            TxConnection::Postgres(client),
+        ) => pg.client_exec(client, sql, params).await,
+        (crate::backend::BackendHandle::Sqlite(sq), TxConnection::Sqlite(client)) => {
+            sq.client_exec(client, sql, params).await
+        }
+        (crate::backend::BackendHandle::Postgres(_), TxConnection::Sqlite(_))
+        | (crate::backend::BackendHandle::Sqlite(_), TxConnection::Postgres(_)) => Err(
+            crate::error::DbError::internal("db: transaction backend/client mismatch"),
+        ),
+    }
+}
+
 /// Apply the §17.5 per-app PG role to a transaction's dedicated client.
 ///
 /// Issues `SET LOCAL ROLE "<per-app role>"` on `client` so every

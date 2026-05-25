@@ -41,28 +41,22 @@ hmac = { workspace = true }
 # / `encode("col", 'base64')` on read. Both legs need a hot-path
 # base64 codec; `base64` v0.22 is already a workspace dep.
 base64 = { workspace = true }
-# SQLite backend dependencies — gated behind the `sqlite` Cargo feature
-# below. P1 PR 1 reintroduces these alongside the
-# `crate::backend::sqlite` module skeleton (the previous declarations
-# were removed in the P0 mop-up because the underlying module did not
-# exist and `--features sqlite` failed E0433).
+# SQLite backend dependencies — unconditional now that both backends
+# ship in every build.
 #
 # - `rusqlite`: bundled SQLite amalgamation + `preupdate_hook` seam the
 #   P2 CDC pass will wire in.
 # - `flume`: bounded MPMC queue the `SqliteSession` actor uses to
 #   serialise calls onto the single rusqlite writer thread (compio is
-#   single-threaded; the actor runs under `spawn_blocking`). The
-#   `flume` workspace dep was already declared for the sandbox phase-1
-#   queue — we just opt in optionally here.
-rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"], optional = true }
-flume = { workspace = true, optional = true }
+#   single-threaded; the actor runs under `spawn_blocking`).
+rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
+flume = { workspace = true }
 # **P4 PR 7** — `sqlite-vec` statically compiles the `vec0` C extension
 # into the binary and hooks every rusqlite Connection via
-# `sqlite3_auto_extension`. Optional + gated under the `sqlite` feature
-# umbrella below — the PG arm uses pgvector and never touches this
-# crate. Supersedes the prior P4 PR 4 pure-Rust flat-scan path (see
-# P4 plan §10 2026-05-24 reassessment).
-sqlite-vec = { workspace = true, optional = true }
+# `sqlite3_auto_extension`. Unconditional now that the SQLite arm is
+# always compiled in. The PG arm still never touches this crate.
+sqlite-vec = { workspace = true }
+tempfile = { workspace = true }
 # **P3 PR 3** — SQLite SessionMinter uses HMAC-SHA256. `sha2` is
 # already an unconditional dep (used for the auto-generated index
 # name suffix). The previous `hmac = { ... optional = true }` line
@@ -96,11 +90,6 @@ criterion = { workspace = true }
 # 7c6bd2ec drift in cycle 13:17 — a snapshot test would have caught
 # it pre-commit.
 tracing-subscriber = { workspace = true }
-# P1 PR 2: per-test temp directory for the SQLite integration target
-# (`tests/sqlite_integration.rs`). `SqliteBackend::new(db_dir)` opens
-# `<db_dir>/zs-control.sqlite`; the dir auto-cleans on drop so the
-# tests leave no on-disk artefacts.
-tempfile = { workspace = true }
 # P3 PR 4: cross-backend session-payload equivalence test in
 # `tests/sqlite_integration.rs` needs to recompute HMAC-SHA256 over
 # the canonical payload independently of the production code path so
@@ -109,11 +98,8 @@ tempfile = { workspace = true }
 # are `pub(crate)` and unreachable from the integration target).
 # `sha2` is already declared as a non-optional `[dependencies]` entry
 # (line 20) so it's available to the test target without re-listing;
-# `hmac` is `optional = true` under the `sqlite` feature, which the
-# sqlite_integration target enables — so it transitively reaches dev
-# code, but for explicit clarity (and so a future Cargo change that
-# stops propagating optional deps to dev tests doesn't break us) we
-# also pin `hmac` here as an unconditional dev-dep.
+# `hmac` is also unconditional now, but we keep the dev-dep pin so the
+# integration target still spells out its dependency explicitly.
 hmac = { workspace = true }
 
 [[bench]]
@@ -141,25 +127,6 @@ name = "bench_first_row_or_null"
 harness = false
 
 [features]
-# Default backends — `pg` is the only backend implemented in P0.
-#
-# A `sqlite = []` feature was declared in r14 alongside a
-# `BackendHandle::Sqlite(Rc<crate::backend::sqlite::SqliteBackend>)`
-# enum arm, but the underlying `crate::backend::sqlite` module does
-# not exist, so `--features sqlite` failed to compile (E0433). The
-# P0-mop-up cycle (post-r14) removed both the feature declaration and
-# the enum arm — they will be re-introduced atomically with the
-# `crate::backend::sqlite::SqliteBackend` impl in P1.
-default = ["pg"]
-pg = []
-# Re-introduced in P1 PR 1 alongside the `crate::backend::sqlite`
-# module skeleton. Toggles the `rusqlite` + `flume` dep activation
-# and gates the `BackendHandle::Sqlite` arm. The skeleton commits
-# stub method bodies (every capability impl returns a typed
-# `DbError::Internal { message: "P1 PR2+ stub" }` or `unimplemented!`);
-# real behaviour lands across PR 2-5 per
-# `docs/proposals/p1-sqlite-implementation-plan.md` §9.
-sqlite = ["dep:rusqlite", "dep:flume", "dep:sqlite-vec"]
 # `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via
@@ -171,15 +138,12 @@ name = "integration"
 path = "tests/integration.rs"
 required-features = ["test-helpers"]
 
-# SQLite-side integration target. P1 PR 1 wires the skeleton (a single
-# `smoke_compiles` test); PR 2-5 backfill mirror coverage for the
-# register-model / migration / introspection paths under the SQLite arm.
-# Behind `required-features` so the default-feature build stays clean —
-# `cargo test -p zeroship-plugin-db` (no flags) never builds rusqlite.
+# SQLite-side integration target. PR 0 makes the backend unconditional,
+# so only `test-helpers` remains gated.
 [[test]]
 name = "sqlite_integration"
 path = "tests/sqlite_integration.rs"
-required-features = ["sqlite", "test-helpers"]
+required-features = ["test-helpers"]
 
 [lints]
 workspace = true

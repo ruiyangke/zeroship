@@ -433,7 +433,6 @@ enum ParentValue {
     /// Encrypted column: SQLite BLOB returned as raw bytes (we read
     /// blobs as `TypedCell::Blob` from the typed session API so no
     /// base64 intermediate is needed).
-    #[cfg(feature = "sqlite")]
     SqliteBlob(Vec<u8>),
 }
 
@@ -448,19 +447,13 @@ async fn sample_rows(
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            return sample_rows_pg(pg, app_id, collection, column, sibling, sample_pct).await;
-        }
+    if let Some(pg) = backend.as_postgres() {
+        return sample_rows_pg(pg, app_id, collection, column, sibling, sample_pct).await;
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            return sample_rows_sqlite(sq, app_id, collection, column, sibling, sample_pct).await;
-        }
+    if let Some(sq) = backend.as_sqlite() {
+        return sample_rows_sqlite(sq, app_id, collection, column, sibling, sample_pct).await;
     }
 
     let _ = backend;
@@ -473,7 +466,6 @@ async fn sample_rows(
     })
 }
 
-#[cfg(feature = "pg")]
 async fn sample_rows_pg(
     pg: &crate::backend::PostgresBackend,
     app_id: &str,
@@ -534,7 +526,6 @@ async fn sample_rows_pg(
     Ok(out)
 }
 
-#[cfg(feature = "sqlite")]
 async fn sample_rows_sqlite(
     sq: &crate::backend::sqlite::SqliteBackend,
     app_id: &str,
@@ -642,7 +633,6 @@ async fn compute_expected_masked(
                      arrived as PG BYTEA hex"
                 )));
             }
-            #[cfg(feature = "sqlite")]
             ParentValue::SqliteBlob(_) => {
                 return Err(DbError::internal(format!(
                     "drift_check: column '{column}' not encrypted but parent \
@@ -682,56 +672,45 @@ async fn decrypt_parent_value(
     );
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_encrypted_column_pg() {
-            use crate::backend::EncryptedColumn as _;
-            let hex_str = match parent {
-                ParentValue::PgHex(s) => s.as_str(),
-                ParentValue::Plain(_) => {
-                    return Err(DbError::internal(
-                        "drift_check: encrypted column on PG arrived as plain text",
-                    ));
-                }
-                #[cfg(feature = "sqlite")]
-                ParentValue::SqliteBlob(_) => {
-                    return Err(DbError::internal(
-                        "drift_check: PG path received SQLite BLOB value",
-                    ));
-                }
-            };
-            let bytes = hex_to_bytes(hex_str)?;
-            let key = pg.resolve_key(app_id, &enc.key_id).await?;
-            return Ok(pg.decrypt(&key, enc.mode, &bytes, &aad)?);
-        }
+    if let Some(pg) = backend.as_encrypted_column_pg() {
+        use crate::backend::EncryptedColumn as _;
+        let hex_str = match parent {
+            ParentValue::PgHex(s) => s.as_str(),
+            ParentValue::Plain(_) => {
+                return Err(DbError::internal(
+                    "drift_check: encrypted column on PG arrived as plain text",
+                ));
+            }
+            ParentValue::SqliteBlob(_) => {
+                return Err(DbError::internal(
+                    "drift_check: PG path received SQLite BLOB value",
+                ));
+            }
+        };
+        let bytes = hex_to_bytes(hex_str)?;
+        let key = pg.resolve_key(app_id, &enc.key_id).await?;
+        return Ok(pg.decrypt(&key, enc.mode, &bytes, &aad)?);
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_encrypted_column_sqlite() {
-            use crate::backend::EncryptedColumn as _;
-            let bytes: &[u8] = match parent {
-                ParentValue::SqliteBlob(b) => b.as_slice(),
-                ParentValue::PgHex(_) | ParentValue::Plain(_) => {
-                    return Err(DbError::internal(
-                        "drift_check: encrypted column on SQLite arrived in non-BLOB shape",
-                    ));
-                }
-            };
-            let key = sq.resolve_key(app_id, &enc.key_id).await?;
-            return Ok(sq.decrypt(&key, enc.mode, bytes, &aad)?);
-        }
+    if let Some(sq) = backend.as_encrypted_column_sqlite() {
+        use crate::backend::EncryptedColumn as _;
+        let bytes: &[u8] = match parent {
+            ParentValue::SqliteBlob(b) => b.as_slice(),
+            ParentValue::PgHex(_) | ParentValue::Plain(_) => {
+                return Err(DbError::internal(
+                    "drift_check: encrypted column on SQLite arrived in non-BLOB shape",
+                ));
+            }
+        };
+        let key = sq.resolve_key(app_id, &enc.key_id).await?;
+        return Ok(sq.decrypt(&key, enc.mode, bytes, &aad)?);
     }
 
-    let _ = backend;
-    let _ = aad;
     Err(DbError::Configuration {
         code: "encryption_unavailable",
-        message: "drift_check: encryption surface not available on this build".to_string(),
-        hint: Some(
-            "rebuild with `--features pg` or `--features sqlite`".into(),
-        ),
+        message: "drift_check: no backend arm available for encryption".to_string(),
+        hint: None,
     })
 }
 
@@ -816,66 +795,56 @@ async fn write_drift_audit_row(
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            use crate::backend::PgSqlExecutor as _;
-            let pool = pg.pool_handle();
-            let sql = format!(
-                r#"INSERT INTO "{app_id}"."__zeroship_audit_mask_drift"
-                   (collection, column_name, row_pk, sample_pct, stored_masked, expected_masked)
-                   VALUES ($1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (detected_at, collection, column_name, row_pk) DO NOTHING"#
-            );
-            let pct_s = format!("{sample_pct}");
-            pool.query_text_params(
-                &sql,
-                &[
-                    &sample.collection,
-                    &sample.column,
-                    &sample.row_pk,
-                    &pct_s,
-                    &sample.stored,
-                    &sample.expected,
-                ],
-            )
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            return Ok(());
-        }
+    if let Some(pg) = backend.as_postgres() {
+        use crate::backend::PgSqlExecutor as _;
+        let pool = pg.pool_handle();
+        let sql = format!(
+            r#"INSERT INTO "{app_id}"."__zeroship_audit_mask_drift"
+               (collection, column_name, row_pk, sample_pct, stored_masked, expected_masked)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (detected_at, collection, column_name, row_pk) DO NOTHING"#
+        );
+        let pct_s = format!("{sample_pct}");
+        pool.query_text_params(
+            &sql,
+            &[
+                &sample.collection,
+                &sample.column,
+                &sample.row_pk,
+                &pct_s,
+                &sample.stored,
+                &sample.expected,
+            ],
+        )
+        .await
+        .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        return Ok(());
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-            let q_app = sq.quote_ident(app_id);
-            let sql = format!(
-                r#"INSERT OR IGNORE INTO {q_app}."__zeroship_audit_mask_drift"
-                   (collection, column_name, row_pk, sample_pct, stored_masked, expected_masked)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#
-            );
-            let pct_s = format!("{sample_pct}");
-            sq.pool_exec(
-                &sql,
-                &[
-                    sample.collection.as_str(),
-                    sample.column.as_str(),
-                    sample.row_pk.as_str(),
-                    pct_s.as_str(),
-                    sample.stored.as_str(),
-                    sample.expected.as_str(),
-                ],
-            )
-            .await?;
-            return Ok(());
-        }
+    if let Some(sq) = backend.as_sqlite() {
+        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        let q_app = sq.quote_ident(app_id);
+        let sql = format!(
+            r#"INSERT OR IGNORE INTO {q_app}."__zeroship_audit_mask_drift"
+               (collection, column_name, row_pk, sample_pct, stored_masked, expected_masked)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#
+        );
+        let pct_s = format!("{sample_pct}");
+        sq.pool_exec(
+            &sql,
+            &[
+                sample.collection.as_str(),
+                sample.column.as_str(),
+                sample.row_pk.as_str(),
+                pct_s.as_str(),
+                sample.stored.as_str(),
+                sample.expected.as_str(),
+            ],
+        )
+        .await?;
+        return Ok(());
     }
-
-    let _ = backend;
-    let _ = sample;
-    let _ = sample_pct;
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "drift_check: no backend arm available for drift audit".to_string(),
@@ -904,71 +873,63 @@ async fn ensure_drift_audit_table(app_id: &str) -> Result<(), DbError> {
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            use crate::backend::PgSqlExecutor as _;
-            let pool = pg.pool_handle();
-            let sql = format!(
-                r#"CREATE TABLE IF NOT EXISTS "{app_id}"."__zeroship_audit_mask_drift" (
-                    detected_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    collection      TEXT NOT NULL,
-                    column_name     TEXT NOT NULL,
-                    row_pk          TEXT NOT NULL,
-                    sample_pct      REAL NOT NULL,
-                    stored_masked   TEXT NOT NULL,
-                    expected_masked TEXT NOT NULL,
-                    PRIMARY KEY (detected_at, collection, column_name, row_pk)
-                )"#
-            );
-            let empty: Vec<&str> = Vec::new();
-            pool.query_text_params(&sql, &empty)
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            let idx_coll = format!(
-                r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_mask_drift_coll_idx"
-                   ON "{app_id}"."__zeroship_audit_mask_drift" (collection, column_name, detected_at)"#
-            );
-            pool.query_text_params(&idx_coll, &empty)
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            return Ok(());
-        }
+    if let Some(pg) = backend.as_postgres() {
+        use crate::backend::PgSqlExecutor as _;
+        let pool = pg.pool_handle();
+        let sql = format!(
+            r#"CREATE TABLE IF NOT EXISTS "{app_id}"."__zeroship_audit_mask_drift" (
+                detected_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                collection      TEXT NOT NULL,
+                column_name     TEXT NOT NULL,
+                row_pk          TEXT NOT NULL,
+                sample_pct      REAL NOT NULL,
+                stored_masked   TEXT NOT NULL,
+                expected_masked TEXT NOT NULL,
+                PRIMARY KEY (detected_at, collection, column_name, row_pk)
+            )"#
+        );
+        let empty: Vec<&str> = Vec::new();
+        pool.query_text_params(&sql, &empty)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        let idx_coll = format!(
+            r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_mask_drift_coll_idx"
+               ON "{app_id}"."__zeroship_audit_mask_drift" (collection, column_name, detected_at)"#
+        );
+        pool.query_text_params(&idx_coll, &empty)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        return Ok(());
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-            let q_app = sq.quote_ident(app_id);
-            // SQLite mirror:
-            //   - TIMESTAMPTZ → TEXT with CURRENT_TIMESTAMP default
-            //   - REAL → REAL (native)
-            //   - composite PK identical
-            let sql = format!(
-                r#"CREATE TABLE IF NOT EXISTS {q_app}."__zeroship_audit_mask_drift" (
-                    detected_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    collection      TEXT NOT NULL,
-                    column_name     TEXT NOT NULL,
-                    row_pk          TEXT NOT NULL,
-                    sample_pct      REAL NOT NULL,
-                    stored_masked   TEXT NOT NULL,
-                    expected_masked TEXT NOT NULL,
-                    PRIMARY KEY (detected_at, collection, column_name, row_pk)
-                )"#
-            );
-            sq.pool_exec(&sql, &[]).await?;
-            let idx_coll = format!(
-                r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_mask_drift_coll_idx"
-                   ON "__zeroship_audit_mask_drift" (collection, column_name, detected_at)"#
-            );
-            sq.pool_exec(&idx_coll, &[]).await?;
-            return Ok(());
-        }
+    if let Some(sq) = backend.as_sqlite() {
+        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        let q_app = sq.quote_ident(app_id);
+        // SQLite mirror:
+        //   - TIMESTAMPTZ → TEXT with CURRENT_TIMESTAMP default
+        //   - REAL → REAL (native)
+        //   - composite PK identical
+        let sql = format!(
+            r#"CREATE TABLE IF NOT EXISTS {q_app}."__zeroship_audit_mask_drift" (
+                detected_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                collection      TEXT NOT NULL,
+                column_name     TEXT NOT NULL,
+                row_pk          TEXT NOT NULL,
+                sample_pct      REAL NOT NULL,
+                stored_masked   TEXT NOT NULL,
+                expected_masked TEXT NOT NULL,
+                PRIMARY KEY (detected_at, collection, column_name, row_pk)
+            )"#
+        );
+        sq.pool_exec(&sql, &[]).await?;
+        let idx_coll = format!(
+            r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_mask_drift_coll_idx"
+               ON "__zeroship_audit_mask_drift" (collection, column_name, detected_at)"#
+        );
+        sq.pool_exec(&idx_coll, &[]).await?;
+        return Ok(());
     }
-
-    let _ = backend;
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "drift_check: no backend arm available to provision __zeroship_audit_mask_drift"
@@ -996,77 +957,70 @@ pub async fn read_drift_audit_rows_for_tests(
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-            let q_app = sq.quote_ident(app_id);
-            let sql = format!(
-                r#"SELECT collection, column_name, row_pk, stored_masked, expected_masked
-                   FROM {q_app}."__zeroship_audit_mask_drift"
-                   ORDER BY detected_at, collection, column_name, row_pk"#
-            );
-            let handle = sq.acquire_dedicated_client().await?;
-            let rows = match handle.query_internal(&sql, &[]).await {
-                Ok(r) => r,
-                Err(e) => {
-                    // The lazy table-create only fires when drift
-                    // writes a row; a zero-drift run leaves it
-                    // missing. Surface as "no rows" so the test
-                    // doesn't have to pre-provision.
-                    let msg = format!("{e}");
-                    if msg.contains("no such table") || msg.contains("does not exist") {
-                        return Ok(Vec::new());
-                    }
-                    return Err(e);
+    if let Some(sq) = backend.as_sqlite() {
+        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        let q_app = sq.quote_ident(app_id);
+        let sql = format!(
+            r#"SELECT collection, column_name, row_pk, stored_masked, expected_masked
+               FROM {q_app}."__zeroship_audit_mask_drift"
+               ORDER BY detected_at, collection, column_name, row_pk"#
+        );
+        let handle = sq.acquire_dedicated_client().await?;
+        let rows = match handle.query_internal(&sql, &[]).await {
+            Ok(r) => r,
+            Err(e) => {
+                // The lazy table-create only fires when drift
+                // writes a row; a zero-drift run leaves it
+                // missing. Surface as "no rows" so the test
+                // doesn't have to pre-provision.
+                let msg = format!("{e}");
+                if msg.contains("no such table") || msg.contains("does not exist") {
+                    return Ok(Vec::new());
                 }
-            };
-            return Ok(rows
-                .into_iter()
-                .map(|r| {
-                    (
-                        r.first().cloned().flatten().unwrap_or_default(),
-                        r.get(1).cloned().flatten().unwrap_or_default(),
-                        r.get(2).cloned().flatten().unwrap_or_default(),
-                        r.get(3).cloned().flatten().unwrap_or_default(),
-                        r.get(4).cloned().flatten().unwrap_or_default(),
-                    )
-                })
-                .collect());
-        }
+                return Err(e);
+            }
+        };
+        return Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    r.first().cloned().flatten().unwrap_or_default(),
+                    r.get(1).cloned().flatten().unwrap_or_default(),
+                    r.get(2).cloned().flatten().unwrap_or_default(),
+                    r.get(3).cloned().flatten().unwrap_or_default(),
+                    r.get(4).cloned().flatten().unwrap_or_default(),
+                )
+            })
+            .collect());
     }
 
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            use crate::backend::PgSqlExecutor as _;
-            let pool = pg.pool_handle();
-            let sql = format!(
-                r#"SELECT collection, column_name, row_pk, stored_masked, expected_masked
-                   FROM "{app_id}"."__zeroship_audit_mask_drift"
-                   ORDER BY detected_at, collection, column_name, row_pk"#
-            );
-            let empty: Vec<&str> = Vec::new();
-            let rows = pool
-                .query_text_params(&sql, &empty)
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            return Ok(rows
-                .into_iter()
-                .map(|r| {
-                    let get = |i: usize| -> String {
-                        r.try_get::<_, Option<&str>>(i)
-                            .ok()
-                            .flatten()
-                            .map(str::to_string)
-                            .unwrap_or_default()
-                    };
-                    (get(0), get(1), get(2), get(3), get(4))
-                })
-                .collect());
-        }
+    if let Some(pg) = backend.as_postgres() {
+        use crate::backend::PgSqlExecutor as _;
+        let pool = pg.pool_handle();
+        let sql = format!(
+            r#"SELECT collection, column_name, row_pk, stored_masked, expected_masked
+               FROM "{app_id}"."__zeroship_audit_mask_drift"
+               ORDER BY detected_at, collection, column_name, row_pk"#
+        );
+        let empty: Vec<&str> = Vec::new();
+        let rows = pool
+            .query_text_params(&sql, &empty)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        return Ok(rows
+            .into_iter()
+            .map(|r| {
+                let get = |i: usize| -> String {
+                    r.try_get::<_, Option<&str>>(i)
+                        .ok()
+                        .flatten()
+                        .map(str::to_string)
+                        .unwrap_or_default()
+                };
+                (get(0), get(1), get(2), get(3), get(4))
+            })
+            .collect());
     }
-    let _ = backend;
     Ok(Vec::new())
 }
 

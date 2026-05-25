@@ -51,18 +51,15 @@
 //! is the whole point of `SAVEPOINT`), so no new connection is acquired
 //! for a nested `transaction()`.
 //!
-//! Like the pre-P9 `begin_transaction` and the `auto_tx` wrapper, the
-//! top-level `BEGIN` path acquires a dedicated Postgres client via
-//! [`crate::backend::SqlExecutor::acquire_dedicated_client`] and is
-//! therefore **Postgres-bound** today — the `tx_conn` slot itself holds a
-//! `compio_postgres::Client`, and `run_sql` only consults it on the PG
-//! path. SQLite routes CRUD through its session actor and does not
-//! participate in `tx_conn`; a SQLite `transaction()` rejects with
-//! `backend_unsupported`, matching the pre-existing `beginTransaction`
-//! behaviour. (The savepoint SQL the orchestrator emits is plain-standard
-//! and is exercised against the SQLite engine directly in
-//! `tests/sqlite_integration.rs` so it is validated for the eventual
-//! SQLite-tx wiring.)
+//! The top-level `BEGIN` path acquires a backend-specific dedicated
+//! client via [`crate::backend::SqlExecutor::acquire_dedicated_client`]
+//! and parks it in the per-isolate `tx_conn` slot. Postgres stores a
+//! dedicated libpq connection; SQLite stores a handle to the shared
+//! session actor and drives the same `BEGIN` / `SAVEPOINT` /
+//! `COMMIT` / `ROLLBACK` verbs over that one connection. SQLite ignores
+//! the SDK isolation-level hint (it has no `ISOLATION LEVEL` clause);
+//! the successful-path semantics remain Tier-1 parity, while
+//! concurrency/isolation nuance stays documented as a divergence.
 
 #![allow(unsafe_code)]
 
@@ -71,6 +68,7 @@ use std::cell::Cell;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use crate::backend::SqlExecutor;
+use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 use crate::v8_bridge::runtime_state;
@@ -287,39 +285,59 @@ async fn exec_begin_or_savepoint(
         return Ok(Some(name));
     }
 
-    // Top-level BEGIN — acquire a dedicated connection (PG-bound, like
-    // the pre-P9 begin_transaction / auto_tx paths).
-    let begin_sql = build_begin_sql(isolation_level)?;
-
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let pg = backend
-        .as_postgres()
-        .ok_or_else(|| DbError::backend_unsupported("transaction"))?;
-    let client = pg.acquire_dedicated_client().await?;
 
-    client
-        .execute(&begin_sql, &[])
-        .await
-        .map_err(|e| DbError::from_pg(&e))?;
+    match &backend {
+        crate::backend::BackendHandle::Postgres(pg) => {
+            let begin_sql = build_begin_sql(isolation_level)?;
+            let client = pg.acquire_dedicated_client().await?;
+            let tx_client = TxConnection::Postgres(client);
+            super::client_exec_on_tx(&backend, &tx_client, &begin_sql, &[]).await?;
+            let TxConnection::Postgres(client) = tx_client else {
+                unreachable!("just constructed Postgres tx client")
+            };
 
-    // §17.5 — constrain client SQL to the per-app role for the lifetime of
-    // this transaction. `SET LOCAL ROLE` auto-reverts at COMMIT / ROLLBACK,
-    // so the dedicated tx connection never leaks the role.
-    // The nested SAVEPOINT arm above deliberately does NOT call this: a
-    // savepoint reuses the open connection, which already had the role
-    // applied at its enclosing top-level BEGIN. See
-    // `orchestrator::apply_per_app_role`.
-    super::apply_per_app_role(&client, app_id).await?;
+            // §17.5 — constrain client SQL to the per-app role for the
+            // lifetime of this transaction. `SET LOCAL ROLE` auto-reverts
+            // at COMMIT / ROLLBACK, so the dedicated tx connection never
+            // leaks the role. The nested SAVEPOINT arm above deliberately
+            // does NOT call this: a savepoint reuses the open connection,
+            // which already had the role applied at its enclosing
+            // top-level BEGIN.
+            super::apply_per_app_role(&client, app_id).await?;
 
-    crate::context::with_mut(|c| {
-        let _previous = c.install_tx_client(client);
-        debug_assert!(
-            _previous.is_none(),
-            "exec_begin_or_savepoint: tx_conn slot already occupied"
-        );
-        c.reset_savepoint_depth();
-    });
+            crate::context::with_mut(|c| {
+                let _previous = c.install_tx_client(TxConnection::Postgres(client));
+                debug_assert!(
+                    _previous.is_none(),
+                    "exec_begin_or_savepoint: tx_conn slot already occupied"
+                );
+                c.reset_savepoint_depth();
+            });
+        }
+        crate::backend::BackendHandle::Sqlite(sq) => {
+            // SQLite has no `ISOLATION LEVEL` clause. We still validate
+            // the caller-provided string defensively for parity with the
+            // PG arm, then issue a plain `BEGIN`.
+            let _ = build_begin_sql(isolation_level)?;
+            let client = sq.acquire_dedicated_client().await?;
+            let tx_client = TxConnection::Sqlite(client);
+            super::client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
+            let TxConnection::Sqlite(client) = tx_client else {
+                unreachable!("just constructed SQLite tx client")
+            };
+
+            crate::context::with_mut(|c| {
+                let _previous = c.install_tx_client(TxConnection::Sqlite(client));
+                debug_assert!(
+                    _previous.is_none(),
+                    "exec_begin_or_savepoint: tx_conn slot already occupied"
+                );
+                c.reset_savepoint_depth();
+            });
+        }
+    }
     // Defensive: drop any broker residue from an interrupted prior run so
     // it cannot leak into this tx's drain.
     clear_pending_emits();
@@ -359,13 +377,15 @@ fn savepoint_name(depth: u32) -> String {
 /// connection, holding the client across the await and putting it back.
 /// Used for savepoint statements that must NOT drain the connection.
 async fn run_on_tx_conn(sql: &str) -> Result<(), DbError> {
+    let backend = crate::context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let client = crate::context::with_mut(|c| c.take_tx_client())
         .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
-    let result = client.execute(sql, &[]).await;
+    let result = super::client_exec_on_tx(&backend, &client, sql, &[]).await;
     // Put the client back regardless — savepoint statements keep the tx
     // open.
     crate::context::with_mut(|c| c.put_tx_client(client));
-    result.map(|_| ()).map_err(|e| DbError::from_pg(&e))
+    result.map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +654,7 @@ fn settle_failed_before_body(
 
 /// Result of the settle SQL, carrying enough to build the outer promise's
 /// `ResolveValue`.
+#[derive(Debug)]
 enum SettleOutcome {
     /// Settle SQL succeeded.
     Ok,
@@ -678,6 +699,14 @@ async fn exec_settle(success: bool, savepoint: Option<&str>) -> SettleOutcome {
 /// Top-level COMMIT / ROLLBACK. Drains the connection out of the slot,
 /// runs the statement, drops the client, and settles the broker queue.
 async fn exec_settle_top_level(success: bool) -> SettleOutcome {
+    let backend = match crate::context::with(|c| c.backend()) {
+        Some(backend) => backend,
+        None => {
+            crate::context::with_mut(|c| c.reset_savepoint_depth());
+            clear_pending_emits();
+            return SettleOutcome::Ok;
+        }
+    };
     let client_opt = crate::context::with_mut(|c| c.take_tx_client());
     let Some(client) = client_opt else {
         // Slot already drained (e.g. a concurrent teardown). Treat as
@@ -688,7 +717,10 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
     };
 
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let result = client.execute(cmd, &[]).await;
+    let result = super::client_exec_on_tx(&backend, &client, cmd, &[]).await;
+    if success && result.is_err() && matches!(client, TxConnection::Sqlite(_)) {
+        let _ = super::client_exec_on_tx(&backend, &client, "ROLLBACK", &[]).await;
+    }
     drop(client);
 
     // Clear the tx slot bookkeeping now that the connection is gone.
@@ -702,11 +734,12 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
         }
         (true, Err(e)) => {
             // COMMIT failed after the body resolved → indeterminate.
-            // Best-effort rollback is moot (the connection is gone, which
-            // Postgres treats as a rollback). Drop the queued events so
-            // subscribers never see writes that may not have landed.
+            // PG aborts on connection drop; SQLite needs the explicit
+            // best-effort `ROLLBACK` above because the actor outlives the
+            // handle. Drop the queued events so subscribers never see
+            // writes that may not have landed.
             clear_pending_emits();
-            SettleOutcome::CommitIndeterminate(DbError::from_pg(&e))
+            SettleOutcome::CommitIndeterminate(e)
         }
         (false, Ok(_)) => {
             // Rollback succeeded — drop the queued events.
@@ -714,9 +747,10 @@ async fn exec_settle_top_level(success: bool) -> SettleOutcome {
             SettleOutcome::Ok
         }
         (false, Err(_)) => {
-            // Rollback failed; the connection drop already aborted the tx
-            // server-side. Treat as rolled back (the body error still
-            // governs the outer rejection).
+            // Rollback failed; PG still aborts on connection drop and the
+            // SQLite arm already attempted an explicit `ROLLBACK`.
+            // Treat as rolled back (the body error still governs the
+            // outer rejection).
             clear_pending_emits();
             SettleOutcome::Ok
         }
@@ -774,6 +808,47 @@ fn build_settle_resolve_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    use crate::backend::sqlite::SqliteBackend;
+    use crate::backend::SqlExecutor;
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
+    }
+
+    struct ContextReset;
+
+    impl Drop for ContextReset {
+        fn drop(&mut self) {
+            crate::context::with_mut(|c| {
+                let _ = c.take_tx_client();
+                c.set_auto_tx_owned(false);
+                c.reset_savepoint_depth();
+                c.clear_pending_emits();
+                c.clear_pool();
+            });
+        }
+    }
+
+    fn install_sqlite_backend_for_test() -> (Rc<SqliteBackend>, tempfile::TempDir, ContextReset) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let backend = Rc::new(
+            SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+        );
+        let reset = ContextReset;
+        crate::context::with_mut(|c| {
+            let _ = c.take_tx_client();
+            c.set_auto_tx_owned(false);
+            c.reset_savepoint_depth();
+            c.clear_pending_emits();
+            c.set_sqlite_backend(Rc::clone(&backend));
+        });
+        (backend, dir, reset)
+    }
 
     #[test]
     fn savepoint_name_is_prefixed_and_1_based() {
@@ -837,5 +912,83 @@ mod tests {
         matches!(rv, ResolveValue::Undefined)
             .then_some(())
             .expect("expected Undefined for ok+no-body");
+    }
+
+    #[test]
+    fn sqlite_top_level_begin_ignores_isolation_and_commits() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            let probe = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire sqlite probe");
+            backend
+                .client_exec(
+                    &probe,
+                    "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            exec_begin_or_savepoint(false, Some("SERIALIZABLE"), "app_sqlite")
+                .await
+                .expect("begin sqlite tx");
+            backend
+                .client_exec(&probe, "INSERT INTO notes (title) VALUES ('kept')", &[])
+                .await
+                .expect("insert inside sqlite tx");
+
+            match exec_settle(true, None).await {
+                SettleOutcome::Ok => {}
+                other => panic!("expected Ok settle outcome, got {other:?}"),
+            }
+
+            let rows = probe
+                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .await
+                .expect("count notes after commit");
+            assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert!(!crate::context::with(|c| c.has_tx()));
+        });
+    }
+
+    #[test]
+    fn sqlite_top_level_reject_path_actively_rolls_back() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            let probe = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire sqlite probe");
+            backend
+                .client_exec(
+                    &probe,
+                    "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            exec_begin_or_savepoint(false, None, "app_sqlite")
+                .await
+                .expect("begin sqlite tx");
+            backend
+                .client_exec(&probe, "INSERT INTO notes (title) VALUES ('rolled-back')", &[])
+                .await
+                .expect("insert inside sqlite tx");
+
+            match exec_settle(false, None).await {
+                SettleOutcome::Ok => {}
+                other => panic!("expected Ok settle outcome, got {other:?}"),
+            }
+
+            let rows = probe
+                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .await
+                .expect("count notes after rollback");
+            assert_eq!(rows[0][0].as_deref(), Some("0"));
+            assert!(!crate::context::with(|c| c.has_tx()));
+        });
     }
 }

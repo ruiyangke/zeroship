@@ -1,6 +1,6 @@
 # zeroship app
 
-A zeroship app with database (PGlite in dev), file storage, and key-value cache
+A zeroship app with database (SQLite by default in dev), file storage, and key-value cache
 wired up out of the box.
 
 ## Get started
@@ -11,7 +11,7 @@ npm run dev
 ```
 
 - **http://localhost:5173** — your app
-- **.zeroship/** — local dev state (Postgres data, uploaded files). Git-ignored.
+- **.zeroship/** — local dev state (SQLite data, uploaded files). Git-ignored.
 - **src/index.ts** — server functions (marked `"use server"`). React UI calls
   these like regular functions; the plugin turns them into RPC.
 - **src/App.tsx** — React client.
@@ -20,7 +20,7 @@ npm run dev
 
 | SDK | Where it comes from | What it does |
 |---|---|---|
-| `@zeroship/db` | `env.db` | Typed CRUD over Postgres |
+| `@zeroship/db` | `env.db` | Typed CRUD over the app database |
 | `@zeroship/storage` | `env.storage` | File uploads / object storage |
 | `@zeroship/kv` | `env.kv` | In-memory cache, sessions, counters |
 

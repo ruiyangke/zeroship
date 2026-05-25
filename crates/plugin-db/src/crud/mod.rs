@@ -26,6 +26,7 @@
 
 use std::future::Future;
 
+use base64::Engine as _;
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
@@ -162,6 +163,177 @@ where
     }
 }
 
+fn current_sql_dialect() -> query::SqlDialect {
+    match crate::context::with(|c| c.backend()) {
+        Some(crate::backend::BackendHandle::Sqlite(_)) => query::SqlDialect::Sqlite,
+        _ => query::SqlDialect::Postgres,
+    }
+}
+
+fn maybe_lower_sqlite_boolean_doc(
+    app_id: &str,
+    collection: &str,
+    doc: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    lower_boolean_doc_with_schema(&schema, doc);
+}
+
+fn maybe_lower_sqlite_boolean_docs(
+    app_id: &str,
+    collection: &str,
+    docs: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    let Some(arr) = docs.as_array_mut() else {
+        return;
+    };
+    for doc in arr {
+        lower_boolean_doc_with_schema(&schema, doc);
+    }
+}
+
+fn maybe_lower_sqlite_boolean_update(
+    app_id: &str,
+    collection: &str,
+    patch: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    lower_boolean_update_with_schema(&schema, patch);
+}
+
+fn maybe_lower_sqlite_boolean_filter(
+    app_id: &str,
+    collection: &str,
+    filter: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    lower_boolean_filter_with_schema(&schema, filter);
+}
+
+fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    for (field, value) in obj {
+        if field.starts_with("__zsenc__") {
+            continue;
+        }
+        if schema_field_type(schema, field) == Some("boolean") {
+            lower_boolean_scalar(value);
+        }
+    }
+}
+
+fn lower_boolean_update_with_schema(schema: &Value, patch: &mut Value) {
+    let Some(obj) = patch.as_object_mut() else {
+        return;
+    };
+    if let Some(set_doc) = obj.get_mut("$set") {
+        lower_boolean_doc_with_schema(schema, set_doc);
+    }
+    for (field, value) in obj {
+        if field.starts_with('$') || field.starts_with("__zsenc__") {
+            continue;
+        }
+        if schema_field_type(schema, field) != Some("boolean") {
+            continue;
+        }
+        match value {
+            Value::Bool(_) => lower_boolean_scalar(value),
+            Value::Object(ops) => {
+                if let Some(set_val) = ops.get_mut("$set") {
+                    lower_boolean_scalar(set_val);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lower_boolean_filter_with_schema(schema: &Value, filter: &mut Value) {
+    let Some(obj) = filter.as_object_mut() else {
+        return;
+    };
+    for (key, value) in obj {
+        if key.starts_with('$') {
+            match key.as_str() {
+                "$and" | "$or" => {
+                    if let Some(arr) = value.as_array_mut() {
+                        for clause in arr {
+                            lower_boolean_filter_with_schema(schema, clause);
+                        }
+                    }
+                }
+                "$not" => lower_boolean_filter_with_schema(schema, value),
+                _ => {}
+            }
+            continue;
+        }
+        if schema_field_type(schema, key) == Some("boolean") {
+            lower_boolean_filter_value(value);
+        }
+    }
+}
+
+fn lower_boolean_filter_value(value: &mut Value) {
+    match value {
+        Value::Bool(_) => lower_boolean_scalar(value),
+        Value::Object(ops) => {
+            for (op, operand) in ops {
+                match op.as_str() {
+                    "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" => {
+                        lower_boolean_scalar(operand);
+                    }
+                    "$in" | "$nin" => {
+                        if let Some(arr) = operand.as_array_mut() {
+                            for item in arr {
+                                lower_boolean_scalar(item);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lower_boolean_scalar(value: &mut Value) {
+    if let Value::Bool(b) = value {
+        *value = Value::Number(serde_json::Number::from(i64::from(u8::from(*b))));
+    }
+}
+
+fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
+    schema
+        .as_object()?
+        .get(field)?
+        .get("type")?
+        .as_str()
+}
+
 /// Lower a `Vec<Value>` result to a single JSON value: the first row,
 /// or `null` when the result was empty. Used by `insert` / `update` /
 /// `delete` / `upsert`, all of which the SDK expects to resolve to a
@@ -226,6 +398,223 @@ fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
     } else {
         ResolveValue::Json(json)
     }
+}
+
+fn normalize_rows_on_read(
+    app_id: &str,
+    collection: &str,
+    mut rows: Vec<Value>,
+) -> Result<Vec<Value>, DbError> {
+    let schema = crate::context::with(|c| c.schema_for(app_id, collection));
+    for row in rows.iter_mut() {
+        normalize_row_on_read(schema.as_ref(), row)?;
+    }
+    Ok(rows)
+}
+
+fn normalize_row_on_read(schema: Option<&Value>, row: &mut Value) -> Result<(), DbError> {
+    let Some(obj) = row.as_object_mut() else {
+        return Ok(());
+    };
+    for (key, value) in obj.iter_mut() {
+        if matches!(key.as_str(), "created_at" | "updated_at" | "deleted_at") {
+            normalize_timestamp_value(value)?;
+            continue;
+        }
+
+        let Some(def) = schema
+            .and_then(Value::as_object)
+            .and_then(|schema_obj| schema_obj.get(key))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+
+        if def.get("encrypted").is_some() {
+            continue;
+        }
+
+        match def.get("type").and_then(Value::as_str) {
+            Some("boolean") => normalize_boolean_value(value),
+            Some("json") | Some("object") | Some("array") | Some("union") => {
+                normalize_json_value(value)
+            }
+            Some("bytes") => normalize_bytes_value(value)?,
+            Some("date") | Some("calendarDate") => normalize_timestamp_value(value)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn normalize_boolean_value(value: &mut Value) {
+    match value {
+        Value::Bool(_) | Value::Null => {}
+        Value::Number(n) => {
+            if n.as_i64() == Some(0) {
+                *value = Value::Bool(false);
+            } else if n.as_i64() == Some(1) {
+                *value = Value::Bool(true);
+            }
+        }
+        Value::String(s) => match s.as_str() {
+            "0" | "false" => *value = Value::Bool(false),
+            "1" | "true" => *value = Value::Bool(true),
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn normalize_json_value(value: &mut Value) {
+    if let Value::String(s) = value {
+        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+            *value = parsed;
+        }
+    }
+}
+
+fn normalize_bytes_value(value: &mut Value) -> Result<(), DbError> {
+    match value {
+        Value::Null | Value::String(_) => Ok(()),
+        Value::Array(arr) => {
+            let mut raw = Vec::with_capacity(arr.len());
+            for cell in arr.iter() {
+                let Some(n) = cell.as_u64() else {
+                    return Err(DbError::internal(format!(
+                        "normalize_row_on_read: bytes field expected byte array, got {cell:?}"
+                    )));
+                };
+                let byte = u8::try_from(n).map_err(|_| {
+                    DbError::internal(format!(
+                        "normalize_row_on_read: bytes field byte out of range: {n}"
+                    ))
+                })?;
+                raw.push(byte);
+            }
+            *value = Value::String(base64::engine::general_purpose::STANDARD.encode(raw));
+            Ok(())
+        }
+        other => Err(DbError::internal(format!(
+            "normalize_row_on_read: bytes field expected string/array/null, got {other:?}"
+        ))),
+    }
+}
+
+fn normalize_timestamp_value(value: &mut Value) -> Result<(), DbError> {
+    match value {
+        Value::Null | Value::Number(_) => Ok(()),
+        Value::String(s) => {
+            if let Some(ms) = parse_timestamp_millis(s) {
+                *value = Value::Number(serde_json::Number::from(ms));
+            }
+            Ok(())
+        }
+        other => Err(DbError::internal(format!(
+            "normalize_row_on_read: timestamp field expected string/number/null, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_timestamp_millis(s: &str) -> Option<i64> {
+    if let Some(ms) = crate::backend::sqlite::session_minter::parse_iso_to_millis(s) {
+        return Some(ms);
+    }
+
+    let b = s.as_bytes();
+    if b.len() < 19 {
+        return None;
+    }
+    if b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b' ' | b'T') || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+
+    let year: i32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let month: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
+    let day: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
+    let hour: i64 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
+    let minute: i64 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
+    let second: i64 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
+        return None;
+    }
+
+    let mut millis = 0i64;
+    let mut tz_offset_minutes = 0i64;
+    let mut idx = 19usize;
+
+    if idx < b.len() && b[idx] == b'.' {
+        idx += 1;
+        let frac_start = idx;
+        while idx < b.len() && b[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        if idx == frac_start {
+            return None;
+        }
+        let frac = &b[frac_start..idx];
+        let frac_digits = std::str::from_utf8(frac).ok()?;
+        let mut milli_digits = frac_digits.chars().take(3).collect::<String>();
+        while milli_digits.len() < 3 {
+            milli_digits.push('0');
+        }
+        millis = milli_digits.parse().ok()?;
+    }
+
+    if idx < b.len() {
+        tz_offset_minutes = parse_timestamp_offset_minutes(&b[idx..])?;
+    }
+
+    let days = days_from_civil(year, month, day)?;
+    let total_secs = days * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(total_secs * 1000 + millis - tz_offset_minutes * 60 * 1000)
+}
+
+fn parse_timestamp_offset_minutes(rest: &[u8]) -> Option<i64> {
+    match rest {
+        b"Z" | b"z" => Some(0),
+        [sign @ (b'+' | b'-'), h1, h2] => {
+            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
+            if hours > 23 {
+                return None;
+            }
+            let sign = if *sign == b'-' { -1 } else { 1 };
+            Some(sign * hours * 60)
+        }
+        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
+            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
+            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            let sign = if *sign == b'-' { -1 } else { 1 };
+            Some(sign * (hours * 60 + minutes))
+        }
+        [sign @ (b'+' | b'-'), h1, h2, m1, m2] => {
+            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
+            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            let sign = if *sign == b'-' { -1 } else { 1 };
+            Some(sign * (hours * 60 + minutes))
+        }
+        _ => None,
+    }
+}
+
+fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { i64::from(y) - 1 } else { i64::from(y) };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let m = m as i64;
+    let d = d as i64;
+    let doy = ((153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1) as u64;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe as i64 - 719_468)
 }
 
 // ---------------------------------------------------------------------------
@@ -316,10 +705,12 @@ pub(crate) fn dispatch_find<'s>(
         // **P7 PR 5** — soft-delete auto-filter gate.
         let filter_soft_deleted =
             system_fields_pass::should_filter_soft_deleted(&app, &coll, include_deleted);
-        let built = query::build_find_with_schema_and_unmask_and_soft_delete(
+        let mut sql_filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
+        let built = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
             &app,
             &coll,
-            &filter,
+            &sql_filter,
             limit,
             offset,
             order_by.as_ref(),
@@ -327,6 +718,7 @@ pub(crate) fn dispatch_find<'s>(
             schema_hint.as_ref(),
             &unmask_columns,
             filter_soft_deleted,
+            current_sql_dialect(),
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -340,6 +732,16 @@ pub(crate) fn dispatch_find<'s>(
         };
         match exec_query(bq).await {
             Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
                 // **P5 PR 2** — decrypt encrypted columns on every
                 // returned row. No-op when the schema declares none.
                 let rows = match apply_encryption_on_read(&app, &coll, rows).await {
@@ -466,7 +868,8 @@ pub(crate) fn dispatch_insert<'s>(
                 request_id,
             };
         }
-        let built = query::build_insert(&app, &coll, &doc);
+        maybe_lower_sqlite_boolean_doc(&app, &coll, &mut doc);
+        let built = query::build_insert_with_dialect(&app, &coll, &doc, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
                 exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
@@ -475,6 +878,16 @@ pub(crate) fn dispatch_insert<'s>(
         };
         match result {
             Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
                 let rows = apply_encryption_on_read(&app, &coll, rows).await;
                 let rows = match rows {
                     Ok(rows) => rows,
@@ -540,8 +953,10 @@ pub(crate) fn dispatch_insert_many<'s>(
         collection,
         actor_id.as_deref(),
     );
+    maybe_lower_sqlite_boolean_docs(app_id, collection, &mut docs);
 
-    let built = query::build_insert_many(app_id, collection, &docs);
+    let built =
+        query::build_insert_many_with_dialect(app_id, collection, &docs, current_sql_dialect());
     let coll = collection.to_string();
     let app = app_id.to_string();
 
@@ -550,7 +965,9 @@ pub(crate) fn dispatch_insert_many<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         rows_as_json_array,
     )));
@@ -630,6 +1047,9 @@ pub(crate) fn dispatch_update_one<'s>(
                 request_id,
             };
         }
+        maybe_lower_sqlite_boolean_update(&app, &coll, &mut update);
+        let mut sql_filter = filter.clone();
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
         // **P7 PR 4** — auto-bump via the system-fields-aware builder.
         // Actor flows into the `updated_by` bind; the `hints` from the
         // pre-pass tell the builder which auto-bumps to suppress.
@@ -642,9 +1062,9 @@ pub(crate) fn dispatch_update_one<'s>(
         let built = query::build_update_one_with_system_fields(
             &app,
             &coll,
-            &filter,
+            &sql_filter,
             &update,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         let bq = match built {
@@ -659,6 +1079,16 @@ pub(crate) fn dispatch_update_one<'s>(
         };
         match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
                 // **P7 PR 4** — optimistic-concurrency check. When the
                 // creator supplied a `version: N` predicate AND the
                 // RETURNING set is empty, classify as a CAS failure
@@ -791,18 +1221,29 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
 
+        let mut update = update;
+        if let Err(e) = apply_encryption_on_update(&app, &coll, &filter, &mut update).await {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
         let autobump = query::SystemFieldAutoBump {
             actor_id: actor_id.as_deref(),
             skip_version: hints.creator_supplied_version,
             skip_updated_at: hints.creator_supplied_updated_at,
             skip_updated_by: hints.creator_supplied_updated_by,
         };
+        maybe_lower_sqlite_boolean_update(&app, &coll, &mut update);
+        let mut sql_filter = filter.clone();
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
         let built = query::build_update_many_with_system_fields(
             &app,
             &coll,
-            &filter,
+            &sql_filter,
             &update,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         let bq = match built {
@@ -895,6 +1336,8 @@ pub(crate) fn dispatch_delete_one<'s>(
     let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
 
     if has_marker {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
         let autobump = query::SystemFieldAutoBump {
             actor_id: actor_id.as_deref(),
             ..Default::default()
@@ -903,7 +1346,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             &app,
             &coll,
             &filter,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -914,19 +1357,32 @@ pub(crate) fn dispatch_delete_one<'s>(
                 // Tagged as Update because soft-delete IS an UPDATE
                 // setting `deleted_at`. Subscribers wanting to react
                 // to soft-deletes inspect `new_tuple.deleted_at`.
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+                let rows =
+                    exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update)
+                        .await?;
+                normalize_rows_on_read(&app, &coll, rows)
             },
             first_row_or_null,
         )));
     } else {
         system_fields_pass::warn_legacy_hard_delete(&app, &coll);
-        let built = query::build_delete_one(&app, &coll, &filter);
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
+        let built = query::build_delete_one_with_dialect(
+            &app,
+            &coll,
+            &filter,
+            current_sql_dialect(),
+        );
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
             resolver,
             request_id,
             built,
             move |bq| async move {
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
+                let rows =
+                    exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
+                        .await?;
+                normalize_rows_on_read(&app, &coll, rows)
             },
             first_row_or_null,
         )));
@@ -954,6 +1410,8 @@ pub(crate) fn dispatch_delete_many<'s>(
     let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
 
     if has_marker {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
         let autobump = query::SystemFieldAutoBump {
             actor_id: actor_id.as_deref(),
             ..Default::default()
@@ -962,7 +1420,7 @@ pub(crate) fn dispatch_delete_many<'s>(
             &app,
             &coll,
             &filter,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -976,6 +1434,8 @@ pub(crate) fn dispatch_delete_many<'s>(
         )));
     } else {
         system_fields_pass::warn_legacy_hard_delete(&app, &coll);
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
         let built = query::build_delete_many(&app, &coll, &filter);
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
             resolver,
@@ -1006,7 +1466,10 @@ pub(crate) fn dispatch_purge_one<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_delete_one(app_id, collection, &filter);
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
+    let built =
+        query::build_delete_one_with_dialect(app_id, collection, &filter, current_sql_dialect());
     let coll = collection.to_string();
     let app = app_id.to_string();
 
@@ -1015,7 +1478,10 @@ pub(crate) fn dispatch_purge_one<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
+                    .await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         first_row_or_null,
     )));
@@ -1033,6 +1499,8 @@ pub(crate) fn dispatch_purge_many<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let built = query::build_delete_many(app_id, collection, &filter);
     let coll = collection.to_string();
     let app = app_id.to_string();
@@ -1083,11 +1551,13 @@ pub(crate) fn dispatch_restore_one<'s>(
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let built = query::build_restore_one_with_system_fields(
         &app,
         &coll,
         &filter,
-        query::SqlDialect::Postgres,
+        current_sql_dialect(),
         &autobump,
     );
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -1095,7 +1565,9 @@ pub(crate) fn dispatch_restore_one<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         first_row_or_null,
     )));
@@ -1134,11 +1606,13 @@ pub(crate) fn dispatch_restore_many<'s>(
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let built = query::build_restore_many_with_system_fields(
         &app,
         &coll,
         &filter,
-        query::SqlDialect::Postgres,
+        current_sql_dialect(),
         &autobump,
     );
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -1195,18 +1669,24 @@ pub(crate) fn dispatch_aggregate<'s>(
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    let built = query::build_aggregate_with_soft_delete(
+    let app = app_id.to_string();
+    let coll = collection.to_string();
+    let built = query::build_aggregate_with_soft_delete_with_dialect(
         app_id,
         collection,
         &pipeline,
         filter_soft_deleted,
+        current_sql_dialect(),
     );
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
         built,
-        exec_query,
+        move |bq| async move {
+            let rows = exec_query(bq).await?;
+            normalize_rows_on_read(&app, &coll, rows)
+        },
         rows_as_json_array,
     )));
 
@@ -1235,19 +1715,27 @@ pub(crate) fn dispatch_distinct<'s>(
         .unwrap_or(false);
     let filter_soft_deleted =
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
-    let built = query::build_distinct_with_soft_delete(
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
+    let app = app_id.to_string();
+    let coll = collection.to_string();
+    let built = query::build_distinct_with_soft_delete_with_dialect(
         app_id,
         collection,
         field,
         &filter,
         filter_soft_deleted,
+        current_sql_dialect(),
     );
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
         built,
-        exec_query,
+        move |bq| async move {
+            let rows = exec_query(bq).await?;
+            normalize_rows_on_read(&app, &coll, rows)
+        },
         |rows: Vec<Value>| {
             // Extract single-column values into a flat array. `rows`
             // is the pre-decoded result set — no JSON parse needed
@@ -1292,6 +1780,8 @@ pub(crate) fn dispatch_count<'s>(
         .unwrap_or(false);
     let filter_soft_deleted =
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let built =
@@ -1328,7 +1818,15 @@ pub(crate) fn dispatch_upsert<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_upsert(app_id, collection, &doc, &conflict_fields);
+    let mut doc = doc;
+    maybe_lower_sqlite_boolean_doc(app_id, collection, &mut doc);
+    let built = query::build_upsert_with_dialect(
+        app_id,
+        collection,
+        &doc,
+        &conflict_fields,
+        current_sql_dialect(),
+    );
     let coll = collection.to_string();
     let app = app_id.to_string();
 
@@ -1341,7 +1839,9 @@ pub(crate) fn dispatch_upsert<'s>(
             // We tag as Update because the subscriber's reaction is the
             // same — re-fetch. The proposal's read-set narrowing (P8b)
             // will distinguish; P8a doesn't need to.
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         first_row_or_null,
     )));
@@ -1440,13 +1940,13 @@ pub(crate) fn dispatch_search<'s>(
                 // `limit: Option<usize>` either way.
                 args.get("k").and_then(Value::as_u64).map(|n| n as usize)
             });
-        let filter = args
+        let mut filter = args
             .get("filter")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-
         let app = app_id.to_string();
         let coll = collection.to_string();
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             let backend = crate::context::with(|c| c.backend());
@@ -1459,47 +1959,42 @@ pub(crate) fn dispatch_search<'s>(
                 // PG path so a build with both arms compiled in
                 // dispatches based on which arm the runtime is bound
                 // to, not on Cargo-feature ordering.
-                #[cfg(feature = "sqlite")]
-                {
-                    if let Some(sq) = backend.as_sqlite() {
-                        use crate::backend::FullTextIndex as _;
-                        return sq
-                            .fts_search(&app, &coll, &text_query, &filter, limit)
-                            .await;
-                    }
-                }
-                #[cfg(feature = "pg")]
-                {
-                    let pg = backend
-                        .as_postgres()
-                        .ok_or_else(|| DbError::backend_unsupported("fts_search"))?;
+                if let Some(sq) = backend.as_sqlite() {
                     use crate::backend::FullTextIndex as _;
-                    return pg.fts_search(&app, &coll, &text_query, &filter, limit).await;
+                    return sq
+                        .fts_search(&app, &coll, &text_query, &filter, limit)
+                        .await;
                 }
-                #[cfg(not(feature = "pg"))]
-                {
-                    Err(DbError::Configuration {
-                        code: "fts_unsupported",
-                        message:
-                            "db: full-text search requires the `pg` Cargo feature on this build"
-                                .to_string(),
-                        hint: Some(
-                            "rebuild with `--features pg` or use the SQLite arm (P4 PR 5)"
-                                .to_string(),
-                        ),
-                    })
-                }
+                let pg = backend
+                    .as_postgres()
+                    .ok_or_else(|| DbError::backend_unsupported("fts_search"))?;
+                use crate::backend::FullTextIndex as _;
+                pg.fts_search(&app, &coll, &text_query, &filter, limit).await
             }
             .await;
 
             match result {
-                Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: zeroship_runtime::state::ResolveValue::Json(
-                        Value::Array(rows).to_string(),
-                    ),
-                    request_id,
-                },
+                Ok(rows) => {
+                    let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            return zeroship_runtime::state::OpResult::JsValue {
+                                resolver,
+                                value: zeroship_runtime::state::ResolveValue::RejectError(
+                                    e.to_op_error(),
+                                ),
+                                request_id,
+                            };
+                        }
+                    };
+                    zeroship_runtime::state::OpResult::JsValue {
+                        resolver,
+                        value: zeroship_runtime::state::ResolveValue::Json(
+                            Value::Array(rows).to_string(),
+                        ),
+                        request_id,
+                    }
+                }
                 Err(e) => zeroship_runtime::state::OpResult::JsValue {
                     resolver,
                     value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
@@ -1578,13 +2073,13 @@ pub(crate) fn dispatch_search<'s>(
         .and_then(Value::as_str)
         .unwrap_or("embedding")
         .to_string();
-    let filter = args
+    let mut filter = args
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-
     let app = app_id.to_string();
     let coll = collection.to_string();
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Reach the backend through the per-isolate context. The
@@ -1596,31 +2091,13 @@ pub(crate) fn dispatch_search<'s>(
             let backend = backend.ok_or_else(|| {
                 DbError::config("not_configured", "db: backend not initialized".to_string())
             })?;
-            #[allow(unused_variables)]
             let pg_path = || async {
-                #[cfg(feature = "pg")]
-                {
-                    let pg = backend
-                        .as_postgres()
-                        .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
-                    use crate::backend::VectorIndex as _;
-                    return pg
-                        .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
-                        .await;
-                }
-                #[cfg(not(feature = "pg"))]
-                {
-                    Err(DbError::Configuration {
-                        code: "vector_unsupported",
-                        message:
-                            "db: vector search requires the `pg` Cargo feature on this build"
-                                .to_string(),
-                        hint: Some(
-                            "rebuild with `--features pg` or use the SQLite arm (P4 PR 4)"
-                                .to_string(),
-                        ),
-                    })
-                }
+                let pg = backend
+                    .as_postgres()
+                    .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
+                use crate::backend::VectorIndex as _;
+                pg.vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                    .await
             };
             // **P4 PR 4** — SQLite arm routes through the pure-Rust
             // flat-scan `VectorIndex` impl on `SqliteBackend`. We
@@ -1628,27 +2105,38 @@ pub(crate) fn dispatch_search<'s>(
             // arms compiled in (`--features "pg sqlite"` for tests)
             // dispatches based on which arm the runtime is bound to,
             // not on Cargo-feature ordering.
-            #[cfg(feature = "sqlite")]
-            {
-                if let Some(sq) = backend.as_sqlite() {
-                    use crate::backend::VectorIndex as _;
-                    return sq
-                        .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
-                        .await;
-                }
+            if let Some(sq) = backend.as_sqlite() {
+                use crate::backend::VectorIndex as _;
+                return sq
+                    .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                    .await;
             }
             pg_path().await
         }
         .await;
 
         match result {
-            Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::Json(
-                    Value::Array(rows).to_string(),
-                ),
-                request_id,
-            },
+            Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return zeroship_runtime::state::OpResult::JsValue {
+                            resolver,
+                            value: zeroship_runtime::state::ResolveValue::RejectError(
+                                e.to_op_error(),
+                            ),
+                            request_id,
+                        };
+                    }
+                };
+                zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::Json(
+                        Value::Array(rows).to_string(),
+                    ),
+                    request_id,
+                }
+            }
             Err(e) => zeroship_runtime::state::OpResult::JsValue {
                 resolver,
                 value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
@@ -1748,13 +2236,14 @@ pub(crate) fn dispatch_near<'s>(
         .get("limit")
         .and_then(Value::as_u64)
         .map(|n| n as usize);
-    let filter = args
+    let mut filter = args
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
     let app = app_id.to_string();
     let coll = collection.to_string();
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let point = crate::backend::GeoPoint { lat, lng };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -1768,49 +2257,43 @@ pub(crate) fn dispatch_near<'s>(
             // `SqliteBackend`. Short-circuit BEFORE the PG path so a
             // build with both arms compiled in dispatches based on
             // which arm the runtime is bound to.
-            #[cfg(feature = "sqlite")]
-            {
-                if let Some(sq) = backend.as_sqlite() {
-                    use crate::backend::SpatialIndex as _;
-                    return sq
-                        .spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
-                        .await;
-                }
-            }
-            #[cfg(feature = "pg")]
-            {
-                let pg = backend
-                    .as_postgres()
-                    .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
+            if let Some(sq) = backend.as_sqlite() {
                 use crate::backend::SpatialIndex as _;
-                return pg
+                return sq
                     .spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
                     .await;
             }
-            #[cfg(not(feature = "pg"))]
-            {
-                Err(DbError::Configuration {
-                    code: "spatial_unsupported",
-                    message:
-                        "db: spatial search requires the `pg` Cargo feature on this build"
-                            .to_string(),
-                    hint: Some(
-                        "rebuild with `--features pg` or use the SQLite arm (P4 PR 5)"
-                            .to_string(),
-                    ),
-                })
-            }
+            let pg = backend
+                .as_postgres()
+                .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
+            use crate::backend::SpatialIndex as _;
+            pg.spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
+                .await
         }
         .await;
 
         match result {
-            Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::Json(
-                    Value::Array(rows).to_string(),
-                ),
-                request_id,
-            },
+            Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return zeroship_runtime::state::OpResult::JsValue {
+                            resolver,
+                            value: zeroship_runtime::state::ResolveValue::RejectError(
+                                e.to_op_error(),
+                            ),
+                            request_id,
+                        };
+                    }
+                };
+                zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::Json(
+                        Value::Array(rows).to_string(),
+                    ),
+                    request_id,
+                }
+            }
             Err(e) => zeroship_runtime::state::OpResult::JsValue {
                 resolver,
                 value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
@@ -1952,17 +2435,11 @@ async fn apply_encryption_on_update(
 /// Decrypt every encrypted column on each row of `rows`. Short-circuits
 /// when the schema has no encrypted columns OR when not registered.
 ///
-/// **PG arm** (`feature = "pg"`): rows arrive with BYTEA columns
-/// surfaced as `\x`-prefixed hex strings (compio-postgres' text
-/// protocol). `decrypt_row_on_read` parses the hex back to bytes.
-///
-/// **SQLite arm** (P5 PR 3.5, gated on `feature = "sqlite"`): rows
-/// produced by the SQLite-flavoured CRUD path carry BLOB columns
-/// already encoded as base64 [`Value::String`] (the
-/// `v8_bridge::typed_rows_to_json_value` adapter base64-encodes BLOBs
-/// for JSON transport). We decode the base64 ourselves before invoking
-/// `decrypt_row_on_read` so the existing helper's hex-decode branch
-/// only runs on the PG arm.
+/// Read rows are normalised before this pass runs, so encrypted-column
+/// values arrive in a lossless text envelope on both backends:
+/// Postgres `BYTEA` now decodes to base64, and SQLite BLOBs are
+/// base64-encoded by the typed-row adapter. The shared decrypt helper
+/// accepts either the legacy `\x...` PG text shape or base64.
 async fn apply_encryption_on_read(
     app_id: &str,
     collection: &str,
@@ -1976,40 +2453,24 @@ async fn apply_encryption_on_read(
     }
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_encrypted_column_pg() {
-            for row in rows.iter_mut() {
-                crate::crud::encryption_pass::decrypt_row_on_read(
-                    pg, app_id, collection, &schema, row,
-                )
-                .await?;
-            }
-            return Ok(rows);
+    if let Some(pg) = backend.as_encrypted_column_pg() {
+        for row in rows.iter_mut() {
+            crate::crud::encryption_pass::decrypt_row_on_read(
+                pg, app_id, collection, &schema, row,
+            )
+            .await?;
         }
+        return Ok(rows);
     }
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_encrypted_column_sqlite() {
-            // Convert each encrypted column's base64-wire shape (the
-            // SQLite CRUD path's BLOB → JSON transport encoding) back
-            // to the PG-style `\x`-hex shape `decrypt_row_on_read`
-            // already understands, so we don't fork the decryption
-            // helper. Then dispatch through the shared helper.
-            crate::crud::encryption_pass::rewrite_sqlite_encrypted_row_blobs_to_hex(
-                &schema,
-                &mut rows,
-            )?;
-            for row in rows.iter_mut() {
-                crate::crud::encryption_pass::decrypt_row_on_read(
-                    sq, app_id, collection, &schema, row,
-                )
-                .await?;
-            }
-            return Ok(rows);
+    if let Some(sq) = backend.as_encrypted_column_sqlite() {
+        for row in rows.iter_mut() {
+            crate::crud::encryption_pass::decrypt_row_on_read(
+                sq, app_id, collection, &schema, row,
+            )
+            .await?;
         }
+        return Ok(rows);
     }
-    let _ = backend; // silence unused under feature combinations
     Ok(rows)
 }
 
@@ -2034,7 +2495,6 @@ async fn apply_encryption_on_read(
 /// schema declares an encrypted column, surface a typed Configuration
 /// error so the SDK can branch on `.code` rather than silently writing
 /// plaintext to the BYTEA/BLOB column.
-#[allow(unused_variables)]
 async fn encryption_pass_dispatch(
     app_id: &str,
     collection: &str,
@@ -2045,36 +2505,23 @@ async fn encryption_pass_dispatch(
 ) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_encrypted_column_pg() {
-            return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-                pg, app_id, collection, schema, row_pk, doc, sidechannel,
-            )
-            .await;
-        }
+    if let Some(pg) = backend.as_encrypted_column_pg() {
+        return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+            pg, app_id, collection, schema, row_pk, doc, sidechannel,
+        )
+        .await;
     }
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_encrypted_column_sqlite() {
-            return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-                sq, app_id, collection, schema, row_pk, doc, sidechannel,
-            )
-            .await;
-        }
+    if let Some(sq) = backend.as_encrypted_column_sqlite() {
+        return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+            sq, app_id, collection, schema, row_pk, doc, sidechannel,
+        )
+        .await;
     }
-    // No backend-arm with an `EncryptedColumn` CRUD-path wire compiled
-    // in (a build with neither `pg` nor `sqlite`). Encrypted columns
-    // declared in the schema would reach a write site that has no
-    // encryption surface — surface a typed Configuration error so the
-    // SDK can branch on `.code` rather than silently writing plaintext.
     if schema_has_encrypted_columns(schema) {
         return Err(DbError::Configuration {
             code: "column_encryption_unavailable",
-            message:
-                "db: column encryption CRUD path requires a backend feature (`pg` or `sqlite`) on this build"
-                    .to_string(),
-            hint: Some("rebuild with `--features pg` or `--features sqlite`".to_string()),
+            message: "db: no backend arm available for column encryption CRUD path".to_string(),
+            hint: None,
         });
     }
     Ok(())
@@ -2155,4 +2602,92 @@ fn schema_has_masked_columns(schema: &Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_row_on_read_coerces_sqlite_wire_shapes() {
+        let schema = serde_json::json!({
+            "active": { "type": "boolean" },
+            "prefs": { "type": "object" },
+            "avatar": { "type": "bytes" },
+            "published_at": { "type": "date" }
+        });
+        let mut row = serde_json::json!({
+            "active": 1,
+            "prefs": "{\"theme\":\"dark\"}",
+            "avatar": [222, 173, 190, 239],
+            "published_at": "2026-05-24T12:34:56.789Z",
+            "created_at": "2026-05-24 12:34:56"
+        });
+
+        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
+
+        assert_eq!(row.get("active"), Some(&Value::Bool(true)));
+        assert_eq!(row.pointer("/prefs/theme"), Some(&Value::String("dark".to_string())));
+        assert_eq!(
+            row.get("avatar"),
+            Some(&Value::String(
+                base64::engine::general_purpose::STANDARD.encode([222, 173, 190, 239]),
+            )),
+        );
+        assert!(row.get("published_at").and_then(Value::as_i64).is_some());
+        assert!(row.get("created_at").and_then(Value::as_i64).is_some());
+    }
+
+    #[test]
+    fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {
+        let expected = 1_779_626_096_789i64;
+        assert_eq!(
+            parse_timestamp_millis("2026-05-24T12:34:56.789Z"),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_timestamp_millis("2026-05-24T12:34:56.789123Z"),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_timestamp_millis("2026-05-24T14:34:56.789+02:00"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
+        let schema = serde_json::json!({
+            "active": { "type": "boolean" },
+            "payload": { "type": "json" }
+        });
+        let mut filter = serde_json::json!({
+            "$and": [
+                { "active": { "$in": [true, false] } },
+                { "payload": true }
+            ]
+        });
+
+        lower_boolean_filter_with_schema(&schema, &mut filter);
+
+        assert_eq!(filter["$and"][0]["active"]["$in"], serde_json::json!([1, 0]));
+        assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
+    }
+
+    #[test]
+    fn normalize_row_on_read_skips_encrypted_columns() {
+        let schema = serde_json::json!({
+            "secret": {
+                "type": "bytes",
+                "encrypted": { "mode": "randomised", "wraps": "bytes" }
+            }
+        });
+        let mut row = serde_json::json!({
+            "secret": "c2VjcmV0"
+        });
+
+        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
+
+        assert_eq!(row.get("secret"), Some(&Value::String("c2VjcmV0".to_string())));
+    }
 }

@@ -26,12 +26,14 @@
 //! isolation. The pool is created lazily on first use (one per worker
 //! thread).
 
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 use crate::context::with_mut as ctx_mut;
+use crate::error::DbError;
 
 // Module visibility note:
 //
@@ -121,11 +123,9 @@ pub mod encryption;
 // `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
 // capability declared in `crate::backend::mod`. Crate-private — the
 // stable consumer surface is the `BackendHandle::as_change_stream_pg`
-// accessor (mirroring the `as_postgres` / `as_sqlite` shape). Behind
-// `cfg(feature = "pg")` because the adapter borrows `PostgresBackend`
-// and the underlying replication helpers (`replication.rs` /
-// `wal_consumer.rs`) are PG-only.
-#[cfg(feature = "pg")]
+// accessor (mirroring the `as_postgres` / `as_sqlite` shape). The
+// adapter borrows `PostgresBackend` and the underlying replication
+// helpers (`replication.rs` / `wal_consumer.rs`) are PG-only.
 pub(crate) mod change_stream_pg;
 
 // Crate-private in release, pub under `test-helpers` (for tests/integration.rs):
@@ -370,7 +370,7 @@ pub fn set_db_url_for_tests(url: &str) {
 /// Production code reaches the SQLite arm through the
 /// `DbPlugin::build_instance` path; this helper short-circuits that
 /// for SQLite-only integration tests in `tests/sqlite_integration.rs`.
-#[cfg(all(any(test, feature = "test-helpers"), feature = "sqlite"))]
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBackend>) {
     ctx_mut(|c| c.set_sqlite_backend(backend));
@@ -460,7 +460,7 @@ pub async fn install_tx_marker_for_tests(url: &str) {
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
     ctx_mut(|c| {
-        let _previous = c.install_tx_client(client);
+        let _previous = c.install_tx_client(crate::context::TxConnection::Postgres(client));
         debug_assert!(_previous.is_none(), "install_tx_marker_for_tests: slot already occupied");
     });
 }
@@ -485,10 +485,18 @@ pub async fn install_tx_marker_for_tests(url: &str) {
 #[doc(hidden)]
 pub async fn uninstall_tx_marker_for_tests() {
     if let Some(client) = ctx_mut(|c| c.take_tx_client()) {
-        // Best-effort: a connection already torn down (panic recovery)
-        // is fine — drop closes the fd.
-        let _ = client.batch_execute("ROLLBACK").await;
-        drop(client);
+        match client {
+            crate::context::TxConnection::Postgres(client) => {
+                // Best-effort: a connection already torn down (panic recovery)
+                // is fine — drop closes the fd.
+                let _ = client.batch_execute("ROLLBACK").await;
+                drop(client);
+            }
+            crate::context::TxConnection::Sqlite(client) => {
+                let _ = client.exec("ROLLBACK", &[]).await;
+                drop(client);
+            }
+        }
     }
 }
 
@@ -519,6 +527,73 @@ pub fn clear_pending_emits_for_tests() {
     exec::clear_pending_emits();
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BackendUrl {
+    Postgres,
+    Sqlite { path: PathBuf },
+}
+
+fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(DbError::config_hinted(
+            "invalid_database_url",
+            "database URL is empty",
+            "expected postgres://, postgresql://, sqlite:, file:, :memory:, or a filesystem path",
+        ));
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == ":memory:" {
+        return Ok(BackendUrl::Sqlite {
+            path: PathBuf::from(":memory:"),
+        });
+    }
+    if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
+        return Ok(BackendUrl::Postgres);
+    }
+    if lower.starts_with("sqlite://") {
+        // SQLite URLs are always local-file selectors here, so any URI
+        // authority is folded into the filesystem path (`sqlite://host/db`
+        // becomes `host/db`, not a remote host lookup).
+        return Ok(BackendUrl::Sqlite {
+            path: PathBuf::from(&trimmed["sqlite://".len()..]),
+        });
+    }
+    if lower.starts_with("sqlite:") {
+        return Ok(BackendUrl::Sqlite {
+            path: PathBuf::from(&trimmed["sqlite:".len()..]),
+        });
+    }
+    if lower.starts_with("file:") {
+        return Ok(BackendUrl::Sqlite {
+            path: PathBuf::from(&trimmed["file:".len()..]),
+        });
+    }
+
+    let has_scheme = trimmed
+        .split_once(':')
+        .map(|(scheme, _)| {
+            // Windows `C:\...` is rejected here as scheme `c`; that's
+            // acceptable because zeroship only targets Linux workers.
+            let mut chars = scheme.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        })
+        .unwrap_or(false);
+    if has_scheme {
+        return Err(DbError::config_hinted(
+            "unsupported_database_url_scheme",
+            format!("unsupported database URL scheme in `{trimmed}`"),
+            "expected postgres://, postgresql://, sqlite:, file:, :memory:, or a filesystem path",
+        ));
+    }
+
+    Ok(BackendUrl::Sqlite {
+        path: PathBuf::from(trimmed),
+    })
+}
+
 /// Initialize the connection pool asynchronously.
 ///
 /// Must be called on the compio runtime thread BEFORE any JS execution.
@@ -539,21 +614,109 @@ pub async fn init_pool_async() -> Result<(), String> {
         return Ok(()); // No URL configured — DB plugin is disabled
     };
 
-    let pool = Pool::connect(&url, 8)
-        .await
-        .map_err(|e| {
-            // Walk the error source chain so the root cause (e.g. ECONNREFUSED,
-            // TLS handshake failure) reaches the JS console instead of the
-            // generic "error connecting to server" wrapper.
-            let mut msg = format!("db: failed to connect: {e}");
-            let mut cur: &dyn std::error::Error = &e;
-            while let Some(src) = std::error::Error::source(cur) {
-                msg.push_str(&format!(" — caused by: {src}"));
-                cur = src;
-            }
-            msg
-        })?;
+    // SQLite installs only a backend handle (no pool), so the old
+    // `pool_initialised()` idempotency check is not enough on its own.
+    // Once any backend is installed for the current URL, repeated lazy
+    // init calls become no-ops.
+    if context::with(|c| c.backend().is_some()) {
+        return Ok(());
+    }
 
-    ctx_mut(|c| c.set_pool(Rc::new(pool)));
+    match backend_for_url(&url).map_err(DbError::into_string)? {
+        BackendUrl::Postgres => {
+            let pool = Pool::connect(&url, 8)
+                .await
+                .map_err(|e| {
+                    // Walk the error source chain so the root cause (e.g. ECONNREFUSED,
+                    // TLS handshake failure) reaches the JS console instead of the
+                    // generic "error connecting to server" wrapper.
+                    let mut msg = format!("db: failed to connect: {e}");
+                    let mut cur: &dyn std::error::Error = &e;
+                    while let Some(src) = std::error::Error::source(cur) {
+                        msg.push_str(&format!(" — caused by: {src}"));
+                        cur = src;
+                    }
+                    msg
+                })?;
+
+            ctx_mut(|c| c.set_pool(Rc::new(pool)));
+        }
+        BackendUrl::Sqlite { path } => {
+            let backend = crate::backend::sqlite::SqliteBackend::open(&path)
+                .await
+                .map_err(DbError::into_string)?;
+            ctx_mut(|c| c.set_sqlite_backend(Rc::new(backend)));
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod backend_url_tests {
+    use super::{BackendUrl, backend_for_url};
+    use std::path::PathBuf;
+
+    #[test]
+    fn postgres_urls_dispatch_to_postgres() {
+        assert!(matches!(
+            backend_for_url("postgres://localhost/dev").unwrap(),
+            BackendUrl::Postgres
+        ));
+        assert!(matches!(
+            backend_for_url("postgresql://localhost/dev").unwrap(),
+            BackendUrl::Postgres
+        ));
+    }
+
+    #[test]
+    fn sqlite_urls_dispatch_to_sqlite() {
+        assert_eq!(
+            backend_for_url("sqlite:/tmp/dev.sqlite").unwrap(),
+            BackendUrl::Sqlite {
+                path: PathBuf::from("/tmp/dev.sqlite"),
+            }
+        );
+        assert_eq!(
+            backend_for_url("sqlite:///tmp/dev.sqlite").unwrap(),
+            BackendUrl::Sqlite {
+                path: PathBuf::from("/tmp/dev.sqlite"),
+            }
+        );
+        assert_eq!(
+            backend_for_url("file:./dev.sqlite").unwrap(),
+            BackendUrl::Sqlite {
+                path: PathBuf::from("./dev.sqlite"),
+            }
+        );
+        assert_eq!(
+            backend_for_url(":memory:").unwrap(),
+            BackendUrl::Sqlite {
+                path: PathBuf::from(":memory:"),
+            }
+        );
+        assert_eq!(
+            backend_for_url("./dev.sqlite").unwrap(),
+            BackendUrl::Sqlite {
+                path: PathBuf::from("./dev.sqlite"),
+            }
+        );
+        assert_eq!(
+            backend_for_url("sqlite://host/db").unwrap(),
+            BackendUrl::Sqlite {
+                path: PathBuf::from("host/db"),
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_scheme_is_rejected() {
+        let err = backend_for_url("mysql://localhost/dev").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::DbError::Configuration {
+                code: "unsupported_database_url_scheme",
+                ..
+            }
+        ));
+    }
 }

@@ -27,12 +27,13 @@ import {
 } from "../src/build.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Rust runtime's embedded Node-globals polyfill — replaces the deleted
-// `runtime-prelude.js` once shipped by the vite-plugin. Resolves from
-// the vite-plugin test dir up to the workspace root.
+// Rust runtime's inline Node-globals shim. The dedicated
+// `crates/runtime/src/embed/node-globals.js` file was deleted when the
+// remaining JS polyfill moved into `core/init.rs`; this test guards
+// the inline source against reintroducing legacy vite-plugin globals.
 const NODE_GLOBALS_PATH = resolve(
   __dirname,
-  "../../../crates/runtime/src/embed/node-globals.js"
+  "../../../crates/runtime/src/core/init.rs"
 );
 
 // ── Fixture builder ────────────────────────────────────────────────────────

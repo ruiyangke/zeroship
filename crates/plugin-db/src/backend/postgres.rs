@@ -308,13 +308,30 @@ impl PgSqlExecutor for PostgresBackend {
 // function directly so it can chain `update_audit_status` after, no
 // behaviour change on the PG audit path.
 impl AuditWriter for PostgresBackend {
-    async fn write_audit_row(
+    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
+        crate::audit::ensure_audit_table_exists(self.pool.as_ref(), app_id).await
+    }
+
+    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError> {
+        crate::audit::next_schema_version(self.pool.as_ref(), app_id).await
+    }
+
+    async fn write_audit_row_returning_id(
         &self,
         app_id: &str,
         row: &crate::audit::AuditRow,
-    ) -> Result<(), DbError> {
-        crate::audit::write_audit_row(self.pool.as_ref(), app_id, row).await?;
-        Ok(())
+    ) -> Result<i64, DbError> {
+        crate::audit::write_audit_row(self.pool.as_ref(), app_id, row).await
+    }
+
+    async fn update_audit_status(
+        &self,
+        app_id: &str,
+        id: i64,
+        new_status: crate::audit::TerminalStatus,
+        error: Option<&str>,
+    ) -> Result<bool, DbError> {
+        crate::audit::update_audit_status(self.pool.as_ref(), app_id, id, new_status, error).await
     }
 }
 
@@ -812,6 +829,10 @@ impl PgLockManager for PostgresBackend {
 pub(crate) struct PgDialect;
 
 impl DialectBuilder for PgDialect {
+    fn sql_dialect(&self) -> crate::query::SqlDialect {
+        crate::query::SqlDialect::Postgres
+    }
+
     /// Double-quote with embedded-quote escape. Matches the existing
     /// `crate::query::quote_ident` helper byte-for-byte.
     fn quote_ident(&self, name: &str) -> String {
@@ -883,6 +904,10 @@ impl DialectBuilder for PgDialect {
 /// separate field. The bodies delegate to the `PgDialect` ZST; rustc
 /// inlines the value away because every method is `&self`.
 impl DialectBuilder for PostgresBackend {
+    fn sql_dialect(&self) -> crate::query::SqlDialect {
+        PgDialect.sql_dialect()
+    }
+
     fn quote_ident(&self, name: &str) -> String {
         PgDialect.quote_ident(name)
     }

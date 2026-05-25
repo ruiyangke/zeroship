@@ -1,7 +1,6 @@
 //! SQLite-side integration tests.
 //!
-//! Behind `required-features = ["sqlite", "test-helpers"]` so the
-//! default-feature build never compiles this file. **P1 PR 2** adds
+//! Behind `required-features = ["test-helpers"]`. **P1 PR 2** adds
 //! the first four behaviour tests — they exercise the
 //! `SqliteSession` actor end-to-end:
 //!
@@ -19,6 +18,9 @@
 use std::path::PathBuf;
 
 use std::rc::Rc;
+
+#[path = "parity/mod.rs"]
+mod parity;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::{
@@ -49,6 +51,33 @@ fn run<F: std::future::Future>(f: F) -> F::Output {
     compio::runtime::Runtime::new()
         .expect("compio runtime build")
         .block_on(f)
+}
+
+#[test]
+fn parity_matrix_sqlite_seed_projection_matches_contract() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create parity dir");
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        assert_eq!(snapshot.seed, parity::expected_seed_projection());
+    });
+}
+
+#[test]
+fn parity_matrix_sqlite_transaction_projection_matches_contract() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create parity dir");
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        assert_eq!(snapshot.tx, parity::expected_tx_projection());
+    });
+}
+
+#[test]
+fn parity_matrix_sqlite_typed_projection_matches_contract() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create parity dir");
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        assert_eq!(snapshot.typed, parity::expected_typed_projection());
+    });
 }
 
 /// Read the value of a single-column scalar PRAGMA back from the
@@ -272,6 +301,23 @@ fn ensure_app_schema_isolates_per_app() {
             rows_b.is_empty(),
             "app_b must not see app_a's tables; got {rows_b:?}"
         );
+    });
+}
+
+#[test]
+fn estimate_row_count_missing_table_returns_zero() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        let rows = backend
+            .estimate_row_count("app_demo", "missing_table")
+            .await
+            .expect("estimate_row_count for missing table");
+        assert_eq!(rows, 0, "missing table must classify as empty");
     });
 }
 
@@ -580,7 +626,7 @@ fn introspect_after_create_table_round_trip() {
 // `tests/integration.rs::cross_app_fk_rejected_at_parse`.
 // ---------------------------------------------------------------------------
 
-/// Provision the per-app `__zs_migrations` audit table the
+/// Provision the per-app `__zeroship_migrations` audit table the
 /// `AuditWriter` impl writes into. P1 PR 5 ships only the INSERT path;
 /// the audit-table provisioning DDL is a later-PR concern. We create
 /// it inline here so the `unique_violation` path's best-effort audit
@@ -589,7 +635,7 @@ fn introspect_after_create_table_round_trip() {
 /// contract — but covering both halves is cheap).
 async fn ensure_audit_table(backend: &SqliteBackend, app_id: &str) {
     let sql = format!(
-        "CREATE TABLE IF NOT EXISTS \"{app_id}\".\"__zs_migrations\" (\
+        "CREATE TABLE IF NOT EXISTS \"{app_id}\".\"__zeroship_migrations\" (\
              id              INTEGER PRIMARY KEY AUTOINCREMENT, \
              collection      TEXT NOT NULL, \
              phase           TEXT NOT NULL, \
@@ -606,7 +652,7 @@ async fn ensure_audit_table(backend: &SqliteBackend, app_id: &str) {
     backend
         .pool_exec(&sql, &[])
         .await
-        .expect("create __zs_migrations audit table");
+        .expect("create __zeroship_migrations audit table");
 }
 
 #[test]
@@ -7908,21 +7954,13 @@ fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
 // P9 PR 3 — nested-transaction SAVEPOINT SQL validated against the SQLite
 // engine.
 //
-// The native `Db.transaction(fn)` orchestrator
-// (`crates/plugin-db/src/orchestrator/transaction.rs`) is Postgres-bound
-// today (the `tx_conn` slot holds a `compio_postgres::Client`; `run_sql`
-// only consults it on the PG path — same scope as the pre-P9
-// `beginTransaction` / auto-tx wrappers). It cannot drive the SQLite
-// session actor end-to-end without a separate SQLite-tx wiring.
-//
-// What we CAN — and do — validate here is that the exact savepoint SQL
-// the orchestrator emits (`SAVEPOINT zs_sp_N`, `ROLLBACK TO SAVEPOINT
-// zs_sp_N`, `RELEASE SAVEPOINT zs_sp_N`, inside a `BEGIN ... COMMIT`)
-// behaves correctly on the SQLite engine — so the SQL is proven valid for
-// the eventual SQLite-tx wiring. The dedicated client multiplexes the
-// single shared writer session, so the savepoint statements all land on
-// the one connection (exactly the orchestrator's single-connection
-// model).
+// The native `Db.transaction(fn)` orchestrator now drives SQLite through
+// the same `tx_conn` slot/savepoint state machine it uses on Postgres,
+// with the SQLite arm issuing `BEGIN` / `SAVEPOINT` / `RELEASE` /
+// `ROLLBACK TO` / `COMMIT` over the session actor handle. These tests are
+// still worth keeping: they pin the raw SQLite engine behaviour for the
+// exact savepoint SQL the orchestrator emits, independent of the V8-side
+// callback/finalizer wiring.
 
 /// Inner savepoint rolled back to → only the outer write survives the
 /// COMMIT. Mirrors `nested_inner_reject_rolls_back_to_savepoint_outer_continues`

@@ -167,6 +167,14 @@ pub(crate) enum Command {
         params: Vec<String>,
         reply: flume::Sender<Result<u64, DbError>>,
     },
+    /// Run a multi-statement batch through `Connection::execute_batch`.
+    /// Consumer is the SQLite register-model apply path, which needs
+    /// the full `CREATE TABLE ...; CREATE INDEX ...; ...` payload to
+    /// land atomically on the writer thread.
+    ExecBatch {
+        sql: String,
+        reply: flume::Sender<Result<(), DbError>>,
+    },
     /// Run a row-returning statement; reply with the materialised
     /// rows. PR 4 routes
     /// [`super::SqliteBackend::introspect_schema`] +
@@ -410,6 +418,10 @@ impl SqliteSession {
                         let result = run_exec(&conn, &sql, &params);
                         let _ = reply.send(result);
                     }
+                    Command::ExecBatch { sql, reply } => {
+                        let result = run_exec_batch(&conn, &sql);
+                        let _ = reply.send(result);
+                    }
                     Command::Query { sql, params, reply } => {
                         let result = run_query(&conn, &sql, &params);
                         let _ = reply.send(result);
@@ -473,6 +485,17 @@ impl SqliteSession {
         let cmd = Command::Exec {
             sql: sql.to_string(),
             params: params.iter().map(|s| s.to_string()).collect(),
+            reply: reply_tx,
+        };
+        self.send(cmd).await?;
+        recv_reply(reply_rx).await?
+    }
+
+    /// Send an `ExecBatch` command and await the reply.
+    pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
+        let cmd = Command::ExecBatch {
+            sql: sql.to_string(),
             reply: reply_tx,
         };
         self.send(cmd).await?;
@@ -661,6 +684,12 @@ impl SqliteSessionHandle {
         self.0.exec(sql, params).await
     }
 
+    /// Convenience: forward an `exec_batch` through the underlying
+    /// session.
+    pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
+        self.0.exec_batch(sql).await
+    }
+
     /// Forward a `query` through the underlying session.
     ///
     /// `pub` under the `test-helpers` feature so the integration
@@ -745,6 +774,10 @@ fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, DbEr
         .execute(sql, refs.as_slice())
         .map_err(from_sqlite)?;
     Ok(n as u64)
+}
+
+fn run_exec_batch(conn: &Connection, sql: &str) -> Result<(), DbError> {
+    conn.execute_batch(sql).map_err(from_sqlite)
 }
 
 /// **P5 PR 3.5** — typed bind value. Either a borrowed `&str` (the

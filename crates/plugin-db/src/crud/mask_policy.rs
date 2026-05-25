@@ -224,34 +224,22 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
     })?;
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            persist_pg(pg, app_id, &policy).await?;
-            crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy.clone())));
-            return Ok(());
-        }
+    if let Some(pg) = backend.as_postgres() {
+        persist_pg(pg, app_id, &policy).await?;
+        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy.clone())));
+        return Ok(());
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            persist_sqlite(sq, app_id, &policy)?;
-            crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy.clone())));
-            return Ok(());
-        }
+    if let Some(sq) = backend.as_sqlite() {
+        persist_sqlite(sq, app_id, &policy)?;
+        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy.clone())));
+        return Ok(());
     }
-
-    let _ = backend; // silence unused when no backend feature is enabled
-    let _ = app_id;
-    let _ = &policy;
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "db: no backend arm available for setMaskPolicy".to_string(),
-        hint: Some(
-            "rebuild with `--features pg` or `--features sqlite`".into(),
-        ),
+        hint: None,
     })
 }
 
@@ -264,7 +252,6 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
 /// arrives as canonical JSON; PG receives it as JSONB via a text
 /// parameter (`::jsonb` cast inside the function body — the wire is
 /// text only).
-#[cfg(feature = "pg")]
 async fn persist_pg(
     pg: &crate::backend::PostgresBackend,
     app_id: &str,
@@ -283,7 +270,6 @@ async fn persist_pg(
 /// **P5.5 PR 5** — PG storage read through the SECURITY DEFINER
 /// `__zeroship_admin.get_mask_policy(app_id)`. Returns `None` when
 /// the app has no policy row.
-#[cfg(feature = "pg")]
 pub async fn load_pg(
     pg: &crate::backend::PostgresBackend,
     app_id: &str,
@@ -320,7 +306,6 @@ pub async fn load_pg(
 /// keyed by `app_id` — mirrors the in-process structure most closely
 /// and avoids per-app I/O multipliers (a 50-app worker would otherwise
 /// open 50 files at startup).
-#[cfg(feature = "sqlite")]
 fn sqlite_policy_path(sq: &crate::backend::sqlite::SqliteBackend) -> std::path::PathBuf {
     sq.db_dir().join("mask_policies.json")
 }
@@ -340,7 +325,6 @@ fn sqlite_policy_path(sq: &crate::backend::sqlite::SqliteBackend) -> std::path::
 /// is read at backend construction + on every `setMaskPolicy`; no
 /// concurrent writers under the current model. Multi-worker
 /// coordination is a P6+ concern (see open question).
-#[cfg(feature = "sqlite")]
 fn persist_sqlite(
     sq: &crate::backend::sqlite::SqliteBackend,
     app_id: &str,
@@ -403,7 +387,6 @@ fn persist_sqlite(
 /// **P5.5 PR 5** — load the policy for a single app from the sidecar
 /// file. Returns `None` when the file is absent or has no entry for
 /// the app.
-#[cfg(feature = "sqlite")]
 pub fn load_sqlite(
     sq: &crate::backend::sqlite::SqliteBackend,
     app_id: &str,

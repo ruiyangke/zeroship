@@ -253,30 +253,22 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
     };
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            let loaded = crate::crud::mask_policy::load_pg(pg, app_id).await?;
-            if let Some(p) = loaded {
-                crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
-            }
-            return Ok(());
+    if let Some(pg) = backend.as_postgres() {
+        let loaded = crate::crud::mask_policy::load_pg(pg, app_id).await?;
+        if let Some(p) = loaded {
+            crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
         }
+        return Ok(());
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            let loaded = crate::crud::mask_policy::load_sqlite(sq, app_id)?;
-            if let Some(p) = loaded {
-                crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
-            }
-            return Ok(());
+    if let Some(sq) = backend.as_sqlite() {
+        let loaded = crate::crud::mask_policy::load_sqlite(sq, app_id)?;
+        if let Some(p) = loaded {
+            crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
         }
+        return Ok(());
     }
-
-    let _ = backend; // silence unused under non-canonical feature combos
     Ok(())
 }
 
@@ -381,107 +373,97 @@ async fn fetch_and_decrypt(
         },
     );
 
-    // ---- PG arm (gated on pg, matching apply_encryption_on_read) ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_encrypted_column_pg() {
-            use crate::backend::{EncryptedColumn as _, PgSqlExecutor as _};
-            let pool = pg.pool_handle();
-            let sql = format!(
-                "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
-                args.column, app_id, args.collection
-            );
-            let rows = pool
-                .query_text_params(&sql, &[&args.row_pk])
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            if rows.is_empty() {
-                return Err(DbError::ValidationFailed {
-                    code: "unmask_not_found",
-                    message: format!(
-                        "row '{}' not found in '{}.{}'",
-                        args.row_pk, app_id, args.collection
-                    ),
-                    hint: None,
-                });
-            }
-            // BYTEA arrives over the text protocol as a `\xHHHH...`
-            // hex string. We parse it back to raw bytes here (mirror
-            // the decode in `decrypt_row_on_read`).
-            let value: Option<&str> = rows[0]
-                .try_get::<_, Option<&str>>(0)
-                .map_err(|e| DbError::internal(format!("unmask: get column value: {e}")))?;
-            let hex_str = value.ok_or_else(|| DbError::ValidationFailed {
-                code: "unmask_value_null",
+    // ---- PG arm ----
+    if let Some(pg) = backend.as_encrypted_column_pg() {
+        use crate::backend::{EncryptedColumn as _, PgSqlExecutor as _};
+        let pool = pg.pool_handle();
+        let sql = format!(
+            "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
+            args.column, app_id, args.collection
+        );
+        let rows = pool
+            .query_text_params(&sql, &[&args.row_pk])
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        if rows.is_empty() {
+            return Err(DbError::ValidationFailed {
+                code: "unmask_not_found",
                 message: format!(
-                    "column '{}' on row '{}' is NULL; nothing to unmask",
-                    args.column, args.row_pk
+                    "row '{}' not found in '{}.{}'",
+                    args.row_pk, app_id, args.collection
                 ),
                 hint: None,
-            })?;
-            let bytes = hex_to_bytes(hex_str)?;
-            let key = pg.resolve_key(app_id, &enc_meta.key_id).await?;
-            let plaintext_bytes = pg.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
-            return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
+            });
         }
+        // BYTEA arrives over the text protocol as a `\xHHHH...`
+        // hex string. We parse it back to raw bytes here (mirror
+        // the decode in `decrypt_row_on_read`).
+        let value: Option<&str> = rows[0]
+            .try_get::<_, Option<&str>>(0)
+            .map_err(|e| DbError::internal(format!("unmask: get column value: {e}")))?;
+        let hex_str = value.ok_or_else(|| DbError::ValidationFailed {
+            code: "unmask_value_null",
+            message: format!(
+                "column '{}' on row '{}' is NULL; nothing to unmask",
+                args.column, args.row_pk
+            ),
+            hint: None,
+        })?;
+        let bytes = hex_to_bytes(hex_str)?;
+        let key = pg.resolve_key(app_id, &enc_meta.key_id).await?;
+        let plaintext_bytes = pg.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
+        return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_encrypted_column_sqlite() {
-            use crate::backend::sqlite::session::TypedCell;
-            use crate::backend::{DialectBuilder as _, EncryptedColumn as _, SqlExecutor as _};
-            let q_app = sq.quote_ident(app_id);
-            let q_coll = sq.quote_ident(&args.collection);
-            let q_col = sq.quote_ident(&args.column);
-            let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-            let handle = sq.acquire_dedicated_client().await?;
-            let typed = handle
-                .query_typed_internal(&sql, &[args.row_pk.as_str()])
-                .await?;
-            if typed.rows.is_empty() {
+    if let Some(sq) = backend.as_encrypted_column_sqlite() {
+        use crate::backend::sqlite::session::TypedCell;
+        use crate::backend::{DialectBuilder as _, EncryptedColumn as _, SqlExecutor as _};
+        let q_app = sq.quote_ident(app_id);
+        let q_coll = sq.quote_ident(&args.collection);
+        let q_col = sq.quote_ident(&args.column);
+        let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+        let handle = sq.acquire_dedicated_client().await?;
+        let typed = handle
+            .query_typed_internal(&sql, &[args.row_pk.as_str()])
+            .await?;
+        if typed.rows.is_empty() {
+            return Err(DbError::ValidationFailed {
+                code: "unmask_not_found",
+                message: format!(
+                    "row '{}' not found in '{}.{}'",
+                    args.row_pk, app_id, args.collection
+                ),
+                hint: None,
+            });
+        }
+        let bytes = match &typed.rows[0][0] {
+            TypedCell::Blob(b) => b.clone(),
+            TypedCell::Null => {
                 return Err(DbError::ValidationFailed {
-                    code: "unmask_not_found",
+                    code: "unmask_value_null",
                     message: format!(
-                        "row '{}' not found in '{}.{}'",
-                        args.row_pk, app_id, args.collection
+                        "column '{}' on row '{}' is NULL; nothing to unmask",
+                        args.column, args.row_pk
                     ),
                     hint: None,
                 });
             }
-            let bytes = match &typed.rows[0][0] {
-                TypedCell::Blob(b) => b.clone(),
-                TypedCell::Null => {
-                    return Err(DbError::ValidationFailed {
-                        code: "unmask_value_null",
-                        message: format!(
-                            "column '{}' on row '{}' is NULL; nothing to unmask",
-                            args.column, args.row_pk
-                        ),
-                        hint: None,
-                    });
-                }
-                other => {
-                    return Err(DbError::internal(format!(
-                        "unmask: expected BLOB for encrypted column, got {other:?}"
-                    )));
-                }
-            };
-            let key = sq.resolve_key(app_id, &enc_meta.key_id).await?;
-            let plaintext_bytes = sq.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
-            return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
-        }
+            other => {
+                return Err(DbError::internal(format!(
+                    "unmask: expected BLOB for encrypted column, got {other:?}"
+                )));
+            }
+        };
+        let key = sq.resolve_key(app_id, &enc_meta.key_id).await?;
+        let plaintext_bytes = sq.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
+        return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
     }
 
-    let _ = backend; // silence unused under non-canonical feature combos
-    let _ = aad;
     Err(DbError::Configuration {
         code: "encryption_unavailable",
-        message: "db: column encryption surface not available on this build".to_string(),
-        hint: Some(
-            "rebuild with `--features pg` or `--features sqlite`".into(),
-        ),
+        message: "db: no backend arm available for column encryption".to_string(),
+        hint: None,
     })
 }
 
@@ -494,84 +476,77 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            use crate::backend::PgSqlExecutor as _;
-            let pool = pg.pool_handle();
-            let sql = format!(
-                "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
-                args.column, app_id, args.collection
-            );
-            let rows = pool
-                .query_text_params(&sql, &[&args.row_pk])
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            if rows.is_empty() {
-                return Err(DbError::ValidationFailed {
-                    code: "unmask_not_found",
-                    message: format!(
-                        "row '{}' not found in '{}.{}'",
-                        args.row_pk, app_id, args.collection
-                    ),
-                    hint: None,
-                });
-            }
-            let value: Option<&str> = rows[0]
-                .try_get::<_, Option<&str>>(0)
-                .map_err(|e| DbError::internal(format!("unmask: get column value: {e}")))?;
-            return Ok(value
-                .ok_or_else(|| DbError::ValidationFailed {
-                    code: "unmask_value_null",
-                    message: format!(
-                        "column '{}' on row '{}' is NULL; nothing to unmask",
-                        args.column, args.row_pk
-                    ),
-                    hint: None,
-                })?
-                .to_string());
+    if let Some(pg) = backend.as_postgres() {
+        use crate::backend::PgSqlExecutor as _;
+        let pool = pg.pool_handle();
+        let sql = format!(
+            "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
+            args.column, app_id, args.collection
+        );
+        let rows = pool
+            .query_text_params(&sql, &[&args.row_pk])
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        if rows.is_empty() {
+            return Err(DbError::ValidationFailed {
+                code: "unmask_not_found",
+                message: format!(
+                    "row '{}' not found in '{}.{}'",
+                    args.row_pk, app_id, args.collection
+                ),
+                hint: None,
+            });
         }
+        let value: Option<&str> = rows[0]
+            .try_get::<_, Option<&str>>(0)
+            .map_err(|e| DbError::internal(format!("unmask: get column value: {e}")))?;
+        return Ok(value
+            .ok_or_else(|| DbError::ValidationFailed {
+                code: "unmask_value_null",
+                message: format!(
+                    "column '{}' on row '{}' is NULL; nothing to unmask",
+                    args.column, args.row_pk
+                ),
+                hint: None,
+            })?
+            .to_string());
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-            let q_app = sq.quote_ident(app_id);
-            let q_coll = sq.quote_ident(&args.collection);
-            let q_col = sq.quote_ident(&args.column);
-            let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-            let handle = sq.acquire_dedicated_client().await?;
-            let rows = handle
-                .query_internal(&sql, &[args.row_pk.as_str()])
-                .await?;
-            if rows.is_empty() {
-                return Err(DbError::ValidationFailed {
-                    code: "unmask_not_found",
-                    message: format!(
-                        "row '{}' not found in '{}.{}'",
-                        args.row_pk, app_id, args.collection
-                    ),
-                    hint: None,
-                });
-            }
-            let value = rows[0]
-                .first()
-                .and_then(|c| c.clone())
-                .ok_or_else(|| DbError::ValidationFailed {
-                    code: "unmask_value_null",
-                    message: format!(
-                        "column '{}' on row '{}' is NULL; nothing to unmask",
-                        args.column, args.row_pk
-                    ),
-                    hint: None,
-                })?;
-            return Ok(value);
+    if let Some(sq) = backend.as_sqlite() {
+        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        let q_app = sq.quote_ident(app_id);
+        let q_coll = sq.quote_ident(&args.collection);
+        let q_col = sq.quote_ident(&args.column);
+        let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+        let handle = sq.acquire_dedicated_client().await?;
+        let rows = handle
+            .query_internal(&sql, &[args.row_pk.as_str()])
+            .await?;
+        if rows.is_empty() {
+            return Err(DbError::ValidationFailed {
+                code: "unmask_not_found",
+                message: format!(
+                    "row '{}' not found in '{}.{}'",
+                    args.row_pk, app_id, args.collection
+                ),
+                hint: None,
+            });
         }
+        let value = rows[0]
+            .first()
+            .and_then(|c| c.clone())
+            .ok_or_else(|| DbError::ValidationFailed {
+                code: "unmask_value_null",
+                message: format!(
+                    "column '{}' on row '{}' is NULL; nothing to unmask",
+                    args.column, args.row_pk
+                ),
+                hint: None,
+            })?;
+        return Ok(value);
     }
 
-    let _ = backend;
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "db: no backend arm available for unmask".to_string(),
@@ -617,8 +592,7 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
 /// `crate::crud::encryption_pass::hex_to_bytes` — duplicated here so
 /// `unmask` doesn't depend on that module's privacy boundary.
 ///
-/// Only reachable through `fetch_and_decrypt`'s PG arm
-/// (`#[cfg(feature = "pg")]`).
+/// Only reachable through `fetch_and_decrypt`'s PG arm.
 #[allow(dead_code)]
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
     let hex = s.strip_prefix("\\x").unwrap_or(s);
@@ -696,80 +670,73 @@ async fn write_audit_unmask_row(
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            use crate::backend::PgSqlExecutor as _;
-            let pool = pg.pool_handle();
-            let sql = format!(
-                r#"INSERT INTO "{app_id}"."__zeroship_audit_unmask"
-                   (actor_id, actor_role, collection, row_pk, "column",
-                    classification, reason, outcome)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#
-            );
-            let actor_id_s: String = actor_id.unwrap_or_default();
-            let actor_role_s: String = actor_role.unwrap_or_default();
-            let reason_s: String = args.reason.clone().unwrap_or_default();
-            // text params: empty strings serve as NULL placeholders;
-            // pg interprets `''` as TEXT, so we ROUTE truly-null fields
-            // through `Option`-shaped params via NULLIF on the wire.
-            // Simpler: just store empty strings as ''-typed text rows;
-            // operators can `WHERE actor_id = ''` to filter. Trading
-            // perfect NULL fidelity for codepath simplicity is fine
-            // here — the audit table is operator-read-only.
-            pool.query_text_params(
-                &sql,
-                &[
-                    &actor_id_s,
-                    &actor_role_s,
-                    &args.collection,
-                    &args.row_pk,
-                    &args.column,
-                    classification,
-                    &reason_s,
-                    outcome,
-                ],
-            )
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            return Ok(());
-        }
+    if let Some(pg) = backend.as_postgres() {
+        use crate::backend::PgSqlExecutor as _;
+        let pool = pg.pool_handle();
+        let sql = format!(
+            r#"INSERT INTO "{app_id}"."__zeroship_audit_unmask"
+               (actor_id, actor_role, collection, row_pk, "column",
+                classification, reason, outcome)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#
+        );
+        let actor_id_s: String = actor_id.unwrap_or_default();
+        let actor_role_s: String = actor_role.unwrap_or_default();
+        let reason_s: String = args.reason.clone().unwrap_or_default();
+        // text params: empty strings serve as NULL placeholders;
+        // pg interprets `''` as TEXT, so we ROUTE truly-null fields
+        // through `Option`-shaped params via NULLIF on the wire.
+        // Simpler: just store empty strings as ''-typed text rows;
+        // operators can `WHERE actor_id = ''` to filter. Trading
+        // perfect NULL fidelity for codepath simplicity is fine
+        // here — the audit table is operator-read-only.
+        pool.query_text_params(
+            &sql,
+            &[
+                &actor_id_s,
+                &actor_role_s,
+                &args.collection,
+                &args.row_pk,
+                &args.column,
+                classification,
+                &reason_s,
+                outcome,
+            ],
+        )
+        .await
+        .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        return Ok(());
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-            let q_app = sq.quote_ident(app_id);
-            let sql = format!(
-                r#"INSERT INTO {q_app}."__zeroship_audit_unmask"
-                   (actor_id, actor_role, collection, row_pk, "column",
-                    classification, reason, outcome)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#
-            );
-            let actor_id_s: String = actor_id.unwrap_or_default();
-            let actor_role_s: String = actor_role.unwrap_or_default();
-            let reason_s: String = args.reason.clone().unwrap_or_default();
-            sq.pool_exec(
-                &sql,
-                &[
-                    actor_id_s.as_str(),
-                    actor_role_s.as_str(),
-                    args.collection.as_str(),
-                    args.row_pk.as_str(),
-                    args.column.as_str(),
-                    classification,
-                    reason_s.as_str(),
-                    outcome,
-                ],
-            )
-            .await?;
-            return Ok(());
-        }
+    if let Some(sq) = backend.as_sqlite() {
+        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        let q_app = sq.quote_ident(app_id);
+        let sql = format!(
+            r#"INSERT INTO {q_app}."__zeroship_audit_unmask"
+               (actor_id, actor_role, collection, row_pk, "column",
+                classification, reason, outcome)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#
+        );
+        let actor_id_s: String = actor_id.unwrap_or_default();
+        let actor_role_s: String = actor_role.unwrap_or_default();
+        let reason_s: String = args.reason.clone().unwrap_or_default();
+        sq.pool_exec(
+            &sql,
+            &[
+                actor_id_s.as_str(),
+                actor_role_s.as_str(),
+                args.collection.as_str(),
+                args.row_pk.as_str(),
+                args.column.as_str(),
+                classification,
+                reason_s.as_str(),
+                outcome,
+            ],
+        )
+        .await?;
+        return Ok(());
     }
 
-    let _ = backend;
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "db: no backend arm available for unmask audit".to_string(),
@@ -791,111 +758,104 @@ async fn ensure_audit_unmask_table(app_id: &str) -> Result<(), DbError> {
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
     // ---- PG arm ----
-    #[cfg(feature = "pg")]
-    {
-        if let Some(pg) = backend.as_postgres() {
-            use crate::backend::PgSqlExecutor as _;
-            let pool = pg.pool_handle();
-            // BIGSERIAL PRIMARY KEY mirrors the platform's other audit
-            // tables; `outcome` is a CHECK-constrained text column so
-            // a malformed insert refuses at the engine.
-            let sql = format!(
-                r#"CREATE TABLE IF NOT EXISTS "{app_id}"."__zeroship_audit_unmask" (
-                    id              BIGSERIAL PRIMARY KEY,
-                    ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    actor_id        TEXT NULL,
-                    actor_role      TEXT NULL,
-                    collection      TEXT NOT NULL,
-                    row_pk          TEXT NOT NULL,
-                    "column"        TEXT NOT NULL,
-                    classification  TEXT NOT NULL,
-                    reason          TEXT NULL,
-                    request_id      TEXT NULL,
-                    outcome         TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
-                )"#
-            );
-            let empty: Vec<&str> = Vec::new();
-            pool.query_text_params(&sql, &empty)
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            // Indexes — `IF NOT EXISTS` keeps the per-call cost flat.
-            let idx1 = format!(
-                r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_ts_idx"
-                   ON "{app_id}"."__zeroship_audit_unmask" (ts)"#
-            );
-            let idx2 = format!(
-                r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_actor_idx"
-                   ON "{app_id}"."__zeroship_audit_unmask" (actor_id, ts)"#
-            );
-            let idx3 = format!(
-                r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_row_idx"
-                   ON "{app_id}"."__zeroship_audit_unmask" (row_pk, "column", ts)"#
-            );
-            pool.query_text_params(&idx1, &empty)
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            pool.query_text_params(&idx2, &empty)
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            pool.query_text_params(&idx3, &empty)
-                .await
-                .map_err(|e| crate::error::DbError::from_pg(&e))?;
-            return Ok(());
-        }
+    if let Some(pg) = backend.as_postgres() {
+        use crate::backend::PgSqlExecutor as _;
+        let pool = pg.pool_handle();
+        // BIGSERIAL PRIMARY KEY mirrors the platform's other audit
+        // tables; `outcome` is a CHECK-constrained text column so
+        // a malformed insert refuses at the engine.
+        let sql = format!(
+            r#"CREATE TABLE IF NOT EXISTS "{app_id}"."__zeroship_audit_unmask" (
+                id              BIGSERIAL PRIMARY KEY,
+                ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                actor_id        TEXT NULL,
+                actor_role      TEXT NULL,
+                collection      TEXT NOT NULL,
+                row_pk          TEXT NOT NULL,
+                "column"        TEXT NOT NULL,
+                classification  TEXT NOT NULL,
+                reason          TEXT NULL,
+                request_id      TEXT NULL,
+                outcome         TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
+            )"#
+        );
+        let empty: Vec<&str> = Vec::new();
+        pool.query_text_params(&sql, &empty)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        // Indexes — `IF NOT EXISTS` keeps the per-call cost flat.
+        let idx1 = format!(
+            r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_ts_idx"
+               ON "{app_id}"."__zeroship_audit_unmask" (ts)"#
+        );
+        let idx2 = format!(
+            r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_actor_idx"
+               ON "{app_id}"."__zeroship_audit_unmask" (actor_id, ts)"#
+        );
+        let idx3 = format!(
+            r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_row_idx"
+               ON "{app_id}"."__zeroship_audit_unmask" (row_pk, "column", ts)"#
+        );
+        pool.query_text_params(&idx1, &empty)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        pool.query_text_params(&idx2, &empty)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        pool.query_text_params(&idx3, &empty)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        return Ok(());
     }
 
     // ---- SQLite arm ----
-    #[cfg(feature = "sqlite")]
-    {
-        if let Some(sq) = backend.as_sqlite() {
-            use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-            let q_app = sq.quote_ident(app_id);
-            // SQLite analogues:
-            //   - BIGSERIAL → INTEGER PRIMARY KEY (alias for ROWID)
-            //   - TIMESTAMPTZ → TEXT (ISO 8601 via CURRENT_TIMESTAMP)
-            let sql = format!(
-                r#"CREATE TABLE IF NOT EXISTS {q_app}."__zeroship_audit_unmask" (
-                    id              INTEGER PRIMARY KEY,
-                    ts              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    actor_id        TEXT,
-                    actor_role      TEXT,
-                    collection      TEXT NOT NULL,
-                    row_pk          TEXT NOT NULL,
-                    "column"        TEXT NOT NULL,
-                    classification  TEXT NOT NULL,
-                    reason          TEXT,
-                    request_id      TEXT,
-                    outcome         TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
-                )"#
-            );
-            sq.pool_exec(&sql, &[]).await?;
-            // SQLite's `CREATE INDEX` syntax puts the schema BEFORE the
-            // index name, NOT before the table — `CREATE INDEX
-            // <schema>.<idx> ON <table>` is the dotted shape SQLite
-            // accepts. The `<schema>.<table>` shape PG uses is rejected
-            // at parse time on this arm. We also scope the index name
-            // to the per-app schema so two attached apps don't collide
-            // on `__zeroship_audit_unmask_ts_idx`.
-            let idx1 = format!(
-                r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_ts_idx"
-                   ON "__zeroship_audit_unmask" (ts)"#
-            );
-            let idx2 = format!(
-                r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_actor_idx"
-                   ON "__zeroship_audit_unmask" (actor_id, ts)"#
-            );
-            let idx3 = format!(
-                r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_row_idx"
-                   ON "__zeroship_audit_unmask" (row_pk, "column", ts)"#
-            );
-            sq.pool_exec(&idx1, &[]).await?;
-            sq.pool_exec(&idx2, &[]).await?;
-            sq.pool_exec(&idx3, &[]).await?;
-            return Ok(());
-        }
+    if let Some(sq) = backend.as_sqlite() {
+        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        let q_app = sq.quote_ident(app_id);
+        // SQLite analogues:
+        //   - BIGSERIAL → INTEGER PRIMARY KEY (alias for ROWID)
+        //   - TIMESTAMPTZ → TEXT (ISO 8601 via CURRENT_TIMESTAMP)
+        let sql = format!(
+            r#"CREATE TABLE IF NOT EXISTS {q_app}."__zeroship_audit_unmask" (
+                id              INTEGER PRIMARY KEY,
+                ts              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                actor_id        TEXT,
+                actor_role      TEXT,
+                collection      TEXT NOT NULL,
+                row_pk          TEXT NOT NULL,
+                "column"        TEXT NOT NULL,
+                classification  TEXT NOT NULL,
+                reason          TEXT,
+                request_id      TEXT,
+                outcome         TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
+            )"#
+        );
+        sq.pool_exec(&sql, &[]).await?;
+        // SQLite's `CREATE INDEX` syntax puts the schema BEFORE the
+        // index name, NOT before the table — `CREATE INDEX
+        // <schema>.<idx> ON <table>` is the dotted shape SQLite
+        // accepts. The `<schema>.<table>` shape PG uses is rejected
+        // at parse time on this arm. We also scope the index name
+        // to the per-app schema so two attached apps don't collide
+        // on `__zeroship_audit_unmask_ts_idx`.
+        let idx1 = format!(
+            r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_ts_idx"
+               ON "__zeroship_audit_unmask" (ts)"#
+        );
+        let idx2 = format!(
+            r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_actor_idx"
+               ON "__zeroship_audit_unmask" (actor_id, ts)"#
+        );
+        let idx3 = format!(
+            r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_row_idx"
+               ON "__zeroship_audit_unmask" (row_pk, "column", ts)"#
+        );
+        sq.pool_exec(&idx1, &[]).await?;
+        sq.pool_exec(&idx2, &[]).await?;
+        sq.pool_exec(&idx3, &[]).await?;
+        return Ok(());
     }
 
-    let _ = backend;
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "db: no backend arm available to provision __zeroship_audit_unmask".to_string(),

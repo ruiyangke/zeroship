@@ -225,10 +225,10 @@ export function devEntry(options: DevEntryOptions): DevEntry {
 
     // Await schema-readiness AFTER `loadNormalized` had a chance to
     // populate `schemaReady`. Reading it BEFORE the import would
-    // observe `undefined` on the first call. Under pglite-socket's
-    // per-connection-in-tx serialisation, opening BEGIN while
-    // registerModel still holds `pg_advisory_lock` deadlocks — gate
-    // here. No-op on the warm path.
+    // observe `undefined` on the first call. On the cold path,
+    // `registerModel` may still be installing schema state when the
+    // first RPC tries to begin a transaction, so gate here. No-op on
+    // the warm path.
     if (schemaReady && typeof schemaReady.then === "function") {
       try { await schemaReady; } catch { /* surfaces via the handler */ }
     }

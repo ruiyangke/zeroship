@@ -27,10 +27,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use serde_json::Value;
+use tempfile::TempDir;
 
 use crate::backend::{
     AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
@@ -130,6 +132,9 @@ use session::{SqliteSession, SqliteSessionHandle};
 ///   connection drops the hooks drops the sender drops the channel.
 #[allow(dead_code)]
 pub struct SqliteBackend {
+    // Held before `session` so drop order closes SQLite (and any
+    // ATTACH-ed per-app files) before TempDir cleanup runs.
+    memory_db_dir: Option<TempDir>,
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
     db_dir: PathBuf,
@@ -210,6 +215,39 @@ impl SqliteBackend {
         &self.db_dir
     }
 
+    pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
+        self.session.exec_batch(sql).await
+    }
+
+    pub(crate) async fn query_json(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        let typed = self.session.query_typed(sql, params).await?;
+        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
+    }
+
+    /// Production constructor used by the runtime URL-scheme
+    /// dispatcher.
+    ///
+    /// `path` names the control database file for the backend. Per-app
+    /// files still live beside it as `zs-<app_id>.sqlite` and are
+    /// ATTACHed lazily by `ensure_app_schema`.
+    ///
+    /// If `path` points at an existing directory we place the control
+    /// session at `<dir>/zs-control.sqlite`. `:memory:` opens the
+    /// control session in SQLite's in-memory mode and keeps a
+    /// `tempfile::TempDir` alive for the lifetime of the backend so
+    /// the per-app ATTACH files stay ephemeral too.
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        let path = path.as_ref().to_path_buf();
+        let opened = compio::runtime::spawn_blocking(move || Self::open_blocking(path))
+            .await
+            .map_err(|_| DbError::internal("SqliteBackend::open: spawn_blocking task panicked"))??;
+        Ok(Self::finish_open(opened))
+    }
+
     /// **Test helper** (P2 PR 4) — open a [`crate::backend::BrokerPauseGuard`]
     /// for `app_id`. While the returned guard is bound, the SQLite CDC
     /// publisher drops every packet whose `app_id` matches; on drop
@@ -249,6 +287,50 @@ impl SqliteBackend {
 
     #[allow(dead_code)]
     pub fn new(db_dir: PathBuf) -> Result<Self, DbError> {
+        let session_path = db_dir.join("zs-control.sqlite");
+        Self::open_with_session_path(db_dir, session_path)
+    }
+
+    fn open_blocking(path: PathBuf) -> Result<OpenedBackend, DbError> {
+        let (db_dir, session_path, memory_db_dir) = if path == Path::new(":memory:") {
+            let memory_db_dir = tempfile::tempdir().map_err(|e| {
+                DbError::internal(format!(
+                    "SqliteBackend::open: failed to create SQLite temp dir: {e}"
+                ))
+            })?;
+            (memory_db_dir.path().to_path_buf(), PathBuf::from(":memory:"), Some(memory_db_dir))
+        } else if path.is_dir() {
+            let session_path = path.join("zs-control.sqlite");
+            (path, session_path, None)
+        } else {
+            let session_path = path;
+            let db_dir = session_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            (db_dir, session_path, None)
+        };
+
+        std::fs::create_dir_all(&db_dir).map_err(|e| {
+            DbError::internal(format!(
+                "SqliteBackend::open: failed to create SQLite directory {}: {e}",
+                db_dir.display()
+            ))
+        })?;
+
+        Self::open_session(db_dir, session_path, memory_db_dir)
+    }
+
+    fn open_with_session_path(db_dir: PathBuf, session_path: PathBuf) -> Result<Self, DbError> {
+        let opened = Self::open_session(db_dir, session_path, None)?;
+        Ok(Self::finish_open(opened))
+    }
+
+    fn open_session(
+        db_dir: PathBuf,
+        session_path: PathBuf,
+        memory_db_dir: Option<TempDir>,
+    ) -> Result<OpenedBackend, DbError> {
         // CDC packet channel — worker thread (producer, via commit
         // hook) → compio publisher task (consumer, calls
         // broker::publish on this thread).
@@ -259,12 +341,28 @@ impl SqliteBackend {
         // `app_id` argument is currently unused inside the dispatcher
         // (per-event app_id derives from the hook's `db_name`
         // parameter — see `cdc::install` rustdoc), so we pass `None`.
-        let session_path = db_dir.join("zs-control.sqlite");
-        let session = Rc::new(SqliteSession::open(
+        let session = SqliteSession::open(
             &session_path,
             None,
             Some(packet_tx),
-        )?);
+        )?;
+
+        Ok(OpenedBackend {
+            session,
+            db_dir,
+            memory_db_dir,
+            packet_rx,
+        })
+    }
+
+    fn finish_open(opened: OpenedBackend) -> Self {
+        let OpenedBackend {
+            session,
+            db_dir,
+            memory_db_dir,
+            packet_rx,
+        } = opened;
+        let session = Rc::new(session);
 
         // Spawn the publisher task on the current compio runtime. The
         // task captures `Rc<SqliteSession>` (for lazy column-name
@@ -300,7 +398,8 @@ impl SqliteBackend {
             crate::encryption::KeySource::EnvVar,
         );
 
-        Ok(Self {
+        Self {
+            memory_db_dir,
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
@@ -310,7 +409,7 @@ impl SqliteBackend {
             minter_secret_prev,
             nonce_cache,
             key_store,
-        })
+        }
     }
 
     /// **P3 PR 3 test helper** — construct a backend with the
@@ -352,6 +451,7 @@ impl SqliteBackend {
         );
 
         Ok(Self {
+            memory_db_dir: None,
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
@@ -363,6 +463,13 @@ impl SqliteBackend {
             key_store,
         })
     }
+}
+
+struct OpenedBackend {
+    session: SqliteSession,
+    db_dir: PathBuf,
+    memory_db_dir: Option<TempDir>,
+    packet_rx: flume::Receiver<CommitPacket>,
 }
 
 // ---------------------------------------------------------------------------
@@ -881,7 +988,13 @@ impl SchemaIntrospect for SqliteBackend {
         let q_app = self.quote_ident(app_id);
         let q_coll = self.quote_ident(collection);
         let sql = format!("SELECT COUNT(*) FROM {q_app}.{q_coll}");
-        let rows = self.session.query(&sql, &[]).await?;
+        let rows = match self.session.query(&sql, &[]).await {
+            Ok(rows) => rows,
+            Err(DbError::Transient { message }) if message.contains("no such table") => {
+                return Ok(0);
+            }
+            Err(e) => return Err(e),
+        };
         let n = rows
             .first()
             .and_then(|r| r.first())
@@ -928,25 +1041,23 @@ impl IndexBuilder for SqliteBackend {
         deploy_id: &str,
         schema_version: i32,
     ) -> Result<(), DbError> {
-        // Build the CREATE INDEX SQL ourselves rather than reuse
-        // `spec.sql` because `IndexSpec::sql` was built against the PG
-        // dialect (`CREATE INDEX CONCURRENTLY` + qualified
-        // `"app"."idx" ON "app"."collection" (cols)`). SQLite uses
-        // `IF NOT EXISTS` (atomic, no CONCURRENTLY) and the index +
-        // table identifiers route through `self.quote_ident` (the
-        // dialect hook). We assemble the column list manually because
-        // SQLite has no `USING <method>` clause — every index is a
-        // B-tree on the listed columns.
-        let q_app = self.quote_ident(app_id);
-        let q_coll = self.quote_ident(collection);
-        let q_idx = self.quote_ident(&spec.name);
-        let cols_quoted: Vec<String> =
-            spec.columns.iter().map(|c| self.quote_ident(c)).collect();
-        let col_list = cols_quoted.join(", ");
-        let unique_kw = if spec.unique { "UNIQUE " } else { "" };
-        let sql = format!(
-            "CREATE {unique_kw}INDEX IF NOT EXISTS {q_app}.{q_idx} ON {q_coll} ({col_list})"
-        );
+        let sql = {
+            let built = self.build_create_index(spec, false);
+            if !built.is_empty() {
+                built
+            } else {
+                let q_app = self.quote_ident(app_id);
+                let q_coll = self.quote_ident(collection);
+                let q_idx = self.quote_ident(&spec.name);
+                let cols_quoted: Vec<String> =
+                    spec.columns.iter().map(|c| self.quote_ident(c)).collect();
+                let col_list = cols_quoted.join(", ");
+                let unique_kw = if spec.unique { "UNIQUE " } else { "" };
+                format!(
+                    "CREATE {unique_kw}INDEX IF NOT EXISTS {q_app}.{q_idx} ON {q_coll} ({col_list})"
+                )
+            }
+        };
 
         match self.session.exec(&sql, &[]).await {
             Ok(_) => Ok(()),
@@ -1044,32 +1155,81 @@ impl IndexBuilder for SqliteBackend {
     }
 }
 
-// P1 PR 5: `AuditWriter` capability. The SQLite impl routes the
-// parameterised INSERT through the session actor. The audit table on
-// SQLite is named `__zs_migrations` (the per-app analogue of PG's
-// `__zeroship_migrations`); PR 5 ships only the INSERT path — the
-// audit-table provisioning ddl + the `update_audit_status` transition
-// path are SQLite-side work for a later PR, since `IndexBuilder` is
-// the only PR-5 consumer and it writes a terminal row in one shot.
+// PR 2: full `AuditWriter` capability for the SQLite register-model
+// pipeline — provisioning, `next_schema_version`, row insert, and
+// terminal-status updates all route through the session actor.
 impl AuditWriter for SqliteBackend {
-    async fn write_audit_row(
+    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
+        let q_app = self.quote_ident(app_id);
+        let ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {q_app}.\"__zeroship_migrations\" (\
+                 id                INTEGER PRIMARY KEY, \
+                 collection        TEXT NOT NULL, \
+                 phase             TEXT NOT NULL, \
+                 change_class      TEXT NOT NULL, \
+                 change_kind       TEXT NOT NULL, \
+                 details           TEXT NOT NULL, \
+                 ddl_sql           TEXT, \
+                 created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+                 updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+                 applied_at        TEXT, \
+                 applied_by_kind   TEXT NOT NULL, \
+                 applied_by_id     TEXT, \
+                 deploy_id         TEXT NOT NULL, \
+                 parent_id         INTEGER REFERENCES \"__zeroship_migrations\"(id), \
+                 schema_version    INTEGER NOT NULL, \
+                 status            TEXT NOT NULL, \
+                 error             TEXT, \
+                 duration_ms       INTEGER, \
+                 validate_cursor   INTEGER, \
+                 owner_session_id  TEXT, \
+                 last_heartbeat_at TEXT, \
+                 dead_letter_pks   TEXT, \
+                 audit_generation  INTEGER NOT NULL DEFAULT 0, \
+                 CONSTRAINT __zeroship_migrations_phase_chk CHECK (phase IN ('ddl','validation','backfill','audit')), \
+                 CONSTRAINT __zeroship_migrations_class_chk CHECK (change_class IN ('additive','compatible','destructive')), \
+                 CONSTRAINT __zeroship_migrations_status_chk CHECK (status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back','validation_refused'))\
+             );\
+             CREATE INDEX IF NOT EXISTS {q_app}.\"__zeroship_migrations_deploy_idx\" \
+                 ON \"__zeroship_migrations\" (deploy_id);\
+             CREATE INDEX IF NOT EXISTS {q_app}.\"__zeroship_migrations_updated_at_idx\" \
+                 ON \"__zeroship_migrations\" (updated_at DESC);"
+        );
+        self.session.exec_batch(&ddl).await
+    }
+
+    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError> {
+        let q_app = self.quote_ident(app_id);
+        let sql = format!(
+            "SELECT COALESCE(MAX(schema_version), 0) + 1 \
+             FROM {q_app}.\"__zeroship_migrations\" \
+             WHERE phase = 'ddl' AND status = 'applied'"
+        );
+        let rows = self.session.query(&sql, &[]).await?;
+        let value = rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|cell| cell.as_deref())
+            .ok_or_else(|| DbError::internal("sqlite audit: missing schema_version row"))?;
+        value.parse::<i32>().map_err(|e| {
+            DbError::internal(format!(
+                "sqlite audit: invalid schema_version {value:?}: {e}"
+            ))
+        })
+    }
+
+    async fn write_audit_row_returning_id(
         &self,
         app_id: &str,
         row: &crate::audit::AuditRow,
-    ) -> Result<(), DbError> {
-        // Parameterised INSERT mirroring the PG-side
-        // `crate::audit::write_audit_row` shape (audit.rs:333). The
-        // SQLite column set is a subset (no `applied_at`, no
-        // `parent_id` — those land when the SQLite audit-table
-        // provisioning DDL ships). The INSERT uses `?N` positional
-        // binds so the session actor's `&[&str]` param surface routes
-        // through `rusqlite::Statement::execute` cleanly.
+    ) -> Result<i64, DbError> {
         let q_app = self.quote_ident(app_id);
         let sql = format!(
-            "INSERT INTO {q_app}.\"__zs_migrations\" \
+            "INSERT INTO {q_app}.\"__zeroship_migrations\" \
                 (collection, phase, change_class, change_kind, details, \
                  ddl_sql, status, deploy_id, applied_by_kind, schema_version) \
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            RETURNING id"
         );
 
         let details_str = row.details.to_string();
@@ -1088,8 +1248,60 @@ impl AuditWriter for SqliteBackend {
             schema_version_str.as_str(),
         ];
 
-        self.session.exec(&sql, &params).await?;
-        Ok(())
+        let rows = self.session.query(&sql, &params).await?;
+        let value = rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|cell| cell.as_deref())
+            .ok_or_else(|| DbError::internal("sqlite audit: missing inserted id"))?;
+        value.parse::<i64>().map_err(|e| {
+            DbError::internal(format!("sqlite audit: invalid inserted id {value:?}: {e}"))
+        })
+    }
+
+    async fn update_audit_status(
+        &self,
+        app_id: &str,
+        id: i64,
+        new_status: crate::audit::TerminalStatus,
+        error: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let q_app = self.quote_ident(app_id);
+        let id_str = id.to_string();
+        let status = new_status.as_sql();
+
+        let rows = if let Some(err) = error {
+            let sql = format!(
+                "UPDATE {q_app}.\"__zeroship_migrations\" \
+                 SET status = ?2, \
+                     error = ?3, \
+                     updated_at = CURRENT_TIMESTAMP, \
+                     applied_at = CASE \
+                         WHEN ?2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL \
+                         THEN CURRENT_TIMESTAMP \
+                         ELSE applied_at \
+                     END \
+                 WHERE id = ?1 AND status IN ('running','pending') \
+                 RETURNING id"
+            );
+            self.session.query(&sql, &[id_str.as_str(), status, err]).await?
+        } else {
+            let sql = format!(
+                "UPDATE {q_app}.\"__zeroship_migrations\" \
+                 SET status = ?2, \
+                     updated_at = CURRENT_TIMESTAMP, \
+                     applied_at = CASE \
+                         WHEN ?2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL \
+                         THEN CURRENT_TIMESTAMP \
+                         ELSE applied_at \
+                     END \
+                 WHERE id = ?1 AND status IN ('running','pending') \
+                 RETURNING id"
+            );
+            self.session.query(&sql, &[id_str.as_str(), status]).await?
+        };
+
+        Ok(!rows.is_empty())
     }
 }
 
@@ -1099,6 +1311,10 @@ impl DialectBuilder for SqliteBackend {
     // dialect without naming the inner type. The ZST is instantiated
     // per call — rustc inlines the value away because every method on
     // `SqliteDialect` is `&self` and side-effect-free.
+
+    fn sql_dialect(&self) -> crate::query::SqlDialect {
+        SqliteDialect.sql_dialect()
+    }
 
     fn quote_ident(&self, name: &str) -> String {
         SqliteDialect.quote_ident(name)
@@ -2230,7 +2446,6 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 //       SQLite has no WAL-archive PITR. Returns
 //       `Configuration { code: "pitr_pg_only" }` unconditionally.
 
-#[cfg(feature = "sqlite")]
 impl crate::backend::Backup for SqliteBackend {
     async fn snapshot(
         &self,
@@ -2277,7 +2492,6 @@ impl crate::backend::Backup for SqliteBackend {
 ///
 /// `pub(super)` so the trait methods above can call in; the helpers
 /// stay private to this file.
-#[cfg(feature = "sqlite")]
 mod backup_sqlite {
     use std::io::Read;
     use std::path::{Path, PathBuf};
@@ -2688,6 +2902,24 @@ mod tests {
         AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
         SchemaIntrospect, SqlExecutor,
     };
+
+    #[test]
+    fn memory_backend_tempdir_is_removed_on_drop() {
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+        let temp_dir_path = runtime.block_on(async {
+            let backend = SqliteBackend::open(":memory:")
+                .await
+                .expect("open in-memory backend");
+            let temp_dir_path = backend.db_dir().to_path_buf();
+            assert!(temp_dir_path.exists(), "temp dir should exist while backend lives");
+            drop(backend);
+            temp_dir_path
+        });
+        assert!(
+            !temp_dir_path.exists(),
+            "TempDir-backed SQLite scratch dir should be cleaned on drop"
+        );
+    }
 
     /// P1 PR 5: `Backend` composition marker now lands on
     /// `SqliteBackend`. Pinning the bound here means a future change

@@ -9,7 +9,7 @@
 use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
-use crate::backend::SchemaIntrospect;
+use crate::backend::{DialectBuilder, SchemaIntrospect};
 use crate::diff::{DiffOp, LiveSchema};
 use crate::error::DbError;
 use crate::query;
@@ -38,7 +38,7 @@ pub(crate) struct Plan {
 /// the carved capability trait expresses exactly that. See
 /// `docs/proposals/p0-implementation-plan.md` §"PR 2" and
 /// `docs/proposals/db-system-design.md` §7.
-pub(crate) async fn compute_plan<B: SchemaIntrospect<LiveSchema = LiveSchema>>(
+pub(crate) async fn compute_plan<B: SchemaIntrospect<LiveSchema = LiveSchema> + DialectBuilder>(
     backend: &B,
     ctx: &RegisterContext,
     collection: &str,
@@ -59,11 +59,12 @@ pub(crate) async fn compute_plan<B: SchemaIntrospect<LiveSchema = LiveSchema>>(
     // `live` and can inline the FK, or defers it to its own apply phase.
     let existing_tables: std::collections::HashSet<String> =
         live.tables.keys().cloned().collect();
-    let create_table = query::build_create_table_with_fks(
+    let create_table = query::build_create_table_with_fks_for_dialect(
         &ctx.app_id,
         collection,
         schema,
         &query::FkEmission::Deferred(&existing_tables),
+        backend.sql_dialect(),
     )
     .map_err(DbError::from)?;
 
