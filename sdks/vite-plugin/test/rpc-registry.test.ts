@@ -203,7 +203,15 @@ describe("buildServerEntrySource — forbidden helpers (Stage 5b cleanup)", () =
     "installSchema",
     "__zsSchemaInit",
     "_zsSchemaMod",
-    "@zeroship/db",                 // No SDK imports in the entry
+    // No SDK *helper* logic in the entry — i.e. no NAMED imports pulling
+    // symbols out of the db SDK. The entry MAY (and must) bare side-effect-
+    // import `@zeroship/db/internal` + `@zeroship/bootstrap/install-schema`
+    // so the bundler includes the exact modules the runtime-entry resolves
+    // via dynamic `import()` at isolate boot (V8 can only resolve dynamic
+    // imports against bundle-resident modules). Those are `import "…";` with
+    // no `from`, so forbidding `from "@zeroship/db` catches helper imports
+    // while allowing the bundle-inclusion side-effect import.
+    'from "@zeroship/db',
     "installOnEnvDb",
   ];
 
