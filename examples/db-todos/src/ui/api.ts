@@ -1,13 +1,17 @@
-// Tiny typed client for the db-todos RPC surface.
+// Typed client for the db-todos RPC surface, built on the platform's
+// `@zeroship/rpc-client` — the same wire the vite-plugin discovers on the
+// server side (`"use server"` exports in src/index.ts). We declare the
+// procedure map (`App`) and the client hands back per-procedure handles:
+//   • rpc.listTodos.query(input)        → Promise<result>
+//   • rpc.createTodo.mutation(input)    → Promise<result>
+//   • rpc.subscribeTodos.stream(input)  → AsyncIterableIterator (AI-SDK
+//                                          Data Stream frames, parsed for us)
 //
-// The platform wire contract is dead simple, so we hit it directly with
-// `fetch` instead of pulling in the full rpc-client stack:
-//   • call:   POST /_zs/v1/<procedure>   body { "json": <input> }
-//   • result: 200 { "json": <result> }   error: 4xx/5xx { message, code }
-//   • stream: GET  /_zs/v1/<procedure>?input=<base64url {"json":<input>}>
-//             AI-SDK SSE frames — `2:[<json>]` per object, `d:{}` to end.
+// This is why the realtime feed needs the client and not a raw EventSource:
+// the platform streams the AI-SDK Data Stream Protocol (`2:[…]` frames),
+// which EventSource (SSE `data:` only) cannot parse — `.stream()` can.
 
-const RPC = "/_zs/v1";
+import { client, type ProcedureType } from "@zeroship/rpc-client";
 
 export type Priority = "low" | "medium" | "high";
 
@@ -35,107 +39,46 @@ export interface Todo {
   deleted_at: number | null;
 }
 
-/** Error carrying the platform's typed `code` (SCREAMING_SNAKE). */
-export class RpcError extends Error {
-  code: string;
-  constructor(message: string, code = "ERROR") {
-    super(message);
-    this.name = "RpcError";
-    this.code = code;
-  }
-}
-
-async function call<T>(proc: string, input: unknown): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(`${RPC}/${proc}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ json: input ?? null }),
-    });
-  } catch (e) {
-    throw new RpcError(
-      `network error calling ${proc}: ${(e as Error).message}`,
-      "NETWORK",
-    );
-  }
-  const text = await res.text();
-  let body: unknown = null;
-  try {
-    body = text ? JSON.parse(text) : null;
-  } catch {
-    /* non-JSON body */
-  }
-  if (!res.ok) {
-    const b = body as { message?: string; code?: string } | null;
-    throw new RpcError(b?.message ?? `${proc} failed (${res.status})`, b?.code ?? `HTTP_${res.status}`);
-  }
-  return (body as { json?: T } | null)?.json as T;
-}
-
-// ── Queries ────────────────────────────────────────────────────────────
-export const listTodos = (userId: string) =>
-  call<Todo[]>("listTodos", { userId });
-
-export const todoCount = (userId: string) =>
-  call<number>("todoCount", { userId });
-
-// ── Mutations ──────────────────────────────────────────────────────────
-export const seedUser = (input: { email: string; name: string; handle: string }) =>
-  call<User>("seedUser", input);
-
-export const createTodo = (input: { userId: string; title: string; priority?: Priority }) =>
-  call<Todo>("createTodo", input);
-
-export const completeTodo = (id: string) => call<Todo>("completeTodo", { id });
-export const archiveTodo = (id: string) => call<Todo>("archiveTodo", { id });
-export const deleteTodo = (id: string) => call<Todo>("deleteTodo", { id });
-
-// ── Realtime ─────────────────────────────────────────────────────────────
+/** Change event from the broker (`subscribe("todos")`). */
 export interface ChangeEvent {
   kind?: string;
-  collection?: string;
   op?: "insert" | "update" | "delete" | string;
-  id?: string | number;
-  [k: string]: unknown;
+  collection?: string;
+  pk?: string | number;
+  columns?: string[];
 }
 
-function b64url(s: string): string {
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
+type SeedInput = { email: string; name: string; handle: string };
+type CreateInput = { userId: string; title: string; priority?: Priority };
+type ById = { id: string };
+type ByUser = { userId: string };
 
-/**
- * Open the `subscribeTodos` SSE stream. Returns a teardown fn.
- * Parses AI-SDK frames: `2:[<json>]` carries one (or more) change events.
- */
-export function subscribeTodos(
-  onEvent: (e: ChangeEvent) => void,
-  onStatus?: (live: boolean) => void,
-): () => void {
-  const input = b64url(JSON.stringify({ json: {} }));
-  const es = new EventSource(`${RPC}/subscribeTodos?input=${input}`);
-  es.onopen = () => onStatus?.(true);
-  es.onerror = () => onStatus?.(false);
-  es.onmessage = (msg) => handleFrame(msg.data, onEvent);
-  // The platform encodes frames as raw `2:[...]` lines, which some SSE
-  // transports surface as the default (unnamed) event data above; if the
-  // server uses explicit `event:` names this still no-ops safely.
-  return () => {
-    es.close();
-    onStatus?.(false);
-  };
-}
+// The procedure map — mirrors the wrapped exports in src/index.ts.
+export type App = {
+  listTodos: ProcedureType<"query", ByUser, Todo[]>;
+  todoCount: ProcedureType<"query", ByUser, number>;
+  seedUser: ProcedureType<"mutation", SeedInput, User>;
+  createTodo: ProcedureType<"mutation", CreateInput, Todo>;
+  completeTodo: ProcedureType<"mutation", ById, Todo>;
+  archiveTodo: ProcedureType<"mutation", ById, Todo>;
+  deleteTodo: ProcedureType<"mutation", ById, Todo>;
+  subscribeTodos: ProcedureType<"stream", Record<string, never>, ChangeEvent>;
+};
 
-function handleFrame(data: string, onEvent: (e: ChangeEvent) => void) {
-  for (const line of data.split("\n")) {
-    const trimmed = line.trimStart();
-    if (!trimmed.startsWith("2:")) continue;
-    try {
-      const payload = JSON.parse(trimmed.slice(2));
-      const events = Array.isArray(payload) ? payload : [payload];
-      for (const e of events) if (e && typeof e === "object") onEvent(e as ChangeEvent);
-    } catch {
-      /* ignore malformed frame */
-    }
-  }
-}
+export const rpc = client<App>({ baseUrl: "", transformer: "superjson" });
+
+// Re-export the structured error so the UI can branch on `.code`.
+export { RpcError } from "@zeroship/rpc-client";
+
+// ── thin wrappers (keep the component import surface tidy) ──────────────
+export const listTodos = (userId: string) => rpc.listTodos.query({ userId });
+export const todoCount = (userId: string) => rpc.todoCount.query({ userId });
+export const seedUser = (input: SeedInput) => rpc.seedUser.mutation(input);
+export const createTodo = (input: CreateInput) => rpc.createTodo.mutation(input);
+export const completeTodo = (id: string) => rpc.completeTodo.mutation({ id });
+export const archiveTodo = (id: string) => rpc.archiveTodo.mutation({ id });
+export const deleteTodo = (id: string) => rpc.deleteTodo.mutation({ id });
+
+/** Live change feed — async iterator over broker events. `signal` cancels. */
+export const subscribeTodos = (signal?: AbortSignal): AsyncIterableIterator<ChangeEvent> =>
+  rpc.subscribeTodos.stream({}, signal ? { signal } : undefined);

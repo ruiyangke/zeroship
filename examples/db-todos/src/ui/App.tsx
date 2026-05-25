@@ -105,24 +105,37 @@ export function App() {
     };
   }, [user, flash]);
 
-  // Load + live-subscribe once we have a user.
+  // Load + live-subscribe once we have a user. The platform streams the
+  // AI-SDK Data Stream Protocol; `subscribeTodos()` returns an async
+  // iterator (rpc-client parses the frames) — we consume it in a loop and
+  // abort on teardown.
   useEffect(() => {
     if (!user) return;
     setLoading(true);
     void refresh(user.id);
+    const controller = new AbortController();
     let t: number | undefined;
-    const stop = subscribeTodos(
-      (ev) => {
-        if (ev.collection && ev.collection !== "todos") return;
-        setPulse((p) => p + 1);
-        window.clearTimeout(t);
-        t = window.setTimeout(() => void refresh(user.id), 180); // debounce bursts
-      },
-      (isLive) => setLive(isLive),
-    );
+    (async () => {
+      try {
+        const stream = subscribeTodos(controller.signal);
+        setLive(true);
+        for await (const ev of stream) {
+          if (controller.signal.aborted) break;
+          if (ev.collection && ev.collection !== "todos") continue;
+          setPulse((p) => p + 1);
+          window.clearTimeout(t);
+          t = window.setTimeout(() => void refresh(user.id), 180); // debounce bursts
+        }
+      } catch {
+        /* aborted on teardown, or the stream ended/errored */
+      } finally {
+        setLive(false);
+      }
+    })();
     return () => {
       window.clearTimeout(t);
-      stop();
+      controller.abort();
+      setLive(false);
     };
   }, [user, refresh]);
 
