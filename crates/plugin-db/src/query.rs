@@ -2125,6 +2125,69 @@ pub fn build_find(
     build_find_with_schema(app_id, collection, filter, limit, offset, order_by, select, None)
 }
 
+pub(crate) fn build_conflict_probe_with_dialect(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let obj = filter.as_object().ok_or_else(|| {
+        QueryError::InvalidFilter("conflict probe filter must be an object".to_string())
+    })?;
+    if obj.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "conflict probe filter cannot be empty".to_string(),
+        ));
+    }
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+    let mut params = Vec::new();
+    let mut conditions = Vec::new();
+
+    for (field, value) in obj {
+        if field.starts_with("__zsenc__") {
+            continue;
+        }
+        validate_field_name(field)?;
+        let col = quote_ident(field);
+        if value.is_null() {
+            conditions.push(format!("{col} IS NULL"));
+            continue;
+        }
+
+        let raw = value_to_param(value);
+        let encrypted = obj.contains_key(&format!("__zsenc__{field}"));
+        let param_value = if encrypted {
+            dialect.wrap_encrypted_param(raw)
+        } else {
+            raw
+        };
+        params.push(param_value);
+        let n = params.len();
+        if encrypted {
+            conditions.push(format!("{col} = {}", dialect.encrypted_column_bind_placeholder(n)));
+        } else {
+            conditions.push(format!("{col} = ${n}"));
+        }
+    }
+
+    if conditions.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "conflict probe filter cannot be empty".to_string(),
+        ));
+    }
+
+    let sql = format!(
+        "SELECT \"id\" FROM {schema}.{table} WHERE {} LIMIT 1",
+        conditions.join(" AND ")
+    );
+    Ok(BuiltQuery { sql, params })
+}
+
 /// **P5.5 PR 3** — schema-aware SELECT builder.
 ///
 /// Same shape as [`build_find`], plus an optional `schema` (the cached

@@ -42,7 +42,7 @@ export type SubscriptionEvent =
       op: "insert" | "update" | "delete";
       collection: string;
       /** Surrogate primary key of the affected row, or null. */
-      pk: number | null;
+      pk: string | null;
       /** Columns touched by the mutation (post-image, minus system fields). */
       columns: string[];
     }
@@ -54,6 +54,17 @@ export type SubscriptionEvent =
       /** Subscription closed; iterator terminates. */
       kind: "closed";
     };
+
+type _Assert<T extends true> = T;
+type _IsExactly<A, B> = (
+  (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false
+);
+type _SubscriptionEventPkMatchesRuntime = _Assert<
+  _IsExactly<Extract<SubscriptionEvent, { kind: "change" }>["pk"], string | null>
+>;
+type _SubscriptionEventPkMatchesPublished = _Assert<
+  _IsExactly<Extract<ZeroshipSubscriptionEvent, { kind: "change" }>["pk"], string | null>
+>;
 
 /**
  * A live subscription — an `AsyncIterable<SubscriptionEvent>` that

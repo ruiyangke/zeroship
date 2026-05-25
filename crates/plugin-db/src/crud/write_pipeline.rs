@@ -7,7 +7,7 @@ use crate::query;
 pub(crate) enum ApplyMode<'a> {
     Insert { actor_id: Option<&'a str> },
     InsertMany { actor_id: Option<&'a str> },
-    Update { filter: &'a Value },
+    Update { row_pk: &'a str },
     Upsert {
         actor_id: Option<&'a str>,
         conflict_fields: &'a Value,
@@ -73,11 +73,8 @@ pub(crate) async fn apply(
             }
             Ok(())
         }
-        ApplyMode::Update { filter } => {
-            let row_pk = row_pk_from_filter(filter);
-            stages
-                .apply_to_update(app_id, collection, &row_pk, payload)
-                .await?;
+        ApplyMode::Update { row_pk } => {
+            stages.apply_to_update(app_id, collection, row_pk, payload).await?;
             Ok(())
         }
         ApplyMode::Upsert {
@@ -200,15 +197,104 @@ fn row_pk_from_doc(doc: &Value) -> String {
     row_pk_from_value(doc.get("id"))
 }
 
-fn row_pk_from_filter(filter: &Value) -> String {
-    row_pk_from_value(filter.get("id"))
-}
-
 fn row_pk_from_value(value: Option<&Value>) -> String {
     match value {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
         _ => String::new(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TargetRowId {
+    pub(crate) id_value: Value,
+    pub(crate) row_pk: String,
+}
+
+pub(crate) async fn resolve_target_row_ids(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+) -> Result<Vec<TargetRowId>, DbError> {
+    let mut sql_filter = filter.clone();
+    super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut sql_filter);
+    let select = serde_json::json!(["id"]);
+    let built = query::build_find(
+        app_id,
+        collection,
+        &sql_filter,
+        limit,
+        None,
+        None,
+        Some(&select),
+    )
+    .map_err(DbError::from)?;
+    let rows = exec_query(app_id, built).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let id_value = row.get("id")?.clone();
+            Some(TargetRowId {
+                row_pk: row_pk_from_value(Some(&id_value)),
+                id_value,
+            })
+        })
+        .collect())
+}
+
+pub(crate) fn update_requires_per_row_encryption(
+    app_id: &str,
+    collection: &str,
+    patch: &Value,
+) -> bool {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return false;
+    };
+    update_touches_randomised_encrypted_field(&schema, patch)
+}
+
+fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> bool {
+    let Some(schema_obj) = schema.as_object() else {
+        return false;
+    };
+    let Some(update_obj) = patch.as_object() else {
+        return false;
+    };
+
+    if let Some(set_obj) = update_obj.get("$set").and_then(Value::as_object) {
+        if set_obj.iter().any(|(field, _)| {
+            schema_obj
+                .get(field)
+                .is_some_and(field_is_randomised_encrypted)
+        }) {
+            return true;
+        }
+    }
+
+    update_obj.iter().any(|(field, value)| {
+        if field.starts_with('$') || field.starts_with("__zsenc__") {
+            return false;
+        }
+        schema_obj
+            .get(field)
+            .is_some_and(field_is_randomised_encrypted)
+            && field_update_writes_value(value)
+    })
+}
+
+fn field_is_randomised_encrypted(field_def: &Value) -> bool {
+    field_def
+        .get("encrypted")
+        .and_then(Value::as_object)
+        .and_then(|enc| enc.get("mode").and_then(Value::as_str))
+        .is_some_and(|mode| matches!(mode, "randomised" | "randomized"))
+}
+
+fn field_update_writes_value(value: &Value) -> bool {
+    match value {
+        Value::Object(ops) => ops.keys().any(|key| key.starts_with('$')),
+        _ => true,
     }
 }
 
@@ -255,16 +341,24 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     }
 
     let mut filter = Value::Object(filter_obj);
+    if let Some(probe_schema) = deterministic_conflict_probe_schema(schema, conflict_arr)? {
+        let mut sidechannel = super::mask_pass::MaskPlaintextSidechannel::new();
+        super::encryption_pass_dispatch(
+            app_id,
+            collection,
+            &probe_schema,
+            "",
+            &mut filter,
+            &mut sidechannel,
+        )
+        .await?;
+    }
     super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
-    let select = serde_json::json!(["id"]);
-    let built = query::build_find(
+    let built = query::build_conflict_probe_with_dialect(
         app_id,
         collection,
         &filter,
-        Some(1),
-        None,
-        None,
-        Some(&select),
+        super::current_sql_dialect(),
     )
     .map_err(DbError::from)?;
     let rows = exec_query(app_id, built).await?;
@@ -277,6 +371,46 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     };
     obj.insert("id".to_string(), Value::String(existing_id));
     Ok(())
+}
+
+fn deterministic_conflict_probe_schema(
+    schema: &Value,
+    conflict_fields: &[Value],
+) -> Result<Option<Value>, DbError> {
+    let Some(schema_obj) = schema.as_object() else {
+        return Ok(None);
+    };
+    let mut out = serde_json::Map::new();
+    for field in conflict_fields.iter().filter_map(Value::as_str) {
+        let Some(def) = schema_obj.get(field) else {
+            continue;
+        };
+        let Some(enc) = def.get("encrypted").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(mode) = enc.get("mode").and_then(Value::as_str) else {
+            continue;
+        };
+        match mode {
+            "deterministic" => {
+                out.insert(field.to_string(), def.clone());
+            }
+            "randomised" | "randomized" => {
+                return Err(DbError::validation(
+                    "upsert_conflict_field_requires_deterministic_encryption",
+                    format!(
+                        "upsert: conflict field `{field}` uses randomised encryption; ON CONFLICT equality requires deterministic ciphertext"
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Value::Object(out)))
+    }
 }
 
 #[cfg(test)]
@@ -544,7 +678,6 @@ mod tests {
             )
             .await;
 
-            let filter = serde_json::json!({ "id": seeded_id.clone() });
             let mut update_patch = serde_json::json!({
                 "$set": {
                     "ssn": "555-55-5555",
@@ -561,7 +694,9 @@ mod tests {
                 app_id,
                 collection,
                 &mut update_patch,
-                ApplyMode::Update { filter: &filter },
+                ApplyMode::Update {
+                    row_pk: seeded_id.as_str(),
+                },
             )
             .await
             .expect("prepare update patch");

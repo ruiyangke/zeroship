@@ -375,7 +375,7 @@ type ZeroshipSubscriptionEvent =
       kind: "change";
       op: "insert" | "update" | "delete";
       collection: string;
-      pk: number | null;
+      pk: string | null;
       columns: string[];
     }
   | { kind: "resync" }

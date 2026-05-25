@@ -3448,6 +3448,44 @@ setup.config = {{ kind: "action" }};
     ) + SQLITE_RUNTIME_RPC_SHIM
 }
 
+fn sqlite_runtime_upsert_det_conflict_source(
+    collection: &str,
+    key_id: &str,
+    body: &str,
+) -> String {
+    format!(
+        r#"
+import {{ env }} from "zeroship";
+
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+const COLLECTION = "{collection}";
+const KEY_ID = "{key_id}";
+
+function setup(_input, _ctx) {{
+    return __plat.registerModel(COLLECTION, {{
+        email: {{
+            type: "string",
+            required: true,
+            unique: true,
+            encrypted: {{ mode: "deterministic", keyId: KEY_ID, wraps: "string" }}
+        }},
+        name: {{ type: "string", required: true }},
+        ssn: {{
+            type: "string",
+            encrypted: {{ mode: "randomised", keyId: KEY_ID, wraps: "string" }},
+            mask: {{ kind: "last4", classification: "spi" }}
+        }}
+    }});
+}}
+setup.config = {{ kind: "action" }};
+
+{body}
+"#
+    ) + SQLITE_RUNTIME_RPC_SHIM
+}
+
 fn dispatch_sqlite_runtime(
     dir: &tempfile::TempDir,
     source: &str,
@@ -3837,6 +3875,367 @@ const _procedures = { setup, upsertConflict };
             b"987-65-4321".to_vec(),
             "stored ciphertext must decrypt to the updated plaintext"
         );
+    });
+}
+
+#[test]
+fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_sqlite_runtime() {
+    let key_id = "c2_upsert_det_conflict_runtime";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_C2_UPSERT_DET_CONFLICT_RUNTIME",
+        &"6".repeat(64),
+    );
+
+    run(async {
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+        use zeroship_plugin_db::encryption;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_det_conflict_source(
+            "users",
+            key_id,
+            r#"
+async function upsertConflict(_input, _ctx) {
+    const coll = env.db.collection(COLLECTION);
+    const first = await coll.upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+    const second = await coll.upsert(
+        {
+            id: "user_new",
+            email: "alice@example.com",
+            name: "Alice Updated",
+            ssn: "987-65-4321"
+        },
+        { conflictFields: ["email"] },
+    );
+    return { first, second };
+}
+upsertConflict.config = { kind: "action" };
+
+const _procedures = { setup, upsertConflict };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        let result = dispatch_sqlite_runtime(&dir, &source, "upsertConflict");
+        let payload = parity::extract_json(&result);
+        let second = payload.get("second").expect("second response row");
+        assert_eq!(
+            second.get("id").and_then(|v| v.as_str()),
+            Some("user_seed"),
+            "deterministic conflict probe must rewrite to the existing row id"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let typed = client
+            .query_typed(
+                r#"SELECT id, email, ssn, ssn_masked
+                   FROM "default"."users""#,
+                &[],
+            )
+            .await
+            .expect("SELECT typed conflict row");
+        assert_eq!(typed.rows.len(), 1, "exactly one row after conflict upsert");
+
+        let row = &typed.rows[0];
+        let row_id = match &row[0] {
+            TypedCell::Text(id) => id.clone(),
+            other => panic!("id must be TEXT, got {other:?}"),
+        };
+        let email_blob = match &row[1] {
+            TypedCell::Blob(bytes) => bytes.clone(),
+            other => panic!("email must be stored as deterministic ciphertext BLOB, got {other:?}"),
+        };
+        let ssn_blob = match &row[2] {
+            TypedCell::Blob(bytes) => bytes.clone(),
+            other => panic!("ssn must be stored as randomised ciphertext BLOB, got {other:?}"),
+        };
+        match &row[3] {
+            TypedCell::Text(masked) => assert_eq!(masked, "***-**-4321"),
+            other => panic!("ssn_masked must be TEXT, got {other:?}"),
+        }
+
+        let key = backend
+            .resolve_key("default", key_id)
+            .await
+            .expect("resolve key");
+        let email_plaintext = backend
+            .decrypt(
+                &key,
+                EncryptionMode::Deterministic,
+                &email_blob,
+                &encryption::canonical_aad("users", "email", None),
+            )
+            .expect("decrypt deterministic conflict key");
+        assert_eq!(email_plaintext, b"alice@example.com".to_vec());
+
+        let ssn_plaintext = backend
+            .decrypt(
+                &key,
+                EncryptionMode::Randomised,
+                &ssn_blob,
+                &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+            )
+            .expect("decrypt conflict-updated randomised sibling");
+        assert_eq!(
+            ssn_plaintext,
+            b"987-65-4321".to_vec(),
+            "randomised sibling must be readable against the existing row id"
+        );
+    });
+}
+
+#[test]
+fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
+    let key_id = "c1_update_non_id_runtime";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_C1_UPDATE_NON_ID_RUNTIME",
+        &"7".repeat(64),
+    );
+
+    run(async {
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+        use zeroship_plugin_db::encryption;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function seed(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+seed.config = { kind: "action" };
+
+async function updateByEmail(_input, _ctx) {
+    return await env.db.collection(COLLECTION).update(
+        { email: "alice@example.com" },
+        { ssn: "987-65-4321" },
+    );
+}
+updateByEmail.config = { kind: "action" };
+
+const _procedures = { setup, seed, updateByEmail };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+        let updated = dispatch_sqlite_runtime(&dir, &source, "updateByEmail");
+        let row = parity::extract_json(&updated);
+        assert_eq!(
+            row.get("id").and_then(|v| v.as_str()),
+            Some("user_seed"),
+            "update by non-id filter should still target the seeded row"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let typed = client
+            .query_typed(
+                r#"SELECT id, ssn, ssn_masked
+                   FROM "default"."users"
+                   WHERE email = 'alice@example.com'"#,
+                &[],
+            )
+            .await
+            .expect("SELECT typed updated row");
+        assert_eq!(typed.rows.len(), 1, "exactly one updated row");
+
+        let row = &typed.rows[0];
+        let row_id = match &row[0] {
+            TypedCell::Text(id) => id.clone(),
+            other => panic!("id must be TEXT, got {other:?}"),
+        };
+        let stored_blob = match &row[1] {
+            TypedCell::Blob(bytes) => bytes.clone(),
+            other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+        };
+        match &row[2] {
+            TypedCell::Text(masked) => assert_eq!(masked, "***-**-4321"),
+            other => panic!("ssn_masked must be TEXT, got {other:?}"),
+        }
+
+        let key = backend
+            .resolve_key("default", key_id)
+            .await
+            .expect("resolve key");
+        let plaintext = backend
+            .decrypt(
+                &key,
+                EncryptionMode::Randomised,
+                &stored_blob,
+                &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+            )
+            .expect("decrypt updated ciphertext");
+        assert_eq!(
+            plaintext,
+            b"987-65-4321".to_vec(),
+            "non-id update must store ciphertext readable with the resolved row id"
+        );
+    });
+}
+
+#[test]
+fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
+    let key_id = "c1_update_many_non_id_runtime";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_C1_UPDATE_MANY_NON_ID_RUNTIME",
+        &"8".repeat(64),
+    );
+
+    run(async {
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+        use zeroship_plugin_db::encryption;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function seed(_input, _ctx) {
+    const coll = env.db.collection(COLLECTION);
+    await coll.upsert(
+        {
+            id: "user_a",
+            email: "alice@example.com",
+            name: "Red Team",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+    await coll.upsert(
+        {
+            id: "user_b",
+            email: "bob@example.com",
+            name: "Red Team",
+            ssn: "222-33-4444"
+        },
+        { conflictFields: ["email"] },
+    );
+    await coll.upsert(
+        {
+            id: "user_c",
+            email: "carol@example.com",
+            name: "Blue Team",
+            ssn: "555-66-7777"
+        },
+        { conflictFields: ["email"] },
+    );
+    return { seeded: 3 };
+}
+seed.config = { kind: "action" };
+
+async function updateManyByName(_input, _ctx) {
+    return await env.db.collection(COLLECTION).updateMany(
+        { name: "Red Team" },
+        { ssn: "999-88-7777" },
+    );
+}
+updateManyByName.config = { kind: "action" };
+
+const _procedures = { setup, seed, updateManyByName };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+        let updated = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyByName"));
+        assert_eq!(
+            updated.as_f64(),
+            Some(2.0),
+            "two rows should match the non-id updateMany filter: {updated}"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let typed = client
+            .query_typed(
+                r#"SELECT id, name, ssn, ssn_masked
+                   FROM "default"."users"
+                   WHERE name = 'Red Team'
+                   ORDER BY id"#,
+                &[],
+            )
+            .await
+            .expect("SELECT typed updated rows");
+        assert_eq!(typed.rows.len(), 2, "exactly two rows should be updated");
+
+        let key = backend
+            .resolve_key("default", key_id)
+            .await
+            .expect("resolve key");
+        for row in &typed.rows {
+            let row_id = match &row[0] {
+                TypedCell::Text(id) => id.clone(),
+                other => panic!("id must be TEXT, got {other:?}"),
+            };
+            match &row[1] {
+                TypedCell::Text(name) => assert_eq!(name, "Red Team"),
+                other => panic!("name must be TEXT, got {other:?}"),
+            }
+            let stored_blob = match &row[2] {
+                TypedCell::Blob(bytes) => bytes.clone(),
+                other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+            };
+            match &row[3] {
+                TypedCell::Text(masked) => assert_eq!(masked, "***-**-7777"),
+                other => panic!("ssn_masked must be TEXT, got {other:?}"),
+            }
+            let plaintext = backend
+                .decrypt(
+                    &key,
+                    EncryptionMode::Randomised,
+                    &stored_blob,
+                    &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+                )
+                .expect("decrypt updated ciphertext");
+            assert_eq!(
+                plaintext,
+                b"999-88-7777".to_vec(),
+                "each bulk-updated row must carry ciphertext bound to its own row id"
+            );
+        }
     });
 }
 
