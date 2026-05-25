@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped. Live reference: docs/reference/sqlite-divergences.md.
+
 # SQLite ↔ Postgres parity — SQLite as the dev backend
 
 **Status**: design v4, for critic/reviser loop. Not committed to main.

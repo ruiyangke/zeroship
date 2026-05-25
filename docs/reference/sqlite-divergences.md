@@ -1,6 +1,6 @@
 # SQLite divergences
 
-`plugin-db` keeps the creator-facing CRUD surface aligned across Postgres and SQLite. The remaining intentional differences are in engine-specific search, locking, and scoring behavior.
+`plugin-db` keeps the creator-facing CRUD surface aligned across Postgres and SQLite. The remaining intentional differences are in engine-specific search, transaction isolation, locking, scoring, and text-ordering behavior.
 
 ## Current differences
 
@@ -10,7 +10,9 @@
 | Full-text language | `language` selects the `tsvector` configuration | FTS5 ignores the `language` parameter | Matching behavior should line up; do not depend on language-specific tokenization on SQLite. |
 | Full-text score | `ts_rank`-style descending score | FTS5 hidden `rank` / bm25 score, surfaced verbatim as `_rank` | Match on documents, not exact cross-engine score values. |
 | Spatial search | PostGIS + GIST-backed `ST_DWithin` | no index build; `spatial_near` does a haversine flat scan over the stored geopoint BLOB | Result semantics aim to match, but the SQLite path is a dev-scale scan. |
+| Transaction isolation | `env.db.transaction(..., { isolationLevel })` emits `BEGIN ISOLATION LEVEL ...` | validates the supplied isolation level but always runs plain `BEGIN` | Commit/rollback/savepoint behavior should line up; do not depend on SQLite honoring PG isolation-level distinctions. |
 | Write contention | backend-native locking | WAL mode + single writer actor; busy-family SQLite errors collapse to the same typed lock-contention surface | Callers should branch on the typed error code, not raw SQLite error text. |
+| Text ordering | backend ordering plus the database collation | emulates PG NULL placement with `IS NULL` buckets, but does not inject a cross-engine collation | Do not depend on locale-sensitive or Unicode string ordering matching exactly across backends. |
 
 ## Source of truth
 
@@ -21,6 +23,8 @@
 - [crates/plugin-db/src/backend/sqlite/spatial.rs](crates/plugin-db/src/backend/sqlite/spatial.rs) — haversine helper
 - [crates/plugin-db/src/backend/sqlite/session.rs](crates/plugin-db/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
 - [crates/plugin-db/src/backend/sqlite/error.rs](crates/plugin-db/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
+- [crates/plugin-db/src/orchestrator/transaction.rs](crates/plugin-db/src/orchestrator/transaction.rs) — SQLite `transaction()` begin path
+- [crates/plugin-db/src/query.rs](crates/plugin-db/src/query.rs) — cross-backend `ORDER BY` shaping
 
 ## Test coverage
 
