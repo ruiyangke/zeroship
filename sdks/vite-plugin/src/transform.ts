@@ -1097,24 +1097,24 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             `  } catch (_) { /* @zeroship/server not installed — SSR hooks unavailable. RPC dispatch still works. */ }\n` +
             `}\n`
           );
-          // Emit __register calls so the dev-bootstrap can build its
-          // dispatch table. dev-bootstrap.js is loaded by the Rust runtime
-          // in `pnpm vite` mode; its `default.rpc` looks the procedure up
-          // in a `globalThis.__register`-populated Map. Without these
-          // calls, /_zs/v1/<id> returns 404 in dev. No-ops in production
-          // (the synthetic SSR entry does static dispatch).
-          const registerCalls = serverFns
+          // Emit one module-scoped registration call so the dev-bootstrap
+          // can replace this module's whole wire-id set atomically. That
+          // lets HMR drop stale ids when a handler is renamed or deleted.
+          const registerEntries = serverFns
             .map((fn) => {
               const wid = wireIdFor(fn);
-              return `if (typeof globalThis.__register === "function") globalThis.__register(${JSON.stringify(wid)}, ${fn.name});`;
+              return `${JSON.stringify(wid)}: ${fn.name}`;
             })
-            .join("\n");
+            .join(", ");
+          const registerCall =
+            `if (typeof globalThis.__registerModule === "function") ` +
+            `globalThis.__registerModule(${JSON.stringify(id)}, { ${registerEntries} });`;
 
           s.append(
             `\n\n// zeroship: SSR hooks\n` +
             `${ssrPatches}\n` +
             `\n// zeroship: dev-bootstrap registry (harmless no-op outside dev)\n` +
-            `${registerCalls}\n`
+            `${registerCall}\n`
           );
           return {
             code: s.toString(),

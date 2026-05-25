@@ -8,8 +8,9 @@
  * shell that:
  *
  *   1. Constructs a `ModuleRunner` connected to Vite over HTTP.
- *   2. Maintains the `__register` registry (transform-appended
- *      `globalThis.__register(<wireId>, <fn>)` calls land here).
+ *   2. Maintains the dev RPC registry (transform-appended
+ *      `globalThis.__registerModule(<file>, { <wireId>: <fn> })`
+ *      calls land here).
  *   3. Polls Vite for changed files every 500ms and invalidates the
  *      runner's evaluated-module cache (HMR proxy — V8 can't open the
  *      outbound WS Vite expects).
@@ -29,6 +30,7 @@ import {
   HMR_POLL_PATH,
 } from "../constants.js";
 import { startHmrPoll } from "./hmr";
+import { createDevRpcRegistry } from "./rpc-registry";
 
 const ENTRY = (globalThis as { process?: { env?: { ZEROSHIP_ENTRY?: string } } }).process?.env?.ZEROSHIP_ENTRY!;
 
@@ -36,15 +38,19 @@ let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
 let stopHmrPoll: (() => void) | null = null;
 
-// Procedure registry — transform-appended `__register(name, fn)` calls
-// land here. Importing the user module triggers those side-effects.
-// Last-write-wins so HMR replacements land cleanly. The dev-entry's
-// `normalizeUserModule` reads this map per call.
-const registry: Map<string, (input: unknown, ctx: unknown) => unknown> = new Map();
-(globalThis as Record<string, unknown>).__register = (name: string, fn: (input: unknown, ctx: unknown) => unknown) => {
-  registry.set(name, fn);
+// Procedure registry — transform-appended `__registerModule(file, handlers)`
+// calls land here. Each module owns its current wire-id set, so a hot
+// update can prune the previous registrations before the module is
+// re-imported. That makes rename/delete stop resolving immediately.
+const registry = createDevRpcRegistry();
+(globalThis as Record<string, unknown>).__registerModule = (
+  moduleId: string,
+  handlers: Record<string, (input: unknown, ctx: unknown) => unknown>,
+) => {
+  registry.replaceModule(moduleId, handlers);
 };
-(globalThis as Record<string, unknown>).__lookup = (name: string) => registry.get(name);
+(globalThis as Record<string, unknown>).__lookup = (name: string) =>
+  registry.registry.get(name);
 
 async function getRunner(): Promise<ModuleRunner> {
   if (runner) return runner;
@@ -87,7 +93,7 @@ const entry = devEntry({
     const envObj = (globalThis as { __zs_env?: () => { db?: unknown } | undefined }).__zs_env?.();
     return envObj?.db;
   },
-  registry,
+  registry: registry.registry,
   // Load `installSchema` THROUGH the ModuleRunner so the `TypeBuilder`
   // class identity matches the one the user's `t.*` builders use.
   // Without this, the esbuild-bundled `installSchema` carries its own
@@ -125,7 +131,16 @@ function ensureHmrPollStarted() {
   if (!viteOrigin) return;
 
   const pollUrl = `${viteOrigin}${HMR_POLL_PATH}`;
-  stopHmrPoll = startHmrPoll(pollUrl, () => runner, console.log);
+  stopHmrPoll = startHmrPoll(
+    pollUrl,
+    () => runner,
+    console.log,
+    (files) => {
+      for (const file of files) {
+        registry.pruneModule(file);
+      }
+    },
+  );
 
   const proc = (globalThis as {
     process?: {
