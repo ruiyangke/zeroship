@@ -3331,6 +3331,166 @@ fn sqlite_blob_literal(bytes: &[u8]) -> String {
     s
 }
 
+#[test]
+fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
+    run(async {
+        use std::collections::HashMap;
+
+        use base64::Engine as _;
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+        use zeroship_plugin_db::encryption;
+        use zeroship_plugin_db::query::{
+            build_create_table_with_fks_for_dialect, build_insert_many_with_dialect, FkEmission,
+            SqlDialect,
+        };
+
+        let key_id = "c1_insert_many";
+        let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_C1_INSERT_MANY", &"d".repeat(64));
+        let app_id = "app_demo";
+        let collection = "bulk_people";
+        let schema = serde_json::json!({
+            "name": { "type": "string" },
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": key_id, "wraps": "string" },
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let (backend, _dir) =
+            unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        let ddl = build_create_table_with_fks_for_dialect(
+            app_id,
+            collection,
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build DDL");
+        for stmt in ddl.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+        }
+
+        let mut docs = serde_json::json!([
+            { "name": "Alice", "ssn": "123-45-6789" },
+            { "name": "Bob", "ssn": "987-65-4321" }
+        ]);
+        zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(
+            &mut docs,
+            app_id,
+            collection,
+            Some("usr_bulk_writer"),
+        )
+        .await
+        .expect("prepare insertMany docs");
+
+        let expected_by_id: HashMap<String, (String, String)> = docs
+            .as_array()
+            .expect("docs array")
+            .iter()
+            .map(|doc| {
+                let obj = doc.as_object().expect("doc object");
+                (
+                    obj.get("id")
+                        .and_then(|v| v.as_str())
+                        .expect("minted id")
+                        .to_string(),
+                    (
+                        obj.get("ssn")
+                            .and_then(|v| v.as_str())
+                            .expect("base64 ciphertext marker doc")
+                            .to_string(),
+                        obj.get("ssn_masked")
+                            .and_then(|v| v.as_str())
+                            .expect("masked sibling")
+                            .to_string(),
+                    ),
+                )
+            })
+            .collect();
+
+        let built =
+            build_insert_many_with_dialect(app_id, collection, &docs, SqlDialect::Sqlite)
+                .expect("build insertMany");
+        let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        client
+            .query(&built.sql, &params)
+            .await
+            .expect("INSERT ... RETURNING");
+
+        let typed = client
+            .query_typed(
+                &format!(
+                    r#"SELECT id, ssn, ssn_masked FROM "{app_id}"."{collection}" ORDER BY id"#
+                ),
+                &[],
+            )
+            .await
+            .expect("SELECT typed");
+        assert_eq!(typed.rows.len(), 2, "two rows stored");
+
+        let key = backend
+            .resolve_key(app_id, key_id)
+            .await
+            .expect("resolve key");
+        for row in &typed.rows {
+            let id = match &row[0] {
+                TypedCell::Text(s) => s.clone(),
+                other => panic!("id must be TEXT, got {other:?}"),
+            };
+            let stored_blob = match &row[1] {
+                TypedCell::Blob(bytes) => bytes.clone(),
+                other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+            };
+            let masked = match &row[2] {
+                TypedCell::Text(s) => s.clone(),
+                other => panic!("ssn_masked must be TEXT, got {other:?}"),
+            };
+            let (prepared_ciphertext_b64, prepared_masked) = expected_by_id
+                .get(&id)
+                .expect("stored row id should match prepared docs");
+            assert_eq!(masked, *prepared_masked, "masked sibling must be persisted");
+            assert_ne!(
+                stored_blob,
+                b"123-45-6789".to_vec(),
+                "stored bytes must not equal raw plaintext",
+            );
+            assert_ne!(
+                stored_blob,
+                b"987-65-4321".to_vec(),
+                "stored bytes must not equal raw plaintext",
+            );
+            let expected_ciphertext = base64::engine::general_purpose::STANDARD
+                .decode(prepared_ciphertext_b64)
+                .expect("prepared ciphertext base64");
+            assert_eq!(
+                stored_blob, expected_ciphertext,
+                "raw stored bytes must match the write-side ciphertext",
+            );
+            let plaintext = backend
+                .decrypt(
+                    &key,
+                    EncryptionMode::Randomised,
+                    &stored_blob,
+                    &encryption::canonical_aad(collection, "ssn", Some(id.as_bytes())),
+                )
+                .expect("decrypt stored blob");
+            assert!(
+                plaintext == b"123-45-6789" || plaintext == b"987-65-4321",
+                "decrypting the stored blob must recover one of the inserted plaintexts",
+            );
+        }
+    });
+}
+
 /// **P5 PR 3 — gate #1 (SQLite half)**: round-trip an encrypted string
 /// column under Randomised mode. Insert a row with `ssn` declared
 /// `t.encrypted({ mode: "randomised" })`, read it back via the SQLite

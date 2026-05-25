@@ -652,46 +652,68 @@ pub(crate) fn dispatch_insert_many<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    // **P7 PR 3** — populate `id` per-row + `created_by` / `updated_by`
-    // for the whole batch under one actor stamp BEFORE `build_insert_many`
-    // collects column unions. Same actor-binding rationale as
-    // `dispatch_insert`: pin to the originating request's actor at the
-    // sync boundary.
-    let actor_id = system_fields_pass::current_actor_id(&state);
-    let mut docs = docs;
-    system_fields_pass::apply_system_fields_on_insert_many(
-        &mut docs,
-        app_id,
-        collection,
-        actor_id.as_deref(),
-    );
-    maybe_lower_sqlite_boolean_docs(app_id, collection, &mut docs);
-
-    let built =
-        query::build_insert_many_with_dialect(app_id, collection, &docs, current_sql_dialect());
     let coll = collection.to_string();
     let app = app_id.to_string();
+    let actor_id = system_fields_pass::current_actor_id(&state);
 
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        move |bq| async move {
-            let rows =
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await?;
-            read_pipeline::apply(
-                &app,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
-        },
-        |result: read_pipeline::ApplyResult| {
-            rows_as_json_array_masked(result.rows, result.has_masked)
-        },
-    )));
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let mut docs = docs;
+        if let Err(e) = prepare_insert_many_docs_for_write(
+            &mut docs,
+            &app,
+            &coll,
+            actor_id.as_deref(),
+        )
+        .await
+        {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
+        maybe_lower_sqlite_boolean_docs(&app, &coll, &mut docs);
+
+        let built =
+            query::build_insert_many_with_dialect(&app, &coll, &docs, current_sql_dialect());
+        let result = match built {
+            Ok(bq) => {
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
+            }
+            Err(e) => Err(DbError::from(e)),
+        };
+        match result {
+            Ok(rows) => {
+                let result = match read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                OpResult::JsValue {
+                    resolver,
+                    value: rows_as_json_array_masked(result.rows, result.has_masked),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
 
     promise
 }
@@ -2142,6 +2164,42 @@ async fn apply_encryption_on_write(
     }
     if has_mask {
         mask_pass::apply_mask_on_write(&schema, &sidechannel, doc)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-helpers"))]
+async fn prepare_insert_many_docs_for_write(
+    docs: &mut Value,
+    app_id: &str,
+    collection: &str,
+    actor_id: Option<&str>,
+) -> Result<(), DbError> {
+    prepare_insert_many_docs_for_write_impl(docs, app_id, collection, actor_id).await
+}
+
+#[cfg(feature = "test-helpers")]
+pub async fn prepare_insert_many_docs_for_write(
+    docs: &mut Value,
+    app_id: &str,
+    collection: &str,
+    actor_id: Option<&str>,
+) -> Result<(), DbError> {
+    prepare_insert_many_docs_for_write_impl(docs, app_id, collection, actor_id).await
+}
+
+async fn prepare_insert_many_docs_for_write_impl(
+    docs: &mut Value,
+    app_id: &str,
+    collection: &str,
+    actor_id: Option<&str>,
+) -> Result<(), DbError> {
+    system_fields_pass::apply_system_fields_on_insert_many(docs, app_id, collection, actor_id);
+    let Some(arr) = docs.as_array_mut() else {
+        return Ok(());
+    };
+    for doc in arr.iter_mut() {
+        apply_encryption_on_write(app_id, collection, doc).await?;
     }
     Ok(())
 }
