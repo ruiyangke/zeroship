@@ -1,19 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   archiveTodo,
   completeTodo,
   createTodo,
   deleteTodo,
+  errCode,
   listTodos,
   publicUser,
-  RpcError,
   subscribeTodos,
   type Priority,
   type Todo,
 } from "./api";
 
 const PRIORITIES: Priority[] = ["low", "medium", "high"];
+const qk = (uid: string) => ["todos", uid] as const;
 
 function ago(ms: number): string {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
@@ -29,7 +30,11 @@ const shortId = (id: string) => {
   const [p, rest] = id.split("_");
   return rest ? `${p}_${rest.slice(0, 6)}…` : id;
 };
-const errText = (e: unknown) => (e instanceof RpcError ? `${e.code}: ${e.message}` : String(e));
+const errText = (e: unknown) => {
+  const c = errCode(e);
+  const msg = (e as { message?: string } | null)?.message ?? String(e);
+  return c ? `${c}: ${msg}` : msg;
+};
 
 type Banner = { kind: "error" | "live"; text: string } | null;
 
@@ -46,7 +51,7 @@ export function App() {
   const [removing, setRemoving] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   // realId → optimistic key, so the optimistic→real swap keeps one React
-  // element (no re-mount, no entrance-animation "double flash").
+  // element (no re-mount → no entrance-animation "double flash").
   const keyMap = useRef(new Map<string, string>());
   const keySeq = useRef(0);
   const keyOf = (t: Todo) => t._key ?? keyMap.current.get(t.id) ?? t.id;
@@ -67,13 +72,15 @@ export function App() {
     };
   }, [flash]);
 
-  // The list — React Query owns the cache; everything below reads/writes it.
-  const todosQ = listTodos.useQuery(
-    { userId: userId ?? "" },
-    { enabled: !!userId },
-  ) as { data?: Todo[]; isLoading: boolean };
-  const todos = todosQ.data ?? [];
   const uid = userId ?? "";
+
+  // The list — TanStack Query over the direct-imported `listTodos` caller.
+  const todosQ = useQuery({
+    queryKey: qk(uid),
+    queryFn: () => listTodos({ userId: uid }),
+    enabled: !!userId,
+  });
+  const todos = (todosQ.data ?? []) as Todo[];
 
   // Live feed → invalidate (React Query refetches + dedupes). Own connection
   // per tab via the nonce in subscribeTodos.
@@ -99,7 +106,7 @@ export function App() {
           }
           setPulse((p) => p + 1);
           window.clearTimeout(t);
-          t = window.setTimeout(() => void listTodos.invalidate({ userId }), 180);
+          t = window.setTimeout(() => void qc.invalidateQueries({ queryKey: qk(userId) }), 180);
         }
       } catch {
         /* aborted on teardown / stream ended */
@@ -112,18 +119,19 @@ export function App() {
       controller.abort();
       setLive(false);
     };
-  }, [userId]);
+  }, [userId, qc]);
 
-  // ── Optimistic create (the React Query pattern) ───────────────────────
-  const createM = createTodo.useMutation({
-    onMutate: async (input: { userId: string; title: string; priority?: Priority }) => {
-      const key = listTodos.queryKey({ userId: input.userId });
+  // ── Optimistic create (raw React Query over the direct-imported caller) ──
+  const createM = useMutation({
+    mutationFn: createTodo,
+    onMutate: async (input) => {
+      const key = qk(input.userId);
       await qc.cancelQueries({ queryKey: key });
       const prev = qc.getQueryData<Todo[]>(key);
-      const k = `k${++keySeq.current}`;
+      const ck = `k${++keySeq.current}`;
       const optimistic: Todo = {
-        id: `tmp_${k}`,
-        _key: k,
+        id: `tmp_${ck}`,
+        _key: ck,
         created_at: Date.now(),
         updated_at: Date.now(),
         version: 1,
@@ -135,24 +143,23 @@ export function App() {
         archived: false,
         deleted_at: null,
       };
-      listTodos.setData({ userId: input.userId }, (old: Todo[] = []) => [optimistic, ...old]);
-      return { prev, k, userId: input.userId };
+      qc.setQueryData<Todo[]>(key, (old = []) => [optimistic, ...old]);
+      return { prev, ck, userId: input.userId };
     },
-    onError: (e: unknown, _input: unknown, ctx: { prev?: Todo[]; userId: string } | undefined) => {
-      if (ctx) listTodos.setData({ userId: ctx.userId }, ctx.prev ?? []);
+    onError: (e, _input, ctx) => {
+      if (ctx) qc.setQueryData<Todo[]>(qk(ctx.userId), ctx.prev ?? []);
       flash({ kind: "error", text: errText(e) });
     },
-    onSuccess: (real: Todo, _input: unknown, ctx: { k: string; userId: string } | undefined) => {
-      if (!ctx) return;
-      keyMap.current.set(real.id, ctx.k); // bridge real id → optimistic key
-      listTodos.setData({ userId: ctx.userId }, (old: Todo[] = []) =>
-        old.map((t) => (t._key === ctx.k ? { ...real, _key: ctx.k } : t)),
+    onSuccess: (real, _input, ctx) => {
+      keyMap.current.set(real.id, ctx.ck); // bridge real id → optimistic key
+      qc.setQueryData<Todo[]>(qk(ctx.userId), (old = []) =>
+        old.map((t) => (t._key === ctx.ck ? { ...real, _key: ctx.ck } : t)),
       );
     },
-    onSettled: (_d: unknown, _e: unknown, _input: unknown, ctx: { userId: string } | undefined) => {
-      if (ctx) void listTodos.invalidate({ userId: ctx.userId });
+    onSettled: (_d, _e, _input, ctx) => {
+      if (ctx) void qc.invalidateQueries({ queryKey: qk(ctx.userId) });
     },
-  }) as { mutate: (input: { userId: string; title: string; priority?: Priority }) => void };
+  });
 
   const add = useCallback(
     (e?: React.FormEvent) => {
@@ -169,7 +176,7 @@ export function App() {
   // complete: optimistic flip, then sync.
   const onComplete = useCallback(
     async (id: string) => {
-      listTodos.setData({ userId: uid }, (old: Todo[] = []) =>
+      qc.setQueryData<Todo[]>(qk(uid), (old = []) =>
         old.map((t) => (t.id === id ? { ...t, done: true } : t)),
       );
       try {
@@ -177,10 +184,10 @@ export function App() {
       } catch (e) {
         flash({ kind: "error", text: errText(e) });
       } finally {
-        void listTodos.invalidate({ userId: uid });
+        void qc.invalidateQueries({ queryKey: qk(uid) });
       }
     },
-    [uid, flash],
+    [uid, qc, flash],
   );
 
   // archive / delete: play the leave animation, optimistically drop, then sync.
@@ -188,7 +195,7 @@ export function App() {
     async (id: string, fn: (i: { id: string }) => Promise<unknown>) => {
       setRemoving((s) => new Set(s).add(id));
       await new Promise((r) => setTimeout(r, 220));
-      listTodos.setData({ userId: uid }, (old: Todo[] = []) => old.filter((t) => t.id !== id));
+      qc.setQueryData<Todo[]>(qk(uid), (old = []) => old.filter((t) => t.id !== id));
       try {
         await fn({ id });
       } catch (e) {
@@ -199,10 +206,10 @@ export function App() {
           n.delete(id);
           return n;
         });
-        void listTodos.invalidate({ userId: uid });
+        void qc.invalidateQueries({ queryKey: qk(uid) });
       }
     },
-    [uid, flash],
+    [uid, qc, flash],
   );
 
   const { active, done } = useMemo(() => {
@@ -240,10 +247,10 @@ export function App() {
             One ledger, <em>everyone</em>.
           </h1>
           <p>
-            A single shared list on the real <code>@zeroship/db</code> surface —
-            no logins, no per-window identity. Creates are optimistic via React
-            Query; every commit streams to every open window over SSE. Open a
-            second tab and watch them move together.
+            A single shared list on the real <code>@zeroship/db</code> surface.
+            The client just imports the server procedures and calls them — the
+            vite plugin turns those into RPC. Creates are optimistic via React
+            Query; every commit streams to every open window over SSE.
           </p>
         </div>
 

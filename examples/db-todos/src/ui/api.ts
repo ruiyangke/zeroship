@@ -1,18 +1,19 @@
-// Typed client for the db-todos RPC surface, built on @zeroship/rpc-client.
-// Each procedure is wrapped with `__makeProcedure` so it's both directly
-// callable AND carries React Query hooks (`.useQuery` / `.useMutation` /
-// `.setData` / `.invalidate` / `.queryKey`) once `@zeroship/rpc-react` is
-// imported at the app root. Mirrors examples/csr-todo.
-
+// Direct backend calls — the supported path. We import the wrapped server
+// procedures straight from the "use server" module (src/index.ts); the
+// @zeroship/vite-plugin transform rewrites these client-side imports into
+// typed RPC callers (POST /_zs/v1/<id>). No hand-rolled client.
+//
+// `query()`/`mutation()` return `typeof handler`, and branded ids
+// (UserId/TodoId) are just strings over the wire — so we re-type the
+// callers with plain client-facing shapes here.
 import {
-  client,
-  __makeProcedure,
-  RpcError,
-  type ProcedureType,
-  type ProcedureCaller,
-} from "@zeroship/rpc-client";
-
-export { RpcError };
+  listTodos as _listTodos,
+  createTodo as _createTodo,
+  completeTodo as _completeTodo,
+  archiveTodo as _archiveTodo,
+  deleteTodo as _deleteTodo,
+  publicUser as _publicUser,
+} from "../index";
 
 export type Priority = "low" | "medium" | "high";
 
@@ -50,52 +51,20 @@ export interface ChangeEvent {
   columns?: string[];
 }
 
-type CreateInput = { userId: string; title: string; priority?: Priority };
-type ById = { id: string };
 type ByUser = { userId: string };
+type ById = { id: string };
+type CreateInput = { userId: string; title: string; priority?: Priority };
 
-export type App = {
-  listTodos: ProcedureType<"query", ByUser, Todo[]>;
-  publicUser: ProcedureType<"mutation", Record<string, never>, User>;
-  createTodo: ProcedureType<"mutation", CreateInput, Todo>;
-  completeTodo: ProcedureType<"mutation", ById, Todo>;
-  archiveTodo: ProcedureType<"mutation", ById, Todo>;
-  deleteTodo: ProcedureType<"mutation", ById, Todo>;
-};
+export const listTodos = _listTodos as unknown as (i: ByUser) => Promise<Todo[]>;
+export const createTodo = _createTodo as unknown as (i: CreateInput) => Promise<Todo>;
+export const completeTodo = _completeTodo as unknown as (i: ById) => Promise<Todo>;
+export const archiveTodo = _archiveTodo as unknown as (i: ById) => Promise<Todo>;
+export const deleteTodo = _deleteTodo as unknown as (i: ById) => Promise<Todo>;
+export const publicUser = _publicUser as unknown as (i: Record<string, never>) => Promise<User>;
 
-const rpc = client<App>({ baseUrl: "", transformer: "superjson" });
-
-// `__makeProcedure` returns a loose `ProcedureFn` union; these precise shapes
-// expose exactly the hooks-on-function surface we use (the methods exist at
-// runtime once @zeroship/rpc-react populates the registry).
-type UseQueryResult<O> = { data?: O; isLoading: boolean; isError: boolean; error: unknown };
-type UseMutationResult<I, O> = {
-  mutate: (input: I) => void;
-  mutateAsync: (input: I) => Promise<O>;
-  isPending: boolean;
-};
-export type QueryProc<I, O> = ((i: I) => Promise<O>) & {
-  useQuery: (i: I, opts?: Record<string, unknown>) => UseQueryResult<O>;
-  queryKey: (i?: I) => unknown[];
-  setData: (i: I, updater: O | ((old: O | undefined) => O)) => void;
-  invalidate: (i?: I) => Promise<void>;
-};
-export type MutationProc<I, O> = ((i: I) => Promise<O>) & {
-  useMutation: (opts?: Record<string, unknown>) => UseMutationResult<I, O>;
-};
-
-const q = <I, O>(id: keyof App, fn: (i: I) => Promise<O>) =>
-  __makeProcedure(fn as ProcedureCaller<I, O>, { id: id as string, kind: "query" }) as unknown as QueryProc<I, O>;
-const m = <I, O>(id: keyof App, fn: (i: I) => Promise<O>) =>
-  __makeProcedure(fn as ProcedureCaller<I, O>, { id: id as string, kind: "mutation" }) as unknown as MutationProc<I, O>;
-
-// Hooks-on-function procedures.
-export const listTodos = q<ByUser, Todo[]>("listTodos", (i) => rpc.listTodos.query(i));
-export const publicUser = m<Record<string, never>, User>("publicUser", (i) => rpc.publicUser.mutation(i));
-export const createTodo = m<CreateInput, Todo>("createTodo", (i) => rpc.createTodo.mutation(i));
-export const completeTodo = m<ById, Todo>("completeTodo", (i) => rpc.completeTodo.mutation(i));
-export const archiveTodo = m<ById, Todo>("archiveTodo", (i) => rpc.archiveTodo.mutation(i));
-export const deleteTodo = m<ById, Todo>("deleteTodo", (i) => rpc.deleteTodo.mutation(i));
+/** Error shape thrown by the transform's RPC stubs (plain Error + .code). */
+export const errCode = (e: unknown): string | undefined =>
+  (e as { code?: string } | null)?.code;
 
 // ── Realtime ─────────────────────────────────────────────────────────────
 function b64url(s: string): string {
@@ -103,13 +72,11 @@ function b64url(s: string): string {
 }
 
 /**
- * Live change feed — async iterator over broker events. We read the stream
- * with a hand-rolled fetch reader (not `rpc...stream()`): the subscription
- * GET is identical across tabs (`?input=<base64 {json:{}}>`), and browsers
- * COALESCE identical in-flight streaming fetches to one connection — a 2nd
- * tab would never get its own stream. A per-connection `_n` nonce makes each
- * request unique (like EventSource's independent connections); we parse the
- * AI-SDK Data Stream frames (`2:[…]`) ourselves. `signal` cancels.
+ * Live change feed — async iterator over broker events. Hand-rolled fetch
+ * reader (not a generated stub) because the subscription GET is identical
+ * across tabs and browsers COALESCE identical streaming fetches; a per-
+ * connection `_n` nonce gives each tab its own stream. Parses the AI-SDK
+ * Data Stream frames (`2:[…]`). `signal` cancels.
  */
 export async function* subscribeTodos(signal?: AbortSignal): AsyncIterableIterator<ChangeEvent> {
   const input = b64url(JSON.stringify({ json: {} }));

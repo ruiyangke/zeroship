@@ -14,7 +14,6 @@
     "@zeroship/db": "workspace:*",
     "@zeroship/migrations": "workspace:*",
     "@zeroship/rpc-client": "workspace:*",
-    "@zeroship/rpc-react": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "react": "catalog:react18",
