@@ -33,8 +33,11 @@ src/storage.rs                app-storage abstraction
 ## Invariants
 
 - V8 isolates are thread-bound. The worker keeps a thread-local cache in [cache.rs](crates/worker/src/cache.rs).
+- That `thread_local!` cache shape is what lets each worker thread own, re-enter, and evict only its own isolates without crossing V8 thread affinity.
 - `RuntimeInner` tracks `enter_depth`; isolates are entered for a V8 turn and exited afterwards so multiple isolates can live on one worker thread.
+- `build()` leaves a new isolate entered, and the worker exits it after caching so later requests can re-enter it just in time for dispatch.
 - Async native work resolves through the per-isolate pump started by `Runtime::start_pump()`.
+- The pump batches ready timer and op completions into a single V8 re-entry so one burst of settled work does not pay one enter/exit cycle per completion.
 - Initialization failures are stored on `RuntimeInner::init_error`; `call_fetch_handler` surfaces them as a 500 instead of pretending no handler exists.
 
 ## Native surface
@@ -84,3 +87,12 @@ The runtime accepts many `ModuleEntry` values, but the current worker path still
 | Streams | [streams/mod.rs](crates/runtime/src/web/streams/mod.rs) |
 | Native plugin wiring | [plugin.rs](crates/runtime/src/core/plugin.rs) |
 | Bench tooling | `crates/runtime/benches/`, `docs/reference/zerobench.md` |
+
+## Related docs
+
+- [docs/architecture/overview.md](docs/architecture/overview.md) places the runtime in the full platform architecture.
+- [docs/architecture/distributed.md](docs/architecture/distributed.md) expands the cross-service request and deploy flows around the worker/runtime boundary.
+- [docs/reference/plugin-system.md](docs/reference/plugin-system.md) explains how `NativePlugin` surfaces become `env.*` namespaces inside an isolate.
+- [docs/reference/websocket-design.md](docs/reference/websocket-design.md) covers the runtime's WebSocket model and upgrade handling in more detail.
+- [docs/reference/node-compat.md](docs/reference/node-compat.md) documents how npm packages and Node-style resolution are exposed inside V8.
+- [docs/reference/runtime-limits.md](docs/reference/runtime-limits.md) defines the operator-facing CPU, wall-clock, heap, and idle-GC controls referenced here.

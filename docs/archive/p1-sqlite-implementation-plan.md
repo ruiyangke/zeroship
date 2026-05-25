@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped (DB P-series). Live reference: docs/reference/db.md.
+
 # P1 — SQLite Backend Core: Implementation Blueprint
 
 **Source design**: `docs/proposals/db-system-design.md` §1, §5.5, §6.2.1, §7, §8, §10.5, §11.5 (context), §17.6/§17.7, §18 Q1+Q7+Q8, §19 P1

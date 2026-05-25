@@ -1,6 +1,7 @@
 # Gateway routing
 
 Current request dispatch lives in `crates/gateway`. The hot path is the compiled resource tree from `zeroship_bundle::Manifest`, not the older rule walker.
+That compile step replaced the rule walker so inheritance flattening and RPC/path indexing happen once during route-cache updates instead of being recomputed on every request.
 
 ## Relevant files
 
@@ -45,6 +46,7 @@ Resource keys have three forms:
 - `*`
 
 `*` is the inheritance root during policy compilation. URL dispatch still depends on an explicit path or glob entry.
+When present, it sits at the head of each resource's inheritance chain and contributes defaults, but it never matches a URL by itself.
 
 ## Compile step
 
@@ -113,3 +115,11 @@ Gateway polls `/internal/routes` every 5 seconds. `RouteCache::update` validates
 | Request gating | [dispatch.rs](crates/gateway/src/router/dispatch.rs) |
 | Static asset behavior | [static_serve.rs](crates/gateway/src/router/static_serve.rs) |
 | Route sync | [sync.rs](crates/gateway/src/sync.rs) |
+
+## Related docs
+
+- [docs/architecture/overview.md](docs/architecture/overview.md): entry point and system map.
+- [docs/architecture/distributed.md](docs/architecture/distributed.md): end-to-end request flow across gateway, worker, and control.
+- [docs/architecture/control-plane.md](docs/architecture/control-plane.md): where route state and manifests come from.
+- [docs/architecture/blob-store.md](docs/architecture/blob-store.md): blob-backed static asset and bundle storage.
+- [docs/reference/zs-standard.md](docs/reference/zs-standard.md): the `/_zs/v1` dispatch contract.

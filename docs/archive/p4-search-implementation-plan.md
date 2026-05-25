@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped (DB P-series). Live reference: docs/reference/db.md.
+
 # P4 — Vector + Full-Text + Spatial — Implementation Plan
 
 **Status**: design (planning only — no Rust written).

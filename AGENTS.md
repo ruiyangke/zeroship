@@ -219,7 +219,10 @@ Stable contracts, live in `docs/reference/`:
 - `websocket-design.md` — WebSocketPair, RFC 6455
 - `plugin-system.md` — how to add an `env.*` namespace
 - `node-compat.md` — Node.js module resolution in V8
+- `vite-plugin.md` — `@zeroship/vite-plugin`: node-compat shims, server-procedure discovery, the synthetic server entry, dev runtime + `.zship` build
 - `vite-environment-api.md` — Vite dev server inside the V8 runtime
+- `runtime-limits.md` — per-app `AppRuntimeLimits` vs runtime-side `RuntimeLimits` (CPU, wall timeout, heap), plus idle-GC knobs
+- `sqlite-divergences.md` — intentional Postgres↔SQLite differences in vector/full-text/spatial search, transaction isolation, locking, and text ordering
 - `zerobench.md` — the HTTP/SSE/WS benchmark tool
 
 ---

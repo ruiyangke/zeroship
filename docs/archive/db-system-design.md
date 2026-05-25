@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped. Live reference: docs/reference/db.md.
+
 # plugin-db — System Design
 
 **Status**: design, not implemented. Foundational doc for the whole DB subsystem.

@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped (feat/sandbox-pg merged). Code: crates/sandbox/src/.
+
 # pg-backed sandbox state
 
 **Date:** 2026-05-04

@@ -136,3 +136,11 @@ cargo build --release -p zeroship-runtime --bin zeroship-bench-server
 ```
 
 The runner script is `./crates/runtime/benches/run_zerobench.sh`. Read that script before using it; it shells out to an external `zerobench` binary and `nix`.
+
+## Related docs
+
+- [Multi-node / Docker Compose](docs/runbooks/docker-compose.md) — the same stack via `docker compose` instead of three terminals.
+- [Architecture overview](docs/architecture/overview.md) — what each binary (`control`/`worker`/`gate`) does.
+- [Distributed architecture](docs/architecture/distributed.md) — how control, gateway, and worker talk over the `/internal/*` feeds you wired above.
+- [`.zship` artifact format](docs/reference/zship.md) — the deploy archive `pnpm build` emits and `zeroship deploy` uploads.
+- [ZS deploy contract](docs/reference/zs-standard.md) — what `default = { schema?, fetch?, rpc? }` an example app must export.

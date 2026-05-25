@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped (Go ch task driver merged dde08ca2). Live ops: docs/runbooks/sandbox-nomad-ch.md. Code: nomad-driver-ch/ + crates/sandbox/src/backend/nomad_ch.rs.
+
 # Nomad task driver plugin for Cloud Hypervisor
 
 **Date:** 2026-05-22

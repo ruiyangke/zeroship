@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped. Live reference: docs/reference/db.md.
+
 # Sensitive Field Masking — Never-Decrypt-Automatically
 
 **Status**: design proposal.

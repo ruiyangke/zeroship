@@ -1,3 +1,4 @@
+> Archived 2026-05-25: shipped. Live reference: docs/reference/kv.md. Code: crates/plugin-kv/ + sdks/kv/.
 # plugin-kv redesign — implementation plan (2026-05-24)
 
 Status: pre-ship proposal, drafted in worktree `kv-v8class`. Do NOT commit until the implementing PR. Pre-launch → no back-compat (rename/break freely).

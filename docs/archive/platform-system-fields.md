@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped. Live reference: docs/reference/db.md.
+
 # Platform System Fields
 
 **Status**: design proposal.

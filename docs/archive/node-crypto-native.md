@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-05-node-crypto-native.md. See also docs/reference/ where applicable.
+
 # Native Node.js `node:crypto` design
 
 **Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review) · 2026-05-02 (v3 round-3 audit) · 2026-05-02 (v4 round-4 narrow audit)

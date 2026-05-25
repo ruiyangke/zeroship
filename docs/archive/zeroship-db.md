@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped. Live reference: docs/reference/db.md.
+
 # @zeroship/db v2 — proposal
 
 **Status:** Draft 2026-05-12, rev. R14 (uncommitted; lives in `docs/proposals/` until landed; loop converged at composite score 89)

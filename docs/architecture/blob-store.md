@@ -27,7 +27,7 @@ The shipping backend in this worktree is `LocalDiskBlobStore`.
 
 Important current behavior:
 
-- Blob keys are global by hash. There is no per-app blob namespace.
+- Blob keys are global by hash. There is no per-app blob namespace, so identical bytes (a shared dependency, an unchanged asset across deploys) are stored once and deduped across every app.
 - `put_blob_stream` re-hashes bytes while writing and rejects size/hash mismatches.
 - `LocalDiskBlobStore::local_path` is a cheap path computation; it does not check whether the file exists.
 - Reads validate the stored bytes again and return `BlobError::HashMismatch` if on-disk content is corrupt.
@@ -73,3 +73,11 @@ The control plane is not on the hot path for asset bytes.
 - No blob-serving API shaped like `GET /blobs/<hash>`
 - No shipping S3-backed `BlobStore` in this worktree
 - No blob-store-specific routing logic; URL/path/variant selection stays in the gateway
+
+## Related docs
+
+- [Architecture overview](docs/architecture/overview.md) — the entry point and system map.
+- [Gateway routing](docs/architecture/gateway-routing.md) — the static-serving consumer of `BlobStore`.
+- [Control plane](docs/architecture/control-plane.md) — runs the `.zship` ingest that writes blobs.
+- [Distributed architecture](docs/architecture/distributed.md) — how the blob root is shared across processes.
+- [`.zship` artifact format](docs/reference/zship.md) — the deploy archive whose blobs land here.

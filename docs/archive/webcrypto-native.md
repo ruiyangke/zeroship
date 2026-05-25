@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-webcrypto-native.md. See also docs/reference/ where applicable.
+
 # Native W3C Web Cryptography API design
 
 **Date:** 2026-05-02

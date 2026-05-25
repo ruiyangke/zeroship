@@ -1,7 +1,7 @@
 # Native `CompressionStream` / `DecompressionStream` shipped
 
 **Status:** Shipped 2026-05-01 (codec layer); CompressionStream/DecompressionStream classes landed 2026-05-05 in `ed3125e`
-**Long-form design:** [`docs/proposals/compression-streams-native.md`](../proposals/compression-streams-native.md)
+**Long-form design:** [`docs/archive/compression-streams-native.md`](../archive/compression-streams-native.md)
 **Implementation:** [`crates/runtime/src/web/streams/compression.rs`](../../crates/runtime/src/web/streams/compression.rs)
 
 ## Context

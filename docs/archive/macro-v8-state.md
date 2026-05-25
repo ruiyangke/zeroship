@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-04-macro-v8-state.md. See also docs/reference/ where applicable.
+
 # MAC-01 — `#[v8_state_marker(MarkerTy)]`: project V8 internal-field-0 from a separate state struct
 
 - **Date:** 2026-05-04

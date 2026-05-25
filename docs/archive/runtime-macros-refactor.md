@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped. Live reference: docs/reference/plugin-system.md. Design: docs/decisions/2026-05-04-macro-constructor-post-init.md + docs/decisions/2026-05-04-macro-v8-state.md.
+
 # `runtime-macros` — Refactor Guide (final-state spec)
 
 - **Date:** 2026-05-05

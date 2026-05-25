@@ -1,3 +1,5 @@
+> Archived 2026-05-25: shipped (DB P-series). Live reference: docs/reference/db.md.
+
 # P0 Implementation Plan — Capability Trait Split + PostgresBackend Migration
 
 **Source design**: `docs/proposals/db-system-design.md` §5, §7, §19 P0

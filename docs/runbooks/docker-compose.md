@@ -33,4 +33,10 @@ DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://1
 docker compose -f docker-compose.cluster.yml down -v
 ```
 
-The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host ports `7000`, `7001`, and `7002`.
+The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host ports `7000`, `7001`, and `7002`. These use `network_mode: host` (not a `ports:` mapping), so the ports can't be remapped and must be free on the host before you start the stack.
+
+## Related docs
+
+- [Local dev setup](docs/runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
+- [Nomad + Cloud Hypervisor sandbox](docs/runbooks/sandbox-nomad-ch.md) — operating the bare-metal VM sandbox backend.
+- [Distributed architecture](docs/architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.
