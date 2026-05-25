@@ -1593,42 +1593,77 @@ pub(crate) fn dispatch_upsert<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    let mut doc = doc;
-    maybe_lower_sqlite_boolean_doc(app_id, collection, &mut doc);
-    let built = query::build_upsert_with_dialect(
-        app_id,
-        collection,
-        &doc,
-        &conflict_fields,
-        current_sql_dialect(),
-    );
+    let actor_id = system_fields_pass::current_actor_id(&state);
     let coll = collection.to_string();
     let app = app_id.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        move |bq| async move {
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let mut doc = doc;
+        if let Err(e) = prepare_upsert_doc_for_write(
+            &mut doc,
+            &app,
+            &coll,
+            actor_id.as_deref(),
+            &conflict_fields,
+        )
+        .await
+        {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
+        maybe_lower_sqlite_boolean_doc(&app, &coll, &mut doc);
+        let built = query::build_upsert_with_dialect(
+            &app,
+            &coll,
+            &doc,
+            &conflict_fields,
+            current_sql_dialect(),
+        );
+        let result = match built {
+            Ok(bq) => {
             // Upsert can be either INSERT (new row) or UPDATE (existing).
             // We tag as Update because the subscriber's reaction is the
             // same — re-fetch. The proposal's read-set narrowing (P8b)
             // will distinguish; P8a doesn't need to.
-            let rows =
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
-            read_pipeline::apply(
-                &app,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
-        },
-        |result: read_pipeline::ApplyResult| {
-            first_row_or_null_masked(result.rows, result.has_masked)
-        },
-    )));
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            }
+            Err(e) => Err(DbError::from(e)),
+        };
+        match result {
+            Ok(rows) => {
+                let result = match read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                OpResult::JsValue {
+                    resolver,
+                    value: first_row_or_null_masked(result.rows, result.has_masked),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
 
     promise
 }
@@ -2201,6 +2236,98 @@ async fn prepare_insert_many_docs_for_write_impl(
     for doc in arr.iter_mut() {
         apply_encryption_on_write(app_id, collection, doc).await?;
     }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-helpers"))]
+async fn prepare_upsert_doc_for_write(
+    doc: &mut Value,
+    app_id: &str,
+    collection: &str,
+    actor_id: Option<&str>,
+    conflict_fields: &Value,
+) -> Result<(), DbError> {
+    prepare_upsert_doc_for_write_impl(doc, app_id, collection, actor_id, conflict_fields).await
+}
+
+#[cfg(feature = "test-helpers")]
+pub async fn prepare_upsert_doc_for_write(
+    doc: &mut Value,
+    app_id: &str,
+    collection: &str,
+    actor_id: Option<&str>,
+    conflict_fields: &Value,
+) -> Result<(), DbError> {
+    prepare_upsert_doc_for_write_impl(doc, app_id, collection, actor_id, conflict_fields).await
+}
+
+async fn prepare_upsert_doc_for_write_impl(
+    doc: &mut Value,
+    app_id: &str,
+    collection: &str,
+    actor_id: Option<&str>,
+    conflict_fields: &Value,
+) -> Result<(), DbError> {
+    system_fields_pass::apply_system_fields_on_insert(doc, app_id, collection, actor_id);
+    rewrite_upsert_doc_id_to_existing_row_id(doc, app_id, collection, conflict_fields).await?;
+    apply_encryption_on_write(app_id, collection, doc).await
+}
+
+async fn rewrite_upsert_doc_id_to_existing_row_id(
+    doc: &mut Value,
+    app_id: &str,
+    collection: &str,
+    conflict_fields: &Value,
+) -> Result<(), DbError> {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return Ok(());
+    };
+    if !schema_has_encrypted_columns(&schema) {
+        return Ok(());
+    }
+    let Some(obj) = doc.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(conflict_arr) = conflict_fields.as_array() else {
+        return Ok(());
+    };
+    if conflict_arr.is_empty() {
+        return Ok(());
+    }
+
+    let mut filter_obj = serde_json::Map::with_capacity(conflict_arr.len());
+    for field in conflict_arr.iter().filter_map(Value::as_str) {
+        let Some(value) = obj.get(field).cloned() else {
+            return Ok(());
+        };
+        filter_obj.insert(field.to_string(), value);
+    }
+    if filter_obj.len() != conflict_arr.len() {
+        return Ok(());
+    }
+
+    let mut filter = Value::Object(filter_obj);
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
+    let select = serde_json::json!(["id"]);
+    let built = query::build_find(
+        app_id,
+        collection,
+        &filter,
+        Some(1),
+        None,
+        None,
+        Some(&select),
+    )
+    .map_err(DbError::from)?;
+    let rows = exec_query(built).await?;
+    let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
+        Some(Value::String(id)) => Some(id.clone()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    obj.insert("id".to_string(), Value::String(existing_id));
     Ok(())
 }
 
