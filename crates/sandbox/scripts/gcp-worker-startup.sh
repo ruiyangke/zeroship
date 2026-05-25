@@ -184,15 +184,15 @@ if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
   # MUST move together (mirrors the R24-T1 snapshot_stress.py
   # lockstep at dd2079a9). A SHA mismatch is FATAL — the worker
   # refuses to start until operator reconciles.
-  DRIVER_BINARY_SHA256="cd336c4edde2c227183d555a00eecea771698306ae72a85811eb3cf0b6bfab06"
-  gs_pull nomad-driver-ch.v22 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
+  DRIVER_BINARY_SHA256="399baf2d5563dd68bd9a523ea26fcff228c5b5e941bd02fa656822e86523d28b"
+  gs_pull nomad-driver-ch.v23 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
   chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
   got=$(sha256sum /etc/zeroship/nomad-plugins/nomad-driver-ch | awk '{print $1}')
   if [ "$got" != "$DRIVER_BINARY_SHA256" ]; then
     echo "[startup] FATAL: nomad-driver-ch SHA mismatch" >&2
     echo "[startup]   expected: $DRIVER_BINARY_SHA256" >&2
     echo "[startup]   got:      $got" >&2
-    echo "[startup]   GCS object: gs://$ARTIFACT_BUCKET/nomad-driver-ch.v22" >&2
+    echo "[startup]   GCS object: gs://$ARTIFACT_BUCKET/nomad-driver-ch.v23" >&2
     echo "[startup]   Rebuild via nomad-driver-ch/scripts/build-binary.sh --verify and re-upload." >&2
     exit 1
   fi
