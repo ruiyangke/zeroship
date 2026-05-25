@@ -236,8 +236,8 @@ describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", ()
       id: 1,
       name: "Alice",
       ssn: "***-**-6789" as unknown as MaskedValue<string>,
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
     };
     assertType<MaskedValue<string>>(row.ssn);
     assertType<string>(row.name);

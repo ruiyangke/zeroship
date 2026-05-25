@@ -40,8 +40,8 @@ describe("Infer helpers", () => {
       id: 1,
       email: "a@b.com",
       name: "Alice",
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
     };
     assert.equal(x.id, 1);
   });

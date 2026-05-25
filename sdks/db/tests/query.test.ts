@@ -4,6 +4,18 @@ import { Query } from "../src/query.js";
 import { naming } from "@zeroship/db";
 
 type PlainObject = Record<string, unknown>;
+const SYSTEM_FIELDS = new Set([
+  "id",
+  "created_at",
+  "updated_at",
+  "created_by",
+  "updated_by",
+  "deleted_at",
+  "version",
+]);
+const systemAwareToField = (key: string) => (
+  SYSTEM_FIELDS.has(key) ? key : naming.snakeCase.toField(key)
+);
 
 function makeMockNative(rows: PlainObject[]) {
   const calls: { collection: string; filter: PlainObject; opts: PlainObject }[] = [];
@@ -103,16 +115,16 @@ describe("Query thenable execution", () => {
     assert.equal(data[1].id, "2");
   });
 
-  test("await Query maps created_at → createdAt", async () => {
+  test("await Query maps created_at → created_at", async () => {
     const { fn } = makeMockNative([
       { id: "1", created_at: "2024-01-01", updated_at: "2024-06-01" },
     ]);
-    const q = new Query("docs", {}, fn, naming.snakeCase.toField);
+    const q = new Query("docs", {}, fn, systemAwareToField);
     const { data, error } = await q;
     assert.equal(error, null);
     assert.ok(data !== null);
-    assert.equal(data[0].createdAt, "2024-01-01");
-    assert.equal(data[0].updatedAt, "2024-06-01");
+    assert.equal(data[0].created_at, "2024-01-01");
+    assert.equal(data[0].updated_at, "2024-06-01");
   });
 
   test("Query without options sends empty opts", async () => {
@@ -178,9 +190,9 @@ describe("Query opts key names", () => {
 
   test("string sort parses correctly", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", {}, fn).sort("-createdAt name");
+    const q = new Query("users", {}, fn).sort("-created_at name");
     await q;
-    assert.deepEqual(calls[0].opts.orderBy, { createdAt: -1, name: 1 });
+    assert.deepEqual(calls[0].opts.orderBy, { created_at: -1, name: 1 });
   });
 });
 
@@ -189,19 +201,19 @@ describe("Query opts key names", () => {
 // ---------------------------------------------------------------------------
 
 describe("Query with toField", () => {
-  test("maps snake_case result to camelCase when toField provided", async () => {
+  test("maps snake_case result while preserving snake_case system fields", async () => {
     const { fn } = makeMockNative([
-      { id: 1, first_name: "Alice", created_at: 1000 },
+      { id: "1", first_name: "Alice", created_at: 1000 },
     ]);
-    const q = new Query("users", {}, fn, naming.snakeCase.toField);
+    const q = new Query("users", {}, fn, systemAwareToField);
     const { data } = await q;
     assert.equal(data![0].firstName, "Alice");
-    assert.equal(data![0].createdAt, 1000);
+    assert.equal(data![0].created_at, 1000);
     assert.equal((data![0] as any).first_name, undefined);
   });
 
   test("without toField, keys pass through unchanged", async () => {
-    const { fn } = makeMockNative([{ id: 1, first_name: "Alice" }]);
+    const { fn } = makeMockNative([{ id: "1", first_name: "Alice" }]);
     const q = new Query("users", {}, fn);
     const { data } = await q;
     assert.equal((data![0] as any).first_name, "Alice");
@@ -243,29 +255,29 @@ describe("Query cursor pagination (after)", () => {
   test("after() returns this for chaining", () => {
     const { fn } = makeMockNative([]);
     const q = new Query("users", {}, fn);
-    assert.equal(q.after(42), q);
+    assert.equal(q.after("42"), q);
   });
 
   test("after() merges id $gt condition into empty filter", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", {}, fn).after(100);
+    const q = new Query("users", {}, fn).after("100");
     await q._exec();
-    assert.deepEqual(calls[0].filter, { id: { $gt: 100 } });
+    assert.deepEqual(calls[0].filter, { id: { $gt: "100" } });
   });
 
   test("after() wraps existing filter with $and", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", { active: true }, fn).after(50);
+    const q = new Query("users", { active: true }, fn).after("50");
     await q._exec();
     assert.deepEqual(calls[0].filter, {
-      $and: [{ active: true }, { id: { $gt: 50 } }],
+      $and: [{ active: true }, { id: { $gt: "50" } }],
     });
   });
 
   test("after() does not modify original filter reference", async () => {
     const { fn, calls } = makeMockNative([]);
     const originalFilter = { active: true };
-    const q = new Query("users", originalFilter, fn).after(10);
+    const q = new Query("users", originalFilter, fn).after("10");
     await q._exec();
     // Original filter should be unchanged
     assert.deepEqual(originalFilter, { active: true });
@@ -275,9 +287,9 @@ describe("Query cursor pagination (after)", () => {
 
   test("after() works with sort and limit", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", {}, fn).after(5).sort({ id: 1 }).limit(10);
+    const q = new Query("users", {}, fn).after("5").sort({ id: 1 }).limit(10);
     await q._exec();
-    assert.deepEqual(calls[0].filter, { id: { $gt: 5 } });
+    assert.deepEqual(calls[0].filter, { id: { $gt: "5" } });
     assert.deepEqual(calls[0].opts.orderBy, { id: 1 });
     assert.equal(calls[0].opts.limit, 10);
   });

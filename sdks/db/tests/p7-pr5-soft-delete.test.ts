@@ -65,7 +65,7 @@ function makeNativeRecording() {
             id: "post_restored",
             title: "back",
             version: 3,
-            deletedAt: null,
+            deleted_at: null,
           };
         },
         async restoreMany(filter: AnyRec) {
@@ -161,9 +161,9 @@ describe("P7 PR 5 — soft-delete: purge + restore + include_deleted opt-out", (
     const row = result.data as AnyRec | null;
     assert.ok(row);
     assert.equal(row.id, "post_restored");
-    // `deletedAt` is mapped back from the `deletedAt` column shape the
+    // `deleted_at` is mapped back from the `deleted_at` column shape the
     // native double returned — the SDK's `mapResultDoc` preserves it.
-    assert.equal(row.deletedAt, null);
+    assert.equal(row.deleted_at, null);
     assert.deepEqual(captured.restoreFilter, { id: "post_restored" });
   });
 

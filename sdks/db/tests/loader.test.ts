@@ -39,12 +39,10 @@ type CallLog = {
 /** A mock native that records every `find` call and returns rows from
  *  the provided row table keyed by id.
  *
- *  **P7 PR 3** — `Collection.get(N)` stringifies the numeric id on the
- *  way into the IdLoader (`String(idOrFilter)`); the mock accepts both
- *  `number` and `string` lookups by coercing via `String()` so pre-PR 3
- *  row tables keyed by `number` still match the new wire shape without
- *  rewriting every fixture. */
-function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Error }) {
+ *  The mock accepts string ids throughout and still coerces object-key
+ *  lookups through `String()` so JS object literal keys remain convenient.
+ */
+function makeMockNative(rows: Record<string, AnyRec>, opts?: { findThrows?: Error }) {
   const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
   let beginCount = 0;
   // String-keyed view onto the same row table — the loader sends string
@@ -85,14 +83,14 @@ function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Erro
           }
           if (opts?.findThrows) throw opts.findThrows;
           if (isBatched) {
-            const ids = (idClause as { $in: (string | number)[] }).$in;
+            const ids = (idClause as { $in: string[] }).$in;
             return ids.map((i) => stringIndex[String(i)]).filter(Boolean);
           }
           // Single-row resolve: match by id when present, otherwise
           // return the first row whose field map matches every filter
           // key. Good enough for tests that probe a small fixed row
           // table.
-          if (typeof idClause === "number" || typeof idClause === "string") {
+          if (typeof idClause === "string") {
             const r = stringIndex[String(idClause)];
             return r ? [r] : [];
           }
@@ -117,8 +115,8 @@ function makeMockNative(rows: Record<number, AnyRec>, opts?: { findThrows?: Erro
 describe("IdLoader — DataLoader batching for get(id)", () => {
   test("two concurrent get(id) calls collapse into one find with $in", async () => {
     const { native, calls } = makeMockNative({
-      1: { id: 1, email: "a@b.com", name: "Alice" },
-      2: { id: 2, email: "b@b.com", name: "Bob" },
+      1: { id: "1", email: "a@b.com", name: "Alice" },
+      2: { id: "2", email: "b@b.com", name: "Bob" },
     });
     const Users = model(
       "users",
@@ -129,7 +127,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       native,
     );
 
-    const [a, b] = await Promise.all([Users.get(1), Users.get(2)]);
+    const [a, b] = await Promise.all([Users.get("1"), Users.get("2")]);
     assert.equal(a.error, null);
     assert.equal(b.error, null);
     assert.equal(a.data?.email, "a@b.com");
@@ -137,8 +135,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
     assert.equal(calls.findBatched.length, 1, "expected exactly one batched find");
     assert.equal(calls.findSingle.length, 0, "no single-row find expected");
-    // **P7 PR 3** — the loader sends typed_id strings on the wire;
-    // `Collection.get(1)` is `String(1) === "1"` going into `$in`.
+    // **P7 PR 3** — the loader sends string ids on the wire.
     const idClause = calls.findBatched[0].filter.id as { $in: string[] };
     assert.ok(idClause && Array.isArray(idClause.$in));
     assert.deepEqual([...idClause.$in].sort(), ["1", "2"]);
@@ -146,7 +143,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
   test("filter object falls through to direct dispatch (find with limit:1)", async () => {
     const { native, calls } = makeMockNative({
-      1: { id: 1, email: "a@b.com", name: "Alice" },
+      1: { id: "1", email: "a@b.com", name: "Alice" },
     });
     const Users = model(
       "users",
@@ -158,22 +155,22 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     );
 
     const [byId1, byId2, byFilter] = await Promise.all([
-      Users.get(1),
-      Users.get(1),
+      Users.get("1"),
+      Users.get("1"),
       Users.get({ email: "a@b.com" }),
     ]);
     assert.equal(byId1.data?.email, "a@b.com");
     assert.equal(byId2.data?.email, "a@b.com");
     assert.equal(byFilter.data?.email, "a@b.com");
 
-    // The two numeric gets coalesce; the filter call dispatches directly.
-    assert.equal(calls.findBatched.length, 1, "one batched find for numeric ids");
+    // The two id gets coalesce; the filter call dispatches directly.
+    assert.equal(calls.findBatched.length, 1, "one batched find for string ids");
     assert.equal(calls.findSingle.length, 1, "filter call uses find with limit:1");
   });
 
   test("get(id, {select: [...]}) bypasses the loader", async () => {
     const { native, calls } = makeMockNative({
-      1: { id: 1, email: "a@b.com", name: "Alice" },
+      1: { id: "1", email: "a@b.com", name: "Alice" },
     });
     const Users = model(
       "users",
@@ -184,7 +181,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       native,
     );
 
-    const { data } = await Users.get(1, { select: ["email"] });
+    const { data } = await Users.get("1", { select: ["email"] });
     assert.ok(data);
     assert.equal(calls.findBatched.length, 0);
     assert.equal(calls.findSingle.length, 1, "select narrows → direct find with limit:1");
@@ -192,7 +189,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
   test("get(id) for missing row resolves to null", async () => {
     const { native, calls } = makeMockNative({
-      1: { id: 1, email: "a@b.com", name: "Alice" },
+      1: { id: "1", email: "a@b.com", name: "Alice" },
     });
     const Users = model(
       "users",
@@ -203,7 +200,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       native,
     );
 
-    const [hit, miss] = await Promise.all([Users.get(1), Users.get(99)]);
+    const [hit, miss] = await Promise.all([Users.get("1"), Users.get("99")]);
     assert.equal(hit.data?.email, "a@b.com");
     assert.equal(miss.error, null);
     assert.equal(miss.data, null);
@@ -223,9 +220,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     );
 
     const [a, b, c] = await Promise.all([
-      Users.get(1),
-      Users.get(2),
-      Users.get(3),
+      Users.get("1"),
+      Users.get("2"),
+      Users.get("3"),
     ]);
     assert.equal(a.data, null);
     assert.equal(b.data, null);
@@ -241,8 +238,8 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
   test("inside db.transaction(...) the loader is bypassed (each get uses find with limit:1)", async () => {
     const { native, calls } = makeMockNative({
-      1: { id: 1, email: "a@b.com", name: "Alice" },
-      2: { id: 2, email: "b@b.com", name: "Bob" },
+      1: { id: "1", email: "a@b.com", name: "Alice" },
+      2: { id: "2", email: "b@b.com", name: "Bob" },
     });
     const db = installSchemaForTest(
       {
@@ -255,7 +252,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     );
 
     const { data, error } = await db.transaction(async (tx) => {
-      const [u1, u2] = await Promise.all([tx.users.get(1), tx.users.get(2)]);
+      const [u1, u2] = await Promise.all([tx.users.get("1"), tx.users.get("2")]);
       return { u1, u2 };
     });
     assert.equal(error, null);
@@ -276,10 +273,10 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // (the JS-side DataLoader queues have no Rust counterpart, so the
     // drain stays in JS even though the begin moved into Rust).
     const events: string[] = [];
-    const rowsByTable: Record<string, Record<number, AnyRec>> = {
+    const rowsByTable: Record<string, Record<string, AnyRec>> = {
       users: {
-        1: { id: 1, email: "a@b.com", name: "Alice" },
-        2: { id: 2, email: "b@b.com", name: "Bob" },
+        1: { id: "1", email: "a@b.com", name: "Alice" },
+        2: { id: "2", email: "b@b.com", name: "Bob" },
       },
     };
     const native = {
@@ -303,7 +300,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
         return {
           async find(filter: AnyRec, o: AnyRec) {
             events.push(`find(${name},${JSON.stringify(filter)})`);
-            const idClause = filter.id as { $in?: number[] } | undefined;
+            const idClause = filter.id as { $in?: string[] } | undefined;
             if (idClause && Array.isArray(idClause.$in)) {
               return idClause.$in.map((i) => rowsByTable[name]?.[i]).filter(Boolean);
             }
@@ -311,10 +308,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
             // replaces the old `findOne` path. Resolve to a 1-element
             // array (or empty) so the SDK's slice picks the row up.
             const id = filter.id;
-            if (
-              (typeof id === "number" || typeof id === "string") &&
-              o && (o as AnyRec).limit === 1
-            ) {
+            if (typeof id === "string" && o && (o as AnyRec).limit === 1) {
               const row = rowsByTable[name]?.[id as keyof typeof rowsByTable[string]];
               return row ? [row] : [];
             }
@@ -338,7 +332,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // it reach `loader.load()` (so the loader queue contains an entry)
     // BUT keep the dispatch microtask from firing before we enter the
     // tx — by starting the tx in the same microtask drain cycle.
-    await db.users.get(99); // primes _idLoader
+    await db.users.get("99"); // primes _idLoader
     events.length = 0;
 
     // Reach into the loader and queue an entry directly: this models a
@@ -352,12 +346,11 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       _idLoader: { load(id: string): Promise<unknown> } | null;
     };
     assert.ok(usersCol._idLoader !== null, "loader must be primed");
-    // **P7 PR 3** — loader API is keyed by typed_id string. Pass "1"
-    // so the underlying Map lookup matches the stringified row id.
+    // **P7 PR 3** — loader API is keyed by string ids.
     const preTxGet = usersCol._idLoader!.load("1");
 
     const txResult = db.transaction(async (tx) => {
-      const got = await tx.users.get(2);
+      const got = await tx.users.get("2");
       return got;
     });
 
@@ -370,15 +363,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
     // Critical: the batched find for the pre-tx get must precede
     // beginTransaction in the event log.
-    // **P7 PR 3** — wire shape is `$in:["1"]` (typed_id string), not
-    // `$in:[1]`. The pre-tx loader.load(1) call below stays on the
-    // number-keyed loader API; the outer Collection.get path stringifies
-    // before reaching loader.load, so the events string match must
-    // accept either shape during the migration window.
+    // **P7 PR 3** — wire shape is `$in:["1"]`.
     const batchedFindIdx = events.findIndex(
-      (e) =>
-        e.startsWith("find(users,") &&
-        (e.includes('"$in":[1]') || e.includes('"$in":["1"]')),
+      (e) => e.startsWith("find(users,") && e.includes('"$in":["1"]'),
     );
     const beginIdx = events.indexOf("begin");
     assert.ok(batchedFindIdx >= 0, `expected a batched find, got events=${JSON.stringify(events)}`);
@@ -455,7 +442,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
 
   test("repeated id in one microtask is deduped before the wire call", async () => {
     const { native, calls } = makeMockNative({
-      7: { id: 7, email: "x@y.com", name: "Same" },
+      7: { id: "7", email: "x@y.com", name: "Same" },
     });
     const Users = model(
       "users",
@@ -466,7 +453,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       native,
     );
 
-    const results = await Promise.all([Users.get(7), Users.get(7), Users.get(7)]);
+    const results = await Promise.all([Users.get("7"), Users.get("7"), Users.get("7")]);
     for (const r of results) assert.equal(r.data?.email, "x@y.com");
     assert.equal(calls.find.length, 1);
     // **P7 PR 3** — typed_id string wire shape.

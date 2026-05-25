@@ -185,10 +185,10 @@ describe("P7 PR 1 — Row<S> auto-includes the seven system fields", () => {
       version: 1,
       deleted_at: null,
       // Legacy camelCase aliases retained during the P7 migration
-      // window so existing callers (`db.users.find({ createdAt })`)
+      // window so existing callers (`db.users.find({ created_at })`)
       // type-check unchanged.
-      createdAt: 1700000000000,
-      updatedAt: 1700000000000,
+      created_at: 1700000000000,
+      updated_at: 1700000000000,
     };
     assert.equal(row.title, "hello");
     assert.equal(row.id, 42);
@@ -208,8 +208,8 @@ describe("P7 PR 1 — Row<S> auto-includes the seven system fields", () => {
       updated_by: "usr_abc",
       version: 3,
       deleted_at: null,
-      createdAt: 1700000000000,
-      updatedAt: 1700000000000,
+      created_at: 1700000000000,
+      updated_at: 1700000000000,
     };
     const deletedRow: Row<UserSchema> = {
       title: "hi",
@@ -220,8 +220,8 @@ describe("P7 PR 1 — Row<S> auto-includes the seven system fields", () => {
       updated_by: null,
       version: 5,
       deleted_at: 1700000060000,
-      createdAt: 1700000000000,
-      updatedAt: 1700000000000,
+      created_at: 1700000000000,
+      updated_at: 1700000000000,
     };
     assert.equal(liveRow.deleted_at, null);
     assert.equal(typeof deletedRow.deleted_at, "number");

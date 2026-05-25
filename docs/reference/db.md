@@ -141,7 +141,7 @@ Use the `t.*` factories. Every builder is chainable.
 | `t.calendarDate()`     | `string` (`YYYY-MM-DD`)       | DATE            |
 | `t.json()`             | `Record<string, unknown>`     | JSONB           |
 | `t.array(t.string())`  | `string[]`                    | JSONB           |
-| `t.ref("users")`       | `Id<"users">` (branded num)   | INTEGER + FK    |
+| `t.ref("users")`       | `Id<"users">` (branded string) | TEXT + FK      |
 | `t.object({ ... })`    | nested inferred object        | JSONB           |
 | `t.literal("login")`   | `"login"`                     | underlying type |
 | `t.union(v1, v2, ...)` | discriminated union           | flat columns    |
@@ -171,13 +171,13 @@ You never declare these; every collection has them. They're the
 platform "system fields" — full documentation lives in the
 [System fields](#system-fields) section below:
 
-- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62>`), minted SDK-side.
-- `created_at: Date` — server `NOW()` at INSERT.
-- `updated_at: Date` — server `NOW()` at INSERT; bumped on every UPDATE.
+- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62(uuidv7)>`), platform-minted.
+- `created_at: number` — Unix-ms timestamp at INSERT.
+- `updated_at: number` — Unix-ms timestamp at INSERT; bumped on every UPDATE.
 - `created_by: string | null` — session actor at INSERT (`null` for system writes).
 - `updated_by: string | null` — session actor at every UPDATE.
 - `version: number` — `1` at INSERT; auto-bumped on every UPDATE; supports optimistic concurrency.
-- `deleted_at: Date | null` — `null` (live) by default; `delete()` stamps `NOW()`.
+- `deleted_at: number | null` — `null` (live) by default; `delete()` stamps the current Unix-ms time.
 
 These seven columns are added by the platform on every table created
 through the schema DSL — `softDelete()` / `withVersioning()` are no
@@ -250,8 +250,8 @@ fields, matching Postgres B-tree semantics:
 **Validation at definition time.** `.index(name, fields)` throws with
 `code = "schema_invalid"` if `name` is empty or already declared on the
 schema, or if `fields` is empty or references a field absent from the
-schema. The auto-generated columns (`id`, `createdAt`, `updatedAt`,
-`deletedAt` under soft-delete, `version` under versioning) are accepted.
+schema. The auto-generated columns (`id`, `created_at`, `updated_at`,
+`deleted_at` under soft-delete, `version` under versioning) are accepted.
 
 **Runtime warning.** Outside `NODE_ENV=production`, calling
 `find()` / `get()` / `deleteMany()` with a filter whose keys don't form
@@ -281,7 +281,7 @@ depending on the data.
 
 ## Branded ids
 
-`t.ref("users")` produces `Id<"users">` — a branded `number`. Two ref types
+`t.ref("users")` produces `Id<"users">` — a branded `string`. Two ref types
 backed by different tables are mutually incompatible at compile time:
 
 ```ts
@@ -329,8 +329,8 @@ const { data: user } = await db.users.upsert(
 ### Read
 
 ```ts
-// Single row by id (number is a shorthand for `{ id }`)
-const { data: user } = await db.users.get(1);
+// Single row by id (string is a shorthand for `{ id }`)
+const { data: user } = await db.users.get("usr_01hxyz...");
 
 // Single row by filter
 const { data: user } = await db.users.get({ email: "alice@example.com" });
@@ -351,14 +351,14 @@ const { data: next } = await db.users.find({}).sort({ id: 1 }).after(lastId);
 // rows. The cursor is opaque base64-JSON and bound to the orderBy used.
 const { data: p1 } = await db.users
   .find({})
-  .sort({ createdAt: -1 })
+  .sort({ created_at: -1 })
   .paginate({ cursor: null, numItems: 20 });
 // p1 = { page, continueCursor, isDone }
 
 if (!p1!.isDone) {
   const { data: p2 } = await db.users
     .find({})
-    .sort({ createdAt: -1 })
+    .sort({ created_at: -1 })
     .paginate({ cursor: p1!.continueCursor, numItems: 20 });
 }
 
@@ -423,7 +423,7 @@ const { data } = await db.todos.find({}, {
 - The `with` key MUST be a `t.ref(...)` field declared on the parent
   schema. `with: { id: true }`, `with: { title: true }`, or any
   unknown key rejects with `"... is not a t.ref field on \"<table>\""`.
-- The joined row REPLACES the FK number at the same key. To keep
+- The joined row REPLACES the FK string id at the same key. To keep
   both the FK and the joined row, declare the relation on a separate
   field name (e.g. `user: t.ref("users")` instead of `userId`) — the
   joined row lands at `user`, and its `.id` is the original FK.
@@ -455,21 +455,21 @@ const { data } = await db.todos.find({}, {
 
 ```ts
 // By id, full row patch
-const { data: u } = await db.users.update(1, { name: "Alice Smith" });
+const { data: u } = await db.users.update("usr_01hxyz...", { name: "Alice Smith" });
 if (!u) throw new Error("not found");
 
 // By filter (returns the first match, or null)
 const { data: u } = await db.users.update({ email: "alice@..." }, { role: "admin" });
 
 // Atomic operators — per-field
-await db.products.update(1, {
+await db.products.update("prd_01hxyz...", {
   stock: { $dec: 1 },
   views: { $inc: 1 },
   tags:  { $push: "sale" },
 });
 
 // MongoDB top-level shape (SDK translates)
-await db.products.update(1, { $inc: { views: 1 } });
+await db.products.update("prd_01hxyz...", { $inc: { views: 1 } });
 
 // Update many — returns counts
 const { data: counts } = await db.users.updateMany(
@@ -480,7 +480,7 @@ const { data: counts } = await db.users.updateMany(
 
 // CAS via versioning (when withVersioning() is on)
 const { data, error } = await db.products.update(
-  { id: 1, version: 5 },
+  { id: "prd_01hxyz...", version: 5 },
   { stock: { $dec: 1 } },
 );
 // error instanceof OptimisticLockError when stored version != 5
@@ -525,7 +525,7 @@ up to the caller.
 
 ```ts
 // By id — returns the deleted row (or null)
-const { data } = await db.users.delete(1);
+const { data } = await db.users.delete("usr_01hxyz...");
 
 // By filter
 const { data } = await db.users.delete({ email: "spam@..." });
@@ -534,10 +534,10 @@ const { data } = await db.users.delete({ email: "spam@..." });
 const { data } = await db.sessions.deleteMany({ expiresAt: { $lt: Date.now() } });
 // { deletedCount: N }
 
-// Soft delete: with `softDelete()` on the schema, delete sets deletedAt
+// Soft delete: with `softDelete()` on the schema, delete sets deleted_at
 // instead of removing the row. For an explicit hard-delete (regardless
 // of soft-delete state), use `purge` / `purgeMany`:
-await db.users.purge(1);
+await db.users.purge("usr_01hxyz...");
 await db.users.purgeMany({ email: { $like: "spam-%" } });
 ```
 
@@ -1021,7 +1021,7 @@ Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
 
 | Column        | Type (PG)       | Default            | Set by             |
 |---------------|-----------------|--------------------|--------------------|
-| `id`          | `TEXT` PK       | minted SDK-side    | typed_id (`<prefix>_<base62>`) |
+| `id`          | `TEXT` PK       | platform-minted    | typed_id (`<prefix>_<base62(uuidv7)>`) |
 | `created_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT  | DB default         |
 | `updated_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT, bumped on every UPDATE | runtime UPDATE builder |
 | `created_by`  | `TEXT` NULL     | `null` if no actor | session actor at INSERT |
@@ -1042,12 +1042,12 @@ declare them, and they show up on every row you read:
 ```ts
 const { data: user } = await db.users.get(userId);
 user.id;          // string ("usr_…")
-user.created_at;  // Date
-user.updated_at;  // Date
+user.created_at;  // number (Unix ms)
+user.updated_at;  // number (Unix ms)
 user.created_by;  // string | null
 user.updated_by;  // string | null
 user.version;     // number  (1 on a freshly-inserted row)
-user.deleted_at;  // Date | null  (null = live)
+user.deleted_at;  // number | null  (null = live)
 ```
 
 `created_by` / `updated_by` are nullable. The platform stamps them from
@@ -1132,7 +1132,7 @@ platform is pre-launch as of 2026-05-24).
 ### Lifecycle worked example
 
 ```ts
-// 1. Create a row. id is minted SDK-side; the rest is server-side.
+// 1. Create a row. id is platform-minted; the rest is server-side.
 const { data: post } = await db.posts.insert({
   title: "First post",
   body:  "…",
@@ -1292,8 +1292,8 @@ Bulk unmask across rows (single RPC; atomic):
 ```ts
 const plains = await env.db.users.bulkUnmask(
   [
-    { id: 1, columns: ["ssn"] },
-    { id: 2, columns: ["ssn", "email"] },
+    { id: "usr_01hxyz...", columns: ["ssn"] },
+    { id: "usr_01hxza...", columns: ["ssn", "email"] },
   ],
   { actor, reason },
 );

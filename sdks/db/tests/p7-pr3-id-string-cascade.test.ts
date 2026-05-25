@@ -69,16 +69,13 @@ describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
           async findOne(filter: AnyRec) {
             calls.findOne.push(filter);
             const id = filter.id;
-            if (typeof id === "string" || typeof id === "number") {
-              return rows[String(id)] ?? null;
-            }
-            return null;
+            return typeof id === "string" ? rows[id] ?? null : null;
           },
           async find(filter: AnyRec) {
             calls.find.push(filter);
-            const idClause = filter.id as { $in?: (string | number)[] } | undefined;
+            const idClause = filter.id as { $in?: string[] } | undefined;
             if (idClause && Array.isArray(idClause.$in)) {
-              return idClause.$in.map((i) => rows[String(i)]).filter(Boolean);
+              return idClause.$in.map((i) => rows[i]).filter(Boolean);
             }
             return [];
           },
@@ -117,25 +114,6 @@ describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
     );
   });
 
-  test("collection_load_by_legacy_numeric_id_stringifies", async () => {
-    // **P7 PR 3** — pre-migration collections that still store integer
-    // ids continue to batch through the loader; the SDK stringifies
-    // the numeric id on the way into the loader so the keyspace is
-    // uniform.
-    const { native, calls } = makeNative({
-      "1": { id: 1, title: "legacy" },
-    });
-    const Posts = model(
-      "posts",
-      { title: t.string().required() },
-      native,
-    );
-    const r = await Posts.get(1);
-    assert.equal(r.error, null);
-    assert.equal((r.data as AnyRec)?.title, "legacy");
-    const idClause = calls.find[0].id as { $in: string[] };
-    assert.deepEqual([...idClause.$in], ["1"]);
-  });
 });
 
 describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
@@ -153,8 +131,6 @@ describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
       updated_by: "usr_actor",
       version: 1,
       deleted_at: null,
-      createdAt: 1700000000000,
-      updatedAt: 1700000000000,
     };
     // Runtime sanity — value preserved.
     assert.equal(typeof row.id, "string");
