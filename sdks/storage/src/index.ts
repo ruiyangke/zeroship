@@ -1,7 +1,7 @@
 // @zeroship/storage — object-storage SDK.
 //
 // Wraps the `zeroship.storage.*` native primitives in a typed, ergonomic
-// Bucket interface. Same shape your app will use in dev (SQLite-backed
+// Bucket interface. Same shape your app will use in dev (local runtime state
 // local state plus local FS) and prod (S3/R2 once those land behind the
 // same native interface).
 

@@ -5,11 +5,8 @@
 // dispatches by URL scheme, so dev just points DATABASE_URL at a
 // project-local SQLite file and lets the in-process backend take over.
 //
-// Used by dev-server.ts when DATABASE_URL is not provided via .env or
-// the parent environment.
-
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+// Used by dev-server.ts when DATABASE_URL is not provided via the shell
+// environment or .env.
 
 const DEV_DB_DIR = ".zeroship";
 const DEV_DB_FILE = "dev.sqlite";
@@ -21,10 +18,8 @@ export interface DevDatabase {
 }
 
 /**
- * Ensure the project-local SQLite directory exists and return the URL
- * the runtime should receive via DATABASE_URL.
+ * Return the default project-local SQLite URL for dev mode.
  */
-export function resolveDevDatabase(projectRoot: string): DevDatabase {
-  mkdirSync(resolve(projectRoot, DEV_DB_DIR), { recursive: true });
+export function resolveDevDatabase(_projectRoot: string): DevDatabase {
   return { databaseUrl: DEV_DB_URL };
 }

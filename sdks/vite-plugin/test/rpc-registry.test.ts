@@ -333,6 +333,27 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
   // inside a workspace-local scratch dir so the package resolves via
   // the standard upward node_modules walk.
   const workspaceTmpRoot = new URL("./.tmp/", import.meta.url).pathname;
+
+  async function installBootstrapStub(baseDir: string): Promise<void> {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+
+    const pkgDir = join(baseDir, "node_modules", "@zeroship", "bootstrap");
+    await mkdir(pkgDir, { recursive: true });
+    await writeFile(
+      join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "@zeroship/bootstrap",
+        type: "module",
+        exports: {
+          ".": "./index.js",
+        },
+      }, null, 2),
+      "utf8",
+    );
+    await writeFile(join(pkgDir, "index.js"), "export {};\n", "utf8");
+  }
+
   test("namespace-walk entry: ESM-evaluable normaliser yields a dict", async () => {
     // Materialise the synthetic entry against a stub user module and
     // import it. The default export must carry a dict-shape `rpc`.
@@ -343,6 +364,7 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
     await mkdir(workspaceTmpRoot, { recursive: true });
     const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-dict-"));
     try {
+      await installBootstrapStub(dir);
       const userPath = join(dir, "user.mjs");
       await writeFile(
         userPath,
@@ -389,6 +411,7 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
     await mkdir(workspaceTmpRoot, { recursive: true });
     const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-merge-"));
     try {
+      await installBootstrapStub(dir);
       const userPath = join(dir, "user.mjs");
       await writeFile(
         userPath,
@@ -422,6 +445,7 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
     await mkdir(workspaceTmpRoot, { recursive: true });
     const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-dict-only-"));
     try {
+      await installBootstrapStub(dir);
       const userPath = join(dir, "user.mjs");
       await writeFile(
         userPath,

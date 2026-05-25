@@ -9,12 +9,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChildProcess, spawn } from "node:child_process";
 import http from "node:http";
-import { WebSocketServer } from "ws";
-import type { WebSocket } from "ws";
 import {
-  WS_PATH,
+  MODULE_FETCH_PATH,
+  HMR_POLL_PATH,
   ENV_DEV,
-  ENV_VITE_WS,
+  ENV_VITE_ORIGIN,
   ENV_ENTRY,
   DEFAULT_DEV_PORT,
 } from "./constants.js";
@@ -31,6 +30,79 @@ import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
 export interface DevServerOptions {
   devServerPort?: number;
   serverEntry?: string;
+}
+
+type FetchMethod = "fetchModule" | "getBuiltins";
+type DatabaseUrlSource = "shell" | "dotenv" | "default";
+
+const MAX_FETCH_BODY_BYTES = 64 * 1024;
+const ALLOWED_FETCH_METHODS = new Set<FetchMethod>(["fetchModule", "getBuiltins"]);
+
+function requestPath(req: http.IncomingMessage): string {
+  return new URL(req.url ?? "", "http://localhost").pathname;
+}
+
+function writeJson(
+  res: http.ServerResponse,
+  statusCode: number,
+  payload: unknown,
+): void {
+  res.writeHead(statusCode, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(payload));
+}
+
+function httpError(statusCode: number, message: string): Error & { statusCode: number } {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function parseDotenvVars(root: string): Record<string, string> {
+  const envPath = resolve(root, ".env");
+  if (!existsSync(envPath)) return {};
+
+  const dotenvVars: Record<string, string> = {};
+  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let val = trimmed.slice(eq + 1).trim();
+    if ((val.startsWith("\"") && val.endsWith("\"")) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    dotenvVars[key] = val;
+  }
+  return dotenvVars;
+}
+
+function resolveDatabaseUrl(
+  parentEnv: NodeJS.ProcessEnv,
+  dotenvVars: Record<string, string>,
+  defaultDatabaseUrl: string,
+): { databaseUrl: string; source: DatabaseUrlSource } {
+  if (parentEnv.DATABASE_URL) {
+    return { databaseUrl: parentEnv.DATABASE_URL, source: "shell" };
+  }
+  if (dotenvVars.DATABASE_URL) {
+    return { databaseUrl: dotenvVars.DATABASE_URL, source: "dotenv" };
+  }
+  return { databaseUrl: defaultDatabaseUrl, source: "default" };
+}
+
+function logDatabaseUrlSource(source: DatabaseUrlSource, databaseUrl: string): void {
+  if (source === "shell") {
+    console.log("[zeroship] using DATABASE_URL from shell environment");
+    return;
+  }
+  if (source === "dotenv") {
+    console.log("[zeroship] using DATABASE_URL from .env");
+    return;
+  }
+  console.log(`[zeroship] using default DATABASE_URL ${databaseUrl}`);
+}
+
+function isAllowedFetchMethod(methodName: string): methodName is FetchMethod {
+  return ALLOWED_FETCH_METHODS.has(methodName as FetchMethod);
 }
 
 // ── Plugin factory ─────────────────────────────────────────────────────────
@@ -87,43 +159,11 @@ export function devServerPlugin(
     configureServer(server: ViteDevServer) {
       if (!isDev) return;
 
-      // 1. WebSocket bridge ─────────────────────────────────────────────────
-      //
-      // Create a noServer WSS so we can intercept upgrade events manually.
-      // Vite also uses WebSocket for its own HMR — we must only intercept
-      // requests targeting WS_PATH and leave the rest to Vite.
-
-      const wss = new WebSocketServer({ noServer: true });
-
-      server.httpServer?.on(
-        "upgrade",
-        (req: http.IncomingMessage, socket: import("stream").Duplex, head: Buffer) => {
-          const url = new URL(req.url ?? "", "http://localhost");
-          if (url.pathname !== WS_PATH) return; // let Vite handle its own upgrades
-
-          wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-            wss.emit("connection", ws, req);
-
-            const zeroshipEnv = server.environments[
-              "zeroship"
-            ] as ZeroshipDevEnvironment | undefined;
-
-            if (zeroshipEnv) {
-              zeroshipEnv.setWebSocket(ws);
-            } else {
-              console.warn(
-                "[zeroship] WS connection received but zeroship environment not found"
-              );
-            }
-          });
-        }
-      );
-
-      // 2. Module fetch endpoint ─────────────────────────────────────────
+      // 1. Module fetch endpoint ─────────────────────────────────────────
       //
       // The runtime's ModuleRunner calls this to fetch transformed modules
-      // from Vite's environment. This replaces WebSocket-based invoke since
-      // the V8 runtime doesn't support outbound WebSocket connections.
+      // from Vite's environment. V8 can't open the bidirectional transport
+      // Vite uses for browser HMR, so the dev bootstrap uses plain HTTP.
 
       server.middlewares.use(
         async (
@@ -131,7 +171,7 @@ export function devServerPlugin(
           res: http.ServerResponse,
           next: () => void
         ) => {
-          if (req.url !== "/__zeroship_fetch" || req.method !== "POST") {
+          if (requestPath(req) !== MODULE_FETCH_PATH || req.method !== "POST") {
             return next();
           }
 
@@ -140,57 +180,75 @@ export function devServerPlugin(
           ] as ZeroshipDevEnvironment | undefined;
 
           if (!zeroshipEnv) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: { message: "zeroship environment not found" } }));
+            writeJson(res, 500, { error: { message: "zeroship environment not found" } });
             return;
           }
 
-          // Read POST body
-          const chunks: Buffer[] = [];
-          for await (const chunk of req) chunks.push(chunk as Buffer);
-          const body = Buffer.concat(chunks).toString();
-
           try {
+            const chunks: Buffer[] = [];
+            let bodySize = 0;
+            for await (const chunk of req) {
+              const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+              bodySize += buf.length;
+              if (bodySize > MAX_FETCH_BODY_BYTES) {
+                writeJson(res, 413, {
+                  error: {
+                    message: `zeroship fetch body exceeds ${MAX_FETCH_BODY_BYTES} bytes`,
+                  },
+                });
+                return;
+              }
+              chunks.push(buf);
+            }
+
+            const body = Buffer.concat(chunks).toString("utf8");
             const data = JSON.parse(body);
             // The ModuleRunner sends vite:invoke calls via the transport.
             // Format: { type: "custom", event: "vite:invoke",
             //           data: { id: correlationId, name: methodName, data: args[] } }
             const invoke = data.data ?? data;
-            const { name: methodName, data: args } = invoke;
+            if (!invoke || typeof invoke !== "object") {
+              throw httpError(400, "invalid zeroship fetch payload");
+            }
 
-            let result: any;
+            const methodName = (invoke as { name?: unknown }).name;
+            const args = (invoke as { data?: unknown }).data;
+            if (typeof methodName !== "string" || !isAllowedFetchMethod(methodName)) {
+              throw httpError(400, `unsupported zeroship fetch method: ${String(methodName)}`);
+            }
+
+            let result: unknown;
             if (methodName === "fetchModule") {
+              if (!Array.isArray(args) || typeof args[0] !== "string") {
+                throw httpError(400, "fetchModule expects [id, importer?, options?]");
+              }
               // args = [id, importer, options?]
-              result = await zeroshipEnv.fetchModule(args[0], args[1], args[2]);
-            } else if (methodName === "getBuiltins") {
+              result = await zeroshipEnv.fetchModule(
+                args[0],
+                typeof args[1] === "string" ? args[1] : undefined,
+                args[2] ?? undefined,
+              );
+            } else {
               // Return EMPTY builtins — our V8 runtime can't import node: modules
               // natively. By returning [], the ModuleRunner will always call
               // fetchModule() for every import, which lets our fetchModule override
               // intercept node:* and return polyfill code.
               result = [];
-            } else {
-              // Dispatch other methods to the environment if they exist
-              const fn = (zeroshipEnv as any)[methodName];
-              if (typeof fn === "function") {
-                result = await fn.apply(zeroshipEnv, args ?? []);
-              } else {
-                // Unknown methods return empty result rather than error —
-                // the runner may probe for optional capabilities.
-                result = null;
-              }
             }
 
             // Return in the format the runner expects: { result } or { error }
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ result }));
+            writeJson(res, 200, { result });
           } catch (e: any) {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: { message: e.message ?? String(e) } }));
+            const statusCode =
+              typeof e?.statusCode === "number" ? e.statusCode : 500;
+            writeJson(res, statusCode, {
+              error: { message: e?.message ?? String(e) },
+            });
           }
         }
       );
 
-      // 3. HMR poll endpoint ──────────────────────────────────────────────
+      // 2. HMR poll endpoint ──────────────────────────────────────────────
       //
       // The V8 runtime polls this every 500ms to discover changed files.
       // Returns the pending set and clears it atomically. Empty array = no
@@ -203,25 +261,22 @@ export function devServerPlugin(
           res: http.ServerResponse,
           next: () => void
         ) => {
-          if (req.url !== "/__zeroship_hmr_check" || req.method !== "GET") {
+          if (requestPath(req) !== HMR_POLL_PATH || req.method !== "GET") {
             return next();
           }
 
           const changed = [...pendingHmrChanges];
           pendingHmrChanges.clear();
 
-          res.writeHead(200, {
-            "Content-Type": "application/json",
-            "Cache-Control": "no-store",
-          });
+          res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
           res.end(JSON.stringify({ changed }));
         }
       );
 
-      // 4. Spawn zeroship runtime ────────────────────────────────────────────
+      // 3. Spawn zeroship runtime ────────────────────────────────────────────
       //
-      // Deferred until Vite's HTTP server is actually listening. The bootstrap
-      // opens a WebSocket back to Vite, which fails if the server isn't ready.
+      // Deferred until Vite's HTTP server is actually listening so the child
+      // gets a stable origin for module fetches and HMR polling.
 
       const __filename = fileURLToPath(import.meta.url);
       const __dirname = dirname(__filename);
@@ -237,6 +292,42 @@ export function devServerPlugin(
           "[zeroship] dev-bootstrap.js not found — skipping runtime spawn (run the bootstrap bundler first)"
         );
       } else {
+        let restartTimer: ReturnType<typeof setTimeout> | null = null;
+        let shouldRestart = true;
+
+        const attachRestartHandler = (child: ChildProcess) => {
+          child.once("exit", (code, signal) => {
+            if (!shouldRestart || signal === "SIGTERM" || signal === "SIGKILL") return;
+            console.warn(
+              `[zeroship] runtime exited unexpectedly (code=${code}, signal=${signal}) — restarting in 1s`
+            );
+            if (restartTimer) clearTimeout(restartTimer);
+            restartTimer = setTimeout(() => {
+              restartTimer = null;
+              runSpawn();
+            }, 1000);
+          });
+        };
+
+        const killChild = () => {
+          shouldRestart = false;
+          if (restartTimer) {
+            clearTimeout(restartTimer);
+            restartTimer = null;
+          }
+          const child = serverProcess;
+          serverProcess = null;
+          if (child && !child.killed) {
+            child.kill("SIGTERM");
+            setTimeout(() => {
+              if (!child.killed) {
+                child.kill("SIGKILL");
+              }
+            }, 3000).unref();
+          }
+          devDb = null;
+        };
+
         const spawnRuntime = async () => {
           // Resolve the actual listening port from the HTTP server.
           const addr = server.httpServer?.address();
@@ -246,42 +337,16 @@ export function devServerPlugin(
                 ? server.config.server.port
                 : 5173;
 
-          // Load .env file if present (like dotenv)
-          const dotenvVars: Record<string, string> = {};
-          const envPath = resolve(root, ".env");
-          if (existsSync(envPath)) {
-            for (const line of readFileSync(envPath, "utf-8").split("\n")) {
-              const trimmed = line.trim();
-              if (!trimmed || trimmed.startsWith("#")) continue;
-              const eq = trimmed.indexOf("=");
-              if (eq === -1) continue;
-              const key = trimmed.slice(0, eq).trim();
-              let val = trimmed.slice(eq + 1).trim();
-              // Strip surrounding quotes
-              if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-                val = val.slice(1, -1);
-              }
-              dotenvVars[key] = val;
-            }
+          const dotenvVars = parseDotenvVars(root);
+          if (!devDb) {
+            devDb = resolveDevDatabase(root);
           }
-
-          // Default to a project-local SQLite file when the creator
-          // hasn't provided DATABASE_URL via .env or the parent
-          // environment. The runtime dispatches by scheme, so the same
-          // `DATABASE_URL` escape hatch still works for real Postgres.
-          const hasUserDbUrl = !!(dotenvVars.DATABASE_URL || process.env.DATABASE_URL);
-          if (!hasUserDbUrl && !devDb) {
-            try {
-              devDb = resolveDevDatabase(root);
-              console.log(
-                `[zeroship] dev db ready (sqlite) — ${devDb.databaseUrl}`
-              );
-            } catch (err) {
-              console.warn(
-                `[zeroship] failed to prepare sqlite dev db: ${(err as Error).message} — zeroship.db.* will be unavailable`
-              );
-            }
-          }
+          const { databaseUrl, source } = resolveDatabaseUrl(
+            process.env,
+            dotenvVars,
+            devDb.databaseUrl,
+          );
+          logDatabaseUrlSource(source, databaseUrl);
 
           // Stage 5c: schema discovery is unified — dev-bootstrap
           // reads `mod.default.schema` lazily on first request (via
@@ -289,16 +354,17 @@ export function devServerPlugin(
           // the entry-default convention is the only path.
 
           const childEnv: NodeJS.ProcessEnv = {
-            ...process.env,
             ...dotenvVars,
-            ...(devDb && !hasUserDbUrl ? { DATABASE_URL: devDb.databaseUrl } : {}),
+            ...process.env,
+            DATABASE_URL: databaseUrl,
             [ENV_DEV]: "1",
-            [ENV_VITE_WS]: `ws://localhost:${vitePort}${WS_PATH}`,
+            [ENV_VITE_ORIGIN]: `http://localhost:${vitePort}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
           };
 
           try {
-            serverProcess = spawn(
+            shouldRestart = true;
+            const child = spawn(
               cmd,
               ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
               {
@@ -307,17 +373,19 @@ export function devServerPlugin(
                 env: childEnv,
               }
             );
+            serverProcess = child;
 
-            serverProcess.stdout?.on("data", (d: Buffer) => {
+            child.stdout?.on("data", (d: Buffer) => {
               const msg = d.toString().trim();
               if (msg) console.log(`[zeroship:api] ${msg}`);
             });
 
-            serverProcess.stderr?.on("data", (d: Buffer) => {
+            child.stderr?.on("data", (d: Buffer) => {
               const msg = d.toString().trim();
               if (msg) console.log(`[zeroship:api] ${msg}`);
             });
 
+            attachRestartHandler(child);
             console.log(`[zeroship] API server starting on :${devPort}`);
           } catch {
             console.warn(
@@ -337,19 +405,6 @@ export function devServerPlugin(
           server.httpServer?.once("listening", runSpawn);
         }
 
-        // Clean up child process + dev db on Vite exit (SIGINT, SIGTERM, process.exit)
-        const killChild = () => {
-          if (serverProcess && !serverProcess.killed) {
-            serverProcess.kill("SIGTERM");
-            setTimeout(() => {
-              if (serverProcess && !serverProcess.killed) {
-                serverProcess.kill("SIGKILL");
-              }
-            }, 3000).unref();
-          }
-          devDb = null;
-        };
-
         // Signal handlers — stored so they can be removed on server close
         // to prevent listener leaks when Vite is restarted programmatically.
         const onExit   = () => killChild();
@@ -365,29 +420,6 @@ export function devServerPlugin(
           process.removeListener("SIGTERM", onSigterm);
         };
         server.httpServer?.on("close", () => { killChild(); cleanupListeners(); });
-
-        // Restart on unexpected exit (crash recovery).
-        // A single timer reference prevents concurrent spawn attempts
-        // when the child crash-loops faster than the restart delay.
-        let restartTimer: ReturnType<typeof setTimeout> | null = null;
-
-        const setupRestartHandler = () => {
-          if (!serverProcess) return;
-          serverProcess.on("exit", (code, signal) => {
-            if (signal === "SIGTERM" || signal === "SIGKILL") return;
-            console.warn(
-              `[zeroship] runtime exited unexpectedly (code=${code}, signal=${signal}) — restarting in 1s`
-            );
-            if (restartTimer) clearTimeout(restartTimer);
-            restartTimer = setTimeout(() => {
-              restartTimer = null;
-              runSpawn();
-              setupRestartHandler();
-            }, 1000);
-          });
-        };
-
-        setupRestartHandler();
       }
 
       // 4. Proxy middleware (returned as pre-middleware) ─────────────────────

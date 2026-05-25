@@ -19,7 +19,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { writeFile, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -51,6 +51,38 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
   return typeof (plugin.transform as any) === "function"
     ? (plugin.transform as any)
     : (plugin.transform as any).handler;
+}
+
+async function installRpcClientStub(baseDir: string): Promise<void> {
+  const pkgDir = join(baseDir, "node_modules", "@zeroship", "rpc-client");
+  await mkdir(pkgDir, { recursive: true });
+  await writeFile(
+    join(pkgDir, "package.json"),
+    JSON.stringify({
+      name: "@zeroship/rpc-client",
+      type: "module",
+      exports: {
+        ".": "./index.js",
+      },
+    }, null, 2),
+    "utf8",
+  );
+  await writeFile(
+    join(pkgDir, "index.js"),
+    [
+      "export const __SERVER_REFERENCE = Symbol.for(\"zeroship/server-reference\");",
+      "export function __makeProcedure(call, meta) {",
+      "  const fn = (input, options) => call(input, options);",
+      "  Object.defineProperty(fn, \"id\", { value: meta.id, enumerable: true });",
+      "  Object.defineProperty(fn, \"kind\", { value: meta.kind, enumerable: true });",
+      "  Object.defineProperty(fn, \"wire\", { value: meta.wire ?? \"json\", enumerable: true });",
+      "  Object.defineProperty(fn, __SERVER_REFERENCE, { value: true, enumerable: false });",
+      "  return fn;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
 }
 
 describe("client-environment transform — branded stubs", () => {
@@ -156,6 +188,7 @@ export const ping = mutation(async () => "pong", { id: "ping" });
     const dir = await mkdtemp(new URL("zs-stub-", here).pathname);
     const file = join(dir, "stub.mjs");
     try {
+      await installRpcClientStub(dir);
       await writeFile(file, emitted, "utf8");
       const mod: any = await import(pathToFileURL(file).href);
       const sym = Symbol.for("zeroship/server-reference");

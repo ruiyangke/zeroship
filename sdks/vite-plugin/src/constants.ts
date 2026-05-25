@@ -1,11 +1,12 @@
 // sdks/vite-plugin/src/constants.ts
 
-/** WebSocket path for HMR channel, appended to Vite's HTTP server URL. */
-export const WS_PATH = "/__zeroship_hmr";
+/** HTTP endpoints used by the dev bootstrap for module fetch + HMR polling. */
+export const MODULE_FETCH_PATH = "/__zeroship_fetch";
+export const HMR_POLL_PATH = "/__zeroship_hmr_check";
 
 /** Environment variable names passed to the zeroship child process. */
 export const ENV_DEV = "ZEROSHIP_DEV";
-export const ENV_VITE_WS = "ZEROSHIP_VITE_WS";
+export const ENV_VITE_ORIGIN = "ZEROSHIP_VITE_ORIGIN";
 export const ENV_ENTRY = "ZEROSHIP_ENTRY";
 
 /** Default port for the zeroship dev runtime. */
