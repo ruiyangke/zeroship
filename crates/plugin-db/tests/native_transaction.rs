@@ -190,13 +190,26 @@ fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) 
 
 /// `_procedures` declaring `setup` (registerModel) plus the per-test
 /// handlers `body`.
+///
+/// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+/// capability handle (reached via `globalThis.__zsDbPlatform`, which the
+/// production runtime-entry DELETES before request handlers run). This
+/// test module's top-level evaluates BEFORE that deletion (ESM import
+/// hoisting puts `__user__.js` ahead of the spliced runtime-entry), so we
+/// capture the resolver into a module-local const here and register
+/// through it — mirroring how `@zeroship/bootstrap`'s dev-entry captures
+/// the handle at module init.
 fn build_src(body: &str) -> String {
     format!(
         r#"
 import {{ env }} from "zeroship";
 
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {{
-    return env.db.registerModel("notes", {{
+    return __plat.registerModel("notes", {{
         title: {{ type: "string", required: true }},
     }});
 }}

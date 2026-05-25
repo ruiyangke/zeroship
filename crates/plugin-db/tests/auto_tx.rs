@@ -292,11 +292,18 @@ fn t1_query_tx_is_read_only() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
     // Plugin-db's registerModel uses (collectionName, schemaObj). The
     // app_id comes from env_vars.APP_ID (defaults to "default") so the
     // real schema is "default"."notes".
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
         body: { type: "string" },
     });
@@ -360,8 +367,15 @@ fn t1_handler_success_commits() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
     });
 }
@@ -394,8 +408,15 @@ fn t1_handler_reject_rolls_back_tx() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
     });
 }
@@ -438,8 +459,15 @@ fn t1_action_no_tx_wrapping() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
     });
 }
@@ -480,8 +508,15 @@ fn t1_mutation_visible_to_subsequent_query() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
     });
 }
@@ -534,8 +569,15 @@ fn t1_query_tx_refuses_writes_at_postgres_level() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
     });
 }
@@ -612,8 +654,15 @@ fn t1_mutation_tx_is_serializable_read_write() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
     });
 }
@@ -690,8 +739,15 @@ fn t1_mutation_tx_envelope_proven_by_rollback() {
     let user_code = r#"
 import { env } from "zeroship";
 
+// **P9 PR 4** — `registerModel` moved off `env.db` to the `__platform`
+// handle. Capture the resolver at module top-level (it runs before the
+// runtime-entry deletes the global) and register through the handle.
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
 function setup(_input, _ctx) {
-    return env.db.registerModel("notes", {
+    return __plat.registerModel("notes", {
         title: { type: "string", required: true },
     });
 }

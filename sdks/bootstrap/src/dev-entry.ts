@@ -123,6 +123,21 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   const log = options.logger?.log ?? ((m) => console.log(m));
   const logError = options.logger?.error ?? ((m) => console.error(m));
 
+  // **P9 §8** — capture the platform-handle resolver NOW, at devEntry()
+  // call time (dev-bootstrap module init). The production `runtime-entry`
+  // that wraps the dev-bootstrap deletes `globalThis.__zsDbPlatform`
+  // during ITS module evaluation — which runs AFTER this module's
+  // top-level (ESM import hoisting) but BEFORE dev's lazy schema install
+  // (first request). Capturing the reference here, module-locally (and
+  // therefore invisible to user code, which lives in a separate module),
+  // lets the lazy install still resolve the `__platform` handle after the
+  // global is gone. `registerModel` / `setMaskPolicy` moved onto that
+  // handle in P9 PR 4; without this capture, dev registration would
+  // silently no-op.
+  const platformResolver = (globalThis as unknown as {
+    __zsDbPlatform?: (db: unknown) => unknown;
+  }).__zsDbPlatform;
+
   // Module-local handle on the most recent install's `ready` promise.
   // Stage 6 of the @zeroship/db refactor replaced the cross-module
   // `globalThis.__zeroshipPlatformReady` with a per-isolate (per-
@@ -181,7 +196,17 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       const installSchema = options.getInstallSchema
         ? await options.getInstallSchema()
         : bundledInstallSchema;
-      const { ready } = installSchema(schema as Parameters<typeof installSchema>[0], envDb as Parameters<typeof installSchema>[1]);
+      // **P9 §8** — resolve the `__platform` handle via the captured
+      // resolver (the global may already be deleted by the production
+      // runtime-entry; the module-local capture survives). Hand it to
+      // `installSchema` so `registerModel` routes through `__platform`.
+      const platform =
+        typeof platformResolver === "function" ? platformResolver(envDb) : undefined;
+      const { ready } = installSchema(
+        schema as Parameters<typeof installSchema>[0],
+        envDb as Parameters<typeof installSchema>[1],
+        { platform } as Parameters<typeof installSchema>[2],
+      );
       schemaReady = ready;
       log(`[zeroship:dev] registered schema from default-export`);
     } catch (e) {

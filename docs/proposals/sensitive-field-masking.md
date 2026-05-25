@@ -801,3 +801,13 @@ walkthrough).
 Deferred follow-ups recorded in the db-system-design amendment:
 AAD version binding (→ P7.5 once `version` lands), P6+ drift
 dashboard, per-collection mask policies (Q-MASK-H, → P9+).
+
+## Amendment — P9 PR 2/PR 4 (2026-05-24): `MaskedValue` is a native v8_class; unmask + policy relocated
+
+Two P9 (API/ABI alignment) changes touch this design:
+
+- **`MaskedValue` is now a native `#[v8_class]`** (`crates/plugin-db/src/v8_classes/masked_value.rs`), minted directly by the row serializer (P9 PR 2). The old `{sentinel: "__zsmask__", ...}` JSON sentinel + the SDK's `mapResultDoc` JS rehydration loop are gone — Rust hands V8 a real `MaskedValue` instance on the first hop. Public surface (getters `masked`/`classification`/`_meta`; methods `unmask`/`canUnmask`/`toString`/`toJSON`/`[Symbol.toPrimitive]`) is byte-identical to the old TS class, so `Row<S>['ssn']`'s observable type is unchanged. The published `.d.ts` ships a hand-maintained `declare class MaskedValue<Value>` preserving the `_plaintext` phantom.
+
+- **`unmaskField` / `bulkUnmaskFields` moved off `Db` to `Collection`** (P9 PR 2): `Collection.unmaskField(rowPk, col, opts)` + `Collection.bulkUnmask(items, opts)` (collection name inherited from the receiver, not spoofable) and `MaskedValue.unmask(...)` (dispatches from the instance's own bound `_meta`).
+
+- **`setMaskPolicy` moved behind the `__platform` capability handle** (P9 PR 4): it is no longer a method on `env.db`. `defineMaskPolicy()` still works unchanged for creators; the boot-time flush (`runtime-entry.ts`) now calls `__platform.setMaskPolicy(...)` via the V8 private-symbol handle instead of `env.db.setMaskPolicy(...)`. The authorization path (`crud::unmask::check_unmask_authorization`) and the policy storage are unchanged.

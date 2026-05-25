@@ -161,6 +161,19 @@ pub enum DbError {
         hint: Option<String>,
     },
 
+    /// **P9 PR 4** — a platform-internal capability was reached through a
+    /// creator-visible path that must refuse it. Today the sole source is
+    /// the `env.db.__platform` string-access getter trap
+    /// (`platform_internal_only`): the real `DbPlatform` capability handle
+    /// lives under a V8 private symbol and is unreachable from creator JS,
+    /// so any string-named `__platform` access is an attempt to reach a
+    /// platform internal and is denied with a `tracing::error!`. The
+    /// `code` is `'static` because the closed set of access-denied
+    /// reasons is known at compile time.
+    AccessDenied {
+        code: &'static str,
+    },
+
     /// Catch-all for everything that doesn't fit above. The message is
     /// preserved for the JS console; the code is always `internal` so
     /// the SDK has *something* to branch on (even if it's "this should
@@ -269,6 +282,11 @@ impl DbError {
                 OpError::coded(code, message, hint)
             }
             DbError::Coded { code, message, hint } => OpError::coded(code, message, hint),
+            DbError::AccessDenied { code } => OpError::coded(
+                code,
+                "platform-internal capability is not reachable from app code",
+                None::<String>,
+            ),
             DbError::Internal { message } => {
                 OpError::coded("internal", message, None::<String>)
             }
@@ -295,6 +313,9 @@ impl DbError {
             | DbError::Configuration { message, .. }
             | DbError::Coded { message, .. }
             | DbError::Internal { message } => message,
+            DbError::AccessDenied { .. } => {
+                "platform-internal capability is not reachable from app code".to_string()
+            }
         }
     }
 
@@ -318,6 +339,9 @@ impl DbError {
             | DbError::Configuration { message, .. }
             | DbError::Coded { message, .. }
             | DbError::Internal { message } => message,
+            DbError::AccessDenied { .. } => {
+                "platform-internal capability is not reachable from app code"
+            }
         }
     }
 
@@ -613,6 +637,9 @@ impl std::fmt::Display for DbError {
             | DbError::Configuration { message, .. }
             | DbError::Coded { message, .. }
             | DbError::Internal { message } => f.write_str(message),
+            DbError::AccessDenied { .. } => {
+                f.write_str("platform-internal capability is not reachable from app code")
+            }
         }
     }
 }

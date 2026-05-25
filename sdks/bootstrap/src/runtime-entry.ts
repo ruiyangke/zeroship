@@ -40,6 +40,12 @@ declare const user: { default?: { schema?: unknown } };
 declare const globalThis: {
   __zsBeginAutoTx?: unknown;
   __zs_env?: () => { db?: unknown } | undefined;
+  // **P9 §8** — the capability-handle resolver the runtime installs.
+  // `runtime-entry` is the sole legitimate caller: it resolves the
+  // `__platform` handle once here, hands it to `installSchema`, then
+  // DELETES this global so no creator handler (which runs only after
+  // module evaluation completes) can reach it.
+  __zsDbPlatform?: (db: unknown) => unknown;
   [key: string]: unknown;
 };
 
@@ -52,6 +58,7 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
       installSchema?: (
         schema: unknown,
         env: unknown,
+        options?: { platform?: unknown },
       ) => { collections: unknown; ready: Promise<void> };
     };
     if (typeof sdk.installSchema === "function") {
@@ -65,7 +72,18 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
         ? globalThis.__zs_env()
         : undefined;
       const envDb = envObj && envObj.db;
-      const { ready } = sdk.installSchema(schema, envDb);
+
+      // **P9 §8** — resolve the platform capability handle via the
+      // runtime resolver, BEFORE we delete the global below. The handle
+      // is the carrier for `registerModel` / `setMaskPolicy` (those
+      // moved off `env.db`). Resolving once and passing it through
+      // `installSchema` + the mask flush means the rest of this entry
+      // works after the resolver is gone.
+      const plat = (typeof globalThis.__zsDbPlatform === "function" && envDb)
+        ? globalThis.__zsDbPlatform(envDb)
+        : undefined;
+
+      const { ready } = sdk.installSchema(schema, envDb, { platform: plat });
       // Await the DDL chain so the bootstrap module's top-level
       // promise doesn't resolve until registerModel has settled.
       try {
@@ -87,6 +105,10 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
       // module evaluation (same shape as the schema DDL failure
       // above) so a creator's typo in `defineMaskPolicy({...})` is
       // loud, not silent.
+      //
+      // **P9 §8** — `setMaskPolicy` moved off `env.db` to the
+      // `__platform` handle. Call it on `plat` (resolved above), not on
+      // `envDb`.
       try {
         const policyMod = await import("@zeroship/db/internal") as {
           _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
@@ -95,15 +117,15 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
           ? policyMod._flushPendingMaskPolicy()
           : null;
         if (pending) {
-          const setMaskPolicy = (envDb as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
+          const setMaskPolicy = (plat as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
           if (typeof setMaskPolicy === "function") {
-            // Call via `.call(envDb, ...)` so the v8_class brand
-            // check sees the right receiver (mirrors the
-            // `registerModel` pattern in `installSchema`).
+            // Call via `.call(plat, ...)` so the v8_class brand check
+            // sees the right receiver (mirrors the `registerModel`
+            // pattern in `installSchema`).
             await (setMaskPolicy as (
-              this: typeof envDb,
+              this: typeof plat,
               p: Record<string, readonly string[]>,
-            ) => Promise<unknown>).call(envDb, pending);
+            ) => Promise<unknown>).call(plat, pending);
           }
         }
       } catch (e) {
@@ -116,4 +138,26 @@ if (typeof globalThis.__zsBeginAutoTx === "function") {
       }
     }
   }
+}
+
+// **P9 §8** — capability boundary close-out. The platform handle has
+// been handed to `installSchema` (and used for the mask flush); the
+// resolver global is no longer needed. Delete it so no creator `fetch` /
+// `rpc` handler — which runs only AFTER this module evaluation
+// completes — can call `globalThis.__zsDbPlatform(env.db)` to fish the
+// handle out of the private slot. The handle itself remains live (held
+// by `env.db`'s private symbol); only the JS-reachable resolver is
+// removed.
+//
+// Runs UNCONDITIONALLY (outside the `__zsBeginAutoTx` / schema guards):
+// the runtime installs `__zsDbPlatform` on every isolate, so it must be
+// cleared even on RPC-only / fetch-only apps that skipped the schema
+// install above. Idempotent: a no-op if the runtime never installed it
+// or a re-evaluation already cleared it.
+try {
+  delete globalThis.__zsDbPlatform;
+} catch {
+  // A non-configurable global (shouldn't happen — the runtime installs
+  // it as a plain property) would throw in strict mode; swallow so the
+  // boot doesn't fail on the cleanup step.
 }

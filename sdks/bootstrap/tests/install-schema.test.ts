@@ -19,6 +19,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   installSchema,
+  resolveDbPlatform,
   validateRefTargets,
   normalizeSchema,
   expandUnionToFlatColumns,
@@ -123,5 +124,124 @@ describe("normalizeUserModule — minimal smoke", () => {
     const mod = { default: { schema: { todos: {} } } };
     const out = normalizeUserModule(mod);
     assert.deepEqual(out.schema, { todos: {} });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P9 PR 4 — `__platform` capability handle routing (§8)
+// ---------------------------------------------------------------------------
+//
+// `registerModel` / `setMaskPolicy` moved off `env.db` to the
+// `__platform` handle the runtime stashes under a V8 private symbol and
+// exposes via `globalThis.__zsDbPlatform(db)`. These tests pin the
+// bootstrap-side wiring: `resolveDbPlatform` finds the handle, and
+// `installSchema` routes registration THROUGH it (not through `env.db`)
+// when present, while still falling back to a `registerModel` on the
+// `env` object directly when no handle exists (the unit-test mock shape).
+describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
+  // Install a fake `globalThis.__zsDbPlatform` resolver that returns
+  // `handle` for the given `db`, run `fn`, then restore the global.
+  function withResolver<T>(
+    db: unknown,
+    handle: unknown,
+    fn: () => T,
+  ): T {
+    const g = globalThis as unknown as { __zsDbPlatform?: (d: unknown) => unknown };
+    const prev = g.__zsDbPlatform;
+    g.__zsDbPlatform = (d: unknown) => (d === db ? handle : undefined);
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete g.__zsDbPlatform;
+      else g.__zsDbPlatform = prev;
+    }
+  }
+
+  test("resolveDbPlatform reads the handle via globalThis.__zsDbPlatform", () => {
+    const db = { collection() { return {}; } };
+    const handle = { registerModel: async () => {}, setMaskPolicy: async () => ({}) };
+    const resolved = withResolver(db, handle, () => resolveDbPlatform(db));
+    assert.equal(resolved, handle, "resolveDbPlatform must return the resolver's handle");
+  });
+
+  test("resolveDbPlatform prefers an explicitly-passed handle (no resolver call)", () => {
+    const handle = { registerModel: async () => {}, setMaskPolicy: async () => ({}) };
+    // No resolver installed — but `prefer` is honoured.
+    const resolved = resolveDbPlatform({}, handle as never);
+    assert.equal(resolved, handle);
+  });
+
+  test("resolveDbPlatform returns undefined when no resolver and no prefer", () => {
+    const g = globalThis as unknown as { __zsDbPlatform?: unknown };
+    const prev = g.__zsDbPlatform;
+    delete g.__zsDbPlatform;
+    try {
+      assert.equal(resolveDbPlatform({}), undefined);
+    } finally {
+      if (prev !== undefined) g.__zsDbPlatform = prev;
+    }
+  });
+
+  test("installSchema routes registerModel through the __platform handle, NOT env.db", async () => {
+    const platformCalls: string[] = [];
+    const envCalls: string[] = [];
+    // `env.db` has NO registerModel (P9 PR 4 shape) — only collection +
+    // transaction. A stray call to `env.registerModel` would be a bug.
+    const env = {
+      registerModel(name: string) { envCalls.push(name); return Promise.resolve(); },
+      transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
+      collection(_n: string) { return { async find() { return []; } }; },
+    } as unknown as ZeroshipDb;
+    const handle = {
+      registerModel(name: string) { platformCalls.push(name); return Promise.resolve(); },
+      setMaskPolicy: async () => ({}),
+    };
+
+    const { ready } = withResolver(env, handle, () =>
+      installSchema({ users: { name: t.string().required() } }, env),
+    );
+    await ready;
+
+    assert.deepEqual(platformCalls, ["users"], "registerModel must run on the __platform handle");
+    assert.deepEqual(envCalls, [], "registerModel must NOT run on env.db when a handle exists");
+  });
+
+  test("installSchema honours an explicit options.platform handle", async () => {
+    const platformCalls: string[] = [];
+    const env = {
+      transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
+      collection(_n: string) { return { async find() { return []; } }; },
+    } as unknown as ZeroshipDb;
+    const handle = {
+      registerModel(name: string) { platformCalls.push(name); return Promise.resolve(); },
+      setMaskPolicy: async () => ({}),
+    };
+    const { ready } = installSchema(
+      { posts: { title: t.string().required() } },
+      env,
+      { platform: handle },
+    );
+    await ready;
+    assert.deepEqual(platformCalls, ["posts"]);
+  });
+
+  test("installSchema falls back to env.registerModel when no handle (mock shape)", async () => {
+    const envCalls: string[] = [];
+    const env = {
+      registerModel(name: string) { envCalls.push(name); return Promise.resolve(); },
+      transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
+      collection(_n: string) { return { async find() { return []; } }; },
+    } as unknown as ZeroshipDb;
+    // No resolver, no options.platform — registration falls back to env.
+    const g = globalThis as unknown as { __zsDbPlatform?: unknown };
+    const prev = g.__zsDbPlatform;
+    delete g.__zsDbPlatform;
+    try {
+      const { ready } = installSchema({ items: { name: t.string().required() } }, env);
+      await ready;
+    } finally {
+      if (prev !== undefined) g.__zsDbPlatform = prev;
+    }
+    assert.deepEqual(envCalls, ["items"], "fallback to env.registerModel for the mock shape");
   });
 });

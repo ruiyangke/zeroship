@@ -50,6 +50,69 @@ import {
 } from "@zeroship/db/internal";
 
 // ---------------------------------------------------------------------------
+// DbPlatform capability handle (P9 PR 4 — §8)
+// ---------------------------------------------------------------------------
+
+/**
+ * The platform-internal capability handle, set on the native `env.db`
+ * object under a V8 private symbol and reachable only via the runtime's
+ * `globalThis.__zsDbPlatform(db)` resolver (P9 §8). It is NOT a string
+ * property on `env.db` — creator code cannot reach it, and it is absent
+ * from the published `@zeroship/types` surface (its shape lives in this
+ * package's framework-internal `internal.d.ts`).
+ *
+ * `installSchema` reads it via {@link resolveDbPlatform} and routes
+ * `registerModel` / `setMaskPolicy` through it. The matching
+ * `ZeroshipDbPlatform` ambient interface (in `internal.d.ts`) carries
+ * the full surface (including the `migrations` / `replication`
+ * namespaces); this local alias is the subset `installSchema` calls.
+ */
+export interface DbPlatformHandle {
+  registerModel(
+    collection: string,
+    schema: unknown,
+    indexes?: unknown,
+  ): Promise<void>;
+  setMaskPolicy(policy: Record<string, readonly string[]>): Promise<unknown>;
+}
+
+/**
+ * Resolve the {@link DbPlatformHandle} for a native `env.db` object via
+ * the runtime's `globalThis.__zsDbPlatform(db)` resolver (P9 §8). The
+ * resolver reads the handle out of the private-symbol slot on `db`.
+ *
+ * Returns `undefined` when:
+ *   - the resolver isn't installed (no DbPlugin on this runtime — e.g. a
+ *     dev run without `DATABASE_URL`, or a unit test with a mock
+ *     `env.db`), or
+ *   - `db` carries no platform slot (a mock that wasn't minted by the
+ *     native `mint_db`).
+ *
+ * In both cases `installSchema` falls back to its handle-absent path: it
+ * skips `registerModel` (the dispatcher's `_schemaReady` defense still
+ * gates auto-tx), exactly as it did before P9 PR 4 when `registerModel`
+ * lived directly on `env.db`. The `prefer` argument lets a caller (the
+ * runtime-entry) pass a handle it resolved earlier so the resolver isn't
+ * consulted twice — and so it keeps working after runtime-entry deletes
+ * the global.
+ */
+export function resolveDbPlatform(
+  db: unknown,
+  prefer?: DbPlatformHandle,
+): DbPlatformHandle | undefined {
+  if (prefer && typeof prefer.registerModel === "function") return prefer;
+  const g = globalThis as unknown as {
+    __zsDbPlatform?: (db: unknown) => unknown;
+  };
+  if (typeof g.__zsDbPlatform !== "function") return undefined;
+  const handle = g.__zsDbPlatform(db);
+  if (handle == null || typeof handle !== "object") return undefined;
+  const h = handle as Partial<DbPlatformHandle>;
+  if (typeof h.registerModel !== "function") return undefined;
+  return handle as DbPlatformHandle;
+}
+
+// ---------------------------------------------------------------------------
 // normalizeSchema + expandUnionToFlatColumns (moved from @zeroship/db/schema)
 // ---------------------------------------------------------------------------
 
@@ -404,14 +467,27 @@ export function model<S extends Record<string, unknown>>(
   // Call via `.call(native, ...)` so the v8_class brand check sees the
   // right receiver. The unbound-fn form drops `this` and triggers
   // "Illegal invocation" — see commit e564c010 for context.
-  let registrationPromise: Promise<void> | null = null;
-  if (!skipRegister && native.registerModel) {
-    registrationPromise = (native.registerModel as unknown as (
+  //
+  // **P9 PR 4** — `registerModel` moved off the published `ZeroshipDb`
+  // surface to the `__platform` handle, so it's no longer a typed member
+  // of `native: NativeDb`. The standalone `model()` path (skipRegister =
+  // false) is exercised only by `@zeroship/db` unit tests, which pass a
+  // mock `native` carrying its own `registerModel`; we read it via a
+  // structural cast so those callers keep working. The production
+  // `installSchema` path passes `skipRegister = true` and runs
+  // registration through the `__platform` handle instead (see
+  // `_installSchemaInner`).
+  const nativeRegisterModel = (native as unknown as {
+    registerModel?: (
       this: typeof native,
       collection: string,
       schema: ZeroshipDbSchema,
       indexes?: ZeroshipDbNamedIndex[],
-    ) => Promise<void>).call(native, name, dbSchema, wireIndexes);
+    ) => Promise<void>;
+  }).registerModel;
+  let registrationPromise: Promise<void> | null = null;
+  if (!skipRegister && typeof nativeRegisterModel === "function") {
+    registrationPromise = nativeRegisterModel.call(native, name, dbSchema, wireIndexes);
   }
 
   return new Collection<S>(name, normalized, native, {
@@ -715,6 +791,20 @@ function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
 export interface InstallSchemaOptions {
   /** Column naming strategy. Default: `naming.snakeCase`. */
   naming?: NamingStrategy;
+  /**
+   * **P9 PR 4** — the platform capability handle the caller already
+   * resolved via the runtime's `globalThis.__zsDbPlatform(env.db)`
+   * resolver (§8). The production `runtime-entry` resolves it once and
+   * passes it here so registration (`registerModel` / `setMaskPolicy`)
+   * routes through `__platform` even after the runtime-entry deletes the
+   * resolver global.
+   *
+   * When omitted, `installSchema` resolves the handle itself; when no
+   * handle is available (no DbPlugin, or a mock `env`), registration
+   * falls back to a `registerModel` method on `env` directly if present
+   * (the shape `@zeroship/db` unit-test mocks use), else skips.
+   */
+  platform?: DbPlatformHandle;
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
@@ -786,6 +876,25 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const native = env;
   const namingStrategy = options?.naming ?? naming.snakeCase;
   const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
+
+  // **P9 PR 4** — registration (`registerModel`) target. In production
+  // `registerModel` lives on the `__platform` capability handle, not on
+  // `env.db`; resolve it via the runtime resolver (or the handle the
+  // caller pre-resolved through `options.platform`). When no handle is
+  // available, fall back to a `registerModel` method on `env` directly —
+  // the shape `@zeroship/db`'s unit-test mocks use — else registration
+  // is skipped (RPC-only / fetch-only apps, dev without a DB URL). The
+  // call is dispatched with `.call(registerTarget, ...)` so the v8_class
+  // brand check sees the right receiver.
+  const platform = resolveDbPlatform(native, options?.platform);
+  const registerTarget = (platform ?? (native as unknown)) as {
+    registerModel?: (
+      this: unknown,
+      collection: string,
+      schema: ZeroshipDbSchema,
+      indexes?: ZeroshipDbNamedIndex[],
+    ) => Promise<void>;
+  };
 
   // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
   // method BEFORE the install loop overwrites `env.db.transaction` with
@@ -868,13 +977,17 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       ...(idx.unique ? { unique: true } : {}),
     }));
     chain = chain.then(() => {
-      if (!native.registerModel) return Promise.resolve();
-      return (native.registerModel as unknown as (
-        this: typeof native,
-        collection: string,
-        schema: ZeroshipDbSchema,
-        indexes?: ZeroshipDbNamedIndex[],
-      ) => Promise<void>).call(native, name, dbSchema, wireIndexes);
+      // **P9 PR 4** — register through the `__platform` handle (or the
+      // mock fallback); see `registerTarget` above.
+      if (typeof registerTarget.registerModel !== "function") {
+        return Promise.resolve();
+      }
+      return registerTarget.registerModel.call(
+        registerTarget,
+        name,
+        dbSchema,
+        wireIndexes,
+      );
     });
     (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }

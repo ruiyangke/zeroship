@@ -363,75 +363,13 @@ interface ZeroshipTxView {
   [collection: string]: ZeroshipCollection;
 }
 
-/**
- * A live migration-run wrapper minted by `env.db.migrations.start(spec)`.
- * Holds the (app_id, name, collection) triple plus the session-scoped
- * Postgres advisory lock that fences concurrent runs. The wrapper's
- * Weak finalizer auto-cancels if the wrapper is GC'd without an
- * explicit terminal `commitBatch(isDone=true, ...)`.
- *
- * `status` / `cancel` / `reset` here operate on this exact run; the
- * `env.db.migrations.status({name, collection})` /
- * `.cancel({name, collection})` / `.reset({name, collection})` methods
- * operate by name+collection and don't hold the advisory lock.
- */
-/**
- * Status snapshot returned by `ZeroshipMigration.status()` and
- * `ZeroshipMigrations.status(spec)`. Mirrors the audit-row shape; the
- * `@zeroship/migrations` SDK maps it to its public
- * `MigrationStatusSnapshot` type.
- */
-interface ZeroshipMigrationStatus {
-  exists: boolean;
-  status: string | null;
-  cursor: number;
-  processed: number;
-  deadLetterPks: number[];
-  isDone: boolean;
-  error: string | null;
-}
+// **P9 PR 4** — `ZeroshipMigrationStatus` / `ZeroshipMigration` /
+// `ZeroshipMigrations` moved to `@zeroship/bootstrap`'s framework-
+// internal `internal.d.ts` (reached via `__platform.migrations`, not
+// `env.db.migrations`). They are absent from this published surface so
+// creator IDE hover doesn't see the migration cursor lifecycle.
 
-/**
- * Lifecycle: `start(spec)` mints the wrapper in the `active` state.
- * `commitBatch(isDone=true, ...)` / `cancel()` / `reset()` all drive
- * it to the `settled` state — subsequent `commitBatch` / `cancel` /
- * `reset` calls reject because the wrapper no longer holds the
- * advisory lock; `status()` continues to work (the audit row is
- * still observable by `(name, collection)` coordinates).
- */
-interface ZeroshipMigration {
-  status(): Promise<ZeroshipMigrationStatus>;
-  cancel(): Promise<void>;
-  reset(): Promise<void>;
-
-  /**
-   * Fetch the next batch of rows after `cursor`. Resolves with the
-   * row array; each row is a plain object keyed by column name.
-   *
-   * `cursor` / `batchSize` must be finite, integer-valued numbers in
-   * the `i64` range; out-of-range values reject with a `RangeError`.
-   */
-  fetchBatch(cursor: number, batchSize: number): Promise<Record<string, unknown>[]>;
-
-  /**
-   * Commit one batch of per-row updates. The spec is walked from V8
-   * directly — no `JSON.stringify` on the SDK side. If `isDone=true`,
-   * drives the audit row to `terminalStatus` and releases the
-   * advisory lock. Resolves void; rejects with the underlying
-   * Postgres error on failure.
-   */
-  commitBatch(spec: {
-    updates: { id: number; set: Record<string, unknown> }[];
-    deadLetterPks: number[];
-    nextCursor: number;
-    processedTotal: number;
-    isDone: boolean;
-    terminalStatus?: string;
-    errorMessage?: string;
-  }): Promise<void>;
-}
-
-/** One event emitted by `ZeroshipSubscription.next()`. */
+/** One event emitted by a subscription's `next()`. */
 type ZeroshipSubscriptionEvent =
   | {
       kind: "change";
@@ -472,89 +410,42 @@ interface ZeroshipSubscription {
   close(): void;
 }
 
-/**
- * The `Migrations` namespace surfaced as `env.db.migrations`. Two
- * concerns:
- * - **Running** a migration: `start(spec)` mints a Migration wrapper.
- * - **Observing / controlling** an already-persisted migration row by
- *   coordinates: `status(spec)` / `cancel(spec)` / `reset(spec)`.
- */
-interface ZeroshipMigrations {
-  start(spec: {
-    name: string;
-    collection: string;
-    dryRun?: boolean;
-    reset?: boolean;
-  }): Promise<ZeroshipMigration>;
-  status(spec: { name: string; collection: string }): Promise<ZeroshipMigrationStatus>;
-  cancel(spec: { name: string; collection: string }): Promise<void>;
-  reset(spec: { name: string; collection: string }): Promise<void>;
-}
+// **P9 PR 4** — `ZeroshipMigrations` and `ZeroshipReplication` moved to
+// `@zeroship/bootstrap`'s framework-internal `internal.d.ts` (reached
+// via `__platform.migrations` / `__platform.replication`, not
+// `env.db.*`). Absent from this published surface.
 
 // ---------------------------------------------------------------------------
 // Db entry point — env.db
 // ---------------------------------------------------------------------------
 
 /**
- * Operator-facing replication namespace, surfaced as
- * `env.db.replication`. Apps don't call these — the deploy
- * orchestrator / control plane does.
- */
-interface ZeroshipReplication {
-  /**
-   * Idempotently provision the per-app Postgres publication +
-   * logical replication slot. Returns a JSON `SetupOutcome`
-   * (`{publication, slot, created, confirmedFlushLsn}`). Requires
-   * `wal_level=logical` on the server.
-   */
-  setup(opts?: { appId?: string }): Promise<string>;
-
-  /**
-   * Run the C1 watchdog query against `pg_replication_slots`.
-   * Returns a JSON array of slot health records `[{slot, active,
-   * restartLsn, confirmedFlushLsn, lagBytes, walStatus}]`.
-   */
-  watchdog(): Promise<string>;
-
-  /**
-   * Drop replication slots that have been inactive for at least
-   * `opts.inactiveSeconds` (default 3600). Returns the names of
-   * dropped slots as a JSON array. Apps whose slot was reaped see
-   * a `resync` event on next subscriber attach.
-   */
-  dropAbandoned(opts?: { inactiveSeconds?: number }): Promise<string>;
-}
-
-/**
  * The `zeroship.db` namespace surfaced as `env.db` on every isolate.
- * Every operation lives on the Db v8_class instance — schema
- * registration, collection mint, transaction open, subscription open,
- * the migrations / replication sub-namespaces.
+ * The creator-facing operations live on the Db v8_class instance —
+ * collection mint and transaction open. The platform-internal entry
+ * points (schema registration, mask policy, replication, migrations)
+ * moved to the `__platform` capability handle in P9 PR 4 (§8) and are
+ * not on this surface.
  */
 interface ZeroshipDb {
-  /**
-   * Register a model — creates table and columns if not exist. The
-   * optional third argument carries named multi-column indexes
-   * declared via `schema(...).index(name, fields)`; each materialises
-   * as a CONCURRENTLY-built Postgres index named
-   * `"<collection>__<name>"`.
-   */
-  registerModel(
-    collection: string,
-    schema: ZeroshipDbSchema,
-    indexes?: ZeroshipDbNamedIndex[],
-  ): Promise<void>;
-
+  // **P9 PR 4** — the platform-internal entry points moved off `env.db`
+  // to the `__platform` capability handle (reached only via a V8
+  // private symbol; §8). Removed from this published surface:
+  //   - `registerModel`         → `__platform.registerModel`
+  //   - `setMaskPolicy`         → `__platform.setMaskPolicy`
+  //   - `startReplicationConsumer` → `__platform.startReplicationConsumer`
+  //   - `migrations` (getter)   → `__platform.migrations`
+  //   - `replication` (getter)  → `__platform.replication`
+  // Their type declarations live in `@zeroship/bootstrap`'s
+  // framework-internal `internal.d.ts` (the `ZeroshipDbPlatform`
+  // interface). Creator IDE hover on `env.db` no longer surfaces them.
+  // `env.db.__platform` (string access) is actively refused at runtime
+  // with `platform_internal_only`.
+  //
   // **P9 PR 2** — `unmaskField` / `bulkUnmaskFields` moved off `Db` to
   // `Collection` (collection name inherited from the receiver). See
   // `ZeroshipCollection.unmaskField` / `.bulkUnmask`. `MaskedValue`
   // instances dispatch unmask natively from their own bound `_meta`.
-
-  /**
-   * **P5.5 PR 5** — install the per-app mask policy. Called once at
-   * app boot from `defineMaskPolicy()`'s pending-slot drain.
-   */
-  setMaskPolicy(policy: Record<string, string[]>): Promise<Record<string, never>>;
 
   /**
    * Mint (or return the cached) Collection wrapper for `name`. Identity
@@ -591,30 +482,9 @@ interface ZeroshipDb {
     },
   ): Promise<R>;
 
-  /**
-   * Mint (or return the cached) Migrations namespace wrapper. Identity
-   * is cached on the Db wrapper so repeated reads of `env.db.migrations`
-   * return the same JS object.
-   *
-   * - `.start(spec)` acquires a Postgres advisory lock and returns a
-   *   live Migration wrapper that drives `fetchBatch` / `commitBatch`.
-   * - `.status(spec)` / `.cancel(spec)` / `.reset(spec)` operate on a
-   *   migration row by `{name, collection}` and don't acquire the
-   *   advisory lock — safe to call while another worker has an active
-   *   run.
-   */
-  migrations: ZeroshipMigrations;
-
-  /**
-   * Auto-spawn the supervised WAL consumer for this app. Idempotent.
-   * `opts.appId` overrides the current app context for the operator
-   * path. Resolves once the publication + slot are durable.
-   */
-  startReplicationConsumer(opts?: string): Promise<string>;
-
-  /**
-   * Operator-facing replication ops. Identity-cached: repeated reads
-   * of `env.db.replication` return the same JS object.
-   */
-  replication: ZeroshipReplication;
+  // **P9 PR 4** — `migrations`, `startReplicationConsumer`, and
+  // `replication` moved to the `__platform` capability handle (see the
+  // note at the top of this interface and `ZeroshipDbPlatform` in
+  // `@zeroship/bootstrap`'s `internal.d.ts`). They are no longer on the
+  // published `env.db` surface.
 }

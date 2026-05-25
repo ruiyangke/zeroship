@@ -254,6 +254,77 @@ export {
 /// the URL matches /_zs/v1/<id>; symmetric to `default.fetch`),
 /// `fetchFast` is the optional zeroship-extension HTTP fast path for
 /// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
+/// Name of the process-lifetime `v8::Private` symbol under which the
+/// `DbPlatform` capability handle is stashed on the `env.db` object
+/// (P9 §8 — the `__platform` capability gate).
+///
+/// A `v8::Private` minted via [`v8::Private::for_api`] is interned by
+/// name across the isolate and never collected, so any site that needs
+/// the symbol — `plugin-db`'s `mint_db` (which calls `set_private`) and
+/// the [`zs_db_platform_callback`] resolver (which calls `get_private`)
+/// — derives the SAME symbol from this single name string. The name is
+/// the shared source of truth; there is no shared static handle to
+/// thread across crates.
+///
+/// `plugin-db` references this via
+/// `zeroship_runtime::core::init::ZS_PLATFORM_PRIVATE_NAME`
+/// (plugin-db depends on the runtime crate; not vice-versa). The
+/// qualified `#capability` suffix follows the V8 guidance to namespace
+/// `for_api` keys to avoid clashes in the global private name space.
+pub const ZS_PLATFORM_PRIVATE_NAME: &str = "zeroship::db::__platform#capability";
+
+/// Resolve the process-lifetime `ZS_PLATFORM` private symbol.
+///
+/// Both the `set_private` site (`plugin-db::v8_classes::db::mint_db`)
+/// and the `get_private` reader ([`zs_db_platform_callback`]) call this
+/// so they operate on byte-identical symbol identity. Cheap after the
+/// first call — `for_api` returns the interned symbol on repeat reads.
+pub fn zs_platform_private<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Private> {
+    let name = v8::String::new(scope, ZS_PLATFORM_PRIVATE_NAME).unwrap();
+    v8::Private::for_api(scope, Some(name))
+}
+
+/// `globalThis.__zsDbPlatform(db)` — the capability-handle resolver
+/// handed to `@zeroship/bootstrap`'s `runtime-entry` (P9 §8).
+///
+/// Reads the `DbPlatform` instance stashed on the passed `db` object
+/// under the `ZS_PLATFORM` private symbol and returns it. Returns
+/// `undefined` when the argument is not an object or carries no platform
+/// slot (e.g. a stub `env.db` in a dev run without `DATABASE_URL`).
+///
+/// ## Security (P9 §8)
+///
+/// The `DbPlatform` handle lives in a `v8::Private` slot — invisible to
+/// `Object.keys` / `getOwnPropertyNames` / `getOwnPropertySymbols` /
+/// `for..in` / JSON, and unreadable from JS (a `v8::Private` is NOT a
+/// `v8::Symbol` and cannot be used as a property key). The ONLY JS path
+/// to the handle is this resolver. `runtime-entry` invokes it once
+/// during module evaluation, threads the handle into `installSchema`,
+/// and then **deletes `globalThis.__zsDbPlatform`** — so by the time any
+/// creator `fetch` / `rpc` handler runs, the resolver is gone. Creator
+/// code cannot import `@zeroship/bootstrap` (an existing invariant), so
+/// it has no other carrier. `env.db.__platform` (string access) is
+/// actively refused by a getter trap on the `Db` class
+/// (`platform_internal_only`).
+fn zs_db_platform_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let arg = args.get(0);
+    let Ok(db_obj) = v8::Local::<v8::Object>::try_from(arg) else {
+        rv.set(v8::undefined(scope).into());
+        return;
+    };
+    let priv_sym = zs_platform_private(scope);
+    match db_obj.get_private(scope, priv_sym) {
+        Some(handle) if !handle.is_undefined() => rv.set(handle),
+        _ => rv.set(v8::undefined(scope).into()),
+    }
+}
+
 /// Schema auto-discovery init script. Spliced into [`BOOTSTRAP_JS`]
 /// immediately after the `import * as user from "./__user__.js"` line so
 /// the top-level `await import("@zeroship/bootstrap/install-schema")`
@@ -1738,6 +1809,18 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     {
         let f = v8::Function::new(scope, zs_env_callback).unwrap();
         let key = v8::String::new(scope, "__zs_env").unwrap();
+        global.set(scope, key.into(), f.into());
+    }
+
+    // __zsDbPlatform — the P9 §8 capability-handle resolver. Reads the
+    // `DbPlatform` instance stashed on `env.db` under the `ZS_PLATFORM`
+    // private symbol and returns it. `@zeroship/bootstrap`'s
+    // `runtime-entry` calls this once at boot, threads the handle into
+    // `installSchema`, then DELETES the global so no creator handler can
+    // reach it. See `zs_db_platform_callback`.
+    {
+        let f = v8::Function::new(scope, zs_db_platform_callback).unwrap();
+        let key = v8::String::new(scope, "__zsDbPlatform").unwrap();
         global.set(scope, key.into(), f.into());
     }
 

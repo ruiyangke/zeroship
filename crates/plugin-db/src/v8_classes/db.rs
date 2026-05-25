@@ -1,23 +1,32 @@
 //! `Db` — the `#[v8_class]` instance backing `env.db`.
 //!
-//! `DbPlugin::build_instance` returns a `Db` instance from this
-//! module; the `NativeRegistrar` then attaches the Db-scoped entry
-//! points (`registerModel`, `transaction`, the `replication*`
-//! ops) on top. `Migrations` is reached via the `migrations` getter
-//! on this class, not via flat callbacks.
+//! `DbPlugin::build_instance` returns a `Db` instance from this module.
 //!
-//! ## What this class adds
+//! ## Creator-facing surface (`env.db.*`)
 //!
 //! - `collection(name)` — `#[v8_method]` returning a `Collection`
 //!   v8_class instance for the given collection name. Cached by
 //!   `name`: subsequent calls for the same `name` return the same
 //!   `Collection` JS object (`env.db.collection("users") ===
 //!   env.db.collection("users")` holds).
+//! - `transaction(fn, opts?)` — the native transaction orchestrator
+//!   (P9 PR 3).
 //!
 //! Per-collection CRUD lives on the `Collection` wrapper, not here —
 //! every `find` / `insert` / `update` / `delete` etc. is a
 //! `#[v8_method]` on `Collection` that calls into the
 //! `crate::crud::dispatch_*` helpers.
+//!
+//! ## Platform-internal surface (P9 PR 4 — behind `__platform`)
+//!
+//! `registerModel`, `setMaskPolicy`, `startReplicationConsumer`, and the
+//! `migrations` / `replication` namespaces moved off `env.db` to the
+//! [`super::db_platform::DbPlatform`] capability handle. That handle is
+//! set on this `Db` object under the `ZS_PLATFORM` private symbol in
+//! [`mint_db`] and reached only via `@zeroship/bootstrap`'s
+//! runtime-entry (§8). The string `env.db.__platform` is actively
+//! refused by the [`Db::platform_trap`] getter
+//! (`platform_internal_only`).
 //!
 //! ## Why a v8_class
 //!
@@ -36,12 +45,10 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::crud::dispatch_set_mask_policy_field;
-use crate::orchestrator::register_model::register_model_dispatch;
 use crate::orchestrator::transaction::transaction_dispatch;
-use crate::replication_ops::start_replication_consumer_dispatch;
-use crate::v8_bridge::{read_json_arg, v8_value_to_serde_json};
+use crate::v8_bridge::v8_value_to_serde_json;
 use crate::v8_classes::collection::mint_collection;
+use crate::v8_classes::db_platform::mint_db_platform;
 
 // ---------------------------------------------------------------------------
 // Db state
@@ -66,14 +73,12 @@ pub struct Db {
     /// calls return the same Global so identity holds:
     /// `env.db.collection("users") === env.db.collection("users")`.
     pub(crate) collection_cache: RefCell<HashMap<String, v8::Global<v8::Object>>>,
-    /// Cache of the `Migrations` namespace wrapper minted on first
-    /// access of `env.db.migrations`. Stable identity so
-    /// `env.db.migrations === env.db.migrations` holds.
-    pub(crate) migrations_obj: RefCell<Option<v8::Global<v8::Object>>>,
-    /// Cache of the `Replication` namespace wrapper minted on first
-    /// access of `env.db.replication`. Stable identity so
-    /// `env.db.replication === env.db.replication` holds.
-    pub(crate) replication_obj: RefCell<Option<v8::Global<v8::Object>>>,
+    // **P9 PR 4** — the `migrations` / `replication` namespace caches
+    // moved to `DbPlatform` (they're reached via `__platform.migrations`
+    // / `__platform.replication`, not `env.db.*`). The `DbPlatform`
+    // instance itself is stashed on this wrapper under the `ZS_PLATFORM`
+    // private symbol (set in `mint_db`), not as a struct field — its
+    // own Weak finalizer reclaims it.
 }
 
 impl std::fmt::Debug for Db {
@@ -135,41 +140,9 @@ impl Db {
         }
     }
 
-    /// `db.registerModel(collection, schema, indexes?)` — DDL
-    /// orchestrator entry. Idempotent: returns a resolved promise on
-    /// second call for the same (app_id, collection). `indexes` is the
-    /// array of named multi-column indexes declared on the schema via
-    /// `schema(...).index(name, fields)`; each materialises as
-    /// `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<collection>__<name>"`.
-    #[v8_method]
-    #[v8_name = "registerModel"]
-    fn register_model<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        collection: String,
-        schema: v8::Local<v8::Value>,
-        indexes: v8::Local<v8::Value>,
-    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        if collection.is_empty() {
-            return Err(OpError::type_error(
-                "db.registerModel: collection must be a non-empty string",
-            ));
-        }
-        let schema_v = read_json_arg(scope, Some(schema));
-        let indexes_v = if indexes.is_null_or_undefined() {
-            serde_json::Value::Array(Vec::new())
-        } else {
-            read_json_arg(scope, Some(indexes))
-        };
-        Ok(register_model_dispatch(
-            scope,
-            &self.app_id,
-            &collection,
-            schema_v,
-            indexes_v,
-        )
-        .into())
-    }
+    // **P9 PR 4** — `db.registerModel` moved to
+    // `DbPlatform::register_model` (reached via `__platform`, not
+    // `env.db`). The `register_model_dispatch` pipeline is unchanged.
 
     /// `db.transaction(asyncFn, opts?)` — run `asyncFn` inside a
     /// transaction (P9 PR 3).
@@ -231,106 +204,44 @@ impl Db {
         Ok(transaction_dispatch(scope, user_fn, isolation, self.app_id.clone()).into())
     }
 
-    /// `db.startReplicationConsumer(opts?)` — provisions the per-app
-    /// publication + slot, then spawns the supervised WAL consumer.
-    /// Idempotent.
-    ///
-    /// Always scoped to `self.app_id` (the id stamped on this `Db`
-    /// wrapper at mint time, sourced from the isolate's `APP_ID` env
-    /// var). `opts` is accepted but currently unused — reserved for
-    /// forward compatibility. Any app-id-shaped value is intentionally
-    /// ignored: the v8_class runs in the tenant isolate, so honouring
-    /// a JS-supplied app_id here would let App A spawn a WAL consumer
-    /// against App B's stream. Operator-shaped provisioning is a
-    /// control-plane concern. Resolution policy lives in
-    /// `resolve_consumer_app_id` (out-of-method so it's unit-testable
-    /// without V8 plumbing — see the `consumer_app_id_*` tests).
-    #[v8_method]
-    #[v8_name = "startReplicationConsumer"]
-    fn start_replication_consumer<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        opts: v8::Local<v8::Value>,
-    ) -> v8::Local<'s, v8::Value> {
-        let app_id = resolve_consumer_app_id(&self.app_id, scope, opts);
-        start_replication_consumer_dispatch(scope, app_id).into()
-    }
+    // **P9 PR 4** — `db.startReplicationConsumer`, `db.setMaskPolicy`,
+    // and the `db.migrations` / `db.replication` getters moved to
+    // `DbPlatform` (reached via the `__platform` capability handle, not
+    // `env.db`). Their dispatch pipelines (`start_replication_consumer_
+    // dispatch`, `dispatch_set_mask_policy_field`, `mint_migrations`,
+    // `mint_replication`) are unchanged — only the JS carrier relocated.
+    //
+    // **P9 PR 2** — `db.unmaskField` / `db.bulkUnmaskFields` had already
+    // moved to `Collection.unmaskField` / `.bulkUnmask` +
+    // `MaskedValue.unmask`.
 
-    /// `db.setMaskPolicy(policy)` — **P5.5 PR 5**. Persist the per-app
-    /// mask policy declared via `defineMaskPolicy()` and refresh the
-    /// in-process cache write-through. The flushed policy is the
-    /// authoritative source for the unmask authorization path
-    /// (`crud::unmask::check_unmask_authorization`); without it, the
-    /// PR 4 default-deny stub applies (`auto` actor allowed; everyone
-    /// else denied).
-    ///
-    /// `policy` is the canonical wire shape produced by
-    /// `defineMaskPolicy()`: `{ "<role>": ["<classification>", ...], … }`.
-    /// Validated structurally + against the six-classification
-    /// taxonomy in [`crate::crud::mask_policy::MaskPolicy::from_json`].
-    ///
-    /// Resolves with `{}` on success; rejects with the typed
-    /// `invalid_mask_policy_shape` / `invalid_mask_classification` /
-    /// `backend_unsupported` codes on failure.
-    #[v8_method]
-    #[v8_name = "setMaskPolicy"]
-    fn set_mask_policy<'s>(
+    /// `env.db.__platform` (string access) — **actively refused** (P9
+    /// §8). The real `DbPlatform` capability handle lives under the
+    /// `ZS_PLATFORM` private symbol, not under any string-named
+    /// property, so a creator reading `env.db.__platform` hits this trap
+    /// and gets a typed `platform_internal_only` error rather than the
+    /// handle (or a silent `undefined`). Defense-in-depth: even if a
+    /// future code path accidentally planted a string `__platform`
+    /// property, this getter shadows it. The legitimate reader
+    /// (`@zeroship/bootstrap`'s `runtime-entry`) never uses the string
+    /// name — it resolves the handle through `globalThis.__zsDbPlatform`,
+    /// which reads the private slot in Rust.
+    #[v8_getter]
+    #[v8_name = "__platform"]
+    fn platform_trap<'s>(
         &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        policy: v8::Local<v8::Value>,
+        _scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let policy_v = read_json_arg(scope, Some(policy));
-        Ok(dispatch_set_mask_policy_field(scope, &self.app_id, policy_v).into())
-    }
-
-    // **P9 PR 2** — `db.unmaskField` and `db.bulkUnmaskFields` were
-    // removed. The unmask round-trip is now collection-scoped:
-    // `Collection.unmaskField(rowPk, col, opts)` and
-    // `Collection.bulkUnmask(items, opts)` (the collection name is
-    // inherited from the receiver, so it can't be spoofed by an
-    // args-shape mismatch). `MaskedValue.unmask(...)` dispatches
-    // natively from the v8_class instance using its own bound `_meta`.
-
-    /// `db.replication` — returns the [`super::replication::Replication`]
-    /// namespace wrapper exposing `setup` / `watchdog` / `dropAbandoned`
-    /// scoped to this app. Cached on first access.
-    #[v8_getter]
-    fn replication<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        if let Some(existing) = self.replication_obj.borrow().as_ref() {
-            return Ok(v8::Local::new(scope, existing));
+        tracing::error!(
+            target: "zeroship_db",
+            app_id = %self.app_id,
+            "env.db.__platform string access denied (platform_internal_only) — \
+             the platform capability handle is private-symbol-only"
+        );
+        Err(crate::error::DbError::AccessDenied {
+            code: "platform_internal_only",
         }
-        let obj = super::replication::mint_replication(scope, &self.app_id)?;
-        let global = v8::Global::new(scope, obj);
-        *self.replication_obj.borrow_mut() = Some(global);
-        Ok(obj)
-    }
-
-    /// `db.migrations` — returns the [`super::migrations::Migrations`]
-    /// namespace wrapper. Cached on first access: subsequent reads of
-    /// `env.db.migrations` return the same JS object.
-    ///
-    /// Exposed as a `#[v8_getter]` (not `#[v8_method]`) so callers
-    /// access it as a property — `env.db.migrations.start(spec)` — and
-    /// JS identity holds across reads (`env.db.migrations ===
-    /// env.db.migrations`). The Db instance owns the cached Global, so
-    /// we don't need WebIDL `[SameObject]` macro support; manual
-    /// caching on `migrations_obj` is sufficient and lets us pass the
-    /// owned `app_id` into `mint_migrations`.
-    #[v8_getter]
-    fn migrations<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        if let Some(existing) = self.migrations_obj.borrow().as_ref() {
-            return Ok(v8::Local::new(scope, existing));
-        }
-        let obj = super::migrations::mint_migrations(scope, &self.app_id)?;
-        let global = v8::Global::new(scope, obj);
-        *self.migrations_obj.borrow_mut() = Some(global);
-        Ok(obj)
+        .to_op_error())
     }
 }
 
@@ -348,8 +259,7 @@ fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
     else { "value" }
 }
 
-/// Resolve the app_id used by `Db::start_replication_consumer` for
-/// dispatch.
+/// Resolve the app_id used by `startReplicationConsumer` for dispatch.
 ///
 /// Returns `stamped` verbatim, ignoring any JS-supplied `opts`. Lifted
 /// out of the `#[v8_method]` body (a) so the security-critical
@@ -358,11 +268,17 @@ fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
 /// delete this helper (and its tests) — making the regression visible
 /// in review.
 ///
+/// **P9 PR 4** — `startReplicationConsumer` moved to
+/// [`super::db_platform::DbPlatform`]; this helper stays here (its
+/// `consumer_app_id_*` unit tests live in this module) and is called by
+/// `DbPlatform::start_replication_consumer` via
+/// `super::db::resolve_consumer_app_id`.
+///
 /// The `_scope` and `_opts` parameters mirror the v8_method signature
 /// so future forward-compat fields can be plumbed through without
 /// touching the security-critical app-id path.
 #[inline]
-fn resolve_consumer_app_id(
+pub(crate) fn resolve_consumer_app_id(
     stamped: &str,
     _scope: &mut v8::PinScope<'_, '_>,
     _opts: v8::Local<v8::Value>,
@@ -403,9 +319,18 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
 ///
 /// Called from `DbPlugin::build_instance` once per V8 isolate during
 /// `build_env_object`. The returned object becomes the `env.db`
-/// namespace value; the runtime then layers the Db-scoped entry
-/// points (registerModel, transaction, …) on top via the
-/// `NativeRegistrar` returned by `DbPlugin::register`.
+/// namespace value; the runtime then layers the auto-tx globals on top
+/// via the `NativeRegistrar` returned by `DbPlugin::register`.
+///
+/// **P9 PR 4** — before returning, this also mints a [`DbPlatform`]
+/// capability handle scoped to the same `app_id` and stashes it on the
+/// `Db` object under the `ZS_PLATFORM` private symbol (§8). The handle
+/// holds the platform-internal callables (`registerModel`,
+/// `setMaskPolicy`, `startReplicationConsumer`, `migrations`,
+/// `replication`); it is unreachable from creator JS (a `v8::Private`
+/// slot is invisible to every JS reflection path and cannot be keyed
+/// from JS) and is read only by Rust and the bootstrap runtime-entry
+/// resolver (`globalThis.__zsDbPlatform`).
 pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -422,8 +347,6 @@ pub fn mint_db<'s>(
     let state = Db {
         app_id: app_id.to_string(),
         collection_cache: RefCell::new(HashMap::new()),
-        migrations_obj: RefCell::new(None),
-        replication_obj: RefCell::new(None),
     };
     let boxed: Box<Db> = Box::new(state);
     let raw = Box::into_raw(boxed);
@@ -446,6 +369,23 @@ pub fn mint_db<'s>(
         }),
     );
     std::mem::forget(weak);
+
+    // **P9 PR 4** — mint the platform capability handle and stash it on
+    // the Db object under the `ZS_PLATFORM` private symbol. A failure to
+    // mint the handle is non-fatal: the Db is still usable for the public
+    // `collection` / `transaction` surface; `__platform` resolution
+    // simply yields `undefined` and `installSchema` falls back to its
+    // platform-handle-absent path (skip registerModel, used by RPC-only /
+    // fetch-only apps and dev runs without a DB URL).
+    if let Some(plat) = mint_db_platform(scope, app_id) {
+        let priv_sym = zeroship_runtime::core::init::zs_platform_private(scope);
+        // `set_private` returns `Option<bool>` (None only on context
+        // teardown — impossible here, we just minted the object). The
+        // private slot is the sole capability carrier; if it somehow
+        // failed, `__zsDbPlatform` returns undefined and installSchema
+        // takes its handle-absent path.
+        let _ = obj.set_private(scope, priv_sym, plat.into());
+    }
 
     Some(obj)
 }

@@ -829,10 +829,11 @@ the calling convention.
 ## Migrations (`@zeroship/migrations`)
 
 Schema changes are immediate — the platform's schema installer calls
-`registerModel` on every collection in your `default.schema` map, which
-adds tables and columns idempotently on cold start. **Data backfills**
-are the asynchronous part: a separate orchestrator iterates rows in
-batches with resume, dry-run, cancel, and a dead-letter queue.
+`registerModel` (on the platform-internal `__platform` handle, not a
+method you call) for every collection in your `default.schema` map,
+which adds tables and columns idempotently on cold start. **Data
+backfills** are the asynchronous part: a separate orchestrator iterates
+rows in batches with resume, dry-run, cancel, and a dead-letter queue.
 
 ```ts
 import { defineMigration, migrations } from "@zeroship/migrations";
@@ -965,17 +966,39 @@ if (error?.name === "OptimisticLockError") {
 ## Native surface (advanced)
 
 The SDK calls into a small native surface registered as `env.db` by the
-Rust DbPlugin. App code rarely needs it; SDK packages and special
-ops use it directly.
+Rust DbPlugin. App code rarely needs it; SDK packages use it directly.
 
-- `env.db.collection(name)` → `Collection` wrapper
-- `env.db.beginTransaction({ isolationLevel? })` → `Transaction` wrapper
+**Creator-reachable on `env.db`:**
+
+- `env.db.collection(name)` → `Collection` wrapper (per-collection CRUD)
+- `env.db.transaction(fn, opts?)` → native transaction orchestrator
+  (begin/commit/rollback/nested-savepoint owned in Rust; throw to abort,
+  resolve to commit — see [Transactions](#transactions))
 - `env.db.<collection>.openSubscription()` → `Subscription` wrapper
-- `env.db.migrations.{start,status,cancel,reset}` → Migration ops
-- `env.db.registerModel(name, schema)` → idempotent DDL
+  (the internal pull-loop behind `env.db.live`)
 
-Type contracts live in `sdks/types/db.d.ts`. The runtime implementation
-lives in `crates/plugin-db/`.
+**Platform-internal — NOT on `env.db` (P9 §8 `__platform` capability gate):**
+
+`registerModel`, `setMaskPolicy`, `startReplicationConsumer`, and the
+`migrations` / `replication` namespaces are **not** properties of
+`env.db`. They live on a `DbPlatform` capability handle the runtime sets
+on `env.db` under a **V8 private symbol** and hands only to
+`@zeroship/bootstrap`'s runtime-entry. They are unreachable from app
+code:
+
+- `env.db.__platform` (string access) throws `platform_internal_only`.
+- The handle is invisible to `Object.keys` / `getOwnPropertyNames` /
+  `getOwnPropertySymbols` / `Reflect.ownKeys` / `for..in` / JSON — a
+  `v8::Private` slot is not a JS property and cannot be keyed from JS.
+- Schema registration happens automatically at app boot: the platform
+  installer reads your `default.schema` and registers each collection
+  via the platform handle. You never call `registerModel` yourself.
+
+Public type contracts live in `sdks/types/db.d.ts` (which no longer
+declares the platform-internal classes — those moved to
+`@zeroship/bootstrap`'s framework-internal `internal.d.ts`). The runtime
+implementation lives in `crates/plugin-db/` (`v8_classes/db.rs`,
+`v8_classes/db_platform.rs`).
 
 ## Per-app isolation
 

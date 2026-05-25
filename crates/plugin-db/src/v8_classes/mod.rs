@@ -4,7 +4,13 @@
 //! state and a `v8::Weak` guaranteed finalizer for resource teardown:
 //!
 //! - [`db`] — `Db` backs `env.db`. Exposes `.collection(name)`
-//!   returning a `Collection` v8_class wrapper.
+//!   returning a `Collection` v8_class wrapper, plus the native
+//!   `transaction(fn)` orchestrator. The platform-internal entry points
+//!   (`registerModel`, `setMaskPolicy`, `startReplicationConsumer`,
+//!   `migrations`, `replication`) moved to [`db_platform`] in P9 PR 4.
+//! - [`db_platform`] — **P9 PR 4**: `DbPlatform`, the capability handle
+//!   set on `Db` under a V8 private symbol (`ZS_PLATFORM`). Holds the
+//!   platform-internal callables; unreachable from creator JS.
 //! - [`collection`] — per-collection CRUD. Each method walks its
 //!   `v8::Local<Value>` args directly into a `serde_json::Value` via
 //!   `v8_bridge::v8_value_to_serde_json` (no JSON.stringify/parse) and
@@ -32,6 +38,7 @@
 
 pub mod collection;
 pub mod db;
+pub mod db_platform;
 pub mod masked_value;
 pub mod migration;
 pub mod migrations;
