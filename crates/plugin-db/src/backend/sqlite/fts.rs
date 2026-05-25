@@ -330,18 +330,17 @@ pub(crate) fn build_update_trigger_sql(
 ///  WHERE f."<coll>__fts" MATCH ?1
 ///    [AND <filter>]
 ///  ORDER BY _rank
-///  [LIMIT ?2]
+///  [LIMIT ?]
 /// ```
 ///
 /// **Parameter contract**: `$1` is the FTS query (bound as TEXT;
 /// FTS5 MATCH accepts the raw query syntax verbatim — phrase, prefix
-/// (`foo*`), NEAR/AND/OR boolean, etc.); `$2` is the LIMIT when
-/// `has_limit` is `true`. The `filter_clause` is spliced into the
-/// WHERE composition `AND`-joined with the MATCH predicate; the
-/// caller is responsible for pre-allocating the params vector so the
-/// builder's `$N` numbering lines up (filter params start at `$2`
-/// when `has_limit` is false, or `$3` when true). This is the same
-/// param-offset contract pgvector / spatial use upstream.
+/// (`foo*`), NEAR/AND/OR boolean, etc.). `filter_clause` placeholders
+/// continue at `$2+` because the caller seeds only the query param
+/// before lowering the filter. When `has_limit` is true, the trailing
+/// `LIMIT ?` bind is appended LAST so rusqlite's positional bind order
+/// matches the SQL placeholder appearance order even when the filter
+/// introduced `$2`, `$3`, ... placeholders before the LIMIT.
 ///
 /// **bm25 ordering**: SQLite FTS5's `bm25(f)` returns NEGATIVE doubles
 /// where more-relevant rows have MORE-NEGATIVE values. `ORDER BY
@@ -386,7 +385,7 @@ pub(crate) fn build_fts_search_sql(
     }
     sql.push_str(" ORDER BY _rank");
     if has_limit {
-        sql.push_str(" LIMIT $2");
+        sql.push_str(" LIMIT ?");
     }
     sql
 }
@@ -396,10 +395,9 @@ pub(crate) fn build_fts_search_sql(
 ///
 /// Wraps [`build_where`] with one tweak: every `$N` placeholder in
 /// the emitted predicate references the params buffer the caller pre-
-/// seeded with `[query_text, limit_str]` (so the first filter param
-/// lands at `$3` when a limit is bound, or `$2` otherwise). The
-/// builder is already param-offset-aware — this helper just gives a
-/// callable name to the operation.
+/// seeded with `[query_text]`, so the first filter param lands at
+/// `$2`. The trailing LIMIT bind is appended after the filter params
+/// and uses a positional `?` placeholder.
 pub(crate) fn build_fts_filter_clause(
     filter: &serde_json::Value,
     params: &mut Vec<String>,
@@ -527,20 +525,20 @@ mod tests {
 
     #[test]
     fn fts_search_sql_with_filter_with_limit() {
-        let sql = build_fts_search_sql("myapp", "docs", "\"lang\" = $3", true, None);
+        let sql = build_fts_search_sql("myapp", "docs", "\"lang\" = $2", true, None);
         assert_eq!(
             sql,
             "SELECT \"t\".*, f.rank AS _rank \
              FROM \"myapp\".\"docs\" t \
              JOIN \"myapp\".\"docs__fts\" f ON t.rowid = f.rowid \
-             WHERE f.\"docs__fts\" MATCH $1 AND \"lang\" = $3 ORDER BY _rank LIMIT $2"
+             WHERE f.\"docs__fts\" MATCH $1 AND \"lang\" = $2 ORDER BY _rank LIMIT ?"
         );
     }
 
     #[test]
     fn fts_search_sql_with_limit_no_filter() {
         let sql = build_fts_search_sql("myapp", "docs", "", true, None);
-        assert!(sql.ends_with("ORDER BY _rank LIMIT $2"), "got: {sql}");
+        assert!(sql.ends_with("ORDER BY _rank LIMIT ?"), "got: {sql}");
         assert!(!sql.contains(" AND "), "no filter -> no AND: {sql}");
     }
 
@@ -583,16 +581,16 @@ mod tests {
 
     #[test]
     fn fts_filter_clause_advances_params() {
-        // Pre-seed params with `[query_text, limit_str]` so the
-        // filter starts at `$3`. The builder is param-offset-aware.
-        let mut params: Vec<String> = vec!["rust".into(), "100".into()];
+        // Pre-seed params with `[query_text]` so the filter starts at
+        // `$2`. LIMIT binds later as a positional `?`.
+        let mut params: Vec<String> = vec!["rust".into()];
         let clause = build_fts_filter_clause(
             &serde_json::json!({ "lang": "en" }),
             &mut params,
         )
         .expect("filter compiles");
-        assert!(clause.contains("$3"), "filter param must be $3: {clause}");
-        assert_eq!(params.len(), 3, "params must grow by 1");
-        assert_eq!(params[2], "en");
+        assert!(clause.contains("$2"), "filter param must be $2: {clause}");
+        assert_eq!(params.len(), 2, "params must grow by 1");
+        assert_eq!(params[1], "en");
     }
 }

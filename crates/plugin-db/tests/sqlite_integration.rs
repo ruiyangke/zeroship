@@ -4636,7 +4636,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "ssn": hex,
         });
 
-        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value)
+        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value, &[])
             .await
             .expect("decrypt_row_on_read");
 
@@ -7751,6 +7751,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
         let filter = serde_json::json!({ "id": "post_v1bump" });
         let update = serde_json::json!({ "title": "v2" });
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_e2e_updater"),
             ..Default::default()
         };
@@ -7830,6 +7831,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
         let filter = serde_json::json!({ "id": "post_cas_ok", "version": 1 });
         let update = serde_json::json!({ "title": "v2" });
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_cas_ok"),
             ..Default::default()
         };
@@ -7899,6 +7901,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
         let filter = serde_json::json!({ "id": "post_cas_stale", "version": 99 });
         let update = serde_json::json!({ "title": "v_nope" });
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_cas_stale"),
             ..Default::default()
         };
@@ -7969,6 +7972,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
         let filter1 = serde_json::json!({ "id": "post_race", "version": 1 });
         let update1 = serde_json::json!({ "title": "v_winner" });
         let ab = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_a"),
             ..Default::default()
         };
@@ -8056,6 +8060,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             let filter = serde_json::json!({ "id": "post_blind" });
             let update = serde_json::json!({ "title": new_title });
             let ab = SystemFieldAutoBump {
+                dispatch_write: true,
                 actor_id: Some("usr_blind"),
                 ..Default::default()
             };

@@ -41,6 +41,9 @@ import { createFetchHandler } from "./fetch-handler.js";
 import { normalizeUserModule, type NormalizedUserModule } from "./normalize.js";
 
 type InstallSchema = typeof bundledInstallSchema;
+type DbInternalModule = {
+  _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
+};
 
 declare const globalThis: {
   __zsDispatch?: (
@@ -89,6 +92,13 @@ export interface DevEntryOptions {
    * preserved automatically.
    */
   getInstallSchema?: () => Promise<InstallSchema>;
+  /**
+   * Optional loader for `@zeroship/db/internal`. In dev mode the caller
+   * should provide this through the same ModuleRunner that loaded the
+   * user module so `defineMaskPolicy()` and `_flushPendingMaskPolicy()`
+   * observe the same module instance.
+   */
+  getDbInternal?: () => Promise<DbInternalModule>;
   /**
    * Logger for dev-only diagnostics. Defaults to `console.log` /
    * `console.error`. Pass a no-op pair to silence the dev path.
@@ -207,7 +217,24 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         envDb as Parameters<typeof installSchema>[1],
         { platform } as Parameters<typeof installSchema>[2],
       );
-      schemaReady = ready;
+      schemaReady = (async () => {
+        await ready;
+        const policyMod = options.getDbInternal
+          ? await options.getDbInternal()
+          : await import("@zeroship/db/internal") as DbInternalModule;
+        const pending = typeof policyMod._flushPendingMaskPolicy === "function"
+          ? policyMod._flushPendingMaskPolicy()
+          : null;
+        if (pending) {
+          const setMaskPolicy = (platform as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
+          if (typeof setMaskPolicy === "function") {
+            await (setMaskPolicy as (
+              this: typeof platform,
+              p: Record<string, readonly string[]>,
+            ) => Promise<unknown>).call(platform, pending);
+          }
+        }
+      })();
       log(`[zeroship:dev] registered schema from default-export`);
     } catch (e) {
       const err = e as { message?: string };
@@ -263,8 +290,13 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   function dispatchRpc(name: string, input: unknown, ctx: unknown): unknown {
     const regFn = options.registry?.get(name) as ((input: unknown, ctx: unknown) => unknown) | undefined;
     if (regFn) {
-      const cfg = (regFn as { config?: { kind?: string } }).config;
-      const kind = cfg?.kind;
+      const regFnMeta = regFn as { kind?: string; config?: { kind?: string } };
+      // Legacy `fn.config = { id: "..." }` assignments replace the
+      // wrapper-attached config object, which can drop `config.kind`
+      // for stream/subscription procedures. The SSR-hook patch also
+      // plants a stable top-level `.kind`; honor it first so the dev
+      // stream fast-path survives config replacement.
+      const kind = regFnMeta.kind ?? regFnMeta.config?.kind;
       if (kind === "stream" || kind === "subscription") {
         // Return the AsyncIterator synchronously — the kernel's FallThrough
         // path routes to default.fetch (createFetchHandler) which handles

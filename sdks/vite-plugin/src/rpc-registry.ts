@@ -208,12 +208,13 @@ function buildPhase2Entry(
 // behind a \\0-prefix. Dispatch lives in the runtime's \`__zsDispatch\`
 // (Stage 5a) — this file is pure normalisation.
 
-// Side-effect import: forces the bundler to include @zeroship/bootstrap
-// so the runtime-entry's \`await import("@zeroship/bootstrap/install-schema")\`
-// resolves against a bundle-resident module. The synthetic entry never
-// CALLS anything from the package; this import exists purely for bundle
-// inclusion.
-import "@zeroship/bootstrap";
+// Side-effect imports: force the bundler to include the exact modules
+// the runtime-entry resolves dynamically during isolate boot. Bundle
+// inclusion matters even though the synthetic entry never calls them
+// directly: the V8 module loader can only resolve dynamic imports
+// against bundle-resident modules.
+import "@zeroship/bootstrap/install-schema";
+import "@zeroship/db/internal";
 
 import * as _zsUser from ${userImport};
 ${importLines}

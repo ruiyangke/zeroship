@@ -334,6 +334,143 @@ fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
         .as_str()
 }
 
+fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
+    schema.as_object()?.get(field)
+}
+
+fn sqlite_blob_param(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+
+    format!(
+        "{}{}",
+        crate::query::SQLITE_ENC_BLOB_PREFIX,
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    )
+}
+
+fn encode_sqlite_binary_scalar(field: &str, field_def: &Value, value: &mut Value) -> Result<(), DbError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    if matches!(value, Value::String(s) if s.starts_with(crate::query::SQLITE_ENC_BLOB_PREFIX)) {
+        return Ok(());
+    }
+
+    match field_def.get("type").and_then(Value::as_str) {
+        Some("vector") => {
+            let dims = field_def
+                .get("vectorDims")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    DbError::internal(format!(
+                        "sqlite vector write encoding: schema for '{field}' is missing vectorDims"
+                    ))
+                })? as usize;
+            let arr = value.as_array().ok_or_else(|| {
+                DbError::validation(
+                    "invalid_vector_arg",
+                    format!("db: vector column '{field}' must be a number[]"),
+                )
+            })?;
+            if arr.len() != dims {
+                return Err(DbError::validation(
+                    "vector_dimension_mismatch",
+                    format!(
+                        "db: vector column '{field}' expected {dims} dimensions, got {}",
+                        arr.len()
+                    ),
+                ));
+            }
+            let mut vector = Vec::with_capacity(dims);
+            for item in arr {
+                let n = item.as_f64().ok_or_else(|| {
+                    DbError::validation(
+                        "invalid_vector_arg",
+                        format!("db: vector column '{field}' must contain only numbers"),
+                    )
+                })?;
+                vector.push(n as f32);
+            }
+            *value = Value::String(sqlite_blob_param(
+                &crate::backend::sqlite::vector::vec_to_le_bytes(&vector),
+            ));
+            Ok(())
+        }
+        Some("geoPoint") => {
+            let obj = value.as_object().ok_or_else(|| {
+                DbError::validation(
+                    "invalid_geo_arg",
+                    format!("db: geoPoint column '{field}' must be an object with lat/lng"),
+                )
+            })?;
+            let lat = obj.get("lat").and_then(Value::as_f64).ok_or_else(|| {
+                DbError::validation(
+                    "invalid_geo_arg",
+                    format!("db: geoPoint column '{field}' is missing numeric lat"),
+                )
+            })?;
+            let lng = obj.get("lng").and_then(Value::as_f64).ok_or_else(|| {
+                DbError::validation(
+                    "invalid_geo_arg",
+                    format!("db: geoPoint column '{field}' is missing numeric lng"),
+                )
+            })?;
+            *value = Value::String(sqlite_blob_param(
+                &crate::backend::sqlite::spatial::point_to_blob(crate::backend::GeoPoint {
+                    lat,
+                    lng,
+                }),
+            ));
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn encode_sqlite_binary_doc_with_schema(schema: &Value, doc: &mut Value) -> Result<(), DbError> {
+    let Some(obj) = doc.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(schema_obj) = schema.as_object() else {
+        return Ok(());
+    };
+    for (field, field_def) in schema_obj {
+        let Some(value) = obj.get_mut(field) else {
+            continue;
+        };
+        encode_sqlite_binary_scalar(field, field_def, value)?;
+    }
+    Ok(())
+}
+
+fn encode_sqlite_binary_update_with_schema(schema: &Value, patch: &mut Value) -> Result<(), DbError> {
+    let Some(obj) = patch.as_object_mut() else {
+        return Ok(());
+    };
+    if let Some(set_doc) = obj.get_mut("$set") {
+        encode_sqlite_binary_doc_with_schema(schema, set_doc)?;
+    }
+    for (field, value) in obj {
+        if field.starts_with('$') || field.starts_with("__zsenc__") {
+            continue;
+        }
+        let Some(field_def) = schema_field(schema, field) else {
+            continue;
+        };
+        match value {
+            Value::Array(_) | Value::String(_) | Value::Object(_) | Value::Null => {
+                if let Some(set_val) = value.as_object_mut().and_then(|ops| ops.get_mut("$set")) {
+                    encode_sqlite_binary_scalar(field, field_def, set_val)?;
+                } else {
+                    encode_sqlite_binary_scalar(field, field_def, value)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
     let Some(stages) = pipeline.as_array() else {
         return Vec::new();
@@ -856,6 +993,7 @@ pub(crate) fn dispatch_update_one<'s>(
         // Actor flows into the `updated_by` bind; the `hints` from the
         // pre-pass tell the builder which auto-bumps to suppress.
         let autobump = query::SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: actor_id.as_deref(),
             skip_version: hints.creator_supplied_version,
             skip_updated_at: hints.creator_supplied_updated_at,
@@ -1028,6 +1166,7 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
         let autobump = query::SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: actor_id.as_deref(),
             skip_version: hints.creator_supplied_version,
             skip_updated_at: hints.creator_supplied_updated_at,
@@ -1278,6 +1417,7 @@ pub(crate) fn dispatch_restore_one<'s>(
     let app = app_id.to_string();
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
+        dispatch_write: true,
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
@@ -1327,6 +1467,7 @@ pub(crate) fn dispatch_restore_many<'s>(
     let app = app_id.to_string();
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
+        dispatch_write: true,
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
@@ -2122,7 +2263,6 @@ pub(crate) fn dispatch_near<'s>(
 // ===========================================================================
 // P5 PR 2 — transparent column encryption hooks
 // ===========================================================================
-
 #[cfg(not(feature = "test-helpers"))]
 async fn prepare_insert_many_docs_for_write(
     docs: &mut Value,
@@ -2279,9 +2419,24 @@ fn schema_has_masked_columns(schema: &Value) -> bool {
         .unwrap_or(false)
 }
 
+fn schema_has_sqlite_binary_columns(schema: &Value) -> bool {
+    schema
+        .as_object()
+        .map(|o| {
+            o.values().any(|def| {
+                matches!(
+                    def.get("type").and_then(Value::as_str),
+                    Some("vector") | Some("geoPoint")
+                )
+            })
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
@@ -2330,5 +2485,56 @@ mod tests {
             &["ssn".to_string()],
         )
         .expect("id-inclusive projection ok");
+    }
+
+    #[test]
+    fn encode_sqlite_binary_doc_with_schema_packs_vector_and_geopoint() {
+        let schema = serde_json::json!({
+            "embedding": { "type": "vector", "vectorDims": 4 },
+            "loc": { "type": "geoPoint" },
+            "name": { "type": "string" }
+        });
+        let mut doc = serde_json::json!({
+            "embedding": [1.0, 0.0, 0.5, -1.25],
+            "loc": { "lat": 37.7749, "lng": -122.4194 },
+            "name": "Alpha HQ"
+        });
+
+        encode_sqlite_binary_doc_with_schema(&schema, &mut doc).expect("encode sqlite blobs");
+
+        let embedding = doc["embedding"]
+            .as_str()
+            .expect("embedding should be sentinel-wrapped base64");
+        let loc = doc["loc"]
+            .as_str()
+            .expect("loc should be sentinel-wrapped base64");
+
+        assert!(
+            embedding.starts_with(crate::query::SQLITE_ENC_BLOB_PREFIX),
+            "vector payload must use the sqlite blob sentinel: {embedding}"
+        );
+        assert!(
+            loc.starts_with(crate::query::SQLITE_ENC_BLOB_PREFIX),
+            "geo payload must use the sqlite blob sentinel: {loc}"
+        );
+
+        let embedding_bytes = base64::engine::general_purpose::STANDARD
+            .decode(embedding.trim_start_matches(crate::query::SQLITE_ENC_BLOB_PREFIX))
+            .expect("decode vector blob");
+        let loc_bytes = base64::engine::general_purpose::STANDARD
+            .decode(loc.trim_start_matches(crate::query::SQLITE_ENC_BLOB_PREFIX))
+            .expect("decode geo blob");
+
+        assert_eq!(
+            embedding_bytes,
+            crate::backend::sqlite::vector::vec_to_le_bytes(&[1.0, 0.0, 0.5, -1.25]),
+        );
+        assert_eq!(
+            loc_bytes,
+            crate::backend::sqlite::spatial::point_to_blob(crate::backend::GeoPoint {
+                lat: 37.7749,
+                lng: -122.4194,
+            }),
+        );
     }
 }

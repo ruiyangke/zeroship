@@ -243,6 +243,7 @@ pub async fn decrypt_row_on_read<B>(
     collection: &str,
     schema: &Value,
     row: &mut Value,
+    unmask_columns: &[String],
 ) -> Result<(), DbError>
 where
     B: EncryptedColumn,
@@ -279,6 +280,19 @@ where
             .unwrap_or("default")
             .to_string();
         let wraps = parse_wraps(enc_meta);
+
+        let masked_kind = def
+            .get("mask")
+            .and_then(|v| v.as_object())
+            .and_then(|mask| mask.get("kind").and_then(|v| v.as_str()))
+            .unwrap_or("none");
+        let sibling_key = format!("{col}_masked");
+        let should_decrypt = masked_kind == "none"
+            || unmask_columns.iter().any(|field| field == col)
+            || obj.contains_key(&sibling_key);
+        if !should_decrypt {
+            continue;
+        }
 
         let Some(value) = obj.get(col) else {
             continue;
@@ -663,7 +677,9 @@ mod tests {
         let mut read_row = serde_json::json!({ "id": "usr_01HX", "ssn": hex_str, "name": "alice" });
 
         rt.block_on(async {
-            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut read_row).await.unwrap();
+            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut read_row, &[])
+                .await
+                .unwrap();
         });
 
         assert_eq!(read_row["ssn"].as_str(), Some("123-45-6789"));
@@ -674,7 +690,8 @@ mod tests {
         // `encryption_aead_failed`).
         let mut wrong_pk_row = serde_json::json!({ "id": "usr_02HX", "ssn": hex_str, "name": "alice" });
         let err = rt.block_on(async {
-            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut wrong_pk_row).await
+            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut wrong_pk_row, &[])
+                .await
         });
         match err {
             Err(DbError::ValidationFailed { code, .. }) => {
@@ -682,6 +699,80 @@ mod tests {
             }
             other => panic!("expected ValidationFailed/encryption_aead_failed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decrypt_row_on_read_skips_masked_default_aliases() {
+        use crate::backend::{EncryptedColumn, EncryptionMode};
+        use crate::encryption::aead::AeadKey;
+
+        struct StubBackend;
+        impl EncryptedColumn for StubBackend {
+            type KeyHandle = AeadKey;
+            async fn resolve_key(
+                &self,
+                _app_id: &str,
+                _key_id: &str,
+            ) -> Result<Self::KeyHandle, DbError> {
+                Ok(AeadKey {
+                    k_enc: [0x11; 32],
+                    k_siv: [0x22; 32],
+                })
+            }
+            fn encrypt(
+                &self,
+                key: &Self::KeyHandle,
+                mode: EncryptionMode,
+                plaintext: &[u8],
+                aad: &[u8],
+            ) -> Result<Vec<u8>, DbError> {
+                match mode {
+                    EncryptionMode::Randomised => {
+                        crate::encryption::aead::encrypt_randomised(key, plaintext, aad)
+                    }
+                    EncryptionMode::Deterministic => {
+                        crate::encryption::aead::encrypt_deterministic(key, plaintext, aad)
+                    }
+                }
+            }
+            fn decrypt(
+                &self,
+                key: &Self::KeyHandle,
+                _mode: EncryptionMode,
+                blob: &[u8],
+                aad: &[u8],
+            ) -> Result<Vec<u8>, DbError> {
+                crate::encryption::aead::decrypt(key, blob, aad)
+            }
+        }
+
+        let schema = serde_json::json!({
+            "contactEmail": {
+                "type": "string",
+                "encrypted": { "mode": "deterministic", "keyId": "default", "wraps": "string" },
+                "mask": { "kind": "email", "classification": "pii" }
+            }
+        });
+        let mut read_row = serde_json::json!({
+            "id": "usr_01HX",
+            "contactEmail": "a***@example.com"
+        });
+
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+        rt.block_on(async {
+            decrypt_row_on_read(
+                &StubBackend,
+                "app1",
+                "users",
+                &schema,
+                &mut read_row,
+                &[],
+            )
+            .await
+            .unwrap();
+        });
+
+        assert_eq!(read_row["contactEmail"].as_str(), Some("a***@example.com"));
     }
 
     /// Deterministic mode: same plaintext under same `(collection,

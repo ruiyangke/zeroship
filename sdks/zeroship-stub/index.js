@@ -33,3 +33,21 @@ export function getRequest() {
     "this stub exists only so SDK unit tests can resolve the 'zeroship' module."
   );
 }
+
+function unavailable(name) {
+  return () => {
+    throw new Error(
+      `${name} is not available outside the zeroship V8 runtime — ` +
+      "this stub exists only so SDK unit tests and Node-side builds can resolve the 'zeroship' module."
+    );
+  };
+}
+
+export const runQuery = unavailable("runQuery");
+export const runMutation = unavailable("runMutation");
+export const currentUser = unavailable("currentUser");
+export const currentRequestId = unavailable("currentRequestId");
+export const currentTraceId = unavailable("currentTraceId");
+export const currentSignal = unavailable("currentSignal");
+export const currentHeaders = unavailable("currentHeaders");
+export const currentIdempotencyKey = unavailable("currentIdempotencyKey");

@@ -46,7 +46,7 @@ export function requireCollectionResolver(
   if (typeof collection !== "function") {
     throwRequiredSurfaceError(error);
   }
-  return collection as (name: string) => NativeCollection;
+  return (name: string) => (collection as (name: string) => NativeCollection).call(db, name);
 }
 
 export function requireNativeCollection(
@@ -65,6 +65,23 @@ export function requireNativeCapability<TFunc extends (...args: any[]) => any>(
     throwRequiredSurfaceError(error);
   }
   return capability;
+}
+
+export function requireBoundNativeCapability<
+  TObject extends object,
+  TKey extends keyof TObject,
+>(
+  owner: TObject,
+  key: TKey,
+  error: RequiredSurfaceError,
+): TObject[TKey] extends (...args: any[]) => any ? TObject[TKey] : never {
+  const capability = owner[key];
+  if (typeof capability !== "function") {
+    throwRequiredSurfaceError(error);
+  }
+  return capability.bind(owner) as TObject[TKey] extends (...args: any[]) => any
+    ? TObject[TKey]
+    : never;
 }
 
 export function captureNativeTransaction(

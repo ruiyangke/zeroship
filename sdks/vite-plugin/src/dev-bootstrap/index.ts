@@ -107,6 +107,10 @@ const entry = devEntry({
     };
     return mod.installSchema;
   },
+  async getDbInternal() {
+    const r = await getRunner();
+    return await r.import("@zeroship/db/internal") as Parameters<typeof devEntry>[0]["getDbInternal"] extends (() => Promise<infer T>) | undefined ? T : never;
+  },
 });
 
 // Kick off connection immediately + start HMR poll.
