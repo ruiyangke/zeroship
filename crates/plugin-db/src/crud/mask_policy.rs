@@ -6,7 +6,7 @@
 //! ([`crate::context::IsolateDbContext::mask_policy`]). The cache is
 //! seeded from durable storage:
 //!
-//! - **PG** (`feature = "pg" + hardening`): `__zeroship_admin.mask_policies`
+//! - **PG** (`feature = "pg"`): `__zeroship_admin.mask_policies`
 //!   table; read via the SECURITY DEFINER `get_mask_policy(app_id)`
 //!   helper, written via the SECURITY DEFINER `set_mask_policy(app_id,
 //!   policy)` helper. The admin schema mirrors the `column_keys`
@@ -205,7 +205,7 @@ impl MaskPolicy {
 /// 1. Validate the policy JSON via [`MaskPolicy::from_json`] (both shape
 ///    + classification taxonomy).
 /// 2. Persist:
-///    - **PG (hardening)**: `INSERT ... ON CONFLICT (app_id) DO UPDATE`
+///    - **PG**: `INSERT ... ON CONFLICT (app_id) DO UPDATE`
 ///      through the SECURITY DEFINER `__zeroship_admin.set_mask_policy`.
 ///    - **SQLite**: read sidecar JSON, update the app's entry, atomic
 ///      write back via `<file>.tmp + rename`.
@@ -224,7 +224,7 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
     })?;
 
     // ---- PG arm ----
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     {
         if let Some(pg) = backend.as_postgres() {
             persist_pg(pg, app_id, &policy).await?;
@@ -243,14 +243,14 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
         }
     }
 
-    let _ = backend; // silence unused on PG-no-hardening builds
+    let _ = backend; // silence unused when no backend feature is enabled
     let _ = app_id;
     let _ = &policy;
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "db: no backend arm available for setMaskPolicy".to_string(),
         hint: Some(
-            "rebuild with `--features hardening` (PG) or `--features sqlite`".into(),
+            "rebuild with `--features pg` or `--features sqlite`".into(),
         ),
     })
 }
@@ -264,7 +264,7 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
 /// arrives as canonical JSON; PG receives it as JSONB via a text
 /// parameter (`::jsonb` cast inside the function body — the wire is
 /// text only).
-#[cfg(all(feature = "pg", feature = "hardening"))]
+#[cfg(feature = "pg")]
 async fn persist_pg(
     pg: &crate::backend::PostgresBackend,
     app_id: &str,
@@ -283,7 +283,7 @@ async fn persist_pg(
 /// **P5.5 PR 5** — PG storage read through the SECURITY DEFINER
 /// `__zeroship_admin.get_mask_policy(app_id)`. Returns `None` when
 /// the app has no policy row.
-#[cfg(all(feature = "pg", feature = "hardening"))]
+#[cfg(feature = "pg")]
 pub async fn load_pg(
     pg: &crate::backend::PostgresBackend,
     app_id: &str,

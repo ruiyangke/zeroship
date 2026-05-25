@@ -41,10 +41,6 @@ pub struct PostgresBackend {
     /// returns NULL (pre-migration / dev parity). Single-threaded
     /// (`RefCell` inside `KeyStore`) since every `PostgresBackend` is
     /// owned by a single compio thread.
-    ///
-    /// `#[cfg(feature = "hardening")]` because the `KeySource::PgAdminTable`
-    /// variant referencing this pool is itself gated to that feature.
-    #[cfg(feature = "hardening")]
     key_store: crate::encryption::KeyStore,
     /// **P4 PR 2** — cached pgvector extension presence probe.
     ///
@@ -86,7 +82,6 @@ impl PostgresBackend {
         // without re-reaching into `PostgresBackend`. The pool clone is
         // cheap (Rc inc), and the cache is invalidated naturally on
         // backend drop.
-        #[cfg(feature = "hardening")]
         let key_store = crate::encryption::KeyStore::new(
             crate::encryption::KeySource::PgAdminTable(pool.clone()),
         );
@@ -95,7 +90,6 @@ impl PostgresBackend {
             url,
             pgvector_available: RefCell::new(None),
             postgis_available: RefCell::new(None),
-            #[cfg(feature = "hardening")]
             key_store,
         }
     }
@@ -1193,16 +1187,13 @@ async fn create_index_with_recovery_audited(
 // P5 — EncryptedColumn (PR 2) + Backup (PR 4) impls on PostgresBackend
 // ===========================================================================
 //
-// Both impls are gated on `hardening`:
+// Both impls are unconditional on the PG arm:
 //   * `EncryptedColumn` (PR 2) — PG-prod key sourcing reads from
-//     `__zeroship_admin.column_keys` via a SECURITY DEFINER getter
-//     under the `hardening` subtree. PR 2 wires an env-var fallback
-//     for dev parity under the same gate.
+//     `__zeroship_admin.column_keys` via a SECURITY DEFINER getter,
+//     with an env-var fallback for dev parity.
 //   * `Backup` (PR 4) — the PITR placeholder writes to
-//     `__zeroship_admin.pitr_targets`, which only exists under
-//     `hardening`. Snapshot / restore themselves don't strictly
-//     need the admin schema, but the trait surface stays gated
-//     uniformly so `BackendHandle::as_backup_pg` matches the
+//     `__zeroship_admin.pitr_targets`. Snapshot / restore themselves don't strictly
+//     need the admin schema; `BackendHandle::as_backup_pg` matches the
 //     `as_encrypted_column_pg` shape.
 //
 // The PR-1 stub bodies (returning `Configuration { code: "p5_pr2_stub" }`)
@@ -1213,7 +1204,6 @@ async fn create_index_with_recovery_audited(
 // agnostic on decrypt because the wire format carries the nonce). Key
 // resolution goes through `self.key_store` which prefers the
 // SECURITY DEFINER getter and falls back to env-var sourcing.
-#[cfg(feature = "hardening")]
 impl crate::backend::EncryptedColumn for PostgresBackend {
     type KeyHandle = crate::encryption::aead::AeadKey;
 
@@ -1269,12 +1259,12 @@ impl crate::backend::EncryptedColumn for PostgresBackend {
 // `pitr_replay` → records the target row in `__zeroship_admin.pitr_targets`;
 // the operator runs the actual recovery via `recovery.conf`.
 //
-// Gated on `hardening` because:
-//   1. The PITR placeholder writes to the `__zeroship_admin` schema, which
-//      only exists under the auth/bootstrap subtree (also `hardening`).
+// Notes:
+//   1. The PITR placeholder writes to the `__zeroship_admin` schema,
+//      provisioned by the auth/bootstrap subtree.
 //   2. `Backup` is admin-tier surface — app code never reaches it; the
 //      `BackendHandle::as_backup_pg` accessor is the only entry point and
-//      mirrors the `as_encrypted_column_pg` shape (also `hardening`).
+//      mirrors the `as_encrypted_column_pg` shape.
 //
 // Both `pg_dump` and `pg_restore` need to be on `PATH` in the deployment
 // environment. The integration tests `#[ignore]` themselves when the
@@ -1285,7 +1275,6 @@ impl crate::backend::EncryptedColumn for PostgresBackend {
 // set unchanged (no `process` feature dep) and matches the shell-out
 // pattern used elsewhere in the codebase (e.g. `sandbox-agent/src/exec.rs`).
 
-#[cfg(feature = "hardening")]
 impl crate::backend::Backup for PostgresBackend {
     async fn snapshot(
         &self,
@@ -1317,7 +1306,6 @@ impl crate::backend::Backup for PostgresBackend {
 /// keeps the "thin trait facade + per-capability impl block" shape.
 /// `pub(super)` so the trait methods above can call in; everything
 /// else stays private.
-#[cfg(feature = "hardening")]
 mod backup_pg {
     use std::io::Read;
     use std::path::{Path, PathBuf};

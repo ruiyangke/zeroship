@@ -1921,9 +1921,8 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 // equivalent on SQLite). Mirrors the session-minter pattern (P3) where
 // the secret comes from `ZEROSHIP_SESSION_SECRET`.
 //
-// Unlike PG, this impl is NOT gated on `hardening` — env-var sourcing
-// is the only path on SQLite, and the `sqlite` feature gate on this
-// file already restricts the build to SQLite-enabled targets.
+// Key sourcing on SQLite is env-var-only; the `sqlite` feature gate on
+// this file already restricts the build to SQLite-enabled targets.
 
 // **P5 PR 3** — Real `EncryptedColumn` body. Delegates to the workspace
 // `crate::encryption::aead` module (mode-dispatch on encrypt; mode-

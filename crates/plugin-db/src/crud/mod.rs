@@ -1952,9 +1952,9 @@ async fn apply_encryption_on_update(
 /// Decrypt every encrypted column on each row of `rows`. Short-circuits
 /// when the schema has no encrypted columns OR when not registered.
 ///
-/// **PG arm** (`feature = "pg" + hardening`): rows arrive with BYTEA
-/// columns surfaced as `\x`-prefixed hex strings (compio-postgres'
-/// text protocol). `decrypt_row_on_read` parses the hex back to bytes.
+/// **PG arm** (`feature = "pg"`): rows arrive with BYTEA columns
+/// surfaced as `\x`-prefixed hex strings (compio-postgres' text
+/// protocol). `decrypt_row_on_read` parses the hex back to bytes.
 ///
 /// **SQLite arm** (P5 PR 3.5, gated on `feature = "sqlite"`): rows
 /// produced by the SQLite-flavoured CRUD path carry BLOB columns
@@ -1976,7 +1976,7 @@ async fn apply_encryption_on_read(
     }
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     {
         if let Some(pg) = backend.as_encrypted_column_pg() {
             for row in rows.iter_mut() {
@@ -2016,7 +2016,7 @@ async fn apply_encryption_on_read(
 /// Run the write-side encryption pass over `doc` using the
 /// backend-arm `EncryptedColumn` impl.
 ///
-/// - **PG arm** (gated on `feature = "pg" + hardening`): goes through
+/// - **PG arm** (gated on `feature = "pg"`): goes through
 ///   `PostgresBackend`'s `EncryptedColumn` impl (PR 2). The SQL builder
 ///   emits `decode($N, 'base64')::bytea` so the BYTEA column receives
 ///   raw bytes.
@@ -2030,7 +2030,7 @@ async fn apply_encryption_on_read(
 /// PR 3.5 closes the SQLite gap PR 3 left open — encrypted columns
 /// now work end-to-end on both backends through the SDK's CRUD path.
 ///
-/// If neither arm is available (e.g. PG without `hardening`) and the
+/// If neither backend arm is compiled in (no `pg`, no `sqlite`) and the
 /// schema declares an encrypted column, surface a typed Configuration
 /// error so the SDK can branch on `.code` rather than silently writing
 /// plaintext to the BYTEA/BLOB column.
@@ -2045,7 +2045,7 @@ async fn encryption_pass_dispatch(
 ) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     {
         if let Some(pg) = backend.as_encrypted_column_pg() {
             return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
@@ -2063,18 +2063,18 @@ async fn encryption_pass_dispatch(
             .await;
         }
     }
-    // No backend-arm with an `EncryptedColumn` CRUD-path wire available
-    // (e.g. PG built without `hardening`). Encrypted columns declared
-    // in the schema would reach a write site that has no encryption
-    // surface — surface a typed Configuration error so the SDK can
-    // branch on `.code` rather than silently writing plaintext.
+    // No backend-arm with an `EncryptedColumn` CRUD-path wire compiled
+    // in (a build with neither `pg` nor `sqlite`). Encrypted columns
+    // declared in the schema would reach a write site that has no
+    // encryption surface — surface a typed Configuration error so the
+    // SDK can branch on `.code` rather than silently writing plaintext.
     if schema_has_encrypted_columns(schema) {
         return Err(DbError::Configuration {
             code: "column_encryption_unavailable",
             message:
-                "db: column encryption CRUD path requires the `hardening` Cargo feature on this build"
+                "db: column encryption CRUD path requires a backend feature (`pg` or `sqlite`) on this build"
                     .to_string(),
-            hint: Some("rebuild with `--features hardening` (PG) or `--features sqlite`".to_string()),
+            hint: Some("rebuild with `--features pg` or `--features sqlite`".to_string()),
         });
     }
     Ok(())

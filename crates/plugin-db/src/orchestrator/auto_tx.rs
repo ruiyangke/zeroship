@@ -59,8 +59,8 @@ pub fn auto_begin_transaction(
     // §17.5 — app_id for the per-app `SET LOCAL ROLE` inside the auto-tx.
     // Read from the same `APP_ID` env-var convention every other dispatch
     // uses; empty if the runtime didn't inject it (dev/raw-JS), in which
-    // case `apply_per_app_role` is a no-op anyway (hardening-off or the
-    // role doesn't exist).
+    // case the role set is against an empty app_id (the role doesn't
+    // exist for a missing app).
     let app_id = crate::v8_bridge::get_app_id_pub(&state);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -234,8 +234,8 @@ async fn exec_auto_begin(
         .map_err(|e| DbError::from_pg(&e))?;
 
     // §17.5 — constrain the auto-tx's client SQL to the per-app role.
-    // `SET LOCAL ROLE` reverts at the auto-tx COMMIT/ROLLBACK. No-op
-    // without `hardening`. See `orchestrator::apply_per_app_role`.
+    // `SET LOCAL ROLE` reverts at the auto-tx COMMIT/ROLLBACK. See
+    // `orchestrator::apply_per_app_role`.
     super::apply_per_app_role(&client, app_id).await?;
 
     crate::context::with_mut(|c| {

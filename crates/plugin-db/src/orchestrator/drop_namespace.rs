@@ -180,10 +180,7 @@ pub async fn drop_namespace(
     // ---- Step 7: DROP ROLE (per-app role from P6a-2) ----
     // Dropped LAST: the schema CASCADE removed the role's objects +
     // grants, so the role no longer owns anything and can be dropped.
-    // Idempotent (`DROP ROLE IF EXISTS`). Production-only — the role only
-    // exists under `hardening`; without it this is a no-op (the role was
-    // never created).
-    #[cfg(feature = "hardening")]
+    // Idempotent (`DROP ROLE IF EXISTS`).
     crate::auth::bootstrap::drop_per_app_role(pool, app_id).await?;
 
     Ok(DropNamespaceOutcome::Completed)

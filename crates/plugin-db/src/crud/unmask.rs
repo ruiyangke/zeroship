@@ -131,8 +131,8 @@ fn lookup_mask_meta(
 
 /// Encryption metadata for the target column (when present). The
 /// `key_id` and `wraps` fields are only consumed under the
-/// `feature = "pg" + hardening` or `feature = "sqlite"` arms of
-/// `fetch_and_decrypt`; the bare default-feature build never reads
+/// `feature = "pg"` or `feature = "sqlite"` arms of
+/// `fetch_and_decrypt`; a build with no backend feature never reads
 /// them. `#[allow(dead_code)]` keeps the build clean without
 /// duplicating the metadata struct per arm.
 #[allow(dead_code)]
@@ -253,7 +253,7 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
     };
 
     // ---- PG arm ----
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     {
         if let Some(pg) = backend.as_postgres() {
             let loaded = crate::crud::mask_policy::load_pg(pg, app_id).await?;
@@ -381,8 +381,8 @@ async fn fetch_and_decrypt(
         },
     );
 
-    // ---- PG arm (gated on pg + hardening, matching apply_encryption_on_read) ----
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    // ---- PG arm (gated on pg, matching apply_encryption_on_read) ----
+    #[cfg(feature = "pg")]
     {
         if let Some(pg) = backend.as_encrypted_column_pg() {
             use crate::backend::{EncryptedColumn as _, PgSqlExecutor as _};
@@ -480,7 +480,7 @@ async fn fetch_and_decrypt(
         code: "encryption_unavailable",
         message: "db: column encryption surface not available on this build".to_string(),
         hint: Some(
-            "rebuild with `--features hardening` (PG) or `--features sqlite`".into(),
+            "rebuild with `--features pg` or `--features sqlite`".into(),
         ),
     })
 }
@@ -587,9 +587,8 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
 /// - `"bytes"`  → base64 encode.
 ///
 /// Only reachable through `fetch_and_decrypt`'s feature-gated arms.
-/// `#[allow(dead_code)]` keeps the default-feature build clean (no
-/// arm in `fetch_and_decrypt` calls it under `--no-default-features`
-/// or `pg`-only without `hardening`).
+/// `#[allow(dead_code)]` keeps a no-backend build clean (no arm in
+/// `fetch_and_decrypt` calls it under `--no-default-features`).
 #[allow(dead_code)]
 fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError> {
     match wraps {
@@ -619,7 +618,7 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
 /// `unmask` doesn't depend on that module's privacy boundary.
 ///
 /// Only reachable through `fetch_and_decrypt`'s PG arm
-/// (`#[cfg(all(feature = "pg", feature = "hardening"))]`).
+/// (`#[cfg(feature = "pg")]`).
 #[allow(dead_code)]
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>, DbError> {
     let hex = s.strip_prefix("\\x").unwrap_or(s);

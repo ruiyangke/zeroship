@@ -682,7 +682,7 @@ async fn decrypt_parent_value(
     );
 
     // ---- PG arm ----
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     {
         if let Some(pg) = backend.as_encrypted_column_pg() {
             use crate::backend::EncryptedColumn as _;
@@ -730,7 +730,7 @@ async fn decrypt_parent_value(
         code: "encryption_unavailable",
         message: "drift_check: encryption surface not available on this build".to_string(),
         hint: Some(
-            "rebuild with `--features hardening` (PG) or `--features sqlite`".into(),
+            "rebuild with `--features pg` or `--features sqlite`".into(),
         ),
     })
 }

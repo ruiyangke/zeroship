@@ -1,8 +1,7 @@
 //! Key rotation primitives.
 //!
-//! **Cargo gate**: this module compiles only under `--features hardening`
-//! (cycle 10:47, commit `2fa9472e`); default builds skip the entire
-//! `auth/*` subtree.
+//! Part of the always-compiled `auth/*` subtree. Dormant until the
+//! control-plane wire-up calls in (no production callers yet).
 //!
 //! The platform's HMAC secret is rotated periodically — daily by
 //! default, per the proposal — by inserting a fresh `gen_random_bytes(32)`

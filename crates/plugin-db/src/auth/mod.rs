@@ -53,47 +53,25 @@
 //! problem entirely: the secret lives in the DB from the moment the
 //! cluster is bootstrapped; an env-var bootstrap is unnecessary.
 //!
-//! ## Compile-time gating (`hardening` Cargo feature)
-//!
-//! The entire subtree is gated behind `#[cfg(feature = "hardening")]`
-//! at `lib.rs` (commit `2fa9472e`, cycle 10:47). Default builds do
-//! NOT compile this module — `crate::auth::*` is invisible to
-//! `cargo build -p zeroship-plugin-db --lib`. The eventual control-
-//! plane wire-up (per the auth-r1 design) flips the feature on; until
-//! then `replication::ensure_publication_and_slot` and the rest of
-//! P8a/P8b continue to function unchanged using the per-app role
-//! directly. Integration tests probe this surface via
-//! `required-features = ["test-helpers", "hardening"]` on the
-//! `[[test]] integration` target.
-//!
 //! The original `--harden` CLI flag in the proposal is one possible
-//! runtime opt-in once this module ships; it is NOT how the subtree
-//! is currently gated.
+//! runtime opt-in for the control-plane wire-up; it is NOT a
+//! compile-time gate on this subtree.
 
-// `util` is reachable whenever the `auth` module itself is reachable
-// (`any(feature = "hardening", feature = "sqlite")`). It owns the
-// helpers — TTL default, getrandom fallback, ISO timestamp formatter,
-// hex codec — that BOTH the PG free fns in `session.rs` and the
-// upcoming SQLite `SessionMinter` impl in `backend/sqlite/session_minter.rs`
-// need. See `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6
-// (H-1).
+// `util` owns the helpers — TTL default, getrandom fallback, ISO
+// timestamp formatter, hex codec — that BOTH the PG free fns in
+// `session.rs` and the SQLite `SessionMinter` impl in
+// `backend/sqlite/session_minter.rs` need. See
+// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6 (H-1).
 pub mod util;
 
-// The PG-side `bootstrap` / `keys` / `session` modules stay gated to
-// the `hardening` feature: they speak SECURITY DEFINER + `compio_postgres`
-// and aren't reachable from the SQLite arm.
-#[cfg(feature = "hardening")]
+// The PG-side `bootstrap` / `keys` / `session` modules speak SECURITY
+// DEFINER + `compio_postgres` and aren't reachable from the SQLite arm.
 pub mod bootstrap;
-#[cfg(feature = "hardening")]
 pub mod keys;
-#[cfg(feature = "hardening")]
 pub mod session;
 
-#[cfg(feature = "hardening")]
 pub use bootstrap::{ensure_admin_schema, BootstrapOutcome};
-#[cfg(feature = "hardening")]
 pub use keys::{rotate_session_keys, RotationOutcome};
-#[cfg(feature = "hardening")]
 pub use session::{init_session, mint_session_token, MintedToken, SessionInit};
 
 // Re-export the schema/role names so other modules (replication.rs,
@@ -116,7 +94,7 @@ pub const PLATFORM_ROLE: &str = "__zeroship_platform_role";
 pub const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 
 // Token-lifetime / nonce-retention constants moved to
-// `crate::auth::util` in P3 PR 1 so they're reachable from both the
-// PG arm (gated by `hardening`) and the SQLite arm (gated by `sqlite`).
-// Re-exported here for back-compat with existing in-crate callers.
+// `crate::auth::util` in P3 PR 1 so they're reachable from both the PG
+// arm and the SQLite arm (gated by `sqlite`). Re-exported here for the
+// in-crate callers.
 pub use util::{DEFAULT_TOKEN_TTL_SECS, NONCE_RETENTION_SECS};

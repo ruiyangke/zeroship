@@ -695,9 +695,8 @@ pub trait AuditWriter: 'static {
 /// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §3). The
 /// trait declaration is **not** feature-gated — both backends will
 /// implement it. The PG impl (PR 2) lives at the bottom of
-/// `crate::auth::session` and stays gated to the `hardening` feature
-/// because it wraps SECURITY DEFINER functions managed by
-/// `crate::auth::bootstrap`. The SQLite impl (PR 3) lives in
+/// `crate::auth::session` and wraps SECURITY DEFINER functions managed
+/// by `crate::auth::bootstrap`. The SQLite impl (PR 3) lives in
 /// `crate::backend::sqlite::session_minter` and is gated only by the
 /// `sqlite` feature — dev tier per the design doc, no SQL surface,
 /// HMAC-SHA256 + bounded LRU nonce cache in Rust.
@@ -1342,8 +1341,8 @@ pub struct GeoPoint {
 /// - PG and SQLite share the same AEAD impl (`crate::encryption::aead`),
 ///   so per-backend trait impls are thin delegations.
 /// - **Key sourcing differs**: PG uses `__zeroship_admin.column_keys`
-///   via SECURITY DEFINER (gated to the `hardening` feature); SQLite
-///   uses the `ZEROSHIP_COLUMN_KEY_<KEYID>` env var. The trait's
+///   via SECURITY DEFINER; SQLite uses the
+///   `ZEROSHIP_COLUMN_KEY_<KEYID>` env var. The trait's
 ///   [`Self::KeyHandle`] associated type lets each backend pick its
 ///   own key-material container without forcing a common type on the
 ///   read/write surface.
@@ -1444,7 +1443,7 @@ pub enum EncryptionMode {
 /// accessors rather than joining the [`Backend`] super-trait. App
 /// code never reaches this; only the platform's backup orchestrator
 /// does. PR 4 (PG) ships `pg_dump`/`pg_restore` shell-out + PITR
-/// placeholder under `hardening`; PR 5 (SQLite) ships `VACUUM INTO`
+/// placeholder; PR 5 (SQLite) ships `VACUUM INTO`
 /// + atomic-rename restore + `pitr_pg_only` refusal.
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
@@ -1615,12 +1614,7 @@ impl Drop for SchemaPendingGuard {
 // **P5.5 PR 6** — the `EncryptedColumn` super-bound is required for
 // the `MaskBackfill` / `MaskRewrite` dispatch in `register_model::apply`
 // (the backfill decrypts encrypted columns before applying the mask
-// transform). The trait is itself gated on `hardening` (see the
-// PostgresBackend impl); we mirror that gate here so non-hardening
-// builds stay buildable. The mask-backfill code under non-hardening
-// supports plaintext-mask columns only (encrypted columns can't be
-// declared without hardening).
-#[cfg(feature = "hardening")]
+// transform). Both backends impl `EncryptedColumn` unconditionally.
 pub trait RegisterBackend:
     PgSqlExecutor
     + LockManager<Client = compio_postgres::Client>
@@ -1635,7 +1629,6 @@ pub trait RegisterBackend:
 {
 }
 
-#[cfg(feature = "hardening")]
 impl<T> RegisterBackend for T where
     T: PgSqlExecutor
         + LockManager<Client = compio_postgres::Client>
@@ -1647,34 +1640,6 @@ impl<T> RegisterBackend for T where
         + FullTextIndex
         + SpatialIndex
         + EncryptedColumn
-{
-}
-
-#[cfg(not(feature = "hardening"))]
-pub trait RegisterBackend:
-    PgSqlExecutor
-    + LockManager<Client = compio_postgres::Client>
-    + NamespaceManager
-    + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-    + IndexBuilder
-    + PgLockManager
-    + VectorIndex
-    + FullTextIndex
-    + SpatialIndex
-{
-}
-
-#[cfg(not(feature = "hardening"))]
-impl<T> RegisterBackend for T where
-    T: PgSqlExecutor
-        + LockManager<Client = compio_postgres::Client>
-        + NamespaceManager
-        + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
-        + IndexBuilder
-        + PgLockManager
-        + VectorIndex
-        + FullTextIndex
-        + SpatialIndex
 {
 }
 
@@ -1947,13 +1912,11 @@ impl BackendHandle {
     /// Borrow an [`EncryptedColumn`] capability over the PG arm.
     ///
     /// **P5 PR 1**: returns `Some(&PostgresBackend)` on the PG arm.
-    /// The `EncryptedColumn` impl is gated on `feature = "hardening"`
-    /// per the plan §5 — only buildable when the admin-schema
-    /// SECURITY DEFINER getter for `column_keys` is in play. PR 2
-    /// backfills the real body.
+    /// The `EncryptedColumn` impl wires the admin-schema SECURITY
+    /// DEFINER getter for `column_keys`. PR 2 backfills the real body.
     ///
     /// Returns `Some` on the PG arm; `None` on the SQLite arm.
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     pub fn as_encrypted_column_pg(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
@@ -1982,14 +1945,9 @@ impl BackendHandle {
     /// Borrow a [`Backup`] capability over the PG arm.
     ///
     /// **P5 PR 4**: returns `Some(&PostgresBackend)` on the PG arm.
-    /// The real `Backup` impl (pg_dump/pg_restore shell-out + PITR
-    /// placeholder) is gated on `feature = "hardening"` because the
-    /// PITR placeholder writes to the `__zeroship_admin.pitr_targets`
-    /// table (also `hardening`). Without `hardening`, callers can
-    /// still construct the reference but reaching `.snapshot(...)` /
-    /// `.restore(...)` won't satisfy the trait bound at the call
-    /// site. Mirrors the [`Self::as_encrypted_column_pg`] gating
-    /// shape.
+    /// The real `Backup` impl is pg_dump/pg_restore shell-out plus a
+    /// PITR placeholder that writes to `__zeroship_admin.pitr_targets`.
+    /// Mirrors the [`Self::as_encrypted_column_pg`] shape.
     ///
     /// Returns `Some` on the PG arm; `None` on the SQLite arm.
     #[cfg(feature = "pg")]
@@ -2175,7 +2133,7 @@ mod tests {
 
     /// Compile-time (P5 PR 1): the [`EncryptedColumn`] trait's shape
     /// is pinned. PR 1 ships stub impls on both `PostgresBackend`
-    /// (under `hardening`) and `SqliteBackend` (under `sqlite`) — see
+    /// and `SqliteBackend` (under `sqlite`) — see
     /// `_assert_encrypted_column_pg` / `_assert_encrypted_column_sqlite`
     /// below for the per-backend instantiations. This unparameterised
     /// pin checks that the trait itself compiles (associated type +
@@ -2190,12 +2148,10 @@ mod tests {
     fn _assert_backup<T: Backup>() {}
 
     /// Compile-time (P5 PR 1): `PostgresBackend` satisfies
-    /// [`EncryptedColumn`] when the `hardening` feature is active
-    /// (PR 1 stub impl returns `p5_pr2_stub`; PR 2 backfills the
-    /// SECURITY DEFINER body). Gated on `hardening` to mirror the
-    /// auth/session subtree the PG impl reads from.
+    /// [`EncryptedColumn`] (PR 1 stub impl returned `p5_pr2_stub`;
+    /// PR 2 backfilled the SECURITY DEFINER body).
     #[allow(dead_code)]
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     fn _assert_postgres_backend_impls_encrypted_column() {
         fn assert_impl<T: EncryptedColumn>() {}
         assert_impl::<PostgresBackend>();
@@ -2212,15 +2168,13 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// Compile-time (P5 PR 4): `PostgresBackend` satisfies [`Backup`]
-    /// when the `hardening` feature is active. PR 4 backfills the
-    /// `pg_dump`/`pg_restore` shell-out body; the impl is gated on
-    /// `hardening` because the PITR placeholder writes to the
-    /// `__zeroship_admin.pitr_targets` table (also `hardening`).
-    /// Mirrors the `_assert_postgres_backend_impls_encrypted_column`
-    /// shape above.
+    /// Compile-time (P5 PR 4): `PostgresBackend` satisfies [`Backup`].
+    /// PR 4 backfilled the `pg_dump`/`pg_restore` shell-out body; the
+    /// PITR placeholder writes to the `__zeroship_admin.pitr_targets`
+    /// table. Mirrors the
+    /// `_assert_postgres_backend_impls_encrypted_column` shape above.
     #[allow(dead_code)]
-    #[cfg(all(feature = "pg", feature = "hardening"))]
+    #[cfg(feature = "pg")]
     fn _assert_postgres_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}
         assert_impl::<PostgresBackend>();

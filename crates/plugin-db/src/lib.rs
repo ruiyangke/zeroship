@@ -39,7 +39,7 @@ use crate::context::with_mut as ctx_mut;
 // consumed by external test crates under `tests/`, which are compiled
 // as separate crate targets. Those need `pub` visibility when the
 // `test-helpers` Cargo feature is enabled (the `[[test]] integration`
-// target lists `required-features = ["test-helpers", "hardening"]`).
+// target lists `required-features = ["test-helpers"]`).
 // The cfg-fork below keeps the release surface tight while exposing
 // the modules for tests.
 //
@@ -47,15 +47,9 @@ use crate::context::with_mut as ctx_mut;
 // `v8_classes`) are reached even without the feature — see
 // tests/subscription_finalizer.rs and tests/db_v8_class.rs.
 //
-// The `auth` module carries an extra cfg dimension (`hardening`
-// Cargo feature, commit `2fa9472e`, cycle 10:47): without
-// `--features hardening` the subtree is compile-out, regardless of
-// `test-helpers`. The three-arm ladder below means default builds
-// see no auth, default+`test-helpers` builds still see no auth,
-// and only `hardening`-on builds compile it. The
-// `required-features` list on `[[test]] integration` therefore must
-// include BOTH features so the integration suite can probe the
-// auth surface.
+// The `auth` module is always compiled; the two-arm ladder below only
+// switches its visibility on `test-helpers` so the integration suite
+// can probe the auth surface.
 
 // Always pub:
 pub mod broker;
@@ -140,17 +134,14 @@ pub(crate) mod audit;
 #[cfg(feature = "test-helpers")]
 pub mod audit;
 
-// P3 PR 1 (H-1): the `auth` module itself is gated to
-// `any(feature = "hardening", feature = "sqlite")` so the
-// `auth::util` shared-helper subtree is reachable for the upcoming
-// SQLite `SessionMinter` impl without forcing dev builds to enable
-// `hardening`. The PG-side submodules (`bootstrap`, `keys`,
-// `session`) stay individually gated on `hardening` inside
-// `auth/mod.rs`. See
+// The `auth` module is always compiled: the PG-side submodules
+// (`bootstrap`, `keys`, `session`) carry the per-app role + session
+// machinery, and `auth::util` is the shared-helper subtree the SQLite
+// `SessionMinter` impl reuses. See
 // `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6.
-#[cfg(all(any(feature = "hardening", feature = "sqlite"), not(feature = "test-helpers")))]
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod auth;
-#[cfg(all(any(feature = "hardening", feature = "sqlite"), feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 pub mod auth;
 
 #[cfg(not(feature = "test-helpers"))]

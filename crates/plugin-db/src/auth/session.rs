@@ -1,11 +1,10 @@
 //! HMAC-signed session-init plumbing — the Rust side of the trust
 //! anchor.
 //!
-//! **Cargo gate**: this module compiles only under `--features hardening`
-//! (cycle 10:47, commit `2fa9472e`); default builds skip the entire
-//! `auth/*` subtree. See `docs/proposals/db-system-design.md` §12 for
-//! the threat-model discussion of the PG-side SECURITY DEFINER design
-//! vs the SQLite-side Rust HMAC alternative.
+//! Part of the always-compiled `auth/*` subtree. See
+//! `docs/proposals/db-system-design.md` §12 for the threat-model
+//! discussion of the PG-side SECURITY DEFINER design vs the SQLite-side
+//! Rust HMAC alternative.
 //!
 //! Two operations matter to the runtime:
 //!
@@ -375,10 +374,6 @@ pub async fn mint_and_init_via_pool(
 // carries `pid` through `MintedToken` verbatim so SDK round-trips
 // don't lose data; the SECURITY DEFINER ignores it.
 //
-// **Gating**: this impl block is gated on `#[cfg(feature = "hardening")]`
-// indirectly — the entire `auth::session` module is reachable only
-// under that feature (see `auth/mod.rs`).
-
 impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
     async fn mint_session_token(
         &self,
@@ -461,8 +456,8 @@ impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
 // TTL default, getrandom fallback, ISO timestamp formatter, and hex
 // codec used to live here. They were relocated to `crate::auth::util`
 // in P3 PR 1 so the SQLite `SessionMinter` impl (gated only by the
-// `sqlite` feature) can reuse them without dragging the rest of the
-// PG-only `auth::*` surface behind `hardening`. See
+// `sqlite` feature) can reuse them without dragging in the rest of the
+// PG-only `auth::*` surface. See
 // `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6 (H-1).
 
 // ---------------------------------------------------------------------------

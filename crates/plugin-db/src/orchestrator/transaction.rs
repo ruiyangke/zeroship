@@ -305,9 +305,7 @@ async fn exec_begin_or_savepoint(
 
     // §17.5 — constrain client SQL to the per-app role for the lifetime of
     // this transaction. `SET LOCAL ROLE` auto-reverts at COMMIT / ROLLBACK,
-    // so the dedicated tx connection never leaks the role. Production-only
-    // (`hardening`): without the feature the per-app role isn't provisioned
-    // and this is a no-op — client SQL runs under the platform login role.
+    // so the dedicated tx connection never leaks the role.
     // The nested SAVEPOINT arm above deliberately does NOT call this: a
     // savepoint reuses the open connection, which already had the role
     // applied at its enclosing top-level BEGIN. See

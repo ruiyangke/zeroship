@@ -22,8 +22,7 @@
 //!
 //! P5 PR 1 ships one [`KeySource`] variant — env-var lookup. That
 //! covers SQLite (where there's no admin-schema sidecar) and the PG
-//! dev-parity case. PR 2 adds a `PgAdminTable` variant (gated behind
-//! the `hardening` feature) that reads from
+//! dev-parity case. PR 2 adds a `PgAdminTable` variant that reads from
 //! `__zeroship_admin.column_keys` via a SECURITY DEFINER getter so
 //! the raw bytes never reach app code.
 //!
@@ -54,9 +53,8 @@ use crate::error::DbError;
 ///      **falls back to the env-var path** so apps that haven't yet
 ///      run the column-keys migration still resolve a key.
 ///
-/// Both variants are gated to `feature = "hardening"` on the consumer
-/// side — only the `EncryptedColumn for PostgresBackend` impl (also
-/// `hardening`-gated) instantiates `PgAdminTable`.
+/// `PgAdminTable` is instantiated by `PostgresBackend::new`; the
+/// SQLite tier uses `EnvVar`.
 #[derive(Debug)]
 #[non_exhaustive] // Future variants (Vault, KMS, …) slot in here.
 pub enum KeySource {
@@ -67,9 +65,7 @@ pub enum KeySource {
     /// `__zeroship_admin.column_keys` via the SECURITY DEFINER getter
     /// installed by `crate::auth::bootstrap::ensure_admin_schema`.
     /// Falls through to `EnvVar` when the getter returns NULL (covers
-    /// the pre-migration / dev-parity case). Gated on the consumer side
-    /// to `feature = "hardening"`.
-    #[cfg(feature = "hardening")]
+    /// the pre-migration / dev-parity case).
     PgAdminTable(std::rc::Rc<compio_postgres::Pool>),
 }
 
@@ -152,7 +148,6 @@ impl KeyStore {
         }
         let root = match &self.sourcing {
             KeySource::EnvVar => env_lookup_root(key_id)?,
-            #[cfg(feature = "hardening")]
             KeySource::PgAdminTable(pool) => {
                 // PG-prod path: call the SECURITY DEFINER getter. NULL
                 // result (table empty, key id missing, table itself
@@ -219,12 +214,9 @@ fn derive_key(root: &[u8; 32], app_id: &str) -> Result<AeadKey, DbError> {
     Ok(AeadKey { k_enc, k_siv })
 }
 
-/// Tiny local hex decoder so the encryption module stays compilable
-/// in the default (`pg`-only, no `hardening`) build — the existing
-/// `crate::auth::util::hex_decode` helper is gated to
-/// `any(hardening, sqlite)`. Inlining a stdlib-only decoder here
-/// avoids widening that gate and avoids adding a `hex` crate
-/// dependency just for one call site.
+/// Tiny local hex decoder — keeps the encryption module independent
+/// of `crate::auth::util` and avoids adding a `hex` crate dependency
+/// just for one call site.
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     if s.len() % 2 != 0 {
         return Err(format!("odd-length hex string ({} chars)", s.len()));
@@ -261,7 +253,6 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
 ///
 /// The function returns the raw 32-byte root; HKDF expansion happens
 /// in `derive_key`.
-#[cfg(feature = "hardening")]
 async fn pg_admin_lookup_root(
     pool: &compio_postgres::Pool,
     key_id: &str,

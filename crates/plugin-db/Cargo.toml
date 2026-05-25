@@ -165,20 +165,11 @@ sqlite = ["dep:rusqlite", "dep:flume", "dep:sqlite-vec"]
 # The same symbols are visible to the in-crate unit tests via
 # `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
 test-helpers = []
-# `hardening` gates the dormant `auth/*` subsystem (~2,860 LOC: admin
-# schema bootstrap, session minting, HMAC key rotation). Architect r7
-# I5 + code-critique r9 MAJOR-R9-5: zero production callers today;
-# enables 58 dead-code warnings in default builds. The eventual
-# control-plane wire-up (per the auth-r1 design) flips this feature
-# on. Until then, default builds skip the subtree entirely.
-hardening = []
-# Integration tests need both feature flags so the legacy auth surface
-# the test suite probes is reachable.
 
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
-required-features = ["test-helpers", "hardening"]
+required-features = ["test-helpers"]
 
 # SQLite-side integration target. P1 PR 1 wires the skeleton (a single
 # `smoke_compiles` test); PR 2-5 backfill mirror coverage for the

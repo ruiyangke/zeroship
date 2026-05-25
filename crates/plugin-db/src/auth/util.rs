@@ -16,9 +16,9 @@
 //!
 //! ## Gating
 //!
-//! This module is reachable whenever the parent `auth` module is
-//! reachable — i.e. `any(feature = "hardening", feature = "sqlite")`.
-//! Helpers carry no PG dependencies, so the wider gate is safe.
+//! This module is always compiled (the parent `auth` module is
+//! unconditional). Helpers carry no PG dependencies, so the SQLite arm
+//! reuses them directly.
 //!
 //! ## Stability
 //!

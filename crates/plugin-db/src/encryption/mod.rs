@@ -19,8 +19,8 @@
 //!   derived via HKDF-SHA256 from a per-platform root key. P5 ships
 //!   one [`KeySource`]: env-var lookup (`ZEROSHIP_COLUMN_KEY_<KEYID>`)
 //!   for the SQLite tier and PG dev parity. The PG-prod source
-//!   (`__zeroship_admin.column_keys` via SECURITY DEFINER) lands in
-//!   PR 2 under the `hardening` feature.
+//!   (`__zeroship_admin.column_keys` via SECURITY DEFINER) landed in
+//!   PR 2.
 //! - [`aad`] — canonical, length-prefixed AAD construction.
 //!   `Randomised` mode binds `(collection, column, row_pk_bytes)`;
 //!   `Deterministic` mode binds `(collection, column)` only.
@@ -37,10 +37,8 @@
 //!
 //! Both the Postgres and SQLite arms consume this module, so it sits
 //! outside the `pg` / `sqlite` Cargo feature gates. Default-feature
-//! builds (`--features pg`, no `hardening`) compile the module even
-//! though no production caller reaches it — that's fine; the module
-//! is small and pure-Rust, and the compile cost is a one-time noise
-//! floor.
+//! builds (`--features pg`) compile the module; the column-key store
+//! is wired into `PostgresBackend` unconditionally.
 
 pub mod aad;
 pub mod aead;

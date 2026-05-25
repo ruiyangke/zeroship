@@ -61,7 +61,6 @@ use compio_postgres::Pool;
 use serde_json::Value;
 
 use crate::audit::{ActorKind, AuditRow, ChangeClass, InitialStatus, Phase, TerminalStatus};
-#[cfg(feature = "hardening")]
 use crate::backend::EncryptedColumn;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::{Classification, MaskKind};
@@ -162,13 +161,10 @@ pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), DbErro
 /// pass writes nothing (matches `apply_mask_on_write`'s Q-MASK-L
 /// pass-through-null rule).
 ///
-/// **Feature gate**: the `B: EncryptedColumn` bound is only required
-/// on `#[cfg(feature = "hardening")]` because the `EncryptedColumn`
-/// trait itself is gated. Non-hardening builds drop the generic
-/// parameter entirely; encrypted columns cannot be declared in
-/// non-hardening schemas, so `enc_meta` is always `None` and the
-/// decrypt branch is unreachable.
-#[cfg(feature = "hardening")]
+/// The `B: EncryptedColumn` bound carries the decrypt path: an
+/// encrypted column resolves its key + recovers plaintext before the
+/// mask transform; plaintext columns (`enc_meta == None`) take the
+/// direct branch.
 pub async fn apply_mask_to_one_row<B>(
     backend: &B,
     app_id: &str,
@@ -217,31 +213,8 @@ where
     Ok(Some(apply_mask_kind(kind, &plaintext_string)))
 }
 
-/// Non-hardening variant: refuses any encrypted-column metadata
-/// (compile-time impossible — `EncryptionMeta` references the gated
-/// `EncryptionMode` type), reads the parent value directly. The shape
-/// of the two functions matches at the apply-site call-out, so the
-/// dispatch in `apply.rs` is cfg-clean.
-#[cfg(not(feature = "hardening"))]
-pub async fn apply_mask_to_one_row<B>(
-    _backend: &B,
-    _app_id: &str,
-    column: &str,
-    _enc_meta: Option<&()>,
-    kind: MaskKind,
-    _row_pk: &str,
-    value: &Value,
-) -> Result<Option<String>, DbError> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    let plaintext_string = plaintext_from_value(column, value)?;
-    Ok(Some(apply_mask_kind(kind, &plaintext_string)))
-}
-
 /// Read the parent column's value as the string the mask transform
-/// consumes. Shared by the hardening / non-hardening
-/// [`apply_mask_to_one_row`] arms via the "no enc_meta" branch.
+/// consumes. Used by [`apply_mask_to_one_row`]'s "no enc_meta" branch.
 fn plaintext_from_value(column: &str, value: &Value) -> Result<String, DbError> {
     match value {
         Value::String(s) => Ok(s.clone()),
@@ -330,7 +303,6 @@ pub struct BackfillReport {
 /// finds the existing `Running` (or `Failed`) audit row and reuses it
 /// — the row's `cursor` carries the last processed PK so subsequent
 /// SELECTs pick up where the previous attempt stopped.
-#[cfg(feature = "hardening")]
 pub async fn run_mask_backfill<B>(
     backend: &B,
     app_id: &str,
@@ -398,57 +370,6 @@ where
     })
 }
 
-/// **Non-hardening variant**: no decrypt support. Encrypted columns
-/// cannot be declared without `hardening`, so the apply.rs dispatch
-/// only ever passes `enc_meta: None` here. Signature parity with the
-/// hardening arm keeps the call-site cfg-clean.
-#[cfg(not(feature = "hardening"))]
-#[allow(clippy::too_many_arguments)]
-pub async fn run_mask_backfill<B>(
-    backend: &B,
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    kind: MaskKind,
-    classification: Classification,
-    _enc_meta: Option<&()>,
-    pool: &Pool,
-) -> Result<BackfillReport, DbError> {
-    let sibling = format!("{column}_masked");
-    let name = backfill_audit_name(collection, column);
-
-    let audit_id = open_backfill_audit_row(
-        pool,
-        app_id,
-        collection,
-        &name,
-        kind,
-        classification,
-        ChangeClass::Additive,
-    )
-    .await;
-
-    let report = backfill_loop_plain::<B>(
-        backend, app_id, collection, column, &sibling, kind, pool, audit_id, true,
-    )
-    .await;
-    finalize_audit_row(pool, app_id, audit_id, &report).await;
-    let report = report?;
-    let alter_sql = format!(
-        "ALTER TABLE {}.{} ALTER COLUMN {} SET NOT NULL",
-        quote_ident(app_id),
-        quote_ident(collection),
-        quote_ident(&sibling),
-    );
-    pool.query_text_params(&alter_sql, &[])
-        .await
-        .map_err(|e| crate::error::coded_sql("mask_backfill: SET NOT NULL", e))?;
-    Ok(BackfillReport {
-        processed: report.processed,
-        completed: true,
-    })
-}
-
 // ---------------------------------------------------------------------
 // 6b — mask rewrite
 // ---------------------------------------------------------------------
@@ -468,7 +389,6 @@ pub async fn run_mask_backfill<B>(
 /// observable difference. Resume from `audit_row.cursor` skips
 /// already-rewritten rows for the common case where the operator
 /// just wants to bypass the redundant work.
-#[cfg(feature = "hardening")]
 pub async fn run_mask_rewrite<B>(
     backend: &B,
     app_id: &str,
@@ -512,44 +432,6 @@ where
 
     finalize_audit_row(pool, app_id, audit_id, &report).await;
 
-    let report = report?;
-    Ok(BackfillReport {
-        processed: report.processed,
-        completed: true,
-    })
-}
-
-/// **Non-hardening variant** of `run_mask_rewrite`. Same shape as
-/// the hardening arm minus the decrypt path.
-#[cfg(not(feature = "hardening"))]
-#[allow(clippy::too_many_arguments)]
-pub async fn run_mask_rewrite<B>(
-    backend: &B,
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    new_kind: MaskKind,
-    classification: Classification,
-    _enc_meta: Option<&()>,
-    pool: &Pool,
-) -> Result<BackfillReport, DbError> {
-    let sibling = format!("{column}_masked");
-    let name = rewrite_audit_name(collection, column);
-    let audit_id = open_backfill_audit_row(
-        pool,
-        app_id,
-        collection,
-        &name,
-        new_kind,
-        classification,
-        ChangeClass::Compatible,
-    )
-    .await;
-    let report = backfill_loop_plain::<B>(
-        backend, app_id, collection, column, &sibling, new_kind, pool, audit_id, false,
-    )
-    .await;
-    finalize_audit_row(pool, app_id, audit_id, &report).await;
     let report = report?;
     Ok(BackfillReport {
         processed: report.processed,
@@ -608,7 +490,6 @@ pub async fn run_mask_remove(
 /// "completion" criterion — `cursor` monotonically advances and the
 /// `LIMIT` exits the loop once every row past the cursor has been
 /// rewritten.
-#[cfg(feature = "hardening")]
 #[allow(clippy::too_many_arguments)]
 async fn backfill_loop<B>(
     backend: &B,
@@ -715,98 +596,6 @@ where
         // Heartbeat: bump the audit cursor so a worker restart picks
         // up from here. Best-effort — a transient failure on the
         // audit UPDATE doesn't block the data write.
-        if let Some(id) = audit_id {
-            let _ = update_backfill_cursor(pool, app_id, id, cursor, processed).await;
-        }
-    }
-}
-
-/// Plain-text mask backfill loop — no decrypt path. Same shape +
-/// semantics as the hardening-arm `backfill_loop`, just without the
-/// `EncryptedColumn` bound. Under non-hardening encrypted columns
-/// can't be declared, so the decrypt branch is unreachable; we strip
-/// it entirely so the function builds without the trait import.
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // unused in #[cfg(feature = "hardening")] builds
-async fn backfill_loop_plain<B>(
-    _backend: &B,
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    sibling: &str,
-    kind: MaskKind,
-    pool: &Pool,
-    audit_id: Option<i64>,
-    select_only_null_sibling: bool,
-) -> Result<BackfillReport, DbError> {
-    let schema = quote_ident(app_id);
-    let table = quote_ident(collection);
-    let parent = quote_ident(column);
-    let sibling_q = quote_ident(sibling);
-
-    let where_clause = if select_only_null_sibling {
-        format!("WHERE {sibling_q} IS NULL AND {parent} IS NOT NULL")
-    } else {
-        format!("WHERE {parent} IS NOT NULL")
-    };
-    let select_sql = format!(
-        "SELECT id, {parent} FROM {schema}.{table} \
-         {where_clause} AND id > $1::bigint \
-         ORDER BY id LIMIT $2::bigint"
-    );
-
-    let mut cursor: i64 = match audit_id {
-        Some(id) => read_cursor_from_audit_id(pool, app_id, id).await.unwrap_or(0),
-        None => 0,
-    };
-    let mut processed: i64 = match audit_id {
-        Some(id) => read_processed_from_audit_id(pool, app_id, id).await.unwrap_or(0),
-        None => 0,
-    };
-    let mut consecutive_empty = 0;
-    let required_empty_polls = if select_only_null_sibling { 2 } else { 1 };
-    let batch_size_str = BATCH_SIZE.to_string();
-
-    loop {
-        let cursor_str = cursor.to_string();
-        let rows = pool
-            .query_text_params(&select_sql, &[cursor_str.as_str(), batch_size_str.as_str()])
-            .await
-            .map_err(|e| crate::error::coded_sql("mask_backfill: SELECT", e))?;
-
-        if rows.is_empty() {
-            consecutive_empty += 1;
-            if consecutive_empty >= required_empty_polls {
-                return Ok(BackfillReport {
-                    processed,
-                    completed: true,
-                });
-            }
-            cursor = 0;
-            continue;
-        }
-        consecutive_empty = 0;
-
-        for row in &rows {
-            let id: i64 = row.try_get("id").unwrap_or(0);
-            let parent_value = pg_row_value(row, column);
-            if parent_value.is_null() {
-                cursor = std::cmp::max(cursor, id);
-                continue;
-            }
-            let plaintext = plaintext_from_value(column, &parent_value)?;
-            let masked = apply_mask_kind(kind, &plaintext);
-            let update_sql = format!(
-                "UPDATE {schema}.{table} SET {sibling_q} = $1 WHERE id = $2::bigint",
-            );
-            let id_str = id.to_string();
-            pool.query_text_params(&update_sql, &[masked.as_str(), id_str.as_str()])
-                .await
-                .map_err(|e| crate::error::coded_sql("mask_backfill: UPDATE", e))?;
-            processed += 1;
-            cursor = std::cmp::max(cursor, id);
-        }
-
         if let Some(id) = audit_id {
             let _ = update_backfill_cursor(pool, app_id, id, cursor, processed).await;
         }
