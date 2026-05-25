@@ -1,7 +1,7 @@
 # `#[v8_state_marker]` macro attribute shipped (MAC-01)
 
 **Status:** Shipped 2026-05-04
-**Long-form design:** [`docs/proposals/macro-v8-state.md`](../archive/macro-v8-state.md)
+**Long-form design:** [`docs/archive/macro-v8-state.md`](../archive/macro-v8-state.md)
 **Implementation:** [`crates/runtime-macros/src/lib.rs`](../../crates/runtime-macros/src/lib.rs) (`pub fn v8_state_marker`); preserved through the runtime-macros refactor.
 
 ## Context

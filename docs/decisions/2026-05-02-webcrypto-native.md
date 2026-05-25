@@ -1,7 +1,7 @@
 # Native W3C Web Cryptography API shipped
 
 **Status:** Shipped 2026-05-02
-**Long-form design:** [`docs/proposals/webcrypto-native.md`](../archive/webcrypto-native.md)
+**Long-form design:** [`docs/archive/webcrypto-native.md`](../archive/webcrypto-native.md)
 **Implementation:** [`crates/runtime/src/web/crypto/`](../../crates/runtime/src/web/crypto/) (~8,200 LOC: aes, ec, rsa, okp, hmac, digest, derive, jwk, subtle, …)
 
 ## Context
