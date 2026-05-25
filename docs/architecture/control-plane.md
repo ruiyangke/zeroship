@@ -18,6 +18,7 @@ Current internal endpoints are:
 - `POST /internal/usage`
 
 Mutating `/api/*` endpoints accept either an authenticated admin session or the master-key bearer. `/internal/*` is gated by the control-key bearer unless `--dev-insecure` is enabled.
+The master-key is the human or automation credential for creator/admin control-plane mutations, while the control-key is the machine-to-machine bearer gateway and worker use for `/internal/*` feeds and usage reporting.
 
 ## Module map
 
@@ -80,6 +81,7 @@ apps(
 `Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
 
 Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/env/{app_id}` when `env_version` changes.
+These feeds are polled rather than pushed so the control plane stays stateless with respect to gateway and worker consumers.
 
 ## Deploy ingest
 
@@ -114,3 +116,12 @@ Worker/runtime -> reads the forwarded user context
 - `EnvStore` uses `zeroship_core::crypto` for encrypted-at-rest secrets, with primary + previous master-key support for rotation.
 - `BundleStore` is still present on `AppState`, but deploy ingestion and runtime asset serving use `BlobStore`.
 - Stripe support lives in `stripe_handlers.rs` and `stripe_store.rs`; worker metering still arrives through `/internal/usage`.
+
+## Related docs
+
+- [docs/architecture/overview.md](docs/architecture/overview.md) — Platform entry point and system map
+- [docs/architecture/distributed.md](docs/architecture/distributed.md) — How feeds propagate across nodes
+- [docs/architecture/gateway-routing.md](docs/architecture/gateway-routing.md) — Gateway-side route resolution and dispatch
+- [docs/architecture/blob-store.md](docs/architecture/blob-store.md) — Bundle and asset blob storage architecture
+- [docs/reference/auth.md](docs/reference/auth.md) — Creator and end-user authentication model
+- [docs/reference/billing-metering.md](docs/reference/billing-metering.md) — Usage reporting, metering, and billing flows
