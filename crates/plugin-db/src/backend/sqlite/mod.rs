@@ -1748,41 +1748,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
 
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
-
-        // Build JSON rows. vec0 returns `_distance` as a Real cell;
-        // every other column flows through the standard
-        // TypedCell -> serde_json::Value mapping. BLOB cells (the
-        // base-table vector column included verbatim by `t.*`)
-        // surface as a byte array — the SDK strips the column at the
-        // row-out boundary, so the encoding choice is engine-internal.
-        let mut out: Vec<serde_json::Value> = Vec::with_capacity(typed.rows.len());
-        for row in &typed.rows {
-            let mut obj = serde_json::Map::with_capacity(typed.columns.len());
-            for (i, name) in typed.columns.iter().enumerate() {
-                let cell = row.get(i).ok_or_else(|| {
-                    DbError::internal("vector_search: typed row cell-count mismatch")
-                })?;
-                let val = match cell {
-                    session::TypedCell::Null => serde_json::Value::Null,
-                    session::TypedCell::Integer(n) => {
-                        serde_json::Value::Number(serde_json::Number::from(*n))
-                    }
-                    session::TypedCell::Real(f) => serde_json::Number::from_f64(*f)
-                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
-                    session::TypedCell::Text(s) => serde_json::Value::String(s.clone()),
-                    session::TypedCell::Blob(b) => serde_json::Value::Array(
-                        b.iter()
-                            .map(|byte| {
-                                serde_json::Value::Number(serde_json::Number::from(*byte))
-                            })
-                            .collect(),
-                    ),
-                };
-                obj.insert(name.clone(), val);
-            }
-            out.push(serde_json::Value::Object(obj));
-        }
-        Ok(out)
+        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
     }
 }
 
@@ -1925,45 +1891,7 @@ impl crate::backend::FullTextIndex for SqliteBackend {
 
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
-
-        // Re-emit each row as a JSON object including a synthetic
-        // `_rank: f64` field. The bm25 column reaches us as a `Real`
-        // typed cell — promote it through `serde_json::Number::from_f64`.
-        let mut out: Vec<serde_json::Value> = Vec::with_capacity(typed.rows.len());
-        for row in &typed.rows {
-            let mut obj = serde_json::Map::with_capacity(typed.columns.len());
-            for (i, name) in typed.columns.iter().enumerate() {
-                let cell = row.get(i).ok_or_else(|| {
-                    DbError::internal("fts_search: typed row cell-count mismatch")
-                })?;
-                let val = match cell {
-                    session::TypedCell::Null => serde_json::Value::Null,
-                    session::TypedCell::Integer(n) => {
-                        serde_json::Value::Number(serde_json::Number::from(*n))
-                    }
-                    session::TypedCell::Real(f) => serde_json::Number::from_f64(*f)
-                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
-                    session::TypedCell::Text(s) => serde_json::Value::String(s.clone()),
-                    session::TypedCell::Blob(b) => {
-                        // BLOB columns (rare on FTS-source tables but
-                        // possible) surface as a byte array — same
-                        // convention the vector path uses. The `_rank`
-                        // column is a Real, never a Blob, so the
-                        // synthetic-column rename below is unaffected.
-                        serde_json::Value::Array(
-                            b.iter()
-                                .map(|byte| {
-                                    serde_json::Value::Number(serde_json::Number::from(*byte))
-                                })
-                                .collect(),
-                        )
-                    }
-                };
-                obj.insert(name.clone(), val);
-            }
-            out.push(serde_json::Value::Object(obj));
-        }
-        Ok(out)
+        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
     }
 }
 
@@ -2088,33 +2016,12 @@ impl crate::backend::SpatialIndex for SqliteBackend {
             scored.truncate(l);
         }
 
-        // Build the JSON rows. Each row carries every selected column
-        // PLUS a synthetic `_distance_m` field (per the `SpatialIndex`
-        // trait doc-comment).
+        // Build the JSON rows through the shared typed-row decoder, then
+        // append the synthetic `_distance_m` field.
         let mut out: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
         for (d, idx) in scored {
             let row = &typed.rows[idx];
-            let mut obj = serde_json::Map::with_capacity(typed.columns.len() + 1);
-            for (i, name) in typed.columns.iter().enumerate() {
-                let cell = &row[i];
-                let val = match cell {
-                    session::TypedCell::Null => serde_json::Value::Null,
-                    session::TypedCell::Integer(n) => {
-                        serde_json::Value::Number(serde_json::Number::from(*n))
-                    }
-                    session::TypedCell::Real(f) => serde_json::Number::from_f64(*f)
-                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
-                    session::TypedCell::Text(s) => serde_json::Value::String(s.clone()),
-                    session::TypedCell::Blob(b) => serde_json::Value::Array(
-                        b.iter()
-                            .map(|byte| {
-                                serde_json::Value::Number(serde_json::Number::from(*byte))
-                            })
-                            .collect(),
-                    ),
-                };
-                obj.insert(name.clone(), val);
-            }
+            let mut obj = crate::v8_bridge::typed_row_to_json_object(&typed.columns, row);
             obj.insert(
                 "_distance_m".to_string(),
                 serde_json::Number::from_f64(d)

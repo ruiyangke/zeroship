@@ -352,18 +352,20 @@ pub(crate) fn rows_to_json_value(rows: &[compio_postgres::Row]) -> Vec<Value> {
 pub(crate) fn typed_rows_to_json_value(rows: &TypedRows) -> Vec<Value> {
     rows.rows
         .iter()
-        .map(|row| {
-            let mut obj = serde_json::Map::with_capacity(rows.columns.len());
-            for (idx, name) in rows.columns.iter().enumerate() {
-                let value = row
-                    .get(idx)
-                    .map(typed_cell_to_json)
-                    .unwrap_or(Value::Null);
-                obj.insert(name.clone(), value);
-            }
-            Value::Object(obj)
-        })
+        .map(|row| Value::Object(typed_row_to_json_object(&rows.columns, row)))
         .collect()
+}
+
+pub(crate) fn typed_row_to_json_object(
+    columns: &[String],
+    row: &[TypedCell],
+) -> serde_json::Map<String, Value> {
+    let mut obj = serde_json::Map::with_capacity(columns.len());
+    for (idx, name) in columns.iter().enumerate() {
+        let value = row.get(idx).map(typed_cell_to_json).unwrap_or(Value::Null);
+        obj.insert(name.clone(), value);
+    }
+    obj
 }
 
 /// Convert a single Row to a JSON object.
