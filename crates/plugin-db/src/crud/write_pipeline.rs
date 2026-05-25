@@ -4,6 +4,9 @@ use crate::error::DbError;
 use crate::exec::exec_query;
 use crate::query;
 
+#[cfg(any(test, feature = "test-helpers"))]
+use std::cell::RefCell;
+
 pub(crate) enum ApplyMode<'a> {
     Insert { actor_id: Option<&'a str> },
     InsertMany { actor_id: Option<&'a str> },
@@ -217,6 +220,7 @@ pub(crate) async fn resolve_target_row_ids(
     filter: &Value,
     limit: Option<i64>,
 ) -> Result<Vec<TargetRowId>, DbError> {
+    note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
     super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut sql_filter);
     let select = serde_json::json!(["id"]);
@@ -254,6 +258,17 @@ pub(crate) fn update_requires_per_row_encryption(
     update_touches_randomised_encrypted_field(&schema, patch)
 }
 
+pub(crate) fn upsert_requires_conflict_probe(
+    app_id: &str,
+    collection: &str,
+    doc: &Value,
+) -> bool {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return false;
+    };
+    doc_touches_randomised_encrypted_field(&schema, doc)
+}
+
 fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> bool {
     let Some(schema_obj) = schema.as_object() else {
         return false;
@@ -280,6 +295,24 @@ fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> b
             .get(field)
             .is_some_and(field_is_randomised_encrypted)
             && field_update_writes_value(value)
+    })
+}
+
+fn doc_touches_randomised_encrypted_field(schema: &Value, doc: &Value) -> bool {
+    let Some(schema_obj) = schema.as_object() else {
+        return false;
+    };
+    let Some(doc_obj) = doc.as_object() else {
+        return false;
+    };
+
+    doc_obj.iter().any(|(field, value)| {
+        if field.starts_with("__zsenc__") || value.is_null() {
+            return false;
+        }
+        schema_obj
+            .get(field)
+            .is_some_and(field_is_randomised_encrypted)
     })
 }
 
@@ -313,12 +346,12 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     conflict_fields: &Value,
     schema: Option<&Value>,
 ) -> Result<(), DbError> {
+    if !upsert_requires_conflict_probe(app_id, collection, doc) {
+        return Ok(());
+    }
     let Some(schema) = schema else {
         return Ok(());
     };
-    if !super::schema_has_encrypted_columns(schema) {
-        return Ok(());
-    }
     let Some(obj) = doc.as_object_mut() else {
         return Ok(());
     };
@@ -353,6 +386,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         )
         .await?;
     }
+    note_upsert_conflict_probe_for_tests();
     super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let built = query::build_conflict_probe_with_dialect(
         app_id,
@@ -372,6 +406,53 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     obj.insert("id".to_string(), Value::String(existing_id));
     Ok(())
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WritePathCounters {
+    pub target_row_resolution_calls: usize,
+    pub upsert_conflict_probe_calls: usize,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+thread_local! {
+    static WRITE_PATH_COUNTERS: RefCell<WritePathCounters> =
+        RefCell::new(WritePathCounters::default());
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[cfg_attr(test, allow(dead_code))]
+pub fn reset_write_path_counters_for_tests() {
+    WRITE_PATH_COUNTERS.with(|counters| {
+        *counters.borrow_mut() = WritePathCounters::default();
+    });
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[cfg_attr(test, allow(dead_code))]
+pub fn write_path_counters_for_tests() -> WritePathCounters {
+    WRITE_PATH_COUNTERS.with(|counters| *counters.borrow())
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn note_target_row_resolution_for_tests() {
+    WRITE_PATH_COUNTERS.with(|counters| {
+        counters.borrow_mut().target_row_resolution_calls += 1;
+    });
+}
+
+#[cfg(not(any(test, feature = "test-helpers")))]
+fn note_target_row_resolution_for_tests() {}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn note_upsert_conflict_probe_for_tests() {
+    WRITE_PATH_COUNTERS.with(|counters| {
+        counters.borrow_mut().upsert_conflict_probe_calls += 1;
+    });
+}
+
+#[cfg(not(any(test, feature = "test-helpers")))]
+fn note_upsert_conflict_probe_for_tests() {}
 
 fn deterministic_conflict_probe_schema(
     schema: &Value,

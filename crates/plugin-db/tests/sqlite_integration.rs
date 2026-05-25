@@ -3497,6 +3497,20 @@ fn dispatch_sqlite_runtime(
     body
 }
 
+fn assert_write_path_fast_path(label: &str) {
+    let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
+    assert_eq!(
+        counters.target_row_resolution_calls,
+        0,
+        "{label}: plain write must not resolve row ids: {counters:?}",
+    );
+    assert_eq!(
+        counters.upsert_conflict_probe_calls,
+        0,
+        "{label}: plain write must not run an upsert conflict probe: {counters:?}",
+    );
+}
+
 #[test]
 fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
     run(async {
@@ -4236,6 +4250,169 @@ const _procedures = { setup, seed, updateManyByName };
                 "each bulk-updated row must carry ciphertext bound to its own row id"
             );
         }
+    });
+}
+
+#[test]
+fn plain_updates_on_encrypted_collection_stay_on_fast_path_sqlite_runtime() {
+    let key_id = "perf_plain_update_fast_path_runtime";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_PERF_PLAIN_UPDATE_FAST_PATH_RUNTIME",
+        &"9".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function seed(_input, _ctx) {
+    const coll = env.db.collection(COLLECTION);
+    await coll.upsert(
+        {
+            id: "user_a",
+            email: "alice@example.com",
+            name: "Red Team",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+    await coll.upsert(
+        {
+            id: "user_b",
+            email: "bob@example.com",
+            name: "Red Team",
+            ssn: "222-33-4444"
+        },
+        { conflictFields: ["email"] },
+    );
+    return true;
+}
+seed.config = { kind: "action" };
+
+async function updatePlain(_input, _ctx) {
+    return await env.db.collection(COLLECTION).update(
+        { email: "alice@example.com" },
+        { name: "Blue Team" },
+    );
+}
+updatePlain.config = { kind: "action" };
+
+async function updateManyPlain(_input, _ctx) {
+    return await env.db.collection(COLLECTION).updateMany(
+        { name: "Red Team" },
+        { name: "Green Team" },
+    );
+}
+updateManyPlain.config = { kind: "action" };
+
+const _procedures = { setup, seed, updatePlain, updateManyPlain };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+
+        zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+        let updated = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updatePlain"));
+        assert_eq!(
+            updated.get("name").and_then(|v| v.as_str()),
+            Some("Blue Team"),
+            "plain update should still update the targeted row",
+        );
+        assert_write_path_fast_path("updateOne plain field");
+
+        zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+        let updated_many =
+            parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyPlain"));
+        assert_eq!(
+            updated_many.as_f64(),
+            Some(1.0),
+            "plain updateMany should only affect the remaining Red Team row",
+        );
+        assert_write_path_fast_path("updateMany plain field");
+    });
+}
+
+#[test]
+fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
+    let key_id = "perf_plain_upsert_fast_path_runtime";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_PERF_PLAIN_UPSERT_FAST_PATH_RUNTIME",
+        &"a".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = r#"
+import { env } from "zeroship";
+
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+const COLLECTION = "users";
+const KEY_ID = "__KEY_ID__";
+
+function setup(_input, _ctx) {
+    return __plat.registerModel(COLLECTION, {
+        email: { type: "string", required: true, unique: true },
+        name: { type: "string", required: true },
+        secret: {
+            type: "string",
+            encrypted: { mode: "randomised", keyId: KEY_ID, wraps: "string" }
+        }
+    });
+}
+setup.config = { kind: "action" };
+
+async function seed(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            secret: "alpha-secret"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+seed.config = { kind: "action" };
+
+async function upsertPlainConflict(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_new",
+            email: "alice@example.com",
+            name: "Alice Updated"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+upsertPlainConflict.config = { kind: "action" };
+
+const _procedures = { setup, seed, upsertPlainConflict };
+"#
+        .replace("__KEY_ID__", key_id)
+            + SQLITE_RUNTIME_RPC_SHIM;
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+
+        zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+        let updated =
+            parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "upsertPlainConflict"));
+        assert_eq!(
+            updated.get("id").and_then(|v| v.as_str()),
+            Some("user_seed"),
+            "plain conflict upsert should still target the existing row",
+        );
+        assert_eq!(
+            updated.get("name").and_then(|v| v.as_str()),
+            Some("Alice Updated"),
+            "plain conflict upsert should still update the plain field",
+        );
+        assert_write_path_fast_path("upsert plain field");
     });
 }
 
