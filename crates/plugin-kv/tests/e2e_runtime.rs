@@ -595,6 +595,84 @@ export default {
 };
 "#;
 
+// ---------------------------------------------------------------------------
+// Backend-unavailable resilience app — every `env.kv.*` op MUST reject (NOT
+// hang, NOT crash the isolate) when the configured Redis backend's server is
+// absent. Each op is awaited inside try/catch; the catch records the rejection
+// `.code`. The handler returns {ok:true} only if EVERY op rejected with a
+// connection/backend code. A hang would never reach the return at all and the
+// Rust harness's pump timeout would fail the test (surfaced, not silently
+// passed).
+//
+// `kv_connection` is the canonical code for a connect/transport failure
+// (single-node `pool()`→`Pool::connect` ECONNREFUSED and `conn()`→acquire both
+// map to `KvError::connection`); `kv_backend` is accepted as a fallback so a
+// differently-classified transport error still counts as a graceful reject.
+// ---------------------------------------------------------------------------
+const KV_BACKEND_DOWN_APP: &str = r#"
+export default {
+    async fetch(request, env, ctx) {
+        const kv = env.kv;
+        const trace = [];
+        function fail(step, detail) {
+            const e = new Error("step failed: " + step + " :: " + detail);
+            e.zsStep = step; e.zsDetail = detail; throw e;
+        }
+
+        // Await a kv op that should REJECT because the backend is down.
+        // Asserts it threw and that the coded error is a connection/backend
+        // class code (the graceful-degradation contract). A non-reject
+        // (resolve) is a failure; a hang never returns here at all.
+        async function expectReject(step, fn) {
+            trace.push(step);
+            let threw = false;
+            let code = null;
+            let msg = null;
+            try {
+                await fn();
+            } catch (e) {
+                threw = true;
+                code = e && e.code ? e.code : null;
+                msg = e && e.message ? String(e.message) : null;
+            }
+            if (!threw) {
+                fail(step, "op resolved but backend is down (expected reject)");
+            }
+            if (code !== "kv_connection" && code !== "kv_backend") {
+                fail(step, "unexpected code=" + code + " msg=" + msg);
+            }
+            return code;
+        }
+
+        try {
+            // Cover the distinct backend entry points: get (read), set
+            // (write), incr (Lua EVAL path), list (SCAN path). Each routes
+            // through conn()/pool() → connect → ECONNREFUSED → map_err.
+            const codes = {};
+            codes.get  = await expectReject("get",  () => kv.get("k"));
+            codes.set  = await expectReject("set",  () => kv.set("k", "v"));
+            codes.incr = await expectReject("incr", () => kv.incr("c"));
+            codes.list = await expectReject("list", () => kv.list("p:"));
+
+            return Response.json({ ok: true, codes, trace });
+        } catch (e) {
+            if (e && e.zsStep) {
+                return Response.json({
+                    ok: false, step: e.zsStep, detail: e.zsDetail, trace,
+                }, { status: 500 });
+            }
+            return Response.json({
+                ok: false,
+                step: trace.length ? trace[trace.length - 1] : "<none>",
+                error: String(e && e.message ? e.message : e),
+                code: e && e.code ? e.code : null,
+                trace,
+            }, { status: 500 });
+        }
+    }
+};
+"#;
+
 /// Single module-entry list from a JS source string (replicates
 /// runtime test-common's `m()`).
 fn module(source: &str) -> Vec<ModuleEntry> {
@@ -792,5 +870,30 @@ fn e2e_dragonfly_cluster() {
     let cluster_url = format!("{first}?cluster=true&seeds={seeds}");
     let backend = Redis::new(cluster_url);
     let (status, body) = run_e2e(Arc::new(backend));
+    assert_ok(status, &body);
+}
+
+// ---------------------------------------------------------------------------
+// Backend UNAVAILABLE (single-node Redis pointed at a dead port) — runs in
+// ANY environment because the point is that NO server is listening. This is
+// the resilience guarantee: when the backend is down, app code calling
+// `env.kv.*` rejects gracefully with a typed connection/backend error reaching
+// JS — it does NOT hang and does NOT panic the isolate.
+//
+// It also exercises `redis.rs`'s connect-error `.map_err` arms (the bulk of
+// its otherwise-uncovered lines): `pool()`→`Pool::connect` ECONNREFUSED, the
+// `conn()`/acquire path, and `map_redis_err`'s connection-class mapping — none
+// of which a healthy server ever triggers.
+//
+// 127.0.0.1:6398 is an unused high port (connection-refused on loopback is
+// immediate, so this settles sub-second). The shared `run_app` harness drives
+// the pump under a 30s `compio::time::timeout`: a failure to reject (a hang)
+// would blow that timeout and FAIL the test rather than hang forever.
+#[cfg(feature = "redis")]
+#[test]
+fn e2e_backend_unavailable() {
+    // Single-node URL (NOT cluster) at a dead port — nothing listens here.
+    let backend = Redis::new("redis://127.0.0.1:6398");
+    let (status, body) = run_app(Arc::new(backend), KV_BACKEND_DOWN_APP);
     assert_ok(status, &body);
 }
