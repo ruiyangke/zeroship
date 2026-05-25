@@ -171,7 +171,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
   test("surfaces bulk_unmask_partial_unauthorized via the Result envelope", async () => {
     const { native } = makeNativeWithBulkUnmask(async () => {
       throw Object.assign(new Error("denied"), {
-        code: "bulk_unmask_partial_unauthorized",
+        code: "BULK_UNMASK_PARTIAL_UNAUTHORIZED",
       });
     });
     const db = makeDb(native);
@@ -180,7 +180,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
       { actor: { kind: "user" } },
     );
     assert.ok(result.error, "expected a Result.error");
-    assert.equal((result.error as { code?: string }).code, "bulk_unmask_partial_unauthorized");
+    assert.equal((result.error as { code?: string }).code, "BULK_UNMASK_PARTIAL_UNAUTHORIZED");
   });
 
   test("missing native Collection.bulkUnmask surfaces bulk_unmask_not_available", async () => {
@@ -194,7 +194,7 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
       { actor: { kind: "auto" } },
     );
     assert.ok(result.error);
-    assert.equal((result.error as { code?: string }).code, "bulk_unmask_not_available");
+    assert.equal((result.error as { code?: string }).code, "BULK_UNMASK_NOT_AVAILABLE");
   });
 
   test("a native row missing from results yields an empty record for that row", async () => {

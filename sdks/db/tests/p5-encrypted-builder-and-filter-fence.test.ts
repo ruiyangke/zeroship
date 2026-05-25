@@ -5,13 +5,13 @@
  * These tests pin behaviour that the runtime side cannot enforce:
  *
  *   1. The SDK refuses ANY filter on a randomised-encrypted column
- *      (`randomised_encrypted_field_not_filterable`).
+ *      (`RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE`).
  *   2. The SDK refuses range / regex / LIKE on a deterministic-
- *      encrypted column (`deterministic_encrypted_op_not_supported`).
+ *      encrypted column (`DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED`).
  *   3. `t.encrypted({ wraps: t.object(...) })` rejects with
- *      `encrypted_wraps_unsupported` at schema-definition time.
+ *      `ENCRYPTED_WRAPS_UNSUPPORTED` at schema-definition time.
  *   4. `t.encrypted({ mode: "randomised" }).unique()` rejects with
- *      `unique_encrypted_randomised_unsupported`.
+ *      `UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED`.
  *   5. A bare equality filter on a deterministic column passes.
  */
 
@@ -79,14 +79,14 @@ describe("P5 PR 2 — t.encrypted(...) builder", () => {
   test("wraps=t.boolean() rejects with encrypted_wraps_unsupported", () => {
     assert.throws(
       () => t.encrypted({ wraps: t.boolean() as never }),
-      (e: Error & { code?: string }) => e.code === "encrypted_wraps_unsupported",
+      (e: Error & { code?: string }) => e.code === "ENCRYPTED_WRAPS_UNSUPPORTED",
     );
   });
 
   test("wraps=t.object({...}) rejects with encrypted_wraps_unsupported", () => {
     assert.throws(
       () => t.encrypted({ wraps: t.object({ a: t.string() }) as never }),
-      (e: Error & { code?: string }) => e.code === "encrypted_wraps_unsupported",
+      (e: Error & { code?: string }) => e.code === "ENCRYPTED_WRAPS_UNSUPPORTED",
     );
   });
 
@@ -97,7 +97,7 @@ describe("P5 PR 2 — t.encrypted(...) builder", () => {
     // FK columns must stay unencrypted so JOIN integrity works.
     assert.throws(
       () => t.encrypted({ wraps: t.ref("users") as never }),
-      (e: Error & { code?: string }) => e.code === "encrypted_wraps_unsupported",
+      (e: Error & { code?: string }) => e.code === "ENCRYPTED_WRAPS_UNSUPPORTED",
     );
   });
 
@@ -105,21 +105,21 @@ describe("P5 PR 2 — t.encrypted(...) builder", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => t.encrypted({ mode: "asymmetric" as any }),
-      (e: Error & { code?: string }) => e.code === "encrypted_invalid_mode",
+      (e: Error & { code?: string }) => e.code === "ENCRYPTED_INVALID_MODE",
     );
   });
 
   test("invalid keyId rejects with encrypted_invalid_key_id", () => {
     assert.throws(
       () => t.encrypted({ keyId: "has spaces" }),
-      (e: Error & { code?: string }) => e.code === "encrypted_invalid_key_id",
+      (e: Error & { code?: string }) => e.code === "ENCRYPTED_INVALID_KEY_ID",
     );
   });
 
   test("randomised + .unique() rejects with unique_encrypted_randomised_unsupported", () => {
     assert.throws(
       () => t.encrypted({ mode: "randomised" }).unique(),
-      (e: Error & { code?: string }) => e.code === "unique_encrypted_randomised_unsupported",
+      (e: Error & { code?: string }) => e.code === "UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED",
     );
   });
 
@@ -150,7 +150,7 @@ describe("P5 PR 2 — SDK filter validation fence (P5 gate #3 / IMPORTANT #1)", 
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (db.users as any).find({ ssnRandom: "X" }),
-      (e: Error & { code?: string }) => e.code === "randomised_encrypted_field_not_filterable",
+      (e: Error & { code?: string }) => e.code === "RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE",
     );
   });
 
@@ -159,7 +159,7 @@ describe("P5 PR 2 — SDK filter validation fence (P5 gate #3 / IMPORTANT #1)", 
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (db.users as any).find({ ssnRandom: { $eq: "X" } }),
-      (e: Error & { code?: string }) => e.code === "randomised_encrypted_field_not_filterable",
+      (e: Error & { code?: string }) => e.code === "RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE",
     );
   });
 
@@ -168,7 +168,7 @@ describe("P5 PR 2 — SDK filter validation fence (P5 gate #3 / IMPORTANT #1)", 
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (db.users as any).find({ $or: [{ ssnRandom: "X" }, { name: "y" }] }),
-      (e: Error & { code?: string }) => e.code === "randomised_encrypted_field_not_filterable",
+      (e: Error & { code?: string }) => e.code === "RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE",
     );
   });
 
@@ -199,7 +199,7 @@ describe("P5 PR 2 — SDK filter validation fence (P5 gate #3 / IMPORTANT #1)", 
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (db.users as any).find({ ssnDet: { $gt: "X" } as PlainObject }),
-      (e: Error & { code?: string }) => e.code === "deterministic_encrypted_op_not_supported",
+      (e: Error & { code?: string }) => e.code === "DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED",
     );
   });
 
@@ -208,7 +208,7 @@ describe("P5 PR 2 — SDK filter validation fence (P5 gate #3 / IMPORTANT #1)", 
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (db.users as any).find({ ssnDet: { $like: "X%" } as PlainObject }),
-      (e: Error & { code?: string }) => e.code === "deterministic_encrypted_op_not_supported",
+      (e: Error & { code?: string }) => e.code === "DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED",
     );
   });
 
@@ -223,7 +223,7 @@ describe("P5 PR 2 — SDK filter validation fence (P5 gate #3 / IMPORTANT #1)", 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return (db.users as any).count({ ssnRandom: "X" });
       },
-      (e: Error & { code?: string }) => e.code === "randomised_encrypted_field_not_filterable",
+      (e: Error & { code?: string }) => e.code === "RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE",
     );
   });
 
@@ -234,7 +234,7 @@ describe("P5 PR 2 — SDK filter validation fence (P5 gate #3 / IMPORTANT #1)", 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return (db.users as any).distinct("ssnRandom");
       },
-      (e: Error & { code?: string }) => e.code === "distinct_on_encrypted_field_unsupported",
+      (e: Error & { code?: string }) => e.code === "DISTINCT_ON_ENCRYPTED_FIELD_UNSUPPORTED",
     );
   });
 

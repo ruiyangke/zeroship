@@ -24,8 +24,13 @@
  * Reserved native names throw at boot rather than silently shadowing.
  */
 import {
+  drainCollectionLoaders,
+  enterTransactionScope,
+  exitTransactionScope,
+  captureNativeTransaction,
   Collection,
   type NativeDb,
+  type NativeTransactionFn,
   Query,
   createLive,
   type LiveOptions,
@@ -171,7 +176,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
       new Error(
         `normalizeSchema: top-level TypeBuilder must be a t.union(...) (got type "${def.type}")`,
       ),
-      { code: "schema_top_level_not_union" as const },
+      { code: "SCHEMA_TOP_LEVEL_NOT_UNION" as const },
     );
   }
   const result: NormalizedSchema = {};
@@ -183,7 +188,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
     // at register-model; the SDK-side check surfaces the error at
     // `pnpm dev` build time so creators don't wait for a worker
     // round-trip. Error code mirrors the Rust-side
-    // `reserved_system_field_name`.
+    // `RESERVED_SYSTEM_FIELD_NAME`.
     if (SYSTEM_FIELD_NAMES.includes(key)) {
       throw Object.assign(
         new Error(
@@ -191,7 +196,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
             `System fields (${SYSTEM_FIELD_NAMES.join(", ")}) are managed by ` +
             `the platform and cannot be overridden.`,
         ),
-        { code: "reserved_system_field_name" as const },
+        { code: "RESERVED_SYSTEM_FIELD_NAME" as const },
       );
     }
     if (!(rawVal instanceof TypeBuilder)) {
@@ -201,7 +206,7 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
             `(e.g. t.string(), t.number(), t.ref("users")). Bare constructors and ` +
             `Mongoose-style { type: Constructor } objects are no longer supported.`,
         ),
-        { code: "schema_field_not_typebuilder" as const },
+        { code: "SCHEMA_FIELD_NOT_TYPEBUILDER" as const },
       );
     }
     result[key] = { ...rawVal.toFieldDef() };
@@ -222,7 +227,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
   if (def.type !== "union" || def.variants === undefined || def.discriminator === undefined) {
     throw Object.assign(
       new Error("expandUnionToFlatColumns: not a union FieldDef"),
-      { code: "union_expand_not_union" as const },
+      { code: "UNION_EXPAND_NOT_UNION" as const },
     );
   }
   const discriminator = def.discriminator;
@@ -238,7 +243,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
         new Error(
           `expandUnionToFlatColumns: variant #${i} missing discriminator field "${discriminator}"`,
         ),
-        { code: "union_variant_missing_discriminator" as const },
+        { code: "UNION_VARIANT_MISSING_DISCRIMINATOR" as const },
       );
     }
     const lit = fd.literalValue;
@@ -248,7 +253,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
         new Error(
           `expandUnionToFlatColumns: discriminator literal of variant #${i} has unsupported type "${primTy}"`,
         ),
-        { code: "union_discriminator_unsupported_type" as const },
+        { code: "UNION_DISCRIMINATOR_UNSUPPORTED_TYPE" as const },
       );
     }
     if (discPrimType === null) {
@@ -258,7 +263,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
         new Error(
           `expandUnionToFlatColumns: discriminator literals across variants must share a primitive type (got "${discPrimType}" and "${primTy}")`,
         ),
-        { code: "union_discriminator_type_mismatch" as const },
+        { code: "UNION_DISCRIMINATOR_TYPE_MISMATCH" as const },
       );
     }
     discValues.push(lit);
@@ -271,7 +276,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
         new Error(
           `expandUnionToFlatColumns: duplicate discriminator value ${JSON.stringify(v)}`,
         ),
-        { code: "union_duplicate_discriminator_value" as const },
+        { code: "UNION_DUPLICATE_DISCRIMINATOR_VALUE" as const },
       );
     }
     seen.add(tag);
@@ -302,7 +307,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
             new Error(
               `expandUnionToFlatColumns: field "${field}" has incompatible types across variants ("${existing.type}" vs "${fd.type}")`,
             ),
-            { code: "union_field_type_mismatch" as const },
+            { code: "UNION_FIELD_TYPE_MISMATCH" as const },
           );
         }
       }
@@ -315,7 +320,7 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
 /**
  * Verify that every `t.ref("table")` in `schemas` points at a
  * collection that is itself declared in `schemas`. Throws an `Error`
- * with `code = "ref_target_not_found"` on the first violation.
+ * with `code = "REF_TARGET_NOT_FOUND"` on the first violation.
  *
  * String-based (not type-based) so it acts as a safety net for
  * `t.ref("x" as any)` escapes that bypass the compile-time
@@ -335,7 +340,7 @@ export function validateRefTargets(
       `target collection "${target}" is not declared in the schema map. ` +
       `Add "${target}" to the schema map, or fix the typo.`;
     throw Object.assign(new Error(message), {
-      code: "ref_target_not_found",
+      code: "REF_TARGET_NOT_FOUND",
       collection,
       field,
       target,
@@ -427,13 +432,13 @@ export function model<S extends Record<string, unknown>>(
   if (typeof name !== "string" || name.trim().length === 0) {
     throw Object.assign(
       new Error("model name must be a non-empty string"),
-      { code: "model_invalid_name" as const },
+      { code: "MODEL_INVALID_NAME" as const },
     );
   }
   if (schema === null || schema === undefined || typeof schema !== "object") {
     throw Object.assign(
       new Error("model schema must be an object"),
-      { code: "model_invalid_schema" as const },
+      { code: "MODEL_INVALID_SCHEMA" as const },
     );
   }
   // C2 — a top-level `t.union(...)` is a valid schema. normalizeSchema
@@ -559,7 +564,7 @@ function topoSortByRefs(schemas: Record<string, unknown>): string[] {
 export type SchemaInput =
   | Record<string, unknown>
   | SchemaBuilder<Record<string, unknown>>
-  | TypeBuilder<unknown, any, any, any>;
+  | TypeBuilder<unknown, any, any, any, any>;
 
 /**
  * Schema-shape validator. When a user writes `{ name: "string" }`
@@ -568,13 +573,13 @@ export type SchemaInput =
  * validator walks each collection's field map and emits a
  * string-literal error type at the offending field.
  */
-type IsValidSchemaField<F> = F extends TypeBuilder<unknown, boolean, any, any> ? true : false;
+type IsValidSchemaField<F> = F extends TypeBuilder<unknown, boolean, any, any, any> ? true : false;
 
 export type ValidateSchemaShape<T> = {
   [K in keyof T]:
     T[K] extends SchemaBuilder<Record<string, unknown>>
       ? T[K]
-      : T[K] extends TypeBuilder<unknown, boolean, any, any>
+      : T[K] extends TypeBuilder<unknown, boolean, any, any, any>
         ? T[K]
         : T[K] extends Record<string, unknown>
           ? {
@@ -654,7 +659,7 @@ export interface TransactionOptions {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UnwrapSchema<T> =
   T extends SchemaBuilder<infer S> ? S :
-  T extends TypeBuilder<infer U, any, any, any> ? U :
+  T extends TypeBuilder<infer U, any, any, any, any> ? U :
   T;
 
 export type Collections<T extends Record<string, SchemaInput>> = {
@@ -841,7 +846,7 @@ export function installSchema<const T extends Record<string, SchemaInput>>(
           "this helper must run from a single-threaded scope (the dev-bootstrap and " +
           "production synthetic SSR entry both serialize).",
       ),
-      { code: "install_in_flight" as const },
+      { code: "INSTALL_IN_FLIGHT" as const },
     );
   }
   _installInFlight = true;
@@ -870,7 +875,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         "@zeroship/bootstrap: installSchema requires a native env.db handle as " +
           "the second argument — got " + (env === undefined ? "undefined" : env === null ? "null" : typeof env) + ".",
       ),
-      { code: "native_db_unavailable" as const },
+      { code: "NATIVE_DB_UNAVAILABLE" as const },
     );
   }
   const native = env;
@@ -914,26 +919,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // `Db.prototype` method; in tests a mock's own `transaction`). Bound to
   // `native` so the v8_class receiver check passes.
   const NATIVE_TX_KEY = "__zsNativeTransaction";
-  const nativeHolder = native as unknown as {
-    [NATIVE_TX_KEY]?: (
-      callback: (rawTxView: unknown) => unknown,
-      opts?: { isolationLevel?: string },
-    ) => Promise<unknown>;
-    transaction?: unknown;
-  };
-  if (nativeHolder[NATIVE_TX_KEY] === undefined && typeof nativeHolder.transaction === "function") {
-    const captured = (nativeHolder.transaction as (
-      callback: (rawTxView: unknown) => unknown,
-      opts?: { isolationLevel?: string },
-    ) => Promise<unknown>).bind(native);
-    Object.defineProperty(native, NATIVE_TX_KEY, {
-      value: captured,
-      configurable: true,
-      enumerable: false,
-      writable: true,
-    });
-  }
-  const nativeTransaction = nativeHolder[NATIVE_TX_KEY];
+  const nativeTransaction = captureNativeTransaction(
+    native as unknown as object,
+    NATIVE_TX_KEY,
+  ) as NativeTransactionFn | undefined;
 
   validateRefTargets(schemas);
 
@@ -1021,8 +1010,8 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // `callback(rawTxView)` once BEGIN/SAVEPOINT succeeds and returns a
   // promise that resolves with the callback's result on commit (callback
   // resolved) or rejects with the callback's error on rollback (callback
-  // threw). The four observable error codes — `begin_failed`,
-  // `commit_failed_indeterminate`, `savepoint_depth_exceeded`, and the
+  // threw). The four observable error codes — `BEGIN_FAILED`,
+  // `COMMIT_FAILED_INDETERMINATE`, `savepoint_depth_exceeded`, and the
   // body-error passthrough — are emitted by Rust and surface verbatim on
   // the rejection (`err.code`).
   //
@@ -1033,9 +1022,9 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   //      a batched `get(id)` issued just before `transaction(...)`
   //      completes on the pool, not the tx connection.
   //   2. **`_txDepth` bookkeeping** — bumped on every collection while the
-  //      tx is open so (a) the IdLoader's `loader_tx_race` guard rejects a
+  //      tx is open so (a) the IdLoader's `LOADER_TX_RACE` guard rejects a
   //      non-tx batched read that finds a tx opened mid-batch, and (b)
-  //      `live()` refuses with `live_in_transaction` when called inside a
+  //      `live()` refuses with `LIVE_IN_TRANSACTION` when called inside a
   //      tx body. (The Rust orchestrator owns *nesting depth*; this JS
   //      counter is purely the "am I inside a tx on this collection"
   //      signal those two JS-layer checks read.)
@@ -1061,26 +1050,17 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
             "@zeroship/bootstrap: env.db.transaction not available — " +
               "runtime is missing the native Db.transaction(fn) orchestrator.",
           ),
-          { code: "native_transaction_unavailable" as const },
+          { code: "NATIVE_TRANSACTION_UNAVAILABLE" as const },
         ),
       );
     }
 
-    const collectionList = Object.values(collections).map(
-      (c) => c as unknown as {
-        _txDepth: number;
-        _idLoader: { _drain(): Promise<void> } | null;
-      },
-    );
+    const collectionList = Object.values(collections);
 
     // 1. Drain the JS DataLoader queues (JS-only state; cannot move to
     //    Rust). A drain failure aborts before any BEGIN runs.
     try {
-      await Promise.all(
-        collectionList
-          .map((c) => c._idLoader?._drain())
-          .filter((p): p is Promise<void> => p !== undefined),
-      );
+      await drainCollectionLoaders(collectionList);
     } catch (drainErr) {
       const wrapped = Object.assign(
         new Error(
@@ -1089,7 +1069,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
           }`,
           { cause: drainErr instanceof Error ? drainErr : undefined },
         ),
-        { code: "tx_drain_failed" as const },
+        { code: "TX_DRAIN_FAILED" as const },
       );
       return err(wrapped);
     }
@@ -1098,7 +1078,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     //    live-in-tx refusal see depth > 0 for the duration. Bumped
     //    synchronously *before* the native call so an in-flight batched
     //    read observes the tx the instant BEGIN opens.
-    for (const c of collectionList) c._txDepth += 1;
+    const txScopedCollections = enterTransactionScope(collectionList);
     try {
       // 3. Native orchestrator: begin → callback(txCollections) →
       //    commit/rollback. Resolves with the callback's result on
@@ -1117,12 +1097,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return ok(bodyResult);
     } catch (txErr) {
       // The native rejection already carries the right code
-      // (`commit_failed_indeterminate` / `begin_failed` /
+      // (`COMMIT_FAILED_INDETERMINATE` / `BEGIN_FAILED` /
       // `savepoint_depth_exceeded`) or is the creator's own thrown error
       // verbatim. Surface it as `result.error`.
       return err(txErr instanceof Error ? txErr : new Error(String(txErr)));
     } finally {
-      for (const c of collectionList) c._txDepth -= 1;
+      exitTransactionScope(txScopedCollections);
     }
   }
 
@@ -1151,7 +1131,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
             `@zeroship/bootstrap: schema name "${name}" collides with a native env.db method — ` +
               `rename the collection. Reserved: ${[...RESERVED_ENV_DB_NAMES].join(", ")}.`,
           ),
-          { code: "reserved_env_db_name" as const },
+          { code: "RESERVED_ENV_DB_NAME" as const },
         );
       }
       Object.defineProperty(target, name, {

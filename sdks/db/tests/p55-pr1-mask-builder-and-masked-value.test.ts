@@ -14,9 +14,9 @@
  *      explicit opt-out — no sibling emission (PR 2/3), no wrap on
  *      read.
  *   4. `.mask()` refuses non-primitive wrapped types (json, array,
- *      union, object) with `mask_on_unsupported_type`.
+ *      union, object) with `MASK_ON_UNSUPPORTED_TYPE`.
  *   5. `.mask()` on `t.ref()` refuses with
- *      `encrypted_on_ref_unsupported`.
+ *      `ENCRYPTED_ON_REF_UNSUPPORTED`.
  *   6. Invalid `kind` / `classification` are refused.
  *   7. TypeScript `Row<S>` inference wraps masked fields in
  *      `MaskedValue<T>` (compile-time assertion).
@@ -107,7 +107,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (t.json() as any).mask({ kind: "full" }),
-      (e: Error & { code?: string }) => e.code === "mask_on_unsupported_type",
+      (e: Error & { code?: string }) => e.code === "MASK_ON_UNSUPPORTED_TYPE",
     );
   });
 
@@ -115,7 +115,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (t.boolean() as any).mask({ kind: "full" }),
-      (e: Error & { code?: string }) => e.code === "mask_on_unsupported_type",
+      (e: Error & { code?: string }) => e.code === "MASK_ON_UNSUPPORTED_TYPE",
     );
   });
 
@@ -123,7 +123,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (t.ref("users") as any).mask({ kind: "full" }),
-      (e: Error & { code?: string }) => e.code === "encrypted_on_ref_unsupported",
+      (e: Error & { code?: string }) => e.code === "ENCRYPTED_ON_REF_UNSUPPORTED",
     );
   });
 
@@ -131,7 +131,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (t.string() as any).mask({ kind: "bogus" }),
-      (e: Error & { code?: string }) => e.code === "mask_invalid_kind",
+      (e: Error & { code?: string }) => e.code === "MASK_INVALID_KIND",
     );
   });
 
@@ -139,7 +139,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (t.string() as any).mask({ kind: "full", classification: "bogus" }),
-      (e: Error & { code?: string }) => e.code === "mask_invalid_classification",
+      (e: Error & { code?: string }) => e.code === "MASK_INVALID_CLASSIFICATION",
     );
   });
 
@@ -147,7 +147,7 @@ describe("P5.5 PR 1 — t.string().mask(...) DSL modifier", () => {
     assert.throws(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (t.string() as any).mask(null),
-      (e: Error & { code?: string }) => e.code === "mask_invalid_opts",
+      (e: Error & { code?: string }) => e.code === "MASK_INVALID_OPTS",
     );
   });
 });

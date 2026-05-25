@@ -2,7 +2,7 @@
  * Regression — preserve a native Error's `.code` end-to-end.
  *
  * The native side of the runtime throws Errors carrying a structured
- * `.code` (e.g. `"migration_already_running"`, `"unique_violation"`).
+ * `.code` (e.g. `"MIGRATION_ALREADY_RUNNING"`, `"UNIQUE_VIOLATION"`).
  * Earlier the SDK's `_run → catch → toResultError → mapNativeError(msg)`
  * path rebuilt the Error from the message alone, dropping `.code`. These
  * tests cover the reachable call sites — insert, update, query (find),
@@ -34,34 +34,34 @@ describe("native error .code preservation", () => {
   test("insert: coded native error reaches caller via result.error.code", async () => {
     const native = makeFailingNative(
       Object.assign(new Error("migration in flight"), {
-        code: "migration_already_running",
+        code: "MIGRATION_ALREADY_RUNNING",
       }),
     );
     const Users = model("users", { name: t.string().required() }, native);
     const { error } = await Users.insert({ name: "Alice" });
     assert.ok(error);
-    assert.equal((error as Error & { code?: string }).code, "migration_already_running");
+    assert.equal((error as Error & { code?: string }).code, "MIGRATION_ALREADY_RUNNING");
     assert.equal(error?.message, "migration in flight");
   });
 
   test("update: coded native error reaches caller", async () => {
     const native = makeFailingNative(
-      Object.assign(new Error("unique violation"), { code: "unique_violation" }),
+      Object.assign(new Error("unique violation"), { code: "UNIQUE_VIOLATION" }),
     );
     const Users = model("users", { name: t.string().required() }, native);
     const { error } = await Users.update({ id: 1 }, { $set: { name: "Bob" } });
     assert.ok(error);
-    assert.equal((error as Error & { code?: string }).code, "unique_violation");
+    assert.equal((error as Error & { code?: string }).code, "UNIQUE_VIOLATION");
   });
 
   test("find: coded native error reaches caller through Query._exec", async () => {
     const native = makeFailingNative(
-      Object.assign(new Error("permission denied"), { code: "permission_denied" }),
+      Object.assign(new Error("permission denied"), { code: "PERMISSION_DENIED" }),
     );
     const Users = model("users", { name: t.string().required() }, native);
     const { error } = await Users.find({});
     assert.ok(error);
-    assert.equal((error as Error & { code?: string }).code, "permission_denied");
+    assert.equal((error as Error & { code?: string }).code, "PERMISSION_DENIED");
     assert.equal(error?.message, "permission denied");
   });
 
@@ -78,7 +78,7 @@ describe("native error .code preservation", () => {
   });
 
   test("pass-through: Error with .code is returned unchanged (same identity)", () => {
-    const original = Object.assign(new Error("x"), { code: "x_code" });
+    const original = Object.assign(new Error("x"), { code: "X_CODE" });
     const out = mapNativeError(original);
     assert.strictEqual(out, original);
   });

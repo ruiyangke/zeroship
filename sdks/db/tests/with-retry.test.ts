@@ -68,7 +68,7 @@ describe("withRetry", () => {
         calls += 1;
         if (calls < 2) {
           const e = new Error("custom retry");
-          (e as Error & { code: string }).code = "serialization_failure";
+          (e as Error & { code: string }).code = "SERIALIZATION_FAILURE";
           throw e;
         }
         return "ok";
@@ -76,7 +76,7 @@ describe("withRetry", () => {
       {
         on: (e) =>
           isOptimisticLockError(e) ||
-          (e as { code?: string }).code === "serialization_failure",
+          (e as { code?: string }).code === "SERIALIZATION_FAILURE",
       },
     );
     assert.equal(result, "ok");
@@ -143,7 +143,7 @@ describe("withRetry", () => {
 
   test("isOptimisticLockError matches plain Error with the right code", () => {
     const e = new Error("x");
-    (e as Error & { code: string }).code = "optimistic_lock_failure";
+    (e as Error & { code: string }).code = "VERSION_MISMATCH";
     assert.equal(isOptimisticLockError(e), true);
   });
 });

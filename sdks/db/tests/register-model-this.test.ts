@@ -1,7 +1,7 @@
 /**
  * Pin the v8_class `this`-binding contract for `native.registerModel`.
  *
- * Both `installSchema` (sdks/db/src/db.ts) and `model()` (sdks/db/src/model.ts)
+ * Both `installSchema` (sdks/db/src/db-types.ts via bootstrap) and `model()` (sdks/db/src/model.ts)
  * dispatch `native.registerModel(name, schema, indexes)`. The native side
  * is a v8_class method whose internal brand check throws
  * "Illegal invocation" if the receiver isn't the original instance —
@@ -11,7 +11,7 @@
  * Regression history:
  *   - fa30871c introduced the typed-cast refactor that lost `this` in
  *     both files.
- *   - e564c010 fixed `db.ts` only; `model.ts`'s try/catch silently
+ *   - e564c010 fixed `db-types.ts` only; `model.ts`'s try/catch silently
  *     swallowed the same bug.
  *
  * This test pins the contract by using a mock that REQUIRES the correct

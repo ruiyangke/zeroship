@@ -16,12 +16,26 @@
  * explicit at the import site.
  */
 export { Collection } from "./collection.js";
-export type { NativeDb, NativeCollection } from "./collection.js";
+export { captureNativeTransaction } from "./native.js";
+export type {
+  NativeDb,
+  NativeCollection,
+  NativeSubscriptionLike,
+  NativeTransactionFn,
+} from "./native.js";
 export { Query } from "./query.js";
 export { createLive } from "./live.js";
 export type { LiveOptions, LiveQuery } from "./live.js";
 export { subscribe } from "./subscribe.js";
 export type { Subscription, SubscriptionEvent } from "./subscribe.js";
+export {
+  anyCollectionInTransaction,
+  drainCollectionLoaders,
+  enterTransactionScope,
+  exitTransactionScope,
+  readTransactionDepth,
+} from "./tx-state.js";
+export type { TransactionStateCarrier } from "./tx-state.js";
 export { naming, SchemaBuilder, TypeBuilder, ok, err } from "./types.js";
 export type {
   NamingStrategy,

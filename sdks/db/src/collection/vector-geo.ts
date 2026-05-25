@@ -1,5 +1,6 @@
 import { ValidationError } from "../errors.js";
 import { trackCollectionAccess } from "../live.js";
+import type { NativeCollection } from "../native.js";
 import { mapFilterOutbound, mapResultDoc } from "../utils.js";
 import type { Filter, PlainObject, Result, Row, VectorMetric } from "../types.js";
 
@@ -7,14 +8,14 @@ export interface VectorGeoCollectionInternals<S> {
   _name: string;
   _softDelete: boolean;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
-  _nativeCollection(): ZeroshipCollection;
+  _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
   _toField(column: string): string;
 }
 
 /**
  * Validates `k` / `limit` arguments to `.search()` are positive integers
- * in `1..=1000`. Throws ValidationError with `code: "invalid_k"` on
+ * in `1..=1000`. Throws ValidationError with `code: "INVALID_K"` on
  * violation. The 1000-row ceiling matches the engine-side practical
  * limit for kNN flat scan + GIN/ivfflat result sets.
  */
@@ -215,10 +216,7 @@ export function nearCollection<S>(
       nativeArgs.filter = _mergeFilter(self, {});
     }
 
-    const colAny = self._nativeCollection() as unknown as {
-      near: (a: typeof nativeArgs) => Promise<PlainObject[]>;
-    };
-    const results = await colAny.near(nativeArgs);
+    const results = await self._nativeCollection().near(nativeArgs);
     return (results ?? []).map(
       (d) =>
         mapResultDoc(d as PlainObject, self._toField) as Row<S> & {

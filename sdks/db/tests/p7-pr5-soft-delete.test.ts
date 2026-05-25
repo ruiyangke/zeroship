@@ -197,7 +197,7 @@ describe("P7 PR 5 — soft-delete: purge + restore + include_deleted opt-out", (
     assert.ok(result.error, "must error when native surface missing");
     assert.equal(
       (result.error as Error & { code?: string }).code,
-      "purge_not_available",
+      "PURGE_NOT_AVAILABLE",
     );
   });
 
@@ -215,7 +215,7 @@ describe("P7 PR 5 — soft-delete: purge + restore + include_deleted opt-out", (
     assert.ok(result.error, "must error when native surface missing");
     assert.equal(
       (result.error as Error & { code?: string }).code,
-      "restore_not_available",
+      "RESTORE_NOT_AVAILABLE",
     );
   });
 });

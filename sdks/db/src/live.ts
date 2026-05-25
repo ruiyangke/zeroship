@@ -27,7 +27,7 @@
  *     diffing to suppress no-op events is future work.
  *
  *   - Tx awareness: calling `db.live` inside a `db.transaction(tx => ...)`
- *     callback throws synchronously with `code = "live_in_transaction"`.
+ *     callback throws synchronously with `code = "LIVE_IN_TRANSACTION"`.
  *     Live queries are by definition long-lived; a tx is per-request.
  *
  * Limitations (future work, not v1):
@@ -43,6 +43,7 @@
  */
 
 import { subscribe, type Subscription, type SubscriptionEvent } from "./subscribe.js";
+import { anyCollectionInTransaction } from "./tx-state.js";
 
 /**
  * The minimal contract a `queryFn` return value must satisfy. Either a
@@ -104,23 +105,6 @@ export interface LiveQuery<R> extends AsyncIterableIterator<R[]> {
 }
 
 /**
- * Set of collections that have `_txDepth > 0`. Reading any of them is
- * the "inside an active transaction" signal — `db.live` rejects up
- * front rather than registering a subscription that would race the
- * tx commit.
- */
-type CollectionLike = { _txDepth?: number };
-
-function anyCollectionInTx(db: Record<string, unknown>): boolean {
-  for (const v of Object.values(db)) {
-    if (v === null || typeof v !== "object") continue;
-    const depth = (v as CollectionLike)._txDepth;
-    if (typeof depth === "number" && depth > 0) return true;
-  }
-  return false;
-}
-
-/**
  * Unwrap whatever `queryFn` returned into a `Promise<R[]>`. A Query
  * builder resolves to `Result<R[]>` (`{data, error}`); a bare Promise
  * resolves to `R[]` directly. We detect the Result shape strictly: the
@@ -154,7 +138,7 @@ function isResultEnvelope(v: unknown): v is { data: unknown; error: unknown } {
 /**
  * Build a `LiveQuery<R>` from a `queryFn` and the parent `db` object.
  * Exported via `env.db.live` (planted by `installSchema` — see
- * `db.ts`). `db` is the Collections map `installSchema` built —
+ * `db-types.ts`). `db` is the Collections map `installSchema` built —
  * used to (a) verify we're not inside a tx and (b) call
  * `subscribe(name)` for every detected table.
  */
@@ -163,10 +147,10 @@ export function createLive<R>(
   queryFn: () => QueryFnResult<R>,
   options?: LiveOptions,
 ): LiveQuery<R> {
-  if (anyCollectionInTx(db)) {
+  if (anyCollectionInTransaction(db)) {
     throw Object.assign(
       new Error("@zeroship/db: db.live cannot be called inside db.transaction — live queries outlive the request-scoped tx"),
-      { code: "live_in_transaction" as const },
+      { code: "LIVE_IN_TRANSACTION" as const },
     );
   }
 

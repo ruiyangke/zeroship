@@ -4,6 +4,50 @@
  * translating raw native driver errors into typed JS errors.
  */
 
+const CANONICAL_CODE_OVERRIDES = Object.freeze({
+  expected_one_got_many: "NOT_UNIQUE",
+  expected_one_got_zero: "NOT_FOUND",
+  optimistic_lock_failure: "VERSION_MISMATCH",
+  validation_error: "VALIDATION_ERROR",
+  version_mismatch: "VERSION_MISMATCH",
+} satisfies Record<string, string>);
+
+export function canonicalErrorCode(code: string): string {
+  const overrides = CANONICAL_CODE_OVERRIDES as Readonly<Record<string, string>>;
+  const overridden = overrides[code] ?? code;
+  if (/^[A-Z0-9_]+$/.test(overridden)) return overridden;
+  return overridden
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function stampCanonicalCode<T extends Error>(error: T, code: string): T {
+  try {
+    Object.defineProperty(error, "code", {
+      value: code,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+    return error;
+  } catch {
+    const cloned = Object.assign(new Error(error.message), error, { code });
+    cloned.name = error.name;
+    if ("stack" in error && typeof error.stack === "string") {
+      cloned.stack = error.stack;
+    }
+    return cloned as T;
+  }
+}
+
+export function readCanonicalErrorCode(e: unknown): string | undefined {
+  if (!(e instanceof Error)) return undefined;
+  const code = (e as { code?: unknown }).code;
+  return typeof code === "string" ? canonicalErrorCode(code) : undefined;
+}
+
 /** A single field-level validation failure with path and human-readable message. */
 export interface FieldError {
   message: string;
@@ -13,6 +57,7 @@ export interface FieldError {
 /** Thrown when one or more document fields fail schema validation. */
 export class ValidationError extends Error {
   name = "ValidationError";
+  code = "VALIDATION_ERROR" as const;
   errors: Record<string, FieldError>;
 
   constructor(errors: Record<string, FieldError>) {
@@ -28,26 +73,26 @@ export class ValidationError extends Error {
  * D4 — optimistic-concurrency CAS update failed. Raised when an
  * `updateOne`/`updateMany` call includes `{ version: N }` in the filter
  * but the stored `version` no longer matches N (another writer won the
- * race). The error's `code` is `"optimistic_lock_failure"` matching the
+ * race). The error's `code` is `"VERSION_MISMATCH"` matching the
  * A2 error-code inventory; `expectedVersion` carries the caller's N.
  *
  * **P7 PR 4** — the platform's UPDATE auto-bump path now surfaces the
- * same condition with the typed code `"version_mismatch"` from the
+ * same condition with the typed code `"VERSION_MISMATCH"` from the
  * Rust runtime (`DbError::version_mismatch`). The runtime-typed error
  * carries `retryable: true` semantically (the hint advises re-read +
  * retry). The SDK's `update()` / `updateMany()` catch the native
- * `version_mismatch` code and rethrow as `OptimisticLockError` so
+ * `VERSION_MISMATCH` code and rethrow as `OptimisticLockError` so
  * existing app code that `instanceof OptimisticLockError`-checks
  * keeps working — see [`mapVersionMismatchError`].
  */
 export class OptimisticLockError extends Error {
   name = "OptimisticLockError";
-  code = "optimistic_lock_failure" as const;
+  code = "VERSION_MISMATCH" as const;
   expectedVersion: number;
   /** **P7 PR 4** — always `true` for this error class; advisory flag
    *  the SDK consumer can branch on (`if (e.retryable) retry()`).
    *  Mirrors the `retryable: true` semantics the Rust-side
-   *  `version_mismatch` carries in its `hint`. */
+   *  `VERSION_MISMATCH` carries in its `hint`. */
   retryable = true as const;
 
   constructor(expectedVersion: number, collection?: string) {
@@ -62,13 +107,13 @@ export class OptimisticLockError extends Error {
 /**
  * **P7 PR 4** — translate a caught error from the native UPDATE
  * dispatcher into an [`OptimisticLockError`] when it carries the
- * `version_mismatch` code. Used by `Collection.update()` /
+ * `VERSION_MISMATCH` code. Used by `Collection.update()` /
  * `Collection.updateMany()` so the SDK contract surfaces a single
  * typed error class regardless of whether the failure came from the
  * SDK's pre-PR-4 null-result inference or the runtime's typed reject.
  *
  * Returns the original error unchanged for any code other than
- * `version_mismatch`; the caller then handles it via the standard
+ * `VERSION_MISMATCH`; the caller then handles it via the standard
  * `mapNativeError` rail. The `expectedVersion` defaults to `NaN`
  * when the SDK doesn't have the original CAS value in scope (the
  * runtime's message body carries it but parsing free-text would
@@ -80,10 +125,7 @@ export function mapVersionMismatchError(
   collection: string,
   expectedVersion: number,
 ): Error {
-  if (
-    e instanceof Error &&
-    (e as { code?: unknown }).code === "version_mismatch"
-  ) {
+  if (readCanonicalErrorCode(e) === "VERSION_MISMATCH") {
     return new OptimisticLockError(expectedVersion, collection);
   }
   return e instanceof Error ? e : new Error(String(e));
@@ -101,7 +143,7 @@ export function mapVersionMismatchError(
  */
 export class NotFoundError extends Error {
   name = "NotFoundError";
-  code = "expected_one_got_zero" as const;
+  code = "NOT_FOUND" as const;
   collection?: string;
 
   constructor(collection?: string) {
@@ -126,7 +168,7 @@ export class NotFoundError extends Error {
  */
 export class NotUniqueError extends Error {
   name = "NotUniqueError";
-  code = "expected_one_got_many" as const;
+  code = "NOT_UNIQUE" as const;
   collection?: string;
   /** Number of rows the query observed (capped at 2 by the `LIMIT 2`
    *  the terminal applies). */
@@ -156,7 +198,7 @@ export class InvalidOperationError extends Error {
 
   constructor(code: string, message: string) {
     super(message);
-    this.code = code;
+    this.code = canonicalErrorCode(code);
   }
 }
 
@@ -166,8 +208,8 @@ export class InvalidOperationError extends Error {
  * typed JS Error.
  *
  * Preservation contract — the native side throws Error objects whose `.code`
- * is a structured string (e.g. `"migration_already_running"`,
- * `"unique_violation"`). Earlier code reconstructed a new Error from the
+ * is a structured string (e.g. `"MIGRATION_ALREADY_RUNNING"`,
+ * `"UNIQUE_VIOLATION"`). Earlier code reconstructed a new Error from the
  * message alone, dropping `.code` along the way; this passes the original
  * Error through unchanged whenever it already carries a string `.code`.
  *
@@ -175,14 +217,15 @@ export class InvalidOperationError extends Error {
  * `.code`, preserve the original Error when possible and otherwise wrap
  * the message in a plain `Error`. The SDK does not mint synthetic DB-
  * specific codes; native uniqueness violations already arrive as the
- * coded string `unique_violation`.
+ * coded string `UNIQUE_VIOLATION`.
  */
 export function mapNativeError(e: unknown): Error {
   // Already a coded Error from the native layer — pass through. Subtypes
   // we own (ValidationError, OptimisticLockError) also flow through this
   // branch because they carry `.code` as a string-or-number field.
-  if (e instanceof Error && typeof (e as { code?: unknown }).code === "string") {
-    return e;
+  const canonicalCode = readCanonicalErrorCode(e);
+  if (e instanceof Error && canonicalCode !== undefined) {
+    return stampCanonicalCode(e, canonicalCode);
   }
   const msg = e instanceof Error ? e.message : String(e);
   if (e instanceof Error) return e;

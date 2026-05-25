@@ -5,6 +5,10 @@ import {
 } from "../errors.js";
 import { trackCollectionAccess } from "../live.js";
 import { IdLoader } from "../loader.js";
+import {
+  requireNativeCapability,
+  type NativeCollection,
+} from "../native.js";
 import { Query } from "../query.js";
 import type { NormalizedSchema } from "../schema.js";
 import {
@@ -55,7 +59,7 @@ export interface CrudCollectionInternals<
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _toResultError(e: unknown): Error;
   _loadById(id: string, txDepthAtCall: number): Promise<Row<S> | null>;
-  _nativeCollection(): ZeroshipCollection;
+  _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
   _toField(column: string): string;
   _loadRelations(rows: PlainObject[], withSpec: WithSpec): Promise<void>;
@@ -564,19 +568,13 @@ export function purgeCollection<S, N extends string, AllSchemas extends Record<s
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const native = self._nativeCollection() as ZeroshipCollection & {
-      purge?: (f: ZeroshipDbFilter) => Promise<Record<string, unknown> | null>;
-    };
-    if (typeof native.purge !== "function") {
-      throw Object.assign(
-        new Error(
-          "@zeroship/db: env.db.<collection>.purge not available — " +
-            "runtime is missing the P7 PR 5 purge surface.",
-        ),
-        { code: "purge_not_available" as const },
-      );
-    }
-    const result = await native.purge(mapped);
+    const purge = requireNativeCapability(self._nativeCollection().purge, {
+      code: "PURGE_NOT_AVAILABLE",
+      message:
+        "@zeroship/db: env.db.<collection>.purge not available — " +
+        "runtime is missing the P7 PR 5 purge surface.",
+    });
+    const result = await purge(mapped);
     if (result === null) return null;
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
   });
@@ -595,19 +593,16 @@ export function purgeManyCollection<S, N extends string, AllSchemas extends Reco
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const native = self._nativeCollection() as ZeroshipCollection & {
-      purgeMany?: (f: ZeroshipDbFilter) => Promise<number>;
-    };
-    if (typeof native.purgeMany !== "function") {
-      throw Object.assign(
-        new Error(
+    const purgeMany = requireNativeCapability(
+      self._nativeCollection().purgeMany,
+      {
+        code: "PURGE_NOT_AVAILABLE",
+        message:
           "@zeroship/db: env.db.<collection>.purgeMany not available — " +
-            "runtime is missing the P7 PR 5 purge surface.",
-        ),
-        { code: "purge_not_available" as const },
-      );
-    }
-    const n = await native.purgeMany(mapped);
+          "runtime is missing the P7 PR 5 purge surface.",
+      },
+    );
+    const n = await purgeMany(mapped);
     return { purgedCount: n };
   });
 }
@@ -623,19 +618,13 @@ export function restoreCollection<S, N extends string, AllSchemas extends Record
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const native = self._nativeCollection() as ZeroshipCollection & {
-      restore?: (f: ZeroshipDbFilter) => Promise<Record<string, unknown> | null>;
-    };
-    if (typeof native.restore !== "function") {
-      throw Object.assign(
-        new Error(
-          "@zeroship/db: env.db.<collection>.restore not available — " +
-            "runtime is missing the P7 PR 5 restore surface.",
-        ),
-        { code: "restore_not_available" as const },
-      );
-    }
-    const result = await native.restore(mapped);
+    const restore = requireNativeCapability(self._nativeCollection().restore, {
+      code: "RESTORE_NOT_AVAILABLE",
+      message:
+        "@zeroship/db: env.db.<collection>.restore not available — " +
+        "runtime is missing the P7 PR 5 restore surface.",
+    });
+    const result = await restore(mapped);
     if (result === null) return null;
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
   });
@@ -654,19 +643,16 @@ export function restoreManyCollection<S, N extends string, AllSchemas extends Re
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const native = self._nativeCollection() as ZeroshipCollection & {
-      restoreMany?: (f: ZeroshipDbFilter) => Promise<number>;
-    };
-    if (typeof native.restoreMany !== "function") {
-      throw Object.assign(
-        new Error(
+    const restoreMany = requireNativeCapability(
+      self._nativeCollection().restoreMany,
+      {
+        code: "RESTORE_NOT_AVAILABLE",
+        message:
           "@zeroship/db: env.db.<collection>.restoreMany not available — " +
-            "runtime is missing the P7 PR 5 restore surface.",
-        ),
-        { code: "restore_not_available" as const },
-      );
-    }
-    const n = await native.restoreMany(mapped);
+          "runtime is missing the P7 PR 5 restore surface.",
+      },
+    );
+    const n = await restoreMany(mapped);
     return { restoredCount: n };
   });
 }
@@ -702,7 +688,7 @@ export function distinctCollection<S, N extends string, AllSchemas extends Recor
         new Error(
           `distinct("${field}"): encrypted columns are not distinct-able (would leak ciphertext frequencies).`,
         ),
-        { code: "distinct_on_encrypted_field_unsupported" as const },
+        { code: "DISTINCT_ON_ENCRYPTED_FIELD_UNSUPPORTED" as const },
       );
     }
   }

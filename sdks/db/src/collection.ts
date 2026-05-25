@@ -5,6 +5,11 @@
  */
 import type { IdLoader } from "./loader.js";
 import {
+  requireNativeCollection,
+  type NativeCollection,
+  type NativeDb,
+} from "./native.js";
+import {
   mapNativeError,
   OptimisticLockError,
   ValidationError,
@@ -70,16 +75,11 @@ export { validateArrayPushOps };
 export { __zeroshipDbResetIndexWarnings, __zeroshipDbWarnedShapesSize };
 
 /** The native driver interface from @zeroship/types. */
-export type NativeDb = ZeroshipDb;
-
-/** The native Collection wrapper from @zeroship/types. */
-export type NativeCollection = ZeroshipCollection;
-
 /**
  * Converts a caught value to an Error for inclusion in a Result.
  * ValidationError instances are returned as-is (they are already well-typed).
  * All other errors are passed through mapNativeError so that, e.g., unique
- * constraint violations preserve the native string code `unique_violation`.
+ * constraint violations preserve the native string code `UNIQUE_VIOLATION`.
  */
 function toResultError(e: unknown): Error {
   let out: Error;
@@ -162,7 +162,7 @@ export class Collection<
   /**
    * Active-transaction depth. `db.transaction()` wraps `tx.x.*` calls
    * with an increment/decrement so the loader is bypassed while a tx is
-   * live on this collection — see `_callWithTx` in db.ts. Mixing a
+   * live on this collection — see `tx-state.ts`. Mixing a
    * batched read with `TX_CONN`-routed reads in the same microtask
    * would otherwise blur the connection-routing boundary.
    */
@@ -261,19 +261,12 @@ export class Collection<
    */
   private _nativeCollection(): NativeCollection {
     if (this._nativeCol) return this._nativeCol;
-    const dbAny = this._native as unknown as {
-      collection?: (n: string) => NativeCollection;
-    };
-    if (typeof dbAny.collection !== "function") {
-      throw Object.assign(
-        new Error(
-          "@zeroship/db: env.db.collection(name) not available — " +
-            "runtime is missing the Collection v8_class surface.",
-        ),
-        { code: "native_collection_unavailable" as const },
-      );
-    }
-    this._nativeCol = dbAny.collection(this._name);
+    this._nativeCol = requireNativeCollection(this._native, this._name, {
+      code: "NATIVE_COLLECTION_UNAVAILABLE",
+      message:
+        "@zeroship/db: env.db.collection(name) not available — " +
+        "runtime is missing the Collection v8_class surface.",
+    });
     return this._nativeCol;
   }
 

@@ -11,7 +11,7 @@
  *   6. Multiple parallel `db.live` calls don't interfere with each
  *      other (stack-discipline tracker).
  *   7. Calling `db.live` inside `db.transaction(...)` rejects with
- *      `code = "live_in_transaction"`.
+ *      `code = "LIVE_IN_TRANSACTION"`.
  *   8. Explicit `{tables: [...]}` bypasses auto-detection.
  */
 import { test, describe } from "node:test";
@@ -83,7 +83,7 @@ function makeMockNative() {
     // P9 PR 3: native `transaction(callback)` orchestrator stub. The
     // bootstrap wrapper bumps `_txDepth` before invoking this, so the
     // callback (run synchronously here) sees the in-tx state that makes
-    // `db.live(...)` throw `live_in_transaction`.
+    // `db.live(...)` throw `LIVE_IN_TRANSACTION`.
     transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(name: string) {
       return {
@@ -283,7 +283,7 @@ describe("db.live — reactive query layer", () => {
       return null;
     });
     assert.ok(caught instanceof Error);
-    assert.equal((caught as { code?: string }).code, "live_in_transaction");
+    assert.equal((caught as { code?: string }).code, "LIVE_IN_TRANSACTION");
     assert.ok(error instanceof Error);
   });
 

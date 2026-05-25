@@ -10,7 +10,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 // Import directly from the schema / types modules so the test bundle
-// does not transitively pull in `db.ts`, which imports `env` from the
+// does not transitively pull in `db-types.ts`, which imports `env` from the
 // runtime-supplied "zeroship" module (unavailable in node test env).
 import { validateRefTargets } from "@zeroship/bootstrap/install-schema";
 // Import t and schema through the package entry (the compiled dist)
@@ -31,7 +31,7 @@ describe("B2 validateRefTargets — runtime ref check", () => {
     });
   });
 
-  test("throws ref_target_not_found when target collection is missing", () => {
+  test("throws REF_TARGET_NOT_FOUND when target collection is missing", () => {
     try {
       validateRefTargets({
         posts: {
@@ -43,7 +43,7 @@ describe("B2 validateRefTargets — runtime ref check", () => {
       assert.fail("validateRefTargets should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string; collection?: string; field?: string; target?: string };
-      assert.equal(err.code, "ref_target_not_found");
+      assert.equal(err.code, "REF_TARGET_NOT_FOUND");
       assert.equal(err.collection, "posts");
       assert.equal(err.field, "authorId");
       assert.equal(err.target, "nonexistent");
@@ -91,7 +91,7 @@ describe("B2 validateRefTargets — runtime ref check", () => {
       assert.fail("validateRefTargets should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string; target?: string };
-      assert.equal(err.code, "ref_target_not_found");
+      assert.equal(err.code, "REF_TARGET_NOT_FOUND");
       assert.equal(err.target, "ghosts");
     }
   });

@@ -9,7 +9,7 @@
  *   `{ type: "date", timestampAuto: "now_on_update" }`.
  * - `t.actor()` — emits `{ type: "actor", actorNullable: true }`.
  * - `normalizeSchema` refuses creator-declared system-field names with
- *   `reserved_system_field_name` (mirrors the Rust-side reservation).
+ *   `RESERVED_SYSTEM_FIELD_NAME` (mirrors the Rust-side reservation).
  * - Type-level: `Row<S>` automatically includes the seven system fields.
  *
  * No CREATE TABLE / CRUD wiring is exercised — those land in PR 2/3+.
@@ -39,7 +39,7 @@ describe("P7 PR 1 — t.id() builder", () => {
     assert.throws(
       () => t.id(""),
       (e: unknown) =>
-        (e as { code?: string })?.code === "id_invalid_prefix",
+        (e as { code?: string })?.code === "ID_INVALID_PREFIX",
     );
   });
 
@@ -47,7 +47,7 @@ describe("P7 PR 1 — t.id() builder", () => {
     assert.throws(
       () => t.id("Post-Type"),
       (e: unknown) =>
-        (e as { code?: string })?.code === "id_invalid_prefix",
+        (e as { code?: string })?.code === "ID_INVALID_PREFIX",
     );
   });
 });
@@ -75,7 +75,7 @@ describe("P7 PR 1 — t.timestamp() auto-population modifiers", () => {
     assert.throws(
       () => t.string().auto_now(),
       (e: unknown) =>
-        (e as { code?: string })?.code === "auto_now_on_non_timestamp",
+        (e as { code?: string })?.code === "AUTO_NOW_ON_NON_TIMESTAMP",
     );
   });
 
@@ -83,7 +83,7 @@ describe("P7 PR 1 — t.timestamp() auto-population modifiers", () => {
     assert.throws(
       () => t.number().auto_now_on_update(),
       (e: unknown) =>
-        (e as { code?: string })?.code === "auto_now_on_non_timestamp",
+        (e as { code?: string })?.code === "AUTO_NOW_ON_NON_TIMESTAMP",
     );
   });
 });
@@ -119,14 +119,14 @@ describe("P7 PR 1 — reserved-name validator (SDK side)", () => {
   ];
 
   for (const name of SYSTEM_FIELDS) {
-    test(`schema declaration with "${name}" throws reserved_system_field_name`, () => {
+    test(`schema declaration with "${name}" throws RESERVED_SYSTEM_FIELD_NAME`, () => {
       assert.throws(
         () => normalizeSchema({ [name]: t.string() }),
         (e: unknown) => {
           const code = (e as { code?: string })?.code;
           const msg = (e as { message?: string })?.message ?? "";
           return (
-            code === "reserved_system_field_name" &&
+            code === "RESERVED_SYSTEM_FIELD_NAME" &&
             msg.includes(name) &&
             msg.includes("reserved")
           );

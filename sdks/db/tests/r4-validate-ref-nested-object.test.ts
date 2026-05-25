@@ -26,7 +26,7 @@ describe("R4 MINOR-3 — validateRefTargets recursion into t.object()", () => {
       assert.fail("validateRefTargets should have caught the nested ref");
     } catch (e) {
       const err = e as Error & { code?: string; collection?: string; field?: string; target?: string };
-      assert.equal(err.code, "ref_target_not_found");
+      assert.equal(err.code, "REF_TARGET_NOT_FOUND");
       assert.equal(err.target, "ghost");
       assert.equal(err.collection, "posts");
     }
@@ -57,7 +57,7 @@ describe("R4 MINOR-3 — validateRefTargets recursion into t.object()", () => {
       assert.fail("validateRefTargets should have caught the deeply-nested ref");
     } catch (e) {
       const err = e as Error & { code?: string; target?: string };
-      assert.equal(err.code, "ref_target_not_found");
+      assert.equal(err.code, "REF_TARGET_NOT_FOUND");
       assert.equal(err.target, "ghost");
     }
   });

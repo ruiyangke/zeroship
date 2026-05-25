@@ -118,7 +118,7 @@ export class IdLoader<R extends { id: string }> {
               "transaction opened before flush. await the get() before " +
               "db.transaction(...) to avoid this race.",
             ),
-            { code: "loader_tx_race" as const },
+            { code: "LOADER_TX_RACE" as const },
           ),
         );
       } else {
