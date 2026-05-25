@@ -305,8 +305,8 @@ ORDER BY created_at DESC LIMIT 100;
 - `docs/reference/db.md` — Masking section (schema declaration,
   the eight mask kinds, the six classifications, `MaskedValue<T>`
   shape).
-- `docs/proposals/sensitive-field-masking.md` — full design doc
+- `docs/archive/sensitive-field-masking.md` — full design doc
   (the "why" + the "why not the alternatives" + every open
-  question).
-- `docs/proposals/db-system-design.md` — the parent design doc
-  carries an amendment block dated 2026-05-24 with the PR list.
+  question); shipped and archived.
+- `docs/archive/db-system-design.md` — the parent design doc
+  carries an amendment block dated 2026-05-24 with the PR list; shipped and archived.

@@ -1173,7 +1173,7 @@ const { data: restored } = await db.posts.restore(post.id);
 await db.posts.purge(post.id);
 ```
 
-The full design lives in `docs/proposals/platform-system-fields.md`.
+The full design lives in `docs/archive/platform-system-fields.md` (shipped; archived).
 
 ## Masking
 
@@ -1181,7 +1181,7 @@ The full design lives in `docs/proposals/platform-system-fields.md`.
 sibling concerns and compose: an `t.encrypted(...)` column without
 an explicit `.mask(...)` declaration is treated as `.mask({ kind:
 "full", classification: "pii" })` by default. The full design lives
-in `docs/proposals/sensitive-field-masking.md`; the migration
+in `docs/archive/sensitive-field-masking.md` (shipped; archived); the migration
 walkthrough is `docs/reference/migration/p5-to-masked-decrypt.md`.
 
 ### Mental model
