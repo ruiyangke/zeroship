@@ -1381,18 +1381,12 @@ async fn bootstrap_initial_hmac_key(pool: &Pool) -> Result<bool, DbError> {
 /// anchors in `pg_roles` and `\du` output.
 ///
 /// `app_id` is a non-creator-controllable UUIDv7 base62 typed_id
-/// validated to `[A-Za-z0-9_-]`; we additionally lowercase to mirror the
-/// `replication::sanitise_app_id` normalisation so the role name resolves
-/// identically regardless of the caller's casing. Hyphens are mapped to
-/// underscores because an unquoted PG identifier cannot contain `-` and
-/// quoting every `SET ROLE` is noisier than a stable transform.
+/// validated to `[A-Za-z0-9_-]`. Preserve the raw identifier so two
+/// distinct app ids cannot collapse onto the same role name; every SQL
+/// call site double-quotes the result, so `-` and uppercase letters are
+/// safe here without a lossy transform.
 pub fn per_app_role_name(app_id: &str) -> String {
-    let normalised: String = app_id
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| if c == '-' { '_' } else { c })
-        .collect();
-    format!("app_{normalised}_role")
+    format!("app_{app_id}_role")
 }
 
 /// `SET LOCAL ROLE "app_<id>_role"` — used INSIDE a transaction so the
@@ -1553,11 +1547,17 @@ mod tests {
     fn per_app_role_name_uses_app_id_role_convention() {
         // Convention pinned by the `APP_ROLE_TEMPLATE` docstring.
         assert_eq!(per_app_role_name("app_demo"), "app_app_demo_role");
-        // Hyphens (legal in typed_id base62? no — but defensive) map to
-        // underscores so the unquoted-identifier transform is stable.
-        assert_eq!(per_app_role_name("app-abc"), "app_app_abc_role");
-        // Uppercase normalised to lowercase (mirrors sanitise_app_id).
-        assert_eq!(per_app_role_name("App_X"), "app_app_x_role");
+        assert_eq!(per_app_role_name("app-abc"), "app_app-abc_role");
+        assert_eq!(per_app_role_name("App_X"), "app_App_X_role");
+    }
+
+    #[test]
+    fn per_app_role_name_does_not_collapse_distinct_app_ids() {
+        assert_ne!(
+            per_app_role_name("app-demo"),
+            per_app_role_name("app_demo"),
+            "hyphen and underscore app ids must map to distinct quoted PG roles"
+        );
     }
 
     #[test]
