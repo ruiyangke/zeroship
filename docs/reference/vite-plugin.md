@@ -1,84 +1,102 @@
-# `@zeroship/vite-plugin` — server-module discovery
+# `@zeroship/vite-plugin`
 
-**Status:** Reference
+Reference for the public plugin exported from [`sdks/vite-plugin/src/index.ts`](../../sdks/vite-plugin/src/index.ts).
 
-Plugin tracker for the build/transform side of zeroship apps. This page covers the rules for what becomes an RPC endpoint vs. what stays private to the server bundle. Other build-system pieces (Vite Environment API, the synthetic SSR entry, asset emission) live in `docs/reference/vite-environment-api.md` and `docs/proposals/rpc.md`.
+## What it owns
 
-## What gets published as an RPC
+- Node-compat shims and `zeroship` module resolution
+- Server-procedure discovery for the SSR bundle
+- The synthetic server entry `virtual:zeroship/_server-entry`
+- The zeroship dev runtime and production `.zship` build
 
-A file's exports become network-reachable RPC procedures (mounted at `POST /_zs/v1/<wireId>`) iff **both** of the following hold:
+## Usage
 
-1. The file opens with the file-level `"use server"` ECMAScript directive (i.e. the first non-comment statement is the string-literal expression `"use server"`).
-2. The export's initializer is a call to one of the wrapper markers — `procedure`, `query`, `mutation`, `stream`, or `subscription` — imported from `@zeroship/server` (or `@zeroship/rpc`).
+```ts
+import { defineConfig } from "vite";
+import { zeroship } from "@zeroship/vite-plugin";
 
-Everything else stays in the server bundle as a private helper. Plain `export function`, plain `export const x = ...`, types, constants — none reach the wire. Re-exports (`export * from "./_helpers"`) don't auto-publish either, because the helpers' names don't appear as wrapper calls in the re-exporting module.
+export default defineConfig({
+  plugins: [zeroship({ mode: "full" })],
+});
+```
+
+## Live options
+
+| Option | Default | Current behavior |
+| --- | --- | --- |
+| `serverEntry` | auto-detected | Overrides server-entry discovery for dev and build. |
+| `devServerPort` | `3001` | Port for the zeroship dev runtime. |
+| `mode` | `"full"` | `"full"` builds client + SSR worker; `"static"` skips the SSR sub-build and omits `manifest.worker`. |
+
+## Exposed but not currently effectful
+
+These fields exist on `ZeroshipOptions`, but the current `zeroship()` pipeline does not use them to change emitted behavior:
+
+| Option | Current reality |
+| --- | --- |
+| `rpcEndpoint` | The transform receives it, but generated client stubs still call `/_zs/v1/<wireId>`. Dev middleware also accepts legacy `/_rpc` and `/rpc` routes for migration parity. |
+| `rpc.strict` | `resolveRpcStrict()` and `server-graph.ts` exist, but the build path in [`sdks/vite-plugin/src/build.ts`](../../sdks/vite-plugin/src/build.ts) still emits manifest metadata from wrapper discovery only. |
+
+## Procedure discovery in the active build path
+
+Today, a procedure is recorded for the manifest only when all of the following are true:
+
+1. The file has a top-level `"use server"` directive.
+2. The exported binding is initialized by a recognized wrapper call.
+3. The wrapper is a named import from `@zeroship/server` or `@zeroship/rpc`.
+
+Recognized wrappers: `procedure`, `query`, `mutation`, `action`, `stream`, `subscription`.
+
+Namespace imports and default imports are ignored by the static matcher. Plain exports stay private to the server bundle.
 
 ```ts
 "use server";
 
-import { procedure, query, mutation, stream, z } from "@zeroship/server";
+import { query, mutation } from "@zeroship/server";
 
-// ── RPC procedures (network-reachable) ─────────────────────────────
-export const list = query(async () => db.todos.find({}));
-
-export const create = mutation(
-  async (input: { text: string }) => db.todos.insert(input),
-  {
-    id: "todo.create",                 // explicit wireId (required for prod)
-    input: z.object({ text: z.string() }),
-  },
-);
-
-export const watch = stream(async function* () {
-  for await (const ev of db.todos.changes()) yield ev;
+export const listTodos = query(async () => []);
+export const addTodo = mutation(async (input) => input, {
+  id: "todos.add",
 });
 
-// ── Private helpers (server-only, never reach the wire) ────────────
-function shapeBody(t: string) { return t.trim(); }
-export async function buildSummary(rows: unknown[]) { /* ... */ }
-export const PI = 3.14;
+export async function helper() {
+  return [];
+}
 ```
 
-## Why this shape (and the breaking change)
+In that file, `listTodos` and `addTodo` become RPC procedures. `helper()` does not.
 
-Before ISS-02, server modules were discovered purely by path: `src/server.{ts,tsx,js,jsx}` or anything under `src/server/**`. Inside such a file, **every** export became an RPC. This made `export * from "./_helpers"` silently publish every helper as a public endpoint with no warning. See ISS-02 in `ISSUES.md` for the full footgun analysis.
+The old `src/server.{ts,tsx,js,jsx}` and `src/server/**` path convention is no longer sufficient by itself. Legacy paths without the directive only trigger a migration warning.
 
-The new shape has two opt-in points (file directive + wrapper marker), so the wire surface is decidable from the AST alone: the build refuses to register anything the source didn't explicitly mark.
+## Config, kind, and `wireId`
 
-## Wrapper variants
+- The wrapper's second argument and the legacy `fn.config = { ... }` assignment are both read.
+- `fn.config.id` wins; otherwise the default `wireId` is the bare export name.
+- Production manifest emission rejects procedures that still rely on the default name. Add an explicit `id` before deploy.
+- Duplicate `wireId`s fail the build.
 
-| Wrapper | Implies `kind` | Notes |
-| --- | --- | --- |
-| `procedure(handler, config?)` | (none — see below) | Generic marker. Kind comes from the name-based heuristic (`get*` / `list*` / `find*` / `search*` / `count*` / `read*` / `fetch*` → `query`, async generator → `stream`, default → `mutation`). |
-| `query(handler, config?)` | `query` | Read-only procedures. |
-| `mutation(handler, config?)` | `mutation` | Side-effecting procedures. |
-| `stream(handler, config?)` | `stream` | Async-generator procedures. The handler must be a generator (`async function*` or any async iterable factory). |
-| `subscription(handler, config?)` | `subscription` | Long-lived event stream. Same wire shape as `stream` until the subscription wire fully ships. |
+Kind resolution is:
 
-The optional `config` arg accepts the same fields as the legacy `<fn>.config = { ... }` assignment (`id`, `input`, `output`, `auth`, `rateLimit`, `idempotent`, etc.). The legacy assignment shape still works alongside wrappers.
+- explicit wrapper kind for `query`, `mutation`, `action`, `stream`, `subscription`
+- name-based inference for `procedure()`:
+  `get*`, `list*`, `find*`, `search*`, `count*`, `read*`, `fetch*` => `query`
+- async generators => `stream`
+- everything else => `mutation`
 
-## Migrating an existing app
+`lazy: true` is supported in either the wrapper config or `fn.config`. When present, the synthetic server entry emits a dynamic `import()` wrapper instead of an eager namespace import. Non-literal `lazy` values warn and stay eager.
 
-For apps that used the old `src/server.{ts,...}` / `src/server/**` path convention:
+## Synthetic server entry
 
-1. Add `"use server";` as the first line of every server file (the directive is what opts the file in now).
-2. Wrap each procedure in `procedure()` / `query()` / `mutation()` / `stream()` / `subscription()`. The simplest mechanical migration is `export async function name(args) { ... }` → `export const name = procedure(async (args) => { ... });` — name-based kind inference still works for queries.
-3. Anything you DON'T wrap stays in the server bundle but never reaches the wire — this is the win.
+[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts) emits `virtual:zeroship/_server-entry`. Its job is normalization, not dispatch:
 
-Files at the legacy server-module path that lack the directive emit a one-time migration warning per file (so HMR doesn't spam) pointing at this page.
+- `default.schema` is passed through
+- `default.fetch` is passed through
+- `default.rpc` is a plain object keyed by `wireId`
 
-## Wrapper resolution rules
-
-The transform resolves wrapper identity via a per-file static symbol table:
-
-- Only **named imports** from `@zeroship/server` or `@zeroship/rpc` count: `import { procedure, query as q } from "@zeroship/server"`. Aliased imports work (`q(...)`).
-- **Namespace imports** (`import * as zs`) and **default imports** are not recognized — wrappers must be bare-Identifier callees so the symbol table is decidable from the AST alone.
-- Imports from any other package (even a re-export of `@zeroship/server`) are NOT recognized. This keeps the rule simple and tooling-friendly.
-
-If you need a custom wrapper helper (e.g., one that records an audit log before delegating to `procedure`), make it return a `procedure(...)` call: the inner `procedure(...)` is what the transform sees.
+The runtime-side dispatcher lives in [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md) and [`zs-standard.md`](zs-standard.md), not in the generated entry.
 
 ## See also
 
-- `docs/proposals/rpc.md` — the complete RPC design (wire shape, wireId derivation, manifest emission)
-- `docs/reference/vite-environment-api.md` — Vite's Environment API and the V8 dev runtime
-- `ISSUES.md` — historical ISS-02 entry (closed) for the path-convention footgun
+- [`vite-environment-api.md`](vite-environment-api.md)
+- [`zs-standard.md`](zs-standard.md)
+- [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md)
