@@ -33,10 +33,10 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] db-system-design.md (db; reference/db.md)
 - [x] platform-system-fields.md (db system fields)
 - [x] sensitive-field-masking.md (db masking)
-- [ ] p0-implementation-plan.md (DB P0)
-- [ ] p1-sqlite-implementation-plan.md (DB P1)
-- [ ] p4-search-implementation-plan.md (DB P4)
-- [ ] p5-encryption-backup-implementation-plan.md (DB P5)
+- [x] p0-implementation-plan.md (DB P0)
+- [x] p1-sqlite-implementation-plan.md (DB P1)
+- [x] p4-search-implementation-plan.md (DB P4)
+- [x] p5-encryption-backup-implementation-plan.md (DB P5)
 - [ ] runtime-macros-refactor.md (runtime-macros; reference/plugin-system.md)
 - [ ] zs-standard-and-vite-v2.md (reference/zs-standard.md + vite-plugin.md exist)
 
@@ -73,3 +73,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - sandbox-snapshot-restore.md + nomad-driver-ch.md — archived + runbook ops promotions (MemoryMaxMB, driver-behavior notes)
 
 - 4 DB proposals archived; db.md promotions: strictness/t.ref/collection-names landed; System Fields + Encrypted/Masked CLOBBERED by concurrent write, re-promoting serially
+
+- p0/p1/p4/p5 implementation plans — archived (no promotion needed; db.md covers)
