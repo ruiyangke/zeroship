@@ -27,8 +27,11 @@
 //!   the flattened message string for callers still on the `Result<_,
 //!   String>` rail.
 
+use base64::Engine as _;
 use serde_json::Value;
 use zeroship_runtime::state::SharedState;
+
+use crate::backend::sqlite::session::{TypedCell, TypedRows};
 
 // ---------------------------------------------------------------------------
 // Argument decoders
@@ -340,6 +343,29 @@ pub(crate) fn rows_to_json_value(rows: &[compio_postgres::Row]) -> Vec<Value> {
     rows.iter().map(row_to_json).collect()
 }
 
+/// Convert SQLite typed rows into the same JSON shape the PG row
+/// decoder emits.
+///
+/// BLOBs surface as base64 strings. The CRUD read-side normalizer
+/// consults the declared schema after this step; this helper's job is
+/// only to preserve bytes losslessly across the JSON boundary.
+pub(crate) fn typed_rows_to_json_value(rows: &TypedRows) -> Vec<Value> {
+    rows.rows
+        .iter()
+        .map(|row| {
+            let mut obj = serde_json::Map::with_capacity(rows.columns.len());
+            for (idx, name) in rows.columns.iter().enumerate() {
+                let value = row
+                    .get(idx)
+                    .map(typed_cell_to_json)
+                    .unwrap_or(Value::Null);
+                obj.insert(name.clone(), value);
+            }
+            Value::Object(obj)
+        })
+        .collect()
+}
+
 /// Convert a single Row to a JSON object.
 ///
 /// Uses column OIDs to determine the appropriate JSON type:
@@ -373,6 +399,14 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
     // Try to get the value — if it's NULL, return null
     // OIDs from postgres_types::Type constants
     match oid {
+        // BYTEA = 17 — canonical wire shape is base64 text.
+        17 => match row.raw_value(idx) {
+            Some(bytes) => {
+                let raw = decode_pg_bytea_raw(bytes);
+                Value::String(base64::engine::general_purpose::STANDARD.encode(raw))
+            }
+            None => Value::Null,
+        },
         // BOOL = 16
         16 => match row.try_get::<_, bool>(idx) {
             Ok(v) => Value::Bool(v),
@@ -501,5 +535,43 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
             Ok(v) => Value::String(v),
             Err(_) => Value::Null,
         },
+    }
+}
+
+fn typed_cell_to_json(cell: &TypedCell) -> Value {
+    match cell {
+        TypedCell::Null => Value::Null,
+        TypedCell::Integer(n) => Value::Number(serde_json::Number::from(*n)),
+        TypedCell::Real(f) => serde_json::Number::from_f64(*f)
+            .map_or(Value::Null, Value::Number),
+        TypedCell::Text(s) => Value::String(s.clone()),
+        TypedCell::Blob(bytes) => Value::String(
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ),
+    }
+}
+
+fn decode_pg_bytea_raw(bytes: &[u8]) -> Vec<u8> {
+    if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'x' {
+        let hex = &bytes[2..];
+        if hex.len() % 2 == 0 && hex.iter().all(u8::is_ascii_hexdigit) {
+            let mut out = Vec::with_capacity(hex.len() / 2);
+            for pair in hex.chunks_exact(2) {
+                let hi = from_hex_nibble(pair[0]).unwrap_or(0);
+                let lo = from_hex_nibble(pair[1]).unwrap_or(0);
+                out.push((hi << 4) | lo);
+            }
+            return out;
+        }
+    }
+    bytes.to_vec()
+}
+
+fn from_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }

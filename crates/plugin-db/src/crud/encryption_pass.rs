@@ -284,18 +284,29 @@ where
         if value.is_null() {
             continue;
         }
-        // BYTEA columns surface from compio-postgres' text protocol as
-        // a `\x`-prefixed hex string. Convert that to raw bytes.
-        let Some(hex_str) = value.as_str() else {
+        // Read rows carry encrypted blobs as base64 on both backends.
+        // For back-compat with older PG callers we also accept the
+        // legacy `\x...` text-protocol BYTEA envelope.
+        let Some(wire_str) = value.as_str() else {
             // The row carries something other than the expected BYTEA
             // text shape — fail loud so a regression in the introspect /
             // bind layer surfaces immediately rather than producing
             // garbled plaintext.
             return Err(DbError::internal(format!(
-                "decrypt_row_on_read: column '{col}' expected text-shaped BYTEA, got {value:?}"
+                "decrypt_row_on_read: column '{col}' expected encrypted blob text, got {value:?}"
             )));
         };
-        let bytes = hex_to_bytes(hex_str)?;
+        let bytes = if wire_str.starts_with("\\x") {
+            hex_to_bytes(wire_str)?
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(wire_str)
+                .map_err(|e| {
+                    DbError::internal(format!(
+                        "decrypt_row_on_read: column '{col}' is not valid base64: {e}"
+                    ))
+                })?
+        };
         to_decrypt.push((col.clone(), mode, key_id, wraps, bytes));
     }
 

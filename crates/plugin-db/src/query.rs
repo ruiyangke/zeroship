@@ -2939,18 +2939,18 @@ pub fn build_update_one_with_system_fields(
 
     let where_clause = build_where(filter, &mut params)?;
 
-    // LIMIT 1 for updateOne — PG-flavoured `ctid` subquery. The SQLite
-    // arm's equivalent narrowing is a future PR; the dialect flag only
-    // selects the encrypted-column bind shape inside the SET clauses
-    // for now.
+    let inner_where = if where_clause.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {where_clause}")
+    };
+    let target_col = match dialect {
+        SqlDialect::Postgres => "ctid",
+        SqlDialect::Sqlite => "rowid",
+    };
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE ctid = (SELECT ctid FROM {schema}.{table}{} LIMIT 1) RETURNING *",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
         set_clauses.join(", "),
-        if where_clause.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {where_clause}")
-        }
     );
 
     Ok(BuiltQuery { sql, params })
@@ -3175,6 +3175,16 @@ pub fn build_delete_one(
     collection: &str,
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
+    build_delete_one_with_dialect(app_id, collection, filter, SqlDialect::Postgres)
+}
+
+/// Dialect-aware single-row DELETE builder.
+pub fn build_delete_one_with_dialect(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -3184,9 +3194,12 @@ pub fn build_delete_one(
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where(filter, &mut params)?;
 
-    // LIMIT 1 via subquery with ctid
+    let target_col = match dialect {
+        SqlDialect::Postgres => "ctid",
+        SqlDialect::Sqlite => "rowid",
+    };
     let sql = format!(
-        "DELETE FROM {schema}.{table} WHERE ctid = (SELECT ctid FROM {schema}.{table}{} LIMIT 1) RETURNING *",
+        "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1) RETURNING *",
         if where_clause.is_empty() {
             String::new()
         } else {
@@ -3338,8 +3351,12 @@ pub fn build_soft_delete_one_with_system_fields(
         format!(" WHERE {where_clause} AND \"deleted_at\" IS NULL")
     };
 
+    let target_col = match dialect {
+        SqlDialect::Postgres => "ctid",
+        SqlDialect::Sqlite => "rowid",
+    };
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE ctid = (SELECT ctid FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
         set_clauses.join(", "),
     );
 
@@ -3413,8 +3430,12 @@ pub fn build_restore_one_with_system_fields(
         format!(" WHERE {where_clause} AND \"deleted_at\" IS NOT NULL")
     };
 
+    let target_col = match dialect {
+        SqlDialect::Postgres => "ctid",
+        SqlDialect::Sqlite => "rowid",
+    };
     let sql = format!(
-        "UPDATE {schema}.{table} SET {} WHERE ctid = (SELECT ctid FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
+        "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
         set_clauses.join(", "),
     );
 
@@ -4380,6 +4401,23 @@ pub fn build_upsert(
     collection: &str,
     doc: &Value,
     conflict_fields: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_upsert_with_dialect(
+        app_id,
+        collection,
+        doc,
+        conflict_fields,
+        SqlDialect::Postgres,
+    )
+}
+
+/// Dialect-aware UPSERT builder.
+pub fn build_upsert_with_dialect(
+    app_id: &str,
+    collection: &str,
+    doc: &Value,
+    conflict_fields: &Value,
+    _dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -8900,5 +8938,46 @@ mod tests {
         let q_legacy = build_count("app1", "posts", &filter).unwrap();
         let q_new = build_count_with_soft_delete("app1", "posts", &filter, false).unwrap();
         assert_eq!(q_legacy.sql, q_new.sql);
+    }
+
+    #[test]
+    fn build_update_one_sqlite_uses_rowid_narrowing() {
+        let filter = serde_json::json!({ "id": "post_1" });
+        let update = serde_json::json!({ "title": "next" });
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+            &SystemFieldAutoBump::default(),
+        )
+        .unwrap();
+        assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
+        assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+    }
+
+    #[test]
+    fn build_delete_one_sqlite_uses_rowid_narrowing() {
+        let filter = serde_json::json!({ "id": "post_1" });
+        let q = build_delete_one_with_dialect("app1", "posts", &filter, SqlDialect::Sqlite)
+            .unwrap();
+        assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
+        assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
+    }
+
+    #[test]
+    fn build_soft_delete_one_sqlite_uses_rowid_narrowing() {
+        let filter = serde_json::json!({ "id": "post_1" });
+        let q = build_soft_delete_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            SqlDialect::Sqlite,
+            &SystemFieldAutoBump::default(),
+        )
+        .unwrap();
+        assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
+        assert!(!q.sql.contains("WHERE ctid = (SELECT ctid FROM"));
     }
 }

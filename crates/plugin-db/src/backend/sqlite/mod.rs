@@ -219,6 +219,15 @@ impl SqliteBackend {
         self.session.exec_batch(sql).await
     }
 
+    pub(crate) async fn query_json(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        let typed = self.session.query_typed(sql, params).await?;
+        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
+    }
+
     /// Production constructor used by the runtime URL-scheme
     /// dispatcher.
     ///

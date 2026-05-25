@@ -26,6 +26,7 @@
 
 use std::future::Future;
 
+use base64::Engine as _;
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
@@ -162,6 +163,13 @@ where
     }
 }
 
+fn current_sql_dialect() -> query::SqlDialect {
+    match crate::context::with(|c| c.backend()) {
+        Some(crate::backend::BackendHandle::Sqlite(_)) => query::SqlDialect::Sqlite,
+        _ => query::SqlDialect::Postgres,
+    }
+}
+
 /// Lower a `Vec<Value>` result to a single JSON value: the first row,
 /// or `null` when the result was empty. Used by `insert` / `update` /
 /// `delete` / `upsert`, all of which the SDK expects to resolve to a
@@ -226,6 +234,172 @@ fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
     } else {
         ResolveValue::Json(json)
     }
+}
+
+fn normalize_rows_on_read(
+    app_id: &str,
+    collection: &str,
+    mut rows: Vec<Value>,
+) -> Result<Vec<Value>, DbError> {
+    let schema = crate::context::with(|c| c.schema_for(app_id, collection));
+    for row in rows.iter_mut() {
+        normalize_row_on_read(schema.as_ref(), row)?;
+    }
+    Ok(rows)
+}
+
+fn normalize_row_on_read(schema: Option<&Value>, row: &mut Value) -> Result<(), DbError> {
+    let Some(obj) = row.as_object_mut() else {
+        return Ok(());
+    };
+    for (key, value) in obj.iter_mut() {
+        if matches!(key.as_str(), "created_at" | "updated_at" | "deleted_at") {
+            normalize_timestamp_value(value)?;
+            continue;
+        }
+
+        let Some(def) = schema
+            .and_then(Value::as_object)
+            .and_then(|schema_obj| schema_obj.get(key))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+
+        if def.get("encrypted").is_some() {
+            continue;
+        }
+
+        match def.get("type").and_then(Value::as_str) {
+            Some("boolean") => normalize_boolean_value(value),
+            Some("json") | Some("object") | Some("array") | Some("union") => {
+                normalize_json_value(value)
+            }
+            Some("bytes") => normalize_bytes_value(value)?,
+            Some("date") | Some("calendarDate") => normalize_timestamp_value(value)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn normalize_boolean_value(value: &mut Value) {
+    match value {
+        Value::Bool(_) | Value::Null => {}
+        Value::Number(n) => {
+            if n.as_i64() == Some(0) {
+                *value = Value::Bool(false);
+            } else if n.as_i64() == Some(1) {
+                *value = Value::Bool(true);
+            }
+        }
+        Value::String(s) => match s.as_str() {
+            "0" | "false" => *value = Value::Bool(false),
+            "1" | "true" => *value = Value::Bool(true),
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn normalize_json_value(value: &mut Value) {
+    if let Value::String(s) = value {
+        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+            *value = parsed;
+        }
+    }
+}
+
+fn normalize_bytes_value(value: &mut Value) -> Result<(), DbError> {
+    match value {
+        Value::Null | Value::String(_) => Ok(()),
+        Value::Array(arr) => {
+            let mut raw = Vec::with_capacity(arr.len());
+            for cell in arr.iter() {
+                let Some(n) = cell.as_u64() else {
+                    return Err(DbError::internal(format!(
+                        "normalize_row_on_read: bytes field expected byte array, got {cell:?}"
+                    )));
+                };
+                let byte = u8::try_from(n).map_err(|_| {
+                    DbError::internal(format!(
+                        "normalize_row_on_read: bytes field byte out of range: {n}"
+                    ))
+                })?;
+                raw.push(byte);
+            }
+            *value = Value::String(base64::engine::general_purpose::STANDARD.encode(raw));
+            Ok(())
+        }
+        other => Err(DbError::internal(format!(
+            "normalize_row_on_read: bytes field expected string/array/null, got {other:?}"
+        ))),
+    }
+}
+
+fn normalize_timestamp_value(value: &mut Value) -> Result<(), DbError> {
+    match value {
+        Value::Null | Value::Number(_) => Ok(()),
+        Value::String(s) => {
+            if let Some(ms) = parse_timestamp_millis(s) {
+                *value = Value::Number(serde_json::Number::from(ms));
+            }
+            Ok(())
+        }
+        other => Err(DbError::internal(format!(
+            "normalize_row_on_read: timestamp field expected string/number/null, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_timestamp_millis(s: &str) -> Option<i64> {
+    if let Some(ms) = crate::backend::sqlite::session_minter::parse_iso_to_millis(s) {
+        return Some(ms);
+    }
+
+    let b = s.as_bytes();
+    if !(b.len() == 19 || b.len() == 23) {
+        return None;
+    }
+    if b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b' '
+        || b[13] != b':'
+        || b[16] != b':'
+        || (b.len() == 23 && b[19] != b'.')
+    {
+        return None;
+    }
+
+    let year: i32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let month: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
+    let day: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
+    let hour: i64 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
+    let minute: i64 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
+    let second: i64 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
+    let millis: i64 = if b.len() == 23 {
+        std::str::from_utf8(&b[20..23]).ok()?.parse().ok()?
+    } else {
+        0
+    };
+
+    let days = days_from_civil(year, month, day)?;
+    let total_secs = days * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(total_secs * 1000 + millis)
+}
+
+fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { i64::from(y) - 1 } else { i64::from(y) };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let m = m as i64;
+    let d = d as i64;
+    let doy = ((153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1) as u64;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe as i64 - 719_468)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,7 +640,7 @@ pub(crate) fn dispatch_insert<'s>(
                 request_id,
             };
         }
-        let built = query::build_insert(&app, &coll, &doc);
+        let built = query::build_insert_with_dialect(&app, &coll, &doc, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
                 exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
@@ -475,6 +649,16 @@ pub(crate) fn dispatch_insert<'s>(
         };
         match result {
             Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
                 let rows = apply_encryption_on_read(&app, &coll, rows).await;
                 let rows = match rows {
                     Ok(rows) => rows,
@@ -541,7 +725,8 @@ pub(crate) fn dispatch_insert_many<'s>(
         actor_id.as_deref(),
     );
 
-    let built = query::build_insert_many(app_id, collection, &docs);
+    let built =
+        query::build_insert_many_with_dialect(app_id, collection, &docs, current_sql_dialect());
     let coll = collection.to_string();
     let app = app_id.to_string();
 
@@ -550,7 +735,9 @@ pub(crate) fn dispatch_insert_many<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         rows_as_json_array,
     )));
@@ -644,7 +831,7 @@ pub(crate) fn dispatch_update_one<'s>(
             &coll,
             &filter,
             &update,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         let bq = match built {
@@ -659,6 +846,16 @@ pub(crate) fn dispatch_update_one<'s>(
         };
         match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
                 // **P7 PR 4** — optimistic-concurrency check. When the
                 // creator supplied a `version: N` predicate AND the
                 // RETURNING set is empty, classify as a CAS failure
@@ -802,7 +999,7 @@ pub(crate) fn dispatch_update_many<'s>(
             &coll,
             &filter,
             &update,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         let bq = match built {
@@ -903,7 +1100,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             &app,
             &coll,
             &filter,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -914,19 +1111,30 @@ pub(crate) fn dispatch_delete_one<'s>(
                 // Tagged as Update because soft-delete IS an UPDATE
                 // setting `deleted_at`. Subscribers wanting to react
                 // to soft-deletes inspect `new_tuple.deleted_at`.
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+                let rows =
+                    exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update)
+                        .await?;
+                normalize_rows_on_read(&app, &coll, rows)
             },
             first_row_or_null,
         )));
     } else {
         system_fields_pass::warn_legacy_hard_delete(&app, &coll);
-        let built = query::build_delete_one(&app, &coll, &filter);
+        let built = query::build_delete_one_with_dialect(
+            &app,
+            &coll,
+            &filter,
+            current_sql_dialect(),
+        );
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
             resolver,
             request_id,
             built,
             move |bq| async move {
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
+                let rows =
+                    exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
+                        .await?;
+                normalize_rows_on_read(&app, &coll, rows)
             },
             first_row_or_null,
         )));
@@ -962,7 +1170,7 @@ pub(crate) fn dispatch_delete_many<'s>(
             &app,
             &coll,
             &filter,
-            query::SqlDialect::Postgres,
+            current_sql_dialect(),
             &autobump,
         );
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -1006,7 +1214,8 @@ pub(crate) fn dispatch_purge_one<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_delete_one(app_id, collection, &filter);
+    let built =
+        query::build_delete_one_with_dialect(app_id, collection, &filter, current_sql_dialect());
     let coll = collection.to_string();
     let app = app_id.to_string();
 
@@ -1015,7 +1224,10 @@ pub(crate) fn dispatch_purge_one<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
+                    .await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         first_row_or_null,
     )));
@@ -1087,7 +1299,7 @@ pub(crate) fn dispatch_restore_one<'s>(
         &app,
         &coll,
         &filter,
-        query::SqlDialect::Postgres,
+        current_sql_dialect(),
         &autobump,
     );
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -1095,7 +1307,9 @@ pub(crate) fn dispatch_restore_one<'s>(
         request_id,
         built,
         move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         first_row_or_null,
     )));
@@ -1138,7 +1352,7 @@ pub(crate) fn dispatch_restore_many<'s>(
         &app,
         &coll,
         &filter,
-        query::SqlDialect::Postgres,
+        current_sql_dialect(),
         &autobump,
     );
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -1195,6 +1409,8 @@ pub(crate) fn dispatch_aggregate<'s>(
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    let app = app_id.to_string();
+    let coll = collection.to_string();
     let built = query::build_aggregate_with_soft_delete(
         app_id,
         collection,
@@ -1206,7 +1422,10 @@ pub(crate) fn dispatch_aggregate<'s>(
         resolver,
         request_id,
         built,
-        exec_query,
+        move |bq| async move {
+            let rows = exec_query(bq).await?;
+            normalize_rows_on_read(&app, &coll, rows)
+        },
         rows_as_json_array,
     )));
 
@@ -1235,6 +1454,8 @@ pub(crate) fn dispatch_distinct<'s>(
         .unwrap_or(false);
     let filter_soft_deleted =
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let app = app_id.to_string();
+    let coll = collection.to_string();
     let built = query::build_distinct_with_soft_delete(
         app_id,
         collection,
@@ -1247,7 +1468,10 @@ pub(crate) fn dispatch_distinct<'s>(
         resolver,
         request_id,
         built,
-        exec_query,
+        move |bq| async move {
+            let rows = exec_query(bq).await?;
+            normalize_rows_on_read(&app, &coll, rows)
+        },
         |rows: Vec<Value>| {
             // Extract single-column values into a flat array. `rows`
             // is the pre-decoded result set — no JSON parse needed
@@ -1328,7 +1552,13 @@ pub(crate) fn dispatch_upsert<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_upsert(app_id, collection, &doc, &conflict_fields);
+    let built = query::build_upsert_with_dialect(
+        app_id,
+        collection,
+        &doc,
+        &conflict_fields,
+        current_sql_dialect(),
+    );
     let coll = collection.to_string();
     let app = app_id.to_string();
 
@@ -1341,7 +1571,9 @@ pub(crate) fn dispatch_upsert<'s>(
             // We tag as Update because the subscriber's reaction is the
             // same — re-fetch. The proposal's read-set narrowing (P8b)
             // will distinguish; P8a doesn't need to.
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
+            normalize_rows_on_read(&app, &coll, rows)
         },
         first_row_or_null,
     )));
@@ -1892,17 +2124,11 @@ async fn apply_encryption_on_update(
 /// Decrypt every encrypted column on each row of `rows`. Short-circuits
 /// when the schema has no encrypted columns OR when not registered.
 ///
-/// **PG arm** (`feature = "pg"`): rows arrive with BYTEA columns
-/// surfaced as `\x`-prefixed hex strings (compio-postgres' text
-/// protocol). `decrypt_row_on_read` parses the hex back to bytes.
-///
-/// **SQLite arm** (P5 PR 3.5, gated on `feature = "sqlite"`): rows
-/// produced by the SQLite-flavoured CRUD path carry BLOB columns
-/// already encoded as base64 [`Value::String`] (the
-/// `v8_bridge::typed_rows_to_json_value` adapter base64-encodes BLOBs
-/// for JSON transport). We decode the base64 ourselves before invoking
-/// `decrypt_row_on_read` so the existing helper's hex-decode branch
-/// only runs on the PG arm.
+/// Read rows are normalised before this pass runs, so encrypted-column
+/// values arrive in a lossless text envelope on both backends:
+/// Postgres `BYTEA` now decodes to base64, and SQLite BLOBs are
+/// base64-encoded by the typed-row adapter. The shared decrypt helper
+/// accepts either the legacy `\x...` PG text shape or base64.
 async fn apply_encryption_on_read(
     app_id: &str,
     collection: &str,
@@ -1926,15 +2152,6 @@ async fn apply_encryption_on_read(
         return Ok(rows);
     }
     if let Some(sq) = backend.as_encrypted_column_sqlite() {
-        // Convert each encrypted column's base64-wire shape (the
-        // SQLite CRUD path's BLOB → JSON transport encoding) back
-        // to the PG-style `\x`-hex shape `decrypt_row_on_read`
-        // already understands, so we don't fork the decryption
-        // helper. Then dispatch through the shared helper.
-        crate::crud::encryption_pass::rewrite_sqlite_encrypted_row_blobs_to_hex(
-            &schema,
-            &mut rows,
-        )?;
         for row in rows.iter_mut() {
             crate::crud::encryption_pass::decrypt_row_on_read(
                 sq, app_id, collection, &schema, row,
@@ -2074,4 +2291,56 @@ fn schema_has_masked_columns(schema: &Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_row_on_read_coerces_sqlite_wire_shapes() {
+        let schema = serde_json::json!({
+            "active": { "type": "boolean" },
+            "prefs": { "type": "object" },
+            "avatar": { "type": "bytes" },
+            "published_at": { "type": "date" }
+        });
+        let mut row = serde_json::json!({
+            "active": 1,
+            "prefs": "{\"theme\":\"dark\"}",
+            "avatar": [222, 173, 190, 239],
+            "published_at": "2026-05-24 12:34:56",
+            "created_at": "2026-05-24 12:34:56"
+        });
+
+        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
+
+        assert_eq!(row.get("active"), Some(&Value::Bool(true)));
+        assert_eq!(row.pointer("/prefs/theme"), Some(&Value::String("dark".to_string())));
+        assert_eq!(
+            row.get("avatar"),
+            Some(&Value::String(
+                base64::engine::general_purpose::STANDARD.encode([222, 173, 190, 239]),
+            )),
+        );
+        assert!(row.get("published_at").and_then(Value::as_i64).is_some());
+        assert!(row.get("created_at").and_then(Value::as_i64).is_some());
+    }
+
+    #[test]
+    fn normalize_row_on_read_skips_encrypted_columns() {
+        let schema = serde_json::json!({
+            "secret": {
+                "type": "bytes",
+                "encrypted": { "mode": "randomised", "wraps": "bytes" }
+            }
+        });
+        let mut row = serde_json::json!({
+            "secret": "c2VjcmV0"
+        });
+
+        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
+
+        assert_eq!(row.get("secret"), Some(&Value::String("c2VjcmV0".to_string())));
+    }
 }
