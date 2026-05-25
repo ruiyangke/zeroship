@@ -206,7 +206,8 @@ async fn exec_auto_begin(
     }
 
     // Open a dedicated connection (same pattern as the native
-    // `transaction(fn)` orchestrator's top-level BEGIN).
+    // `transaction(fn)` orchestrator's top-level BEGIN), branching on the
+    // active backend exactly like `transaction::exec_begin_or_savepoint`.
     //
     // **Post-P0 mop-up (I-R12-1)**: routed through
     // [`SqlExecutor::acquire_dedicated_client`] so the
@@ -217,36 +218,64 @@ async fn exec_auto_begin(
     // for the de-doubling of the previous `auto-tx connect failed` wrap.
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let pg = backend
-        .as_postgres()
-        .ok_or_else(|| DbError::backend_unsupported("auto-tx"))?;
-    // **Post-P0 mop-up (code-critique R15-3)**: `acquire_dedicated_client`
-    // already prefixes `Transient` errors with `"db: backend connect
-    // failed: <e>"`. Pre-fix the previous shape here re-prefixed with
-    // `"db: auto-tx connect failed: "`, producing a double-prefix the
-    // SDK observed on every connect failure. We now `?`-propagate the
-    // inner error directly — single prefix, same `Transient` variant,
-    // same wire `.code = "transient"`.
-    let client = pg.acquire_dedicated_client().await?;
 
-    client
-        .execute(&sql, &[])
-        .await
-        .map_err(|e| DbError::from_pg(&e))?;
+    match &backend {
+        crate::backend::BackendHandle::Postgres(pg) => {
+            // **Post-P0 mop-up (code-critique R15-3)**: `acquire_dedicated_client`
+            // already prefixes `Transient` errors with `"db: backend connect
+            // failed: <e>"`. Pre-fix the previous shape here re-prefixed with
+            // `"db: auto-tx connect failed: "`, producing a double-prefix the
+            // SDK observed on every connect failure. We now `?`-propagate the
+            // inner error directly — single prefix, same `Transient` variant,
+            // same wire `.code = "transient"`.
+            let client = pg.acquire_dedicated_client().await?;
 
-    // §17.5 — constrain the auto-tx's client SQL to the per-app role.
-    // `SET LOCAL ROLE` reverts at the auto-tx COMMIT/ROLLBACK. See
-    // `transaction::apply_per_app_role`.
-    super::apply_per_app_role(&client, app_id).await?;
+            client
+                .execute(&sql, &[])
+                .await
+                .map_err(|e| DbError::from_pg(&e))?;
 
-    crate::context::with_mut(|c| {
-        let _previous = c.install_tx_client(TxConnection::Postgres(client));
-        debug_assert!(
-            _previous.is_none(),
-            "exec_auto_begin: tx_conn slot already occupied"
-        );
-        c.set_auto_tx_owned(true);
-    });
+            // §17.5 — constrain the auto-tx's client SQL to the per-app role.
+            // `SET LOCAL ROLE` reverts at the auto-tx COMMIT/ROLLBACK. See
+            // `transaction::apply_per_app_role`.
+            super::apply_per_app_role(&client, app_id).await?;
+
+            crate::context::with_mut(|c| {
+                let _previous = c.install_tx_client(TxConnection::Postgres(client));
+                debug_assert!(
+                    _previous.is_none(),
+                    "exec_auto_begin: tx_conn slot already occupied"
+                );
+                c.set_auto_tx_owned(true);
+            });
+        }
+        crate::backend::BackendHandle::Sqlite(sq) => {
+            // SQLite has no `ISOLATION LEVEL` / `READ ONLY|WRITE` clause and
+            // no per-app `SET LOCAL ROLE`. The PG-flavoured `sql` computed by
+            // `auto_tx_begin_sql` above served only as the wrap gate + the
+            // (defensively-normalised) isolation override; SQLite issues a
+            // plain `BEGIN` through the single-writer session actor, mirroring
+            // the explicit `db.transaction()` SQLite arm in
+            // `transaction::exec_begin_or_savepoint`. Auto-tx is the same
+            // second line of defense behind the capability gate here as on PG.
+            let _ = &sql;
+            let client = sq.acquire_dedicated_client().await?;
+            let tx_client = TxConnection::Sqlite(client);
+            super::client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
+            let TxConnection::Sqlite(client) = tx_client else {
+                unreachable!("just constructed SQLite tx client")
+            };
+
+            crate::context::with_mut(|c| {
+                let _previous = c.install_tx_client(TxConnection::Sqlite(client));
+                debug_assert!(
+                    _previous.is_none(),
+                    "exec_auto_begin: tx_conn slot already occupied"
+                );
+                c.set_auto_tx_owned(true);
+            });
+        }
+    }
     clear_pending_emits();
     Ok(1)
 }
@@ -493,6 +522,76 @@ mod tests {
                 .client_exec(&fresh, "ROLLBACK", &[])
                 .await
                 .expect("cleanup rollback on fresh client");
+
+            crate::context::with_mut(|c| {
+                let _ = c.take_tx_client();
+                c.set_auto_tx_owned(false);
+                c.clear_pending_emits();
+                c.clear_pool();
+            });
+        });
+    }
+
+    /// Regression for the SQLite auto-tx parity gap (re-sweep r2 F3 /
+    /// field report 2026-05-25): `query()` / `mutation()` capability
+    /// wrappers call `__zsBeginAutoTx`, which routed through
+    /// `exec_auto_begin`. That fn was hard-coded to Postgres
+    /// (`backend.as_postgres().ok_or_else(|| backend_unsupported("auto-tx"))`),
+    /// so on the SQLite dev backend EVERY wrapped RPC failed with
+    /// `backend_unsupported`. Pre-fix this asserts `Ok(1)`; the begin
+    /// would instead return `Err(backend_unsupported)`. Post-fix the
+    /// SQLite arm issues a plain `BEGIN` through the session actor,
+    /// installs a `TxConnection::Sqlite`, and `exec_auto_end` commits it.
+    #[test]
+    fn auto_begin_on_sqlite_opens_plain_tx_and_commits() {
+        run(async {
+            use crate::backend::SqlExecutor;
+
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+            );
+
+            crate::context::with_mut(|c| {
+                let _ = c.take_tx_client();
+                c.set_auto_tx_owned(false);
+                c.clear_pending_emits();
+                c.clear_pool();
+                c.set_sqlite_backend(Rc::clone(&backend));
+            });
+
+            // The exact call the capability wrapper makes for a `mutation`
+            // handler. Pre-fix this returned Err(backend_unsupported).
+            let token = exec_auto_begin(Some("mutation"), None, "app_test")
+                .await
+                .expect("auto-tx BEGIN must succeed on the SQLite backend");
+            assert_eq!(token, 1, "a wrapped kind must open the auto-tx (token 1)");
+
+            assert!(
+                crate::context::with(|c| c.has_tx()),
+                "auto-tx BEGIN must install a tx connection on SQLite"
+            );
+            assert!(
+                crate::context::with(|c| c.auto_tx_owned()),
+                "auto-tx must own the tx it opened"
+            );
+
+            // COMMIT path settles cleanly and clears the slot. Routing the
+            // COMMIT through `client_exec_on_tx` against the SQLite backend
+            // also proves the installed connection is the `Sqlite` variant —
+            // a `Postgres` conn on a SQLite backend hits the mismatch arm and
+            // errors, so a clean COMMIT here is the variant assertion.
+            exec_auto_end(1, true)
+                .await
+                .expect("auto-tx COMMIT must succeed on SQLite");
+            assert!(
+                !crate::context::with(|c| c.has_tx()),
+                "COMMIT must clear the tx slot"
+            );
+            assert!(
+                !crate::context::with(|c| c.auto_tx_owned()),
+                "COMMIT must drop auto-tx ownership"
+            );
 
             crate::context::with_mut(|c| {
                 let _ = c.take_tx_client();
