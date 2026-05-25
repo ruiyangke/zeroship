@@ -341,16 +341,24 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     }
 
     let mut filter = Value::Object(filter_obj);
+    if let Some(probe_schema) = deterministic_conflict_probe_schema(schema, conflict_arr)? {
+        let mut sidechannel = super::mask_pass::MaskPlaintextSidechannel::new();
+        super::encryption_pass_dispatch(
+            app_id,
+            collection,
+            &probe_schema,
+            "",
+            &mut filter,
+            &mut sidechannel,
+        )
+        .await?;
+    }
     super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
-    let select = serde_json::json!(["id"]);
-    let built = query::build_find(
+    let built = query::build_conflict_probe_with_dialect(
         app_id,
         collection,
         &filter,
-        Some(1),
-        None,
-        None,
-        Some(&select),
+        super::current_sql_dialect(),
     )
     .map_err(DbError::from)?;
     let rows = exec_query(app_id, built).await?;
@@ -363,6 +371,46 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     };
     obj.insert("id".to_string(), Value::String(existing_id));
     Ok(())
+}
+
+fn deterministic_conflict_probe_schema(
+    schema: &Value,
+    conflict_fields: &[Value],
+) -> Result<Option<Value>, DbError> {
+    let Some(schema_obj) = schema.as_object() else {
+        return Ok(None);
+    };
+    let mut out = serde_json::Map::new();
+    for field in conflict_fields.iter().filter_map(Value::as_str) {
+        let Some(def) = schema_obj.get(field) else {
+            continue;
+        };
+        let Some(enc) = def.get("encrypted").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(mode) = enc.get("mode").and_then(Value::as_str) else {
+            continue;
+        };
+        match mode {
+            "deterministic" => {
+                out.insert(field.to_string(), def.clone());
+            }
+            "randomised" | "randomized" => {
+                return Err(DbError::validation(
+                    "upsert_conflict_field_requires_deterministic_encryption",
+                    format!(
+                        "upsert: conflict field `{field}` uses randomised encryption; ON CONFLICT equality requires deterministic ciphertext"
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(Value::Object(out)))
+    }
 }
 
 #[cfg(test)]
