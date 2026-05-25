@@ -4,12 +4,11 @@
 //! isolate during `build_env_object`; the returned object becomes the
 //! `env.kv` namespace value. Mirrors `plugin-db`'s `Db` v8_class.
 //!
-//! Each `#[v8_method]`:
-//! 1. validates its arguments **synchronously** (key shape, value type
-//!    + size, option ranges) — a failure returns `Err(OpError)` which
-//!    the macro throws as a JS `TypeError` before any dispatch;
-//! 2. calls a `crate::dispatch::dispatch_*` helper that spawns the
-//!    async backend op and returns the `Promise`.
+//! Each `#[v8_method]` first validates its arguments **synchronously**
+//! (key shape, value type + size, option ranges) — a failure returns
+//! `Err(OpError)`, which the macro throws as a JS `TypeError` before any
+//! dispatch. It then calls a `crate::dispatch::dispatch_*` helper that
+//! spawns the async backend op and returns the `Promise`.
 //!
 //! ## Why a v8_class
 //!

@@ -105,7 +105,7 @@ pub fn validate_delta(by: f64) -> Result<i64, KvError> {
     // i64::MAX / MIN are not exactly representable as f64; compare
     // against the f64 bounds that DO round-trip to avoid an out-of-range
     // cast. 2^63 is the first f64 above i64::MAX.
-    if by >= 9_223_372_036_854_775_808.0 || by < -9_223_372_036_854_775_808.0 {
+    if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&by) {
         return Err(KvError::invalid_argument("kv: incr `by` is out of i64 range"));
     }
     Ok(by as i64)
