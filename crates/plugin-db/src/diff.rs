@@ -8,7 +8,7 @@
 //!
 //! The engine intentionally does not run any DDL on its own — it returns
 //! a `Vec<DiffOp>` that the orchestrator in
-//! `orchestrator::register_model::exec_register_model_with_pool`
+//! `crate::register_model::exec_register_model_with_pool`
 //! then sequences with the advisory lock, audit writes, and validation
 //! pass.
 //!

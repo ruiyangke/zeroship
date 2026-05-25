@@ -1210,7 +1210,7 @@ async fn a2_first_deploy_writes_audit_rows() {
         "name": {"type": "string"},
     });
 
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool),
         app,
         "users",
@@ -1272,7 +1272,7 @@ async fn a2_destructive_drop_column_refused_strict() {
         "name": {"type": "string"},
         "legacy_score": {"type": "number"},
     });
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &v1, &serde_json::json!([]), "deploy_v1",)
     .await
     .unwrap();
@@ -1281,7 +1281,7 @@ async fn a2_destructive_drop_column_refused_strict() {
     let v2 = json!({
         "name": {"type": "string"},
     });
-    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &v2, &serde_json::json!([]), "deploy_v2",)
     .await
     .expect_err("strict deploy should refuse drop_column");
@@ -1355,7 +1355,7 @@ async fn a2_strictness_off_skips_validation_refused() {
         "name": {"type": "string"},
         "legacy_score": {"type": "number"},
     });
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &v1, &serde_json::json!([]), "off_v1",)
     .await
     .unwrap();
@@ -1365,7 +1365,7 @@ async fn a2_strictness_off_skips_validation_refused() {
         "_meta": {"strictness": "off"},
         "name": {"type": "string"},
     });
-    let result = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    let result = zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &v2, &serde_json::json!([]), "off_v2",)
     .await;
     assert!(result.is_ok(), "strictness=off should not refuse: {result:?}");
@@ -1398,7 +1398,7 @@ async fn a2_additive_add_column_applied() {
         .unwrap();
 
     let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "items", &v1, &serde_json::json!([]), "add_v1",)
     .await
     .unwrap();
@@ -1408,7 +1408,7 @@ async fn a2_additive_add_column_applied() {
         "name": {"type": "string"},
         "description": {"type": "string"},
     });
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "items", &v2, &serde_json::json!([]), "add_v2",)
     .await
     .unwrap();
@@ -1459,7 +1459,7 @@ async fn a2_not_null_on_non_empty_refused() {
 
     // v1: schema with 'name' field.
     let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "people", &v1, &serde_json::json!([]), "nn_v1",)
     .await
     .unwrap();
@@ -1481,7 +1481,7 @@ async fn a2_not_null_on_non_empty_refused() {
         "name": {"type": "string"},
         "ssn": {"type": "string", "required": true},
     });
-    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "people", &v2, &serde_json::json!([]), "nn_v2",)
     .await
     .expect_err("NOT NULL add on non-empty table should be refused");
@@ -1537,7 +1537,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
     // and `compio::runtime::spawn` schedules on the same thread). The
     // sequential variant is sufficient to verify the lock-acquire /
     // release / re-diff path without needing a second OS thread.
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool),
         "a2_concurrent",
         "races",
@@ -1547,7 +1547,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
     .await
     .expect("first deploy under lock");
 
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool),
         "a2_concurrent",
         "races",
@@ -1609,7 +1609,7 @@ async fn a2_required_with_default_is_compatible() {
         .unwrap();
 
     let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "things", &v1, &serde_json::json!([]), "rd_v1",)
     .await
     .unwrap();
@@ -1625,7 +1625,7 @@ async fn a2_required_with_default_is_compatible() {
         "name": {"type": "string"},
         "status": {"type": "string", "required": true, "default": "active"},
     });
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "things", &v2, &serde_json::json!([]), "rd_v2",)
     .await
     .unwrap_or_else(|e| panic!("required-with-default should be compatible: {e}"));
@@ -2762,7 +2762,7 @@ async fn b2_setup_users_posts(pool: &std::rc::Rc<Pool>, app: &str) {
         .unwrap();
     // Users first so the FK target exists when posts is created.
     let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(pool),
         app,
         "users",
@@ -2775,7 +2775,7 @@ async fn b2_setup_users_posts(pool: &std::rc::Rc<Pool>, app: &str) {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "ref", "refTarget": "users"},
     });
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(pool),
         app,
         "posts",
@@ -2903,7 +2903,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
         .unwrap();
 
     let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "b2_cas_v1",)
     .await
     .unwrap();
@@ -2912,7 +2912,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "ref", "refTarget": "users", "onDelete": "cascade"},
     });
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &posts_schema, &serde_json::json!([]), "b2_cas_v1",)
     .await
     .unwrap();
@@ -3094,7 +3094,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
 
     // V1 — users + posts with a bare number column.
     let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
@@ -3102,7 +3102,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "number"},
     });
-    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v1, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
@@ -3137,7 +3137,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "ref", "refTarget": "users"},
     });
-    let res = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    let res = zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v2, &serde_json::json!([]), "v2",)
     .await;
     assert!(
@@ -5027,7 +5027,7 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 // The validator lives at `crate::cross_app_fk::reject_cross_app_fk`
 // and runs on BOTH backends — the SQLite-side mirror is at
 // `tests/sqlite_integration.rs::cross_app_fk_rejected_at_parse`. The
-// hook is wired into `orchestrator/register_model/bootstrap.rs`, so
+// hook is wired into `register_model/bootstrap.rs`, so
 // any future drift in the rejection contract would surface here AND
 // in the SQLite target. We exercise the validator directly (rather
 // than driving it through the full `run_pipeline`) so the test has
@@ -6711,7 +6711,7 @@ async fn p55_pr1_register_model_refuses_masked_suffix_field() {
         "ssn_masked": {"type": "string"},
     });
 
-    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool),
         app,
         "users",
@@ -6751,7 +6751,7 @@ async fn p55_pr1_register_model_refuses_reserved_classification_field() {
         "pii": {"type": "string"},
     });
 
-    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
+    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool),
         app,
         "users",
@@ -7416,7 +7416,7 @@ async fn wal_connection_stays_platform_role() {
 // ---------------------------------------------------------------------------
 // P6a-3 — Drop-namespace sequencing (§17.7 PG ordering + CRITICAL #4).
 //
-// `orchestrator::drop_namespace` runs the §17.7 PG teardown: subscription
+// `drop_namespace` runs the §17.7 PG teardown: subscription
 // gate → broker drain → slot/publication teardown (via
 // ChangeStream::deprovision) → DROP SCHEMA CASCADE → DROP ROLE. These
 // tests provision a full app (schema + slot + publication + per-app role)
@@ -7428,7 +7428,7 @@ async fn wal_connection_stays_platform_role() {
 // ---------------------------------------------------------------------------
 
 use zeroship_plugin_db::backend::BackendHandle;
-use zeroship_plugin_db::orchestrator::drop_namespace::{
+use zeroship_plugin_db::drop_namespace::{
     drop_namespace, DropNamespaceOpts, DropNamespaceOutcome,
 };
 

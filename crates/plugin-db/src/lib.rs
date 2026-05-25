@@ -64,10 +64,11 @@ pub mod v8_classes;
 // (`tests/sqlite_integration.rs` in particular — P1 PR 2) can name
 // `backend::SqliteBackend` + the `SqlExecutor` trait directly. The PG
 // `tests/integration.rs` target reaches PG-specific behaviour through
-// the lifted-to-pub helpers in `exec` / `migrations` / `orchestrator`
-// — those continue to gate on `test-helpers`. The backend traits
-// themselves carry no production-only behaviour (their bodies are SQL
-// + RPC plumbing), so exposing them under the same gate is safe.
+// the lifted-to-pub helpers in `exec` / `migrations` /
+// `register_model` / `drop_namespace` — those continue to gate on
+// `test-helpers`. The backend traits themselves carry no
+// production-only behaviour (their bodies are SQL + RPC plumbing), so
+// exposing them under the same gate is safe.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod backend;
 #[cfg(feature = "test-helpers")]
@@ -79,7 +80,7 @@ pub(crate) mod context;
 // directly to pin the rejection contract. The function is a pure JSON
 // walk — no DB round-trip — so exposing it has zero runtime impact;
 // the production call site is one line in
-// `orchestrator/register_model/bootstrap.rs::bootstrap`.
+// `register_model/bootstrap.rs::bootstrap`.
 pub mod cross_app_fk;
 // **P5 PR 3.5** — `crud` is crate-private in release builds; `pub`
 // under `test-helpers` so `tests/sqlite_integration.rs` can reach
@@ -164,9 +165,14 @@ pub(crate) mod migration_sweeper;
 pub mod migration_sweeper;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod orchestrator;
+pub(crate) mod drop_namespace;
 #[cfg(feature = "test-helpers")]
-pub mod orchestrator;
+pub mod drop_namespace;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod register_model;
+#[cfg(feature = "test-helpers")]
+pub mod register_model;
 
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod replication;
@@ -177,6 +183,11 @@ pub mod replication;
 pub(crate) mod replication_ops;
 #[cfg(feature = "test-helpers")]
 pub mod replication_ops;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod transaction;
+#[cfg(feature = "test-helpers")]
+pub mod transaction;
 
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod wal_consumer;
@@ -292,7 +303,7 @@ impl NativePlugin for DbPlugin {
         // the auto-tx globals — `query()` / `mutation()` defense in
         // depth at the Postgres level around the B3 capability gate.
         r.add_setup("install_auto_tx_globals", |scope, _ns_obj| {
-            orchestrator::auto_tx::install_auto_tx_globals(scope);
+            transaction::auto_tx::install_auto_tx_globals(scope);
         });
     }
 }

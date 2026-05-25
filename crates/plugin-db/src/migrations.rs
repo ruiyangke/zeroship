@@ -1282,7 +1282,7 @@ mod tests {
     //   same message substrings.
     //
     // Same caveat as the F1 documentation snapshot in
-    // `orchestrator/register_model/apply.rs`: this test re-emits the
+    // `register_model/apply.rs`: this test re-emits the
     // SAME `tracing::warn!` syntax `OwnedLockGuard::release` uses, so
     // it does NOT drive the live unlock-SQL path — it only documents
     // the shape contributors must keep aligned. End-to-end coverage

@@ -3,7 +3,7 @@
 //!
 //! **P0 PR 6** (`docs/proposals/p0-implementation-plan.md` §"PR 6"):
 //! renamed from the prior orchestrator-internal guard type and
-//! moved out of `orchestrator/` into `backend/` — the guard is the
+//! moved out of the old orchestration wrapper into `backend/` — the guard is the
 //! canonical RAII return shape for the
 //! [`crate::backend::LockManager`] capability, not an
 //! orchestrator-internal detail. Construction goes through
@@ -28,7 +28,7 @@
 //!   to `apply()`.
 //! - `apply.rs` — release between Pass 1 and Pass 2 regardless of Pass 1
 //!   outcome (CIC can't run under the lock).
-//! - `run_pipeline` (orchestrator `mod.rs`) — release on Err from
+//! - `run_pipeline` (`register_model/mod.rs`) — release on Err from
 //!   plan / validate, hand off to `apply` on Ok.
 //!
 //! Three sites, one invariant, three open-coded `pg_advisory_unlock`

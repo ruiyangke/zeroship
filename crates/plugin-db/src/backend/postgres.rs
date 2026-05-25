@@ -1,9 +1,10 @@
 //! `PostgresBackend` — the single concrete impl of [`super::Backend`].
 //!
 //! Wraps the `compio_postgres::Pool` and the configured URL. Every PG-
-//! flavoured call moves here so consumer files (`orchestrator/*`,
-//! `audit.rs`, `migrations.rs`) can stay free of `compio_postgres::Client`
-//! direct references and go through the trait instead.
+//! flavoured call moves here so consumer files (`register_model/*`,
+//! `transaction/*`, `audit.rs`, `migrations.rs`) can stay free of
+//! `compio_postgres::Client` direct references and go through the trait
+//! instead.
 //!
 //! The methods are intentionally thin — they forward to the existing
 //! free functions in `crate::audit` / `crate::diff` / `crate::query`
@@ -972,7 +973,7 @@ impl Backend for PostgresBackend {}
 
 // ---------------------------------------------------------------------------
 // create_index_with_recovery_audited — moved from
-// orchestrator::register_model::apply (Stage 8e-R2).
+// register_model::apply (Stage 8e-R2).
 //
 // SQLSTATE-driven retry loop for `CREATE INDEX CONCURRENTLY`. Postgres
 // CIC can land an INVALID index (a partial build that has to be
@@ -1371,7 +1372,7 @@ mod backup_pg {
         BusyPolicy, LockGuard, LockScope, PgLockManager, PitrTarget, SnapshotHandle, SnapshotOpts,
     };
     use crate::error::DbError;
-    use crate::orchestrator::register_model::bootstrap::LOCK_TAG as REGISTER_MODEL_LOCK_TAG;
+    use crate::register_model::bootstrap::LOCK_TAG as REGISTER_MODEL_LOCK_TAG;
 
     /// Parse a `file:///abs/path` URI into the underlying filesystem
     /// path. Returns a typed `Configuration` error for unsupported

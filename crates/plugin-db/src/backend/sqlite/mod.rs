@@ -2421,7 +2421,7 @@ mod backup_sqlite {
     /// Tag used by both `snapshot` and `restore` for the per-app
     /// register_model advisory lock. Matches the PG arm's literal
     /// `REGISTER_MODEL_LOCK_TAG = "register_model"`; the SQLite arm
-    /// doesn't expose that constant outside `orchestrator/register_model`,
+    /// doesn't expose that constant outside `register_model`,
     /// so we duplicate the literal here. A future shared-constant lift
     /// can unify both sides.
     const REGISTER_MODEL_LOCK_TAG: &str = "register_model";

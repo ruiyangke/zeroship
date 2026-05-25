@@ -11,7 +11,7 @@
 //! silently breaks the runbook with no compile error.
 //!
 //! Cycle 13:17 (`7c6bd2ec`) drifted one such site: the F1 warn-half
-//! in `orchestrator::register_model::apply` had its `audit_err`
+//! in `register_model::apply` had its `audit_err`
 //! field renamed to `error` in passing; commit `18aee490` reverted
 //! the drift after a code review caught it. A snapshot test running
 //! under this capture layer would have caught the drift pre-commit.

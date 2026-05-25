@@ -48,7 +48,7 @@ use zeroship_runtime_macros::v8_class;
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::crud::dispatch_set_mask_policy_field;
-use crate::orchestrator::register_model::register_model_dispatch;
+use crate::register_model::register_model_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
 use crate::v8_bridge::read_json_arg;
 
