@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   archiveTodo,
   completeTodo,
@@ -10,12 +11,10 @@ import {
   subscribeTodos,
   type Priority,
   type Todo,
-  type User,
 } from "./api";
 
 const PRIORITIES: Priority[] = ["low", "medium", "high"];
 
-// ── time ────────────────────────────────────────────────────────────────
 function ago(ms: number): string {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
   if (s < 5) return "just now";
@@ -30,17 +29,15 @@ const shortId = (id: string) => {
   const [p, rest] = id.split("_");
   return rest ? `${p}_${rest.slice(0, 6)}…` : id;
 };
+const errText = (e: unknown) => (e instanceof RpcError ? `${e.code}: ${e.message}` : String(e));
 
 type Banner = { kind: "error" | "live"; text: string } | null;
 
 export function App() {
-  // The single shared "public ledger" user — there's no per-window identity;
-  // every window reads + writes the same list, so the realtime feed streams
-  // to all viewers at once.
-  const [user, setUser] = useState<User | null>(null);
-  const [todos, setTodos] = useState<Todo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [booting, setBooting] = useState(true);
+  const qc = useQueryClient();
+
+  // The single shared "public ledger" user — no per-window identity.
+  const [userId, setUserId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner>(null);
   const [live, setLive] = useState(false);
   const [pulse, setPulse] = useState(0);
@@ -48,53 +45,42 @@ export function App() {
   const [priority, setPriority] = useState<Priority>("medium");
   const [removing, setRemoving] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
+  // realId → optimistic key, so the optimistic→real swap keeps one React
+  // element (no re-mount, no entrance-animation "double flash").
+  const keyMap = useRef(new Map<string, string>());
+  const keySeq = useRef(0);
+  const keyOf = (t: Todo) => t._key ?? keyMap.current.get(t.id) ?? t.id;
 
   const flash = useCallback((b: Banner) => {
     setBanner(b);
     if (b) window.setTimeout(() => setBanner((cur) => (cur === b ? null : cur)), 3200);
   }, []);
 
-  const errText = (e: unknown) => (e instanceof RpcError ? `${e.code}: ${e.message}` : String(e));
-
-  const refresh = useCallback(
-    async (uid: string) => {
-      try {
-        setTodos(await listTodos(uid));
-      } catch (e) {
-        flash({ kind: "error", text: errText(e) });
-      } finally {
-        setLoading(false);
-      }
-    },
-    [flash],
-  );
-
-  // Resolve the shared ledger user once on mount (get-or-create).
+  // Resolve the shared ledger user once (get-or-create).
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const u = await publicUser();
-        if (!cancelled) setUser(u);
-      } catch (e) {
-        if (!cancelled) flash({ kind: "error", text: errText(e) });
-      } finally {
-        if (!cancelled) setBooting(false);
-      }
-    })();
+    publicUser({})
+      .then((u) => !cancelled && setUserId(u.id))
+      .catch((e) => !cancelled && flash({ kind: "error", text: errText(e) }));
     return () => {
       cancelled = true;
     };
   }, [flash]);
 
-  // Load + live-subscribe once the shared user is resolved. The platform
-  // streams the AI-SDK Data Stream Protocol; `subscribeTodos()` yields parsed
-  // change events (own connection per tab via a nonce) — debounce-refetch.
+  // The list — React Query owns the cache; everything below reads/writes it.
+  const todosQ = listTodos.useQuery(
+    { userId: userId ?? "" },
+    { enabled: !!userId },
+  ) as { data?: Todo[]; isLoading: boolean };
+  const todos = todosQ.data ?? [];
+  const uid = userId ?? "";
+
+  // Live feed → invalidate (React Query refetches + dedupes). Own connection
+  // per tab via the nonce in subscribeTodos.
   useEffect(() => {
-    if (!user) return;
-    setLoading(true);
-    void refresh(user.id);
+    if (!userId) return;
     const controller = new AbortController();
+    const seen = new Map<string, number>();
     let t: number | undefined;
     (async () => {
       try {
@@ -103,12 +89,20 @@ export function App() {
         for await (const ev of stream) {
           if (controller.signal.aborted) break;
           if (ev.collection && ev.collection !== "todos") continue;
+          const pk = String(ev.pk ?? "");
+          const now = Date.now();
+          if (pk) {
+            const prev = seen.get(pk);
+            if (prev && now - prev < 600) continue; // collapse the broker's double frame
+            seen.set(pk, now);
+            if (seen.size > 200) seen.clear();
+          }
           setPulse((p) => p + 1);
           window.clearTimeout(t);
-          t = window.setTimeout(() => void refresh(user.id), 180);
+          t = window.setTimeout(() => void listTodos.invalidate({ userId }), 180);
         }
       } catch {
-        /* aborted on teardown, or the stream ended/errored */
+        /* aborted on teardown / stream ended */
       } finally {
         setLive(false);
       }
@@ -118,61 +112,97 @@ export function App() {
       controller.abort();
       setLive(false);
     };
-  }, [user, refresh]);
+  }, [userId]);
 
-  const add = useCallback(
-    async (e?: React.FormEvent) => {
-      e?.preventDefault();
-      const text = title.trim();
-      if (!text || !user) return;
-      setTitle("");
-      const temp: Todo = {
-        id: `tmp_${Date.now()}`,
+  // ── Optimistic create (the React Query pattern) ───────────────────────
+  const createM = createTodo.useMutation({
+    onMutate: async (input: { userId: string; title: string; priority?: Priority }) => {
+      const key = listTodos.queryKey({ userId: input.userId });
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<Todo[]>(key);
+      const k = `k${++keySeq.current}`;
+      const optimistic: Todo = {
+        id: `tmp_${k}`,
+        _key: k,
         created_at: Date.now(),
         updated_at: Date.now(),
         version: 1,
-        userId: user.id,
-        title: text,
-        priority,
+        userId: input.userId,
+        title: input.title,
+        priority: input.priority ?? "medium",
         tags: [],
         done: false,
         archived: false,
         deleted_at: null,
       };
-      setTodos((cur) => [temp, ...cur]);
-      try {
-        await createTodo({ userId: user.id, title: text, priority });
-        await refresh(user.id);
-      } catch (err) {
-        setTodos((cur) => cur.filter((x) => x.id !== temp.id));
-        flash({ kind: "error", text: errText(err) });
-      }
+      listTodos.setData({ userId: input.userId }, (old: Todo[] = []) => [optimistic, ...old]);
+      return { prev, k, userId: input.userId };
+    },
+    onError: (e: unknown, _input: unknown, ctx: { prev?: Todo[]; userId: string } | undefined) => {
+      if (ctx) listTodos.setData({ userId: ctx.userId }, ctx.prev ?? []);
+      flash({ kind: "error", text: errText(e) });
+    },
+    onSuccess: (real: Todo, _input: unknown, ctx: { k: string; userId: string } | undefined) => {
+      if (!ctx) return;
+      keyMap.current.set(real.id, ctx.k); // bridge real id → optimistic key
+      listTodos.setData({ userId: ctx.userId }, (old: Todo[] = []) =>
+        old.map((t) => (t._key === ctx.k ? { ...real, _key: ctx.k } : t)),
+      );
+    },
+    onSettled: (_d: unknown, _e: unknown, _input: unknown, ctx: { userId: string } | undefined) => {
+      if (ctx) void listTodos.invalidate({ userId: ctx.userId });
+    },
+  }) as { mutate: (input: { userId: string; title: string; priority?: Priority }) => void };
+
+  const add = useCallback(
+    (e?: React.FormEvent) => {
+      e?.preventDefault();
+      const text = title.trim();
+      if (!text || !userId) return;
+      setTitle("");
+      createM.mutate({ userId, title: text, priority });
       inputRef.current?.focus();
     },
-    [title, priority, user, refresh, flash],
+    [title, priority, userId, createM],
   );
 
-  const mutate = useCallback(
-    async (id: string, fn: (id: string) => Promise<unknown>, optimisticDrop: boolean) => {
-      if (optimisticDrop) {
-        setRemoving((s) => new Set(s).add(id));
-        await new Promise((r) => setTimeout(r, 220));
-      }
+  // complete: optimistic flip, then sync.
+  const onComplete = useCallback(
+    async (id: string) => {
+      listTodos.setData({ userId: uid }, (old: Todo[] = []) =>
+        old.map((t) => (t.id === id ? { ...t, done: true } : t)),
+      );
       try {
-        await fn(id);
-        if (user) await refresh(user.id);
+        await completeTodo({ id });
       } catch (e) {
         flash({ kind: "error", text: errText(e) });
-        if (user) await refresh(user.id);
+      } finally {
+        void listTodos.invalidate({ userId: uid });
+      }
+    },
+    [uid, flash],
+  );
+
+  // archive / delete: play the leave animation, optimistically drop, then sync.
+  const onRemove = useCallback(
+    async (id: string, fn: (i: { id: string }) => Promise<unknown>) => {
+      setRemoving((s) => new Set(s).add(id));
+      await new Promise((r) => setTimeout(r, 220));
+      listTodos.setData({ userId: uid }, (old: Todo[] = []) => old.filter((t) => t.id !== id));
+      try {
+        await fn({ id });
+      } catch (e) {
+        flash({ kind: "error", text: errText(e) });
       } finally {
         setRemoving((s) => {
           const n = new Set(s);
           n.delete(id);
           return n;
         });
+        void listTodos.invalidate({ userId: uid });
       }
     },
-    [user, refresh, flash],
+    [uid, flash],
   );
 
   const { active, done } = useMemo(() => {
@@ -181,6 +211,8 @@ export function App() {
     for (const t of todos) (t.done ? d : a).push(t);
     return { active: a, done: d };
   }, [todos]);
+
+  const booting = !userId || todosQ.isLoading;
 
   return (
     <div className="shell">
@@ -209,8 +241,8 @@ export function App() {
           </h1>
           <p>
             A single shared list on the real <code>@zeroship/db</code> surface —
-            no logins, no per-window identity. Every change is committed to the
-            same collection and streamed to every open window over SSE. Open a
+            no logins, no per-window identity. Creates are optimistic via React
+            Query; every commit streams to every open window over SSE. Open a
             second tab and watch them move together.
           </p>
         </div>
@@ -222,7 +254,7 @@ export function App() {
             placeholder="Add to the shared ledger…"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            disabled={!user}
+            disabled={!userId}
             maxLength={200}
             autoFocus
           />
@@ -239,7 +271,7 @@ export function App() {
               </button>
             ))}
           </div>
-          <button className="commit" type="submit" disabled={!user || !title.trim()}>
+          <button className="commit" type="submit" disabled={!userId || !title.trim()}>
             Commit ↵
           </button>
         </form>
@@ -252,7 +284,7 @@ export function App() {
             </span>
           </div>
 
-          {loading || booting ? (
+          {booting ? (
             <div className="skeleton">
               {[0, 1, 2].map((i) => (
                 <div className="row sk" style={{ animationDelay: `${i * 90}ms` }} key={i} />
@@ -267,13 +299,13 @@ export function App() {
             <ul className="rows">
               {[...active, ...done].map((t, i) => (
                 <TodoRow
-                  key={t.id}
+                  key={keyOf(t)}
                   todo={t}
                   index={i}
                   removing={removing.has(t.id)}
-                  onComplete={() => void mutate(t.id, completeTodo, false)}
-                  onArchive={() => void mutate(t.id, archiveTodo, true)}
-                  onDelete={() => void mutate(t.id, deleteTodo, true)}
+                  onComplete={() => void onComplete(t.id)}
+                  onArchive={() => void onRemove(t.id, archiveTodo)}
+                  onDelete={() => void onRemove(t.id, deleteTodo)}
                 />
               ))}
             </ul>
@@ -331,7 +363,7 @@ function TodoRow({
               #{tg}
             </span>
           ))}
-          <span className="mono">{shortId(todo.id)}</span>
+          <span className="mono">{pending ? "committing…" : shortId(todo.id)}</span>
           <span className="mono dim">v{todo.version}</span>
           <span className="mono dim">{ago(todo.created_at)}</span>
         </div>
