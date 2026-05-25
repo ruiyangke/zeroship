@@ -2459,6 +2459,59 @@ async fn gap_i_migration_finalizer_churn() {
     zeroship_plugin_db::clear_migration_lock_for_tests().await;
 }
 
+#[compio::test]
+async fn lock_guard_drop_closes_pooled_client_and_releases_lock() {
+    // I3 regression: dropping a pooled LockGuard without release()
+    // must kill the backend session so the advisory lock does not stay
+    // stuck on a reusable pool connection.
+    let url = require_pg().await;
+    let lock_pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let probe_pool = std::rc::Rc::new(Pool::connect(&url, 1).await.unwrap());
+    let app = "i3_lockguard_drop";
+    let name = "register_model";
+    let key1 = format!("{app}:{name}");
+    let key2 = name.to_string();
+
+    zeroship_plugin_db::drop_pooled_lock_guard_without_release_for_tests(
+        std::rc::Rc::clone(&lock_pool),
+        &url,
+        app,
+        name,
+    )
+    .await
+    .expect("drop pooled lock guard");
+
+    let mut released = false;
+    for _ in 0..50 {
+        let probe_rows = probe_pool
+            .query_text_params(
+                "SELECT pg_try_advisory_lock(hashtext($1)::int4, hashtext($2)::int4) AS got",
+                &[key1.as_str(), key2.as_str()],
+            )
+            .await
+            .unwrap();
+        let got: bool = probe_rows[0].get("got");
+        if got {
+            released = true;
+            let _ = probe_pool
+                .query_text_params(
+                    "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)",
+                    &[key1.as_str(), key2.as_str()],
+                )
+                .await
+                .unwrap();
+            break;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        released,
+        "dropping LockGuard without release() must close the pooled \
+         session so the advisory lock becomes acquirable again",
+    );
+}
+
 // 38. B1 — cancel against an already-applied migration returns
 // `migration_not_cancellable`.
 #[compio::test]

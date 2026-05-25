@@ -527,6 +527,37 @@ pub fn clear_pending_emits_for_tests() {
     exec::clear_pending_emits();
 }
 
+/// **Test-only**: acquire a real pooled Postgres `LockGuard` against a
+/// caller-owned pool and drop it without `release()`/`into_held()`.
+/// Used by the integration suite to verify the catastrophic Drop path
+/// closes the pooled client instead of leaking the advisory lock onto
+/// a reusable backend session.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub async fn drop_pooled_lock_guard_without_release_for_tests(
+    pool: Rc<compio_postgres::Pool>,
+    url: &str,
+    app_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    use crate::backend::{LockScope, PostgresBackend};
+
+    let backend = PostgresBackend::new(Rc::clone(&pool), url.to_string());
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| error::DbError::from_pg(&e).into_string())?;
+    let scope = LockScope::GlobalApp {
+        app_id: app_id.to_string(),
+        name: name.to_string(),
+    };
+    let guard = backend::lock_guard::LockGuard::acquire(&backend, client, &scope)
+        .await
+        .map_err(error::DbError::into_string)?;
+    drop(guard);
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BackendUrl {
     Postgres,
