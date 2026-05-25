@@ -856,10 +856,9 @@ fn run_query(
             // The Query path is consumed at PR 2 by PRAGMA inspection
             // (integration tests) and at PR 4 by the SchemaIntrospect
             // PRAGMA walk; both produce INTEGER + TEXT, never BLOB.
-            // The BLOB arm uses `format!("{:?}", bytes)` so an
-            // accidental binary column shows up as something the
-            // operator can spot in logs without panicking the row
-            // decoder.
+            // Refuse accidental binary reads loudly so callers route
+            // them through `query_typed` instead of silently receiving
+            // a placeholder string that cannot round-trip.
             use rusqlite::types::ValueRef;
             let value_ref = row.get_ref(i).map_err(from_sqlite)?;
             let cell = match value_ref {
@@ -873,7 +872,13 @@ fn run_query(
                         )))?
                         .to_string(),
                 ),
-                ValueRef::Blob(bytes) => Some(format!("<{} bytes blob>", bytes.len())),
+                ValueRef::Blob(bytes) => {
+                    return Err(DbError::internal(format!(
+                        "sqlite query path does not materialize BLOB column {i} \
+                         ({} bytes); use query_typed instead",
+                        bytes.len()
+                    )));
+                }
             };
             cells.push(cell);
         }
@@ -1312,5 +1317,29 @@ mod tests {
         // Both files untouched.
         assert!(temp.exists(), "temp must remain when DETACH fails");
         assert!(live.exists(), "live must remain when DETACH fails");
+    }
+
+    #[test]
+    fn run_query_rejects_blob_cells_on_untyped_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (payload BLOB);").unwrap();
+        conn.execute("INSERT INTO t (payload) VALUES (X'0102')", [])
+            .unwrap();
+
+        let err = run_query(&conn, "SELECT payload FROM t", &[])
+            .expect_err("untyped query path must refuse BLOB cells");
+        match err {
+            DbError::Internal { message } => {
+                assert!(
+                    message.contains("does not materialize BLOB column"),
+                    "error should explain the untyped BLOB trap: {message}"
+                );
+                assert!(
+                    message.contains("query_typed"),
+                    "error should point callers at the typed path: {message}"
+                );
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
     }
 }

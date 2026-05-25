@@ -3331,6 +3331,644 @@ fn sqlite_blob_literal(bytes: &[u8]) -> String {
     s
 }
 
+const SQLITE_RUNTIME_RPC_SHIM: &str = r#"
+async function _shimRpc(name, input, ctx) {
+    const fn = _procedures[name];
+    if (typeof fn !== "function") {
+        throw Object.assign(new Error("Method not found: " + name), { status: 404 });
+    }
+    let out = fn(input, ctx);
+    if (out && typeof out.then === "function") out = await out;
+    return out;
+}
+async function _zsRpcAndRespond(name, input) {
+    try {
+        const result = await _shimRpc(name, input);
+        return new Response(JSON.stringify({ json: result === undefined ? null : result }),
+            { status: 200, headers: { "content-type": "application/json" } });
+    } catch (err) {
+        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
+        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
+        if (err && typeof err.code === "string") body.code = err.code;
+        if (err && err.details !== undefined) body.details = err.details;
+        return new Response(JSON.stringify(body), {
+            status, headers: { "content-type": "application/json" },
+        });
+    }
+}
+async function _zsFetch(request) {
+    const url = new URL(request.url);
+    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const text = await request.text();
+    let input;
+    if (text) {
+        const env = JSON.parse(text);
+        input = env && typeof env === "object" && "json" in env ? env.json : env;
+    }
+    return await _zsRpcAndRespond(id, input);
+}
+export default { fetch: _zsFetch, rpc: _shimRpc };
+"#;
+
+fn sqlite_runtime_upsert_source(collection: &str, key_id: &str, body: &str) -> String {
+    format!(
+        r#"
+import {{ env }} from "zeroship";
+
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+const COLLECTION = "{collection}";
+const KEY_ID = "{key_id}";
+
+function setup(_input, _ctx) {{
+    return __plat.registerModel(COLLECTION, {{
+        email: {{ type: "string", required: true, unique: true }},
+        name: {{ type: "string", required: true }},
+        ssn: {{
+            type: "string",
+            encrypted: {{ mode: "randomised", keyId: KEY_ID, wraps: "string" }},
+            mask: {{ kind: "last4", classification: "spi" }}
+        }}
+    }});
+}}
+setup.config = {{ kind: "action" }};
+
+{body}
+"#
+    ) + SQLITE_RUNTIME_RPC_SHIM
+}
+
+fn dispatch_sqlite_runtime(
+    dir: &tempfile::TempDir,
+    source: &str,
+    name: &str,
+) -> serde_json::Value {
+    let url = parity::sqlite_url(dir);
+    let (status, body) = parity::dispatch_zs(&url, source, name);
+    assert_eq!(status, 200, "{name} failed: {body}");
+    body
+}
+
+#[test]
+fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
+    run(async {
+        use std::collections::HashMap;
+
+        use base64::Engine as _;
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+        use zeroship_plugin_db::encryption;
+        use zeroship_plugin_db::query::{
+            build_create_table_with_fks_for_dialect, build_insert_many_with_dialect, FkEmission,
+            SqlDialect,
+        };
+
+        let key_id = "c1_insert_many";
+        let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_C1_INSERT_MANY", &"d".repeat(64));
+        let app_id = "app_demo";
+        let collection = "bulk_people";
+        let schema = serde_json::json!({
+            "name": { "type": "string" },
+            "ssn": {
+                "type": "string",
+                "encrypted": { "mode": "randomised", "keyId": key_id, "wraps": "string" },
+                "mask": { "kind": "last4", "classification": "spi" }
+            }
+        });
+        let (backend, _dir) =
+            unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        let ddl = build_create_table_with_fks_for_dialect(
+            app_id,
+            collection,
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build DDL");
+        for stmt in ddl.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+        }
+
+        let mut docs = serde_json::json!([
+            { "name": "Alice", "ssn": "123-45-6789" },
+            { "name": "Bob", "ssn": "987-65-4321" }
+        ]);
+        zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(
+            &mut docs,
+            app_id,
+            collection,
+            Some("usr_bulk_writer"),
+        )
+        .await
+        .expect("prepare insertMany docs");
+
+        let expected_by_id: HashMap<String, (String, String)> = docs
+            .as_array()
+            .expect("docs array")
+            .iter()
+            .map(|doc| {
+                let obj = doc.as_object().expect("doc object");
+                (
+                    obj.get("id")
+                        .and_then(|v| v.as_str())
+                        .expect("minted id")
+                        .to_string(),
+                    (
+                        obj.get("ssn")
+                            .and_then(|v| v.as_str())
+                            .expect("base64 ciphertext marker doc")
+                            .to_string(),
+                        obj.get("ssn_masked")
+                            .and_then(|v| v.as_str())
+                            .expect("masked sibling")
+                            .to_string(),
+                    ),
+                )
+            })
+            .collect();
+
+        let built =
+            build_insert_many_with_dialect(app_id, collection, &docs, SqlDialect::Sqlite)
+                .expect("build insertMany");
+        let params: Vec<&str> = built.params.iter().map(String::as_str).collect();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        client
+            .query_typed(&built.sql, &params)
+            .await
+            .expect("INSERT ... RETURNING");
+
+        let typed = client
+            .query_typed(
+                &format!(
+                    r#"SELECT id, ssn, ssn_masked FROM "{app_id}"."{collection}" ORDER BY id"#
+                ),
+                &[],
+            )
+            .await
+            .expect("SELECT typed");
+        assert_eq!(typed.rows.len(), 2, "two rows stored");
+
+        let key = backend
+            .resolve_key(app_id, key_id)
+            .await
+            .expect("resolve key");
+        for row in &typed.rows {
+            let id = match &row[0] {
+                TypedCell::Text(s) => s.clone(),
+                other => panic!("id must be TEXT, got {other:?}"),
+            };
+            let stored_blob = match &row[1] {
+                TypedCell::Blob(bytes) => bytes.clone(),
+                other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+            };
+            let masked = match &row[2] {
+                TypedCell::Text(s) => s.clone(),
+                other => panic!("ssn_masked must be TEXT, got {other:?}"),
+            };
+            let (prepared_ciphertext_b64, prepared_masked) = expected_by_id
+                .get(&id)
+                .expect("stored row id should match prepared docs");
+            assert_eq!(masked, *prepared_masked, "masked sibling must be persisted");
+            assert_ne!(
+                stored_blob,
+                b"123-45-6789".to_vec(),
+                "stored bytes must not equal raw plaintext",
+            );
+            assert_ne!(
+                stored_blob,
+                b"987-65-4321".to_vec(),
+                "stored bytes must not equal raw plaintext",
+            );
+            let expected_ciphertext = base64::engine::general_purpose::STANDARD
+                .decode(prepared_ciphertext_b64)
+                .expect("prepared ciphertext base64");
+            assert_eq!(
+                stored_blob, expected_ciphertext,
+                "raw stored bytes must match the write-side ciphertext",
+            );
+            let plaintext = backend
+                .decrypt(
+                    &key,
+                    EncryptionMode::Randomised,
+                    &stored_blob,
+                    &encryption::canonical_aad(collection, "ssn", Some(id.as_bytes())),
+                )
+                .expect("decrypt stored blob");
+            assert!(
+                plaintext == b"123-45-6789" || plaintext == b"987-65-4321",
+                "decrypting the stored blob must recover one of the inserted plaintexts",
+            );
+        }
+    });
+}
+
+#[test]
+fn upsert_insert_branch_auto_mints_id_sqlite_runtime() {
+    let key_id = "c2_upsert_runtime_insert";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_C2_UPSERT_RUNTIME_INSERT",
+        &"e".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function upsertInsert(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            email: "mint@example.com",
+            name: "Mint",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+upsertInsert.config = { kind: "action" };
+
+const _procedures = { setup, upsertInsert };
+"#,
+        );
+
+        let setup = dispatch_sqlite_runtime(&dir, &source, "setup");
+        let result = dispatch_sqlite_runtime(&dir, &source, "upsertInsert");
+        let row = parity::extract_json(&result);
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("upsert insert branch must return minted id");
+        assert!(
+            id.starts_with("user_"),
+            "auto-minted id should use collection-derived prefix: {row}"
+        );
+        assert_eq!(
+            row.get("version").and_then(|v| v.as_i64()),
+            Some(1),
+            "freshly inserted upsert row should start at version 1: {row}"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                r#"SELECT id, version FROM "default"."users" WHERE email = 'mint@example.com'"#,
+                &[],
+            )
+            .await
+            .expect("SELECT runtime upsert row");
+        assert_eq!(rows.len(), 1, "exactly one runtime-upsert row");
+        assert_eq!(rows[0][0].as_deref(), Some(id), "stored row keeps minted id");
+        assert_eq!(rows[0][1].as_deref(), Some("1"), "stored row version defaults to 1");
+        drop(setup);
+    });
+}
+
+#[test]
+fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runtime() {
+    let key_id = "c2_upsert_runtime_conflict";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_C2_UPSERT_RUNTIME_CONFLICT",
+        &"f".repeat(64),
+    );
+
+    run(async {
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+        use zeroship_plugin_db::encryption;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function upsertConflict(_input, _ctx) {
+    const coll = env.db.collection(COLLECTION);
+    const first = await coll.upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            created_by: "usr_seed",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+    const second = await coll.upsert(
+        {
+            id: "user_new",
+            email: "alice@example.com",
+            name: "Alice Updated",
+            created_by: "usr_new",
+            updated_by: "usr_update",
+            ssn: "987-65-4321"
+        },
+        { conflictFields: ["email"] },
+    );
+    return { first, second };
+}
+upsertConflict.config = { kind: "action" };
+
+const _procedures = { setup, upsertConflict };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        let result = dispatch_sqlite_runtime(&dir, &source, "upsertConflict");
+        let payload = parity::extract_json(&result);
+        let first = payload.get("first").expect("first response row");
+        let second = payload.get("second").expect("second response row");
+        assert_eq!(
+            first.get("id").and_then(|v| v.as_str()),
+            Some("user_seed"),
+            "first upsert should return the inserted row"
+        );
+        assert_eq!(
+            second.get("id").and_then(|v| v.as_str()),
+            Some("user_seed"),
+            "conflict update must keep the original id"
+        );
+        assert_eq!(
+            second.get("created_by").and_then(|v| v.as_str()),
+            Some("usr_seed"),
+            "conflict update must preserve original created_by"
+        );
+        assert_eq!(
+            second.get("updated_by").and_then(|v| v.as_str()),
+            Some("usr_update"),
+            "mutable updated_by should update on conflict"
+        );
+        assert_eq!(
+            second.get("version").and_then(|v| v.as_i64()),
+            Some(2),
+            "conflict update must auto-bump version"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let typed = client
+            .query_typed(
+                r#"SELECT id, created_by, updated_by, version, ssn, ssn_masked
+                   FROM "default"."users"
+                   WHERE email = 'alice@example.com'"#,
+                &[],
+            )
+            .await
+            .expect("SELECT typed conflict row");
+        assert_eq!(typed.rows.len(), 1, "exactly one row after conflict upsert");
+        let row = &typed.rows[0];
+
+        match &row[0] {
+            TypedCell::Text(id) => assert_eq!(id, "user_seed"),
+            other => panic!("id must be TEXT, got {other:?}"),
+        }
+        match &row[1] {
+            TypedCell::Text(created_by) => assert_eq!(created_by, "usr_seed"),
+            other => panic!("created_by must be TEXT, got {other:?}"),
+        }
+        match &row[2] {
+            TypedCell::Text(updated_by) => assert_eq!(updated_by, "usr_update"),
+            other => panic!("updated_by must be TEXT, got {other:?}"),
+        }
+        match &row[3] {
+            TypedCell::Integer(version) => assert_eq!(*version, 2),
+            other => panic!("version must be INTEGER, got {other:?}"),
+        }
+        let stored_blob = match &row[4] {
+            TypedCell::Blob(bytes) => bytes.clone(),
+            other => panic!("ssn must be stored as BLOB ciphertext, got {other:?}"),
+        };
+        match &row[5] {
+            TypedCell::Text(masked) => assert_eq!(masked, "***-**-4321"),
+            other => panic!("ssn_masked must be TEXT, got {other:?}"),
+        }
+        assert_ne!(
+            stored_blob,
+            b"987-65-4321".to_vec(),
+            "conflict-updated raw storage must not equal plaintext"
+        );
+
+        let key = backend
+            .resolve_key("default", key_id)
+            .await
+            .expect("resolve key");
+        let plaintext = backend
+            .decrypt(
+                &key,
+                EncryptionMode::Randomised,
+                &stored_blob,
+                &encryption::canonical_aad("users", "ssn", Some(b"user_seed")),
+            )
+            .expect("decrypt stored conflict ciphertext");
+        assert_eq!(
+            plaintext,
+            b"987-65-4321".to_vec(),
+            "stored ciphertext must decrypt to the updated plaintext"
+        );
+    });
+}
+
+#[test]
+fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
+    let key_id = "i5_update_nested_version";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_I5_UPDATE_NESTED_VERSION",
+        &"1".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function seed(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+seed.config = { kind: "action" };
+
+async function nestedCasUpdate(_input, _ctx) {
+    return await env.db.collection(COLLECTION).update(
+        {
+            "$and": [
+                { id: "user_seed" },
+                { version: 1 }
+            ]
+        },
+        { name: "Mallory" },
+    );
+}
+nestedCasUpdate.config = { kind: "action" };
+
+const _procedures = { setup, seed, nestedCasUpdate };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        let seeded = dispatch_sqlite_runtime(&dir, &source, "seed");
+        let row = parity::extract_json(&seeded);
+        assert_eq!(
+            row.get("version").and_then(|v| v.as_i64()),
+            Some(1),
+            "seed row must start at version 1"
+        );
+
+        let (status, body) =
+            parity::dispatch_zs(&parity::sqlite_url(&dir), &source, "nestedCasUpdate");
+        assert_ne!(status, 200, "nested version CAS must reject, got {body}");
+        assert_eq!(
+            body.get("code").and_then(|v| v.as_str()),
+            Some("version_filter_must_be_top_level"),
+            "nested CAS rejection must carry the canonical code: {body}"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                r#"SELECT name, version FROM "default"."users" WHERE id = 'user_seed'"#,
+                &[],
+            )
+            .await
+            .expect("SELECT row after rejected nested CAS update");
+        assert_eq!(rows.len(), 1, "seed row must still exist");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("Alice"),
+            "failed nested CAS update must not rewrite the row"
+        );
+        assert_eq!(
+            rows[0][1].as_deref(),
+            Some("1"),
+            "failed nested CAS update must not auto-bump version"
+        );
+    });
+}
+
+#[test]
+fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
+    let key_id = "i5_update_many_nested_version";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_I5_UPDATE_MANY_NESTED_VERSION",
+        &"2".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function seed(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+seed.config = { kind: "action" };
+
+async function nestedCasUpdateMany(_input, _ctx) {
+    return await env.db.collection(COLLECTION).updateMany(
+        {
+            "$and": [
+                { id: "user_seed" },
+                { version: 1 }
+            ]
+        },
+        { name: "Mallory" },
+    );
+}
+nestedCasUpdateMany.config = { kind: "action" };
+
+const _procedures = { setup, seed, nestedCasUpdateMany };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+
+        let (status, body) =
+            parity::dispatch_zs(&parity::sqlite_url(&dir), &source, "nestedCasUpdateMany");
+        assert_ne!(status, 200, "nested version CAS must reject, got {body}");
+        assert_eq!(
+            body.get("code").and_then(|v| v.as_str()),
+            Some("version_filter_must_be_top_level"),
+            "nested CAS rejection must carry the canonical code: {body}"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                r#"SELECT name, version FROM "default"."users" WHERE id = 'user_seed'"#,
+                &[],
+            )
+            .await
+            .expect("SELECT row after rejected nested CAS updateMany");
+        assert_eq!(rows.len(), 1, "seed row must still exist");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("Alice"),
+            "failed nested CAS updateMany must not rewrite the row"
+        );
+        assert_eq!(
+            rows[0][1].as_deref(),
+            Some("1"),
+            "failed nested CAS updateMany must not auto-bump version"
+        );
+    });
+}
+
 /// **P5 PR 3 — gate #1 (SQLite half)**: round-trip an encrypted string
 /// column under Randomised mode. Insert a row with `ssn` declared
 /// `t.encrypted({ mode: "randomised" })`, read it back via the SQLite
@@ -3892,7 +4530,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             .await
             .expect("acquire client");
         let _affected = client
-            .query(&bq.sql, &param_refs)
+            .query_typed(&bq.sql, &param_refs)
             .await
             .expect("INSERT ... RETURNING via SQLite session");
 
@@ -4949,7 +5587,10 @@ fn unmask_with_auto_actor_returns_plaintext() {
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+        let _ = client
+            .query_typed(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT");
 
         // Dispatch unmask with `kind: "auto"` actor — must succeed.
         let args = unmask::UnmaskFieldArgs {
@@ -5224,7 +5865,10 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+        let _ = client
+            .query_typed(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT");
 
         // Unmask with `user` actor — must succeed via the policy.
         let args = unmask::UnmaskFieldArgs {
@@ -6137,7 +6781,10 @@ fn drift_check_handles_encrypted_column() {
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+        let _ = client
+            .query_typed(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT");
 
         // The correct mask for `555-00-1234` under `last4` is
         // `***-**-1234`; stored is `***-**-9999`. Drift expected.

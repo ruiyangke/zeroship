@@ -452,8 +452,8 @@ fn check_keys_for_immutable_and_overrides(
     Ok(())
 }
 
-/// Extract a creator-supplied `version: N` predicate from a filter for
-/// the optimistic-concurrency check. Returns `None` when:
+/// Extract a creator-supplied top-level `version: N` predicate from a
+/// filter for the optimistic-concurrency check. Returns `Ok(None)` when:
 ///
 /// - the filter is not a JSON object (the SQL builder will reject it),
 /// - the filter has no `version` key,
@@ -461,15 +461,31 @@ fn check_keys_for_immutable_and_overrides(
 ///   like `{ $gt: 5 }` short-circuit to `None` — CAS only honours a
 ///   plain equality predicate).
 ///
+/// Returns `Err(version_filter_must_be_top_level)` when a `version`
+/// predicate appears under a top-level `$and` / `$or` combinator. The
+/// dispatch layer would otherwise silently treat that shape as "no CAS
+/// filter", degrading the write to last-writer-wins.
+///
 /// Used by both `dispatch_update_one` and `dispatch_update_many` to
 /// decide whether to surface a `version_mismatch` typed error when the
 /// affected-rows count comes back zero.
-pub(crate) fn extract_cas_version(filter: &Value) -> Option<i64> {
-    let v = filter.as_object()?.get("version")?;
+pub(crate) fn extract_cas_version(
+    filter: &Value,
+    collection: &str,
+) -> Result<Option<i64>, DbError> {
+    if filter_has_nested_version_predicate(filter) {
+        return Err(DbError::version_filter_must_be_top_level(collection));
+    }
+    let Some(obj) = filter.as_object() else {
+        return Ok(None);
+    };
+    let Some(v) = obj.get("version") else {
+        return Ok(None);
+    };
     // Reject operator objects ({ $gt, $in, ... }) — only a plain
     // equality predicate carries CAS semantics. `as_i64` also rejects
     // floats and strings, which is the desired strictness.
-    v.as_i64()
+    Ok(v.as_i64())
 }
 
 /// Detect whether a filter carries an `id` predicate. Used to refuse
@@ -486,6 +502,39 @@ pub(crate) fn filter_has_id_predicate(filter: &Value) -> bool {
     filter
         .as_object()
         .map(|o| o.contains_key("id"))
+        .unwrap_or(false)
+}
+
+fn filter_has_nested_version_predicate(filter: &Value) -> bool {
+    fn combinator_contains_field(value: &Value, field: &str) -> bool {
+        match value {
+            Value::Array(items) => items.iter().any(|item| object_contains_field(item, field)),
+            Value::Object(_) => object_contains_field(value, field),
+            _ => false,
+        }
+    }
+
+    fn object_contains_field(value: &Value, field: &str) -> bool {
+        let Some(obj) = value.as_object() else {
+            return false;
+        };
+        if obj.contains_key(field) {
+            return true;
+        }
+        obj.iter().any(|(key, nested)| {
+            matches!(key.as_str(), "$and" | "$or")
+                && combinator_contains_field(nested, field)
+        })
+    }
+
+    filter
+        .as_object()
+        .map(|obj| {
+            obj.iter().any(|(key, nested)| {
+                matches!(key.as_str(), "$and" | "$or")
+                    && combinator_contains_field(nested, "version")
+            })
+        })
         .unwrap_or(false)
 }
 
@@ -1129,32 +1178,71 @@ mod tests {
     #[test]
     fn extract_cas_version_returns_plain_number() {
         let f = json!({ "id": "post_x", "version": 7 });
-        assert_eq!(extract_cas_version(&f), Some(7));
+        assert_eq!(extract_cas_version(&f, "posts").unwrap(), Some(7));
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_missing_version() {
         let f = json!({ "id": "post_x" });
-        assert_eq!(extract_cas_version(&f), None);
+        assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_operator_object() {
         // `{ $gt: 5 }` is not a CAS predicate.
         let f = json!({ "version": { "$gt": 5 } });
-        assert_eq!(extract_cas_version(&f), None);
+        assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_string_value() {
         let f = json!({ "version": "7" });
-        assert_eq!(extract_cas_version(&f), None);
+        assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
     }
 
     #[test]
     fn extract_cas_version_returns_none_for_non_object_filter() {
         let f = json!("scalar");
-        assert_eq!(extract_cas_version(&f), None);
+        assert_eq!(extract_cas_version(&f, "posts").unwrap(), None);
+    }
+
+    #[test]
+    fn extract_cas_version_rejects_nested_and_version() {
+        let f = json!({
+            "$and": [
+                { "id": "post_x" },
+                { "version": 7 }
+            ]
+        });
+        let err = extract_cas_version(&f, "posts").expect_err("nested CAS must refuse");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "version_filter_must_be_top_level");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_cas_version_rejects_deeply_nested_or_version() {
+        let f = json!({
+            "$and": [
+                {
+                    "$or": [
+                        { "version": 7 },
+                        { "title": "x" }
+                    ]
+                },
+                { "id": "post_x" }
+            ]
+        });
+        let err = extract_cas_version(&f, "posts").expect_err("nested CAS must refuse");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "version_filter_must_be_top_level");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
     }
 
     #[test]

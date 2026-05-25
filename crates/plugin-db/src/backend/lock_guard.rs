@@ -46,11 +46,12 @@
 //!    its scope, but the lock is intentionally still held by the
 //!    returned client. The next stage owns the release responsibility.
 //! 3. **Panic / catastrophic propagation** — `Drop` runs, logs an
-//!    error, and parks the client back into the pool with the lock
-//!    still held. The session-scoped lock will release when the
-//!    pooled connection is recycled or the backend session ends.
-//!    This is a fallback only; production code should always reach
-//!    `release()` or `into_held()`.
+//!    error, closes the pooled client so the backend session dies,
+//!    and lets the now-closed entry fall out of the pool on the next
+//!    checkout. That tears down the session-scoped advisory lock even
+//!    though `Drop` cannot await `pg_advisory_unlock`. This is still a
+//!    fallback only; production code should always reach `release()`
+//!    or `into_held()`.
 //!
 //! # Internal representation
 //!
@@ -259,27 +260,26 @@ impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
         if !self.released {
             // We can't run `pg_advisory_unlock` here — the call is
-            // async and `Drop` is sync. The pooled client (still in
-            // `self.client`) will return to the pool with the
-            // session-scoped lock held. Postgres releases it when the
-            // backend session itself terminates (connection close /
-            // pool recycle), but until then any caller blocked on
-            // `pg_advisory_lock(zs_reg:<app>, register_model)` will
-            // stall.
+            // async and `Drop` is sync. Best-effort fallback: close the
+            // pooled client before it goes back to the pool so the
+            // backend session terminates and Postgres releases the
+            // session-scoped advisory lock with it.
             //
             // This branch is the catastrophic-path fallback (panic
             // unwind, missed `release()` call). Production code should
             // always reach `release()` or `into_held()`.
+            if let Some(client) = self.client.as_mut() {
+                client.__private_api_close();
+            }
             tracing::error!(
                 key = %self.key,
                 tag = %self.tag,
                 "leak: LockGuard dropped without release()/into_held(); \
-                 session-scoped pg_advisory_lock will stay held until the pooled \
-                 client's PG session closes (typically on pool recycle). \
-                 Concurrent register_model callers for this app will stall in \
-                 the meantime. Either an async-cancellation hit the release().await, \
-                 a panic unwound the call stack, or a code path forgot to call \
-                 release()/into_held() — investigate."
+                 closed the pooled client so the PG session will terminate and \
+                 release its session-scoped pg_advisory_lock instead of leaking \
+                 it into the pool. Either an async-cancellation hit the \
+                 release().await, a panic unwound the call stack, or a code path \
+                 forgot to call release()/into_held() — investigate."
             );
         }
     }

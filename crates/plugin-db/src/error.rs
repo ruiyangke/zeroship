@@ -477,6 +477,25 @@ impl DbError {
         }
     }
 
+    /// **I5** — nested `$and` / `$or` `version` predicates are
+    /// refused because the CAS path only honours a top-level equality
+    /// predicate. Failing closed avoids silently degrading a
+    /// compare-and-swap write into a blind last-writer-wins update.
+    pub fn version_filter_must_be_top_level(collection: &str) -> Self {
+        DbError::ValidationFailed {
+            code: "version_filter_must_be_top_level",
+            message: format!(
+                "UPDATE on `{collection}` requires optimistic-concurrency \
+                 `version` filters to be top-level."
+            ),
+            hint: Some(
+                "Use a top-level filter like `{ id: ..., version: N }`; \
+                 nested `$and`/`$or` version predicates are refused."
+                    .to_string(),
+            ),
+        }
+    }
+
     /// **P7 PR 5** — `restore()` called on a table that lacks the
     /// `deleted_at` column (no `_systemFields` marker on the cached
     /// schema). The legacy-hard-delete fallback for `delete()` makes
@@ -1216,6 +1235,18 @@ mod tests {
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
                 assert_eq!(code, "multi_row_version_filter_unsupported");
+                assert!(hint.is_some(), "must carry a remediation hint");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn version_filter_must_be_top_level_stamps_canonical_code() {
+        let e = DbError::version_filter_must_be_top_level("posts").to_op_error();
+        match &e.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(code, "version_filter_must_be_top_level");
                 assert!(hint.is_some(), "must carry a remediation hint");
             }
             other => panic!("expected CodedError, got {other:?}"),

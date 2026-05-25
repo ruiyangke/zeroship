@@ -257,9 +257,8 @@ async fn pg_admin_lookup_root(
     pool: &compio_postgres::Pool,
     key_id: &str,
 ) -> Result<Option<[u8; 32]>, DbError> {
-    // The getter returns `bytea`. compio-postgres' text protocol
-    // surfaces bytea as a `\x`-prefixed hex string (the PG default for
-    // `bytea_output = hex`). We parse it back to bytes; an empty
+    // The getter returns `bytea`, and compio-postgres surfaces result
+    // columns in binary format. Read the raw bytes directly; an empty
     // result set OR a NULL value → `Ok(None)`.
     let rows = pool
         .query_text_params(
@@ -284,17 +283,9 @@ async fn pg_admin_lookup_root(
     // for type mismatches; either way we treat the row as "no key
     // present" and let the caller fall through to env-var sourcing.
     // `Row::get` would panic on NULL.
-    let s: String = match row.try_get::<_, String>(0) {
-        Ok(s) => s,
+    let decoded: Vec<u8> = match row.try_get::<_, Vec<u8>>(0) {
+        Ok(bytes) => bytes,
         Err(_) => return Ok(None),
-    };
-    if s.is_empty() || s == "NULL" {
-        return Ok(None);
-    }
-    // PG `bytea_output = hex` format: `\xHHHH...`.
-    let hex_part = s.strip_prefix("\\x").unwrap_or(&s);
-    let Ok(decoded) = hex_decode(hex_part) else {
-        return Ok(None);
     };
     if decoded.len() != 32 {
         return Ok(None);

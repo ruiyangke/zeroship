@@ -2459,6 +2459,59 @@ async fn gap_i_migration_finalizer_churn() {
     zeroship_plugin_db::clear_migration_lock_for_tests().await;
 }
 
+#[compio::test]
+async fn lock_guard_drop_closes_pooled_client_and_releases_lock() {
+    // I3 regression: dropping a pooled LockGuard without release()
+    // must kill the backend session so the advisory lock does not stay
+    // stuck on a reusable pool connection.
+    let url = require_pg().await;
+    let lock_pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let probe_pool = std::rc::Rc::new(Pool::connect(&url, 1).await.unwrap());
+    let app = "i3_lockguard_drop";
+    let name = "register_model";
+    let key1 = format!("{app}:{name}");
+    let key2 = name.to_string();
+
+    zeroship_plugin_db::drop_pooled_lock_guard_without_release_for_tests(
+        std::rc::Rc::clone(&lock_pool),
+        &url,
+        app,
+        name,
+    )
+    .await
+    .expect("drop pooled lock guard");
+
+    let mut released = false;
+    for _ in 0..50 {
+        let probe_rows = probe_pool
+            .query_text_params(
+                "SELECT pg_try_advisory_lock(hashtext($1)::int4, hashtext($2)::int4) AS got",
+                &[key1.as_str(), key2.as_str()],
+            )
+            .await
+            .unwrap();
+        let got: bool = probe_rows[0].get("got");
+        if got {
+            released = true;
+            let _ = probe_pool
+                .query_text_params(
+                    "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)",
+                    &[key1.as_str(), key2.as_str()],
+                )
+                .await
+                .unwrap();
+            break;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    assert!(
+        released,
+        "dropping LockGuard without release() must close the pooled \
+         session so the advisory lock becomes acquirable again",
+    );
+}
+
 // 38. B1 — cancel against an already-applied migration returns
 // `migration_not_cancellable`.
 #[compio::test]
@@ -6150,6 +6203,105 @@ async fn encrypted_column_missing_key_typed_error() {
     }
 }
 
+/// **I1** — the SECURITY DEFINER `__zeroship_admin.get_column_key`
+/// path must read `bytea` in binary form rather than falling through
+/// to the env-var source. Pin it by seeding the admin table with one
+/// root and the env var with a different root: the resolved key must
+/// match the admin-table root.
+#[compio::test]
+async fn pg_admin_table_key_source_reads_bytea_directly() {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .expect("ensure_admin_schema");
+
+    let key_id = "admin_table_test";
+    let env_name = "ZEROSHIP_COLUMN_KEY_ADMIN_TABLE_TEST";
+    let admin_root_hex = "11".repeat(32);
+    let env_root_hex = "22".repeat(32);
+    let _env = WithEnv::set(env_name, &env_root_hex);
+
+    pool.execute(
+        r#"DELETE FROM "__zeroship_admin"."column_keys" WHERE key_id = $1"#,
+        &[&key_id],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        r#"INSERT INTO "__zeroship_admin"."column_keys" (key_id, root_key)
+           VALUES ($1, decode($2, 'hex')::bytea)"#,
+        &[&key_id, &admin_root_hex.as_str()],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let resolved = backend
+        .resolve_key("app_admin_key_lookup", key_id)
+        .await
+        .expect("resolve key from admin table");
+
+    let root_bytes = admin_root_hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let s = std::str::from_utf8(pair).expect("hex utf8");
+            u8::from_str_radix(s, 16).expect("hex byte")
+        })
+        .collect::<Vec<_>>();
+    let root: [u8; 32] = root_bytes.try_into().expect("32-byte root");
+    let hkdf = Hkdf::<Sha256>::new(Some(b"app_admin_key_lookup"), &root);
+    let mut expected_k_enc = [0u8; 32];
+    let mut expected_k_siv = [0u8; 32];
+    hkdf.expand(b"zsenc/aead/v1/k_enc", &mut expected_k_enc)
+        .expect("expand k_enc");
+    hkdf.expand(b"zsenc/aead/v1/k_siv", &mut expected_k_siv)
+        .expect("expand k_siv");
+
+    assert_eq!(
+        resolved.k_enc, expected_k_enc,
+        "resolve_key must use the admin-table root, not the env-var fallback",
+    );
+    assert_eq!(resolved.k_siv, expected_k_siv);
+}
+
+#[compio::test]
+async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
+    use base64::Engine as _;
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let rows = pool
+        .query_text_params(
+            "SELECT decode('5c783431343234333434', 'hex')::bytea AS payload",
+            &[],
+        )
+        .await
+        .unwrap();
+    let json = zeroship_plugin_db::row_to_json_for_bench(&rows[0]);
+    let payload = json
+        .get("payload")
+        .and_then(Value::as_str)
+        .expect("payload base64 string");
+    let expected_raw =
+        base64::engine::general_purpose::STANDARD.encode(br"\x41424344");
+    let wrong_hex_decoded = base64::engine::general_purpose::STANDARD.encode(b"ABCD");
+
+    assert_eq!(
+        payload, expected_raw,
+        "BYTEA decoding must preserve the raw binary wire bytes",
+    );
+    assert_ne!(
+        payload, wrong_hex_decoded,
+        "BYTEA decoding must not reinterpret raw binary bytes as a \
+         text-protocol \\x... payload",
+    );
+}
+
 // ===========================================================================
 // P5 PR 4 — PG `Backup` impl (pg_dump / pg_restore shell-out + PITR
 // placeholder)
@@ -7170,6 +7322,51 @@ async fn client_sql_runs_under_per_app_role() {
     );
 
     drop(client);
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+    let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+async fn exec_autocommit_query_runs_under_per_app_role() {
+    // I2 regression: the shared autocommit exec path must switch to the
+    // per-app role before running the statement, not just explicit/auto tx.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "p6a_exec_autocommit_role";
+    let role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+
+    let rows = zeroship_plugin_db::exec::exec_query_for_tests(
+        app,
+        zeroship_plugin_db::query::BuiltQuery {
+            sql: "SELECT current_user AS u".to_string(),
+            params: vec![],
+        },
+    )
+    .await
+    .expect("autocommit exec query");
+    let current = rows[0]
+        .get("u")
+        .and_then(Value::as_str)
+        .expect("current_user string");
+    assert_eq!(
+        current, role,
+        "autocommit exec query must run under the per-app role",
+    );
+
+    let who = pool
+        .query_text_params("SELECT current_user AS u", &[])
+        .await
+        .unwrap();
+    let after: String = who[0].get("u");
+    assert_ne!(
+        after, role,
+        "RESET ROLE must run before the pooled autocommit connection returns",
+    );
+
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
 }

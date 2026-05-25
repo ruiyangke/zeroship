@@ -79,6 +79,7 @@ async fn ensure_postgres_pool_for_shared_sql() -> Result<Rc<compio_postgres::Poo
 
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
 pub(crate) async fn run_sql(
+    app_id: &str,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
@@ -103,10 +104,7 @@ pub(crate) async fn run_sql(
     // No transaction — use pool. On the SQLite arm the shared CRUD
     // row-returning path is not wired yet; surface a typed error
     // instead of falling through to a misleading `pool not initialized`.
-    let pool = ensure_postgres_pool_for_shared_sql().await?;
-    pool.query_text_params(sql, params)
-        .await
-        .map_err(|e| DbError::from_pg(&e))
+    exec_postgres_autocommit_with_role(app_id, sql, params).await
 }
 
 /// Execute a built query via pool (or TX conn) and return the
@@ -117,12 +115,12 @@ pub(crate) async fn run_sql(
 /// take a single row without paying for an intermediate serialise +
 /// reparse round-trip. The final JSON string is materialised once at
 /// the V8 boundary (`ResolveValue::Json`).
-pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub(crate) async fn exec_query(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        return sq.query_json(&bq.sql, &param_refs).await;
+        return exec_sqlite_json(&sq, &bq.sql, &param_refs).await;
     }
-    let rows = run_sql(&bq.sql, &param_refs).await?;
+    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
     Ok(rows_to_json_value(&rows))
 }
 
@@ -131,17 +129,17 @@ pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
 /// Returns the raw integer; callers wrap into the appropriate
 /// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
 /// `number`).
-pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, DbError> {
+pub(crate) async fn exec_count(app_id: &str, bq: BuiltQuery) -> Result<i64, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = sq.query_json(&bq.sql, &param_refs).await?;
+        let rows = exec_sqlite_json(&sq, &bq.sql, &param_refs).await?;
         return Ok(rows
             .first()
             .and_then(|row| row.get("count"))
             .and_then(Value::as_i64)
             .unwrap_or(0));
     }
-    let rows = run_sql(&bq.sql, &param_refs).await?;
+    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
 
     Ok(rows
         .first()
@@ -157,13 +155,90 @@ pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, DbError> {
 /// to build broker events without paying for a JSON parse of its own
 /// output; the CRUD resolver chain then serialises once at the V8
 /// boundary.
-pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub(crate) async fn exec_mutation(app_id: &str, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        return sq.query_json(&bq.sql, &param_refs).await;
+        return exec_sqlite_json(&sq, &bq.sql, &param_refs).await;
     }
-    let rows = run_sql(&bq.sql, &param_refs).await?;
+    let rows = run_sql(app_id, &bq.sql, &param_refs).await?;
     Ok(rows_to_json_value(&rows))
+}
+
+async fn exec_postgres_autocommit_with_role(
+    app_id: &str,
+    sql: &str,
+    params: &[&str],
+) -> Result<Vec<compio_postgres::Row>, DbError> {
+    let pool = ensure_postgres_pool_for_shared_sql().await?;
+    let mut client = pool.get().await.map_err(|e| DbError::from_pg(&e))?;
+    apply_autocommit_role(&client, app_id).await?;
+    let query_result = client
+        .query_text_params(sql, params)
+        .await
+        .map_err(|e| DbError::from_pg(&e));
+    let reset_result = reset_autocommit_role(&client).await;
+    if let Err(reset_err) = reset_result {
+        client.__private_api_close();
+        return Err(match query_result {
+            Ok(_) => reset_err,
+            Err(query_err) => query_err,
+        });
+    }
+    query_result
+}
+
+async fn apply_autocommit_role(
+    client: &compio_postgres::Client,
+    app_id: &str,
+) -> Result<(), DbError> {
+    let sql = crate::auth::bootstrap::set_role_sql(app_id);
+    client.execute(&sql, &[]).await.map_err(|e| {
+        let mut err = DbError::from_pg(&e);
+        crate::error::prefix_message(&mut err, "db: SET ROLE (per-app §17.5 autocommit): ");
+        err
+    })?;
+    Ok(())
+}
+
+async fn reset_autocommit_role(client: &compio_postgres::Client) -> Result<(), DbError> {
+    client
+        .execute(crate::auth::bootstrap::reset_role_sql(), &[])
+        .await
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            crate::error::prefix_message(&mut err, "db: RESET ROLE (per-app §17.5 autocommit): ");
+            err
+        })?;
+    Ok(())
+}
+
+async fn exec_sqlite_json(
+    backend: &crate::backend::sqlite::SqliteBackend,
+    sql: &str,
+    params: &[&str],
+) -> Result<Vec<Value>, DbError> {
+    let has_tx = context::with(|c| c.has_tx());
+    if !has_tx {
+        #[cfg(test)]
+        tests::record_sqlite_shared_route();
+        return backend.query_json(sql, params).await;
+    }
+
+    let client = context::with_mut(|c| c.take_tx_client())
+        .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
+    let result = match &client {
+        TxConnection::Sqlite(client) => {
+            #[cfg(test)]
+            tests::record_sqlite_tx_route();
+            let typed = client.query_typed_internal(sql, params).await?;
+            Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
+        }
+        TxConnection::Postgres(_) => Err(DbError::internal(
+            "db: sqlite backend active with postgres transaction connection",
+        )),
+    };
+    context::with_mut(|c| c.put_tx_client(client));
+    result
 }
 
 /// Execute a mutation, then emit a [`crate::wal_consumer::emit_local`]
@@ -196,7 +271,7 @@ pub(crate) async fn exec_mutation_with_emit(
     // iterate the live `Value`s directly. The CRUD resolver in
     // `crud.rs` does the final `Value::Array(rows).to_string()` once
     // at the V8 boundary.
-    let rows = exec_mutation(bq).await?;
+    let rows = exec_mutation(app_id, bq).await?;
     emit_for_rows(&rows, app_id, collection, op);
     Ok(rows)
 }
@@ -385,12 +460,29 @@ pub async fn exec_mutation_with_emit_for_tests(
         .map_err(DbError::into_string)
 }
 
+/// **Test-only**: exec a read query through the same shared
+/// pool-or-tx path production CRUD uses, including the Postgres
+/// autocommit per-app role fence.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub async fn exec_query_for_tests(
+    app_id: &str,
+    bq: crate::query::BuiltQuery,
+) -> Result<Vec<Value>, String> {
+    exec_query(app_id, bq).await.map_err(DbError::into_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::NamespaceManager as _;
+    use crate::backend::sqlite::SqliteBackend;
+    use crate::backend::SqlExecutor as _;
     use crate::broker::ChangeOp;
+    use std::path::PathBuf;
     use std::cell::Cell;
     use std::collections::HashMap;
+    use std::rc::Rc;
 
     thread_local! {
         /// Counter incremented every time the production code path
@@ -399,6 +491,7 @@ mod tests {
         /// `tests::record_tuple_built()` call at the bottom of the
         /// per-row loop.
         static TUPLE_BUILT_COUNT: Cell<usize> = const { Cell::new(0) };
+        static SQLITE_ROUTE: Cell<u8> = const { Cell::new(0) };
     }
 
     /// Hook invoked from [`emit_for_rows`] when the per-row build
@@ -416,6 +509,22 @@ mod tests {
         TUPLE_BUILT_COUNT.with(|c| c.set(0));
     }
 
+    pub(super) fn record_sqlite_shared_route() {
+        SQLITE_ROUTE.with(|c| c.set(1));
+    }
+
+    pub(super) fn record_sqlite_tx_route() {
+        SQLITE_ROUTE.with(|c| c.set(2));
+    }
+
+    fn reset_sqlite_route() {
+        SQLITE_ROUTE.with(|c| c.set(0));
+    }
+
+    fn sqlite_route() -> u8 {
+        SQLITE_ROUTE.with(|c| c.get())
+    }
+
     /// Reset every piece of thread-local state the gate inspects:
     ///   - broker subscriptions (`drop_app(None)`),
     ///   - WAL suppression set (clear the legacy sentinel and any test
@@ -429,6 +538,13 @@ mod tests {
             crate::wal_consumer::unsuppress_app(key);
         }
         reset_counter();
+        reset_sqlite_route();
+    }
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
     }
 
     /// One synthetic RETURNING row with the columns a real mutation
@@ -661,6 +777,104 @@ mod tests {
             }
             other => panic!("expected Change variant, got {other:?}"),
         }
+        reset_world();
+    }
+
+    #[test]
+    fn sqlite_exec_helpers_use_tx_connection_when_present() {
+        reset_world();
+        run(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+            );
+            backend
+                .ensure_app_schema("app_exec")
+                .await
+                .expect("ensure app schema");
+            backend
+                .pool_exec(
+                    r#"CREATE TABLE "app_exec"."notes" (
+                           id INTEGER PRIMARY KEY,
+                           title TEXT NOT NULL
+                       )"#,
+                    &[],
+                )
+                .await
+                .expect("CREATE TABLE notes");
+
+            context::with_mut(|c| {
+                c.clear_pool();
+                c.set_sqlite_backend(Rc::clone(&backend));
+            });
+
+            let client = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire tx client");
+            backend
+                .client_exec(&client, "BEGIN", &[])
+                .await
+                .expect("BEGIN");
+            context::with_mut(|c| {
+                let prev = c.install_tx_client(TxConnection::Sqlite(client));
+                assert!(prev.is_none(), "tx slot should start empty");
+            });
+
+            reset_sqlite_route();
+            let inserted = exec_mutation("app_exec", BuiltQuery {
+                sql: r#"INSERT INTO "app_exec"."notes" (id, title)
+                        VALUES (1, 'tx-row') RETURNING *"#
+                    .to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("exec_mutation through tx");
+            assert_eq!(
+                sqlite_route(),
+                2,
+                "exec_mutation must route through TxConnection::Sqlite",
+            );
+            assert_eq!(
+                inserted[0].get("title").and_then(Value::as_str),
+                Some("tx-row"),
+            );
+
+            reset_sqlite_route();
+            let count = exec_count("app_exec", BuiltQuery {
+                sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("exec_count through tx");
+            assert_eq!(
+                sqlite_route(),
+                2,
+                "exec_count must route through TxConnection::Sqlite",
+            );
+            assert_eq!(count, 1);
+
+            reset_sqlite_route();
+            let rows = exec_query("app_exec", BuiltQuery {
+                sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("exec_query through tx");
+            assert_eq!(
+                sqlite_route(),
+                2,
+                "exec_query must route through TxConnection::Sqlite",
+            );
+            assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("tx-row"));
+
+            if let Some(TxConnection::Sqlite(client)) = context::with_mut(|c| c.take_tx_client()) {
+                let _ = client.exec("ROLLBACK", &[]).await;
+            } else {
+                panic!("sqlite tx client should still be parked for cleanup");
+            }
+            context::with_mut(|c| c.clear_pool());
+        });
         reset_world();
     }
 }

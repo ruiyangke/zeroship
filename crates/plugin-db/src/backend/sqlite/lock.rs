@@ -82,14 +82,16 @@ impl InProcessLockRegistry {
     /// would force every `release` call site to handle a "wasn't held
     /// anyway" branch with no semantic difference.
     pub(crate) fn release(&self, key: (String, String)) {
-        // `borrow()` suffices — we mutate the inner `Cell<bool>`, not
-        // the outer `HashMap`. The `Cell` mutation goes through
-        // interior mutability, so an immutable borrow of the map is
-        // enough to read the slot pointer and flip its bool.
-        let slots = self.slots.borrow();
-        match slots.get(&key) {
+        let mut slots = self.slots.borrow_mut();
+        match slots.get(&key).cloned() {
             Some(slot) if slot.get() => {
                 slot.set(false);
+                // `slot` itself is a cloned `Rc` from the map lookup,
+                // so an unshared entry has strong_count == 2 here:
+                // one owner in the HashMap, one in this stack frame.
+                if Rc::strong_count(&slot) == 2 {
+                    slots.remove(&key);
+                }
             }
             Some(_) => {
                 tracing::warn!(
@@ -157,6 +159,19 @@ mod tests {
         assert!(
             reg.try_acquire(k),
             "re-acquire after release must return true (slot freed)"
+        );
+    }
+
+    #[test]
+    fn release_drops_unshared_slot_from_registry() {
+        let reg = InProcessLockRegistry::new();
+        let k = key("app_demo:register_model", "register_model");
+        assert!(reg.try_acquire(k.clone()));
+        assert_eq!(reg.slots.borrow().len(), 1, "slot must exist after acquire");
+        reg.release(k);
+        assert!(
+            reg.slots.borrow().is_empty(),
+            "release must evict the now-unheld slot so the registry cannot grow unbounded"
         );
     }
 

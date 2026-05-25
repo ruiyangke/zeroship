@@ -78,6 +78,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine;
 use rusqlite::Connection;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
@@ -455,9 +456,8 @@ fn materialise_old(acc: &rusqlite::hooks::PreUpdateOldValueAccessor) -> Vec<Opti
 }
 
 fn value_to_string(v: ValueRef<'_>) -> Option<String> {
-    // Mirror the encoding `session::run_query` uses so the broker
-    // sees a uniform shape regardless of whether the row came from a
-    // SELECT (session.query) or a preupdate fire.
+    // Mirror the JSON read-path shapes so broker predicate evaluation
+    // sees the same scalar encoding a fetch would expose.
     match v {
         ValueRef::Null => None,
         ValueRef::Integer(n) => Some(n.to_string()),
@@ -468,7 +468,7 @@ fn value_to_string(v: ValueRef<'_>) -> Option<String> {
             // The PG side's pgoutput decoder makes the same trade-off.
             Some(String::from_utf8_lossy(bytes).into_owned())
         }
-        ValueRef::Blob(bytes) => Some(format!("<{} bytes blob>", bytes.len())),
+        ValueRef::Blob(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
     }
 }
 
@@ -851,5 +851,15 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m.get("c0"), Some(&"1".to_string()));
         assert_eq!(m.get("c1"), Some(&"alice".to_string()));
+    }
+
+    #[test]
+    fn value_to_string_base64_encodes_blob_cells() {
+        let blob = ValueRef::Blob(&[0x01, 0x02, 0xFF]);
+        assert_eq!(
+            value_to_string(blob),
+            Some("AQL/".to_string()),
+            "CDC tuple blobs must preserve byte content, not length-only placeholders"
+        );
     }
 }

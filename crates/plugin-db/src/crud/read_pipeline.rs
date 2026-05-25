@@ -104,7 +104,7 @@ fn normalize_row_on_read(schema: Option<&Value>, row: &mut Value) -> Result<(), 
         }
 
         match def.get("type").and_then(Value::as_str) {
-            Some("boolean") => normalize_boolean_value(value),
+            Some("boolean") => normalize_boolean_value(value)?,
             Some("json") | Some("object") | Some("array") | Some("union") => {
                 normalize_json_value(value)
             }
@@ -116,22 +116,38 @@ fn normalize_row_on_read(schema: Option<&Value>, row: &mut Value) -> Result<(), 
     Ok(())
 }
 
-fn normalize_boolean_value(value: &mut Value) {
+fn normalize_boolean_value(value: &mut Value) -> Result<(), DbError> {
     match value {
-        Value::Bool(_) | Value::Null => {}
+        Value::Bool(_) | Value::Null => Ok(()),
         Value::Number(n) => {
             if n.as_i64() == Some(0) {
                 *value = Value::Bool(false);
+                Ok(())
             } else if n.as_i64() == Some(1) {
                 *value = Value::Bool(true);
+                Ok(())
+            } else {
+                Err(DbError::internal(format!(
+                    "normalize_row_on_read: boolean field expected 0/1, got {n}"
+                )))
             }
         }
         Value::String(s) => match s.as_str() {
-            "0" | "false" => *value = Value::Bool(false),
-            "1" | "true" => *value = Value::Bool(true),
-            _ => {}
+            "0" | "false" => {
+                *value = Value::Bool(false);
+                Ok(())
+            }
+            "1" | "true" => {
+                *value = Value::Bool(true);
+                Ok(())
+            }
+            other => Err(DbError::internal(format!(
+                "normalize_row_on_read: boolean field expected 0/1/true/false, got {other:?}"
+            ))),
         },
-        _ => {}
+        other => Err(DbError::internal(format!(
+            "normalize_row_on_read: boolean field expected bool/string/number/null, got {other:?}"
+        ))),
     }
 }
 
@@ -401,5 +417,27 @@ mod tests {
             parse_timestamp_millis("2025-05-07T03:02:03.004+02:00"),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn normalize_row_on_read_rejects_out_of_domain_boolean_values() {
+        let schema = serde_json::json!({
+            "active": { "type": "boolean" }
+        });
+        let mut row = serde_json::json!({
+            "active": 2
+        });
+
+        let err = normalize_row_on_read(Some(&schema), &mut row)
+            .expect_err("declared boolean field must reject out-of-domain values");
+        match err {
+            DbError::Internal { message } => {
+                assert!(
+                    message.contains("boolean field expected 0/1"),
+                    "error should explain the boolean domain violation: {message}"
+                );
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
     }
 }

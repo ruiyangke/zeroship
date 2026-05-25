@@ -4554,7 +4554,7 @@ pub fn build_upsert_with_dialect(
     collection: &str,
     doc: &Value,
     conflict_fields: &Value,
-    _dialect: SqlDialect,
+    dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -4592,19 +4592,50 @@ pub fn build_upsert_with_dialect(
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
+    let encrypted_cols = collect_encrypted_cols(obj);
 
     let mut columns = Vec::new();
     let mut placeholders = Vec::new();
     let mut params: Vec<String> = Vec::new();
     let mut update_clauses = Vec::new();
+    let mut doc_has_version = false;
+    let mut doc_has_updated_at = false;
 
     for (key, value) in obj {
+        if key.starts_with("__zsenc__") {
+            continue;
+        }
         columns.push(quote_ident(key));
-        params.push(value_to_param(value));
-        placeholders.push(format!("${}", params.len()));
+
+        match key.as_str() {
+            "version" => doc_has_version = true,
+            "updated_at" => doc_has_updated_at = true,
+            _ => {}
+        }
+
+        if value.is_null() {
+            placeholders.push("NULL".to_string());
+        } else {
+            let is_encrypted = encrypted_cols.contains(key.as_str());
+            let raw = value_to_param(value);
+            let param_value = if is_encrypted {
+                dialect.wrap_encrypted_param(raw)
+            } else {
+                raw
+            };
+            params.push(param_value);
+            let n = params.len();
+            if is_encrypted {
+                placeholders.push(dialect.encrypted_column_bind_placeholder(n));
+            } else {
+                placeholders.push(format!("${n}"));
+            }
+        }
 
         // Non-conflict columns get updated to the EXCLUDED value
-        if !conflict_set.contains(key.as_str()) {
+        if !conflict_set.contains(key.as_str())
+            && !matches!(key.as_str(), "id" | "created_at" | "created_by")
+        {
             update_clauses.push(format!("{} = EXCLUDED.{}", quote_ident(key), quote_ident(key)));
         }
     }
@@ -4614,6 +4645,13 @@ pub fn build_upsert_with_dialect(
         .filter_map(|v| v.as_str())
         .map(quote_ident)
         .collect();
+
+    if !doc_has_version {
+        update_clauses.push(r#""version" = COALESCE("version", 0) + 1"#.to_string());
+    }
+    if !doc_has_updated_at {
+        update_clauses.push(format!(r#""updated_at" = {}"#, now_expr(dialect)));
+    }
 
     // If all columns are conflict columns, use DO UPDATE SET for the first non-id conflict col
     // to make it a true upsert (otherwise Postgres treats it as DO NOTHING).
@@ -5629,6 +5667,121 @@ mod tests {
         let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
         assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn test_upsert_preserves_insert_only_system_fields_on_conflict() {
+        let doc = json!({
+            "email": "a@b.com",
+            "id": "user_new",
+            "created_at": "2026-05-25T00:00:00Z",
+            "created_by": "usr_new",
+            "updated_by": "usr_actor",
+            "name": "alice"
+        });
+        let conflict = json!(["email"]);
+        let q = build_upsert("app1", "users", &doc, &conflict).unwrap();
+        assert!(
+            !q.sql.contains(r#""id" = EXCLUDED."id""#),
+            "upsert must not overwrite id on conflict: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains(r#""created_at" = EXCLUDED."created_at""#),
+            "upsert must not overwrite created_at on conflict: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains(r#""created_by" = EXCLUDED."created_by""#),
+            "upsert must not overwrite created_by on conflict: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""updated_by" = EXCLUDED."updated_by""#),
+            "mutable audit fields should still update from EXCLUDED: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_upsert_autobumps_version_and_updated_at_when_omitted() {
+        let doc = json!({"email": "a@b.com", "name": "alice"});
+        let conflict = json!(["email"]);
+        let q = build_upsert_with_dialect("app1", "users", &doc, &conflict, SqlDialect::Sqlite)
+            .unwrap();
+        assert!(
+            q.sql.contains(r#""version" = COALESCE("version", 0) + 1"#),
+            "upsert must auto-bump version on conflict when omitted: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""updated_at" = CURRENT_TIMESTAMP"#),
+            "SQLite upsert must stamp CURRENT_TIMESTAMP when updated_at omitted: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_upsert_respects_creator_supplied_version_and_updated_at() {
+        let doc = json!({
+            "email": "a@b.com",
+            "name": "alice",
+            "version": 99,
+            "updated_at": "2026-05-25T00:00:00Z"
+        });
+        let conflict = json!(["email"]);
+        let q =
+            build_upsert_with_dialect("app1", "users", &doc, &conflict, SqlDialect::Postgres)
+                .unwrap();
+        assert!(
+            !q.sql.contains(r#""version" = COALESCE("version", 0) + 1"#),
+            "explicit version should suppress conflict-update auto-bump: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains(r#""updated_at" = NOW()"#),
+            "explicit updated_at should suppress conflict-update timestamp auto-stamp: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""version" = EXCLUDED."version""#),
+            "explicit version should flow through EXCLUDED on conflict: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""updated_at" = EXCLUDED."updated_at""#),
+            "explicit updated_at should flow through EXCLUDED on conflict: {}",
+            q.sql
+        );
+    }
+
+    #[test]
+    fn test_upsert_skips_encryption_markers_and_wraps_ciphertext_bind() {
+        let doc = json!({
+            "email": "a@b.com",
+            "ssn": "Y2lwaGVydGV4dA==",
+            "__zsenc__ssn": true,
+        });
+        let conflict = json!(["email"]);
+        let q = build_upsert_with_dialect("app1", "users", &doc, &conflict, SqlDialect::Sqlite)
+            .unwrap();
+        assert!(
+            !q.sql.contains("__zsenc__"),
+            "marker keys must never be emitted as real columns: {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""ssn""#),
+            "real encrypted column must still be emitted: {}",
+            q.sql
+        );
+        assert!(
+            q.params
+                .iter()
+                .any(|p| p.starts_with(SQLITE_ENC_BLOB_PREFIX)),
+            "SQLite upsert must tag encrypted params for blob binding: {:?}",
+            q.params
+        );
     }
 
     #[test]
