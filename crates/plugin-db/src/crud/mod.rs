@@ -105,6 +105,12 @@ pub mod system_fields_pass;
 mod read_pipeline;
 mod write_pipeline;
 
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(unused_imports)]
+pub use write_pipeline::{
+    reset_write_path_counters_for_tests, write_path_counters_for_tests, WritePathCounters,
+};
+
 // ---------------------------------------------------------------------------
 // dispatch_op template
 // ---------------------------------------------------------------------------
@@ -976,54 +982,59 @@ pub(crate) fn dispatch_update_one<'s>(
             };
         }
 
-        let target_rows = match write_pipeline::resolve_target_row_ids(
-            &app,
-            &coll,
-            &filter,
-            Some(1),
-        )
-        .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
-        let Some(target_row) = target_rows.first() else {
-            if let Some(expected_version) = cas_version {
-                let row_id = filter
-                    .as_object()
-                    .and_then(|o| o.get("id"))
-                    .and_then(|v| v.as_str());
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(
-                        DbError::version_mismatch(&coll, row_id, expected_version).to_op_error(),
-                    ),
-                    request_id,
-                };
-            }
-            return OpResult::JsValue {
-                resolver,
-                value: ResolveValue::Json("null".to_string()),
-                request_id,
+        let per_row_encrypted_update =
+            write_pipeline::update_requires_per_row_encryption(&app, &coll, &update);
+        let target_row = if per_row_encrypted_update {
+            let target_rows = match write_pipeline::resolve_target_row_ids(
+                &app,
+                &coll,
+                &filter,
+                Some(1),
+            )
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    return OpResult::JsValue {
+                        resolver,
+                        value: ResolveValue::RejectError(e.to_op_error()),
+                        request_id,
+                    };
+                }
             };
+            let Some(target_row) = target_rows.first().cloned() else {
+                if let Some(expected_version) = cas_version {
+                    let row_id = filter
+                        .as_object()
+                        .and_then(|o| o.get("id"))
+                        .and_then(|v| v.as_str());
+                    return OpResult::JsValue {
+                        resolver,
+                        value: ResolveValue::RejectError(
+                            DbError::version_mismatch(&coll, row_id, expected_version)
+                                .to_op_error(),
+                        ),
+                        request_id,
+                    };
+                }
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json("null".to_string()),
+                    request_id,
+                };
+            };
+            Some(target_row)
+        } else {
+            None
         };
-        let target_row_pk = target_row.row_pk.clone();
-        let target_row_id = target_row.id_value.clone();
 
         let mut update = update;
+        let row_pk = target_row.as_ref().map_or("", |row| row.row_pk.as_str());
         if let Err(e) = write_pipeline::apply(
             &app,
             &coll,
             &mut update,
-            write_pipeline::ApplyMode::Update {
-                row_pk: &target_row_pk,
-            },
+            write_pipeline::ApplyMode::Update { row_pk },
         )
         .await
         {
@@ -1034,10 +1045,17 @@ pub(crate) fn dispatch_update_one<'s>(
             };
         }
         maybe_lower_sqlite_boolean_update(&app, &coll, &mut update);
-        let mut sql_filter = serde_json::json!({ "id": target_row_id });
-        if let Some(expected_version) = cas_version {
-            sql_filter["version"] = Value::from(expected_version);
-        }
+        let sql_filter = if let Some(target_row) = target_row {
+            let mut sql_filter = serde_json::json!({ "id": target_row.id_value });
+            if let Some(expected_version) = cas_version {
+                sql_filter["version"] = Value::from(expected_version);
+            }
+            sql_filter
+        } else {
+            let mut sql_filter = filter.clone();
+            maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
+            sql_filter
+        };
         // **P7 PR 4** — auto-bump via the system-fields-aware builder.
         // Actor flows into the `updated_by` bind; the `hints` from the
         // pre-pass tell the builder which auto-bumps to suppress.
@@ -1199,42 +1217,8 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
 
-        let target_rows = match write_pipeline::resolve_target_row_ids(&app, &coll, &filter, None)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
-        if target_rows.is_empty() {
-            if let Some(expected_version) = cas_version {
-                let row_id = filter
-                    .as_object()
-                    .and_then(|o| o.get("id"))
-                    .and_then(|v| v.as_str());
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(
-                        DbError::version_mismatch(&coll, row_id, expected_version).to_op_error(),
-                    ),
-                    request_id,
-                };
-            }
-            return OpResult::JsValue {
-                resolver,
-                value: usize_count_as_f64(0),
-                request_id,
-            };
-        }
-
         let per_row_encrypted_update =
             write_pipeline::update_requires_per_row_encryption(&app, &coll, &update);
-        let mut update = update;
         let autobump = query::SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: actor_id.as_deref(),
@@ -1243,6 +1227,40 @@ pub(crate) fn dispatch_update_many<'s>(
             skip_updated_by: hints.creator_supplied_updated_by,
         };
         if per_row_encrypted_update {
+            let target_rows =
+                match write_pipeline::resolve_target_row_ids(&app, &coll, &filter, None).await {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+            if target_rows.is_empty() {
+                if let Some(expected_version) = cas_version {
+                    let row_id = filter
+                        .as_object()
+                        .and_then(|o| o.get("id"))
+                        .and_then(|v| v.as_str());
+                    return OpResult::JsValue {
+                        resolver,
+                        value: ResolveValue::RejectError(
+                            DbError::version_mismatch(&coll, row_id, expected_version)
+                                .to_op_error(),
+                        ),
+                        request_id,
+                    };
+                }
+                return OpResult::JsValue {
+                    resolver,
+                    value: usize_count_as_f64(0),
+                    request_id,
+                };
+            }
+
+            let update = update;
             let mut affected = 0usize;
             for target_row in &target_rows {
                 let row_pk = target_row.row_pk.clone();
@@ -1324,6 +1342,7 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
 
+        let mut update = update;
         if let Err(e) = write_pipeline::apply(
             &app,
             &coll,
