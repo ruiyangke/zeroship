@@ -18,8 +18,9 @@
 //!    `serial.file`. Disks + IP are documented no-ops in v1 but the
 //!    code paths exist for the v2 cross-cluster work.
 //! 6. Submit a Nomad job (or equivalent backend op) for the new alloc
-//!    with `ZSBX_RESTORE_FROM=<alloc_dir>` env so the wrapper script's
-//!    PR 3f branch knows to invoke `cloud-hypervisor --restore`.
+//!    with `ZSBX_RESTORE_FROM=<alloc_dir>` env so the ch driver's
+//!    StartTask passes `--restore source_url=file://<alloc_dir>` to
+//!    cloud-hypervisor.
 //! 7. Wait for `/livez` to 200.
 //! 8. CAS `restoring → running`; clear snapshot metadata.
 //! 9. On any mid-flight failure: CAS `restoring → snapshotted`
@@ -1261,10 +1262,10 @@ pub(crate) fn rewrite_config_json(
     // may have different vm_indices (cluster-fallback in v2). We
     // recompute from the destination vm_index. This is the ONLY
     // path the controller rewrites — path-bearing fields (disks[].path,
-    // fs[].socket, serial.file) require the runtime NOMAD_TASK_DIR
-    // which the controller cannot know at job-submit time. The
-    // wrapper handles path rewrites at exec time. See bug-#8
-    // diagnostic 2026-05-22 / proposal § 5.
+    // fs[].socket, serial.file) are passed as absolute paths in
+    // TaskConfig and the ch driver consumes them directly at launch
+    // time (the runtime NOMAD_TASK_DIR is resolved on the worker).
+    // See bug-#8 diagnostic 2026-05-22 / proposal § 5.
     let tap = derive_tap(vm_index);
     let mac = derive_mac(vm_index);
     if let Some(nets) = v.get_mut("net").and_then(|n| n.as_array_mut()) {
@@ -1451,14 +1452,14 @@ mod unit_tests {
     use super::*;
 
     #[test]
-    fn derive_mac_matches_wrapper_pattern() {
+    fn derive_mac_matches_pinned_format() {
         assert_eq!(derive_mac(3), "12:34:56:78:9b:03");
         assert_eq!(derive_mac(16), "12:34:56:78:9b:10");
         assert_eq!(derive_mac(255), "12:34:56:78:9b:ff");
     }
 
     #[test]
-    fn derive_tap_matches_wrapper_pattern() {
+    fn derive_tap_matches_pinned_format() {
         assert_eq!(derive_tap(0), "zsbx-nm-0");
         assert_eq!(derive_tap(42), "zsbx-nm-42");
     }
@@ -1467,8 +1468,9 @@ mod unit_tests {
     /// rewrites ONLY net[].tap + net[].mac. Path-bearing fields
     /// (disks[].path, fs[].socket, serial.file) are left untouched
     /// because the controller can't know the runtime NOMAD_TASK_DIR
-    /// at job-submit time. The wrapper does that rewrite at exec
-    /// time with a `sed` against the real env-resolved task dir.
+    /// at job-submit time. The ch driver receives absolute paths
+    /// in `TaskConfig.Disks` / `TaskConfig.Fs` / `TaskConfig.Serial`
+    /// and passes them through to CH at StartTask.
     #[test]
     fn rewrite_config_json_rewrites_only_net_fields() {
         let dir = std::env::temp_dir().join(format!(
@@ -1500,7 +1502,8 @@ mod unit_tests {
         // net.tap + net.mac rewritten from vm_index=7
         assert_eq!(v["net"][0]["tap"], "zsbx-nm-7");
         assert_eq!(v["net"][0]["mac"], "12:34:56:78:9b:07");
-        // Paths LEFT UNTOUCHED — the wrapper handles them at exec.
+        // Paths LEFT UNTOUCHED — the ch driver receives them as
+        // absolute TaskConfig.{Disks,Fs,Serial} fields at launch.
         assert_eq!(v["fs"][0]["socket"], source_sock);
         assert_eq!(v["disks"][0]["path"], source_disk);
         assert_eq!(v["serial"]["file"], source_serial);
@@ -1970,8 +1973,8 @@ mod unit_tests {
 // with two key differences:
 //
 //   1. ZSBX_RESTORE_FROM=<alloc_dir> set in the spawned task's env
-//      so the wrapper's PR 3f branch invokes
-//      `cloud-hypervisor --restore source_url=file://<alloc_dir>`.
+//      so the ch driver's StartTask passes
+//      `--restore source_url=file://<alloc_dir>` to cloud-hypervisor.
 //   2. The vm_index is forced to the source slot (from the snapshot
 //      row); cluster-fallback is documented but not implemented in
 //      v1. A reserve() collision surfaces as 503
@@ -2025,10 +2028,11 @@ impl VmIndexReservations {
 pub struct RealRestoreBackend {
     cfg: NomadCHConfig,
     /// Controller-wide memory_mb default — written into the restore
-    /// alloc's `ZSBX_VM_MEMORY_MB` env (Phase B fix #6). The wrapper
-    /// passes this through to CH's `--memory size=${N}M,shared=on`
-    /// flag; for restore it must match the snapshot's memory size
-    /// (CH refuses to restore against a size mismatch).
+    /// alloc's `ZSBX_VM_MEMORY_MB` env (Phase B fix #6). The ch
+    /// driver passes this through to CH's
+    /// `--memory size=${N}M,shared=on` flag; for restore it must
+    /// match the snapshot's memory size (CH refuses to restore
+    /// against a size mismatch).
     memory_mb: u32,
     /// Controller-wide cpu count — for `ZSBX_VM_CPUS_BOOT`. Same
     /// match-the-snapshot constraint applies.
@@ -2504,17 +2508,17 @@ fn build_restore_nomad_job_json(
     cpus: f32,
     local_nomad_node_id: Option<&str>,
 ) -> serde_json::Value {
-    // Phase B fix #6 (later: virtio-blk pivot, bug #11): the wrapper
-    // up-front validates a 5-env block (VM_INDEX + ARTIFACT_DIR +
-    // RUNTIME + MEMORY_MB + CPUS_BOOT) on both branches, and on
-    // cold-boot it additionally validates WORKSPACE_IMG +
-    // USER_HOME_IMG + PUBKEY_HEX. Restore doesn't *need* the latter
+    // Phase B fix #6 (later: virtio-blk pivot, bug #11): the ch
+    // driver validates the typed TaskConfig block — VM index +
+    // artifact dir + memory + cpus on both branches, and on
+    // cold-boot it additionally validates workspace.img +
+    // home.img + pubkey hex. Restore doesn't *need* the latter
     // three (CH `--restore` reads the disk paths + cmdline from the
     // snapshot's saved config.json), but we still emit the image
     // paths because the controller derives them deterministically
-    // and the wrapper's defensive `[ -f $PATH ]` check on the
-    // images catches a hand-edited restore jobspec with a typo'd
-    // path before CH's "block device file" error.
+    // and the ch driver's path existence check on the images
+    // catches a hand-edited restore jobspec with a typo'd path
+    // before CH's "block device file" error.
     //
     // PUBKEY_HEX is left empty on restore: it's hex-only validated
     // only when set, and we have no separate persisted hex form on
@@ -2900,9 +2904,11 @@ pub(crate) async fn clock_resync_post_restore(
     // handler can assert it matches its own boot-time-known id. We
     // capture by value because spawn_blocking takes `'static` closures.
     // B24-FOLLOWUP: use .simple() (32-char hex, no hyphens) to match
-    // the canonical form the wrapper validator accepts and that the
-    // agent reads from SANDBOX_AGENT_SANDBOX_ID. Hyphenated form would
-    // 401 every clock_resync on the restore path.
+    // the canonical form the ch driver passes verbatim into the
+    // guest's kernel cmdline (via TaskConfig.Cmdline; the cmdline
+    // field must not contain hyphens) and that the agent reads
+    // from SANDBOX_AGENT_SANDBOX_ID. Hyphenated form would 401
+    // every clock_resync on the restore path.
     let sandbox_id_str = sandbox_id.simple().to_string();
     compio::runtime::spawn_blocking(move || {
         // Use std::time directly here (mirror of `unix_now` in
@@ -3933,9 +3939,10 @@ mod real_backend_tests {
         let parsed: serde_json::Value = serde_json::from_str(&body_str)
             .unwrap_or_else(|e| panic!("body not valid JSON: {e}: body={body_str:?}"));
         // R7-S1 + B24-FOLLOWUP: sandbox_id field carries the .simple()
-        // form (32-hex, no hyphens) — same canonical form the wrapper
-        // env-injects as SANDBOX_AGENT_SANDBOX_ID and that the agent
-        // boots with. Hyphenated form would 401 the resync.
+        // form (32-hex, no hyphens) — same canonical form the ch
+        // driver injects as SANDBOX_AGENT_SANDBOX_ID (via the guest
+        // kernel cmdline) and that the agent boots with. Hyphenated
+        // form would 401 the resync.
         assert_eq!(
             parsed["sandbox_id"].as_str().unwrap_or(""),
             sandbox_id.simple().to_string(),

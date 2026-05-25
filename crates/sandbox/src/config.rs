@@ -332,9 +332,12 @@ pub struct NomadCHConfig {
     pub user_home_dir_root: PathBuf,
 
     /// Inclusive lower bound of the per-VM index pool. Each sandbox
-    /// gets a unique index; the wrapper computes `tap=zsbx-nm-<idx>`,
-    /// host IP `10.99.<100+idx>.1` and VM IP `10.99.<100+idx>.2`. The
-    /// host operator is responsible for pre-creating tap devices in
+    /// gets a unique index; the controller derives
+    /// `tap=zsbx-nm-<idx>`, host IP `10.99.<100+idx>.1` and VM IP
+    /// `10.99.<100+idx>.2` (see `derive_tap` / `derive_mac` in
+    /// `restore_handler.rs`) and passes them to the ch driver via
+    /// `TaskConfig.Net[0]`. The host operator is responsible for
+    /// pre-creating tap devices in
     /// this range. Must be ≥ 1 (an index of 0 reserves the .100
     /// subnet for what's effectively a sentinel — confusing on
     /// inspection, no upside). `SANDBOX_NOMAD_CH_VM_INDEX_FLOOR`
@@ -343,8 +346,8 @@ pub struct NomadCHConfig {
 
     /// Inclusive upper bound of the index pool. Allocator hands out
     /// indices in `[floor, ceil]`; `alloc()` returns an error past
-    /// `ceil`. Must be ≤ 155 — the IP arithmetic in the wrapper +
-    /// controller is `10.99.{100+idx}.2`, and the third octet
+    /// `ceil`. Must be ≤ 155 — the IP arithmetic in the controller
+    /// is `10.99.{100+idx}.2`, and the third octet
     /// overflows past index 155. The cleaner alternative (stretching
     /// the subnet across two octets) costs us a bigger blast radius
     /// for off-by-one bugs and a less readable IP layout; the
@@ -400,7 +403,7 @@ pub struct NomadCHConfig {
     /// see two consecutive failures (connection refused, timeout, or
     /// 5xx) before releasing `vm_index`. Why: Nomad's "alloc
     /// terminal" lags the host-process tree (cloud-hypervisor + 3×
-    /// virtiofsd + the bash wrapper) by 0.5–60 s under N=8 stress.
+    /// virtiofsd + the ch driver task) by 0.5–60 s under N=8 stress.
     /// Releasing the index while the previous tenant's agent is
     /// still listening on `10.99.<100+idx>.2:7777` is the exact
     /// race FM-A's fingerprint check papers over; this is the
@@ -428,8 +431,9 @@ pub struct NomadCHConfig {
     /// historical 10.99/16 layout. Operators on hosts with a corp
     /// 10.99/16 collision can shift this — both controller (which
     /// computes `agent_url = http://10.<base>.<100+idx>.2:7777`)
-    /// and the wrapper (which lays down the tap + IP) read the same
-    /// value. Validated to a non-multicast / non-loopback / non-
+    /// and the ch driver (which lays down the tap + IP via
+    /// `TaskConfig.Net[0]`) read the same value. Validated to a
+    /// non-multicast / non-loopback / non-
     /// link-local prefix so a typo'd `127` or `169` doesn't quietly
     /// produce unreachable IPs.
     /// `SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET` (default 99).
