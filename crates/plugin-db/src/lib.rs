@@ -369,6 +369,19 @@ pub fn set_db_url_for_tests(url: &str) {
     });
 }
 
+/// **Test-only**: install a concrete Postgres pool/backend into the
+/// per-thread context. Used by integration tests that need to force the
+/// plugin onto a non-default login role without waiting for lazy init to
+/// rebuild from a prior test's URL.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
+    ctx_mut(|c| {
+        c.set_db_url(url);
+        c.set_pool(pool);
+    });
+}
+
 /// **P5.5 PR 4 test helper**: install a `SqliteBackend` into the per-
 /// isolate context so the unmask integration suite can drive
 /// `crud::unmask::dispatch_unmask` against a freshly-constructed

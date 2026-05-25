@@ -5500,11 +5500,18 @@ fn aliased_select_skips_kind_none_sqlite() {
         "kind=none must NOT trigger the AS-rewrite: {}",
         bq.sql,
     );
-    // `*` should fall through (no masked columns triggered the
-    // explicit column-list expansion).
+    // Schema-aware reads now always expand to the allowlisted public
+    // column set, even when every mask is `kind: "none"`.
     assert!(
-        bq.sql.contains("SELECT *"),
-        "schema with only kind=none masks must fall through to `*`: {}",
+        !bq.sql.contains("SELECT *"),
+        "schema-backed reads must avoid `*`: {}",
+        bq.sql,
+    );
+    assert!(
+        bq.sql.contains("SELECT \"id\", \"created_at\", \"updated_at\"")
+            && bq.sql.contains("\"ssn\"")
+            && bq.sql.contains("\"name\""),
+        "schema-backed reads must project the public column set: {}",
         bq.sql,
     );
 }

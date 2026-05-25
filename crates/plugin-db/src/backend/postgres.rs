@@ -495,11 +495,9 @@ impl VectorIndex for PostgresBackend {
         .map_err(DbError::from)?;
 
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows = self
-            .pool
-            .query_text_params(&bq.sql, &param_refs)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
+        let rows =
+            crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
+                .await?;
         Ok(crate::v8_bridge::rows_to_json_value(&rows))
     }
 }
@@ -679,11 +677,9 @@ impl FullTextIndex for PostgresBackend {
         )
         .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows = self
-            .pool
-            .query_text_params(&bq.sql, &param_refs)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
+        let rows =
+            crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
+                .await?;
         Ok(crate::v8_bridge::rows_to_json_value(&rows))
     }
 }
@@ -811,11 +807,9 @@ impl SpatialIndex for PostgresBackend {
         )
         .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows = self
-            .pool
-            .query_text_params(&bq.sql, &param_refs)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
+        let rows =
+            crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
+                .await?;
         Ok(crate::v8_bridge::rows_to_json_value(&rows))
     }
 }

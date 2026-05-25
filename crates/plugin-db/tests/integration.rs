@@ -5370,7 +5370,7 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 // at the bottom of the report.
 // ---------------------------------------------------------------------------
 
-async fn postgis_available(pool: &Pool) -> bool {
+async fn postgis_extension_available(pool: &Pool) -> bool {
     // Try a no-op `CREATE EXTENSION` so the test environment that ships
     // PostGIS but doesn't pre-install it still picks it up. If the
     // extension isn't shipped at all the call fails and we fall back
@@ -7074,6 +7074,117 @@ async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str) -> String 
     role
 }
 
+async fn install_role_bound_select_policy(
+    pool: &std::rc::Rc<Pool>,
+    app: &str,
+    collection: &str,
+    role: &str,
+) {
+    pool.execute(
+        &format!(
+            "ALTER TABLE \"{app}\".\"{collection}\" ENABLE ROW LEVEL SECURITY"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(
+            "ALTER TABLE \"{app}\".\"{collection}\" FORCE ROW LEVEL SECURITY"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(
+            "DROP POLICY IF EXISTS role_gate ON \"{app}\".\"{collection}\""
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE POLICY role_gate ON \"{app}\".\"{collection}\" \
+             FOR SELECT USING (current_user = '{role}')"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+}
+
+fn login_role_test_url(base_url: &str, role: &str, password: &str) -> String {
+    let (scheme, rest) = base_url
+        .split_once("://")
+        .unwrap_or(("postgres", base_url));
+    let host = rest.split_once('@').map(|(_, suffix)| suffix).unwrap_or(rest);
+    format!("{scheme}://{role}:{password}@{host}")
+}
+
+async fn provision_platform_login_pool(
+    admin_pool: &std::rc::Rc<Pool>,
+    base_url: &str,
+    login_role: &str,
+    password: &str,
+    app_role: &str,
+    app: &str,
+) -> (String, std::rc::Rc<Pool>) {
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    admin_pool
+        .execute(
+            &format!(
+                "CREATE ROLE \"{login_role}\" LOGIN PASSWORD '{password}' INHERIT"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    admin_pool
+        .execute(
+            &format!("GRANT \"{app_role}\" TO \"{login_role}\""),
+            &[],
+        )
+        .await
+        .unwrap();
+    admin_pool
+        .execute(
+            &format!("GRANT USAGE ON SCHEMA \"{app}\" TO \"{login_role}\""),
+            &[],
+        )
+        .await
+        .unwrap();
+    admin_pool
+        .execute(
+            &format!(
+                "GRANT SELECT ON ALL TABLES IN SCHEMA \"{app}\" TO \"{login_role}\""
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    let login_url = login_role_test_url(base_url, login_role, password);
+    let login_pool = std::rc::Rc::new(Pool::connect(&login_url, 4).await.unwrap());
+    (login_url, login_pool)
+}
+
+async fn postgis_available(pool: &Pool) -> bool {
+    let create_res = pool
+        .execute("CREATE EXTENSION IF NOT EXISTS postgis", &[])
+        .await;
+    if create_res.is_err() {
+        return false;
+    }
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &[])
+        .await
+        .unwrap_or_default();
+    !rows.is_empty()
+}
+
 #[compio::test]
 async fn per_app_role_created_at_provision() {
     let url = require_pg().await;
@@ -7369,6 +7480,362 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 
     let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
+}
+
+#[compio::test]
+#[ignore = "requires pgvector — swap `pg-test` image to pgvector/pgvector:pg16"]
+async fn vector_search_runs_under_per_app_role_via_rls() {
+    use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
+
+    let url = require_pg().await;
+    let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    if !pgvector_available(&admin_pool).await {
+        eprintln!("Skipping: pgvector not installed in test environment");
+        return;
+    }
+
+    let app = "p6a_vector_role_fence";
+    let coll = "docs";
+    let role = provision_app_with_role(&admin_pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    admin_pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id SERIAL PRIMARY KEY, \
+               embedding vector(2) NOT NULL\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    admin_pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"{coll}\" (embedding) VALUES ($1::vector)"
+        ),
+        &[&"[1,0]" as &(dyn compio_postgres::types::ToSql + Sync)],
+    )
+    .await
+    .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+    let login_role = "p6a_vector_login";
+    let (login_url, login_pool) = provision_platform_login_pool(
+        &admin_pool,
+        &url,
+        login_role,
+        "test",
+        &role,
+        app,
+    )
+    .await;
+
+    let blocked = login_pool
+        .query_text_params(&format!("SELECT id FROM \"{app}\".\"{coll}\""), &[])
+        .await
+        .unwrap();
+    assert!(
+        blocked.is_empty(),
+        "login role must be blocked by FORCE RLS before vector_search proves the role fence"
+    );
+
+    let backend = PostgresBackend::new(login_pool.clone(), login_url);
+    let rows = VectorIndex::vector_search(
+        &backend,
+        app,
+        coll,
+        "embedding",
+        &[1.0, 0.0],
+        1,
+        VectorMetric::Cosine,
+        &Value::Null,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
+    assert_eq!(rows.len(), 1, "vector_search must see the role-gated row");
+    assert_eq!(rows[0]["id"], 1);
+
+    drop(login_pool);
+    let _ = admin_pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+}
+
+#[compio::test]
+async fn fts_search_runs_under_per_app_role_via_rls() {
+    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
+
+    let url = require_pg().await;
+    let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "p6a_fts_role_fence";
+    let coll = "people";
+    let role = provision_app_with_role(&admin_pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    admin_pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id SERIAL PRIMARY KEY, \
+               bio TEXT NOT NULL\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let admin_backend = PostgresBackend::new(admin_pool.clone(), url.clone());
+    FullTextIndex::ensure_fts_index(&admin_backend, app, coll, &["bio".to_string()], "english")
+        .await
+        .unwrap();
+    admin_pool.execute(
+        &format!("INSERT INTO \"{app}\".\"{coll}\" (bio) VALUES ('rust systems')"),
+        &[],
+    )
+    .await
+    .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+    let login_role = "p6a_fts_login";
+    let (login_url, login_pool) = provision_platform_login_pool(
+        &admin_pool,
+        &url,
+        login_role,
+        "test",
+        &role,
+        app,
+    )
+    .await;
+
+    let blocked = login_pool
+        .query_text_params(&format!("SELECT id FROM \"{app}\".\"{coll}\""), &[])
+        .await
+        .unwrap();
+    assert!(
+        blocked.is_empty(),
+        "login role must be blocked by FORCE RLS before fts_search proves the role fence"
+    );
+
+    let backend = PostgresBackend::new(login_pool.clone(), login_url);
+    let rows = FullTextIndex::fts_search(&backend, app, coll, "rust", &Value::Null, Some(1))
+        .await
+        .unwrap_or_else(|e| panic!("fts_search failed: {e:?}"));
+    assert_eq!(rows.len(), 1, "fts_search must see the role-gated row");
+    assert_eq!(rows[0]["bio"], "rust systems");
+
+    drop(login_pool);
+    let _ = admin_pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+}
+
+#[compio::test]
+async fn spatial_near_runs_under_per_app_role_via_rls() {
+    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+
+    let url = require_pg().await;
+    let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    if !postgis_extension_available(&admin_pool).await {
+        eprintln!("Skipping: postgis not installed in test environment");
+        return;
+    }
+
+    let app = "p6a_spatial_role_fence";
+    let coll = "places";
+    let role = provision_app_with_role(&admin_pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    admin_pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id SERIAL PRIMARY KEY, \
+               location geography(POINT, 4326) NOT NULL\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    admin_pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"{coll}\" (location) \
+             VALUES (ST_GeogFromText('POINT(-0.1278 51.5074)'))"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+    let login_role = "p6a_spatial_login";
+    let (login_url, login_pool) = provision_platform_login_pool(
+        &admin_pool,
+        &url,
+        login_role,
+        "test",
+        &role,
+        app,
+    )
+    .await;
+
+    let blocked = login_pool
+        .query_text_params(&format!("SELECT id FROM \"{app}\".\"{coll}\""), &[])
+        .await
+        .unwrap();
+    assert!(
+        blocked.is_empty(),
+        "login role must be blocked by FORCE RLS before spatial_near proves the role fence"
+    );
+
+    let backend = PostgresBackend::new(login_pool.clone(), login_url);
+    let rows = SpatialIndex::spatial_near(
+        &backend,
+        app,
+        coll,
+        "location",
+        GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        },
+        1000.0,
+        &Value::Null,
+        Some(1),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
+    assert_eq!(rows.len(), 1, "spatial_near must see the role-gated row");
+    assert_eq!(rows[0]["id"], 1);
+
+    drop(login_pool);
+    let _ = admin_pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
+}
+
+#[compio::test]
+async fn unmask_fetch_runs_under_per_app_role_via_rls() {
+    use zeroship_plugin_db::crud::unmask::{self, UnmaskFieldArgs};
+
+    let url = require_pg().await;
+    let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "p6a_unmask_role_fence";
+    let coll = "users";
+    let role = provision_app_with_role(&admin_pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    let schema = json!({
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" }
+        }
+    });
+    admin_pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id TEXT PRIMARY KEY, \
+               ssn TEXT, \
+               ssn_masked TEXT\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    admin_pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"{coll}\" (id, ssn, ssn_masked) \
+             VALUES ('u1', '123-45-6789', '***-**-6789')"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
+        .await
+        .unwrap();
+    install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
+    let login_role = "p6a_unmask_login";
+    let (login_url, login_pool) = provision_platform_login_pool(
+        &admin_pool,
+        &url,
+        login_role,
+        "test",
+        &role,
+        app,
+    )
+    .await;
+
+    let blocked = login_pool
+        .query_text_params(
+            &format!("SELECT ssn FROM \"{app}\".\"{coll}\" WHERE id = 'u1'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(
+        blocked.is_empty(),
+        "login role must be blocked by FORCE RLS before unmask proves the role fence"
+    );
+
+    zeroship_plugin_db::set_postgres_pool_for_tests(login_pool.clone(), &login_url);
+    zeroship_plugin_db::cache_schema_for_tests(app, coll, schema);
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+
+    let result = unmask::dispatch_unmask(
+        app,
+        UnmaskFieldArgs {
+            collection: coll.to_string(),
+            row_pk: "u1".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(json!({ "kind": "auto" })),
+            reason: Some("security regression".to_string()),
+        },
+    )
+    .await
+    .expect("unmask must read under the per-app role");
+    assert_eq!(result.plaintext, "123-45-6789");
+
+    drop(login_pool);
+    let _ = admin_pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
+        .await;
+    let _ = admin_pool
+        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
+        .await;
 }
 
 #[compio::test]

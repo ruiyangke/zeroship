@@ -1721,11 +1721,13 @@ pub(crate) fn dispatch_aggregate<'s>(
     let app = app_id.to_string();
     let coll = collection.to_string();
     let group_fields = aggregate_group_fields(&pipeline);
+    let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
     let built = query::build_aggregate_with_soft_delete_with_dialect(
         app_id,
         collection,
         &pipeline,
         filter_soft_deleted,
+        schema_hint.as_ref(),
         current_sql_dialect(),
     );
 
@@ -1741,9 +1743,11 @@ pub(crate) fn dispatch_aggregate<'s>(
                 rows,
                 read_pipeline::ApplyOptions {
                     unmask_columns: &[],
-                    schema_field_scope: read_pipeline::SchemaFieldScope::Only(
-                        group_fields.as_slice(),
-                    ),
+                    schema_field_scope: if group_fields.is_empty() {
+                        read_pipeline::SchemaFieldScope::All
+                    } else {
+                        read_pipeline::SchemaFieldScope::Only(group_fields.as_slice())
+                    },
                     ..read_pipeline::ApplyOptions::default()
                 },
             )
