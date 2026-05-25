@@ -2518,8 +2518,9 @@ pub(crate) fn build_masked_aware_select_expr(
 /// - `t."<col>_masked" AS "<col>"` for masked columns,
 /// - `t."<col>" AS "<col>"` for non-masked columns.
 ///
-/// When the schema cache is cold or the schema has no masked columns we
-/// preserve the compact `t.*` form for back-compat and readability.
+/// When the schema cache is warm we always expand to the allowlisted
+/// public column set so read paths cannot surface internal physical
+/// columns. Only a cold schema cache falls back to `t.*`.
 pub(crate) fn build_masked_aware_select_expr_for_table_alias(
     schema_hint: Option<&Value>,
     table_alias: &str,
@@ -2542,12 +2543,13 @@ pub(crate) fn build_masked_aware_select_expr_for_table_alias(
 ///    listed column, emit the bare parent if the column is unmask-
 ///    listed, the sibling alias if the schema marks it masked, else
 ///    the bare parent.
-/// 2. `select` is absent / empty AND `schema_hint` declares masked
-///    columns → expand to an explicit list: every column on the
-///    schema, with masked columns aliased through the sibling EXCEPT
-///    where the unmask hint promotes them back to the parent.
-/// 3. `select` is absent / empty AND `schema_hint` is `None` (or has
-///    no masked columns) → fall through to `*`.
+/// 2. `select` is absent / empty AND `schema_hint` is `Some(_)` →
+///    expand to an explicit list: every public system field plus every
+///    declared schema field, with masked columns aliased through the
+///    sibling EXCEPT where the unmask hint promotes them back to the
+///    parent.
+/// 3. `select` is absent / empty AND `schema_hint` is `None` → fall
+///    through to `*`.
 fn build_masked_aware_select_expr_with_unmask(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
