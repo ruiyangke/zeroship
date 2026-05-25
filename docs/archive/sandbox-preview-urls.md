@@ -1,3 +1,4 @@
+> Archived 2026-05-25: shipped. Code: crates/sandbox/src/preview.rs + preview_ws.rs.
 # Sandbox preview URLs / port forwarding design
 
 **Date:** 2026-05-02
