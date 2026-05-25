@@ -17,7 +17,6 @@
 #          adds POST /_clock_resync so the controller can repair the
 #          guest's frozen-at-snapshot CLOCK_REALTIME post-CH-restore.)
 #        - zeroship-sandbox (controller, from metadata `controller-object`)
-#        - nomad-vm-wrapper.sh
 #        - stress harness:
 #            * snapshot_stress.py — SHA-pinned (R24-T1); canonical
 #              source is `crates/sandbox/scripts/snapshot_stress.py`,
@@ -48,14 +47,6 @@
 #   - vm-index-ceil:       int, default 12; number of taps to create
 #   - snapshot-bucket:     GCS bucket for L2 snapshot storage
 #                          (default = artifact-bucket; can be same/separate)
-#   - install-ch-plugin-driver:
-#                          "1" to install the Go-based nomad-driver-ch
-#                          plugin alongside the bash wrapper and switch
-#                          zsbx-ctl to `SANDBOX_TASK_DRIVER=ch_plugin`
-#                          (T-8 cutover gate). Default unset → no-op,
-#                          preserving the raw_exec wrapper path. Will be
-#                          flipped on in the next worker provision once
-#                          T-8b smoke validation confirms the cutover.
 #
 # Sentinel: the FINAL echo line:  `[startup] zsbx-worker-ready`
 
@@ -92,9 +83,6 @@ ARTIFACT_BUCKET=$(md artifact-bucket)
 CONTROLLER_OBJECT=$(md controller-object)
 VM_INDEX_CEIL=$(md vm-index-ceil); VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
 SNAPSHOT_BUCKET=$(md snapshot-bucket); SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
-# T-8 cutover gate. Default "" → no-op; "1" installs the Go plugin
-# driver and flips zsbx-ctl into ch_plugin jobspec mode.
-INSTALL_CH_PLUGIN_DRIVER=$(md install-ch-plugin-driver); INSTALL_CH_PLUGIN_DRIVER=${INSTALL_CH_PLUGIN_DRIVER:-0}
 
 : "${SERVER_IPS:?missing server-ips}"
 : "${PG_HOST:?missing pg-host}"
@@ -167,60 +155,54 @@ gs_pull ch-remote.v51.1            /usr/local/bin/ch-remote        0755
 gs_pull virtiofsd                  /usr/local/bin/virtiofsd        0755
 gs_pull vmlinuz                    "$ART/vmlinuz"                  0644
 gs_pull rootfs-slim.img.virtio-blk-v5 "$ART/rootfs-slim.img"          0644
-gs_pull nomad-vm-wrapper.sh        "$ART/nomad-vm-wrapper.sh"      0755
 gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
 
-# T-8 cutover gate: pull the Go-based ch_plugin driver alongside the
-# bash wrapper. Both coexist until T-8b smoke confirms parity; until
-# the install flag flips on, this block is a no-op so existing worker
-# nodes (raw_exec wrapper path) are unaffected.
-if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
-  echo "[startup] INSTALL_CH_PLUGIN_DRIVER=1 — installing nomad-driver-ch"
-  mkdir -p /etc/zeroship/nomad-plugins
-  # nomad-driver-ch v20 SHA-pin (R20-S3). The GCS object is built by
-  # `nomad-driver-ch/scripts/build-binary.sh --verify` in the driver
-  # worktree and uploaded out-of-band by the operator; the driver
-  # binary, the GCS mirror, and the DRIVER_BINARY_SHA256 pin below
-  # MUST move together (mirrors the R24-T1 snapshot_stress.py
-  # lockstep at dd2079a9). A SHA mismatch is FATAL — the worker
-  # refuses to start until operator reconciles.
-  DRIVER_BINARY_SHA256="7bb905763094373fd443ff046750afd9eabbb3a92e2fd64696e6c80a57ccc327"
-  gs_pull nomad-driver-ch.v24 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
-  chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
-  got=$(sha256sum /etc/zeroship/nomad-plugins/nomad-driver-ch | awk '{print $1}')
-  if [ "$got" != "$DRIVER_BINARY_SHA256" ]; then
-    echo "[startup] FATAL: nomad-driver-ch SHA mismatch" >&2
-    echo "[startup]   expected: $DRIVER_BINARY_SHA256" >&2
-    echo "[startup]   got:      $got" >&2
-    echo "[startup]   GCS object: gs://$ARTIFACT_BUCKET/nomad-driver-ch.v24" >&2
-    echo "[startup]   Rebuild via nomad-driver-ch/scripts/build-binary.sh --verify and re-upload." >&2
-    exit 1
-  fi
-  echo "[startup] nomad-driver-ch SHA OK ($DRIVER_BINARY_SHA256)"
-  # Surface the embedded gitSHA so we can confirm which build landed.
-  /etc/zeroship/nomad-plugins/nomad-driver-ch --version || true
+# Install the Go-based nomad-driver-ch plugin (unconditional — T-8 cutover complete).
+echo "[startup] installing nomad-driver-ch"
+mkdir -p /etc/zeroship/nomad-plugins
+# nomad-driver-ch v20 SHA-pin (R20-S3). The GCS object is built by
+# `nomad-driver-ch/scripts/build-binary.sh --verify` in the driver
+# worktree and uploaded out-of-band by the operator; the driver
+# binary, the GCS mirror, and the DRIVER_BINARY_SHA256 pin below
+# MUST move together (mirrors the R24-T1 snapshot_stress.py
+# lockstep at dd2079a9). A SHA mismatch is FATAL — the worker
+# refuses to start until operator reconciles.
+DRIVER_BINARY_SHA256="7bb905763094373fd443ff046750afd9eabbb3a92e2fd64696e6c80a57ccc327"
+gs_pull nomad-driver-ch.v24 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
+chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
+got=$(sha256sum /etc/zeroship/nomad-plugins/nomad-driver-ch | awk '{print $1}')
+if [ "$got" != "$DRIVER_BINARY_SHA256" ]; then
+  echo "[startup] FATAL: nomad-driver-ch SHA mismatch" >&2
+  echo "[startup]   expected: $DRIVER_BINARY_SHA256" >&2
+  echo "[startup]   got:      $got" >&2
+  echo "[startup]   GCS object: gs://$ARTIFACT_BUCKET/nomad-driver-ch.v24" >&2
+  echo "[startup]   Rebuild via nomad-driver-ch/scripts/build-binary.sh --verify and re-upload." >&2
+  exit 1
+fi
+echo "[startup] nomad-driver-ch SHA OK ($DRIVER_BINARY_SHA256)"
+# Surface the embedded gitSHA so we can confirm which build landed.
+/etc/zeroship/nomad-plugins/nomad-driver-ch --version || true
 
-  # Tell Nomad where to find plugins. The HCL fragment is loaded
-  # alongside /etc/nomad.d/nomad.hcl (Nomad concatenates everything
-  # in /etc/nomad.d/*.hcl), so writing it BEFORE `systemctl enable
-  # --now nomad` below means we don't need a restart afterwards.
-  #
-  # The explicit `plugin "nomad-driver-ch" { config {} }` stanza is
-  # REQUIRED on Nomad 2.0.2 — `plugin_dir` alone makes the loader emit
-  #   [WARN] agent.plugin_loader: plugin not referenced in the agent
-  #                                configuration file, loading skipped
-  # and skip the driver entirely. The empty `config {}` block is
-  # mandatory; Nomad refuses to load plugins it doesn't see configured,
-  # even with empty config. Confirmed via T-8b-smoke FAIL r1 — see
-  # docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r1.md.
-  cat > /etc/nomad.d/plugin-dir.hcl <<'EOF'
+# Tell Nomad where to find plugins. The HCL fragment is loaded
+# alongside /etc/nomad.d/nomad.hcl (Nomad concatenates everything
+# in /etc/nomad.d/*.hcl), so writing it BEFORE `systemctl enable
+# --now nomad` below means we don't need a restart afterwards.
+#
+# The explicit `plugin "nomad-driver-ch" { config {} }` stanza is
+# REQUIRED on Nomad 2.0.2 — `plugin_dir` alone makes the loader emit
+#   [WARN] agent.plugin_loader: plugin not referenced in the agent
+#                                configuration file, loading skipped
+# and skip the driver entirely. The empty `config {}` block is
+# mandatory; Nomad refuses to load plugins it doesn't see configured,
+# even with empty config. Confirmed via T-8b-smoke FAIL r1 — see
+# docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r1.md.
+cat > /etc/nomad.d/plugin-dir.hcl <<'EOF'
 plugin_dir = "/etc/zeroship/nomad-plugins"
 
 plugin "nomad-driver-ch" {
   config {}
 }
 EOF
-fi
 
 # Stress harness.
 #
@@ -391,41 +373,37 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-# ───── 4b. ch driver-health gate (T-8b-prereqs-config) ──────────
-# When INSTALL_CH_PLUGIN_DRIVER=1 we MUST confirm the ch driver is
-# both detected and healthy before letting startup proceed. Without
-# this gate `zsbx-worker-ready` was emitted even when the plugin
-# loader silently skipped the driver (Nomad 2.0.2 WARN: plugin not
-# referenced in agent config), so the failure only surfaced on the
-# first sandbox-create — many minutes later, far from the actual
-# cause. Surface plugin-load failures at provision time instead.
+# ───── 4b. ch driver-health gate ────────────────────────────────
+# Confirm the ch driver is detected and healthy before proceeding.
+# Without this gate `zsbx-worker-ready` was emitted even when the
+# plugin loader silently skipped the driver (Nomad 2.0.2 WARN: plugin
+# not referenced in agent config), so the failure only surfaced on the
+# first sandbox-create — many minutes later. Surface plugin-load
+# failures at provision time instead.
 #
 # Probe: `nomad node status -self -verbose` lists drivers as
 #   <name>  <detected>  <healthy>  <message>  <time>
 # We match `^ch\s+true\s+true` (whitespace-tolerant), with 10x 3s
-# retries (30s total) before failing the worker startup. raw_exec
-# path (INSTALL_CH_PLUGIN_DRIVER unset/0) is unchanged.
-if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
-  echo "[startup] probing ch driver health (Detected=true, Healthy=true) ..."
-  CH_OK=0
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    if nomad node status -self -verbose 2>/dev/null \
-         | grep -E '^ch[[:space:]]+true[[:space:]]+true' >/dev/null; then
-      CH_OK=1
-      echo "[startup] ch driver healthy (attempt $attempt)"
-      break
-    fi
-    echo "[startup] ch driver not yet healthy (attempt $attempt/10); retry in 3s"
-    sleep 3
-  done
-  if [ "$CH_OK" -ne 1 ]; then
-    echo "[startup] FATAL: ch driver did not reach Detected=true,Healthy=true within 30s" >&2
-    echo "[startup] last node status:" >&2
-    nomad node status -self -verbose 2>&1 | tail -40 >&2 || true
-    echo "[startup] nomad agent logs (tail):" >&2
-    journalctl -u nomad --no-pager -n 80 2>&1 | tail -80 >&2 || true
-    exit 1
+# retries (30s total) before failing the worker startup.
+echo "[startup] probing ch driver health (Detected=true, Healthy=true) ..."
+CH_OK=0
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if nomad node status -self -verbose 2>/dev/null \
+       | grep -E '^ch[[:space:]]+true[[:space:]]+true' >/dev/null; then
+    CH_OK=1
+    echo "[startup] ch driver healthy (attempt $attempt)"
+    break
   fi
+  echo "[startup] ch driver not yet healthy (attempt $attempt/10); retry in 3s"
+  sleep 3
+done
+if [ "$CH_OK" -ne 1 ]; then
+  echo "[startup] FATAL: ch driver did not reach Detected=true,Healthy=true within 30s" >&2
+  echo "[startup] last node status:" >&2
+  nomad node status -self -verbose 2>&1 | tail -40 >&2 || true
+  echo "[startup] nomad agent logs (tail):" >&2
+  journalctl -u nomad --no-pager -n 80 2>&1 | tail -80 >&2 || true
+  exit 1
 fi
 
 # ───── 5. token files (mode 0o400, owned by root) ───────────────
@@ -523,7 +501,6 @@ EnvironmentFile=$ART/sandbox-db.env
 Environment=SANDBOX_BACKEND=nomad-ch
 Environment=SANDBOX_NOMAD_ADDR=http://127.0.0.1:4646
 Environment=SANDBOX_NOMAD_DATACENTER=$DATACENTER
-Environment=SANDBOX_NOMAD_CH_WRAPPER_PATH=$ART/nomad-vm-wrapper.sh
 Environment=SANDBOX_NOMAD_CH_RUNTIME_DIR=/var/lib/zeroship/ch
 Environment=SANDBOX_NOMAD_CH_HOST_STATE_DIR=/var/zeroship/ch
 Environment=SANDBOX_NOMAD_CH_USER_HOME_ROOT=/var/zeroship/ch/users
@@ -553,12 +530,6 @@ Environment=SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS=30
 # (used only by older clients during cutover; new smoke flow polls).
 Environment=SANDBOX_WAKE_RESPONSE_MODE=async
 
-# Wrapper inputs: point at the artifact dir holding vmlinuz + rootfs-slim.img.
-# The wrapper reads ZSBX_ARTIFACT_DIR from its Nomad task env; the
-# controller propagates SANDBOX_NOMAD_CH_RUNTIME_DIR there.
-# (We additionally pre-seed the runtime dir with the artifacts so the
-# wrapper's \`cd "\$ZSBX_ARTIFACT_DIR"\` finds vmlinuz + rootfs-slim.img.)
-
 # Snapshot / restore (Phase B feature flag + L2 GCS)
 Environment=SANDBOX_SNAPSHOT_ENABLED=true
 Environment=SANDBOX_SNAPSHOT_L1_ROOT=/var/zeroship/ch/snapshots
@@ -584,12 +555,6 @@ Environment=SANDBOX_ADMIN_TOKEN_PATH=$ART/sandbox-admin-token
 
 # pg migrations: run only on worker-1.
 $( [ "$IS_MIGRATOR" = "1" ] && echo "Environment=SANDBOX_PG_RUN_MIGRATIONS=1" )
-
-# T-8 cutover gate. With INSTALL_CH_PLUGIN_DRIVER=1 the controller
-# routes through the Go nomad-driver-ch plugin (driver="ch", typed
-# task_config); without it, the bash wrapper raw_exec path stays in
-# effect. nomad_ch::build_nomad_job_json branches on this env.
-$( [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ] && echo "Environment=SANDBOX_TASK_DRIVER=ch_plugin" )
 
 # Option C Phase 4 (T-8b-stress-r7) — driver-side disk image staging.
 # With this flag flipped TRUE, the controller emits \`zsbx_stage_disks=true\`
