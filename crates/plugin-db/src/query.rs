@@ -141,6 +141,13 @@ impl SqlDialect {
 /// [`SqlDialect::wrap_encrypted_param`] is a no-op on the PG arm.
 pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zsenc_blob__:";
 
+pub(crate) const MAX_QUERY_LIMIT: i64 = 500;
+pub(crate) const MAX_QUERY_OFFSET: i64 = 10_000;
+pub(crate) const MAX_SEARCH_LIMIT: usize = 500;
+const MAX_FILTER_NESTING_DEPTH: usize = 16;
+const MAX_FILTER_CLAUSE_COUNT: usize = 128;
+const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
+
 /// Validate a collection name: alphanumeric + underscores only.
 ///
 /// Additional security constraints (beyond character allowlist):
@@ -400,6 +407,49 @@ pub(crate) fn validate_field_name_for_declaration(name: &str) -> Result<(), Quer
              System fields ({}) are managed by the platform and cannot be \
              overridden.",
             SYSTEM_FIELD_NAMES.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn schema_declares_readable_field(schema_hint: Option<&Value>, name: &str) -> bool {
+    schema_hint
+        .and_then(Value::as_object)
+        .map(|obj| obj.contains_key(name) && !is_schema_metadata_key(name))
+        .unwrap_or(false)
+}
+
+fn validate_read_identifier(name: &str, schema_hint: Option<&Value>) -> Result<(), QueryError> {
+    validate_field_name(name)?;
+    if SYSTEM_FIELD_NAMES.contains(&name) || schema_declares_readable_field(schema_hint, name) {
+        return Ok(());
+    }
+    if schema_hint.is_some() {
+        return Err(QueryError::InvalidIdent(format!(
+            "field '{name}' is not a readable schema field; readable fields are declared schema fields plus the public system fields"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_limit_bound(name: &str, value: i64, max: i64) -> Result<(), QueryError> {
+    if value < 0 {
+        return Err(QueryError::InvalidFilter(format!(
+            "{name} must be >= 0, got {value}"
+        )));
+    }
+    if value > max {
+        return Err(QueryError::InvalidFilter(format!(
+            "{name} exceeds the maximum of {max}, got {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_search_limit_bound(name: &str, value: usize) -> Result<(), QueryError> {
+    if value > MAX_SEARCH_LIMIT {
+        return Err(QueryError::InvalidFilter(format!(
+            "{name} exceeds the maximum of {MAX_SEARCH_LIMIT}, got {value}"
         )));
     }
     Ok(())
@@ -2331,10 +2381,15 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
 
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, dialect)?;
+    if let Some(lim) = limit {
+        validate_limit_bound("find.limit", lim, MAX_QUERY_LIMIT)?;
+    }
+    if let Some(off) = offset {
+        validate_limit_bound("find.offset", off, MAX_QUERY_OFFSET)?;
+    }
 
-    // Build SELECT column list from projection, or default to *
     let select_expr =
-        build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns);
+        build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns)?;
 
     let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
     let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
@@ -2344,7 +2399,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     }
 
     if let Some(order) = order_by {
-        let order_clause = build_order_by_with_dialect(order, dialect)?;
+        let order_clause = build_order_by_read_with_dialect(order, dialect, schema_hint)?;
         if !order_clause.is_empty() {
             sql.push_str(" ORDER BY ");
             sql.push_str(&order_clause);
@@ -2441,7 +2496,7 @@ fn compose_where_with_soft_delete(where_clause: &str, filter_soft_deleted: bool)
 pub(crate) fn build_masked_aware_select_expr(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
-) -> String {
+) -> Result<String, QueryError> {
     build_masked_aware_select_expr_with_unmask(select, schema_hint, &[])
 }
 
@@ -2470,41 +2525,11 @@ pub(crate) fn build_masked_aware_select_expr_for_table_alias(
     table_alias: &str,
 ) -> String {
     let qalias = quote_ident(table_alias);
-    let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) else {
+    let empty_unmask: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let Some(parts) = implicit_read_projection_parts(schema_hint, &empty_unmask, Some(table_alias))
+    else {
         return format!("{qalias}.*");
     };
-    let any_masked = schema_obj.values().any(|def| {
-        def.get("mask")
-            .and_then(|m| m.as_object())
-            .and_then(|o| o.get("kind").and_then(|k| k.as_str()))
-            .map(|k| k != "none")
-            .unwrap_or(false)
-    });
-    if !any_masked {
-        return format!("{qalias}.*");
-    }
-
-    let mut parts: Vec<String> = Vec::with_capacity(schema_obj.len() + 1);
-    parts.push(format!(r#"{qalias}."id" AS "id""#));
-    for col in schema_obj.keys() {
-        if col == "id" {
-            continue;
-        }
-        if column_is_masked(col, schema_hint) {
-            let sibling = format!("{col}_masked");
-            parts.push(format!(
-                r#"{qalias}.{} AS {}"#,
-                quote_ident(&sibling),
-                quote_ident(col)
-            ));
-        } else {
-            parts.push(format!(
-                r#"{qalias}.{} AS {}"#,
-                quote_ident(col),
-                quote_ident(col)
-            ));
-        }
-    }
     parts.join(", ")
 }
 
@@ -2527,79 +2552,77 @@ fn build_masked_aware_select_expr_with_unmask(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
     unmask_columns: &[String],
-) -> String {
+) -> Result<String, QueryError> {
     let unmask_set: std::collections::HashSet<&str> =
         unmask_columns.iter().map(String::as_str).collect();
 
     // Case 1: explicit projection.
     if let Some(Value::Array(arr)) = select {
         if !arr.is_empty() {
-            let cols: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(|name| {
-                    // Unmask hint wins: emit the bare parent for
-                    // unmask-listed columns even when the schema would
-                    // normally serve the sibling alias.
-                    if unmask_set.contains(name) {
-                        quote_ident(name)
-                    } else if column_is_masked(name, schema_hint) {
-                        let sibling = format!("{name}_masked");
-                        format!("{} AS {}", quote_ident(&sibling), quote_ident(name))
-                    } else {
-                        quote_ident(name)
-                    }
-                })
-                .collect();
-            if !cols.is_empty() {
-                return cols.join(", ");
+            let mut cols: Vec<String> = Vec::with_capacity(arr.len());
+            for value in arr {
+                let name = value.as_str().ok_or_else(|| {
+                    QueryError::InvalidFilter(
+                        "select entries must be strings".to_string(),
+                    )
+                })?;
+                validate_read_identifier(name, schema_hint)?;
+                cols.push(project_read_field(name, schema_hint, &unmask_set, None));
             }
+            return Ok(cols.join(", "));
         }
     }
 
-    // Case 2: implicit projection — expand `*` to an explicit list when
-    // the schema declares any masked column, so the BYTEA / plaintext
-    // parent column never leaves Postgres on a default read.
-    if let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) {
-        let any_masked = schema_obj.values().any(|def| {
-            def.get("mask")
-                .and_then(|m| m.as_object())
-                .and_then(|o| o.get("kind").and_then(|k| k.as_str()))
-                .map(|k| k != "none")
-                .unwrap_or(false)
-        });
-        if any_masked {
-            let mut parts: Vec<String> = Vec::with_capacity(schema_obj.len() + 1);
-            // `id` is implicit (`build_create_table_with_fks` always
-            // emits a primary key column). Emit it first; if the schema
-            // declares it explicitly, the dedupe loop below skips it.
-            parts.push(quote_ident("id"));
-            for (col, def) in schema_obj.iter() {
-                if col == "id" {
-                    continue;
-                }
-                // Unmask hint wins (see Case 1 for the rationale).
-                if unmask_set.contains(col.as_str()) {
-                    parts.push(quote_ident(col));
-                } else if column_is_masked(col, schema_hint) {
-                    let sibling = format!("{col}_masked");
-                    parts.push(format!(
-                        "{} AS {}",
-                        quote_ident(&sibling),
-                        quote_ident(col)
-                    ));
-                } else {
-                    parts.push(quote_ident(col));
-                }
-                let _ = def;
-            }
-            return parts.join(", ");
-        }
+    if let Some(parts) = implicit_read_projection_parts(schema_hint, &unmask_set, None) {
+        return Ok(parts.join(", "));
     }
 
-    // Case 3: fallthrough — preserve `*` for back-compat with callers
-    // that have no schema cached / no masked columns declared.
-    "*".to_string()
+    Ok("*".to_string())
+}
+
+fn qualified_read_field(table_alias: Option<&str>, field: &str) -> String {
+    match table_alias {
+        Some(alias) => format!("{}.{}", quote_ident(alias), quote_ident(field)),
+        None => quote_ident(field),
+    }
+}
+
+fn project_read_field(
+    field: &str,
+    schema_hint: Option<&Value>,
+    unmask_set: &std::collections::HashSet<&str>,
+    table_alias: Option<&str>,
+) -> String {
+    let logical = quote_ident(field);
+    let source = if unmask_set.contains(field) || !column_is_masked(field, schema_hint) {
+        qualified_read_field(table_alias, field)
+    } else {
+        qualified_read_field(table_alias, &format!("{field}_masked"))
+    };
+    if table_alias.is_some() || source != logical {
+        format!("{source} AS {logical}")
+    } else {
+        logical
+    }
+}
+
+fn implicit_read_projection_parts(
+    schema_hint: Option<&Value>,
+    unmask_set: &std::collections::HashSet<&str>,
+    table_alias: Option<&str>,
+) -> Option<Vec<String>> {
+    let schema_obj = schema_hint.and_then(Value::as_object)?;
+    let mut parts = Vec::with_capacity(SYSTEM_FIELD_NAMES.len() + schema_obj.len());
+    for field in SYSTEM_FIELD_NAMES {
+        parts.push(project_read_field(field, schema_hint, unmask_set, table_alias));
+    }
+    for field in schema_obj.keys() {
+        if is_schema_metadata_key(field) || SYSTEM_FIELD_NAMES.contains(&field.as_str()) {
+            continue;
+        }
+        parts.push(project_read_field(field, schema_hint, unmask_set, table_alias));
+    }
+    Some(parts)
 }
 
 /// **P5.5 PR 3** — does the column named `name` declare a non-`none`
@@ -3731,6 +3754,7 @@ pub fn build_aggregate_with_soft_delete(
         collection,
         pipeline,
         filter_soft_deleted,
+        None,
         SqlDialect::Postgres,
     )
 }
@@ -3741,6 +3765,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
     collection: &str,
     pipeline: &Value,
     filter_soft_deleted: bool,
+    schema_hint: Option<&Value>,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
@@ -3781,6 +3806,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
             if let Some(by_val) = group_obj.get("by") {
                 match by_val {
                     Value::String(s) => {
+                        validate_read_identifier(s, schema_hint)?;
                         let col = quote_ident(s);
                         select_cols.push(col.clone());
                         group_by_cols.push(col);
@@ -3793,6 +3819,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                         .to_string(),
                                 )
                             })?;
+                            validate_read_identifier(s, schema_hint)?;
                             let col = quote_ident(s);
                             select_cols.push(col.clone());
                             group_by_cols.push(col);
@@ -3832,6 +3859,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                 "$sum requires a field name string".to_string(),
                             )
                         })?;
+                        validate_read_identifier(field, schema_hint)?;
                         format!("SUM({})", quote_ident(field))
                     }
                     "$avg" => {
@@ -3840,6 +3868,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                 "$avg requires a field name string".to_string(),
                             )
                         })?;
+                        validate_read_identifier(field, schema_hint)?;
                         format!("AVG({})", quote_ident(field))
                     }
                     "$min" => {
@@ -3848,6 +3877,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                 "$min requires a field name string".to_string(),
                             )
                         })?;
+                        validate_read_identifier(field, schema_hint)?;
                         format!("MIN({})", quote_ident(field))
                     }
                     "$max" => {
@@ -3856,6 +3886,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                 "$max requires a field name string".to_string(),
                             )
                         })?;
+                        validate_read_identifier(field, schema_hint)?;
                         format!("MAX({})", quote_ident(field))
                     }
                     "$first" => {
@@ -3864,6 +3895,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                                 "$first requires a field name string".to_string(),
                             )
                         })?;
+                        validate_read_identifier(field, schema_hint)?;
                         if last_sort.is_empty() {
                             format!("(array_agg({}))[1]", quote_ident(field))
                         } else {
@@ -3891,27 +3923,40 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
                 select_cols.push(format!("{agg_expr} AS {}", quote_ident(alias)));
             }
         } else if let Some(having_val) = obj.get("$having") {
-            having_clause = build_having(having_val, &mut params, &agg_exprs)?;
+            having_clause = build_having(having_val, &mut params, &agg_exprs, schema_hint)?;
         } else if let Some(sort_val) = obj.get("$sort") {
             // Track sort columns/directions for $first threading
             last_sort.clear();
             if let Some(sort_obj) = sort_val.as_object() {
                 for (key, val) in sort_obj {
+                    if !agg_exprs.contains_key(key) {
+                        validate_read_identifier(key, schema_hint)?;
+                    }
                     let descending = matches!(val.as_i64(), Some(n) if n < 0);
                     last_sort.push((key.clone(), descending));
                 }
             }
-            order_clause = build_order_by_with_dialect(sort_val, dialect)?;
+            order_clause = build_order_by_with_validator(sort_val, dialect, |field| {
+                if agg_exprs.contains_key(field) {
+                    Ok(())
+                } else {
+                    validate_read_identifier(field, schema_hint)
+                }
+            })?;
         } else if let Some(limit_val) = obj.get("$limit") {
             let n = limit_val.as_i64().ok_or_else(|| {
                 QueryError::InvalidFilter("aggregate: $limit must be an integer".to_string())
             })?;
+            validate_limit_bound("aggregate.$limit", n, MAX_QUERY_LIMIT)?;
             limit_clause = format!("{n}");
         }
     }
 
     let select_expr = if select_cols.is_empty() {
-        "*".to_string()
+        let empty_unmask: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        implicit_read_projection_parts(schema_hint, &empty_unmask, None)
+            .map(|parts| parts.join(", "))
+            .unwrap_or_else(|| "*".to_string())
     } else {
         select_cols.join(", ")
     };
@@ -3993,6 +4038,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    validate_read_identifier(field, schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4059,7 +4105,8 @@ pub(crate) fn build_vector_search(
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    validate_field_name(column)?;
+    validate_read_identifier(column, schema_hint)?;
+    validate_search_limit_bound("search.k", k)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
@@ -4100,7 +4147,7 @@ pub(crate) fn build_vector_search(
 
     let where_clause = build_where(filter, &mut params)?;
 
-    let select_expr = build_masked_aware_select_expr(None, schema_hint);
+    let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
     let mut sql = format!(
         "SELECT {select_expr}, {col} {op} $1::vector AS _distance FROM {schema}.{table}"
     );
@@ -4160,6 +4207,7 @@ pub(crate) fn build_fts_search(
     // without dragging the whole table into memory if the caller forgets
     // a `.limit()`.
     let limit = limit.unwrap_or(100);
+    validate_search_limit_bound("search.limit", limit)?;
 
     let mut params: Vec<String> = Vec::with_capacity(2 + 4);
     params.push(query.to_string());
@@ -4167,7 +4215,7 @@ pub(crate) fn build_fts_search(
 
     let where_clause = build_where(filter, &mut params)?;
 
-    let select_expr = build_masked_aware_select_expr(None, schema_hint);
+    let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
     let mut sql = format!(
         "SELECT {select_expr}, ts_rank({fts_col}, plainto_tsquery('pg_catalog.english', $1)) AS _rank \
          FROM {schema}.{table} \
@@ -4216,13 +4264,14 @@ pub(crate) fn build_spatial_near(
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    validate_field_name(column)?;
+    validate_read_identifier(column, schema_hint)?;
 
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
     let col = quote_ident(column);
 
     let limit = limit.unwrap_or(100);
+    validate_search_limit_bound("near.limit", limit)?;
 
     // Bind order: (lng, lat, radius_m, limit). Note the swap: ST_MakePoint
     // takes (x, y) = (lng, lat), the inverse of the SDK's {lat, lng}
@@ -4235,7 +4284,7 @@ pub(crate) fn build_spatial_near(
 
     let where_clause = build_where(filter, &mut params)?;
 
-    let select_expr = build_masked_aware_select_expr(None, schema_hint);
+    let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
     let mut sql = format!(
         "SELECT {select_expr}, ST_Distance({col}, ST_MakePoint($1, $2)::geography) AS _distance_m \
          FROM {schema}.{table} \
@@ -4261,6 +4310,17 @@ fn build_having(
     filter: &Value,
     params: &mut Vec<String>,
     agg_exprs: &std::collections::HashMap<String, String>,
+    schema_hint: Option<&Value>,
+) -> Result<String, QueryError> {
+    validate_clause_budget(filter, ClauseBudgetKind::Having)?;
+    build_having_inner(filter, params, agg_exprs, schema_hint)
+}
+
+fn build_having_inner(
+    filter: &Value,
+    params: &mut Vec<String>,
+    agg_exprs: &std::collections::HashMap<String, String>,
+    schema_hint: Option<&Value>,
 ) -> Result<String, QueryError> {
     match filter {
         Value::Null => Ok(String::new()),
@@ -4276,7 +4336,7 @@ fn build_having(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_having(v, params, agg_exprs))
+                                .map(|v| build_having_inner(v, params, agg_exprs, schema_hint))
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> =
@@ -4291,7 +4351,7 @@ fn build_having(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_having(v, params, agg_exprs))
+                                .map(|v| build_having_inner(v, params, agg_exprs, schema_hint))
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> =
@@ -4308,10 +4368,12 @@ fn build_having(
                     }
                 } else {
                     // Resolve alias → aggregate expression, or fall back to quoted column
-                    let col = agg_exprs
-                        .get(key)
-                        .cloned()
-                        .unwrap_or_else(|| quote_ident(key));
+                    let col = if let Some(expr) = agg_exprs.get(key) {
+                        expr.clone()
+                    } else {
+                        validate_read_identifier(key, schema_hint)?;
+                        quote_ident(key)
+                    };
                     let cond = build_having_condition(&col, value, params)?;
                     conditions.push(cond);
                 }
@@ -4399,6 +4461,15 @@ pub(crate) fn build_where_with_dialect(
     params: &mut Vec<String>,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
+    validate_clause_budget(filter, ClauseBudgetKind::Filter)?;
+    build_where_with_dialect_inner(filter, params, dialect)
+}
+
+fn build_where_with_dialect_inner(
+    filter: &Value,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+) -> Result<String, QueryError> {
     match filter {
         Value::Null => Ok(String::new()),
         Value::Object(map) if map.is_empty() => Ok(String::new()),
@@ -4414,7 +4485,7 @@ pub(crate) fn build_where_with_dialect(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_where_with_dialect(v, params, dialect))
+                                .map(|v| build_where_with_dialect_inner(v, params, dialect))
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> =
@@ -4429,7 +4500,7 @@ pub(crate) fn build_where_with_dialect(
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_where_with_dialect(v, params, dialect))
+                                .map(|v| build_where_with_dialect_inner(v, params, dialect))
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> =
@@ -4439,7 +4510,7 @@ pub(crate) fn build_where_with_dialect(
                             }
                         }
                         "$not" => {
-                            let sub = build_where_with_dialect(value, params, dialect)?;
+                            let sub = build_where_with_dialect_inner(value, params, dialect)?;
                             if !sub.is_empty() {
                                 conditions.push(format!("NOT ({sub})"));
                             }
@@ -4530,6 +4601,11 @@ fn build_field_condition_with_dialect(
                         let arr = val.as_array().ok_or_else(|| {
                             QueryError::InvalidFilter("$in must be an array".to_string())
                         })?;
+                        if arr.len() > MAX_MEMBERSHIP_LIST_LEN {
+                            return Err(QueryError::InvalidFilter(format!(
+                                "$in exceeds the maximum of {MAX_MEMBERSHIP_LIST_LEN} values"
+                            )));
+                        }
                         let placeholders: Vec<String> = arr
                             .iter()
                             .map(|v| {
@@ -4543,6 +4619,11 @@ fn build_field_condition_with_dialect(
                         let arr = val.as_array().ok_or_else(|| {
                             QueryError::InvalidFilter("$nin must be an array".to_string())
                         })?;
+                        if arr.len() > MAX_MEMBERSHIP_LIST_LEN {
+                            return Err(QueryError::InvalidFilter(format!(
+                                "$nin exceeds the maximum of {MAX_MEMBERSHIP_LIST_LEN} values"
+                            )));
+                        }
                         let placeholders: Vec<String> = arr
                             .iter()
                             .map(|v| {
@@ -4623,15 +4704,35 @@ fn build_order_by(order: &Value) -> Result<String, QueryError> {
 }
 
 fn build_order_by_with_dialect(order: &Value, dialect: SqlDialect) -> Result<String, QueryError> {
+    build_order_by_with_validator(order, dialect, validate_field_name)
+}
+
+fn build_order_by_read_with_dialect(
+    order: &Value,
+    dialect: SqlDialect,
+    schema_hint: Option<&Value>,
+) -> Result<String, QueryError> {
+    build_order_by_with_validator(order, dialect, |field| {
+        validate_read_identifier(field, schema_hint)
+    })
+}
+
+fn build_order_by_with_validator<F>(
+    order: &Value,
+    dialect: SqlDialect,
+    mut validate: F,
+) -> Result<String, QueryError>
+where
+    F: FnMut(&str) -> Result<(), QueryError>,
+{
     match order {
         Value::Object(map) => {
-            let parts: Vec<String> = map
-                .iter()
-                .map(|(key, val)| {
-                    let descending = matches!(val.as_i64(), Some(n) if n < 0);
-                    build_order_term(key, descending, dialect)
-                })
-                .collect();
+            let mut parts = Vec::with_capacity(map.len());
+            for (key, val) in map {
+                validate(key)?;
+                let descending = matches!(val.as_i64(), Some(n) if n < 0);
+                parts.push(build_order_term(key, descending, dialect));
+            }
             Ok(parts.join(", "))
         }
         Value::Array(arr) => {
@@ -4648,6 +4749,7 @@ fn build_order_by_with_dialect(order: &Value, dialect: SqlDialect) -> Result<Str
                 let field = pair[0].as_str().ok_or_else(|| {
                     QueryError::InvalidFilter("orderBy field must be a string".to_string())
                 })?;
+                validate(field)?;
                 let descending = matches!(pair[1].as_i64(), Some(n) if n < 0);
                 parts.push(build_order_term(field, descending, dialect));
             }
@@ -4657,6 +4759,103 @@ fn build_order_by_with_dialect(order: &Value, dialect: SqlDialect) -> Result<Str
             "orderBy must be an object or array".to_string(),
         )),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ClauseBudgetKind {
+    Filter,
+    Having,
+}
+
+impl ClauseBudgetKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Filter => "filter",
+            Self::Having => "having",
+        }
+    }
+}
+
+fn validate_clause_budget(filter: &Value, kind: ClauseBudgetKind) -> Result<(), QueryError> {
+    let mut clauses = 0usize;
+    count_clause_budget(filter, kind, 1, &mut clauses)
+}
+
+fn count_clause_budget(
+    value: &Value,
+    kind: ClauseBudgetKind,
+    depth: usize,
+    clauses: &mut usize,
+) -> Result<(), QueryError> {
+    if depth > MAX_FILTER_NESTING_DEPTH {
+        return Err(QueryError::InvalidFilter(format!(
+            "{} nesting depth exceeds the maximum of {MAX_FILTER_NESTING_DEPTH}",
+            kind.label()
+        )));
+    }
+    let Some(map) = value.as_object() else {
+        return Ok(());
+    };
+    for (key, child) in map {
+        if key.starts_with('$') {
+            *clauses += 1;
+            if *clauses > MAX_FILTER_CLAUSE_COUNT {
+                return Err(QueryError::InvalidFilter(format!(
+                    "{} clause count exceeds the maximum of {MAX_FILTER_CLAUSE_COUNT}",
+                    kind.label()
+                )));
+            }
+            match key.as_str() {
+                "$and" | "$or" => {
+                    let arr = child.as_array().ok_or_else(|| {
+                        QueryError::InvalidFilter(format!("{key} must be an array"))
+                    })?;
+                    for item in arr {
+                        count_clause_budget(item, kind, depth + 1, clauses)?;
+                    }
+                }
+                "$not" => {
+                    count_clause_budget(child, kind, depth + 1, clauses)?;
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if let Some(ops) = child
+            .as_object()
+            .filter(|ops| ops.keys().any(|op| op.starts_with('$')))
+        {
+            for (op, operand) in ops {
+                *clauses += 1;
+                if *clauses > MAX_FILTER_CLAUSE_COUNT {
+                    return Err(QueryError::InvalidFilter(format!(
+                        "{} clause count exceeds the maximum of {MAX_FILTER_CLAUSE_COUNT}",
+                        kind.label()
+                    )));
+                }
+                if matches!(op.as_str(), "$in" | "$nin") {
+                    let arr = operand.as_array().ok_or_else(|| {
+                        QueryError::InvalidFilter(format!("{op} must be an array"))
+                    })?;
+                    if arr.len() > MAX_MEMBERSHIP_LIST_LEN {
+                        return Err(QueryError::InvalidFilter(format!(
+                            "{op} exceeds the maximum of {MAX_MEMBERSHIP_LIST_LEN} values"
+                        )));
+                    }
+                }
+            }
+        } else {
+            *clauses += 1;
+            if *clauses > MAX_FILTER_CLAUSE_COUNT {
+                return Err(QueryError::InvalidFilter(format!(
+                    "{} clause count exceeds the maximum of {MAX_FILTER_CLAUSE_COUNT}",
+                    kind.label()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_order_term(field: &str, descending: bool, dialect: SqlDialect) -> String {
@@ -9410,6 +9609,128 @@ mod tests {
             "spatial search must read masked sibling: {}",
             q.sql,
         );
+    }
+
+    #[test]
+    fn implicit_find_projection_with_schema_avoids_star_and_internal_columns() {
+        let schema = serde_json::json!({
+            "name": { "type": "string" },
+        });
+        let bq = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            None,
+            Some(&schema),
+        )
+        .expect("find projection");
+        assert!(
+            !bq.sql.starts_with("SELECT *"),
+            "schema-backed find must use an allowlisted projection: {}",
+            bq.sql,
+        );
+        assert!(
+            bq.sql.contains("\"created_at\"") && bq.sql.contains("\"name\""),
+            "schema-backed find must project public system fields + declared fields: {}",
+            bq.sql,
+        );
+        assert!(
+            !bq.sql.contains("\"__fts\""),
+            "implicit projection must not expose internal physical columns: {}",
+            bq.sql,
+        );
+    }
+
+    #[test]
+    fn fts_search_with_schema_avoids_star_when_no_fields_are_masked() {
+        let schema = serde_json::json!({
+            "bio": { "type": "string" },
+        });
+        let q = build_fts_search(
+            "app1",
+            "users",
+            "rust",
+            &serde_json::json!({}),
+            Some(10),
+            Some(&schema),
+        )
+        .expect("fts projection");
+        assert!(
+            !q.sql.starts_with("SELECT *"),
+            "schema-backed search must use an allowlisted projection: {}",
+            q.sql,
+        );
+        assert!(
+            !q.sql.contains("SELECT *") && !q.sql.contains("\"__fts\" AS"),
+            "search projection must not expose internal physical columns: {}",
+            q.sql,
+        );
+    }
+
+    #[test]
+    fn read_side_identifiers_reject_internal_physical_columns() {
+        let schema = serde_json::json!({
+            "name": { "type": "string" },
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+        });
+
+        let select_err = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            None,
+            None,
+            None,
+            Some(&serde_json::json!(["__fts"])),
+            Some(&schema),
+        )
+        .expect_err("select on __fts must be refused");
+        assert!(matches!(select_err, QueryError::InvalidIdent(_)));
+
+        let sort_err = build_find_with_schema(
+            "app1",
+            "users",
+            &serde_json::json!({}),
+            None,
+            None,
+            Some(&serde_json::json!({ "ssn_masked": 1 })),
+            None,
+            Some(&schema),
+        )
+        .expect_err("sort on masked sibling must be refused");
+        assert!(matches!(sort_err, QueryError::InvalidIdent(_)));
+
+        let distinct_err = build_distinct_with_soft_delete_with_dialect(
+            "app1",
+            "users",
+            "__fts",
+            &serde_json::json!({}),
+            false,
+            Some(&schema),
+            SqlDialect::Postgres,
+        )
+        .expect_err("distinct on __fts must be refused");
+        assert!(matches!(distinct_err, QueryError::InvalidIdent(_)));
+
+        let aggregate_err = build_aggregate_with_soft_delete_with_dialect(
+            "app1",
+            "users",
+            &serde_json::json!([
+                { "$group": { "by": "name", "cnt": { "$count": true } } },
+                { "$sort": { "ssn_masked": 1 } }
+            ]),
+            false,
+            Some(&schema),
+            SqlDialect::Postgres,
+        )
+        .expect_err("aggregate sort on masked sibling must be refused");
+        assert!(matches!(aggregate_err, QueryError::InvalidIdent(_)));
     }
 
     // ----------------------------------------------------------------
