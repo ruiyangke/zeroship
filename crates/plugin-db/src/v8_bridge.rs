@@ -272,25 +272,6 @@ pub(crate) fn read_json_arg(
 // Promise plumbing
 // ---------------------------------------------------------------------------
 
-/// Create a promise, allocate an op_id, store the resolver, and return
-/// (op_id, request_id, promise).
-pub(crate) fn setup_promise<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    state: &SharedState,
-) -> (u32, Option<u64>, v8::Local<'s, v8::Promise>) {
-    let resolver = v8::PromiseResolver::new(scope).unwrap();
-    let promise = resolver.get_promise(scope);
-    let global_resolver = v8::Global::new(scope, resolver);
-
-    let mut s = state.borrow_mut();
-    let op_id = s.next_op_id;
-    s.next_op_id += 1;
-    s.pending_resolvers.insert(op_id, global_resolver);
-    let request_id = s.executing_request_id;
-
-    (op_id, request_id, promise)
-}
-
 /// Create a promise for the `OpResult::JsValue` resolution path —
 /// returns `(resolver_global, request_id, promise)`. Use when the
 /// dispatch helper resolves with a real JS value (number, object,

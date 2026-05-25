@@ -13,7 +13,9 @@
 
 use compio_postgres::Pool;
 
-use super::{ADMIN_SCHEMA, APP_ROLE_TEMPLATE, PLATFORM_ROLE};
+use super::APP_ROLE_TEMPLATE;
+#[cfg(any(test, feature = "test-helpers"))]
+use super::{ADMIN_SCHEMA, PLATFORM_ROLE};
 use crate::error::DbError;
 
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
@@ -33,6 +35,7 @@ fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
 /// created X" from "X was already present" so the maintenance cron can
 /// log structured idempotency telemetry instead of grep-ing notice
 /// strings.
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug, Clone, Default)]
 pub struct BootstrapOutcome {
     pub created_platform_role: bool,
@@ -62,6 +65,7 @@ pub struct BootstrapOutcome {
     pub minted_initial_hmac_key: bool,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl BootstrapOutcome {
     pub fn to_json(&self) -> String {
         serde_json::json!({
@@ -86,6 +90,7 @@ impl BootstrapOutcome {
 /// Requires the calling role to be a superuser or to have CREATEROLE +
 /// CREATEDB. Today's deploys connect as `postgres` (Docker pg-test
 /// default); production will use a dedicated bootstrap principal.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbError> {
     let mut out = BootstrapOutcome::default();
 
@@ -239,6 +244,7 @@ async fn create_role_if_missing(
     Ok(true)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 async fn ensure_hmac_keys_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
@@ -277,6 +283,7 @@ async fn ensure_hmac_keys_table(pool: &Pool) -> Result<bool, DbError> {
     Ok(true)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 async fn ensure_nonces_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
@@ -324,6 +331,7 @@ async fn ensure_nonces_table(pool: &Pool) -> Result<bool, DbError> {
     Ok(true)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 async fn ensure_session_ctx_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
@@ -369,6 +377,7 @@ async fn ensure_session_ctx_table(pool: &Pool) -> Result<bool, DbError> {
 /// HKDF-expanded per-(app, slot) by `crate::encryption::keys::KeyStore`.
 /// REVOKEd from PUBLIC; only the SECURITY DEFINER getter is callable
 /// from app code.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn ensure_column_keys_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
@@ -417,6 +426,7 @@ async fn ensure_column_keys_table(pool: &Pool) -> Result<bool, DbError> {
 /// REVOKEd from PUBLIC at the SELECT level, but INSERT/UPDATE/SELECT
 /// is GRANTed to PUBLIC so apps (with the platform role granted)
 /// can write through. The operator runs the actual recovery.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn ensure_pitr_targets_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
@@ -468,6 +478,7 @@ async fn ensure_pitr_targets_table(pool: &Pool) -> Result<bool, DbError> {
 /// REVOKEd from PUBLIC at the table level; only the wrapper functions
 /// (granted to PUBLIC for EXECUTE) reach the rows. Mirrors the
 /// `column_keys` / `pitr_targets` pattern.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn ensure_mask_policies_table(pool: &Pool) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params(
@@ -512,6 +523,7 @@ async fn ensure_mask_policies_table(pool: &Pool) -> Result<bool, DbError> {
 /// boundary moves the privilege check from the caller to the function
 /// owner (`__zeroship_platform_role`). Mirrors the `get_column_key`
 /// pattern from P5 PR 2.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_mask_policy_functions(pool: &Pool) -> Result<(), DbError> {
     // get_mask_policy: STABLE SQL function — same shape as get_column_key.
     let sql_get = format!(
@@ -590,6 +602,7 @@ async fn install_mask_policy_functions(pool: &Pool) -> Result<(), DbError> {
 /// reaches the raw bytes (the table itself is REVOKEd above). The
 /// SECURITY DEFINER boundary moves the privilege check from the
 /// caller to the function owner (`__zeroship_platform_role`).
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_get_column_key_function(pool: &Pool) -> Result<(), DbError> {
     let sql = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".get_column_key(p_key_id TEXT)
@@ -621,6 +634,7 @@ async fn install_get_column_key_function(pool: &Pool) -> Result<(), DbError> {
 /// extraction. Loop runs `max(len(a), len(b))` iterations regardless
 /// of where bytes differ; XOR-accumulator keeps execution time
 /// independent of content. See the proposal lines 412-431.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_const_eq_function(pool: &Pool) -> Result<(), DbError> {
     let sql = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".const_eq(a BYTEA, b BYTEA)
@@ -652,6 +666,7 @@ async fn install_const_eq_function(pool: &Pool) -> Result<(), DbError> {
 /// Returns `BYTEA` (the 32-byte SHA-256 HMAC). EXECUTE is granted to
 /// `__zeroship_platform_role` ONLY; app roles cannot sign their own
 /// tokens because they have no GRANT on this function.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_sign_session_function(pool: &Pool) -> Result<(), DbError> {
     let sql = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".sign_session(
@@ -719,6 +734,7 @@ async fn install_sign_session_function(pool: &Pool) -> Result<(), DbError> {
 /// Verify a presented HMAC against the active key plus the rotation
 /// `previous` key (within the 24h grace window). Returns BOOLEAN; the
 /// init function uses it inside its `IF NOT verify_signature` check.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_verify_signature_function(pool: &Pool) -> Result<(), DbError> {
     let sql = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".verify_signature(
@@ -815,6 +831,7 @@ async fn install_verify_signature_function(pool: &Pool) -> Result<(), DbError> {
 /// it intentionally stays bound to the **current** backend (the row
 /// must be discoverable by audit-write SECURITY DEFINERs running on
 /// THIS connection). Only the HMAC verifier consults `p_pid`.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
     // `CREATE OR REPLACE FUNCTION` refuses to change a function's
     // parameter list. P3 PR 2 widens `init_session` from a 6-arg to
@@ -952,6 +969,7 @@ async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
 /// `reset_session()` — clears the session-ctx row for the current
 /// backend PID. Called by the worker at RPC-handler exit to avoid
 /// stale context bleeding through PgBouncer connection reuse.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_reset_session_function(pool: &Pool) -> Result<(), DbError> {
     let sql = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".reset_session()
@@ -983,6 +1001,7 @@ async fn install_reset_session_function(pool: &Pool) -> Result<(), DbError> {
 
 /// `rotate_session_keys()` — atomically retires `current` to `previous`
 /// and inserts a fresh `current`.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_rotate_keys_function(pool: &Pool) -> Result<(), DbError> {
     let sql = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".rotate_session_keys()
@@ -1049,6 +1068,7 @@ async fn install_rotate_keys_function(pool: &Pool) -> Result<(), DbError> {
 ///
 /// Per the proposal R5-R8, app code never gets REPLICATION; only the
 /// platform-role-owned admin schema does.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn install_slot_wrapper_functions(pool: &Pool) -> Result<(), DbError> {
     // Two single-responsibility wrappers — splitting them out is
     // mandatory because `pg_create_logical_replication_slot()` cannot
@@ -1318,6 +1338,7 @@ async fn install_slot_wrapper_functions(pool: &Pool) -> Result<(), DbError> {
 
 /// Insert the very first HMAC key if none exists. Used during cluster
 /// bootstrap. Returns true if a key was inserted; false otherwise.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn bootstrap_initial_hmac_key(pool: &Pool) -> Result<bool, DbError> {
     let has_key = !pool
         .query_text_params(

@@ -104,25 +104,11 @@ use crate::error::DbError;
 pub(crate) struct CdcTxBuffer {
     /// Events queued since the last COMMIT / ROLLBACK boundary.
     pub(crate) events: Vec<PendingEvent>,
-    /// PR 4 will set this from a `Command::CdcSuppress { on: true }`
-    /// admin command (backfill pause). PR 2 leaves it as `false`; the
-    /// publisher checks the legacy `wal_consumer::is_app_suppressed`
-    /// rail PR 4 wires through.
-    #[allow(dead_code)]
-    pub(crate) suppress_app: bool,
-    /// PR 4 will set this from a `Command::CdcSchemaPending` admin
-    /// command. PR 2 leaves it false.
-    #[allow(dead_code)]
-    pub(crate) schema_pending: bool,
 }
 
 impl CdcTxBuffer {
     fn new() -> Self {
-        Self {
-            events: Vec::new(),
-            suppress_app: false,
-            schema_pending: false,
-        }
+        Self { events: Vec::new() }
     }
 }
 
@@ -178,11 +164,6 @@ pub(crate) struct SqliteCdcDispatcher {
     buffer: Arc<Mutex<CdcTxBuffer>>,
     /// Monotonic commit-id source — stamped on each `CommitPacket`.
     commit_id: Arc<AtomicU64>,
-    /// PR 2: not consumed (per-app cache is on the publisher side
-    /// where the lookup actually happens). The field exists so PR 3+
-    /// can repoint resolution into the writer thread without changing
-    /// the dispatcher's shape.
-    column_cache: Arc<Mutex<HashMap<String, Arc<Vec<String>>>>>,
     /// Sender half of the worker→compio channel.
     packet_tx: flume::Sender<CommitPacket>,
 }
@@ -208,12 +189,10 @@ pub(crate) fn install(
 ) -> Result<SqliteCdcDispatcher, DbError> {
     let buffer = Arc::new(Mutex::new(CdcTxBuffer::new()));
     let commit_id = Arc::new(AtomicU64::new(0));
-    let column_cache = Arc::new(Mutex::new(HashMap::new()));
 
     let dispatcher = SqliteCdcDispatcher {
         buffer: buffer.clone(),
         commit_id: commit_id.clone(),
-        column_cache,
         packet_tx: packet_tx.clone(),
     };
 
@@ -634,7 +613,7 @@ async fn publisher_loop(
                 ChangeOp::Delete => Vec::new(),
             };
 
-            let pk = new_tuple
+            let pk: Option<String> = new_tuple
                 .get("id")
                 .cloned()
                 .or_else(|| old_tuple.as_ref().and_then(|tuple| tuple.get("id").cloned()))
@@ -741,7 +720,8 @@ pub struct SqliteConsumerHandle;
 /// dispatcher's lifetime, so deferred `provision` would just be a
 /// noop. PR 4 may revisit if `provision`/`deprovision` grow per-app
 /// state.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "concrete adapter stays available for the sqlite change-stream capability surface")]
+#[derive(Debug)]
 pub struct SqliteChangeStream {
     backend: Rc<SqliteBackend>,
 }

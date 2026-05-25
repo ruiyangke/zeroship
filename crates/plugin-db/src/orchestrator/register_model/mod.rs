@@ -487,7 +487,7 @@ async fn apply_sqlite(
 /// [`register_model_dispatch`] / [`exec_register_model`], which read
 /// the backend from the per-isolate context. Test code that doesn't
 /// drive the V8 lifecycle uses this helper to skip the lookup.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 pub async fn exec_register_model_with_pool(
     pool: std::rc::Rc<compio_postgres::Pool>,
     app_id: &str,

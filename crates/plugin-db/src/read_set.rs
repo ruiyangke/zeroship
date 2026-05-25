@@ -314,10 +314,12 @@ thread_local! {
 /// refactors that introduce nesting must explicitly engage with the
 /// capture-merge semantics.
 #[derive(Debug)]
+#[cfg(test)]
 pub struct Active {
     _no_send: std::marker::PhantomData<*const ()>,
 }
 
+#[cfg(test)]
 impl Active {
     /// Begin capturing. Subsequent [`record_if_active`] calls append to
     /// this guard's buffer until [`Active::take`] or drop.
@@ -343,6 +345,7 @@ impl Active {
     }
 }
 
+#[cfg(test)]
 impl Drop for Active {
     fn drop(&mut self) {
         // Defensive: if `take` wasn't called, the buffer would leak

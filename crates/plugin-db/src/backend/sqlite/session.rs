@@ -197,19 +197,11 @@ pub(crate) enum Command {
         params: Vec<String>,
         reply: flume::Sender<Result<TypedRows, DbError>>,
     },
-    /// `ATTACH DATABASE 'file:{db_path}' AS '<app_id>'`. Variant lands
-    /// in PR 2 (so the enum shape is final) but the
-    /// `NamespaceManager` impl that emits it lives in PR 3.
-    #[allow(dead_code)]
+    /// `ATTACH DATABASE 'file:{db_path}' AS '<app_id>'` for the live
+    /// namespace-manager path.
     Attach {
         app_id: String,
         db_path: String,
-        reply: flume::Sender<Result<(), DbError>>,
-    },
-    /// `DETACH DATABASE '<app_id>'`. Symmetric to `Attach`.
-    #[allow(dead_code)]
-    Detach {
-        app_id: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
     /// **P5 PR 5** — `VACUUM INTO '<dest_path>'`. Captures the source
@@ -434,10 +426,6 @@ impl SqliteSession {
                         let result = run_attach(&conn, &app_id, &db_path);
                         let _ = reply.send(result);
                     }
-                    Command::Detach { app_id, reply } => {
-                        let result = run_detach(&conn, &app_id);
-                        let _ = reply.send(result);
-                    }
                     Command::VacuumInto { app_id, dest_path, reply } => {
                         let result = run_vacuum_into(&conn, app_id.as_deref(), &dest_path);
                         let _ = reply.send(result);
@@ -543,25 +531,12 @@ impl SqliteSession {
     }
 
     /// Send an `Attach` command and await the reply. Consumer is the
-    /// PR 3 `NamespaceManager::ensure_app_schema` impl.
-    #[allow(dead_code)]
+    /// live SQLite `NamespaceManager::ensure_app_schema` impl.
     pub(crate) async fn attach(&self, app_id: &str, db_path: &str) -> Result<(), DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
         let cmd = Command::Attach {
             app_id: app_id.to_string(),
             db_path: db_path.to_string(),
-            reply: reply_tx,
-        };
-        self.send(cmd).await?;
-        recv_reply(reply_rx).await?
-    }
-
-    /// Send a `Detach` command and await the reply.
-    #[allow(dead_code)]
-    pub(crate) async fn detach(&self, app_id: &str) -> Result<(), DbError> {
-        let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
-        let cmd = Command::Detach {
-            app_id: app_id.to_string(),
             reply: reply_tx,
         };
         self.send(cmd).await?;
@@ -629,6 +604,13 @@ async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
     })
 }
 
+fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbError> {
+    let escaped_path = db_path.replace('\'', "''");
+    let escaped_alias = app_id.replace('"', "\"\"");
+    let sql = format!("ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\"");
+    conn.execute_batch(&sql).map_err(from_sqlite)
+}
+
 impl Drop for SqliteSession {
     fn drop(&mut self) {
         // Best-effort: tell the worker to break out of its loop. If
@@ -682,12 +664,6 @@ impl SqliteSessionHandle {
     /// `SqliteBackend::client_exec` routes here.
     pub(crate) async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
         self.0.exec(sql, params).await
-    }
-
-    /// Convenience: forward an `exec_batch` through the underlying
-    /// session.
-    pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
-        self.0.exec_batch(sql).await
     }
 
     /// Forward a `query` through the underlying session.
@@ -943,31 +919,6 @@ fn run_query_typed(
         columns,
         rows: out,
     })
-}
-
-fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbError> {
-    // ATTACH does not accept bind parameters for the path or alias —
-    // both are SQL syntax. The PR 3 NamespaceManager impl validates
-    // `app_id` upstream (it's already constrained to `[A-Za-z0-9_]`
-    // by the per-app schema convention), so the only safe way to
-    // construct the statement is via formatted SQL with quoted
-    // literals. We use SQLite's standard double-quote-on-identifier
-    // and single-quote-on-string convention.
-    //
-    // PR 3 will move this string-building into `SqliteDialect`; PR 2
-    // ships the helper so the actor can serve the variant.
-    let escaped_path = db_path.replace('\'', "''");
-    let escaped_alias = app_id.replace('"', "\"\"");
-    let sql = format!(
-        "ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\""
-    );
-    conn.execute_batch(&sql).map_err(from_sqlite)
-}
-
-fn run_detach(conn: &Connection, app_id: &str) -> Result<(), DbError> {
-    let escaped_alias = app_id.replace('"', "\"\"");
-    let sql = format!("DETACH DATABASE \"{escaped_alias}\"");
-    conn.execute_batch(&sql).map_err(from_sqlite)
 }
 
 /// **P5 PR 5** — worker body for [`Command::VacuumInto`].

@@ -72,6 +72,7 @@ impl MaskPolicy {
     /// still applies (only `auto` allowed) because
     /// [`Self::allows`] short-circuits on the `auto` role.
     #[must_use]
+    #[cfg(test)]
     pub fn empty() -> Self {
         Self {
             roles: HashMap::new(),

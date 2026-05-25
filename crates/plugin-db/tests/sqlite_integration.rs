@@ -2028,7 +2028,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
 // not-configured) plus +1 cross-backend payload-equivalence pin = +9.
 // ---------------------------------------------------------------------------
 
-use zeroship_plugin_db::backend::{MintedToken, SessionInit, SessionMinter};
+use zeroship_plugin_db::backend::{SessionInit, SessionMinter};
 
 /// 32 bytes of deterministic key material — the same hex digit
 /// repeated. Each fixture uses a distinct nibble so two backends in

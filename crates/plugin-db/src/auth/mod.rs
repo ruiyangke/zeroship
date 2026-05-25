@@ -58,20 +58,25 @@
 //! compile-time gate on this subtree.
 
 // `util` owns the helpers — TTL default, getrandom fallback, ISO
-// timestamp formatter, hex codec — that BOTH the PG free fns in
-// `session.rs` and the SQLite `SessionMinter` impl in
-// `backend/sqlite/session_minter.rs` need. See
-// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6 (H-1).
+// timestamp formatter, hex codec — used by the test-only
+// session-minter surface. The runtime build does not expose session
+// minting today, so keep the helpers behind the same gate.
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod util;
 
 // The PG-side `bootstrap` / `keys` / `session` modules speak SECURITY
 // DEFINER + `compio_postgres` and aren't reachable from the SQLite arm.
 pub mod bootstrap;
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod keys;
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod session;
 
+#[cfg(feature = "test-helpers")]
 pub use bootstrap::{ensure_admin_schema, BootstrapOutcome};
+#[cfg(feature = "test-helpers")]
 pub use keys::{rotate_session_keys, RotationOutcome};
+#[cfg(feature = "test-helpers")]
 pub use session::{init_session, mint_session_token, MintedToken, SessionInit};
 
 // Re-export the schema/role names so other modules (replication.rs,
@@ -79,11 +84,13 @@ pub use session::{init_session, mint_session_token, MintedToken, SessionInit};
 // literals duplicated across the codebase.
 
 /// The privileged schema that owns every C1 platform object.
+#[cfg(any(test, feature = "test-helpers"))]
 pub const ADMIN_SCHEMA: &str = "__zeroship_admin";
 
 /// The platform service role — owns the admin schema, replication
 /// slots, publications. Workers running the WAL consumer connect under
 /// this role; app code does not.
+#[cfg(any(test, feature = "test-helpers"))]
 pub const PLATFORM_ROLE: &str = "__zeroship_platform_role";
 
 /// A template role that per-app roles inherit grants from. Provides
@@ -92,9 +99,3 @@ pub const PLATFORM_ROLE: &str = "__zeroship_platform_role";
 /// by the control plane during app provisioning — they're outside
 /// P8c's scope.
 pub const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
-
-// Token-lifetime / nonce-retention constants moved to
-// `crate::auth::util` in P3 PR 1 so they're reachable from both the PG
-// arm and the SQLite arm (gated by `sqlite`). Re-exported here for the
-// in-crate callers.
-pub use util::{DEFAULT_TOKEN_TTL_SECS, NONCE_RETENTION_SECS};

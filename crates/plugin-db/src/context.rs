@@ -654,7 +654,7 @@ impl IsolateDbContext {
     /// already taken; api-surface r6 MAJOR-R6-1 noted it was dead in
     /// production builds and would footgun a contributor picking it
     /// over the atomic variant.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) fn mark_consumer_running(&mut self, app_id: &str) {
         self.running_consumers.insert(app_id.to_string());
     }

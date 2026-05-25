@@ -21,6 +21,10 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
     format!("sqlite:{}", root.path().join("parity.sqlite").display())
 }
 
+#[allow(
+    dead_code,
+    reason = "the Postgres parity target uses this helper; sqlite_integration compiles the shared module without calling it"
+)]
 pub async fn maybe_pg_url() -> Option<String> {
     let url = std::env::var("PG_TEST_URL")
         .unwrap_or_else(|_| "postgres://postgres:test@localhost:5434/postgres".to_string());

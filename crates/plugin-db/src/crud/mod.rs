@@ -89,9 +89,7 @@ pub mod mask_backfill;
 // recomputed mask of decrypt(parent). Same visibility pattern so the
 // SQLite + PG integration suites can drive `run_drift_check_*`
 // directly via the `test-helpers` gate.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod mask_drift;
-#[cfg(feature = "test-helpers")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod mask_drift;
 
 // **P7 PR 3** — INSERT-time auto-population of platform system fields

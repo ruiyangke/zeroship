@@ -4522,6 +4522,7 @@ fn build_field_condition(
 ///
 /// Accepts: `{ "field": 1 }` or `{ "field": -1 }` (1 = ASC, -1 = DESC)
 /// or `[["field", 1], ["field2", -1]]` for ordered multi-column sort.
+#[cfg(test)]
 fn build_order_by(order: &Value) -> Result<String, QueryError> {
     build_order_by_with_dialect(order, SqlDialect::Postgres)
 }
@@ -6480,7 +6481,7 @@ mod tests {
     }
 
     #[test]
-    fn update_with_version_filter_appends_where_version_eq_N() {
+    fn update_with_version_filter_appends_where_version_eq_n() {
         // PR 4 — when the filter has `version: N`, the standard
         // `build_where` emits `"version" = $N`. The SQL builder
         // doesn't need special CAS handling; the auto-bump SET

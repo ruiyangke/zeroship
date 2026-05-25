@@ -98,6 +98,7 @@ pub enum ChangeKind {
     /// `CREATE INDEX CONCURRENTLY` for a new index marker.
     AddIndex,
     /// `DROP INDEX` for an index no longer in the declared schema.
+    #[allow(dead_code, reason = "DropIndex remains part of the diff model for strictness tests even though the default release build does not construct it.")]
     DropIndex,
     /// B2 — `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`. Emitted when a
     /// column already exists but no FK constraint is attached, or when
@@ -132,6 +133,7 @@ pub enum ChangeKind {
     MaskRewrite {
         collection: String,
         column: String,
+        #[allow(dead_code, reason = "The old mask kind is carried for diagnostics/tests; the apply path only consumes the new shape today.")]
         old_kind: MaskKind,
         new_kind: MaskKind,
         classification: Classification,
@@ -185,12 +187,16 @@ pub struct LiveSchema {
 
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub pg_type: String,
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub not_null: bool,
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub default_expr: Option<String>,
     /// `pg_proc.provolatile` for the default expression's function, if
     /// the default is a function call. `i`/`s`/`v`. `None` if the default
     /// is a plain literal.
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub default_volatility: Option<char>,
     /// **P4 PR 1** — vector dimensionality observed from the live
     /// column. `Some(N)` when the column is a `vector(N)` (PG) or a
@@ -200,6 +206,7 @@ pub struct ColumnInfo {
     /// `information_schema` / `sqlite_master.sql` introspection
     /// (Q-P4-A — regex on DDL today, sidecar `__zs_schema_meta` is
     /// the upgrade path).
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub vector_dims: Option<i32>,
     /// **P4 PR 1** — whether this column is enrolled in the
     /// collection's composite FTS index (one composite index per
@@ -207,11 +214,13 @@ pub struct ColumnInfo {
     /// `tsvector_update_trigger(__fts, ...)` arg list. SQLite:
     /// presence in the `<coll>__fts` external-content vtable's
     /// column list. `false` for every existing column at HEAD.
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub is_fts_source: bool,
     /// **P4 PR 1** — whether this column is a `geography(POINT,
     /// 4326)` (PG) or a BLOB column with a `length("col") = 16`
     /// CHECK constraint (SQLite). `false` for every existing column
     /// at HEAD; PR 4/5 populate this from live-schema introspection.
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub is_geopoint: bool,
     /// **P5 PR 1** — column-encryption metadata when the SDK
     /// declared the column with `t.encrypted(...)`. `None` for every
@@ -220,6 +229,7 @@ pub struct ColumnInfo {
     /// the SQLite side via regex on `sqlite_master.sql` for the
     /// sentinel CHECK comment. Stays `None` in the default-feature
     /// build because no consumer wires the field yet.
+    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub encryption: Option<EncryptionMeta>,
     /// **P5.5 PR 1** — column-mask metadata when the SDK declared the
     /// column with `t.string().mask(...)` or `t.encrypted(...)` (the
@@ -493,11 +503,14 @@ impl Classification {
 
 #[derive(Debug, Clone)]
 pub struct IndexInfo {
+    #[allow(dead_code, reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
     pub is_unique: bool,
+    #[allow(dead_code, reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
     pub columns: Vec<String>,
     /// Whether `pg_index.indisvalid` is true. An INVALID index means a
     /// prior CREATE INDEX CONCURRENTLY failed; the diff engine flags it
     /// for retry.
+    #[allow(dead_code, reason = "Index metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
     pub is_valid: bool,
 }
 
@@ -507,10 +520,12 @@ pub struct ForeignKeyInfo {
     /// Postgres constraint name (e.g. `"author_id_fkey"`).
     pub constraint_name: String,
     /// Local column the FK is attached to.
+    #[allow(dead_code, reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
     pub column: String,
     /// Referenced table name (relative to the same app schema).
     pub target_table: String,
     /// Referenced column on the target table — typically `id`.
+    #[allow(dead_code, reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
     pub target_column: String,
     /// ON DELETE policy in upper-case Postgres form (`RESTRICT`,
     /// `CASCADE`, `SET NULL`, `NO ACTION`).
@@ -518,6 +533,7 @@ pub struct ForeignKeyInfo {
     /// ON UPDATE policy.
     pub on_update: String,
     /// True if the constraint is `DEFERRABLE` (any timing).
+    #[allow(dead_code, reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work.")]
     pub deferrable: bool,
 }
 

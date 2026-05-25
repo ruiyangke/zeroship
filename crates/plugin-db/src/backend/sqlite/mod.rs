@@ -35,9 +35,11 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use crate::backend::{
-    AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
-    SchemaIntrospect, SqlExecutor,
+    AuditWriter, DialectBuilder, IndexBuilder, LockManager, NamespaceManager, SchemaIntrospect,
+    SqlExecutor,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::backend::Backend;
 use crate::error::DbError;
 use crate::query::IndexSpec;
 
@@ -151,16 +153,19 @@ pub struct SqliteBackend {
     /// `init_session` fail with
     /// `DbError::Configuration { code: "not_configured" }` on
     /// first use (lazy failure — see plan §11 Q-P3-H).
+    #[cfg(any(test, feature = "test-helpers"))]
     minter_secret: Option<Vec<u8>>,
     /// **P3 PR 3** — previous-generation HMAC secret for the
     /// rotation grace window. `None` if `ZEROSHIP_SESSION_SECRET_PREV`
     /// isn't set. When `Some`, `verify_signature` always evaluates
     /// both keys (no short-circuit) so timing leaks neither.
+    #[cfg(any(test, feature = "test-helpers"))]
     minter_secret_prev: Option<Vec<u8>>,
     /// **P3 PR 3** — bounded LRU cache for nonce-replay detection.
     /// `Rc<RefCell<…>>` because the trait impl mutates it through
     /// an `&self` receiver. Single-threaded per worker, no atomics
     /// needed.
+    #[cfg(any(test, feature = "test-helpers"))]
     nonce_cache: Rc<RefCell<session_minter::NonceCache>>,
     /// **P5 PR 3** — per-backend column-key cache. Resolves
     /// `(app_id, key_id) → AeadKey` via the `ZEROSHIP_COLUMN_KEY_<KEYID>`
@@ -381,11 +386,13 @@ impl SqliteBackend {
         // call. The `nonce_capacity` env override only applies
         // when the secret IS set; otherwise we provision the
         // default-capacity cache (cheap — empty `VecDeque`).
+        #[cfg(any(test, feature = "test-helpers"))]
         let (minter_secret, minter_secret_prev, nonce_capacity) =
             match session_minter::SqliteSessionMinterConfig::from_env() {
                 Ok(cfg) => (Some(cfg.secret), cfg.secret_prev, cfg.nonce_capacity),
                 Err(_) => (None, None, session_minter::DEFAULT_NONCE_CAPACITY),
             };
+        #[cfg(any(test, feature = "test-helpers"))]
         let nonce_cache = session_minter::NonceCache::new_shared(nonce_capacity);
 
         // **P5 PR 3** — wire the column-key store. SQLite has no
@@ -405,8 +412,11 @@ impl SqliteBackend {
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
             _publisher,
+            #[cfg(any(test, feature = "test-helpers"))]
             minter_secret,
+            #[cfg(any(test, feature = "test-helpers"))]
             minter_secret_prev,
+            #[cfg(any(test, feature = "test-helpers"))]
             nonce_cache,
             key_store,
         }
@@ -1350,6 +1360,7 @@ impl DialectBuilder for SqliteBackend {
 // orchestrator paths that future PRs migrate onto a backend-agnostic
 // bound (`<B: Backend>`) will pick up `SqliteBackend` via this impl
 // without any further per-trait wiring.
+#[cfg(any(test, feature = "test-helpers"))]
 impl Backend for SqliteBackend {}
 
 // ---------------------------------------------------------------------------
@@ -1367,6 +1378,7 @@ impl Backend for SqliteBackend {}
 //   - `init_session`: 5 checks (expiry, actor_kind, nonce length,
 //     replay, signature) in PG-matched order.
 
+#[cfg(feature = "test-helpers")]
 impl crate::backend::SessionMinter for SqliteBackend {
     async fn mint_session_token(
         &self,
@@ -2351,6 +2363,8 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 //       SQLite has no WAL-archive PITR. Returns
 //       `Configuration { code: "pitr_pg_only" }` unconditionally.
 
+#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 impl crate::backend::Backup for SqliteBackend {
     async fn snapshot(
         &self,
@@ -2397,6 +2411,8 @@ impl crate::backend::Backup for SqliteBackend {
 ///
 /// `pub(super)` so the trait methods above can call in; the helpers
 /// stay private to this file.
+#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 mod backup_sqlite {
     use std::io::Read;
     use std::path::{Path, PathBuf};
@@ -2907,6 +2923,7 @@ mod tests {
     /// P3 PR 3: `SessionMinter` capability — pin the SQLite-arm
     /// impl wire so a future refactor that detaches the trait-impl
     /// block fails compilation here.
+    #[cfg(feature = "test-helpers")]
     fn assert_sqlite_backend_impls_session_minter() {
         fn assert_impl<T: crate::backend::SessionMinter>() {}
         assert_impl::<SqliteBackend>();
@@ -3184,6 +3201,7 @@ mod tests {
         let _ = assert_sqlite_backend_impls_index_builder as fn();
         let _ = assert_sqlite_backend_impls_dialect_builder as fn();
         let _ = assert_sqlite_backend_impls_audit_writer as fn();
+        #[cfg(feature = "test-helpers")]
         let _ = assert_sqlite_backend_impls_session_minter as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();
         let _ = assert_sqlite_backend_impls_full_text_index as fn();

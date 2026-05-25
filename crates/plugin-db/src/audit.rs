@@ -82,6 +82,7 @@ impl ActorKind {
 #[derive(Debug, Clone, Copy)]
 pub enum Phase {
     Ddl,
+    #[allow(dead_code, reason = "Validation stays in the persisted audit enum even though the current release flow never constructs that phase.")]
     Validation,
     /// B1 data backfill phase — rows authored by `@zeroship/migrations`
     /// orchestrator via `zeroship.db.migration*` primitives.
@@ -128,6 +129,7 @@ impl ChangeClass {
 /// `ensure_audit_table_exists`).
 #[derive(Debug, Clone, Copy)]
 pub enum InitialStatus {
+    #[allow(dead_code, reason = "Pending remains part of the audit state machine for queued/test flows that are not compiled into the current release build.")]
     Pending,
     Running,
     /// Destructive op refused by the validate stage. Lands terminal at
@@ -160,6 +162,7 @@ pub enum TerminalStatus {
     /// Symmetric with `InitialStatus::ValidationRefused` so callers
     /// can express the state either as an INSERT-direct terminal or
     /// as a transition target.
+    #[allow(dead_code, reason = "ValidationRefused is preserved for audit symmetry and test coverage, though the current release flow only constructs the initial-state variant.")]
     ValidationRefused,
 }
 

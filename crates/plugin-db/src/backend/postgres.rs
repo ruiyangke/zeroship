@@ -17,10 +17,12 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    AuditWriter, Backend, DialectBuilder, FullTextIndex, GeoPoint, IndexBuilder, LockManager,
+    AuditWriter, DialectBuilder, FullTextIndex, GeoPoint, IndexBuilder, LockManager,
     NamespaceManager, PgLockManager, PgSqlExecutor, SchemaIntrospect, SpatialIndex, SqlExecutor,
     VectorIndex, VectorMetric,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+use super::Backend;
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
 ///
@@ -102,6 +104,7 @@ impl PostgresBackend {
     }
 
     /// Borrow the configured URL.
+    #[cfg(feature = "test-helpers")]
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -964,6 +967,7 @@ impl DialectBuilder for PostgresBackend {
 // `Backend` is a pure composition marker after P0 PR 2 — every method
 // lives on a sub-trait impl above. Audit-row operations: see free fns
 // in `crate::audit`. Open Q1 resolution per p0-implementation-plan.md.
+#[cfg(any(test, feature = "test-helpers"))]
 impl Backend for PostgresBackend {}
 
 // ---------------------------------------------------------------------------
@@ -1324,6 +1328,7 @@ impl crate::backend::EncryptedColumn for PostgresBackend {
 // set unchanged (no `process` feature dep) and matches the shell-out
 // pattern used elsewhere in the codebase (e.g. `sandbox-agent/src/exec.rs`).
 
+#[cfg(feature = "test-helpers")]
 impl crate::backend::Backup for PostgresBackend {
     async fn snapshot(
         &self,
@@ -1355,6 +1360,7 @@ impl crate::backend::Backup for PostgresBackend {
 /// keeps the "thin trait facade + per-capability impl block" shape.
 /// `pub(super)` so the trait methods above can call in; everything
 /// else stays private.
+#[cfg(feature = "test-helpers")]
 mod backup_pg {
     use std::io::Read;
     use std::path::{Path, PathBuf};
