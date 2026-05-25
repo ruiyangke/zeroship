@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-01-compression-streams-native.md. See also docs/reference/ where applicable.
+
 # Native `CompressionStream` / `DecompressionStream` design
 
 **Date:** 2026-05-01

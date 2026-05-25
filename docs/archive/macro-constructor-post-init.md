@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-04-macro-constructor-post-init.md. See also docs/reference/ where applicable.
+
 # MAC-02 — `#[v8_constructor(post_init = "fn")]` with `(scope, this)` signature
 
 **Date:** 2026-05-04

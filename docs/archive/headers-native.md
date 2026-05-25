@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-01-headers-native.md. See also docs/reference/ where applicable.
+
 # Native `Headers` design
 
 **Date:** 2026-05-01

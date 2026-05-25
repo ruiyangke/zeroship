@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-streams-native.md. See also docs/reference/ where applicable.
+
 # Native WHATWG Streams design
 
 **Date:** 2026-05-01
@@ -2837,4 +2839,3 @@ are no "Rust + priv sym mirror" rows.
 | [[backpressure]] | Rust `Cell<bool>` | pure data |
 | [[backpressureChangePromise]] | Rust paired storage `(Promise, Resolver)` (fix to critic #52 — replaceable) | promise lifecycle |
 | (compression dep #5) `transformerCodec` | V8 priv sym holding an `External` to the codec pointer | wrapper-near-state mirror for compression's RAII Drop ordering |
-

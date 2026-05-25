@@ -1,3 +1,5 @@
+Archived 2026-05-25: shipped. Live design record: docs/decisions/2026-05-02-websocket-native.md. See also docs/reference/websocket-design.md.
+
 # Native WHATWG WebSocket design
 
 **Date:** 2026-05-02 (v1) · 2026-05-02 (v2 — post-review revision)
