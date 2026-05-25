@@ -11,7 +11,7 @@
 //   • query() / mutation() / action() wrappers (B3) — capability-scoped:
 //       - query   reads only; runs inside READ ONLY tx
 //       - mutation read+write; runs inside SERIALIZABLE tx; refuses fetch
-//       - action  can call fetch(); no auto-tx; must use runQuery/runMutation
+//       - action  can call fetch(); compose via runQuery/runMutation
 //   • Migration audit log (A3) — backfillArchived in ./migrations.ts
 //
 // Wire conventions match the existing examples (hono-demo etc.):
@@ -154,7 +154,7 @@ export const listTodosWithUser = query(
 );
 
 // ---------------------------------------------------------------------------
-// Subscriptions — long-lived streams; capability maps to action (no auto-tx).
+// Subscriptions — long-lived streams; capability maps to action.
 // This example intentionally bridges the framework-internal broker stream
 // into an RPC SSE feed. Creator-facing reactive reads should prefer
 // `db.live(...)`; the low-level `subscribe()` primitive stays internal.

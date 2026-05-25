@@ -2,7 +2,7 @@
  * Tests for the synthetic SSR entry generator (Stage 5b — ZS-standard).
  *
  * After 5b, the synthetic entry is a NORMALISER. Dispatch (input
- * validation, capability frame, auto-tx, stream framing, output
+ * validation, capability frame, stream framing, output
  * validation) lives in the runtime's `__zsDispatch`
  * (`crates/runtime/src/bootstrap/rpc_dispatch.js`). The plugin only
  * shapes the user module into `default = { schema?, fetch?, rpc? }`
@@ -183,14 +183,11 @@ describe("buildServerEntrySource — forbidden helpers (Stage 5b cleanup)", () =
   // FUNCTION; we forbid the function-definition form instead.
   const FORBIDDEN = [
     "_zsRpc(",                      // The old function-shape dispatcher call
-    "_zsRpcWithAutoTx",
     "_zsRpcPost",
     "_zsRpcAndRespond",
     "function _zsFetch",            // Old WinterCG fall-through helper
     "__zsEnterKind",
     "__zsExitKind",
-    "__zsBeginAutoTx",
-    "__zsEndAutoTx",
     "_isAsyncIterator",
     "_isParseable",
     "_zodIssues",

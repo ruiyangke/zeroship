@@ -184,7 +184,7 @@ SDK packages call the `env.*` native primitives internally. Validation, query bu
 `@zeroship/bootstrap` is the coordination package the runtime crate and Vite plugin both consume. It owns:
 
 - `installSchema(schema, env.db)` — orchestrator behind `export default { schema }`
-- `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / auto-tx / stream framing)
+- `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / stream framing)
 - `normalizeUserModule` — namespace → `{ schema, fetch, rpc }` shape
 - `createFetchHandler` — WinterCG fetch wrapper routing `/_zs/v1/<id>` through the dispatcher
 - `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s

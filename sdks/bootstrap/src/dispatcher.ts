@@ -31,8 +31,6 @@ declare const globalThis: {
   __zsDispatch?: unknown;
   __zsEnterKind?: (kind: string) => number;
   __zsExitKind?: (token: number) => void;
-  __zsBeginAutoTx?: (kind: string, isolation: string) => Promise<number>;
-  __zsEndAutoTx?: (token: number, ok: boolean) => Promise<void> | void;
   __zsValidateOutput?: boolean;
   [key: string]: unknown;
 };
@@ -94,7 +92,7 @@ declare const globalThis: {
       throw mkErr("Method not found: " + name, 404, "NOT_FOUND");
     }
 
-    const cfg = (fn as { config?: { input?: unknown; output?: unknown; kind?: string; isolation?: string } }).config;
+    const cfg = (fn as { config?: { input?: unknown; output?: unknown; kind?: string } }).config;
 
     // 1. Input validation.
     let validated = input;
@@ -113,36 +111,10 @@ declare const globalThis: {
     const xk = globalScope.__zsExitKind;
     const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
 
-    // 3. Auto-tx for query/mutation when plugin-db's natives are present.
-    const bt = globalScope.__zsBeginAutoTx;
-    const et = globalScope.__zsEndAutoTx;
-    const wantsAutoTx = (kind === "query" || kind === "mutation")
-                       && typeof bt === "function" && typeof et === "function";
-
     try {
-      let result;
-      if (wantsAutoTx) {
-        const isolation = (cfg && typeof cfg.isolation === "string") ? cfg.isolation : "";
-        let token = 0;
-        try {
-          token = await (bt as (k: string, i: string) => Promise<number>)(kind!, isolation);
-        } catch (beginErr) {
-          throw beginErr;
-        }
-        try {
-          result = await fn(validated, ctx);
-        } catch (handlerErr) {
-          try { await (et as (t: number, ok: boolean) => Promise<void> | void)(token, false); } catch (_rb) { /* swallow rollback errs */ }
-          throw handlerErr;
-        }
-        // Commit. Commit failure becomes the caller-visible error
-        // (data integrity wins, mirroring _zsRpcWithAutoTx).
-        await (et as (t: number, ok: boolean) => Promise<void> | void)(token, true);
-      } else {
-        result = await fn(validated, ctx);
-      }
+      const result = await fn(validated, ctx);
 
-      // 4. AsyncIterator stream framing tag. The encoder reads
+      // 3. AsyncIterator stream framing tag. The encoder reads
       //    __zsOutputIsString to decide between AI-SDK `0:` (text) and
       //    `2:` (object) lanes.
       if (isAsyncIterator(result)) {
@@ -152,7 +124,7 @@ declare const globalThis: {
         return result;
       }
 
-      // 5. Dev-only output validation. Gated on the future runtime-
+      // 4. Dev-only output validation. Gated on the future runtime-
       //    controlled `__zsValidateOutput` flag — opt-in, default-off.
       if (cfg && isParseable(cfg.output) && globalScope.__zsValidateOutput) {
         try {

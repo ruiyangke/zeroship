@@ -19,10 +19,8 @@
  *    registerModel DDL has settled. A synchronous install failure
  *    (reserved-name collision) does NOT reject `ready` directly —
  *    the throw propagates to the caller — but the module-local
- *    prev-chain is updated so subsequent installs serialise behind
- *    it. The auto-tx dispatcher reads its `ready` handle from the
- *    install RETURN VALUE, so it only awaits a successful install's
- *    chain; failures are surfaced by the synchronous throw.
+ *    prev-chain is updated so subsequent installs serialise behind it;
+ *    failures are surfaced by the synchronous throw.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

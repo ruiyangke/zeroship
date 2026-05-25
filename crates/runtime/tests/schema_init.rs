@@ -3,19 +3,34 @@
 //! Covers:
 //!   - The bootstrap's inlined `db_init.js` reads `user.default.schema`
 //!     directly off the loaded entry module — no manifest-injected path.
-//!   - When no DbPlugin is registered (`__zsBeginAutoTx` is undefined)
+//!   - When no DbPlugin is registered (`__zs_env()?.db` is absent)
 //!     the init script silently no-ops — required so dev runs without
 //!     `DATABASE_URL` still boot.
-//!   - When the runtime ships an `installSchema`-shaped global and a
-//!     plant for `__zsBeginAutoTx`, the init script's discovery path
-//!     fires and consumes `user.default.schema`, calling
-//!     `installSchema(schema, env)` with the live `env.db` handle.
+//!   - When the runtime ships an `installSchema`-shaped module and an
+//!     `env.db` namespace, the init script's discovery path fires and
+//!     consumes `user.default.schema`, calling `installSchema(schema, env)`
+//!     with the live `env.db` handle.
 //!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
 
 mod common;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
+use zeroship_runtime::{NativePlugin, NativeRegistrar};
+
+struct DummyDbPlugin;
+
+impl NativePlugin for DummyDbPlugin {
+    fn namespace(&self) -> &str {
+        "db"
+    }
+
+    fn name(&self) -> &str {
+        "dummy-db"
+    }
+
+    fn register(&self, _r: &mut NativeRegistrar) {}
+}
 
 /// Build a Runtime around the given user-entry source + procedure
 /// table, dispatch a probe procedure, and return its result body.
@@ -113,11 +128,11 @@ export default {{ fetch: _zsFetch, rpc: _zsRpc }};
 
 #[test]
 fn init_script_no_ops_without_db_plugin() {
-    // The init script guards on `__zsBeginAutoTx` (the DbPlugin's
-    // begin-auto-tx native). When the plugin isn't loaded — the
-    // configuration this test runs under — the script must NOT attempt
-    // to dynamically import `@zeroship/db` (which isn't in the test
-    // bundle) and the bootstrap must finish module evaluation cleanly.
+    // The init script guards on `__zs_env()?.db`. When the plugin isn't
+    // loaded — the configuration this test runs under — the script must
+    // NOT attempt to dynamically import `@zeroship/db` (which isn't in
+    // the test bundle) and the bootstrap must finish module evaluation
+    // cleanly.
     //
     // We assert the boot path made it through end-to-end: the worker
     // resolved `default.fetch`, served a request, and returned the
@@ -137,9 +152,9 @@ fn init_script_no_ops_without_db_plugin() {
 
 #[test]
 fn init_script_no_ops_when_default_schema_missing() {
-    // Even with `__zsBeginAutoTx` planted (DbPlugin present), absence of
+    // Even with an `env.db` namespace present, absence of
     // `user.default.schema` short-circuits the init script before the
-    // dynamic-import. The test's synthetic-entry shim emits its own
+    // dynamic import. The test's synthetic-entry shim emits its own
     // `default = { fetch, rpc }` (no `schema:` key), so the gate at
     // `typeof user.default.schema === "object"` falls through and the
     // bootstrap finishes evaluation cleanly without trying to import
@@ -163,18 +178,13 @@ export default {
     // No schema key — discovery should short-circuit.
 };
 "#;
-    // Plant `__zsBeginAutoTx` synchronously via a pre-init module that
-    // the bootstrap imports as a side effect. The init script will
-    // see the gate open, but then find no `default.schema` and skip.
-    let preinit = r#"
-globalThis.__zsBeginAutoTx = function () { return 0; };
-globalThis.__zsEndAutoTx = function () {};
-"#;
-    let user_with_preinit = format!("{preinit}\n{user_src}");
     let modules = vec![
-        ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
+        ModuleEntry { specifier: "index.js".into(), source: user_src.into() },
     ];
-    let runtime = Runtime::builder().modules(modules).build();
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .plugin(DummyDbPlugin)
+        .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome = runtime.call_fetch_handler(
@@ -201,9 +211,9 @@ globalThis.__zsEndAutoTx = function () {};
 #[test]
 fn init_script_runs_install_schema_when_db_plugin_present() {
     // Drive the init script's positive path: the user module exports
-    // `default.schema`, we plant `__zsBeginAutoTx` and a stub
-    // `@zeroship/db` so the dynamic-import resolves. The stub
-    // `installSchema` captures the schema value it was handed; we
+    // `default.schema`, the runtime provides an `env.db` namespace, and
+    // a stub `@zeroship/db` module makes the dynamic import resolve. The
+    // stub `installSchema` captures the schema value it was handed; we
     // read it back through a probe handler.
     //
     // End-to-end pre-condition for production: when the DbPlugin is
@@ -247,15 +257,10 @@ export default {
     // Stage 7: the bootstrap dynamically imports
     // `@zeroship/bootstrap/install-schema` (the framework-internal
     // package that owns installSchema post-refactor). Stub it as a
-    // bundle module so the dynamic import resolves. The stub plants
-    // `__zsBeginAutoTx` synchronously at import-time so the init
-    // script's gate is open. The stub captures the schema keys it
-    // was handed; under this test setup the DbPlugin isn't registered
-    // so `env.db` is undefined — verifying installSchema was CALLED
+    // bundle module so the dynamic import resolves. The stub captures
+    // the schema keys it was handed; verifying installSchema was CALLED
     // (with the right schema) is the assertion that matters here.
     let stub_bootstrap = r#"
-globalThis.__zsBeginAutoTx = function () { return 0; };
-globalThis.__zsEndAutoTx   = function () {};
 export function installSchema(schema, _env) {
     globalThis.__zsCapturedSchema = JSON.stringify({
         keys: Object.keys(schema),
@@ -264,12 +269,9 @@ export function installSchema(schema, _env) {
 }
 "#;
 
-    // Pre-seed `__zsBeginAutoTx` in a tiny pre-init module that the
-    // user-entry imports for its side effect, so the bootstrap's
-    // discovery-gate sees the plant BEFORE the dynamic-import resolves.
-    // The pre-init module also imports the stub bootstrap package so
-    // the bundle eagerly compiles it (lazy dynamic import then hits
-    // the registry path).
+    // The pre-init module imports the stub bootstrap package so the
+    // bundle eagerly compiles it (lazy dynamic import then hits the
+    // registry path).
     let pre_init = r#"
 import "@zeroship/bootstrap/install-schema";
 "#;
@@ -282,6 +284,7 @@ import "@zeroship/bootstrap/install-schema";
 
     let runtime = Runtime::builder()
         .modules(modules)
+        .plugin(DummyDbPlugin)
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

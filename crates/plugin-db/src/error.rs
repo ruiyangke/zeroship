@@ -477,8 +477,8 @@ impl DbError {
     /// (`as_postgres().ok_or_else(...)?` / `Some/None` match) routes
     /// through this helper so the wire `.code` (`backend_unsupported`)
     /// AND the operator-facing `hint` stay identical across the
-    /// `migrations` / `migration` / `register_model` / `transaction` /
-    /// `auto_tx` paths.
+    /// `migrations` / `migration` / `register_model` / `transaction`
+    /// paths.
     ///
     /// **Post-P0 mop-up (code-critique R15-1 / R15-2)**: prior hand-rolled
     /// `DbError::Configuration { code: "backend_unsupported", ... }`

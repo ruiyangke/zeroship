@@ -110,8 +110,8 @@ pub trait SqlExecutor: 'static {
     type Client;
 
     /// Acquire a dedicated (non-pooled) connection. Caller owns the
-    /// lifetime — used by the migration lock, the auto-tx wrapper, and
-    /// the native `db.transaction(fn)` orchestrator, which need a
+    /// lifetime — used by the migration lock and the native
+    /// `db.transaction(fn)` orchestrator, which need a
     /// connection that survives across pool-return points.
     ///
     /// For Postgres this opens a fresh `compio_postgres::connect(...)`

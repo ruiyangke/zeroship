@@ -5,7 +5,7 @@
 //
 // Demonstrates four surfaces of the Stage 5a dispatcher:
 //   1. `config.kind = "query"`          → capability frame (no-op without
-//                                          plugin-db; auto-tx wraps when
+//                                          plugin-db; capability wraps when
 //                                          plugin-db is loaded).
 //   2. `config.input.parse(v)`          → pre-handler validation. Returns
 //                                          400 INVALID_ARGUMENT on throw,
@@ -27,7 +27,7 @@
 //                                          frame.
 //   4. plain fn that calls `fetch(...)` → action-like. No kind set; the
 //                                          dispatcher applies no capability
-//                                          frame and no auto-tx.
+//                                          frame.
 //
 // Run:
 //   target/release/zeroship serve examples/raw-streaming.js --port 3000
@@ -120,7 +120,7 @@ tick.config = { kind: "subscription" };
 // ── 3. Action — calls `fetch(...)`. No kind set.
 //
 // The dispatcher applies no capability frame (kind:undefined → tok=-1)
-// and no auto-tx — so outbound fetch is unrestricted. Mirrors the
+// so outbound fetch is unrestricted. Mirrors the
 // `action` ergonomic in `@zeroship/server`.
 
 const echoHeaders = async (input) => {
@@ -139,7 +139,7 @@ const echoHeaders = async (input) => {
 };
 // No echoHeaders.config — action-like surface (no kind marker).
 
-// ── 4. Mutation — symmetric to query, also triggers auto-tx when
+// ── 4. Mutation — symmetric to query, also sets the mutation capability when
 //      plugin-db is loaded. Without plugin-db, the capability frame is
 //      a no-op and the handler runs unwrapped. Real apps would persist
 //      via `env.db.*`; here we just echo the input back with a

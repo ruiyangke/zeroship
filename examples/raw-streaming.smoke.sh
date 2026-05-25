@@ -2,7 +2,7 @@
 # Smoke test for examples/raw-streaming.js — exercises the four ZS-standard
 # dispatcher surfaces this demo demonstrates over `zeroship serve` (no Vite):
 #   1. query + input.parse (valid + invalid)
-#   2. mutation (kind frame, no auto-tx without plugin-db)
+#   2. mutation (kind frame)
 #   3. action-like (no kind set; calls outbound fetch)
 #   4. AsyncIterator return — verifies the dispatcher accepts the shape;
 #      raw deploys can't encode unary streams over POST, so the wire
@@ -53,7 +53,7 @@ check "status is 400" bash -c "[ '$S' = '400' ]"
 check "body surfaces code=INVALID_ARGUMENT" contains "$R" '"code":"INVALID_ARGUMENT"'
 check "body surfaces issues path" contains "$R" '"path":\["q"\]'
 
-echo "[check 3] recordNote — mutation (no auto-tx, no plugin-db loaded)"
+echo "[check 3] recordNote — mutation"
 R=$(rpc recordNote '{"text":"first"}')
 check "recordNote echoed text" contains "$R" '"text":"first"'
 check "recordNote assigned an id" contains "$R" '"id":"'

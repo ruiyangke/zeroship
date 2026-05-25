@@ -7,8 +7,6 @@
 //!     bootstrap wraps the dict in `globalThis.__zsDispatch` which owns:
 //!       * input validation via `fn.config.input.parse()`
 //!       * capability frame via `__zsEnterKind` / `__zsExitKind`
-//!       * auto-tx for query/mutation via `__zsBeginAutoTx` /
-//!         `__zsEndAutoTx`
 //!       * AsyncIterator stream framing (`__zsOutputIsString`)
 //!       * dev-only output validation via `__zsValidateOutput`
 //!   - Function-shape `(name, input, ctx) => ...` (legacy back-compat).
@@ -192,78 +190,7 @@ fn dict_shape_applies_capability_frame() {
     );
 }
 
-// ── 3. Dict-shape applies auto-tx for kind=mutation ────────────────────────
-
-#[test]
-fn dict_shape_applies_auto_tx_on_mutation() {
-    // For `kind: "mutation"` plus installed `__zsBeginAutoTx` /
-    // `__zsEndAutoTx`, the dispatcher must BEGIN before the handler and
-    // call END(token, true) on success.
-    let runtime = build_runtime(
-        r#"
-        globalThis.__zsTxTrace = [];
-        globalThis.__zsBeginAutoTx = function(kind, isolation) {
-            globalThis.__zsTxTrace.push("begin:" + kind + ":" + isolation);
-            return 42;
-        };
-        globalThis.__zsEndAutoTx = function(token, ok) {
-            globalThis.__zsTxTrace.push("end:" + token + ":" + ok);
-        };
-
-        const m = (input) => "wrote";
-        m.config = { kind: "mutation" };
-
-        const peek = () => globalThis.__zsTxTrace.join(",");
-
-        export default { rpc: { m, peek } };
-        "#,
-    );
-    let (status, body) = dispatch(&runtime, "m", r#"{"json":null}"#);
-    assert_eq!(status, 200, "body: {}", body);
-    assert_eq!(unwrap_json_envelope(&body), "\"wrote\"");
-
-    let (_, body2) = dispatch(&runtime, "peek", r#"{"json":null}"#);
-    let trace = unwrap_json_envelope(&body2);
-    assert!(trace.contains("begin:mutation:"), "trace: {}", trace);
-    assert!(trace.contains("end:42:true"), "trace: {}", trace);
-}
-
-// ── 4. Dict-shape rolls back tx on handler throw ───────────────────────────
-
-#[test]
-fn dict_shape_rolls_back_tx_on_throw() {
-    // Auto-tx + handler throws → END(token, false) on the rollback
-    // path, the error surfaces to the caller as a 500.
-    let runtime = build_runtime(
-        r#"
-        globalThis.__zsTxTrace2 = [];
-        globalThis.__zsBeginAutoTx = function(kind, isolation) {
-            globalThis.__zsTxTrace2.push("begin");
-            return 11;
-        };
-        globalThis.__zsEndAutoTx = function(token, ok) {
-            globalThis.__zsTxTrace2.push("end:" + token + ":" + ok);
-        };
-
-        const bad = (input) => { throw new Error("handler-boom"); };
-        bad.config = { kind: "mutation" };
-
-        const peek = () => globalThis.__zsTxTrace2.join(",");
-
-        export default { rpc: { bad, peek } };
-        "#,
-    );
-    let (status, body) = dispatch(&runtime, "bad", r#"{"json":null}"#);
-    assert_eq!(status, 500, "body: {}", body);
-    assert!(parse_message(&body).contains("handler-boom"), "body: {}", body);
-
-    let (_, body2) = dispatch(&runtime, "peek", r#"{"json":null}"#);
-    let trace = unwrap_json_envelope(&body2);
-    assert!(trace.contains("begin"), "trace: {}", trace);
-    assert!(trace.contains("end:11:false"), "trace: {}", trace);
-}
-
-// ── 5. Dict-shape validates input via cfg.input.parse ──────────────────────
+// ── 3. Dict-shape validates input via cfg.input.parse ──────────────────────
 
 #[test]
 fn dict_shape_validates_input() {
@@ -297,7 +224,7 @@ fn dict_shape_validates_input() {
     assert_eq!(issues[0]["message"], "wrong", "body: {}", body);
 }
 
-// ── 6. Function-shape still works (back-compat) ────────────────────────────
+// ── 4. Function-shape still works (back-compat) ────────────────────────────
 
 #[test]
 fn function_shape_back_compat() {

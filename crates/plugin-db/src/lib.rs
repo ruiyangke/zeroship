@@ -294,13 +294,9 @@ impl NativePlugin for DbPlugin {
                 c.clear_pool();
             }
         });
-        // Every JS-visible entry point lives on the Db v8_class
-        // wrapper (see `v8_classes::db`); the registrar only installs
-        // the auto-tx globals — `query()` / `mutation()` defense in
-        // depth at the Postgres level around the B3 capability gate.
-        r.add_setup("install_auto_tx_globals", |scope, _ns_obj| {
-            transaction::auto_tx::install_auto_tx_globals(scope);
-        });
+        // Every JS-visible entry point lives on the Db v8_class wrapper
+        // (see `v8_classes::db`).
+        let _ = r;
     }
 }
 

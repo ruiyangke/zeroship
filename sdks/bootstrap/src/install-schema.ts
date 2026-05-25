@@ -16,8 +16,8 @@
  *     `env.transaction(tx => ...)` are live.
  *   - Returns `{ collections, ready }`. The bootstrap (production
  *     `runtime-entry.ts`, dev `dev-entry.ts`) awaits `ready` before
- *     dispatching any request so the auto-tx path doesn't collide with
- *     the orchestrator's `pg_advisory_lock`.
+ *     dispatching any request so handlers don't race the orchestrator's
+ *     `pg_advisory_lock`.
  *
  * Re-entrancy: a second call with overlapping names re-installs the
  * Collection wrappers (`configurable: true` on the descriptors).
@@ -95,8 +95,8 @@ export interface DbPlatformHandle {
  *
  * In both cases `installSchema` falls back to its handle-absent path: it
  * skips `registerModel` (the dispatcher's `_schemaReady` defense still
- * gates auto-tx), exactly as it did before P9 PR 4 when `registerModel`
- * lived directly on `env.db`. The `prefer` argument lets a caller (the
+ * gates request handling), exactly as it did before P9 PR 4 when
+ * `registerModel` lived directly on `env.db`. The `prefer` argument lets a caller (the
  * runtime-entry) pass a handle it resolved earlier so the resolver isn't
  * consulted twice — and so it keeps working after runtime-entry deletes
  * the global.
@@ -922,7 +922,7 @@ let _installInFlight = false;
 /**
  * Framework-internal helper that backs the `export default { schema }`
  * convention. Returns `{ collections, ready }` — callers MUST await
- * `ready` before opening any auto-tx (the dispatcher does this for them).
+ * `ready` before dispatching handlers.
  */
 export function installSchema<const T extends Record<string, SchemaInput>>(
   schemas: ValidateSchemaShape<T>,

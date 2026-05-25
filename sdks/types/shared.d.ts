@@ -7,10 +7,8 @@ type ZeroshipScalar = string | number | boolean | null;
 
 /**
  * Postgres transaction isolation level. The canonical wire spelling is
- * lowercase and human-readable. Used by both `@zeroship/db`'s
- * `db.transaction({ isolationLevel })` and `@zeroship/server`'s
- * procedure `config.isolation` so the SDKs agree on the input shape
- * without crossing a package boundary at type-check time.
+ * lowercase and human-readable. Used by `@zeroship/db`'s
+ * `db.transaction({ isolationLevel })`.
  *
  * `"read uncommitted"` is accepted as input (Postgres silently
  * upgrades it to `"read committed"`); higher levels trade throughput

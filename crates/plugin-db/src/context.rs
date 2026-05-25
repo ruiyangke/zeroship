@@ -1,7 +1,7 @@
 //! Per-isolate DB context — single typed home for every plug-in
 //! thread-local. Before Stage 8d-R4 the plug-in carried ten separate
 //! `thread_local!` declarations (`DB_POOL`, `DB_URL`, `REGISTERED_MODELS`,
-//! `TX_CONN`, `AUTO_TX_OWNED`, `PENDING_EMITS` in `lib.rs`; `MIG_LOCK` in
+//! `TX_CONN`, `PENDING_EMITS` in `lib.rs`; `MIG_LOCK` in
 //! `migrations.rs`; `RUNNING_CONSUMERS` in `replication_ops.rs`). Each had
 //! its own borrow/take/replace ritual; lifecycle invariants (e.g.
 //! "MIG_LOCK never holds two `MigrationLock` snapshots") were enforced by
@@ -14,9 +14,9 @@
 //! * [`IsolateDbContext::with`] / [`IsolateDbContext::with_mut`] are
 //!   the only entry points; every consumer goes through them.
 //! * `*_tx_*` methods coordinate the tx-state slots (`tx_conn`,
-//!   `auto_tx_owned`, `savepoint_depth`) so the single-connection model
-//!   the transaction orchestrator relies on holds (one BEGIN per isolate,
-//!   nested `SAVEPOINT`s reusing the same connection).
+//!   `savepoint_depth`) so the single-connection model the transaction
+//!   orchestrator relies on holds (one BEGIN per isolate, nested
+//!   `SAVEPOINT`s reusing the same connection).
 //! * Pending broker emits live on the context; the queue is drained by
 //!   the transaction settle path (`drain_pending_emits_on_commit`) and
 //!   cleared on ROLLBACK / fresh BEGIN.
@@ -178,24 +178,13 @@ pub struct IsolateDbContext {
     /// rather than relying on handle drop.
     tx_conn: Option<TxConnection>,
 
-    /// True when the active [`Self::tx_conn`] was opened by the
-    /// auto-tx wrapper (`__zsBeginAutoTx`) — defense-in-depth
-    /// read-only/serializable envelope around `query()`/`mutation()`
-    /// handlers.
-    ///
-    /// User-driven `db.transaction(async tx => {...})` calls leave
-    /// this `false`, so the auto-tx end callback never touches a
-    /// user-owned tx.
-    auto_tx_owned: bool,
-
     /// **P9 PR 3** — number of nested `SAVEPOINT`s currently open within
-    /// the active transaction (auto-tx or explicit). `0` means either no
-    /// transaction is active, or the only open transaction is the
-    /// outermost one (the `BEGIN`, whether opened by the native
-    /// `Db.transaction(fn)` orchestrator or the auto-tx wrapper). Each
-    /// nested `env.db.transaction(...)` call that finds `has_tx() == true`
-    /// emits `SAVEPOINT zs_sp_<depth+1>` and increments this; the matching
-    /// `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT` decrements it.
+    /// the active explicit transaction. `0` means either no transaction
+    /// is active, or the only open transaction is the outermost one (the
+    /// `BEGIN`). Each nested `env.db.transaction(...)` call that finds
+    /// `has_tx() == true` emits `SAVEPOINT zs_sp_<depth+1>` and increments
+    /// this; the matching `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
+    /// decrements it.
     ///
     /// The native transaction module (`transaction`) is the only
     /// writer: the savepoint name `zs_sp_<N>` is derived from this counter
@@ -209,8 +198,7 @@ pub struct IsolateDbContext {
     /// While [`Self::tx_conn`] is `Some`, every successful CRUD
     /// mutation pushes its `ChangeEvent` here instead of calling
     /// [`crate::wal_consumer::emit_local`] directly. The transaction
-    /// settle path (the native `Db.transaction(fn)` orchestrator for
-    /// user-driven tx; `exec_auto_end` for the auto-tx wrapper) drains
+    /// settle path (the native `Db.transaction(fn)` orchestrator) drains
     /// the queue and either fires every event through `emit_local` on
     /// COMMIT or clears it on ROLLBACK. This closes the
     /// "emit-before-commit" dual-write window where a subscriber could
@@ -294,7 +282,6 @@ impl IsolateDbContext {
             db_url: None,
             registered_models: HashSet::new(),
             tx_conn: None,
-            auto_tx_owned: false,
             savepoint_depth: 0,
             pending_emits: None,
             mig_lock: None,
@@ -485,7 +472,7 @@ impl IsolateDbContext {
         self.mask_policies.contains_key(app_id)
     }
 
-    // ----- TX_CONN / AUTO_TX_OWNED / SAVEPOINT_DEPTH ------
+    // ----- TX_CONN / SAVEPOINT_DEPTH ------
 
     /// `true` if a transaction connection is currently parked in the
     /// slot (`tx_conn = Some`). Note: returns `true` even between an
@@ -518,28 +505,6 @@ impl IsolateDbContext {
     /// Return a client previously taken via [`Self::take_tx_client`].
     pub(crate) fn put_tx_client(&mut self, client: TxConnection) {
         self.tx_conn = Some(client);
-    }
-
-    /// True iff the live transaction was opened by the auto-tx
-    /// wrapper (vs. a user-driven `db.transaction(fn)`).
-    pub(crate) fn auto_tx_owned(&self) -> bool {
-        self.auto_tx_owned
-    }
-
-    /// Mark the live transaction as auto-tx-owned (or clear the
-    /// flag).
-    ///
-    /// Invariant: flipping `owned = true` requires an active
-    /// transaction connection. The `false` path is always allowed —
-    /// `exec_auto_end` clears the flag right after taking the client
-    /// out, so the slot is briefly `None` while the flag is also
-    /// being cleared.
-    pub(crate) fn set_auto_tx_owned(&mut self, owned: bool) {
-        debug_assert!(
-            !owned || self.tx_conn.is_some(),
-            "set_auto_tx_owned(true) called without an active tx_conn",
-        );
-        self.auto_tx_owned = owned;
     }
 
     /// **P9 PR 3** — read the current nested-savepoint depth (zero when
@@ -775,9 +740,6 @@ mod tests {
     //!   [`IsolateDbContext::take_tx_client`] /
     //!   [`IsolateDbContext::put_tx_client`] round-trip with a real
     //!   backend client.
-    //! * The `debug_assert!` inside
-    //!   [`IsolateDbContext::set_auto_tx_owned`] that `owned = true`
-    //!   requires `tx_conn = Some` — we only test the `false` branch.
     //! * The `debug_assert!` inside [`IsolateDbContext::push_savepoint`]
     //!   that a savepoint requires an active `tx_conn` — same constraint;
     //!   the pop/reset arms (no such precondition) are unit-tested.
@@ -819,7 +781,6 @@ mod tests {
         assert!(ctx.backend().is_none());
         assert!(ctx.db_url().is_none());
         assert!(!ctx.has_tx());
-        assert!(!ctx.auto_tx_owned());
         assert_eq!(ctx.savepoint_depth(), 0);
         assert!(!ctx.has_mig_lock());
         assert!(ctx.mig_lock_snapshot().is_none());
@@ -838,7 +799,6 @@ mod tests {
         // Compare observable state (no PartialEq on the struct).
         assert_eq!(a.pool_initialised(), b.pool_initialised());
         assert_eq!(a.savepoint_depth(), b.savepoint_depth());
-        assert_eq!(a.auto_tx_owned(), b.auto_tx_owned());
         assert_eq!(a.has_tx(), b.has_tx());
         assert_eq!(a.has_mig_lock(), b.has_mig_lock());
         assert_eq!(a.db_url(), b.db_url());
@@ -942,17 +902,6 @@ mod tests {
         // reset on zero is a no-op.
         ctx.reset_savepoint_depth();
         assert_eq!(ctx.savepoint_depth(), 0);
-    }
-
-    #[test]
-    fn set_auto_tx_owned_false_is_always_allowed() {
-        // The `true` branch requires tx_conn = Some (debug_assert!); the
-        // `false` branch is always allowed because `exec_auto_end`
-        // clears the flag right after taking the client out, when the
-        // slot is briefly empty.
-        let mut ctx = IsolateDbContext::new();
-        ctx.set_auto_tx_owned(false);
-        assert!(!ctx.auto_tx_owned());
     }
 
     // ----- PENDING_EMITS state machine -----------------------------------
