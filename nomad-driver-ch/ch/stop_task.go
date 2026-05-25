@@ -444,8 +444,8 @@ func SetTryAcquireOFDLockForTest(fn func(path string) (ofdLockProbeResult, error
 	return prev
 }
 
-// realTryAcquireOFDLock opens the path O_RDONLY (sufficient to test
-// for F_WRLCK conflict via F_OFD_SETLK), tries to acquire the OFD
+// realTryAcquireOFDLock opens the path O_RDWR (required for F_WRLCK
+// via F_OFD_SETLK — kernel returns EBADF if fd is O_RDONLY), tries to acquire the OFD
 // write lock on the whole file, releases on success, and returns the
 // classified outcome. Always closes the FD before returning.
 //
@@ -461,7 +461,7 @@ func SetTryAcquireOFDLockForTest(fn func(path string) (ofdLockProbeResult, error
 // last open that DID hold it. The released lock leaves no residual
 // kernel state, so it's safe to issue from cleanup paths.
 func realTryAcquireOFDLock(path string) (ofdLockProbeResult, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENOENT) {
 			return ofdLockProbeFileGone, nil

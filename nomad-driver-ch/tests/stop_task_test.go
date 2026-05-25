@@ -12,6 +12,7 @@
 package tests
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"golang.org/x/sys/unix"
 
 	"github.com/zeroship/nomad-driver-ch/ch"
 )
@@ -1389,3 +1391,61 @@ func (e *fakeSocketErr) Error() string { return e.msg }
 
 // Compile-time guard: stopTaskFixture is not used elsewhere.
 var _ = sync.Mutex{}
+
+// ─── v24 regression: O_RDONLY → O_RDWR in realTryAcquireOFDLock ─────────────
+//
+// Prior to v24, realTryAcquireOFDLock opened the file with O_RDONLY and then
+// attempted F_OFD_SETLK F_WRLCK. Linux's fcntl(2) requires the file
+// descriptor to be opened O_WRONLY or O_RDWR for F_WRLCK; O_RDONLY returns
+// EBADF immediately regardless of lock state. This meant every probe was a
+// false-positive EBADF since v17 — wake always failed on attempt 1, destroy
+// always exhausted its budget silently.
+//
+// This test pins both sides of the kernel contract so a future regression
+// cannot silently re-introduce O_RDONLY:
+//
+//  1. Direct O_RDONLY + F_WRLCK syscall → must return EBADF (documents the
+//     failure mode so any reader understands WHY O_RDWR is required).
+//  2. RealTryAcquireOFDLockForTest (which uses the fixed O_RDWR) → must
+//     return ofdLockProbeAcquired, nil on a fresh file with no other holder.
+func TestRealTryAcquireOFDLock_RequiresRDWR(t *testing.T) {
+	// Create a regular writable file in a temp dir.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rootfs.img")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("create test file: %v", err)
+	}
+	f.Close()
+
+	// ── Part 1: verify the failure mode ───────────────────────────────
+	// O_RDONLY + F_WRLCK must return EBADF (errno=9). This proves the
+	// bug that was present in v17-v23 and documents the kernel constraint.
+	fdRO, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("open O_RDONLY: %v", err)
+	}
+	flk := unix.Flock_t{
+		Type:   unix.F_WRLCK,
+		Whence: int16(0), // SEEK_SET
+		Start:  0,
+		Len:    0, // whole file
+	}
+	lockErr := unix.FcntlFlock(uintptr(fdRO), unix.F_OFD_SETLK, &flk)
+	unix.Close(fdRO)
+	if !errors.Is(lockErr, unix.EBADF) {
+		t.Errorf("O_RDONLY + F_WRLCK: expected EBADF, got %v (kernel contract violation or test misconfiguration)", lockErr)
+	}
+
+	// ── Part 2: the fixed probe (O_RDWR) must acquire cleanly ─────────
+	// No other process holds any lock on this fresh file, so the probe
+	// must return Acquired (nil error). If this returns ProbeError with
+	// EBADF, the O_RDONLY regression was re-introduced.
+	result, probeErr := ch.RealTryAcquireOFDLockForTest(path)
+	if probeErr != nil {
+		t.Fatalf("RealTryAcquireOFDLockForTest: unexpected error %v (O_RDONLY regression?)", probeErr)
+	}
+	if result != ch.OFDLockProbeAcquiredForTest {
+		t.Errorf("RealTryAcquireOFDLockForTest: got result=%v, want Acquired", result)
+	}
+}

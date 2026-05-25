@@ -417,6 +417,18 @@ func RunDriverMetricsExporterForTest(ctx context.Context, logger hclog.Logger) {
 	runDriverMetricsExporter(ctx, logger)
 }
 
+// RealTryAcquireOFDLockForTest calls the production realTryAcquireOFDLock
+// directly, bypassing the tryAcquireOFDLockFn seam. Used by regression
+// tests that need to verify the real F_OFD_SETLK syscall behaviour
+// (e.g. confirming that O_RDWR — not O_RDONLY — is used so the kernel
+// does not return EBADF for F_WRLCK requests).
+//
+// v24 regression: stop_task: O_RDONLY → O_RDWR on fd open in
+// realTryAcquireOFDLock (F_OFD_SETLK F_WRLCK requires write-capable fd).
+func RealTryAcquireOFDLockForTest(path string) (OFDLockProbeResultForTest, error) {
+	return realTryAcquireOFDLock(path)
+}
+
 // -- T-8b-stress-r9-retry-4: per-stage restore failure observability --
 
 // StartTaskRestoreBranchForTest is the test entry point for the
