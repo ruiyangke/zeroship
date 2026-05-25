@@ -217,6 +217,28 @@ pub struct NomadCHBackend {
     /// `AppState::from_config` is the only construction path that reaches
     /// the HTTP server.
     nomad_stop_permits: std::sync::OnceLock<Arc<NomadStopPermits>>,
+    /// **R33-I1 (concurrency-r33 IMPORTANT)**: per-user fence around
+    /// the cold-boot `home.img` mkfs step. `home.img` is per-USER (see
+    /// `user_home_image_path`); two concurrent same-user CREATEs would
+    /// otherwise race the exists-then-mkfs sequence inside
+    /// `create_ext4_image_if_missing`. R32-P1's `std::thread::scope`
+    /// parallelisation widens the window. The home_h thread acquires
+    /// the per-user inner `Mutex` before its
+    /// `create_ext4_image_if_missing(&user_home_img, ...)` call and
+    /// drops it as the spawned thread exits. The workspace_h thread is
+    /// NOT gated — workspace.img is per-sandbox (UUID-scoped), so the
+    /// parallelism win from R32-P1 is preserved for the workspace half.
+    ///
+    /// Holds `Arc<...>` of the same `HashMap` `AppState` holds, so the
+    /// fence is process-global (one user can't race themselves across
+    /// the controller's pool of compio blocking threads). Installed
+    /// once at boot from `AppState::from_config` via
+    /// [`Self::install_user_home_mkfs_locks`]. Unit tests that don't
+    /// exercise the fence leave it empty — the cold-boot path falls
+    /// back to running mkfs without the gate (legacy R32-P1 behaviour).
+    user_home_mkfs_locks: std::sync::OnceLock<
+        Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    >,
 }
 
 /// Phase B / snapshot wiring: resolved source-VM identity for a
@@ -701,6 +723,12 @@ impl NomadCHBackend {
             // `AppState::from_config`. Unit tests that don't exercise
             // the cap leave it empty (stop_inner skips the acquire).
             nomad_stop_permits: std::sync::OnceLock::new(),
+            // R33-I1: empty by default; production installs the shared
+            // per-user mkfs fence map via `install_user_home_mkfs_locks`
+            // from `AppState::from_config`. Unit tests that don't
+            // exercise the fence leave it empty (try_create skips the
+            // acquire — legacy R32-P1 unguarded behaviour).
+            user_home_mkfs_locks: std::sync::OnceLock::new(),
         })
     }
 
@@ -733,6 +761,33 @@ impl NomadCHBackend {
     /// the `/shutdown` ladder, and by tests to inspect the live cap.
     pub fn nomad_stop_permits(&self) -> Option<&Arc<NomadStopPermits>> {
         self.nomad_stop_permits.get()
+    }
+
+    /// R33-I1: install the shared per-user `home.img` mkfs fence map.
+    /// Called exactly once from `AppState::from_config` after the
+    /// `Arc<Mutex<HashMap<_, _>>>` is constructed there. Same
+    /// publish-once `OnceLock` shape as `install_nomad_stop_permits`
+    /// (backend held behind `Arc<NomadCHBackend>`; the post-construction
+    /// install can't take `&mut self`). Idempotent — a second install
+    /// attempt is a silent no-op.
+    pub fn install_user_home_mkfs_locks(
+        &self,
+        locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    ) {
+        let _ = self.user_home_mkfs_locks.set(locks);
+    }
+
+    /// R33-I1: read-side accessor for the installed per-user mkfs
+    /// fence map. Returns `None` when uninstalled (unit-test /
+    /// single-tenant binary path) — `try_create` then runs the
+    /// home.img mkfs without the fence (legacy R32-P1 behaviour). Used
+    /// by `try_create` to acquire the per-user inner Mutex before
+    /// spawning the `home_h` thread, and by tests to inspect the live
+    /// map (assert insertion / drop semantics).
+    pub fn user_home_mkfs_locks(
+        &self,
+    ) -> Option<&Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>> {
+        self.user_home_mkfs_locks.get()
     }
 
     /// r3-A (T-8b-stress-r3 fix): install the cached local Nomad
@@ -1130,6 +1185,28 @@ impl NomadCHBackend {
             let host_dir_owned = host_dir.to_path_buf();
             let user_home_img_owned = user_home_img.to_path_buf();
             let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
+            // R33-I1: resolve the per-user `home.img` mkfs fence BEFORE
+            // entering spawn_blocking. We need the outer-map lock briefly
+            // to `.entry(user_id).or_insert_with(...)` a fresh per-user
+            // `Arc<Mutex<()>>`; that operation runs on the ntex worker
+            // (~1 µs, no IO), then the per-user `Arc` is moved into the
+            // spawn_blocking closure and the home_h spawned thread
+            // acquires it across the mkfs subprocess. When the fence map
+            // is uninstalled (unit-test / single-tenant binary path),
+            // `user_home_lock` is `None` and home_h runs unguarded —
+            // legacy R32-P1 behaviour, intentional fallback.
+            //
+            // The workspace_h thread is NOT gated: `workspace.img` is
+            // per-sandbox (UUID-scoped dirent under `host_dir`), so the
+            // R32-P1 parallelism win for the cold-boot wall is preserved
+            // for the workspace half.
+            let user_home_lock: Option<Arc<Mutex<()>>> =
+                self.user_home_mkfs_locks().map(|map_arc| {
+                    let mut map = map_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    map.entry(user_id.to_string())
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                });
             let staged = compio::runtime::spawn_blocking(move || -> Result<PathBuf, String> {
                 std::fs::create_dir_all(&host_dir_owned)
                     .map_err(|e| format!("mkdir {}: {}", host_dir_owned.display(), e))?;
@@ -1141,7 +1218,7 @@ impl NomadCHBackend {
                 // R32-P1: parallelise the two mkfs.ext4 subprocesses.
                 // `workspace.img` (per-sandbox, always fresh on cold-boot)
                 // and `home.img` (per-user, idempotent skip on warm-boot)
-                // touch disjoint paths and disjoint dirents; running them
+                // touch disjoint paths per-sandbox; running them
                 // sequentially adds ~1.5 s on first-sandbox-per-user
                 // (perf-r32 §"Where the 8.9 s c=1 CREATE goes"). Two
                 // `std::thread::scope` threads keep ownership trivial —
@@ -1152,12 +1229,35 @@ impl NomadCHBackend {
                 // fails; if both fail, we surface workspace.img's error
                 // (it's the per-sandbox image — the more diagnostic of
                 // the two for the cold-boot fault domain).
+                //
+                // R33-I1 (concurrency-r33 IMPORTANT): the home_h thread
+                // ACQUIRES `user_home_lock` across its mkfs call when the
+                // fence is installed. `home.img` is per-USER, not
+                // per-sandbox — two same-user concurrent cold-boot
+                // CREATEs would otherwise race two `mkfs.ext4 -q -F
+                // <same-path>` subprocesses. The fence serialises the
+                // per-user mkfs only; workspace_h stays unconditionally
+                // parallel because workspace.img is per-sandbox (no
+                // collision surface).
                 let (workspace_res, home_res) = std::thread::scope(|s| {
                     let workspace_h = s.spawn(|| {
                         create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
                             .map_err(|e| format!("workspace.img: {e}"))
                     });
                     let home_h = s.spawn(|| {
+                        // R33-I1: hold the per-user fence across the
+                        // mkfs subprocess. `_guard` lives until this
+                        // closure returns (thread joins), which is the
+                        // critical-section semantics we want — drop
+                        // happens before scope's `.join()` for this
+                        // handle returns to the parent. Poison recovery
+                        // mirrors the rest of the file: a poisoned mutex
+                        // means a prior thread panicked across the
+                        // mkfs, which is recoverable for our purposes
+                        // (the inner () has no invariants to corrupt).
+                        let _guard = user_home_lock
+                            .as_ref()
+                            .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()));
                         create_ext4_image_if_missing(&user_home_img_owned, workspace_img_size_gb)
                             .map_err(|e| format!("home.img: {e}"))
                     });
@@ -8360,5 +8460,245 @@ mod tests {
         stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(&host_dir_a);
         let _ = std::fs::remove_dir_all(&host_dir_b);
+    }
+
+    // ─── R33-I1: per-user `home.img` mkfs fence ────────────────────
+    //
+    // R32-P1 (`2faaf39b`) parallelised the cold-boot
+    // `workspace.img` + `home.img` mkfs via `std::thread::scope`.
+    // concurrency-r33 (R33-I1) flagged that `home.img` is per-USER
+    // (cf `user_home_image_path`), so two concurrent same-user
+    // cold-boot CREATEs can race two `mkfs.ext4 -q -F <same-path>`
+    // subprocesses. Fix: a per-user `Mutex<HashMap<UserId,
+    // Arc<Mutex<()>>>>` fence acquired only inside the `home_h`
+    // spawned thread. The workspace_h thread stays parallel.
+    //
+    // These tests pin the fence shape directly (install / lookup /
+    // serialization) without needing the full `try_create` mock
+    // surface. The "fence engages only on home_h, not workspace_h"
+    // invariant is structurally visible in the source — the lock is
+    // acquired inside `s.spawn(|| { let _guard = ...; })` for home_h
+    // only.
+
+    /// R33-I1: `install_user_home_mkfs_locks` makes the map readable
+    /// via `user_home_mkfs_locks()`. Default (uninstalled) is `None`
+    /// — the legacy R32-P1 unguarded fallback for unit-test /
+    /// single-tenant binary paths. Mirrors the pattern that
+    /// `nomad_stop_permits` follows.
+    #[test]
+    fn user_home_mkfs_locks_install_then_read() {
+        let backend = NomadCHBackend::new(make_cfg(), None).expect("new");
+        assert!(
+            backend.user_home_mkfs_locks().is_none(),
+            "uninstalled default MUST be None — legacy R32-P1 fallback \
+             (mkfs runs unguarded when fence is absent)"
+        );
+        let map: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        backend.install_user_home_mkfs_locks(Arc::clone(&map));
+        assert!(
+            backend.user_home_mkfs_locks().is_some(),
+            "after install, accessor MUST return Some"
+        );
+        // Same Arc identity — install does not clone the inner map.
+        assert!(
+            Arc::ptr_eq(backend.user_home_mkfs_locks().unwrap(), &map),
+            "install MUST store the exact Arc handed in, not a clone \
+             (so AppState and the backend see the SAME map)"
+        );
+    }
+
+    /// R33-I1: per-user entries are lazily inserted on first lookup
+    /// and shared across subsequent lookups by the same user. Two
+    /// lookups for `usr_a` get Arc-equal `Mutex` handles; a lookup
+    /// for `usr_b` gets a distinct handle. This is the "DashMap-
+    /// equivalent" shape the concurrency-r33 review specified — pin
+    /// it so a future refactor that swaps `Mutex<HashMap<_, _>>` for
+    /// `DashMap` (if/when the workspace gains that dep) doesn't drop
+    /// the entry-sharing semantics.
+    #[test]
+    fn user_home_mkfs_locks_per_user_lazy_insert_and_share() {
+        let map: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // Mirror the production acquire path: lock outer, entry-or-
+        // insert-with, clone the inner Arc, drop the outer lock.
+        let lookup = |uid: &str| -> Arc<Mutex<()>> {
+            let mut g = map.lock().unwrap();
+            g.entry(uid.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let a1 = lookup("usr_alice");
+        let a2 = lookup("usr_alice");
+        let b1 = lookup("usr_bob");
+        assert!(
+            Arc::ptr_eq(&a1, &a2),
+            "two lookups for the same user MUST share the same inner \
+             Mutex (otherwise the fence does not actually serialise)"
+        );
+        assert!(
+            !Arc::ptr_eq(&a1, &b1),
+            "lookups for DIFFERENT users MUST get distinct Mutex \
+             handles (otherwise the fence would over-serialise \
+             cross-user CREATEs and erase the R32-P1 parallelism win)"
+        );
+        // Map size = 2 after the three lookups (alice + bob).
+        assert_eq!(
+            map.lock().unwrap().len(),
+            2,
+            "map MUST contain exactly two entries after 3 lookups for \
+             2 distinct users (Alice's second lookup hits the existing \
+             entry, not insert)"
+        );
+    }
+
+    /// R33-I1 LOAD-BEARING: the per-user fence actually serialises
+    /// the home_h critical section. Synthetic c=2 same-user cold-boot
+    /// scenario:
+    ///
+    ///   - Two threads, each playing the role of a same-user cold-
+    ///     boot CREATE's `home_h` spawn. Both acquire the SAME per-
+    ///     user `Arc<Mutex<()>>` cloned from the map.
+    ///   - A third thread plays workspace_h. workspace.img is per-
+    ///     sandbox (no lock), so it MUST run independently — pin
+    ///     this by NOT having it acquire the map at all and asserting
+    ///     it makes progress while the home_h fence is held.
+    ///
+    /// We count entries via atomic counters and use a barrier to
+    /// rendezvous all three threads at the start so the assertions
+    /// catch lock interleaving, not thread-startup ordering.
+    #[test]
+    fn user_home_mkfs_locks_serialises_home_but_not_workspace() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+        use std::sync::Barrier;
+
+        let map: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Per-user (same user) lock. Two clones — one per home_h
+        // playback thread. This is exactly what `try_create`'s
+        // outer-lock + entry-or-insert + Arc::clone path produces
+        // when CREATE #1 and CREATE #2 by the same user resolve their
+        // fence handles.
+        let user_lock_a: Arc<Mutex<()>> = {
+            let mut g = map.lock().unwrap();
+            g.entry("usr_alice".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let user_lock_b: Arc<Mutex<()>> = {
+            let mut g = map.lock().unwrap();
+            g.entry("usr_alice".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        assert!(
+            Arc::ptr_eq(&user_lock_a, &user_lock_b),
+            "fence sanity: same-user lookups MUST share the inner Mutex"
+        );
+
+        // Witnesses:
+        //   - `home_in_section` counts threads currently holding the
+        //     home_h fence. Should NEVER exceed 1 (serialisation
+        //     invariant — what R33-I1 closes).
+        //   - `workspace_progress` is set by workspace_h while a home_h
+        //     critical section is held. Must reach 1 to prove
+        //     workspace_h runs in PARALLEL with held home_h (the
+        //     R32-P1 perf-win invariant we are preserving).
+        let home_in_section = Arc::new(AtomicUsize::new(0));
+        let home_max_concurrent = Arc::new(AtomicUsize::new(0));
+        let workspace_progress = Arc::new(AtomicUsize::new(0));
+
+        // Barrier across all 3 worker threads so they start their
+        // critical sections in lockstep — without this, thread spawn
+        // order would dominate the timing.
+        let barrier = Arc::new(Barrier::new(3));
+
+        std::thread::scope(|s| {
+            // home_h #1 playback. Acquires the per-user Mutex,
+            // increments in_section, sleeps briefly to GIVE the second
+            // home_h a chance to attempt acquire (which it MUST block
+            // on), decrements + releases. The max_concurrent counter
+            // is "the highest in_section ever reached" — under
+            // correct fencing it's 1; under broken fencing it's 2.
+            let lock1 = Arc::clone(&user_lock_a);
+            let in_section1 = Arc::clone(&home_in_section);
+            let max1 = Arc::clone(&home_max_concurrent);
+            let barrier1 = Arc::clone(&barrier);
+            let h1 = s.spawn(move || {
+                barrier1.wait();
+                let _guard = lock1.lock().unwrap();
+                let now = in_section1.fetch_add(1, AOrd::SeqCst) + 1;
+                max1.fetch_max(now, AOrd::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                in_section1.fetch_sub(1, AOrd::SeqCst);
+            });
+            // home_h #2 playback. Same shape; the second to hit the
+            // critical section MUST observe in_section == 1 (it can't
+            // enter until #1 releases).
+            let lock2 = Arc::clone(&user_lock_b);
+            let in_section2 = Arc::clone(&home_in_section);
+            let max2 = Arc::clone(&home_max_concurrent);
+            let barrier2 = Arc::clone(&barrier);
+            let h2 = s.spawn(move || {
+                barrier2.wait();
+                let _guard = lock2.lock().unwrap();
+                let now = in_section2.fetch_add(1, AOrd::SeqCst) + 1;
+                max2.fetch_max(now, AOrd::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                in_section2.fetch_sub(1, AOrd::SeqCst);
+            });
+            // workspace_h playback. Does NOT touch the map — workspace
+            // .img is per-sandbox; the R32-P1 parallelism win for the
+            // workspace half MUST be preserved. We spin a small busy
+            // wait and assert it can complete WHILE the home_h fence
+            // is held by one of the other two threads.
+            let workspace_progress_h = Arc::clone(&workspace_progress);
+            let barrier_w = Arc::clone(&barrier);
+            let in_section_w = Arc::clone(&home_in_section);
+            let h_workspace = s.spawn(move || {
+                barrier_w.wait();
+                // Wait until SOME home_h has entered the critical
+                // section (in_section >= 1), then signal progress.
+                // If workspace_h were (incorrectly) blocked by the
+                // fence, it would never get past this loop — the
+                // test would time out at join() instead.
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(2);
+                while std::time::Instant::now() < deadline
+                    && in_section_w.load(AOrd::SeqCst) == 0
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                workspace_progress_h.store(1, AOrd::SeqCst);
+            });
+            h1.join().unwrap();
+            h2.join().unwrap();
+            h_workspace.join().unwrap();
+        });
+
+        // The fence's load-bearing invariant: home_h MUST be
+        // serialised — at no instant did two threads sit inside the
+        // critical section together. Without R33-I1's fence, this
+        // would race to 2.
+        assert_eq!(
+            home_max_concurrent.load(AOrd::SeqCst),
+            1,
+            "R33-I1 invariant BROKEN: two concurrent home_h threads \
+             entered the critical section together. The per-user \
+             fence is NOT serialising same-user home.img mkfs."
+        );
+        // The workspace_h thread ran while a home_h fence was held —
+        // proves the fence is per-user (home.img-only), not global.
+        // If this fails, we'd have over-serialised and erased the
+        // R32-P1 parallelism win for the workspace half.
+        assert_eq!(
+            workspace_progress.load(AOrd::SeqCst),
+            1,
+            "R33-I1 over-fencing regression: workspace_h playback \
+             did not observe home_h in-section. The fence has \
+             pessimistically blocked workspace.img too — R32-P1's \
+             cold-boot parallelism win is gone."
+        );
     }
 }

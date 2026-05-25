@@ -257,6 +257,49 @@ pub struct AppState {
     /// expected to go through `from_config`.
     pub(crate) nomad_stop_permits:
         Arc<crate::backend::nomad_ch::NomadStopPermits>,
+
+    /// **R33-I1 (concurrency-r33 IMPORTANT)**: per-user fence around the
+    /// `home.img` mkfs.ext4 step inside the cold-boot create path. The
+    /// `home.img` file is **per-USER** (cf
+    /// `nomad_ch.rs::user_home_image_path`), not per-sandbox — two
+    /// concurrent cold-boot CREATEs by the same user would race the
+    /// exists-then-mkfs sequence inside `create_ext4_image_if_missing`.
+    /// R32-P1's `std::thread::scope` parallelisation widens the window
+    /// by running both mkfs in parallel inside each CREATE, so under
+    /// c≥2 same-user cold-boot stress N `mkfs.ext4 -q -F <same-path>`
+    /// subprocesses can be in flight at once. Worst observable failure
+    /// is silent corruption surfaced only at guest mount.
+    ///
+    /// Shape: a `HashMap<UserId, Arc<Mutex<()>>>` lazily populated as
+    /// users hit their first cold-boot. The outer `Mutex` guards only
+    /// the map's structure (insert / lookup); the inner `Mutex` is what
+    /// the `home_h` thread holds across the mkfs subprocess. The
+    /// workspace_h thread is NOT gated — `workspace.img` is per-sandbox
+    /// (UUID-scoped path), so there's no cross-CREATE collision and the
+    /// parallel-mkfs perf win from R32-P1 is preserved for the
+    /// workspace half.
+    ///
+    /// Why `std::sync::Mutex` (not `tokio::sync::Mutex`): the lock is
+    /// acquired inside the `compio::runtime::spawn_blocking` closure
+    /// (sync context), and the critical section is a CPU/syscall mix
+    /// (truncate + mkfs.ext4 + fsync_dir) that already blocks the
+    /// spawn_blocking thread — async-await semantics buy nothing.
+    ///
+    /// Why `pub(crate)` (matching `nomad_stop_permits`): a planted
+    /// always-locked map from out-of-crate code could deadlock every
+    /// same-user cold-boot. Out-of-crate callers construct via
+    /// `from_config` / `new_fixture`.
+    ///
+    /// `#[allow(dead_code)]`: production reads go through the
+    /// `Arc::clone` installed on the inner `NomadCHBackend` (via
+    /// `install_user_home_mkfs_locks`), not through this field
+    /// directly. The field is kept on `AppState` for lifecycle
+    /// observability (same posture as `nomad_stop_permits`) and so
+    /// future metrics-export / chaos-test fixtures can read through
+    /// `user_home_mkfs_locks()` without going via the backend.
+    #[allow(dead_code)]
+    pub(crate) user_home_mkfs_locks:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>>,
 }
 
 impl AppState {
@@ -307,6 +350,23 @@ impl AppState {
         &self,
     ) -> &Arc<crate::backend::nomad_ch::NomadStopPermits> {
         &self.nomad_stop_permits
+    }
+
+    /// R33-I1: read-only accessor for the per-user `home.img` mkfs
+    /// fence map. `pub(crate)` (not `pub`) — this is an internal fence
+    /// for the cold-boot path inside `NomadCHBackend::try_create`, not
+    /// a public lifecycle hook. Returned `Arc` is cheap to clone; the
+    /// inner `HashMap` is guarded by an `std::sync::Mutex` whose only
+    /// invariant is "outer-lock-held for insert/lookup, inner-lock-held
+    /// across the per-user mkfs". See the field doc on
+    /// [`AppState::user_home_mkfs_locks`] for the race shape this
+    /// fence closes.
+    #[allow(dead_code)]
+    pub(crate) fn user_home_mkfs_locks(
+        &self,
+    ) -> &Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>>
+    {
+        &self.user_home_mkfs_locks
     }
 
     /// A5 (api-surface-2026-05-24-r1): safe builder for
@@ -576,6 +636,12 @@ impl AppState {
             // `Self`.
             local_nomad_node_id: None,
             nomad_stop_permits,
+            // R33-I1: empty map; lazily populated on first cold-boot per
+            // user. Fixtures get their own map so unit tests that
+            // exercise the parallel-mkfs path have an isolated fence.
+            user_home_mkfs_locks: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 }
@@ -794,6 +860,26 @@ impl AppState {
                 cap = config.nomad_ch.nomad_stop_concurrency,
                 "sandbox/nomad-ch r30-A1: installed global Nomad /shutdown \
                  semaphore (SANDBOX_NOMAD_STOP_CONCURRENCY)"
+            );
+        }
+        // R33-I1 (concurrency-r33 IMPORTANT): build + install the
+        // per-user `home.img` mkfs fence map. Held on `AppState` so the
+        // lifecycle is observable in one place (matches the
+        // `nomad_stop_permits` precedent); installed on the inner
+        // `NomadCHBackend` via `OnceLock` so the cold-boot path can
+        // acquire the inner per-user Mutex from `&self` without taking
+        // the whole-backend write-lock. Install happens BEFORE any
+        // create() can fire (probe + cleanup_orphans_at_startup don't
+        // invoke try_create).
+        let user_home_mkfs_locks: Arc<
+            std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>,
+        > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        if let Some(nch) = backend.nomad_ch_handle() {
+            nch.install_user_home_mkfs_locks(Arc::clone(&user_home_mkfs_locks));
+            tracing::info!(
+                "sandbox/nomad-ch R33-I1: installed per-user home.img \
+                 mkfs fence (DashMap-equivalent: Mutex<HashMap<UserId, \
+                 Arc<Mutex<()>>>>)"
             );
         }
         backend.probe().await?;
@@ -1119,6 +1205,10 @@ impl AppState {
             wake_lifecycle,
             local_nomad_node_id,
             nomad_stop_permits,
+            // R33-I1: same `Arc` installed on the inner NomadCHBackend
+            // above; AppState's handle is what production tests / future
+            // metrics-export reads through.
+            user_home_mkfs_locks,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
