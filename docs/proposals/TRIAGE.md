@@ -92,3 +92,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 ## Phase 3 COMPLETE: AGENTS.md link audit done — all cited paths resolve, reference index complete, 4 stale reference→proposals links repointed to archive.
 
 ## TRIAGE FULLY DRAINED — 2026-05-25.
+
+## Phase 2 ENHANCEMENT pass (beyond verify) — 2026-05-25: all 7 architecture docs got a "Read next"/"Related docs" navigation footer (repo-root-relative cross-links to siblings + relevant reference contracts) plus 1-2 code-grounded clarifying sentences each (CHWBL + polling tradeoff in distributed; compile-step rationale + `*` inheritance root in gateway-routing; master-key vs control-key + polling in control-plane; thread-bound isolate JIT enter/exit + pump event-batching in runtime, verified vs runtime.rs:1044; global-by-hash dedup in blob-store). Mix of lean codex agents (gateway-routing/control-plane/runtime) and direct edits (overview/distributed/blob-store/builder; codex companion dropped several jobs mid-run). All verified: links resolve, fences balanced, single H1, no abs paths. Commits cf1cf952, e9130c87, ec0bd0c7, c6c0188e, f385dfe3, e0c3467b, + runtime.
