@@ -9,18 +9,16 @@
  */
 import { ModuleRunner } from "vite/module-runner";
 import { zeroshipEvaluator } from "./evaluator";
+import {
+  ENV_VITE_ORIGIN,
+  MODULE_FETCH_PATH,
+} from "../constants.js";
 
 export async function createRunner(): Promise<ModuleRunner> {
-  const viteWsUrl = (globalThis as any).process?.env?.ZEROSHIP_VITE_WS;
-  if (!viteWsUrl) {
-    throw new Error("[zeroship] ZEROSHIP_VITE_WS not set");
+  const viteOrigin = (globalThis as any).process?.env?.[ENV_VITE_ORIGIN];
+  if (!viteOrigin) {
+    throw new Error(`[zeroship] ${ENV_VITE_ORIGIN} not set`);
   }
-
-  // Convert ws://localhost:5199/__zeroship_hmr → http://localhost:5199
-  const viteOrigin = viteWsUrl
-    .replace(/^ws:/, "http:")
-    .replace(/^wss:/, "https:")
-    .replace(/\/__zeroship_hmr$/, "");
 
   // HTTP-based transport: uses fetch for module requests.
   //
@@ -37,7 +35,7 @@ export async function createRunner(): Promise<ModuleRunner> {
       const xk = (globalThis as any).__zsExitKind;
       const tok = (typeof ck === "function") ? ck() : -1;
       try {
-        const resp = await fetch(`${viteOrigin}/__zeroship_fetch`, {
+        const resp = await fetch(`${viteOrigin}${MODULE_FETCH_PATH}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(data),

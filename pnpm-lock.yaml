@@ -882,9 +882,6 @@ importers:
       unenv:
         specifier: 2.0.0-rc.24
         version: 2.0.0-rc.24
-      ws:
-        specifier: ^8.20.0
-        version: 8.20.0
     devDependencies:
       '@types/mime':
         specifier: ^3.0.4
@@ -892,9 +889,6 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
       '@zeroship/rpc-client':
         specifier: workspace:*
         version: link:../rpc-client
@@ -2524,9 +2518,6 @@ packages:
 
   '@types/validate-npm-package-name@4.0.2':
     resolution: {integrity: sha512-lrpDziQipxCEeK5kWxvljWYhUvOiB2A9izZd9B2AFarYAkqZshb4lPbRs7zKEic6eGtH8V/2qJW+dPp9OtF6bw==}
-
-  '@types/ws@8.18.1':
-    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@uiw/codemirror-extensions-basic-setup@4.25.9':
     resolution: {integrity: sha512-QFAqr+pu6lDmNpAlecODcF49TlsrZ0bj15zPzfhiqSDl+Um3EsDLFLppixC7kFLn+rdDM2LTvVjn5CPvefpRgw==}
@@ -6339,10 +6330,6 @@ snapshots:
 
   '@types/validate-npm-package-name@4.0.2': {}
 
-  '@types/ws@8.18.1':
-    dependencies:
-      '@types/node': 22.19.17
-
   '@uiw/codemirror-extensions-basic-setup@4.25.9(@codemirror/autocomplete@6.20.1)(@codemirror/commands@6.10.3)(@codemirror/language@6.12.3)(@codemirror/lint@6.9.5)(@codemirror/search@6.7.0)(@codemirror/state@6.6.0)(@codemirror/view@6.41.1)':
     dependencies:
       '@codemirror/autocomplete': 6.20.1
@@ -8917,7 +8904,8 @@ snapshots:
 
   wrappy@1.0.2: {}
 
-  ws@8.20.0: {}
+  ws@8.20.0:
+    optional: true
 
   wsl-utils@0.3.1:
     dependencies:

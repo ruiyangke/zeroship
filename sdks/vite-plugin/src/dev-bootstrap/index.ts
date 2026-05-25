@@ -24,6 +24,10 @@
 import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
 import { devEntry } from "@zeroship/bootstrap/dev";
+import {
+  ENV_VITE_ORIGIN,
+  HMR_POLL_PATH,
+} from "../constants.js";
 
 const ENTRY = (globalThis as { process?: { env?: { ZEROSHIP_ENTRY?: string } } }).process?.env?.ZEROSHIP_ENTRY!;
 
@@ -112,15 +116,11 @@ getRunner()
  * dev-only fallback.
  */
 function startHmrPoll(runner: ModuleRunner) {
-  const viteWsUrl = (globalThis as { process?: { env?: { ZEROSHIP_VITE_WS?: string } } }).process?.env?.ZEROSHIP_VITE_WS;
-  if (!viteWsUrl) return;
+  const viteOrigin = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env?.[ENV_VITE_ORIGIN];
+  if (!viteOrigin) return;
 
-  const viteOrigin = viteWsUrl
-    .replace(/^ws:/, "http:")
-    .replace(/^wss:/, "https:")
-    .replace(/\/__zeroship_hmr$/, "");
-
-  const pollUrl = `${viteOrigin}/__zeroship_hmr_check`;
+  const pollUrl = `${viteOrigin}${HMR_POLL_PATH}`;
 
   setInterval(async () => {
     // The poll is dev-kernel infrastructure — bypass the active

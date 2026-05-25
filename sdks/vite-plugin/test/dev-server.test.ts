@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 
 import { createServer, type ViteDevServer } from "vite";
 
+import {
+  HMR_POLL_PATH,
+  MODULE_FETCH_PATH,
+} from "../src/constants.js";
 import { devServerPlugin } from "../src/dev-server.js";
 import type { TransformState } from "../src/transform.js";
 
@@ -34,7 +38,7 @@ interface RuntimeLog {
     DATABASE_URL?: string;
     ZEROSHIP_DEV?: string;
     ZEROSHIP_ENTRY?: string;
-    ZEROSHIP_VITE_WS?: string;
+    ZEROSHIP_VITE_ORIGIN?: string;
   };
 }
 
@@ -57,7 +61,7 @@ describe("devServerPlugin", () => {
   test("serves module fetch requests through the zeroship environment", async () => {
     const harness = await startHarness();
     try {
-      const resp = await fetch(`${harness.origin}/__zeroship_fetch`, {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -81,18 +85,60 @@ describe("devServerPlugin", () => {
     }
   });
 
+  test("rejects unknown module-fetch methods", async () => {
+    const harness = await startHarness();
+    try {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "custom",
+          event: "vite:invoke",
+          data: {
+            id: "fetch-unknown",
+            name: "closeEverything",
+            data: [],
+          },
+        }),
+      });
+      assert.equal(resp.status, 400);
+      assert.deepEqual(await resp.json(), {
+        error: { message: "unsupported zeroship fetch method: closeEverything" },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("bounds request-body buffering for module fetch", async () => {
+    const harness = await startHarness();
+    try {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "x".repeat(70 * 1024),
+      });
+      assert.equal(resp.status, 413);
+      assert.deepEqual(await resp.json(), {
+        error: { message: "zeroship fetch body exceeds 65536 bytes" },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   test("returns and clears pending HMR changes over the poll endpoint", async () => {
     const harness = await startHarness();
     try {
       await harness.queueHmrChange();
 
-      const first = await fetch(`${harness.origin}/__zeroship_hmr_check`);
+      const first = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(first.status, 200);
       assert.deepEqual(await first.json(), {
         changed: [harness.serverEntry],
       });
 
-      const second = await fetch(`${harness.origin}/__zeroship_hmr_check`);
+      const second = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
       assert.equal(second.status, 200);
       assert.deepEqual(await second.json(), { changed: [] });
     } finally {
@@ -112,8 +158,8 @@ describe("devServerPlugin", () => {
       assert.equal(runtime.env.ZEROSHIP_DEV, "1");
       assert.equal(runtime.env.ZEROSHIP_ENTRY, harness.serverEntry);
       assert.match(
-        runtime.env.ZEROSHIP_VITE_WS ?? "",
-        /^ws:\/\/localhost:\d+\/__zeroship_hmr$/,
+        runtime.env.ZEROSHIP_VITE_ORIGIN ?? "",
+        /^http:\/\/localhost:\d+$/,
       );
       assert.deepEqual(runtime.argv.slice(0, 4), [
         "serve",
@@ -130,7 +176,7 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
   });
 
-  test("prefers DATABASE_URL from .env over the parent environment", async () => {
+  test("prefers DATABASE_URL from the parent environment over .env", async () => {
     const harness = await startHarness({
       dotenv: "DATABASE_URL=postgres://dotenv-user:secret@dotenv-host/dotenv-db\n",
       parentDatabaseUrl: "postgres://shell-user:secret@shell-host/shell-db",
@@ -140,7 +186,7 @@ describe("devServerPlugin", () => {
       const runtime = await harness.runtimeLog();
       assert.equal(
         runtime.env.DATABASE_URL,
-        "postgres://dotenv-user:secret@dotenv-host/dotenv-db",
+        "postgres://shell-user:secret@shell-host/shell-db",
       );
     } finally {
       await harness.close();
@@ -199,7 +245,7 @@ async function startHarness(options: {
       "    DATABASE_URL: process.env.DATABASE_URL,",
       "    ZEROSHIP_DEV: process.env.ZEROSHIP_DEV,",
       "    ZEROSHIP_ENTRY: process.env.ZEROSHIP_ENTRY,",
-      "    ZEROSHIP_VITE_WS: process.env.ZEROSHIP_VITE_WS,",
+      "    ZEROSHIP_VITE_ORIGIN: process.env.ZEROSHIP_VITE_ORIGIN,",
       "  },",
       "}, null, 2));",
       "const stop = () => {",
