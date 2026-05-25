@@ -26,7 +26,7 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] nomad-driver-ch.md (merged dde08ca2; ops covered by runbooks/sandbox-nomad-ch.md)
 - [x] sandbox-snapshot-restore.md (merged d1054adb)
 - [x] sqlite-pg-parity.md (merged; reference/sqlite-divergences.md exists)
-- [ ] sandbox-pg-state.md (feat/sandbox-pg merged)
+- [x] sandbox-pg-state.md (feat/sandbox-pg merged)
 - [ ] sandbox-preview-urls.md (sandbox preview merged)
 - [ ] kv-redesign-implementation-plan-2026-05-24.md (kv redesign; reference/kv.md exists)
 - [x] zeroship-db.md (db SDK; reference/db.md exists)
@@ -38,7 +38,7 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] p4-search-implementation-plan.md (DB P4)
 - [x] p5-encryption-backup-implementation-plan.md (DB P5)
 - [x] runtime-macros-refactor.md (runtime-macros; reference/plugin-system.md)
-- [ ] zs-standard-and-vite-v2.md (reference/zs-standard.md + vite-plugin.md exist)
+- [x] zs-standard-and-vite-v2.md (reference/zs-standard.md + vite-plugin.md exist)
 
 ### NEEDS DETERMINATION (check shipped vs active)
 - [ ] rpc.md
@@ -77,3 +77,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - p0/p1/p4/p5 implementation plans — archived (no promotion needed; db.md covers)
 
 - runtime-macros-refactor.md — archived (design in plugin-system.md + macro ADRs)
+
+- zs-standard-and-vite-v2 + sandbox-pg-state — archived (shipped)
