@@ -102,24 +102,24 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
-    idOrFilter: number | Filter<S>,
+    idOrFilter: string | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<Pick<Row<S>, K> | null>;
   get<W extends WithSpec>(
-    idOrFilter: number | Filter<S>,
+    idOrFilter: string | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> },
   ): Promise<(Row<S> & WithRelations<S, W, AllSchemas>) | null>;
   get(
-    idOrFilter: number | Filter<S>,
+    idOrFilter: string | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
   find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
-  update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
+  update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
-  delete(idOrFilter: number | Filter<S>): Promise<Row<S> | null>;
+  delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
   deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
@@ -137,7 +137,7 @@ export type TxQuery<
   skip(n: number): TxQuery<S, P, AllSchemas>;
   select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
-  after(id: number): TxQuery<S, P, AllSchemas>;
+  after(id: string): TxQuery<S, P, AllSchemas>;
   with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
   /** **P9 PR 1** — terminal: first matching row or `null`. Throws inside
    *  the tx callback on a native error (tx unwraps Result). */

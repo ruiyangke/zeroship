@@ -14,7 +14,7 @@
  *     parameter so the result matches the inline form
  *   - `tx.todos.find({}, { with: { userId: true } })` is also strong-typed
  *   - Without `with`, the row type stays `Row<S>` (no joined keys leak)
- *   - The `Id<TargetName>` brand survives the join (the joined row carries `id: number`)
+ *   - The `Id<TargetName>` brand survives the join (the joined row carries `id: string`)
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -65,14 +65,14 @@ describe("relations type-level: inline find(filter, { with })", () => {
     if (row.userId !== null) {
       const email: string = row.userId.email;
       const name: string = row.userId.name;
-      const id: number = row.userId.id;
-      const createdAt: number = row.userId.createdAt;
-      const updatedAt: number = row.userId.updatedAt;
+      const id: string = row.userId.id;
+      const created_at: number = row.userId.created_at;
+      const updated_at: number = row.userId.updated_at;
       assert.equal(typeof email, "string");
       assert.equal(typeof name, "string");
-      assert.equal(typeof id, "number");
-      assert.equal(typeof createdAt, "number");
-      assert.equal(typeof updatedAt, "number");
+      assert.equal(typeof id, "string");
+      assert.equal(typeof created_at, "number");
+      assert.equal(typeof updated_at, "number");
     }
   });
 
@@ -149,9 +149,9 @@ describe("relations type-level: TxCollection / TxQuery propagation", () => {
     });
   });
 
-  test("tx.todos.get(1, { with: { userId: true } }) — joined Row<usersSchema>", async () => {
+  test("tx.todos.get(\"todo_1\", { with: { userId: true } }) — joined Row<usersSchema>", async () => {
     await db.transaction(async (tx) => {
-      const row = await tx.todos.get(1, { with: { userId: true } });
+      const row = await tx.todos.get("todo_1", { with: { userId: true } });
       if (row !== null && row.userId !== null) {
         const email: string = row.userId.email;
         assert.equal(typeof email, "string");
@@ -167,17 +167,17 @@ describe("relations type-level: no `with` → row shape unchanged", () => {
     if (!data || data.length === 0) return;
     const row = data[0];
     // userId is still the FK brand `Id<"users"> | undefined` — assignable
-    // to `number | undefined` because Id<T> = number & {...}. If the row
+    // to `string | undefined` because Id<T> = string & {...}. If the row
     // type had been polluted with `Row<usersSchema>`, this line would
     // refuse to typecheck.
-    const idOrUndef: number | undefined = row.userId;
-    assert.equal(idOrUndef === undefined || typeof idOrUndef === "number", true);
+    const idOrUndef: string | undefined = row.userId;
+    assert.equal(idOrUndef === undefined || typeof idOrUndef === "string", true);
   });
 
-  test("get(1) without `with` keeps the bare Row<S> shape", async () => {
-    const { data } = await db.todos.get(1);
+  test("get(\"todo_1\") without `with` keeps the bare Row<S> shape", async () => {
+    const { data } = await db.todos.get("todo_1");
     if (!data) return;
-    const idOrUndef: number | undefined = data.userId;
-    assert.equal(idOrUndef === undefined || typeof idOrUndef === "number", true);
+    const idOrUndef: string | undefined = data.userId;
+    assert.equal(idOrUndef === undefined || typeof idOrUndef === "string", true);
   });
 });

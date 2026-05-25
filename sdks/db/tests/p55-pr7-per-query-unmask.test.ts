@@ -43,7 +43,7 @@ describe("P5.5 PR 7 — per-query unmask hint opts shape", () => {
   test("ZeroshipDbFindOpts can omit the unmask hint entirely", () => {
     const opts: ZeroshipDbFindOpts = {
       limit: 10,
-      orderBy: { createdAt: -1 },
+      orderBy: { created_at: -1 },
     };
     assert.equal(opts.unmask, undefined);
     assert.equal(opts.actor, undefined);

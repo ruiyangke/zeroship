@@ -8,29 +8,40 @@ import {
 import { naming } from "@zeroship/db";
 
 const { toColumn, toField } = naming.snakeCase;
+const SYSTEM_FIELDS = new Set([
+  "id",
+  "created_at",
+  "updated_at",
+  "created_by",
+  "updated_by",
+  "deleted_at",
+  "version",
+]);
+const systemAwareToField = (key: string) => (SYSTEM_FIELDS.has(key) ? key : toField(key));
+const systemAwareToColumn = (key: string) => (SYSTEM_FIELDS.has(key) ? key : toColumn(key));
 
 describe("mapResultDoc (inbound)", () => {
   test("id → _id", () => {
-    const result = mapResultDoc({ id: "abc123", name: "Alice" }, toField);
+    const result = mapResultDoc({ id: "abc123", name: "Alice" }, systemAwareToField);
     assert.equal(result.id, "abc123");
   });
 
-  test("created_at → createdAt", () => {
+  test("created_at → created_at", () => {
     const now = new Date().toISOString();
-    const result = mapResultDoc({ created_at: now }, toField);
-    assert.equal(result.createdAt, now);
-    assert.equal(result.created_at, undefined);
+    const result = mapResultDoc({ created_at: now }, systemAwareToField);
+    assert.equal(result.created_at, now);
+    assert.equal((result as any).createdAt, undefined);
   });
 
-  test("updated_at → updatedAt", () => {
+  test("updated_at → updated_at", () => {
     const now = new Date().toISOString();
-    const result = mapResultDoc({ updated_at: now }, toField);
-    assert.equal(result.updatedAt, now);
-    assert.equal(result.updated_at, undefined);
+    const result = mapResultDoc({ updated_at: now }, systemAwareToField);
+    assert.equal(result.updated_at, now);
+    assert.equal((result as any).updatedAt, undefined);
   });
 
   test("user fields pass through unchanged", () => {
-    const result = mapResultDoc({ id: "x", name: "Bob", score: 42 }, toField);
+    const result = mapResultDoc({ id: "x", name: "Bob", score: 42 }, systemAwareToField);
     assert.equal(result.name, "Bob");
     assert.equal(result.score, 42);
   });
@@ -41,10 +52,10 @@ describe("mapResultDoc (inbound)", () => {
       created_at: "2024-01-01",
       updated_at: "2024-06-01",
       title: "hello",
-    }, toField);
+    }, systemAwareToField);
     assert.equal(result.id, "1");
-    assert.equal(result.createdAt, "2024-01-01");
-    assert.equal(result.updatedAt, "2024-06-01");
+    assert.equal(result.created_at, "2024-01-01");
+    assert.equal(result.updated_at, "2024-06-01");
     assert.equal(result.title, "hello");
   });
 });
@@ -87,27 +98,27 @@ describe("mapFilterOutbound (outbound)", () => {
     assert.equal(not.id, "abc");
   });
 
-  test("createdAt → created_at in simple filter", () => {
-    const result = mapFilterOutbound({ createdAt: "2024-01-01" }, toColumn);
+  test("created_at → created_at in simple filter", () => {
+    const result = mapFilterOutbound({ created_at: "2024-01-01" }, systemAwareToColumn);
     assert.equal(result.created_at, "2024-01-01");
-    assert.equal(result.createdAt, undefined);
+    assert.equal((result as any).createdAt, undefined);
   });
 
-  test("updatedAt → updated_at in simple filter", () => {
-    const result = mapFilterOutbound({ updatedAt: "2024-06-01" }, toColumn);
+  test("updated_at → updated_at in simple filter", () => {
+    const result = mapFilterOutbound({ updated_at: "2024-06-01" }, systemAwareToColumn);
     assert.equal(result.updated_at, "2024-06-01");
-    assert.equal(result.updatedAt, undefined);
+    assert.equal((result as any).updatedAt, undefined);
   });
 
-  test("createdAt/updatedAt deep mapping inside $and", () => {
+  test("created_at/updated_at deep mapping inside $and", () => {
     const result = mapFilterOutbound({
-      $and: [{ createdAt: "2024-01-01" }, { updatedAt: "2024-06-01" }],
-    }, toColumn) as Record<string, unknown>;
+      $and: [{ created_at: "2024-01-01" }, { updated_at: "2024-06-01" }],
+    }, systemAwareToColumn) as Record<string, unknown>;
     const and = result.$and as Record<string, unknown>[];
     assert.equal(and[0].created_at, "2024-01-01");
-    assert.equal(and[0].createdAt, undefined);
+    assert.equal((and[0] as any).createdAt, undefined);
     assert.equal(and[1].updated_at, "2024-06-01");
-    assert.equal(and[1].updatedAt, undefined);
+    assert.equal((and[1] as any).updatedAt, undefined);
   });
 });
 
@@ -160,29 +171,28 @@ describe("translateAggregatePipeline", () => {
   });
 
   test("non-group stages map field names", () => {
-    const pipeline = [{ $sort: { createdAt: -1 } }, { $limit: 10 }];
+    const pipeline = [{ $sort: { created_at: -1 } }, { $limit: 10 }];
     const result = translateAggregatePipeline(pipeline, toColumn);
     assert.deepEqual(result[0], { $sort: { created_at: -1 } });
     assert.deepEqual(result[1], { $limit: 10 });
   });
 
   test("$having maps field names", () => {
-    const pipeline = [{ $having: { createdAt: { $gt: 100 } } }];
-    const result = translateAggregatePipeline(pipeline, toColumn);
+    const pipeline = [{ $having: { created_at: { $gt: 100 } } }];
+    const result = translateAggregatePipeline(pipeline, systemAwareToColumn);
     const having = result[0].$having as Record<string, unknown>;
-    assert.equal(having.created_at, undefined ? undefined : (having as any).created_at);
     assert.ok("created_at" in having);
-    assert.equal(having.createdAt, undefined);
+    assert.deepEqual(having.created_at, { $gt: 100 });
   });
 
-  test("$match maps camelCase to snake_case", () => {
-    const pipeline = [{ $match: { firstName: "Alice", updatedAt: { $gt: 100 } } }];
-    const result = translateAggregatePipeline(pipeline, toColumn);
+  test("$match preserves snake_case system fields", () => {
+    const pipeline = [{ $match: { firstName: "Alice", updated_at: { $gt: 100 } } }];
+    const result = translateAggregatePipeline(pipeline, systemAwareToColumn);
     const match = result[0].$match as Record<string, unknown>;
     assert.equal(match.first_name, "Alice");
     assert.ok("updated_at" in match);
     assert.equal(match.firstName, undefined);
-    assert.equal(match.updatedAt, undefined);
+    assert.deepEqual(match.updated_at, { $gt: 100 });
   });
 });
 
@@ -246,7 +256,7 @@ describe("mapFilterOutbound with naming strategy", () => {
   });
 
   test("asIs toColumn passes all keys unchanged", () => {
-    const filter = { firstName: "Alice", createdAt: 100 };
+    const filter = { firstName: "Alice", created_at: 100 };
     const result = mapFilterOutbound(filter, naming.asIs.toColumn);
     assert.equal(result, filter); // same reference
   });

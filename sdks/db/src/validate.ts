@@ -119,9 +119,18 @@ function checkField(
   errors: Record<string, FieldError>
 ): void {
   const { type, min, max, enum: enumVals, pattern } = def;
+  const validateStringId = (): boolean => {
+    if (typeof value !== "string" || value.length === 0) {
+      errors[key] = { path: key, message: `${key} must be a non-empty string id` };
+      return false;
+    }
+    return true;
+  };
 
   // Type check
-  if (type === "string") {
+  if (type === "id" || type === "ref") {
+    if (!validateStringId()) return;
+  } else if (type === "string") {
     if (typeof value !== "string") {
       errors[key] = { path: key, message: `${key} must be a string` };
       return;
@@ -164,14 +173,6 @@ function checkField(
         path: key,
         message: `${key} must be at most ${max}`,
       };
-      return;
-    }
-  } else if (type === "ref") {
-    // B2 — refs are stored as integers at the DB level (BIGINT FK). The
-    // brand `Id<T>` is purely type-level; at runtime the value is a
-    // plain number. Validate as number and accept it.
-    if (typeof value !== "number" || isNaN(value as number)) {
-      errors[key] = { path: key, message: `${key} must be a numeric id` };
       return;
     }
   } else if (type === "boolean") {
@@ -539,4 +540,3 @@ export function checkPartial(doc: Doc, schema: NormalizedSchema): void {
     throw new ValidationError(errors);
   }
 }
-

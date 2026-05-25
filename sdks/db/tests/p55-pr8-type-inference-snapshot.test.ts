@@ -59,8 +59,8 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
       id: 1,
       name: "Alice",
       ssn: "***-**-6789" as unknown as MaskedValue<string>,
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
     };
     assertType<MaskedValue<string>>(row.ssn);
     assertType<string>(row.name);
@@ -106,8 +106,8 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     const row: UsersRow = {
       id: 1,
       email: "***************" as unknown as MaskedValue<string>,
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
     };
     assertType<MaskedValue<string>>(row.email);
     assert.equal(row.email as unknown as string, "***************");
@@ -127,8 +127,8 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     const row: UsersRow = {
       id: 1,
       legacy: "raw",
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
     };
     // .legacy is bare string (no MaskedValue wrap).
     assertType<string>(row.legacy);
@@ -136,7 +136,7 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
   });
 
   test("RowInput<S> excludes auto-fields but keeps mask-wrap on inputs (creator writes the bare value)", () => {
-    // Input shape — `id`, `createdAt`, `updatedAt` are auto-generated
+    // Input shape — `id`, `created_at`, `updated_at` are auto-generated
     // and excluded from RowInput. The masked field appears in
     // RowInput as the same MaskedValue<T>-typed slot inferred from
     // the field definition; in practice, creators pass the bare

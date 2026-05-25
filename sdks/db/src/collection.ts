@@ -487,8 +487,15 @@ export class Collection<
       fieldToCol[field] = col;
       colToField[col] = field;
     }
-    const autoFields = ["id", "createdAt", "updatedAt"];
-    if (this._softDelete) autoFields.push("deletedAt");
+    const autoFields = [
+      "id",
+      "created_at",
+      "updated_at",
+      "created_by",
+      "updated_by",
+      "version",
+      "deleted_at",
+    ];
     for (const field of autoFields) {
       const col = strategy.toColumn(field);
       fieldToCol[field] = col;
@@ -634,41 +641,22 @@ export class Collection<
         }
         // Collect distinct FK values for this relation.
         //
-        // **P7 PR 3** — id keyspace widened to TEXT typed_ids
-        // (`<prefix>_<22 base62>`); the FK column type cascaded to
-        // TEXT in `def_to_pg_type` for ref fields. The loader now
-        // accepts a typed_id string directly. The legacy number /
-        // bigint branches stay for the migration window so a pre-P7
-        // collection that still stores integer ids continues to
-        // batch-load — both shapes are stringified on the way into
-        // the `$in` clause so the Map keyspace is uniform.
-        //
-        // bigint coercion fence: `Number(bigint)` loses precision
-        // above 2^53. We stringify the bigint directly so legacy
-        // 64-bit integer ids round-trip losslessly through the
-        // string keyspace.
+        // **P7 PR 3** — FK keyspace is typed_id strings only.
         const ids: string[] = [];
         const seen = new Set<string>();
         for (const r of rows) {
           const v = r[field];
           if (v === null || v === undefined) continue;
-          let key: string;
-          if (typeof v === "string") {
-            if (v.length === 0) continue;
-            key = v;
-          } else if (typeof v === "number") {
-            if (!Number.isFinite(v)) continue;
-            key = String(v);
-          } else if (typeof v === "bigint") {
-            key = v.toString();
-          } else {
+          if (typeof v !== "string") {
             throw Object.assign(
               new TypeError(
-                `_loadRelations: FK value for field '${field}' is not a string / number / bigint (got ${typeof v})`,
+                `_loadRelations: FK value for field '${field}' must be a string id (got ${typeof v})`,
               ),
               { code: "with_fk_not_id_shaped" as const },
             );
           }
+          if (v.length === 0) continue;
+          const key = v;
           if (!seen.has(key)) {
             seen.add(key);
             ids.push(key);
@@ -686,10 +674,6 @@ export class Collection<
           const tid = tr.id;
           if (typeof tid === "string") {
             byId.set(tid, tr);
-          } else if (typeof tid === "number") {
-            byId.set(String(tid), tr);
-          } else if (typeof tid === "bigint") {
-            byId.set(tid.toString(), tr);
           }
         }
         for (const r of rows) {
@@ -698,15 +682,7 @@ export class Collection<
             r[field] = null;
             continue;
           }
-          let key: string | null = null;
-          if (typeof v === "string") {
-            key = v.length === 0 ? null : v;
-          } else if (typeof v === "number") {
-            if (Number.isFinite(v)) key = String(v);
-          } else if (typeof v === "bigint") {
-            key = v.toString();
-          }
-          r[field] = key === null ? null : (byId.get(key) ?? null);
+          r[field] = typeof v === "string" && v.length > 0 ? (byId.get(v) ?? null) : null;
         }
       }),
     );
@@ -767,14 +743,14 @@ export class Collection<
    */
   private _mergeFilter(filter: ZeroshipDbFilter): ZeroshipDbFilter {
     if (!this._softDelete) return filter;
-    const softFilter: ZeroshipDbFilter = { [this._toColumn("deletedAt")]: null };
+    const softFilter: ZeroshipDbFilter = { [this._toColumn("deleted_at")]: null };
     const hasKeys = Object.keys(filter).length > 0;
     return hasKeys ? { $and: [filter, softFilter] } as ZeroshipDbFilter : softFilter;
   }
 
   /**
    * Inserts a single row after validating it against the schema.
-   * Returns the persisted row with `id`, `createdAt`, and `updatedAt` set.
+   * Returns the persisted row with `id`, `created_at`, and `updated_at` set.
    */
   async insert(row: RowInput<S>): Promise<Result<Row<S>>> {
     return this._run(async () => {
@@ -801,7 +777,7 @@ export class Collection<
 
   /**
    * Fetch a single row. The first argument is either an `id` (a bare
-   * `number` or `Id<N>` — branded ids stay narrowed) or a full filter
+   * typed_id string or branded `Id<N>`) or a full filter
    * object. When the filter matches multiple rows, `opts.orderBy`
    * decides which one is returned; without an orderBy the choice is
    * undefined. Returns `null` if no row matches.
@@ -812,26 +788,24 @@ export class Collection<
    * have to widen back to `Row<S>`.
    */
   async get<K extends string & keyof Row<S>>(
-    idOrFilter: string | number | Id<N> | Filter<S>,
+    idOrFilter: string | Id<N> | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<Pick<Row<S>, K> | null>>;
   async get<W extends WithSpec>(
-    idOrFilter: string | number | Id<N> | Filter<S>,
+    idOrFilter: string | Id<N> | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<(Row<S> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
-    idOrFilter: string | number | Id<N> | Filter<S>,
+    idOrFilter: string | Id<N> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<Row<S> | null>>;
   async get(
-    idOrFilter: string | number | Id<N> | Filter<S>,
+    idOrFilter: string | Id<N> | Filter<S>,
     opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1>; with?: WithSpec } = {},
   ): Promise<Result<Row<S> | null>> {
     trackCollectionAccess(this._name);
-    // DataLoader path: a bare id (typed_id string post-P7 PR 3; the
-    // legacy number shape still routes here during the migration
-    // window so pre-P7 collections keep batching) with no projection
-    // / ordering / relation-loading and no active tx. Coalesces
+    // DataLoader path: a bare typed_id string with no projection /
+    // ordering / relation-loading and no active tx. Coalesces
     // concurrent `get(id)` calls in one microtask into a single
     // `WHERE id IN (...)` fetch.
     //
@@ -840,8 +814,7 @@ export class Collection<
     // loader rejects entries whose snapshot was 0 but find current
     // depth > 0 at flush time. See `loader.ts`.
     const txDepthAtCall = this._txDepth;
-    const isBareId =
-      typeof idOrFilter === "string" || typeof idOrFilter === "number";
+    const isBareId = typeof idOrFilter === "string";
     if (
       isBareId &&
       opts.select === undefined &&
@@ -849,11 +822,7 @@ export class Collection<
       opts.with === undefined &&
       txDepthAtCall === 0
     ) {
-      // Stringify on the way into the loader so the post-PR 3
-      // `IdLoader<R extends { id: string }>` sees a uniform keyspace
-      // even when a legacy caller passes a numeric id from an
-      // un-migrated table. The Rust side stringifies on the wire too.
-      return this._run(() => this._loadById(String(idOrFilter), txDepthAtCall));
+      return this._run(() => this._loadById(idOrFilter, txDepthAtCall));
     }
     const filter = (isBareId
       ? ({ id: idOrFilter } as Filter<S>)
@@ -984,8 +953,7 @@ export class Collection<
    * call with `bulk_unmask_partial_unauthorized`. On success the
    * resolved map carries plaintext for every requested pair.
    *
-   * `items[i].id` may be either the numeric `id` (legacy collections)
-   * or a typed-id string; it is stringified on the wire.
+   * `items[i].id` is a typed_id string and is forwarded as-is on the wire.
    *
    * ```ts
    * const plaintexts = await db.users.bulkUnmask(
@@ -1000,7 +968,7 @@ export class Collection<
    */
   async bulkUnmask(
     items: ReadonlyArray<{
-      id: string | number;
+      id: string;
       columns: readonly (string & keyof Row<S>)[];
     }>,
     opts: { actor: Actor; reason?: string },
@@ -1107,7 +1075,7 @@ export class Collection<
   /**
    * Updates the first document matching `idOrFilter` and returns the
    * updated document (or `null` if nothing matched). When the first
-   * argument is a number it is treated as `{ id: <n> }`; otherwise a
+   * argument is a string it is treated as `{ id: <id> }`; otherwise a
    * full filter is accepted (e.g. compound filters for optimistic
    * concurrency: `{ id, version: 3 }`).
    *
@@ -1118,16 +1086,11 @@ export class Collection<
    * Returns the updated row (or `null` if no row matched).
    */
   async update(
-    idOrFilter: string | number | Filter<S>,
+    idOrFilter: string | Filter<S>,
     patch: UpdateExpression<S>
   ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
-      // **P7 PR 3** — accept a bare typed_id string or the legacy
-      // numeric id during the migration window. The pre-P7
-      // `typeof === "number"` branch stays for un-migrated apps
-      // until PR 6 lands the table backfill.
-      const isBareId =
-        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const isBareId = typeof idOrFilter === "string";
       const filter = (isBareId
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
@@ -1225,21 +1188,18 @@ export class Collection<
   /**
    * Deletes the first document matching `idOrFilter` and returns the
    * deleted document (or `null` if nothing matched). When the first
-   * argument is a number it is treated as `{ id: <n> }`.
+   * argument is a string it is treated as `{ id: <id> }`.
    *
-   * When the collection has `softDelete: true`, this sets `deletedAt`
+   * When the collection has `softDelete: true`, this sets `deleted_at`
    * instead of removing the row. **P9 PR 1** — the legacy
    * `{ hard: true }` opt was removed; callers needing an explicit
    * hard-delete use `purge` (P7 PR 5).
    */
   async delete(
-    idOrFilter: string | number | Filter<S>,
+    idOrFilter: string | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
-      // **P7 PR 3** — accept a bare typed_id string. Same migration-
-      // window rationale as `update()`.
-      const isBareId =
-        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const isBareId = typeof idOrFilter === "string";
       const filter = (isBareId
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
@@ -1253,7 +1213,7 @@ export class Collection<
       const casVersion = this._extractCasVersion(filter as PlainObject);
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-        const col = this._toColumn("deletedAt");
+        const col = this._toColumn("deleted_at");
         const patch = this._augmentUpdateWithVersion(
           { [col]: Date.now() } as PlainObject,
           casVersion,
@@ -1278,7 +1238,7 @@ export class Collection<
   /**
    * Deletes all documents matching `filter`. Returns
    * `{ deletedCount: N }`. When the collection has `softDelete: true`,
-   * sets `deletedAt` on each row. **P9 PR 1** — the legacy
+   * sets `deleted_at` on each row. **P9 PR 1** — the legacy
    * `{ hard: true }` opt was removed; callers needing an explicit
    * bulk hard-delete use `purgeMany` (P7 PR 5).
    */
@@ -1293,7 +1253,7 @@ export class Collection<
       const casVersion = this._extractCasVersion(filter as PlainObject);
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-        const col = this._toColumn("deletedAt");
+        const col = this._toColumn("deleted_at");
         const patch = this._augmentUpdateWithVersion(
           { [col]: Date.now() } as PlainObject,
           casVersion,
@@ -1319,11 +1279,10 @@ export class Collection<
    * with the deleted row, or `null` when nothing matched.
    */
   async purge(
-    idOrFilter: string | number | Filter<S>,
+    idOrFilter: string | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
-      const isBareId =
-        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const isBareId = typeof idOrFilter === "string";
       const filter = (isBareId
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
@@ -1380,11 +1339,10 @@ export class Collection<
    * Resolves with the restored row, or `null` when nothing matched.
    */
   async restore(
-    idOrFilter: string | number | Filter<S>,
+    idOrFilter: string | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
-      const isBareId =
-        typeof idOrFilter === "string" || typeof idOrFilter === "number";
+      const isBareId = typeof idOrFilter === "string";
       const filter = (isBareId
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
@@ -1493,7 +1451,7 @@ export class Collection<
     return this._run(async () => {
       let effectivePipeline: ZeroshipDbAggregateStage[] = pipeline;
       if (this._softDelete) {
-        const softFilter: ZeroshipDbFilter = { [this._toColumn("deletedAt")]: null };
+        const softFilter: ZeroshipDbFilter = { [this._toColumn("deleted_at")]: null };
         const head = pipeline[0] as { $match?: ZeroshipDbFilter } | undefined;
         if (head && head.$match !== undefined) {
           const existing = head.$match;

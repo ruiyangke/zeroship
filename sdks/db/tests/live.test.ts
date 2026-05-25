@@ -22,7 +22,7 @@ import { t } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 type SubEvent =
-  | { kind: "change"; op: "insert" | "update" | "delete"; collection: string; pk: number; columns: string[] }
+  | { kind: "change"; op: "insert" | "update" | "delete"; collection: string; pk: string; columns: string[] }
   | { kind: "resync" }
   | { kind: "closed" };
 
@@ -116,7 +116,7 @@ function makeMockNative() {
     fire(table: string, ev?: Partial<SubEvent>): void {
       const list = subs[table] ?? [];
       const event: SubEvent =
-        ev && ev.kind ? (ev as SubEvent) : { kind: "change", op: "insert", collection: table, pk: 0, columns: [] };
+        ev && ev.kind ? (ev as SubEvent) : { kind: "change", op: "insert", collection: table, pk: "0", columns: [] };
       for (const s of list) s.emit(event);
     },
   };
@@ -406,8 +406,8 @@ describe("db.live — reactive query layer", () => {
       },
       { native: ctx.native },
     );
-    await db.users.insert({ id: 1, name: "Alice" });
-    await db.todos.insert({ id: 100, userId: 1, title: "buy milk" });
+    await db.users.insert({ id: "1", name: "Alice" });
+    await db.todos.insert({ id: "100", userId: "1", title: "buy milk" });
 
     const live = db.live(() => db.todos.find({}, { with: { userId: true } }));
 
@@ -431,7 +431,7 @@ describe("db.live — reactive query layer", () => {
     );
 
     // Mutation on `todos` triggers a rerun.
-    await db.todos.insert({ id: 101, userId: 1, title: "write tests" });
+    await db.todos.insert({ id: "101", userId: "1", title: "write tests" });
     ctx.fire("todos");
     const afterTodos = await live.next();
     assert.equal(afterTodos.done, false);

@@ -37,7 +37,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
     const s = schema({
       userId: t.number().required(),
       done: t.boolean().default(false),
-      createdAt: t.timestamp(),
+      created_at: t.timestamp(),
     }).index("by_user_done", ["userId", "done"]);
 
     assert.deepEqual(s.indexes[0].fields, ["userId", "done"]);
@@ -57,12 +57,12 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
     assert.equal(s.indexes[1].name, "by_user_done");
   });
 
-  test("accepts the auto-generated columns (id, createdAt, updatedAt) in fields", () => {
+  test("accepts the auto-generated columns (id, created_at, updated_at) in fields", () => {
     const s = schema({
       title: t.string().required(),
-    }).index("by_recency", ["createdAt"]);
+    }).index("by_recency", ["created_at"]);
 
-    assert.deepEqual(s.indexes[0].fields, ["createdAt"]);
+    assert.deepEqual(s.indexes[0].fields, ["created_at"]);
   });
 
   test("uniqueIndex(name, fields) sets unique: true on the spec", () => {
@@ -254,7 +254,7 @@ describe("Collection — unindexed-query warning honours declared indexes", () =
 
   test("filter by `id` never warns even without an index declaration", async () => {
     const db = makeDb();
-    await db.todos.find({ id: 1 });
+    await db.todos.find({ id: "todo_01" });
     assert.equal(warnings.length, 0);
   });
 });

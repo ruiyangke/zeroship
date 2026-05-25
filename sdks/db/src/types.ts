@@ -120,11 +120,9 @@ export type InferSchema<S> = S extends infer T
  *   migrate via PR 6's one-time ALTER pass; until then the SDK's
  *   `Collection._loadById` accepts either shape on the wire but
  *   exposes `string` on `Row<S>`.
- * - `created_at` / `updated_at` — Unix-ms `number` for continuity
- *   with the pre-P7 `createdAt` / `updatedAt` shape. The wire
- *   widens to ISO 8601 strings in a later PR (P7.5 / P8); the
- *   current shape stays a number to avoid a Date-parse cost on
- *   every read.
+ * - `created_at` / `updated_at` — Unix-ms `number`. The wire widens
+ *   to ISO 8601 strings in a later PR (P7.5 / P8); the current shape
+ *   stays a number to avoid a Date-parse cost on every read.
  * - `created_by` / `updated_by` — nullable actor typed_id string,
  *   `null` for system-initiated writes (migrations, background
  *   jobs). PR 3 wires the auto-populate from the per-request
@@ -157,28 +155,11 @@ export type SystemFields = {
  * fields remain required; system fields are always present at read
  * time (auto-populated by the platform).
  *
- * **P7 PR 1** — supersedes the legacy `{ id, createdAt, updatedAt,
- * version? }` shape. The two legacy camelCase aliases (`createdAt`,
- * `updatedAt`) stay alongside the snake_case canonical names so
- * existing callers (`db.users.find({ createdAt: ... })`) continue
- * to type-check during the migration window.
- *
- * **P7 PR 3** — `id` widened from `number` to `string` (typed_id)
- * now that the Rust-side `dispatch_insert` auto-mint pass is wired.
- * The camelCase aliases stay for back-compat with existing creator
- * code paths during the rolling migration; a later PR removes them
- * once every active app has redeployed against the post-PR 3 SDK.
- *
- * PR 5 lands the runtime change (`crud::dispatch_find` emitting the
- * new fields); PR 6 lands the migration that backfills these columns
- * on pre-P7 tables.
+ * **P7 PR 3** — `id` is a typed_id string
+ * (`<prefix>_<base62(uuidv7)>`) and the system fields are exposed in
+ * snake_case only.
  */
-export type Row<S> = InferSchema<S> & SystemFields & {
-  /** @deprecated alias of `created_at` retained for the P7 migration window. */
-  createdAt: number;
-  /** @deprecated alias of `updated_at` retained for the P7 migration window. */
-  updatedAt: number;
-};
+export type Row<S> = InferSchema<S> & SystemFields;
 
 /** Input type accepted by `insert()` / `upsert()` — required fields
  * stay required, auto-populated system fields are excluded so the
@@ -191,10 +172,6 @@ export type RowInput<S> = InferSchema<S> & {
   updated_by?: never;
   version?: never;
   deleted_at?: never;
-  /** @deprecated alias of `created_at` retained for the P7 migration window. */
-  createdAt?: never;
-  /** @deprecated alias of `updated_at` retained for the P7 migration window. */
-  updatedAt?: never;
 };
 
 // ---------------------------------------------------------------------------
@@ -1946,8 +1923,9 @@ export class SchemaBuilder<S> {
    * keys form a prefix of `fields` are considered covered by the index.
    * The SDK passes the declaration to the native side, which materialises
    * a `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<table>__<name>"` per
-   * declared index. Auto-generated columns (`id`, `createdAt`, `updatedAt`,
-   * `deletedAt`, `version`) are also accepted alongside user fields.
+   * declared index. Auto-generated columns (`id`, `created_at`,
+   * `updated_at`, `created_by`, `updated_by`, `deleted_at`, `version`)
+   * are also accepted alongside user fields.
    *
    * Throws `Error` with `code = "schema_invalid"` at definition time if:
    *  - `name` is empty or already declared on this schema, or
@@ -2013,16 +1991,20 @@ export class SchemaBuilder<S> {
 
   /**
    * The set of field names this schema accepts in `.index(...)`. Includes
-   * user-declared fields plus the auto-generated columns the collection
-   * always carries (`id`, `createdAt`, `updatedAt`); soft-delete /
-   * versioning columns are accepted opportunistically when the matching
-   * option is enabled so a `.softDelete().index("by_active", ["deletedAt"])`
-   * declaration validates.
+   * user-declared fields plus the auto-generated system columns the
+   * collection always carries. With the SDK's snake_case system-field
+   * contract, these names match the underlying columns 1:1.
    */
   private _knownFieldNames(): Set<string> {
-    const out = new Set<string>(["id", "createdAt", "updatedAt"]);
-    if (this._options.softDelete) out.add("deletedAt");
-    if (this._options.versioning) out.add("version");
+    const out = new Set<string>([
+      "id",
+      "created_at",
+      "updated_at",
+      "created_by",
+      "updated_by",
+      "version",
+      "deleted_at",
+    ]);
     const f = this.fields;
     if (f !== null && typeof f === "object") {
       for (const k of Object.keys(f as Record<string, unknown>)) out.add(k);
@@ -2030,7 +2012,7 @@ export class SchemaBuilder<S> {
     return out;
   }
 
-  /** Enable soft delete — deleteOne/deleteMany set `deletedAt` instead of removing rows. */
+  /** Enable soft delete — deleteOne/deleteMany set `deleted_at` instead of removing rows. */
   softDelete(): this {
     this._options.softDelete = true;
     return this;

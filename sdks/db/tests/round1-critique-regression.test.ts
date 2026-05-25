@@ -375,7 +375,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
     // `_txDepth` wasn't bumped yet). The post-fix behaviour bumps
     // synchronously, so `_txDepth > 0` at the call boundary forces
     // the single-row find path (formerly the findOne fallback).
-    const getDuringBegin = db.users.get(42);
+    const getDuringBegin = db.users.get("usr_42");
 
     // Release begin.
     beginTriggered();
@@ -478,10 +478,10 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
     const callLog: { table: string; filter: AnyRec }[] = [];
     const rowsByTable: Record<string, AnyRec[]> = {
       users: [
-        { id: 1, email: "alice@example.com", name: "Alice" },
+        { id: "usr_1", email: "alice@example.com", name: "Alice" },
       ],
       todos: [
-        { id: 10, user_id: 1, title: "buy milk" },
+        { id: "todo_10", user_id: "usr_1", title: "buy milk" },
       ],
     };
     const native = {
@@ -489,13 +489,10 @@ describe("CRITICAL #1 — typed collections after installSchema", () => {
       collection: (n: string) => ({
         async find(filter: AnyRec) {
           callLog.push({ table: n, filter });
-          // **P7 PR 3** — FK ids cascade to TEXT typed_ids on the wire;
-          // the loader sends `["1"]`-shaped lists for legacy number FKs.
-          // Compare via `String(r.id)` so both shapes match.
-          const idClause = filter.id as { $in?: (string | number)[] } | undefined;
+          const idClause = filter.id as { $in?: string[] } | undefined;
           if (idClause && Array.isArray(idClause.$in)) {
-            const wanted = new Set(idClause.$in.map(String));
-            return rowsByTable[n].filter((r) => wanted.has(String(r.id)));
+            const wanted = new Set(idClause.$in);
+            return rowsByTable[n].filter((r) => typeof r.id === "string" && wanted.has(r.id));
           }
           return rowsByTable[n] ?? [];
         },

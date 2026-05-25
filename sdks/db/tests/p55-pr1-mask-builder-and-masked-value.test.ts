@@ -177,8 +177,8 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     };
     const sample: R = {
       id: 1,
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
       ssn: repr as unknown as MaskedValue<string>,
     };
     // Runtime sanity: the cast value's masked field is reachable.
@@ -194,8 +194,8 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     type R = Row<typeof fields>;
     const sample: R = {
       id: 1,
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
       email: "plain@example.com",
     };
     assert.equal(typeof sample.email, "string");
@@ -208,8 +208,8 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     type R = Row<typeof fields>;
     const sample: R = {
       id: 1,
-      createdAt: 0,
-      updatedAt: 0,
+      created_at: 0,
+      updated_at: 0,
       email: "a****@example.com" as unknown as MaskedValue<string>,
     };
     // The slot types as MaskedValue<string>; tsc would reject a bare

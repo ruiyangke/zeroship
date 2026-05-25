@@ -19,7 +19,7 @@ function makeMockNative(row: AnyRec | null) {
         async findOne(_filter: AnyRec, _opts: AnyRec) {
           return row;
         },
-        // The DataLoader path (numeric id, no select, no orderBy, no tx)
+        // The DataLoader path (string id, no select, no orderBy, no tx)
         // dispatches through `find({id: {$in: [...]}})`; existing
         // get-select-narrow tests that use this mock still expect the
         // single-row result to come back, so we mirror it here.
@@ -41,17 +41,17 @@ describe("get(...) select narrowing", () => {
         name: t.string().required(),
         age: t.number(),
       },
-      makeMockNative({ id: 1, email: "a@b.com" }),
+      makeMockNative({ id: "usr_01", email: "a@b.com" }),
     );
 
-    const { data, error } = await Users.get(1, { select: ["email", "id"] });
+    const { data, error } = await Users.get("usr_01", { select: ["email", "id"] });
     assert.equal(error, null);
     assert.ok(data);
     // Type-level check: TS should see `data` as Pick<Row<S>, "email" | "id">.
     const email: string = data.email;
-    const id: number = data.id;
+    const id: string = data.id;
     assert.equal(email, "a@b.com");
-    assert.equal(id, 1);
+    assert.equal(id, "usr_01");
 
     // Negative check: a field outside the select list is not on the
     // narrowed type. We cast through unknown to demonstrate it must NOT
@@ -67,10 +67,10 @@ describe("get(...) select narrowing", () => {
         email: t.string().required().unique(),
         name: t.string().required(),
       },
-      makeMockNative({ id: 1, email: "a@b.com", name: "Alice" }),
+      makeMockNative({ id: "usr_01", email: "a@b.com", name: "Alice" }),
     );
 
-    const { data, error } = await Users.get(1);
+    const { data, error } = await Users.get("usr_01");
     assert.equal(error, null);
     assert.ok(data);
     // Full row — no narrowing.
@@ -87,7 +87,7 @@ describe("get(...) select narrowing", () => {
         email: t.string().required().unique(),
         name: t.string().required(),
       },
-      makeMockNative({ id: 1, email: "a@b.com", name: "Alice" }),
+      makeMockNative({ id: "usr_01", email: "a@b.com", name: "Alice" }),
     );
 
     const { data, error } = await Users.get({ email: "a@b.com" }, { orderBy: { id: -1 } });
@@ -107,7 +107,7 @@ describe("get(...) select narrowing", () => {
       makeMockNative(null),
     );
 
-    const { data, error } = await Users.get(1, { select: ["email"] });
+    const { data, error } = await Users.get("usr_01", { select: ["email"] });
     assert.equal(error, null);
     assert.equal(data, null);
   });
