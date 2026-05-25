@@ -6269,6 +6269,39 @@ async fn pg_admin_table_key_source_reads_bytea_directly() {
     assert_eq!(resolved.k_siv, expected_k_siv);
 }
 
+#[compio::test]
+async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
+    use base64::Engine as _;
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let rows = pool
+        .query_text_params(
+            "SELECT decode('5c783431343234333434', 'hex')::bytea AS payload",
+            &[],
+        )
+        .await
+        .unwrap();
+    let json = zeroship_plugin_db::row_to_json_for_bench(&rows[0]);
+    let payload = json
+        .get("payload")
+        .and_then(Value::as_str)
+        .expect("payload base64 string");
+    let expected_raw =
+        base64::engine::general_purpose::STANDARD.encode(br"\x41424344");
+    let wrong_hex_decoded = base64::engine::general_purpose::STANDARD.encode(b"ABCD");
+
+    assert_eq!(
+        payload, expected_raw,
+        "BYTEA decoding must preserve the raw binary wire bytes",
+    );
+    assert_ne!(
+        payload, wrong_hex_decoded,
+        "BYTEA decoding must not reinterpret raw binary bytes as a \
+         text-protocol \\x... payload",
+    );
+}
+
 // ===========================================================================
 // P5 PR 4 — PG `Backup` impl (pg_dump / pg_restore shell-out + PITR
 // placeholder)
