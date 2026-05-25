@@ -40,7 +40,7 @@ export async function createRunner(): Promise<ModuleRunner> {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(data),
         });
-        const json = JSON.parse(await resp.text());
+        const json = await resp.json();
         return json;
       } catch (e: any) {
         return { error: { message: e.message ?? String(e) } };

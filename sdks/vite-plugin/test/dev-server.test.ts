@@ -25,13 +25,19 @@ interface Harness {
   server: ViteDevServer;
   serverEntry: string;
   runtimeLogPath: string;
+  runtimeCountPath: string;
   runtimeStopPath: string;
   runtimeLog: () => Promise<RuntimeLog>;
-  close: () => Promise<void>;
+  runtimeSpawnCount: () => Promise<number>;
+  buildEnd: () => void;
+  triggerUnexpectedExit: () => Promise<void>;
+  close: (options?: { expectRuntimeStop?: boolean; cleanup?: boolean }) => Promise<void>;
+  cleanup: () => Promise<void>;
   queueHmrChange: (file?: string) => Promise<void>;
 }
 
 interface RuntimeLog {
+  spawnCount: number;
   pid: number;
   argv: string[];
   env: {
@@ -127,6 +133,58 @@ describe("devServerPlugin", () => {
     }
   });
 
+  test("rejects non-JSON module-fetch requests with 415", async () => {
+    const harness = await startHarness();
+    try {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "{}",
+      });
+      assert.equal(resp.status, 415);
+      assert.deepEqual(await resp.json(), {
+        error: {
+          message: "zeroship fetch requests must use Content-Type: application/json",
+        },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("rejects empty module-fetch bodies with 400", async () => {
+    const harness = await startHarness();
+    try {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      assert.equal(resp.status, 400);
+      assert.deepEqual(await resp.json(), {
+        error: { message: "zeroship fetch body is empty" },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("rejects invalid module-fetch JSON with 400", async () => {
+    const harness = await startHarness();
+    try {
+      const resp = await fetch(`${harness.origin}${MODULE_FETCH_PATH}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{not json",
+      });
+      assert.equal(resp.status, 400);
+      assert.deepEqual(await resp.json(), {
+        error: { message: "invalid zeroship fetch JSON" },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   test("returns and clears pending HMR changes over the poll endpoint", async () => {
     const harness = await startHarness();
     try {
@@ -192,6 +250,26 @@ describe("devServerPlugin", () => {
       await harness.close();
     }
   });
+
+  test("buildEnd cancels a pending crash restart before it can respawn", async () => {
+    const harness = await startHarness({
+      devServerPort: 3903,
+    });
+    try {
+      const runtime = await harness.runtimeLog();
+      assert.equal(runtime.spawnCount, 1);
+
+      await harness.triggerUnexpectedExit();
+      await waitForProcessExit(runtime.pid);
+
+      harness.buildEnd();
+      await sleep(1_200);
+
+      assert.equal(await harness.runtimeSpawnCount(), 1);
+    } finally {
+      await harness.close({ expectRuntimeStop: false });
+    }
+  });
 });
 
 async function startHarness(options: {
@@ -202,6 +280,7 @@ async function startHarness(options: {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-vite-dev-server-"));
   const serverEntry = resolve(root, "src/server.ts");
   const runtimeLogPath = resolve(root, ".zeroship-runtime.json");
+  const runtimeCountPath = resolve(root, ".zeroship-runtime.count");
   const runtimeStopPath = resolve(root, ".zeroship-runtime.stopped");
   const childScriptPath = resolve(root, "node_modules/.bin/zeroship");
   const previousDatabaseUrl = process.env.DATABASE_URL;
@@ -233,12 +312,20 @@ async function startHarness(options: {
     childScriptPath,
     [
       "#!/usr/bin/env node",
-      "const { writeFileSync } = require('node:fs');",
+      "const { readFileSync, writeFileSync } = require('node:fs');",
       "const { resolve } = require('node:path');",
       "const root = process.cwd();",
       "const logPath = resolve(root, '.zeroship-runtime.json');",
+      "const countPath = resolve(root, '.zeroship-runtime.count');",
       "const stopPath = resolve(root, '.zeroship-runtime.stopped');",
+      "let spawnCount = 0;",
+      "try {",
+      "  spawnCount = Number(readFileSync(countPath, 'utf8')) || 0;",
+      "} catch {}",
+      "spawnCount += 1;",
+      "writeFileSync(countPath, String(spawnCount));",
       "writeFileSync(logPath, JSON.stringify({",
+      "  spawnCount,",
       "  pid: process.pid,",
       "  argv: process.argv.slice(2),",
       "  env: {",
@@ -254,6 +341,7 @@ async function startHarness(options: {
       "};",
       "process.on('SIGTERM', stop);",
       "process.on('SIGINT', stop);",
+      "process.on('SIGUSR2', () => process.exit(1));",
       "setInterval(() => {}, 1000);",
       "",
     ].join("\n"),
@@ -309,18 +397,33 @@ async function startHarness(options: {
       server,
       serverEntry,
       runtimeLogPath,
+      runtimeCountPath,
       runtimeStopPath,
       runtimeLog: async () => JSON.parse(await fs.readFile(runtimeLogPath, "utf8")) as RuntimeLog,
-      close: async () => {
+      runtimeSpawnCount: async () => Number(await fs.readFile(runtimeCountPath, "utf8")),
+      buildEnd: () => {
+        devServerPluginImpl.buildEnd?.call(devServerPluginImpl);
+      },
+      triggerUnexpectedExit: async () => {
+        const runtime = JSON.parse(await fs.readFile(runtimeLogPath, "utf8")) as RuntimeLog;
+        process.kill(runtime.pid, "SIGUSR2");
+      },
+      close: async (closeOptions = {}) => {
+        const { expectRuntimeStop = true, cleanup = true } = closeOptions;
         if (server) {
           await server.close();
           server = null;
         }
-        await waitFor(async () => {
-          await fs.access(runtimeStopPath);
-        });
-        await cleanupRoot(root, previousDatabaseUrl);
+        if (expectRuntimeStop) {
+          await waitFor(async () => {
+            await fs.access(runtimeStopPath);
+          });
+        }
+        if (cleanup) {
+          await cleanupRoot(root, previousDatabaseUrl);
+        }
       },
+      cleanup: async () => cleanupRoot(root, previousDatabaseUrl),
       queueHmrChange: async (file = serverEntry) => {
         await devServerPluginImpl.hotUpdate!({ file } as any);
       },
@@ -356,4 +459,21 @@ async function waitFor(fn: () => Promise<void>, timeoutMs = 10_000): Promise<voi
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 10_000): Promise<void> {
+  await waitFor(async () => {
+    try {
+      process.kill(pid, 0);
+      throw new Error(`process ${pid} is still alive`);
+    } catch (error: any) {
+      if (error?.code !== "ESRCH") {
+        throw error;
+      }
+    }
+  }, timeoutMs);
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
