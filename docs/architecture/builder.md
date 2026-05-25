@@ -90,3 +90,9 @@ Snapshot/wake behavior is feature-gated by sandbox config. The admin handlers an
 | Nomad + CH runtime | [nomad_ch.rs](crates/sandbox/src/backend/nomad_ch.rs) |
 | preview proxy | [preview.rs](crates/sandbox/src/preview.rs), [preview_ws.rs](crates/sandbox/src/preview_ws.rs) |
 | snapshot/restore | [admin_handlers.rs](crates/sandbox/src/admin_handlers.rs), `docs/runbooks/sandbox-nomad-ch.md` |
+
+## Related docs
+
+- [Architecture overview](docs/architecture/overview.md) — the entry point and system map.
+- [Distributed architecture](docs/architecture/distributed.md) — why the sandbox sits off the end-user request hot path.
+- [Nomad + Cloud Hypervisor runbook](docs/runbooks/sandbox-nomad-ch.md) — operating the `nomad-ch` backend.
