@@ -3,13 +3,22 @@ use serde_json::Value;
 
 use crate::error::DbError;
 
+pub(crate) enum SchemaFieldScope<'a> {
+    All,
+    Only(&'a [String]),
+}
+
 pub(crate) struct ApplyOptions<'a> {
     pub unmask_columns: &'a [String],
+    pub schema_field_scope: SchemaFieldScope<'a>,
 }
 
 impl<'a> Default for ApplyOptions<'a> {
     fn default() -> Self {
-        Self { unmask_columns: &[] }
+        Self {
+            unmask_columns: &[],
+            schema_field_scope: SchemaFieldScope::All,
+        }
     }
 }
 
@@ -46,7 +55,8 @@ pub(crate) async fn apply(
     mut rows: Vec<Value>,
     opts: ApplyOptions<'_>,
 ) -> Result<ApplyResult, DbError> {
-    let schema = crate::context::with(|c| c.schema_for(app_id, collection));
+    let schema = crate::context::with(|c| c.schema_for(app_id, collection))
+        .map(|schema| scope_schema(schema, &opts.schema_field_scope));
     normalize_rows_on_read(schema.as_ref(), &mut rows)?;
 
     if let Some(schema) = schema.as_ref() {
@@ -72,6 +82,19 @@ pub(crate) async fn apply(
     }
 
     Ok(ApplyResult { rows, has_masked })
+}
+
+fn scope_schema(mut schema: Value, scope: &SchemaFieldScope<'_>) -> Value {
+    match scope {
+        SchemaFieldScope::All => schema,
+        SchemaFieldScope::Only(fields) => {
+            let Some(obj) = schema.as_object_mut() else {
+                return schema;
+            };
+            obj.retain(|key, _| key.starts_with('_') || fields.iter().any(|field| field == key));
+            schema
+        }
+    }
 }
 
 fn normalize_rows_on_read(schema: Option<&Value>, rows: &mut [Value]) -> Result<(), DbError> {
@@ -439,5 +462,49 @@ mod tests {
             }
             other => panic!("expected Internal error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scoped_schema_excludes_aggregate_alias_collisions() {
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app_aggregate_scope",
+                "users",
+                serde_json::json!({
+                    "secret": {
+                        "type": "string",
+                        "encrypted": {
+                            "mode": "randomised",
+                            "keyId": "default",
+                            "wraps": "string"
+                        },
+                        "mask": {
+                            "kind": "last4",
+                            "classification": "spi"
+                        }
+                    }
+                }),
+            );
+        });
+
+        let rows = vec![serde_json::json!({
+            "secret": 3
+        })];
+
+        let result = compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(apply(
+                "app_aggregate_scope",
+                "users",
+                rows,
+                ApplyOptions {
+                    unmask_columns: &[],
+                    schema_field_scope: SchemaFieldScope::Only(&[]),
+                },
+            ))
+            .expect("aggregate aliases must bypass schema-driven transforms");
+
+        assert_eq!(result.rows, vec![serde_json::json!({ "secret": 3 })]);
+        assert!(!result.has_masked);
     }
 }
