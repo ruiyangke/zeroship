@@ -87,6 +87,12 @@ export type SchemaInput =
 // Transaction surface — TxCollection / TxQuery / TransactionOptions
 // ---------------------------------------------------------------------------
 
+type TxPaginationResult<P> = {
+  page: P[];
+  continueCursor: string;
+  isDone: boolean;
+};
+
 /**
  * A typed collection inside a transaction — same API as Collection but
  * throws on error instead of returning Result. Generic over schema
@@ -121,9 +127,38 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
   delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
   deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
+  purge(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  purgeMany(filter?: Filter<S>): Promise<{ purgedCount: number }>;
+  restore(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  restoreMany(filter?: Filter<S>): Promise<{ restoredCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
+  bulkUnmask(
+    items: ReadonlyArray<{
+      id: string;
+      columns: readonly (string & keyof Row<S>)[];
+    }>,
+    opts: { actor: import("./types.js").Actor; reason?: string },
+  ): Promise<Map<string, Record<string, unknown>>>;
+  search(
+    args:
+      | {
+          vector: number[];
+          k?: number;
+          metric?: import("./types.js").VectorMetric;
+          column?: string;
+          filter?: Filter<S>;
+        }
+      | { text: string; limit?: number; k?: number; filter?: Filter<S> },
+  ): Promise<(Row<S> & { _distance?: number; _rank?: number })[]>;
+  near(args: {
+    field: keyof S & string;
+    point: { lat: number; lng: number };
+    radius: number;
+    filter?: Filter<S>;
+    limit?: number;
+  }): Promise<(Row<S> & { _distance_m: number })[]>;
 };
 
 /** Query inside a transaction — same chainable API but resolves to data directly */
@@ -139,6 +174,10 @@ export type TxQuery<
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
   after(id: string): TxQuery<S, P, AllSchemas>;
   with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  paginate(opts: {
+    cursor?: string | null;
+    numItems: number;
+  }): Promise<TxPaginationResult<P>>;
   /** **P9 PR 1** — terminal: first matching row or `null`. Throws inside
    *  the tx callback on a native error (tx unwraps Result). */
   first(): Promise<P | null>;

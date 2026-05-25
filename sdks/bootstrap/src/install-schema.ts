@@ -591,6 +591,12 @@ export type ValidateSchemaShape<T> = {
           : `Schema "${K & string}" must be a field map of t.* builders, a schema(...) builder, or a top-level t.union(...).`;
 };
 
+type TxPaginationResult<P> = {
+  page: P[];
+  continueCursor: string;
+  isDone: boolean;
+};
+
 /**
  * A typed collection inside a transaction — same API as Collection but
  * throws on error instead of returning Result. Generic over schema
@@ -619,9 +625,38 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
   delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
   deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
+  purge(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  purgeMany(filter?: Filter<S>): Promise<{ purgedCount: number }>;
+  restore(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  restoreMany(filter?: Filter<S>): Promise<{ restoredCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
+  bulkUnmask(
+    items: ReadonlyArray<{
+      id: string;
+      columns: readonly (string & keyof Row<S>)[];
+    }>,
+    opts: { actor: Record<string, unknown>; reason?: string },
+  ): Promise<Map<string, Record<string, unknown>>>;
+  search(
+    args:
+      | {
+          vector: number[];
+          k?: number;
+          metric?: "cosine" | "l2" | "innerProduct";
+          column?: string;
+          filter?: Filter<S>;
+        }
+      | { text: string; limit?: number; k?: number; filter?: Filter<S> },
+  ): Promise<(Row<S> & { _distance?: number; _rank?: number })[]>;
+  near(args: {
+    field: keyof S & string;
+    point: { lat: number; lng: number };
+    radius: number;
+    filter?: Filter<S>;
+    limit?: number;
+  }): Promise<(Row<S> & { _distance_m: number })[]>;
 };
 
 /** Query inside a transaction — same chainable API but resolves to data directly */
@@ -637,6 +672,10 @@ export type TxQuery<
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
   after(id: string): TxQuery<S, P, AllSchemas>;
   with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  paginate(opts: {
+    cursor?: string | null;
+    numItems: number;
+  }): Promise<TxPaginationResult<P>>;
   /** **P9 PR 1** — first matching row or `null`; throws on native error. */
   first(): Promise<P | null>;
   /** **P9 PR 1** — strict exactly-one; throws `NotFoundError` on zero or
@@ -732,6 +771,18 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async deleteMany(filter: Filter<S>) {
       return unwrap(await collection.deleteMany(filter));
     },
+    async purge(idOrFilter: string | Filter<S>) {
+      return unwrap(await collection.purge(idOrFilter));
+    },
+    async purgeMany(filter: Filter<S> = {} as Filter<S>) {
+      return unwrap(await collection.purgeMany(filter));
+    },
+    async restore(idOrFilter: string | Filter<S>) {
+      return unwrap(await collection.restore(idOrFilter));
+    },
+    async restoreMany(filter: Filter<S> = {} as Filter<S>) {
+      return unwrap(await collection.restoreMany(filter));
+    },
     async count(filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.count(filter));
     },
@@ -740,6 +791,21 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     },
     async aggregate(pipeline: ZeroshipDbAggregateStage[]) {
       return unwrap(await collection.aggregate(pipeline));
+    },
+    async bulkUnmask(
+      ...args: Parameters<Collection<S>["bulkUnmask"]>
+    ) {
+      return unwrap(await collection.bulkUnmask(...args));
+    },
+    async search(
+      ...args: Parameters<Collection<S>["search"]>
+    ) {
+      return unwrap(await collection.search(...args));
+    },
+    async near(
+      ...args: Parameters<Collection<S>["near"]>
+    ) {
+      return unwrap(await collection.near(...args));
     },
   };
   return tx;
@@ -762,6 +828,11 @@ function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
       (query as unknown as { with(s: WithSpec): unknown }).with(spec);
       return wrapped;
     }) as TxQuery<S, Row<S>>["with"],
+    async paginate(
+      opts: Parameters<Query<S, Row<S>>["paginate"]>[0],
+    ): Promise<TxPaginationResult<Row<S>>> {
+      return unwrap(await query.paginate(opts));
+    },
     // **P9 PR 1** — Result→throw shims for the new terminals so the
     // tx-callback contract (throw, not return Result) stays uniform.
     async first(): Promise<Row<S> | null> {
