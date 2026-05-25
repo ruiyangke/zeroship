@@ -720,6 +720,12 @@ type restoreSeamOutcomes struct {
 	resumeErr  error
 	pollDelay  time.Duration // how long pollFn blocks before returning
 	tapUpErr   error
+	// lockProbe overrides the F_OFD_SETLK probe seam for the v21
+	// stage_wake_rootfs_lock_wait gate. Zero-value (nil) installs a
+	// default that returns OFDLockProbeAcquired immediately — the
+	// happy-path test convention. Tests that exercise the lock-wait
+	// gate's failure modes supply a custom fn.
+	lockProbe func(path string) (ch.OFDLockProbeResultForTest, error)
 }
 
 func installRestoreSeams(t *testing.T, rec *restoreSequenceRecorder, out restoreSeamOutcomes) (capturedRunnerPtr **fakeRunner, factory func(cmd *exec.Cmd) ch.ProcessRunnerSeam) {
@@ -753,11 +759,30 @@ func installRestoreSeams(t *testing.T, rec *restoreSequenceRecorder, out restore
 	prevTap := ch.SetEnsureTapUpForTest(func(string) error {
 		return out.tapUpErr
 	})
+	// Default lock-probe stub returns OFDLockProbeAcquired on the
+	// first attempt so the v21 stage_wake_rootfs_lock_wait gate is
+	// effectively a no-op in tests that don't care about it.
+	// (tmpfs in some kernel configs returns EBADF / EOPNOTSUPP on
+	// F_OFD_SETLK against a regular file; stubbing the seam keeps
+	// the test suite hermetic across kernel/fs combinations.)
+	lockProbeFn := out.lockProbe
+	if lockProbeFn == nil {
+		lockProbeFn = func(string) (ch.OFDLockProbeResultForTest, error) {
+			return ch.OFDLockProbeAcquiredForTest, nil
+		}
+	}
+	prevLockProbe := ch.SetTryAcquireOFDLockForTest(lockProbeFn)
+	// Wake-side lock-poll sleep seam: no-op so the poll loop spins
+	// through its 50-attempt budget instantly without real wall time
+	// on the unlikely "all attempts busy" test scenario.
+	prevWakeLockSleep := ch.SetSleepForWakeRootfsLockPollForTest(func(time.Duration) {})
 
 	t.Cleanup(func() {
 		ch.SetPollAPISocketForTest(prevPoll)
 		ch.SetResumeForTest(prevResume)
 		ch.SetEnsureTapUpForTest(prevTap)
+		ch.SetTryAcquireOFDLockForTest(prevLockProbe)
+		ch.SetSleepForWakeRootfsLockPollForTest(prevWakeLockSleep)
 		// Unblock the fake runner's Wait so the supervisor exits
 		// cleanly under -race.
 		if captured != nil {
@@ -1352,6 +1377,12 @@ func TestStartTaskRestoreBranch_StderrTailEmbeddedOnSocketTimeout(t *testing.T) 
 	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
 	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
 
+	// v21 wake_rootfs_lock_wait gate: pass-through.
+	prevLockProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		return ch.OFDLockProbeAcquiredForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevLockProbe) })
+
 	var captured *fakeRunner
 	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
 		captured = newFakeRunner(cmd)
@@ -1426,6 +1457,12 @@ func TestStartTaskRestoreBranch_StderrTailEmbeddedOnResumeFail(t *testing.T) {
 
 	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
 	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
+
+	// v21 wake_rootfs_lock_wait gate: pass-through.
+	prevLockProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		return ch.OFDLockProbeAcquiredForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevLockProbe) })
 
 	var captured *fakeRunner
 	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
@@ -2735,6 +2772,12 @@ func TestRestoreFailures_LivezProbeStage(t *testing.T) {
 	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
 	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
 
+	// v21 wake_rootfs_lock_wait gate: pass-through.
+	prevLockProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		return ch.OFDLockProbeAcquiredForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevLockProbe) })
+
 	var captured *fakeRunner
 	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
 		captured = newFakeRunner(cmd)
@@ -2798,6 +2841,12 @@ func TestRestoreFailures_ResumeStage(t *testing.T) {
 
 	prevTap := ch.SetEnsureTapUpForTest(func(string) error { return nil })
 	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prevTap) })
+
+	// v21 wake_rootfs_lock_wait gate: pass-through.
+	prevLockProbe := ch.SetTryAcquireOFDLockForTest(func(string) (ch.OFDLockProbeResultForTest, error) {
+		return ch.OFDLockProbeAcquiredForTest, nil
+	})
+	t.Cleanup(func() { ch.SetTryAcquireOFDLockForTest(prevLockProbe) })
 
 	var captured *fakeRunner
 	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
@@ -2896,6 +2945,334 @@ func TestRestoreFailures_PromExporterRendersStages(t *testing.T) {
 	if idxSnap < 0 || idxCfg < 0 || idxSnap >= idxCfg {
 		t.Errorf("expected validate_snapshot before validate_taskconfig in sorted render; idxSnap=%d idxCfg=%d", idxSnap, idxCfg)
 	}
+}
+
+// -- T-8b-stress-r9-retry-6 / driver v21: wake_rootfs_lock_wait stage --
+//
+// These tests pin the wake-side OFD-lock-wait gate that closes the
+// c=4 binding stress wedge (8/8 CREATE + 8/8 SNAPSHOT but 0/8 WAKE,
+// all failing at stage=resume with CH stderr `Can't get Write lock
+// for .../rootfs.img as there is already a ExclusiveWrite lock`).
+//
+// Three axes covered:
+//
+//   (a) Happy path: probe returns Acquired on the first attempt →
+//       the gate is a no-op and CH spawn proceeds.
+//   (b) Wait-then-acquire: probe returns Busy on the first few
+//       attempts then Acquired → the gate sleeps + retries until
+//       the source-side `__fput` completes; restore succeeds and
+//       the counter does NOT bump (only budget-exhaustion bumps it).
+//   (c) Budget exhausted: probe returns Busy on every attempt →
+//       the gate surfaces stage=wake_rootfs_lock_wait to Nomad,
+//       bumps `nomad_driver_ch_wake_rootfs_lock_held_total` AND
+//       `nomad_driver_ch_start_task_restore_failures_total
+//       {stage="wake_rootfs_lock_wait"}`.
+
+// TestRestoreFailures_WakeRootfsLockWait_AcquiresImmediately pins
+// the happy-path semantics: when the rootfs.img OFD write lock is
+// already acquirable (the source alloc's `__fput` already ran), the
+// new gate is a no-op and CH spawn proceeds. Asserts:
+//   (a) StartTask succeeds (no error)
+//   (b) wake_rootfs_lock_held_total counter NOT bumped
+//   (c) stage=wake_rootfs_lock_wait failure counter NOT bumped
+//   (d) the spawn ran (recorder witnessed the "spawn(--restore)" step
+//       AFTER the rootfs was staged into runDir)
+func TestRestoreFailures_WakeRootfsLockWait_AcquiresImmediately(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetWakeRootfsLockHeldForTest()
+	t.Cleanup(ch.ResetWakeRootfsLockHeldForTest)
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	// Lock probe returns Acquired immediately on the first call.
+	probeCalls := 0
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{
+		lockProbe: func(string) (ch.OFDLockProbeResultForTest, error) {
+			probeCalls++
+			return ch.OFDLockProbeAcquiredForTest, nil
+		},
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore) with lock immediately acquirable: %v", err)
+	}
+
+	if probeCalls != 1 {
+		t.Errorf("lock probe should be called exactly once on happy path; got %d calls", probeCalls)
+	}
+	if got := ch.WakeRootfsLockHeldTotal(); got != 0 {
+		t.Errorf("wake_rootfs_lock_held_total: got %d, want 0 (happy path must not bump counter)", got)
+	}
+	if got := ch.StartTaskRestoreFailuresTotal(ch.StageWakeRootfsLockWaitForTest); got != 0 {
+		t.Errorf("start_task_restore_failures_total{stage=wake_rootfs_lock_wait}: got %d, want 0", got)
+	}
+	// Sequence witness: the spawn must have happened (lock-wait did
+	// not short-circuit the restore branch).
+	steps := rec.snapshot()
+	foundSpawn := false
+	for _, s := range steps {
+		if s == "spawn(--restore)" {
+			foundSpawn = true
+			break
+		}
+	}
+	if !foundSpawn {
+		t.Errorf("expected spawn(--restore) in recorded steps after lock-wait succeeds; got %v", steps)
+	}
+}
+
+// TestRestoreFailures_WakeRootfsLockWait_BusyThenAcquired pins the
+// wait-then-acquire semantics: when the probe returns Busy on the
+// first few attempts (source-side `__fput` not yet complete) and
+// then Acquired, the gate sleeps + retries until success. Restore
+// proceeds without error and the counter does NOT bump (only budget-
+// exhaustion bumps it; transient busy is the expected operating
+// regime).
+func TestRestoreFailures_WakeRootfsLockWait_BusyThenAcquired(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetWakeRootfsLockHeldForTest()
+	t.Cleanup(ch.ResetWakeRootfsLockHeldForTest)
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	// Probe returns Busy 3 times then Acquired — simulates the
+	// production timing where the source alloc's CH process holds
+	// the lock for tens of milliseconds after destroy returns.
+	var probeCalls int
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{
+		lockProbe: func(string) (ch.OFDLockProbeResultForTest, error) {
+			probeCalls++
+			if probeCalls <= 3 {
+				return ch.OFDLockProbeBusyForTest, nil
+			}
+			return ch.OFDLockProbeAcquiredForTest, nil
+		},
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore) with busy-then-acquired lock: %v", err)
+	}
+
+	if probeCalls != 4 {
+		t.Errorf("lock probe should be called 4 times (3 busy + 1 acquired); got %d calls", probeCalls)
+	}
+	// Transient busy is NOT a failure — counter must stay at 0.
+	if got := ch.WakeRootfsLockHeldTotal(); got != 0 {
+		t.Errorf("wake_rootfs_lock_held_total: got %d, want 0 (transient busy must not bump the budget-exhausted counter)", got)
+	}
+	if got := ch.StartTaskRestoreFailuresTotal(ch.StageWakeRootfsLockWaitForTest); got != 0 {
+		t.Errorf("start_task_restore_failures_total{stage=wake_rootfs_lock_wait}: got %d, want 0", got)
+	}
+}
+
+// TestRestoreFailures_WakeRootfsLockWait_BudgetExhausted pins the
+// budget-exhausted failure path: when the probe returns Busy on
+// EVERY attempt (source-side `__fput` is wedged or the source CH
+// never released its lock), the gate surfaces a stage-labelled
+// error to Nomad and bumps both counters.
+//
+// This is the test that exercises the c=4 binding wedge end-to-end
+// in the negative direction: the gate stops the restore from
+// reaching CH `--restore` with a contended rootfs.img, eliminating
+// the cryptic stage=resume `AlreadyLocked` failure mode that
+// motivated v21.
+//
+// Pin contract (all three axes):
+//   (a) Error message carries `stage=wake_rootfs_lock_wait`
+//   (b) Error message names the budget: `50x100ms` (constants pinned
+//       via WakeRootfsLockWaitAttemptsForTest / IntervalForTest)
+//   (c) wake_rootfs_lock_held_total counter bumped by 1
+//   (d) start_task_restore_failures_total{stage=wake_rootfs_lock_wait}
+//       counter bumped by 1
+func TestRestoreFailures_WakeRootfsLockWait_BudgetExhausted(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetWakeRootfsLockHeldForTest()
+	t.Cleanup(ch.ResetWakeRootfsLockHeldForTest)
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	// Shrink the budget so the test doesn't sleep real seconds.
+	// Budget pin: production is 50 × 100ms = 5s wall; the test
+	// shrinks attempts so the loop completes synchronously (the
+	// sleep seam is also no-op'd by installRestoreSeams above).
+	// We keep attempts > 1 so the loop body runs multiple iterations
+	// — this catches a regression where the gate would short-circuit
+	// after a single failed probe.
+	prevA, prevI := ch.SetWakeRootfsLockWaitForTest(5, time.Millisecond)
+	t.Cleanup(func() { ch.SetWakeRootfsLockWaitForTest(prevA, prevI) })
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	var probeCalls int
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{
+		lockProbe: func(string) (ch.OFDLockProbeResultForTest, error) {
+			probeCalls++
+			return ch.OFDLockProbeBusyForTest, nil
+		},
+	})
+
+	cfg := validRestoreConfig(staged)
+	baseline := ch.StartTaskRestoreFailuresTotal(ch.StageWakeRootfsLockWaitForTest)
+	wakeBaseline := ch.WakeRootfsLockHeldTotal()
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatalf("StartTask (restore) with always-busy lock: expected error, got nil")
+	}
+
+	// Verbatim assertion against the budget-exhausted error shape.
+	// THIS is the assertion that exercises the budget-exhausted path
+	// (per the v21 mandate's report requirement).
+	msg := err.Error()
+	mustContainTest(t, "wake_rootfs_lock_wait stage label", msg, "stage=wake_rootfs_lock_wait")
+	mustContainTest(t, "wake_rootfs_lock_wait budget shape", msg, "rootfs.img lock acquisition budget exhausted")
+	mustContainTest(t, "wake_rootfs_lock_wait budget shape", msg, "5x1ms")
+	mustContainTest(t, "wake_rootfs_lock_wait counter ref", msg, "wake_rootfs_lock_held_total=")
+
+	// Counter assertions.
+	if got := ch.WakeRootfsLockHeldTotal(); got != wakeBaseline+1 {
+		t.Errorf("wake_rootfs_lock_held_total: got %d, want %d (baseline=%d)", got, wakeBaseline+1, wakeBaseline)
+	}
+	if got := ch.StartTaskRestoreFailuresTotal(ch.StageWakeRootfsLockWaitForTest); got != baseline+1 {
+		t.Errorf("start_task_restore_failures_total{stage=wake_rootfs_lock_wait}: got %d, want %d (baseline=%d)", got, baseline+1, baseline)
+	}
+
+	// Probe call count: the loop runs `attempts` times then bails.
+	if probeCalls != 5 {
+		t.Errorf("lock probe should be called %d times (1 per attempt); got %d", 5, probeCalls)
+	}
+
+	// The CH spawn must NOT have happened — the gate stopped the
+	// restore branch BEFORE the spawn step. Compare against the
+	// v20 stage=resume failure mode: pre-v21, the spawn ran and the
+	// resume RPC returned HTTP 500. v21 short-circuits before spawn.
+	steps := rec.snapshot()
+	for _, s := range steps {
+		if s == "spawn(--restore)" {
+			t.Errorf("CH spawn should be short-circuited by lock-wait failure; got steps=%v", steps)
+		}
+	}
+}
+
+// TestRestoreFailures_WakeRootfsLockWait_ProbeError pins the
+// unexpected-syscall-error failure path: if the OFD-lock probe
+// returns an error classification other than EAGAIN/EACCES
+// (ofdLockProbeError — e.g. EBADF / EINVAL on an exotic
+// filesystem), the gate aborts the retry loop immediately and
+// surfaces stage=wake_rootfs_lock_wait without retrying further.
+//
+// This mirrors the destroy-side pollAcquireOFDLock contract: a
+// probe error is NOT a "kernel still busy" signal and shouldn't
+// be retried — it's a host-config issue the operator must fix.
+func TestRestoreFailures_WakeRootfsLockWait_ProbeError(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	ch.ResetWakeRootfsLockHeldForTest()
+	t.Cleanup(ch.ResetWakeRootfsLockHeldForTest)
+	ch.ResetStartTaskRestoreFailuresForTest()
+	t.Cleanup(ch.ResetStartTaskRestoreFailuresForTest)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	var probeCalls int
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{
+		lockProbe: func(string) (ch.OFDLockProbeResultForTest, error) {
+			probeCalls++
+			return ch.OFDLockProbeErrorForTest, errors.New("synthetic syscall error (EBADF)")
+		},
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("StartTask (restore) with lock-probe syscall error: expected error, got nil")
+	}
+
+	msg := err.Error()
+	mustContainTest(t, "probe-error stage", msg, "stage=wake_rootfs_lock_wait")
+	mustContainTest(t, "probe-error cause", msg, "synthetic syscall error (EBADF)")
+	mustContainTest(t, "probe-error attempt", msg, "probe error on attempt 1")
+
+	// On unexpected error the loop bails after ONE attempt — no
+	// retries, no sleep.
+	if probeCalls != 1 {
+		t.Errorf("on ofdLockProbeError the loop must abort after 1 attempt; got %d", probeCalls)
+	}
+
+	// wake_rootfs_lock_held_total counter still bumps (the error is
+	// a budget-exhaustion proxy — we couldn't acquire, so the
+	// observability surface is the same).
+	if got := ch.WakeRootfsLockHeldTotal(); got != 1 {
+		t.Errorf("wake_rootfs_lock_held_total: got %d, want 1", got)
+	}
+}
+
+// TestRestoreFailures_WakeRootfsLockWait_PromExporterRendersCounter
+// pins the metric-exporter wiring: a non-zero
+// `wake_rootfs_lock_held_total` must surface as a Prometheus
+// counter sample in the textfile snapshot. Mirrors the
+// destroy_task_lock_held_total render contract.
+func TestRestoreFailures_WakeRootfsLockWait_PromExporterRendersCounter(t *testing.T) {
+	ch.ResetWakeRootfsLockHeldForTest()
+	t.Cleanup(ch.ResetWakeRootfsLockHeldForTest)
+
+	// Drive the counter directly via the budget-exhaust path on a
+	// minimal fixture. We don't need a full StartTask round-trip —
+	// the renderer just reads WakeRootfsLockHeldTotal().
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	prevA, prevI := ch.SetWakeRootfsLockWaitForTest(2, time.Millisecond)
+	t.Cleanup(func() { ch.SetWakeRootfsLockWaitForTest(prevA, prevI) })
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{
+		lockProbe: func(string) (ch.OFDLockProbeResultForTest, error) {
+			return ch.OFDLockProbeBusyForTest, nil
+		},
+	})
+
+	cfg := validRestoreConfig(staged)
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+	_, _, _ = p.StartTask(taskCfg)
+
+	if got := ch.WakeRootfsLockHeldTotal(); got != 1 {
+		t.Fatalf("wake_rootfs_lock_held_total: got %d, want 1 (setup failed)", got)
+	}
+
+	out := ch.RenderDriverMetricsPromForTest()
+	mustContainTest(t, "prom render", out,
+		"# TYPE nomad_driver_ch_wake_rootfs_lock_held_total counter")
+	mustContainTest(t, "prom render", out,
+		"nomad_driver_ch_wake_rootfs_lock_held_total 1")
 }
 
 // hclogNullForRestore is a small helper so the few tests that

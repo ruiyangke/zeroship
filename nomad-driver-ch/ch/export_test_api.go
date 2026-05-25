@@ -440,6 +440,7 @@ const (
 	StageSymlinkSnapshotArtifactForTest = stageSymlinkSnapshotArtifact
 	StageRootfsSourceMissingForTest     = stageRootfsSourceMissing
 	StageStageRootfsForTest             = stageStageRootfs
+	StageWakeRootfsLockWaitForTest      = stageWakeRootfsLockWait
 	StagePrecreateRuntimeFileForTest    = stagePrecreateRuntimeFile
 	StageTapSetupForTest                = stageTapSetup
 	StageRestoreSpawnForTest            = stageRestoreSpawn
@@ -447,6 +448,19 @@ const (
 	StageResumeForTest                  = stageResume
 	StagePersistStateForTest            = stagePersistState
 )
+
+// WakeRootfsLockWaitAttemptsForTest exposes the wake-side OFD-lock-
+// wait poll budget so tests can pin the "50x100ms" invariant without
+// re-deriving the constants. T-8b-driver-v21.
+func WakeRootfsLockWaitAttemptsForTest() int {
+	return wakeRootfsLockWaitAttempts
+}
+
+// WakeRootfsLockWaitIntervalForTest exposes the wake-side OFD-lock-
+// wait poll cadence so tests can pin the budget shape. T-8b-driver-v21.
+func WakeRootfsLockWaitIntervalForTest() time.Duration {
+	return wakeRootfsLockWaitInterval
+}
 
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing

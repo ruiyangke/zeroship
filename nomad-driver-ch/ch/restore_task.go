@@ -154,6 +154,31 @@ const (
 	// runtime_dir.
 	stageStageRootfs = "stage_rootfs"
 
+	// stageWakeRootfsLockWait: after the rootfs is materialised into
+	// runDir (hardlink — shares inode + locks with the source alloc's
+	// rootfs.img) but BEFORE CH `--restore` spawns, the driver polls
+	// F_OFD_SETLK acquire on the rootfs path until the source alloc's
+	// CH process releases its OFD write lock (or the budget exhausts).
+	//
+	// T-8b-stress-r9-retry-6 (driver v21): c=4 cluster smoke saw 8/8
+	// CREATE + 8/8 SNAPSHOT but 0/8 WAKE, all failing at stage=resume
+	// with verbatim CH stderr `Can't get Write lock for .../rootfs.img
+	// as there is already a ExclusiveWrite lock` followed by `VM
+	// Restore failed: LockingError(DiskLockError(... AlreadyLocked
+	// ...))`. CH then returned HTTP 500 on vm.resume because the
+	// restore never happened. Root cause: kernel-deferred `__fput` on
+	// the source alloc's CH process hadn't run yet — the OFD write
+	// lock attributed to that struct file persisted across the wake
+	// alloc's hardlink + spawn. This stage closes the window with the
+	// destroy-side r5-A pattern flipped to wake: wait for the lock to
+	// become acquirable before forking CH.
+	//
+	// Budget: 50 × 100ms = 5s wall, mirroring r5-A. Finer cadence than
+	// r5-A's 25 × 200ms because the source-side `__fput` typically
+	// completes sub-100ms once destroy returns (we don't want to
+	// over-sleep past the kernel grant).
+	stageWakeRootfsLockWait = "wake_rootfs_lock_wait"
+
 	// stagePrecreateRuntimeFile: pre-creation of serial.file /
 	// console.file in runDir failed (CH `--restore` opens these
 	// without O_CREAT; pre-creation is required, see C-7-LT-9).
@@ -281,6 +306,133 @@ func SetAPISocketPollForTest(timeout, interval time.Duration) (time.Duration, ti
 		defaultAPISocketPollInterval = interval
 	}
 	return prevT, prevI
+}
+
+// T-8b-stress-r9-retry-6 (driver v21): wake-side OFD-lock-probe
+// budget for `stage_wake_rootfs_lock_wait`. After the rootfs is
+// hardlinked into runDir but before CH `--restore` spawns, the driver
+// must wait for the source alloc's CH process to release its OFD
+// write lock on rootfs.img — otherwise CH errors at restore time
+// with `Can't get Write lock ... as there is already a ExclusiveWrite
+// lock` and the resume RPC returns HTTP 500.
+//
+// Budget: 50 × 100ms = 5s wall. Same total ceiling as the destroy-
+// side r5-A probe (`destroyLockPollAttempts × destroyLockPollInterval`
+// in stop_task.go), with a finer cadence (100ms vs 200ms) because
+// the source-side `__fput` typically completes sub-100ms once the
+// source destroy returns — finer cadence picks the lock up sooner
+// without burning extra syscalls (each F_OFD_SETLK is ~10 µs).
+//
+// Var (not const) so SetWakeRootfsLockWaitForTest can shorten them
+// for the test suite.
+var (
+	wakeRootfsLockWaitAttempts = 50
+	wakeRootfsLockWaitInterval = 100 * time.Millisecond
+)
+
+// SetWakeRootfsLockWaitForTest overrides the wake-side OFD-lock-probe
+// poll budget so tests don't sleep 5s. Returns the previous
+// (attempts, interval) pair so the caller can restore them on
+// cleanup. Mirrors SetDestroyLockPollForTest in stop_task.go.
+func SetWakeRootfsLockWaitForTest(attempts int, interval time.Duration) (int, time.Duration) {
+	prevA := wakeRootfsLockWaitAttempts
+	prevI := wakeRootfsLockWaitInterval
+	wakeRootfsLockWaitAttempts = attempts
+	wakeRootfsLockWaitInterval = interval
+	return prevA, prevI
+}
+
+// pollWaitForRootfsLockReleased polls F_OFD_SETLK acquire on the
+// wake-path rootfs.img until the source alloc's CH process has
+// released its OFD write lock, or the budget exhausts.
+//
+// Returns nil on observed acquire (or file-gone — same semantics as
+// the destroy-side `pollAcquireOFDLock`: if the file isn't there,
+// no lock is possible, treat as success). Returns a descriptive
+// error on budget exhaustion or on an unexpected syscall error
+// (anything other than EAGAIN/EACCES from F_OFD_SETLK).
+//
+// Reuses the package-shared `tryAcquireOFDLockFn` seam in
+// stop_task.go so tests drive both paths with the same canned-
+// outcome stub; only the budget (50 × 100ms vs the destroy-side's
+// 25 × 200ms) and the sleep seam (sleepForWakeRootfsLockPoll, this
+// file) differ. Per the v21 mandate's r5-A-pattern note: "check if
+// it can be reused / generalized" — yes, the syscall-touching helper
+// is shared; only the loop bound + counter differ.
+//
+// On budget exhaustion the caller (startTaskRestoreBranch) bumps
+// `nomad_driver_ch_wake_rootfs_lock_held_total` AND
+// `nomad_driver_ch_start_task_restore_failures_total{stage=
+// "wake_rootfs_lock_wait"}` (the latter via the standard
+// restoreErrorf path), then returns the error to Nomad. Unlike the
+// destroy-side r5-A (which proceeds on budget exhaust to avoid a
+// destroy-loop), the wake side MUST surface the error: spawning CH
+// anyway would just hit the original `AlreadyLocked` failure with
+// no diagnostic improvement. The 5s wait + clear stage-labelled
+// error is strictly better than the v20 generic `stage=resume`
+// failure.
+func pollWaitForRootfsLockReleased(path string) error {
+	if path == "" {
+		return errors.New("ch: pollWaitForRootfsLockReleased: empty path")
+	}
+	attempts := wakeRootfsLockWaitAttempts
+	interval := wakeRootfsLockWaitInterval
+	for attempt := 0; attempt < attempts; attempt++ {
+		result, err := tryAcquireOFDLockFn(path)
+		switch result {
+		case ofdLockProbeAcquired:
+			// Source-side `__fput` ran (or never had to). We held the
+			// lock briefly and released it — the next CH `--restore`
+			// spawn will acquire it cleanly. If `err != nil` it's an
+			// unlock-failed edge case the defer close already handles
+			// (and the destroy-side pollAcquireOFDLock treats it as
+			// success too — see realTryAcquireOFDLock comments).
+			return nil
+		case ofdLockProbeFileGone:
+			// File doesn't exist — no lock possible. This should be
+			// impossible on the wake path (stageRootfsForRestore JUST
+			// created the file two lines above the caller) but we
+			// treat it as success for symmetry with the destroy-side
+			// helper: the lock state we cared about is moot.
+			return nil
+		case ofdLockProbeError:
+			return fmt.Errorf("probe error on attempt %d: %w", attempt+1, err)
+		case ofdLockProbeBusy:
+			// Expected during the source-side deferred-__fput window.
+			// Sleep + retry.
+		}
+		if attempt+1 < attempts {
+			sleepForWakeRootfsLockPoll(interval)
+		}
+	}
+	return fmt.Errorf("rootfs.img lock acquisition budget exhausted (%dx%v); source alloc's CH process has not released its OFD write lock",
+		attempts, interval)
+}
+
+// sleepForWakeRootfsLockPoll is the package-level seam tests swap so
+// the wake-path OFD-lock probe loop doesn't add real wall time.
+// Default is time.Sleep — production callers block while the
+// source-side kernel `__fput` workqueue catches up.
+//
+// Distinct from `sleepForOFDLockPoll` in stop_task.go so the two
+// poll loops can be driven independently from tests (a single shared
+// seam would bleed test state between the destroy-side and wake-side
+// test suites). Mirrors the per-loop seam pattern v15 r3-B and r4-A
+// already established.
+var sleepForWakeRootfsLockPoll = func(d time.Duration) {
+	time.Sleep(d)
+}
+
+// SetSleepForWakeRootfsLockPollForTest swaps the wake-path OFD-lock
+// sleep seam. Returns the previous fn so the caller can restore it
+// on cleanup. Tests typically install a no-op so the poll loop spins
+// through its budget instantly rather than waiting real wall time.
+func SetSleepForWakeRootfsLockPollForTest(fn func(d time.Duration)) func(d time.Duration) {
+	prev := sleepForWakeRootfsLockPoll
+	if fn != nil {
+		sleepForWakeRootfsLockPoll = fn
+	}
+	return prev
 }
 
 // pollAPISocketFn is the seam tests swap to skip the real poll. The
@@ -679,6 +831,32 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 	rootfsDst := filepath.Join(runDir, chRootfsName)
 	if err := stageRootfsForRestore(driverConfig.RootfsSource, rootfsDst); err != nil {
 		return nil, nil, restoreErrorf(stageStageRootfs, "stage rootfs %s -> %s: %v", driverConfig.RootfsSource, rootfsDst, err)
+	}
+
+	// T-8b-stress-r9-retry-6 (driver v21): wake-side OFD-lock-wait
+	// gate. The hardlink stageRootfsForRestore just created shares
+	// the inode + kernel-attributed OFD locks with the source alloc's
+	// rootfs.img. The source alloc's CH process may not have released
+	// its exclusive write lock yet (kernel-deferred `__fput` after
+	// the last close lags reap by tens to hundreds of ms on a busy
+	// host). If we spawn CH `--restore` now, CH errors with
+	// `Can't get Write lock for .../rootfs.img as there is already a
+	// ExclusiveWrite lock` and the resume RPC returns HTTP 500 — the
+	// exact wedge stress-r9-retry-6 caught at c=4 (0/8 WAKE).
+	//
+	// Mirrors the destroy-side r5-A pattern (stop_task.go's
+	// pollAcquireOFDLock + waitForOFDLockRelease): try to acquire
+	// F_OFD_SETLK F_WRLCK on the rootfs path; success means the
+	// source-side struct file has been closed and `__fput` ran. On
+	// budget exhaustion (5s wall), bump the labelled counter +
+	// surface stage=wake_rootfs_lock_wait to Nomad — spawning CH
+	// anyway would just hit the same AlreadyLocked with no
+	// diagnostic improvement.
+	if err := pollWaitForRootfsLockReleased(rootfsDst); err != nil {
+		incWakeRootfsLockHeld()
+		return nil, nil, restoreErrorf(stageWakeRootfsLockWait,
+			"%v (path=%s, wake_rootfs_lock_held_total=%d)",
+			err, rootfsDst, WakeRootfsLockHeldTotal())
 	}
 
 	// C-7-LT-9 (smoke-r19): pre-create each runtime file the rewriter
