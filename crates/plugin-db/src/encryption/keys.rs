@@ -40,6 +40,7 @@ use std::collections::HashMap;
 
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use super::aead::AeadKey;
 use crate::error::DbError;
@@ -146,7 +147,7 @@ impl KeyStore {
                 return Ok(k.clone());
             }
         }
-        let root = match &self.sourcing {
+        let root = Zeroizing::new(match &self.sourcing {
             KeySource::EnvVar => env_lookup_root(key_id)?,
             KeySource::PgAdminTable(pool) => {
                 // PG-prod path: call the SECURITY DEFINER getter. NULL
@@ -159,7 +160,7 @@ impl KeyStore {
                     Err(_) => env_lookup_root(key_id)?,
                 }
             }
-        };
+        });
         let key = derive_key(&root, app_id)?;
         self.cache.borrow_mut().insert(
             (app_id.to_string(), key_id.to_string()),
@@ -175,16 +176,16 @@ impl KeyStore {
 /// (`openssl rand -hex 32`) in the SDK error surface.
 fn env_lookup_root(key_id: &str) -> Result<[u8; 32], DbError> {
     let env_name = format!("ZEROSHIP_COLUMN_KEY_{}", key_id.to_uppercase());
-    let hex = std::env::var(&env_name).map_err(|_| DbError::Configuration {
+    let hex = Zeroizing::new(std::env::var(&env_name).map_err(|_| DbError::Configuration {
         code: "column_key_not_configured",
         message: format!("Column key '{key_id}' not configured (set {env_name})"),
         hint: Some("Generate via: openssl rand -hex 32".to_string()),
-    })?;
-    let bytes = hex_decode(&hex).map_err(|e| DbError::Configuration {
+    })?);
+    let bytes = Zeroizing::new(hex_decode(&hex).map_err(|e| DbError::Configuration {
         code: "column_key_not_configured",
         message: format!("{env_name}: hex decode failed: {e}"),
         hint: Some("Value must be 64 hex characters (32 bytes). Generate via: openssl rand -hex 32".to_string()),
-    })?;
+    })?);
     if bytes.len() != 32 {
         return Err(DbError::Configuration {
             code: "column_key_not_configured",
@@ -283,8 +284,8 @@ async fn pg_admin_lookup_root(
     // for type mismatches; either way we treat the row as "no key
     // present" and let the caller fall through to env-var sourcing.
     // `Row::get` would panic on NULL.
-    let decoded: Vec<u8> = match row.try_get::<_, Vec<u8>>(0) {
-        Ok(bytes) => bytes,
+    let decoded = match row.try_get::<_, Vec<u8>>(0) {
+        Ok(bytes) => Zeroizing::new(bytes),
         Err(_) => return Ok(None),
     };
     if decoded.len() != 32 {

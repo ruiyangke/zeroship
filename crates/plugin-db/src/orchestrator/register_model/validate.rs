@@ -161,3 +161,99 @@ fn build_validation_refused_envelope(
     })
     .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingAuditWriter {
+        statuses: RefCell<Vec<String>>,
+        kinds: RefCell<Vec<String>>,
+    }
+
+    impl crate::backend::AuditWriter for RecordingAuditWriter {
+        async fn ensure_audit_table(&self, _app_id: &str) -> Result<(), crate::error::DbError> {
+            Ok(())
+        }
+
+        async fn next_schema_version(&self, _app_id: &str) -> Result<i32, crate::error::DbError> {
+            Ok(1)
+        }
+
+        async fn write_audit_row_returning_id(
+            &self,
+            _app_id: &str,
+            row: &crate::audit::AuditRow,
+        ) -> Result<i64, crate::error::DbError> {
+            self.statuses
+                .borrow_mut()
+                .push(row.status.as_sql().to_string());
+            self.kinds
+                .borrow_mut()
+                .push(row.change_kind.clone());
+            Ok(1)
+        }
+
+        async fn update_audit_status(
+            &self,
+            _app_id: &str,
+            _audit_id: i64,
+            _status: crate::audit::TerminalStatus,
+            _error_message: Option<&str>,
+        ) -> Result<bool, crate::error::DbError> {
+            Ok(true)
+        }
+    }
+
+    fn ctx(strictness: &str) -> RegisterContext {
+        RegisterContext {
+            app_id: "app_validate".to_string(),
+            deploy_id: "deploy_validate".to_string(),
+            schema_version: 7,
+            strictness: strictness.to_string(),
+            declared_indexes: Vec::new(),
+            collection: "posts".to_string(),
+            schema_json: json!({ "name": { "type": "string" } }),
+        }
+    }
+
+    fn destructive_plan() -> Plan {
+        Plan {
+            ops: vec![DiffOp {
+                collection: "posts".to_string(),
+                change_kind: crate::diff::ChangeKind::DropColumn,
+                class: crate::diff::ChangeClass::Destructive,
+                sql: None,
+                details: json!({}),
+                field: Some("legacy_score".to_string()),
+            }],
+        }
+    }
+
+    #[test]
+    fn lenient_validation_terminalises_refused_destructive_ops() {
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+        rt.block_on(async {
+            let backend = RecordingAuditWriter::default();
+            let approved = validate(&backend, &ctx("lenient"), destructive_plan())
+                .await
+                .expect("lenient deploy should not return a refusal envelope");
+
+            assert_eq!(approved.ops.len(), 1, "lenient keeps the op for apply-time skipping");
+            assert_eq!(
+                backend.statuses.borrow().as_slice(),
+                &["validation_refused".to_string()],
+                "lenient destructive ops must be written terminal, not left pending"
+            );
+            assert_eq!(
+                backend.kinds.borrow().as_slice(),
+                &["drop_column".to_string()]
+            );
+        });
+    }
+}

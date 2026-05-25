@@ -335,6 +335,30 @@ fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
         .as_str()
 }
 
+fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
+    let Some(stages) = pipeline.as_array() else {
+        return Vec::new();
+    };
+    let Some(group_val) = stages
+        .iter()
+        .find_map(|stage| stage.as_object().and_then(|obj| obj.get("$group")))
+    else {
+        return Vec::new();
+    };
+    let Some(group_obj) = group_val.as_object() else {
+        return Vec::new();
+    };
+    match group_obj.get("by") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(Value::as_str)
+            .map(ToString::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// **P9 PR 2** — `first_row_or_null` variant that, when `has_masked` is
 /// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
 /// walks the parsed value and replaces `__zsmask__` sentinels with
@@ -400,6 +424,33 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
+fn validate_unmask_projection(
+    select: Option<&Value>,
+    unmask_columns: &[String],
+) -> Result<(), DbError> {
+    if unmask_columns.is_empty() {
+        return Ok(());
+    }
+    let Some(Value::Array(arr)) = select else {
+        return Ok(());
+    };
+    if arr.is_empty() {
+        return Ok(());
+    }
+    if arr.iter().any(|v| v.as_str() == Some("id")) {
+        return Ok(());
+    }
+    Err(DbError::ValidationFailed {
+        code: "unmask_requires_id_projection",
+        message: "find: `opts.unmask` requires explicit `select` projections to include `id`"
+            .to_string(),
+        hint: Some(
+            "Add `id` to `opts.select` or drop the explicit projection when using `opts.unmask`."
+                .to_string(),
+        ),
+    })
+}
+
 /// Shared dispatch for `find`. Reads `limit`/`offset`/`orderBy`/
 /// `select`/`unmask`/`actor` out of `opts`. The per-query unmask hint
 /// (P5.5 PR 7) honours an upfront authorisation fence — a single
@@ -437,6 +488,14 @@ pub(crate) fn dispatch_find<'s>(
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        if let Err(e) = validate_unmask_projection(select.as_ref(), &unmask_columns) {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
+
         // **P5.5 PR 7** — upfront auth fence for the unmask hint.
         if !unmask_columns.is_empty() {
             if let Err(e) = crate::crud::unmask::authorize_query_hint(
@@ -497,6 +556,8 @@ pub(crate) fn dispatch_find<'s>(
                     rows,
                     read_pipeline::ApplyOptions {
                         unmask_columns: &unmask_columns,
+                        schema_field_scope: read_pipeline::SchemaFieldScope::All,
+                        ..read_pipeline::ApplyOptions::default()
                     },
                 )
                 .await
@@ -1450,6 +1511,7 @@ pub(crate) fn dispatch_aggregate<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let app = app_id.to_string();
     let coll = collection.to_string();
+    let group_fields = aggregate_group_fields(&pipeline);
     let built = query::build_aggregate_with_soft_delete_with_dialect(
         app_id,
         collection,
@@ -1468,7 +1530,13 @@ pub(crate) fn dispatch_aggregate<'s>(
                 &app,
                 &coll,
                 rows,
-                read_pipeline::ApplyOptions::default(),
+                read_pipeline::ApplyOptions {
+                    unmask_columns: &[],
+                    schema_field_scope: read_pipeline::SchemaFieldScope::Only(
+                        group_fields.as_slice(),
+                    ),
+                    ..read_pipeline::ApplyOptions::default()
+                },
             )
             .await
         },
@@ -1506,12 +1574,15 @@ pub(crate) fn dispatch_distinct<'s>(
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let app = app_id.to_string();
     let coll = collection.to_string();
+    let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+    let distinct_reads_masked_sibling = query::column_is_masked(field, schema_hint.as_ref());
     let built = query::build_distinct_with_soft_delete_with_dialect(
         app_id,
         collection,
         field,
         &filter,
         filter_soft_deleted,
+        schema_hint.as_ref(),
         current_sql_dialect(),
     );
 
@@ -1525,7 +1596,11 @@ pub(crate) fn dispatch_distinct<'s>(
                 &app,
                 &coll,
                 rows,
-                read_pipeline::ApplyOptions::default(),
+                read_pipeline::ApplyOptions {
+                    apply_decrypt: !distinct_reads_masked_sibling,
+                    wrap_masked: false,
+                    ..read_pipeline::ApplyOptions::default()
+                },
             )
             .await
         },
@@ -2518,5 +2593,35 @@ mod tests {
 
         assert_eq!(filter["$and"][0]["active"]["$in"], serde_json::json!([1, 0]));
         assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
+    }
+
+    #[test]
+    fn validate_unmask_projection_rejects_explicit_select_without_id() {
+        let err = validate_unmask_projection(
+            Some(&serde_json::json!(["ssn", "email"])),
+            &["ssn".to_string()],
+        )
+        .expect_err("explicit unmask projection without id must be refused");
+
+        match err {
+            DbError::ValidationFailed { code, message, .. } => {
+                assert_eq!(code, "unmask_requires_id_projection");
+                assert!(
+                    message.contains("include `id`"),
+                    "error should explain the missing id requirement: {message}"
+                );
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_unmask_projection_accepts_implicit_or_id_inclusive_select() {
+        validate_unmask_projection(None, &["ssn".to_string()]).expect("implicit select ok");
+        validate_unmask_projection(
+            Some(&serde_json::json!(["id", "ssn"])),
+            &["ssn".to_string()],
+        )
+        .expect("id-inclusive projection ok");
     }
 }

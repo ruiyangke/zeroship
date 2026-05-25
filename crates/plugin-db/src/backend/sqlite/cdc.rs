@@ -145,7 +145,7 @@ pub(crate) struct PendingEvent {
     /// SQLite's stable per-row identifier. For an UPDATE we capture the
     /// new rowid (the post-image — same convention as the WAL consumer
     /// emits in [`crate::wal_consumer::emit_local`]).
-    pub(crate) pk: Option<i64>,
+    pub(crate) pk: Option<String>,
     /// Positional values for the new tuple (INSERT / UPDATE). `None`
     /// for DELETE.
     pub(crate) new_values: Option<Vec<Option<String>>>,
@@ -289,7 +289,7 @@ fn preupdate_callback(
             op: ChangeOp::Insert,
             db_name: db_name.to_string(),
             table: table.to_string(),
-            pk: Some(new_acc.get_new_row_id()),
+            pk: Some(new_acc.get_new_row_id().to_string()),
             new_values: Some(materialise_new(new_acc)),
             old_values: None,
         },
@@ -297,7 +297,7 @@ fn preupdate_callback(
             op: ChangeOp::Delete,
             db_name: db_name.to_string(),
             table: table.to_string(),
-            pk: Some(old_acc.get_old_row_id()),
+            pk: Some(old_acc.get_old_row_id().to_string()),
             new_values: None,
             old_values: Some(materialise_old(old_acc)),
         },
@@ -308,7 +308,7 @@ fn preupdate_callback(
             op: ChangeOp::Update,
             db_name: db_name.to_string(),
             table: table.to_string(),
-            pk: Some(new_value_accessor.get_new_row_id()),
+            pk: Some(new_value_accessor.get_new_row_id().to_string()),
             new_values: Some(materialise_new(new_value_accessor)),
             old_values: Some(materialise_old(old_value_accessor)),
         },
@@ -634,11 +634,17 @@ async fn publisher_loop(
                 ChangeOp::Delete => Vec::new(),
             };
 
+            let pk = new_tuple
+                .get("id")
+                .cloned()
+                .or_else(|| old_tuple.as_ref().and_then(|tuple| tuple.get("id").cloned()))
+                .or(pending.pk);
+
             let event = ChangeEvent {
                 app_id: pending.db_name,
                 collection: pending.table,
                 op: pending.op,
-                pk: pending.pk,
+                pk,
                 changed_columns,
                 new_tuple,
                 old_tuple,

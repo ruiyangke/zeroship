@@ -98,6 +98,40 @@ pub(crate) fn vec_table_name(collection: &str, column: &str) -> String {
     format!("{collection}__vec_{column}")
 }
 
+/// Build the vec0 nearest-neighbour search SQL.
+///
+/// When the cached schema declares masked columns, the base-table
+/// projection expands away from `t.*` so masked fields read from the
+/// `<col>_masked` sibling under their logical output name.
+pub(crate) fn build_vector_search_sql(
+    app_id: &str,
+    collection: &str,
+    column: &str,
+    query_hex: &str,
+    k: usize,
+    where_expr: &str,
+    schema_hint: Option<&serde_json::Value>,
+) -> String {
+    let qschema = quote_ident(app_id);
+    let qcoll = quote_ident(collection);
+    let qvtab = quote_ident(&vec_table_name(collection, column));
+    let qcol = quote_ident(column);
+    let select_expr =
+        crate::query::build_masked_aware_select_expr_for_table_alias(schema_hint, "t");
+    let extra_filter = if where_expr.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {where_expr}")
+    };
+    format!(
+        "SELECT {select_expr}, v.distance AS _distance \
+         FROM {qschema}.{qcoll} t \
+         JOIN {qschema}.{qvtab} v ON t.rowid = v.rowid \
+         WHERE v.{qcol} MATCH {query_hex} AND k = {k}{extra_filter} \
+         ORDER BY v.distance"
+    )
+}
+
 /// Build the `CREATE VIRTUAL TABLE IF NOT EXISTS … USING vec0(…)` DDL.
 ///
 /// Shape:
@@ -333,6 +367,34 @@ mod tests {
         assert!(
             sql.contains("INSERT INTO \"docs__vec_embedding\""),
             "trigger body inserts new vector: {sql}"
+        );
+    }
+
+    #[test]
+    fn build_vector_search_sql_reads_masked_sibling_when_schema_cached() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "embedding": { "type": "vector" }
+        });
+        let sql = build_vector_search_sql(
+            "app1",
+            "users",
+            "embedding",
+            "x'0011'",
+            5,
+            "",
+            Some(&schema),
+        );
+        assert!(
+            !sql.starts_with("SELECT t.*"),
+            "vector search must not use t.* when masked columns exist: {sql}"
+        );
+        assert!(
+            sql.contains(r#""t"."ssn_masked" AS "ssn""#),
+            "vector search must read the masked sibling: {sql}"
         );
     }
 

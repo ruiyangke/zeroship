@@ -91,10 +91,10 @@ pub struct ChangeEvent {
     pub collection: String,
     /// Operation kind — `"insert"`, `"update"`, `"delete"`.
     pub op: ChangeOp,
-    /// Primary key of the affected row, if known. Today this is the
-    /// integer surrogate id (BIGINT IDENTITY); typed_id support is
-    /// deferred (open question 3 in the proposal).
-    pub pk: Option<i64>,
+    /// Logical row id of the affected row, if known. This is the
+    /// public `id` column serialized as text so typed ids and legacy
+    /// numeric ids share one wire shape.
+    pub pk: Option<String>,
     /// Columns the mutation touched. For INSERT this is "every
     /// declared column" — we only track the SET-side of UPDATE here.
     /// Empty for DELETE.
@@ -824,7 +824,7 @@ pub fn drop_app(app_id: Option<&str>) {
 ///
 /// The wire shape is:
 /// - `{"kind":"change", "op":"insert"|"update"|"delete",
-///    "collection":"...", "pk": 1|null, "columns":[...]}`
+///    "collection":"...", "pk":"usr_..."|null, "columns":[...]}`
 /// - `{"kind":"resync"}`
 /// - `{"kind":"closed"}`
 ///
@@ -865,7 +865,7 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
 // { "type": "zs.subscription.event",
 //   "handle": "<subscription_id>",
 //   "event": { "kind": "insert", "collection": "users",
-//              "pk": 42, "row": {...} } }
+//              "pk": "usr_42", "row": {...} } }
 // ```
 //
 // The intent is that a WS handler in JS owns a `Map<handle, ws_conn>`
@@ -932,12 +932,12 @@ pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
 mod tests {
     use super::*;
 
-    fn ev(app: &str, col: &str, op: ChangeOp, pk: Option<i64>) -> ChangeEvent {
+    fn ev(app: &str, col: &str, op: ChangeOp, pk: Option<&str>) -> ChangeEvent {
         ChangeEvent {
             app_id: app.to_string(),
             collection: col.to_string(),
             op,
-            pk,
+            pk: pk.map(str::to_string),
             changed_columns: vec![],
             new_tuple: HashMap::new(),
             old_tuple: None,
@@ -948,14 +948,14 @@ mod tests {
         app: &str,
         col: &str,
         op: ChangeOp,
-        pk: Option<i64>,
+        pk: Option<&str>,
         tuple: &[(&str, &str)],
     ) -> ChangeEvent {
         ChangeEvent {
             app_id: app.to_string(),
             collection: col.to_string(),
             op,
-            pk,
+            pk: pk.map(str::to_string),
             changed_columns: vec![],
             new_tuple: tuple
                 .iter()
@@ -969,21 +969,21 @@ mod tests {
     fn subscribe_and_publish_delivers_event() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
-        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         let msg = s.pop().expect("expected a message");
         let SubscriptionMessage::Change(c) = msg else {
             panic!("expected Change variant");
         };
         assert_eq!(c.collection, "messages");
         assert_eq!(c.op, ChangeOp::Insert);
-        assert_eq!(c.pk, Some(1));
+        assert_eq!(c.pk.as_deref(), Some("1"));
     }
 
     #[test]
     fn other_app_events_isolated() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
-        b.publish(&ev("b", "messages", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("b", "messages", ChangeOp::Insert, Some("1")));
         assert!(s.pop().is_none());
     }
 
@@ -991,7 +991,7 @@ mod tests {
     fn other_collection_events_isolated() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
-        b.publish(&ev("a", "channels", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("a", "channels", ChangeOp::Insert, Some("1")));
         assert!(s.pop().is_none());
     }
 
@@ -1000,7 +1000,7 @@ mod tests {
         let mut b = Broker::new();
         let s1 = b.subscribe("a", "messages");
         let s2 = b.subscribe("a", "messages");
-        b.publish(&ev("a", "messages", ChangeOp::Update, Some(7)));
+        b.publish(&ev("a", "messages", ChangeOp::Update, Some("7")));
         assert!(matches!(s1.pop(), Some(SubscriptionMessage::Change(_))));
         assert!(matches!(s2.pop(), Some(SubscriptionMessage::Change(_))));
     }
@@ -1009,9 +1009,9 @@ mod tests {
     fn delivers_insert_update_delete() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
-        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
-        b.publish(&ev("a", "messages", ChangeOp::Update, Some(1)));
-        b.publish(&ev("a", "messages", ChangeOp::Delete, Some(1)));
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
+        b.publish(&ev("a", "messages", ChangeOp::Update, Some("1")));
+        b.publish(&ev("a", "messages", ChangeOp::Delete, Some("1")));
         let ops: Vec<_> = (0..3)
             .filter_map(|_| match s.pop() {
                 Some(SubscriptionMessage::Change(c)) => Some(c.op),
@@ -1025,7 +1025,7 @@ mod tests {
     fn close_terminates_iterator() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
-        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         s.close();
         // Pending change is preserved until drained.
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Change(_))));
@@ -1040,7 +1040,7 @@ mod tests {
         let s = b.subscribe("a", "messages");
         assert_eq!(b.subscription_count(), 1);
         s.close();
-        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         assert_eq!(b.subscription_count(), 0);
     }
 
@@ -1052,19 +1052,19 @@ mod tests {
             "a",
             "m",
             ChangeOp::Insert,
-            Some(1),
+            Some("1"),
         ))));
         s.push(SubscriptionMessage::Change(Rc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
-            Some(2),
+            Some("2"),
         ))));
         s.push(SubscriptionMessage::Change(Rc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
-            Some(3),
+            Some("3"),
         )))); // overflow
         // Queue now contains a single Resync.
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Resync)));
@@ -1077,7 +1077,7 @@ mod tests {
             app_id: "a".into(),
             collection: "messages".into(),
             op: ChangeOp::Insert,
-            pk: Some(7),
+            pk: Some("7".to_string()),
             changed_columns: vec!["title".into(), "body".into()],
             new_tuple: HashMap::new(),
             old_tuple: None,
@@ -1086,7 +1086,7 @@ mod tests {
         assert_eq!(v["kind"], "change");
         assert_eq!(v["op"], "insert");
         assert_eq!(v["collection"], "messages");
-        assert_eq!(v["pk"], 7);
+        assert_eq!(v["pk"], "7");
         assert_eq!(v["columns"][0], "title");
     }
 
@@ -1119,7 +1119,7 @@ mod tests {
             "a",
             "messages",
             ChangeOp::Insert,
-            Some(1),
+            Some("1"),
             &[("userId", "42"), ("body", "hi")],
         ));
         // Non-matching event → filtered.
@@ -1127,12 +1127,12 @@ mod tests {
             "a",
             "messages",
             ChangeOp::Insert,
-            Some(2),
+            Some("2"),
             &[("userId", "99"), ("body", "nope")],
         ));
 
         match s.pop() {
-            Some(SubscriptionMessage::Change(c)) => assert_eq!(c.pk, Some(1)),
+            Some(SubscriptionMessage::Change(c)) => assert_eq!(c.pk.as_deref(), Some("1")),
             other => panic!("expected delivered Change, got {other:?}"),
         }
         assert!(
@@ -1153,7 +1153,7 @@ mod tests {
             app_id: "a".into(),
             collection: "messages".into(),
             op: ChangeOp::Update,
-            pk: Some(1),
+            pk: Some("1".to_string()),
             changed_columns: vec!["userId".into()],
             new_tuple: [("userId".to_string(), "99".to_string())].into(),
             old_tuple: Some([("userId".to_string(), "42".to_string())].into()),
@@ -1182,7 +1182,7 @@ mod tests {
             "a",
             "events",
             ChangeOp::Insert,
-            Some(1),
+            Some("1"),
             &[("createdAt", "1500")],
         ));
         // Below threshold → filtered.
@@ -1190,12 +1190,12 @@ mod tests {
             "a",
             "events",
             ChangeOp::Insert,
-            Some(2),
+            Some("2"),
             &[("createdAt", "500")],
         ));
         match s.pop() {
-            Some(SubscriptionMessage::Change(c)) => assert_eq!(c.pk, Some(1)),
-            other => panic!("expected pk=1, got {other:?}"),
+            Some(SubscriptionMessage::Change(c)) => assert_eq!(c.pk.as_deref(), Some("1")),
+            other => panic!("expected pk=\"1\", got {other:?}"),
         }
         assert!(s.pop().is_none());
     }
@@ -1214,7 +1214,7 @@ mod tests {
             "a",
             "messages",
             ChangeOp::Insert,
-            Some(99),
+            Some("99"),
             &[("a", "99"), ("b", "99")],
         ));
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Change(_))));
@@ -1231,7 +1231,7 @@ mod tests {
             app_id: "a".into(),
             collection: "messages".into(),
             op: ChangeOp::Insert,
-            pk: Some(1),
+            pk: Some("1".to_string()),
             changed_columns: vec![],
             new_tuple: [("userId".into(), "42".into())].into(),
             old_tuple: None,
@@ -1250,7 +1250,7 @@ mod tests {
             app_id: "a".into(),
             collection: "messages".into(),
             op: ChangeOp::Insert,
-            pk: Some(1),
+            pk: Some("1".to_string()),
             changed_columns: vec![],
             new_tuple: [("userId".into(), "42".into())].into(),
             old_tuple: None,
@@ -1269,7 +1269,7 @@ mod tests {
             "a",
             "messages",
             ChangeOp::Insert,
-            Some(1),
+            Some("1"),
             &[("userId", "anything")],
         ));
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Change(_))));
@@ -1286,7 +1286,7 @@ mod tests {
             app_id: "a".into(),
             collection: "messages".into(),
             op: ChangeOp::Insert,
-            pk: Some(7),
+            pk: Some("7".to_string()),
             changed_columns: vec!["userId".into(), "body".into()],
             new_tuple: tuple,
             old_tuple: None,
@@ -1297,7 +1297,7 @@ mod tests {
         assert_eq!(v["handle"], "sub_42");
         assert_eq!(v["event"]["kind"], "insert");
         assert_eq!(v["event"]["collection"], "messages");
-        assert_eq!(v["event"]["pk"], 7);
+        assert_eq!(v["event"]["pk"], "7");
         assert_eq!(v["event"]["row"]["userId"], "42");
     }
 
@@ -1329,7 +1329,7 @@ mod tests {
             "app",
             "messages",
             ChangeOp::Insert,
-            Some(10),
+            Some("10"),
             &[("userId", "1"), ("body", "hi alice")],
         ));
 
@@ -1372,7 +1372,7 @@ mod tests {
         // Close the only subscriber → publish prunes the bucket →
         // has_subscribers returns false.
         s.close();
-        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         assert!(!b.has_subscribers("a", "messages"));
     }
 
@@ -1494,7 +1494,7 @@ mod tests {
         let s = b.subscribe("a", "messages");
         assert!(b.has_subscribers("a", "messages"));
         s.close();
-        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         assert!(!b.has_subscribers("a", "messages"));
         // The per-app bucket was emptied — probing other collections on
         // the same app also returns false (no stale inner HashMap).
@@ -1540,7 +1540,7 @@ mod tests {
         let s = b.subscribe("a", "messages");
         assert_eq!(b.by_key.len(), 1);
         s.close();
-        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some("1")));
         // Per-app entry collapsed away — no leaked inner HashMap.
         assert_eq!(b.by_key.len(), 0);
     }
@@ -1693,7 +1693,7 @@ mod tests {
             app_id: "app".into(),
             collection: "users".into(),
             op: ChangeOp::Insert,
-            pk: Some(42),
+            pk: Some("42".to_string()),
             changed_columns: vec!["id".into(), "ssn".into(), "ssn_masked".into()],
             new_tuple: tuple,
             old_tuple: None,

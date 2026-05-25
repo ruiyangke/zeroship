@@ -960,6 +960,55 @@ fn insert_publishes_via_preupdate_hook() {
 }
 
 #[test]
+fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_cdc")
+            .await
+            .expect("ensure_app_schema");
+
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_cdc\".\"typed_items\" (\
+                     id TEXT PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE typed_items");
+
+        let sub = subscribe_local("app_cdc", "typed_items");
+        let typed_id = "usr_02HXSQLITECDCLOGICALPK";
+
+        backend
+            .pool_exec(
+                &format!(
+                    "INSERT INTO \"app_cdc\".\"typed_items\" (id, name) \
+                     VALUES ('{typed_id}', 'alice')"
+                ),
+                &[],
+            )
+            .await
+            .expect("INSERT typed_items");
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        assert_eq!(msgs.len(), 1, "expected 1 typed-id event; got {msgs:?}");
+        match &msgs[0] {
+            SubscriptionMessage::Change(ev) => {
+                assert_eq!(ev.op, ChangeOp::Insert);
+                assert_eq!(ev.pk.as_deref(), Some(typed_id));
+                assert_eq!(ev.new_tuple.get("id").map(String::as_str), Some(typed_id));
+            }
+            other => panic!("expected Change event, got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn update_publishes_change_event_with_pre_image() {
     run(async {
         let (backend, _dir) = fresh_backend();

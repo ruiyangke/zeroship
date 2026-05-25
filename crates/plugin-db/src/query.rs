@@ -2366,11 +2366,74 @@ fn compose_where_with_soft_delete(where_clause: &str, filter_soft_deleted: bool)
 /// for masked columns when `schema_hint` is `Some(_)`. Thin shim around
 /// [`build_masked_aware_select_expr_with_unmask`] for legacy callers
 /// that have no per-query unmask hint to thread through.
-fn build_masked_aware_select_expr(
+pub(crate) fn build_masked_aware_select_expr(
     select: Option<&Value>,
     schema_hint: Option<&Value>,
 ) -> String {
     build_masked_aware_select_expr_with_unmask(select, schema_hint, &[])
+}
+
+/// **P5.5 PR 8** — compose the implicit `SELECT` list for a qualified
+/// table source (`t`, `src`, ...), accounting for masked columns in the
+/// cached schema.
+///
+/// This is the specialized-search sibling of
+/// [`build_masked_aware_select_expr`]. The search paths (`search`,
+/// `fts`, `near`) all read from a table alias (`t`) and append one
+/// synthetic engine column (`_distance`, `_rank`, `_distance_m`). When
+/// the cached schema declares any masked column, emitting `t.*` drifts
+/// back to the pre-P5.5 shape: the parent ciphertext/plaintext column
+/// rides out of SQL and only gets corrected later in the read pipeline.
+///
+/// Instead, when any masked column exists we expand to an explicit
+/// qualified list:
+/// - `t."id" AS "id"` first,
+/// - `t."<col>_masked" AS "<col>"` for masked columns,
+/// - `t."<col>" AS "<col>"` for non-masked columns.
+///
+/// When the schema cache is cold or the schema has no masked columns we
+/// preserve the compact `t.*` form for back-compat and readability.
+pub(crate) fn build_masked_aware_select_expr_for_table_alias(
+    schema_hint: Option<&Value>,
+    table_alias: &str,
+) -> String {
+    let qalias = quote_ident(table_alias);
+    let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) else {
+        return format!("{qalias}.*");
+    };
+    let any_masked = schema_obj.values().any(|def| {
+        def.get("mask")
+            .and_then(|m| m.as_object())
+            .and_then(|o| o.get("kind").and_then(|k| k.as_str()))
+            .map(|k| k != "none")
+            .unwrap_or(false)
+    });
+    if !any_masked {
+        return format!("{qalias}.*");
+    }
+
+    let mut parts: Vec<String> = Vec::with_capacity(schema_obj.len() + 1);
+    parts.push(format!(r#"{qalias}."id" AS "id""#));
+    for col in schema_obj.keys() {
+        if col == "id" {
+            continue;
+        }
+        if column_is_masked(col, schema_hint) {
+            let sibling = format!("{col}_masked");
+            parts.push(format!(
+                r#"{qalias}.{} AS {}"#,
+                quote_ident(&sibling),
+                quote_ident(col)
+            ));
+        } else {
+            parts.push(format!(
+                r#"{qalias}.{} AS {}"#,
+                quote_ident(col),
+                quote_ident(col)
+            ));
+        }
+    }
+    parts.join(", ")
 }
 
 /// **P5.5 PR 7** — compose the SELECT column-list expression, accounting
@@ -2471,7 +2534,7 @@ fn build_masked_aware_select_expr_with_unmask(
 /// `.mask({...})` entry on `schema_hint`? Returns `false` when the
 /// schema is missing, the column is absent from it, or the mask is the
 /// explicit opt-out (`kind: "none"`).
-fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
+pub(crate) fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
     let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) else {
         return false;
     };
@@ -3840,6 +3903,7 @@ pub fn build_distinct_with_soft_delete(
         field,
         filter,
         filter_soft_deleted,
+        None,
         SqlDialect::Postgres,
     )
 }
@@ -3851,6 +3915,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     field: &str,
     filter: &Value,
     filter_soft_deleted: bool,
+    schema_hint: Option<&Value>,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
@@ -3859,11 +3924,17 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
     let col = quote_ident(field);
+    let select_expr = if column_is_masked(field, schema_hint) {
+        let sibling = format!("{field}_masked");
+        format!("{} AS {col}", quote_ident(&sibling))
+    } else {
+        col.clone()
+    };
 
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where(filter, &mut params)?;
 
-    let mut sql = format!("SELECT DISTINCT {col} FROM {schema}.{table}");
+    let mut sql = format!("SELECT DISTINCT {select_expr} FROM {schema}.{table}");
     let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
     if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
@@ -3911,6 +3982,7 @@ pub(crate) fn build_vector_search(
     k: usize,
     metric: crate::backend::VectorMetric,
     filter: &Value,
+    schema_hint: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -3955,8 +4027,9 @@ pub(crate) fn build_vector_search(
 
     let where_clause = build_where(filter, &mut params)?;
 
+    let select_expr = build_masked_aware_select_expr(None, schema_hint);
     let mut sql = format!(
-        "SELECT *, {col} {op} $1::vector AS _distance FROM {schema}.{table}"
+        "SELECT {select_expr}, {col} {op} $1::vector AS _distance FROM {schema}.{table}"
     );
     if !where_clause.is_empty() {
         sql.push_str(" WHERE ");
@@ -4001,6 +4074,7 @@ pub(crate) fn build_fts_search(
     query: &str,
     filter: &Value,
     limit: Option<usize>,
+    schema_hint: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -4020,8 +4094,9 @@ pub(crate) fn build_fts_search(
 
     let where_clause = build_where(filter, &mut params)?;
 
+    let select_expr = build_masked_aware_select_expr(None, schema_hint);
     let mut sql = format!(
-        "SELECT *, ts_rank({fts_col}, plainto_tsquery('pg_catalog.english', $1)) AS _rank \
+        "SELECT {select_expr}, ts_rank({fts_col}, plainto_tsquery('pg_catalog.english', $1)) AS _rank \
          FROM {schema}.{table} \
          WHERE {fts_col} @@ plainto_tsquery('pg_catalog.english', $1)"
     );
@@ -4064,6 +4139,7 @@ pub(crate) fn build_spatial_near(
     radius_m: f64,
     filter: &Value,
     limit: Option<usize>,
+    schema_hint: Option<&Value>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -4086,8 +4162,9 @@ pub(crate) fn build_spatial_near(
 
     let where_clause = build_where(filter, &mut params)?;
 
+    let select_expr = build_masked_aware_select_expr(None, schema_hint);
     let mut sql = format!(
-        "SELECT *, ST_Distance({col}, ST_MakePoint($1, $2)::geography) AS _distance_m \
+        "SELECT {select_expr}, ST_Distance({col}, ST_MakePoint($1, $2)::geography) AS _distance_m \
          FROM {schema}.{table} \
          WHERE ST_DWithin({col}, ST_MakePoint($1, $2)::geography, $3)"
     );
@@ -5065,6 +5142,37 @@ mod tests {
         );
         assert!(q.sql.contains(r#"ORDER BY "role""#), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["true"]);
+    }
+
+    #[test]
+    fn distinct_on_masked_field_reads_masked_sibling() {
+        let schema = json!({
+            "email": {
+                "type": "string",
+                "mask": { "kind": "email", "classification": "pii" }
+            }
+        });
+        let q = build_distinct_with_soft_delete_with_dialect(
+            "app1",
+            "users",
+            "email",
+            &json!({}),
+            false,
+            Some(&schema),
+            SqlDialect::Postgres,
+        )
+        .expect("build distinct with schema");
+
+        assert!(
+            q.sql.starts_with(r#"SELECT DISTINCT "email_masked" AS "email" FROM "app1"."users""#),
+            "masked distinct must read the sibling column: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains(r#"SELECT DISTINCT "email" FROM"#),
+            "masked distinct must not read the parent column: {}",
+            q.sql
+        );
     }
 
     #[test]
@@ -9045,6 +9153,94 @@ mod tests {
         );
         assert!(bq.sql.contains("\"ssn_masked\" AS \"ssn\""));
         assert!(bq.sql.contains("\"id\""));
+    }
+
+    #[test]
+    fn vector_search_expands_masked_projection_when_schema_cached() {
+        let schema = serde_json::json!({
+            "ssn": { "type": "string",
+                     "mask": { "kind": "last4", "classification": "spi" } },
+            "embedding": { "type": "vector" },
+        });
+        let q = build_vector_search(
+            "app1",
+            "users",
+            "embedding",
+            &[0.1, 0.2],
+            5,
+            crate::backend::VectorMetric::Cosine,
+            &serde_json::json!({}),
+            Some(&schema),
+        )
+        .expect("vector search sql");
+        assert!(
+            !q.sql.starts_with("SELECT *"),
+            "vector search must not fall back to SELECT * when masked columns exist: {}",
+            q.sql,
+        );
+        assert!(
+            q.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            "vector search must read masked sibling: {}",
+            q.sql,
+        );
+    }
+
+    #[test]
+    fn fts_search_expands_masked_projection_when_schema_cached() {
+        let schema = serde_json::json!({
+            "ssn": { "type": "string",
+                     "mask": { "kind": "last4", "classification": "spi" } },
+            "bio": { "type": "string" },
+        });
+        let q = build_fts_search(
+            "app1",
+            "users",
+            "alice",
+            &serde_json::json!({}),
+            Some(10),
+            Some(&schema),
+        )
+        .expect("fts search sql");
+        assert!(
+            !q.sql.starts_with("SELECT *"),
+            "fts search must not fall back to SELECT * when masked columns exist: {}",
+            q.sql,
+        );
+        assert!(
+            q.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            "fts search must read masked sibling: {}",
+            q.sql,
+        );
+    }
+
+    #[test]
+    fn spatial_near_expands_masked_projection_when_schema_cached() {
+        let schema = serde_json::json!({
+            "ssn": { "type": "string",
+                     "mask": { "kind": "last4", "classification": "spi" } },
+            "location": { "type": "geoPoint" },
+        });
+        let q = build_spatial_near(
+            "app1",
+            "users",
+            "location",
+            crate::backend::GeoPoint { lat: 37.7, lng: -122.4 },
+            1000.0,
+            &serde_json::json!({}),
+            Some(10),
+            Some(&schema),
+        )
+        .expect("spatial search sql");
+        assert!(
+            !q.sql.starts_with("SELECT *"),
+            "spatial search must not fall back to SELECT * when masked columns exist: {}",
+            q.sql,
+        );
+        assert!(
+            q.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            "spatial search must read masked sibling: {}",
+            q.sql,
+        );
     }
 
     // ----------------------------------------------------------------

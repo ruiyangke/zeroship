@@ -763,7 +763,7 @@ mod tests {
             app_id: "app_t".into(),
             collection: collection.into(),
             op: ChangeOp::Insert,
-            pk: Some(1),
+            pk: Some("1".to_string()),
             changed_columns: Vec::new(),
             new_tuple: HashMap::new(),
             old_tuple: None,
