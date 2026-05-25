@@ -23,8 +23,8 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] node-crypto-native.md → 2026-05-05-node-crypto-native ADR
 
 ### SHIPPED — merged to main, no ADR (promote any reference-grade content, then archive)
-- [ ] nomad-driver-ch.md (merged dde08ca2; ops covered by runbooks/sandbox-nomad-ch.md)
-- [ ] sandbox-snapshot-restore.md (merged d1054adb)
+- [x] nomad-driver-ch.md (merged dde08ca2; ops covered by runbooks/sandbox-nomad-ch.md)
+- [x] sandbox-snapshot-restore.md (merged d1054adb)
 - [x] sqlite-pg-parity.md (merged; reference/sqlite-divergences.md exists)
 - [ ] sandbox-pg-state.md (feat/sandbox-pg merged)
 - [ ] sandbox-preview-urls.md (sandbox preview merged)
@@ -69,3 +69,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - 9 ADR-backed native-API proposals — archived to docs/archive/ + headers — 82adcefd (renames) + e8564b49 (headers)
 
 - sqlite-pg-parity.md — 2 divergences promoted + archived
+
+- sandbox-snapshot-restore.md + nomad-driver-ch.md — archived + runbook ops promotions (MemoryMaxMB, driver-behavior notes)
