@@ -424,6 +424,33 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
+fn validate_unmask_projection(
+    select: Option<&Value>,
+    unmask_columns: &[String],
+) -> Result<(), DbError> {
+    if unmask_columns.is_empty() {
+        return Ok(());
+    }
+    let Some(Value::Array(arr)) = select else {
+        return Ok(());
+    };
+    if arr.is_empty() {
+        return Ok(());
+    }
+    if arr.iter().any(|v| v.as_str() == Some("id")) {
+        return Ok(());
+    }
+    Err(DbError::ValidationFailed {
+        code: "unmask_requires_id_projection",
+        message: "find: `opts.unmask` requires explicit `select` projections to include `id`"
+            .to_string(),
+        hint: Some(
+            "Add `id` to `opts.select` or drop the explicit projection when using `opts.unmask`."
+                .to_string(),
+        ),
+    })
+}
+
 /// Shared dispatch for `find`. Reads `limit`/`offset`/`orderBy`/
 /// `select`/`unmask`/`actor` out of `opts`. The per-query unmask hint
 /// (P5.5 PR 7) honours an upfront authorisation fence — a single
@@ -461,6 +488,14 @@ pub(crate) fn dispatch_find<'s>(
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        if let Err(e) = validate_unmask_projection(select.as_ref(), &unmask_columns) {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
+
         // **P5.5 PR 7** — upfront auth fence for the unmask hint.
         if !unmask_columns.is_empty() {
             if let Err(e) = crate::crud::unmask::authorize_query_hint(
@@ -2549,5 +2584,35 @@ mod tests {
 
         assert_eq!(filter["$and"][0]["active"]["$in"], serde_json::json!([1, 0]));
         assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
+    }
+
+    #[test]
+    fn validate_unmask_projection_rejects_explicit_select_without_id() {
+        let err = validate_unmask_projection(
+            Some(&serde_json::json!(["ssn", "email"])),
+            &["ssn".to_string()],
+        )
+        .expect_err("explicit unmask projection without id must be refused");
+
+        match err {
+            DbError::ValidationFailed { code, message, .. } => {
+                assert_eq!(code, "unmask_requires_id_projection");
+                assert!(
+                    message.contains("include `id`"),
+                    "error should explain the missing id requirement: {message}"
+                );
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_unmask_projection_accepts_implicit_or_id_inclusive_select() {
+        validate_unmask_projection(None, &["ssn".to_string()]).expect("implicit select ok");
+        validate_unmask_projection(
+            Some(&serde_json::json!(["id", "ssn"])),
+            &["ssn".to_string()],
+        )
+        .expect("id-inclusive projection ok");
     }
 }
