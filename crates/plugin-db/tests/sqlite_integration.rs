@@ -3791,6 +3791,184 @@ const _procedures = { setup, upsertConflict };
     });
 }
 
+#[test]
+fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
+    let key_id = "i5_update_nested_version";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_I5_UPDATE_NESTED_VERSION",
+        &"1".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function seed(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+seed.config = { kind: "action" };
+
+async function nestedCasUpdate(_input, _ctx) {
+    return await env.db.collection(COLLECTION).update(
+        {
+            "$and": [
+                { id: "user_seed" },
+                { version: 1 }
+            ]
+        },
+        { name: "Mallory" },
+    );
+}
+nestedCasUpdate.config = { kind: "action" };
+
+const _procedures = { setup, seed, nestedCasUpdate };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        let seeded = dispatch_sqlite_runtime(&dir, &source, "seed");
+        let row = parity::extract_json(&seeded);
+        assert_eq!(
+            row.get("version").and_then(|v| v.as_i64()),
+            Some(1),
+            "seed row must start at version 1"
+        );
+
+        let (status, body) =
+            parity::dispatch_zs(&parity::sqlite_url(&dir), &source, "nestedCasUpdate");
+        assert_ne!(status, 200, "nested version CAS must reject, got {body}");
+        assert_eq!(
+            body.get("code").and_then(|v| v.as_str()),
+            Some("version_filter_must_be_top_level"),
+            "nested CAS rejection must carry the canonical code: {body}"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                r#"SELECT name, version FROM "default"."users" WHERE id = 'user_seed'"#,
+                &[],
+            )
+            .await
+            .expect("SELECT row after rejected nested CAS update");
+        assert_eq!(rows.len(), 1, "seed row must still exist");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("Alice"),
+            "failed nested CAS update must not rewrite the row"
+        );
+        assert_eq!(
+            rows[0][1].as_deref(),
+            Some("1"),
+            "failed nested CAS update must not auto-bump version"
+        );
+    });
+}
+
+#[test]
+fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
+    let key_id = "i5_update_many_nested_version";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_I5_UPDATE_MANY_NESTED_VERSION",
+        &"2".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = sqlite_runtime_upsert_source(
+            "users",
+            key_id,
+            r#"
+async function seed(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            ssn: "123-45-6789"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+seed.config = { kind: "action" };
+
+async function nestedCasUpdateMany(_input, _ctx) {
+    return await env.db.collection(COLLECTION).updateMany(
+        {
+            "$and": [
+                { id: "user_seed" },
+                { version: 1 }
+            ]
+        },
+        { name: "Mallory" },
+    );
+}
+nestedCasUpdateMany.config = { kind: "action" };
+
+const _procedures = { setup, seed, nestedCasUpdateMany };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+
+        let (status, body) =
+            parity::dispatch_zs(&parity::sqlite_url(&dir), &source, "nestedCasUpdateMany");
+        assert_ne!(status, 200, "nested version CAS must reject, got {body}");
+        assert_eq!(
+            body.get("code").and_then(|v| v.as_str()),
+            Some("version_filter_must_be_top_level"),
+            "nested CAS rejection must carry the canonical code: {body}"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                r#"SELECT name, version FROM "default"."users" WHERE id = 'user_seed'"#,
+                &[],
+            )
+            .await
+            .expect("SELECT row after rejected nested CAS updateMany");
+        assert_eq!(rows.len(), 1, "seed row must still exist");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("Alice"),
+            "failed nested CAS updateMany must not rewrite the row"
+        );
+        assert_eq!(
+            rows[0][1].as_deref(),
+            Some("1"),
+            "failed nested CAS updateMany must not auto-bump version"
+        );
+    });
+}
+
 /// **P5 PR 3 — gate #1 (SQLite half)**: round-trip an encrypted string
 /// column under Randomised mode. Insert a row with `ssn` declared
 /// `t.encrypted({ mode: "randomised" })`, read it back via the SQLite

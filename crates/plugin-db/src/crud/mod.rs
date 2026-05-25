@@ -771,7 +771,16 @@ pub(crate) fn dispatch_update_one<'s>(
         };
         // **P7 PR 4** — detect creator-supplied CAS version + reject
         // the unsupported "version filter without id" shape eagerly.
-        let cas_version = system_fields_pass::extract_cas_version(&filter);
+        let cas_version = match system_fields_pass::extract_cas_version(&filter, &coll) {
+            Ok(version) => version,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
+            }
+        };
         if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
             return OpResult::JsValue {
                 resolver,
@@ -939,7 +948,16 @@ pub(crate) fn dispatch_update_many<'s>(
                 };
             }
         };
-        let cas_version = system_fields_pass::extract_cas_version(&filter);
+        let cas_version = match system_fields_pass::extract_cas_version(&filter, &coll) {
+            Ok(version) => version,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
+            }
+        };
         if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
             return OpResult::JsValue {
                 resolver,
