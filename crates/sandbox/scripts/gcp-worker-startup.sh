@@ -356,8 +356,7 @@ client {
     retry_max      = 0
   }
   options = {
-    "driver.raw_exec.enable" = "1"
-    "user.blacklist"         = ""
+    "user.blacklist" = ""
   }
 }
 EOF
