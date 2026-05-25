@@ -8,6 +8,7 @@ import {
   RpcError,
   seedUser,
   subscribeTodos,
+  userExists,
   type Priority,
   type Todo,
   type User,
@@ -56,7 +57,7 @@ export function App() {
   const [user, setUser] = useState<User | null>(loadUser);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [booting, setBooting] = useState(!loadUser());
+  const [booting, setBooting] = useState(true);
   const [banner, setBanner] = useState<Banner>(null);
   const [live, setLive] = useState(false);
   const [pulse, setPulse] = useState(0);
@@ -84,26 +85,33 @@ export function App() {
     [flash],
   );
 
-  // Bootstrap a session user on first visit.
+  // Bootstrap / validate the session user once on mount. A stored id can
+  // go stale when the dev DB is reset — using it would FK-violate on
+  // createTodo — so we verify it still exists and re-provision if not.
   useEffect(() => {
-    if (user) return;
     let cancelled = false;
     (async () => {
-      try {
-        const u = await seedUser(freshIdentity());
-        if (cancelled) return;
-        saveUser(u);
-        setUser(u);
-      } catch (e) {
-        flash({ kind: "error", text: e instanceof RpcError ? `${e.code}: ${e.message}` : String(e) });
-      } finally {
-        if (!cancelled) setBooting(false);
+      let u = loadUser();
+      if (u && !(await userExists(u.id))) u = null; // stale → drop
+      if (!u) {
+        try {
+          u = await seedUser(freshIdentity());
+          saveUser(u);
+        } catch (e) {
+          if (!cancelled)
+            flash({ kind: "error", text: e instanceof RpcError ? `${e.code}: ${e.message}` : String(e) });
+        }
       }
+      if (cancelled) return;
+      if (u) setUser(u);
+      setBooting(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [user, flash]);
+    // mount-only — validation/seed happens once per page load
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load + live-subscribe once we have a user. The platform streams the
   // AI-SDK Data Stream Protocol; `subscribeTodos()` returns an async
@@ -164,6 +172,21 @@ export function App() {
         await createTodo({ userId: user.id, title: text, priority });
         await refresh(user.id);
       } catch (err) {
+        const code = err instanceof RpcError ? err.code : "";
+        if (code === "FOREIGN_KEY_VIOLATION" || code === "fk_violation") {
+          // Session user vanished mid-session (dev DB reset) — re-provision + retry once.
+          try {
+            const fresh = await seedUser(freshIdentity());
+            saveUser(fresh);
+            setUser(fresh);
+            await createTodo({ userId: fresh.id, title: text, priority });
+            await refresh(fresh.id);
+            inputRef.current?.focus();
+            return;
+          } catch {
+            /* fall through to surface the error below */
+          }
+        }
         setTodos((cur) => cur.filter((x) => x.id !== temp.id));
         flash({ kind: "error", text: err instanceof RpcError ? `${err.code}: ${err.message}` : String(err) });
       }

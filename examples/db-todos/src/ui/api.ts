@@ -57,6 +57,7 @@ type ByUser = { userId: string };
 export type App = {
   listTodos: ProcedureType<"query", ByUser, Todo[]>;
   todoCount: ProcedureType<"query", ByUser, number>;
+  getUserPair: ProcedureType<"query", { aId: string; bId: string }, { a: User | null; b: User | null }>;
   seedUser: ProcedureType<"mutation", SeedInput, User>;
   createTodo: ProcedureType<"mutation", CreateInput, Todo>;
   completeTodo: ProcedureType<"mutation", ById, Todo>;
@@ -73,6 +74,16 @@ export { RpcError } from "@zeroship/rpc-client";
 // ── thin wrappers (keep the component import surface tidy) ──────────────
 export const listTodos = (userId: string) => rpc.listTodos.query({ userId });
 export const todoCount = (userId: string) => rpc.todoCount.query({ userId });
+
+/** Existence probe: a stored session id is stale if the row is gone (dev DB reset). */
+export const userExists = async (id: string): Promise<boolean> => {
+  try {
+    const { a } = await rpc.getUserPair.query({ aId: id, bId: id });
+    return a != null;
+  } catch {
+    return false;
+  }
+};
 export const seedUser = (input: SeedInput) => rpc.seedUser.mutation(input);
 export const createTodo = (input: CreateInput) => rpc.createTodo.mutation(input);
 export const completeTodo = (id: string) => rpc.completeTodo.mutation({ id });
