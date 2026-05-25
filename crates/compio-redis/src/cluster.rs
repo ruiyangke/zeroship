@@ -641,6 +641,42 @@ impl ClusterClient {
         crate::protocol::expect_integer(frame)
     }
 
+    /// PERSIST key — remove the TTL. True when a TTL was removed, false
+    /// when the key is missing or already had no TTL.
+    pub async fn persist(&self, key: &str) -> Result<bool> {
+        let frame = self.send_to_slot(key.as_bytes(),
+            build_cmd(&[b"PERSIST", key.as_bytes()])).await?;
+        Ok(crate::protocol::expect_integer(frame)? > 0)
+    }
+
+    /// EVAL a Lua script, returning the integer reply. Routes by the
+    /// first key's slot (every key must hash to the same slot — our
+    /// `{app_id}:` hash-tag scoping guarantees one slot per app, so the
+    /// incr-with-TTL script always stays local to one node).
+    pub async fn eval(&self, script: &str, keys: &[&str], args: &[&str]) -> Result<i64> {
+        if keys.is_empty() {
+            return Err(Error::Unexpected(
+                "EVAL with no keys cannot be slot-routed in cluster mode".to_string(),
+            ));
+        }
+        let key_bytes: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes()).collect();
+        // Validate all keys share one slot. `same_slot_or_err` derives that
+        // slot from `keys[0]`, and `send_to_slot(keys[0], …)` recomputes the
+        // identical slot via `redis_keyslot(keys[0])` — so routing by
+        // `keys[0]` IS routing by the validated slot. We keep the call for
+        // its CrossSlot guard and discard the (provably redundant) value.
+        let _ = same_slot_or_err(&key_bytes)?;
+        let nkeys = keys.len().to_string();
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + keys.len() + args.len());
+        parts.push(b"EVAL");
+        parts.push(script.as_bytes());
+        parts.push(nkeys.as_bytes());
+        for k in keys { parts.push(k.as_bytes()); }
+        for a in args { parts.push(a.as_bytes()); }
+        let frame = self.send_to_slot(keys[0].as_bytes(), build_cmd(&parts)).await?;
+        crate::protocol::expect_integer(frame)
+    }
+
     /// DECRBY — symmetric with INCRBY for tooling visibility in MONITOR.
     pub async fn decr_by(&self, key: &str, delta: i64) -> Result<i64> {
         let d = delta.to_string();

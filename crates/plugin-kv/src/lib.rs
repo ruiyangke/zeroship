@@ -1,40 +1,48 @@
-//! Key-value plugin — `zeroship.kv.*` native primitives.
+//! Key-value plugin — `env.kv.*` native primitives.
+//!
+//! `env.kv` is a `#[v8_class]` instance (`Kv`) minted once per isolate by
+//! [`KvPlugin::build_instance`]. The instance carries the backend handle
+//! and the app_id, so callbacks never read a thread-local for the
+//! backend and never re-derive the app_id per call (mirrors `env.db`).
 //!
 //! Pluggable `Backend` dispatches to either:
-//! - `InMemory` — dev only, per-worker HashMap
-//! - `Redis` — strongly consistent, atomic INCR, network-backed
+//! - `RedbBackend` — single-process embedded persistent store (the
+//!   self-host tier and the test backend)
+//! - `Redis` — strongly consistent, atomic INCR / set-if-absent, TTL,
+//!   network-backed
 //!
-//! Contract: **strong consistency + atomic ops** forever. If a future
-//! backend can't keep that promise, it ships under a different SDK name
-//! (see `@zeroship/config` plans). See `backend/mod.rs` for details.
+//! Contract: **strong consistency + atomic ops** forever (see
+//! `backend/mod.rs` for the canonical incr contract). If a future
+//! backend can't keep that promise, it ships under a different SDK name.
 //!
-//! Native API surface (wrapped by `@zeroship/kv` SDK):
-//! - `zeroship.kv.get(key)` → Promise<string | null>
-//! - `zeroship.kv.set(key, value, ttlMs?)` → Promise<{ ok: true }>
-//! - `zeroship.kv.delete(key)` → Promise<{ deleted: boolean }>
-//! - `zeroship.kv.incr(key, delta?)` → Promise<number>
-//! - `zeroship.kv.list(prefix?)` → Promise<string[]>
+//! Native API surface (wrapped by the `@zeroship/kv` SDK):
+//! - `env.kv.get(key)` → Promise<string | null>
+//! - `env.kv.set(key, value, {ttlMs?})` → Promise<{ ok: true }>
+//! - `env.kv.delete(key)` → Promise<{ deleted: boolean }>
+//! - `env.kv.incr(key, {by?, ttlMs?})` → Promise<number | bigint>
+//! - `env.kv.setIfAbsent(key, value, {ttlMs?})` → Promise<{ stored: boolean }>
+//! - `env.kv.expire(key, ttlMs)` → Promise<{ updated: boolean }>
+//! - `env.kv.ttl(key)` → Promise<{ ttlMs: number | null } | null>
+//! - `env.kv.persist(key)` → Promise<{ updated: boolean }>
+//! - `env.kv.list(prefix?, {cursor?, limit?})` → Promise<{ keys, cursor }>
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 pub mod backend;
-pub mod callbacks;
+pub mod dispatch;
+pub mod error;
+pub mod limits;
+pub mod v8_class;
 
-pub use backend::{Backend, InMemory};
+pub use backend::{Backend, TtlState};
+#[cfg(feature = "redb")]
+pub use backend::RedbBackend;
 #[cfg(feature = "redis")]
 pub use backend::Redis;
-
-// ---------------------------------------------------------------------------
-// Thread-local backend handle — every worker has one.
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    pub(crate) static KV_BACKEND: RefCell<Option<Arc<dyn Backend>>> =
-        const { RefCell::new(None) };
-}
+pub use error::KvError;
+pub use v8_class::mint_kv;
 
 // ---------------------------------------------------------------------------
 // KvPlugin
@@ -51,39 +59,29 @@ impl std::fmt::Debug for KvPlugin {
 }
 
 impl KvPlugin {
-    /// In-memory backend (dev only — no cross-worker state).
-    #[must_use]
-    pub fn in_memory() -> Self {
-        Self { backend: Arc::new(InMemory::new()) }
-    }
-
-    /// Back-compat shortcut matching the pre-refactor API.
-    #[must_use]
-    pub fn new() -> Self { Self::in_memory() }
-
-    /// Custom backend — use for `Redis` in production or custom impls.
+    /// Construct with a backend. There is no infallible default backend:
+    /// `RedbBackend::open` is fallible (it takes an exclusive file lock),
+    /// so callers open the backend and pass it here. Use `RedbBackend`
+    /// for the embedded/self-host tier or `Redis` for distributed fleets.
     #[must_use]
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
         Self { backend }
     }
 }
 
-impl Default for KvPlugin {
-    fn default() -> Self { Self::new() }
-}
-
 impl NativePlugin for KvPlugin {
     fn namespace(&self) -> &str { "kv" }
     fn name(&self) -> &str { "kv" }
 
-    fn register(&self, r: &mut NativeRegistrar) {
-        KV_BACKEND.with(|cell| {
-            *cell.borrow_mut() = Some(Arc::clone(&self.backend));
-        });
-        r.add("get", callbacks::get);
-        r.add("set", callbacks::set);
-        r.add("delete", callbacks::delete);
-        r.add("incr", callbacks::incr);
-        r.add("list", callbacks::list);
+    /// No flat callbacks — the whole surface lives on the `Kv`
+    /// v8_class minted by [`Self::build_instance`].
+    fn register(&self, _r: &mut NativeRegistrar) {}
+
+    fn build_instance<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        app_id: &str,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        mint_kv(scope, Arc::clone(&self.backend), app_id)
     }
 }

@@ -118,9 +118,13 @@ fn cmd_serve(args: &[String]) {
     plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::new(storage_root.clone())));
     eprintln!("[zeroship] storage plugin registered (root={})", storage_root.display());
 
-    // KV plugin: Redis-backed when ZEROSHIP_KV_URL is set (distributed-
-    // correctness: shared across workers/regions), in-memory otherwise
-    // (dev default — single worker only).
+    // KV plugin backend selection, in priority order:
+    //   1. ZEROSHIP_KV_URL set → Redis (distributed-correctness: shared
+    //                            across workers/regions).
+    //   2. otherwise           → redb (single-process persistent embedded
+    //                            store; self-host / dev tier). Path is
+    //                            ZEROSHIP_KV_PATH if set, else the default
+    //                            `./.zeroship/kv.redb`.
     let kv_plugin = match std::env::var("ZEROSHIP_KV_URL") {
         Ok(url) if !url.is_empty() => {
             eprintln!("[zeroship] kv plugin registered (redis)");
@@ -129,8 +133,30 @@ fn cmd_serve(args: &[String]) {
             )
         }
         _ => {
-            eprintln!("[zeroship] kv plugin registered (in-memory; single-worker only)");
-            zeroship_plugin_kv::KvPlugin::in_memory()
+            let kv_path: PathBuf = std::env::var_os("ZEROSHIP_KV_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb"));
+            // Create the parent dir so a default `./.zeroship/kv.redb`
+            // opens cleanly on a fresh checkout.
+            if let Some(parent) = kv_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "[zeroship] kv: failed to create dir '{}': {e}",
+                        parent.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let backend = zeroship_plugin_kv::RedbBackend::open(&kv_path)
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "[zeroship] kv: failed to open redb at '{}': {e}",
+                        kv_path.display()
+                    );
+                    std::process::exit(1);
+                });
+            eprintln!("[zeroship] kv plugin registered (redb; path={})", kv_path.display());
+            zeroship_plugin_kv::KvPlugin::with_backend(Arc::new(backend))
         }
     };
     plugins.push(Arc::new(kv_plugin));

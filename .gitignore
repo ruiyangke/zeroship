@@ -14,6 +14,11 @@ perf-compio.data
 .worktrees/
 .superpowers/
 
+# Local dev state: `zeroship serve` writes the default redb KV file
+# (`./.zeroship/kv.redb` + lock) and the storage root (`.zeroship/storage`)
+# here. Never tracked.
+.zeroship/
+
 # Never commit dotenv files — only the .example templates
 .env
 .env.*

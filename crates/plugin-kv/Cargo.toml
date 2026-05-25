@@ -2,21 +2,35 @@
 name = "zeroship-plugin-kv"
 version = "0.1.0"
 edition = "2021"
-description = "Key-value plugin — zeroship.kv.* native primitives (in-memory for dev, Redis later)"
+description = "Key-value plugin — zeroship.kv.* native primitives (redb embedded + Redis distributed)"
 
 [dependencies]
 zeroship-runtime = { workspace = true }
+zeroship-runtime-macros = { workspace = true }
 compio = { workspace = true }
 compio-redis = { workspace = true, optional = true }
+# Pure-Rust embedded persistent KV — the single-process / self-host tier.
+# Optional: only the `redb` feature pulls it in (default builds stay lean).
+redb = { version = "4.1", optional = true }
 serde_json = { workspace = true }
 v8 = { workspace = true }
 async-trait = "0.1"
-url = { workspace = true, optional = true }
+# `url` is always required: `error::redact_url` strips credentials from
+# connection-error messages on every build, not just the redis one.
+url = { workspace = true }
 
 [features]
-default = ["redis"]
+default = ["redis", "redb"]
 # Redis-backed distributed KV — the production default.
-redis = ["dep:compio-redis", "dep:url"]
+redis = ["dep:compio-redis"]
+# redb-backed single-process persistent KV — the always-available
+# embedded + test backend. In default features.
+redb = ["dep:redb"]
+
+[dev-dependencies]
+# Per-test temp dir for the embedded redb backend's test suite (each test
+# opens a throwaway database file; no external server needed).
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

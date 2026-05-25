@@ -19,6 +19,11 @@
             bun
             rustc
             cargo
+            # clippy from the same nixpkgs as rustc/cargo above, so its
+            # bundled clippy-driver matches the toolchain version (a
+            # mismatched clippy fails with E0514 against crates already
+            # built by this rustc).
+            clippy
             pkg-config
             openssl
             # SQLite CLI for ad-hoc inspection of dev/test databases.

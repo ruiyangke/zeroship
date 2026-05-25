@@ -36,6 +36,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
+| **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **ZS deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zs-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
@@ -211,6 +212,7 @@ Stable contracts, live in `docs/reference/`:
 - `api-design-guidelines.md` — 10 principles for AI-friendly APIs
 - `zs-standard.md` — the deploy contract: `default = { schema?, fetch?, rpc? }`, dispatch, raw-JS deploys
 - `db.md` — `@zeroship/db`: `default.schema` discovery, CRUD, aggregation, naming strategy
+- `kv.md` — `@zeroship/kv`: ephemeral key-value surface, TTL, atomic counters, `setIfAbsent`, paginated `list`
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `zship.md` — `.zship` deploy artifact format (tar.zst with content-addressed blobs)
