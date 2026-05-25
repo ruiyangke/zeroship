@@ -4636,7 +4636,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "ssn": hex,
         });
 
-        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value)
+        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value, &[])
             .await
             .expect("decrypt_row_on_read");
 

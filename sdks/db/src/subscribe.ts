@@ -29,8 +29,8 @@
  */
 import {
   nativeDbFromEnv,
+  requireBoundNativeCapability,
   requireCollectionResolver,
-  requireNativeCapability,
   type NativeCollection,
   type NativeSubscriptionLike,
 } from "./native.js";
@@ -101,8 +101,9 @@ export function subscribe(collection: string): Subscription {
     );
   }
   const col = getNativeDbCollection(collection);
-  const openSubscription = requireNativeCapability(
-    col.openSubscription,
+  const openSubscription = requireBoundNativeCapability(
+    col,
+    "openSubscription",
     {
       code: "NATIVE_SUBSCRIPTION_UNAVAILABLE",
       message:

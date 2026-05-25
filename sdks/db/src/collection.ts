@@ -74,6 +74,12 @@ import {
 export { validateArrayPushOps };
 export { __zeroshipDbResetIndexWarnings, __zeroshipDbWarnedShapesSize };
 
+type ReadHints<S> = {
+  actor?: Actor;
+  unmask?: (string & keyof Row<S>)[];
+  unmaskReason?: string;
+};
+
 /** The native driver interface from @zeroship/types. */
 /**
  * Converts a caught value to an Error for inclusion in a Result.
@@ -317,21 +323,24 @@ export class Collection<
 
   async get<K extends string & keyof Row<S>>(
     idOrFilter: string | Id<N> | Filter<S>,
-    opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
+    opts: { select: K[]; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<Pick<Row<S>, K> | null>>;
   async get<W extends WithSpec>(
     idOrFilter: string | Id<N> | Filter<S>,
-    opts: { with: W; orderBy?: Record<string, 1 | -1> },
+    opts: { with: W; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<(Row<S> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
     idOrFilter: string | Id<N> | Filter<S>,
-    opts?: { orderBy?: Record<string, 1 | -1> },
+    opts?: { orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<Row<S> | null>>;
   async get(
     idOrFilter: string | Id<N> | Filter<S>,
     opts: {
+      actor?: Actor;
       select?: (string & keyof Row<S>)[];
       orderBy?: Record<string, 1 | -1>;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
       with?: WithSpec;
     } = {},
   ): Promise<Result<Row<S> | null>> {
@@ -344,12 +353,12 @@ export class Collection<
 
   find<W extends WithSpec>(
     filter: Filter<S>,
-    opts: { with: W },
+    opts: { with: W } & ReadHints<S>,
   ): Query<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
   find(
     filter: Filter<S> = {} as Filter<S>,
-    opts?: { with?: WithSpec },
+    opts?: { with?: WithSpec } & ReadHints<S>,
   ): Query<S, Row<S>, AllSchemas> {
     return findCollection(this._crud(), filter, opts);
   }

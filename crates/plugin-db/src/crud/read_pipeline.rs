@@ -66,7 +66,14 @@ pub(crate) async fn apply(
     if opts.apply_decrypt {
         if let Some(schema) = schema.as_ref() {
             if super::schema_has_encrypted_columns(schema) {
-                decrypt_rows_on_read(app_id, collection, schema, &mut rows).await?;
+                decrypt_rows_on_read(
+                    app_id,
+                    collection,
+                    schema,
+                    &mut rows,
+                    opts.unmask_columns,
+                )
+                .await?;
             }
         }
     }
@@ -341,20 +348,35 @@ async fn decrypt_rows_on_read(
     collection: &str,
     schema: &Value,
     rows: &mut [Value],
+    unmask_columns: &[String],
 ) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
     if let Some(pg) = backend.as_encrypted_column_pg() {
         for row in rows.iter_mut() {
-            crate::crud::encryption_pass::decrypt_row_on_read(pg, app_id, collection, schema, row)
-                .await?;
+            crate::crud::encryption_pass::decrypt_row_on_read(
+                pg,
+                app_id,
+                collection,
+                schema,
+                row,
+                unmask_columns,
+            )
+            .await?;
         }
         return Ok(());
     }
     if let Some(sq) = backend.as_encrypted_column_sqlite() {
         for row in rows.iter_mut() {
-            crate::crud::encryption_pass::decrypt_row_on_read(sq, app_id, collection, schema, row)
-                .await?;
+            crate::crud::encryption_pass::decrypt_row_on_read(
+                sq,
+                app_id,
+                collection,
+                schema,
+                row,
+                unmask_columns,
+            )
+            .await?;
         }
     }
     Ok(())

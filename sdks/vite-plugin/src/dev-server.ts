@@ -350,7 +350,8 @@ export function devServerPlugin(
       const __dirname = dirname(__filename);
       const bootstrapPath = resolve(__dirname, "dev-bootstrap.js");
       const binPath = resolve(root, "node_modules/.bin/zeroship");
-      const cmd = existsSync(binPath) ? binPath : "zeroship";
+      const cmd = process.env.ZEROSHIP_BIN
+        || (existsSync(binPath) ? binPath : "zeroship");
 
       const serverEntry =
         options.serverEntry ?? findServerEntry(root) ?? undefined;

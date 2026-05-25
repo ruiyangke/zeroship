@@ -1725,7 +1725,6 @@ impl crate::backend::VectorIndex for SqliteBackend {
             &where_expr,
             schema_hint.as_ref(),
         );
-
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
         Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
@@ -1852,21 +1851,19 @@ impl crate::backend::FullTextIndex for SqliteBackend {
         filter: &serde_json::Value,
         limit: Option<usize>,
     ) -> Result<Vec<serde_json::Value>, DbError> {
-        // Param layout: `[$1=query, $2=limit?, $3+...=filter_params]`.
-        // When `limit` is `None` we skip the `$2` slot — the filter
-        // params shift down to `$2+`. The builder is param-offset-
-        // aware (it counts `params.len() + 1` for each new placeholder)
-        // so seeding the pre-filter slots in order keeps the numbering
-        // consistent.
+        // Param layout: `[$1=query, $2+...=filter_params, ?=limit?]`.
+        // SQLite/rusqlite binds parameters in placeholder appearance
+        // order, so the trailing LIMIT value must be appended AFTER the
+        // filter params rather than pre-seeded ahead of them.
         let mut params: Vec<String> = Vec::with_capacity(4);
         params.push(query.to_string());
+
+        let filter_clause = fts::build_fts_filter_clause(filter, &mut params)
+            .map_err(DbError::from)?;
         let has_limit = limit.is_some();
         if let Some(l) = limit {
             params.push(l.to_string());
         }
-
-        let filter_clause = fts::build_fts_filter_clause(filter, &mut params)
-            .map_err(DbError::from)?;
         let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
         let sql = fts::build_fts_search_sql(
             app_id,
@@ -1875,7 +1872,6 @@ impl crate::backend::FullTextIndex for SqliteBackend {
             has_limit,
             schema_hint.as_ref(),
         );
-
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
         Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))

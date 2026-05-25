@@ -89,7 +89,60 @@ pub struct UnmaskFieldResult {
 /// schema cache populated by `db.registerModel` (cached via
 /// `context::cache_schema`).
 struct ColumnMaskMeta {
+    canonical_column: String,
     classification: String,
+}
+
+fn to_snake_case_alias(column: &str) -> String {
+    let mut out = String::with_capacity(column.len() + 4);
+    for ch in column.chars() {
+        if ch.is_ascii_uppercase() {
+            out.push('_');
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn to_camel_case_alias(column: &str) -> String {
+    let mut out = String::with_capacity(column.len());
+    let mut upper_next = false;
+    for ch in column.chars() {
+        if ch == '_' {
+            upper_next = true;
+            continue;
+        }
+        if upper_next {
+            out.push(ch.to_ascii_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn resolve_schema_column(app_id: &str, collection: &str, column: &str) -> Result<Option<String>, DbError> {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return Ok(None);
+    };
+    let Some(obj) = schema.as_object() else {
+        return Ok(None);
+    };
+    if obj.contains_key(column) {
+        return Ok(Some(column.to_string()));
+    }
+    let snake = to_snake_case_alias(column);
+    if snake != column && obj.contains_key(&snake) {
+        return Ok(Some(snake));
+    }
+    let camel = to_camel_case_alias(column);
+    if camel != column && camel != snake && obj.contains_key(&camel) {
+        return Ok(Some(camel));
+    }
+    Ok(None)
 }
 
 /// Walk the cached schema and return the mask metadata for `(collection,
@@ -100,13 +153,16 @@ fn lookup_mask_meta(
     collection: &str,
     column: &str,
 ) -> Result<Option<ColumnMaskMeta>, DbError> {
+    let Some(canonical_column) = resolve_schema_column(app_id, collection, column)? else {
+        return Ok(None);
+    };
     let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
         return Ok(None);
     };
     let Some(obj) = schema.as_object() else {
         return Ok(None);
     };
-    let Some(def) = obj.get(column) else {
+    let Some(def) = obj.get(&canonical_column) else {
         return Ok(None);
     };
     let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
@@ -126,7 +182,10 @@ fn lookup_mask_meta(
         .and_then(|v| v.as_str())
         .unwrap_or("pii")
         .to_string();
-    Ok(Some(ColumnMaskMeta { classification }))
+    Ok(Some(ColumnMaskMeta {
+        canonical_column,
+        classification,
+    }))
 }
 
 /// Encryption metadata for the target column (when present). The
@@ -289,7 +348,7 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
 /// in [`dispatch_unmask_field`] is the only crate-internal caller.
 pub async fn dispatch_unmask(
     app_id: &str,
-    args: UnmaskFieldArgs,
+    mut args: UnmaskFieldArgs,
 ) -> Result<UnmaskFieldResult, DbError> {
     // Step 1 — mask metadata lookup. A column with no mask declaration
     // (or `kind: "none"` opt-out) cannot be unmasked — there's no
@@ -306,6 +365,7 @@ pub async fn dispatch_unmask(
                 "Apply `.mask({ kind, classification })` on the field via @zeroship/db".into(),
             ),
         })?;
+    args.column = mask_meta.canonical_column.clone();
 
     // Step 2 — authorization. **P5.5 PR 5**: load the per-app policy
     // into the cache (best-effort) THEN consult `check_unmask_authorization`,
@@ -951,41 +1011,59 @@ pub async fn dispatch_bulk_unmask(
     let mut classifications: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut unauthorized: Vec<(String, String)> = Vec::new(); // (row_pk, column)
+    let mut normalized_items: Vec<(String, Vec<(String, String)>)> =
+        Vec::with_capacity(args.items.len());
+    let mut normalized_audit_items: Vec<BulkUnmaskItem> = Vec::with_capacity(args.items.len());
 
     for item in &args.items {
+        let mut normalized_columns: Vec<(String, String)> = Vec::with_capacity(item.columns.len());
+        let mut audit_columns: Vec<String> = Vec::with_capacity(item.columns.len());
         for col in &item.columns {
-            if !classifications.contains_key(col) {
-                let mask_meta = lookup_mask_meta(app_id, &args.collection, col)?
-                    .ok_or_else(|| DbError::ValidationFailed {
-                        code: "unmask_column_not_masked",
-                        message: format!(
-                            "bulkUnmask: column '{}' on collection '{}' has no mask declaration",
-                            col, args.collection
-                        ),
-                        hint: Some(
-                            "Apply `.mask({ kind, classification })` on the field via @zeroship/db"
-                                .into(),
-                        ),
-                    })?;
-                classifications.insert(col.clone(), mask_meta.classification);
-            }
+            let mask_meta = lookup_mask_meta(app_id, &args.collection, col)?
+                .ok_or_else(|| DbError::ValidationFailed {
+                    code: "unmask_column_not_masked",
+                    message: format!(
+                        "bulkUnmask: column '{}' on collection '{}' has no mask declaration",
+                        col, args.collection
+                    ),
+                    hint: Some(
+                        "Apply `.mask({ kind, classification })` on the field via @zeroship/db"
+                            .into(),
+                    ),
+                })?;
+            classifications
+                .entry(mask_meta.canonical_column.clone())
+                .or_insert_with(|| mask_meta.classification.clone());
             let classification = classifications
-                .get(col)
+                .get(&mask_meta.canonical_column)
                 .expect("just inserted")
                 .clone();
             let allowed = check_unmask_authorization(app_id, &args.actor, &classification)?;
             if !allowed {
-                unauthorized.push((item.row_pk.clone(), col.clone()));
+                unauthorized.push((item.row_pk.clone(), mask_meta.canonical_column.clone()));
             }
+            normalized_columns.push((col.clone(), mask_meta.canonical_column.clone()));
+            audit_columns.push(mask_meta.canonical_column);
         }
+        normalized_items.push((item.row_pk.clone(), normalized_columns));
+        normalized_audit_items.push(BulkUnmaskItem {
+            row_pk: item.row_pk.clone(),
+            columns: audit_columns,
+        });
     }
+    let normalized_audit_args = BulkUnmaskArgs {
+        collection: args.collection.clone(),
+        items: normalized_audit_items,
+        actor: args.actor.clone(),
+        reason: args.reason.clone(),
+    };
 
     // ---- Step 2 — atomic-fence enforcement. If ANY pair denied,
     // emit one audit row covering the whole call + refuse.
     if !unauthorized.is_empty() {
         write_audit_bulk_row(
             app_id,
-            &args,
+            &normalized_audit_args,
             &classifications,
             "denied",
             Some(&unauthorized),
@@ -1008,16 +1086,16 @@ pub async fn dispatch_bulk_unmask(
     // so we don't duplicate the PG / SQLite arms. Bulk-of-one is
     // exactly one fetch.
     let mut out: BulkUnmaskResult = BulkUnmaskResult::default();
-    for item in &args.items {
-        if item.columns.is_empty() {
+    for (row_pk, cols) in &normalized_items {
+        if cols.is_empty() {
             continue;
         }
-        let row_map = out.results.entry(item.row_pk.clone()).or_default();
-        for col in &item.columns {
+        let row_map = out.results.entry(row_pk.clone()).or_default();
+        for (requested_col, canonical_col) in cols {
             let single_args = UnmaskFieldArgs {
                 collection: args.collection.clone(),
-                row_pk: item.row_pk.clone(),
-                column: col.clone(),
+                row_pk: row_pk.clone(),
+                column: canonical_col.clone(),
                 actor: args.actor.clone(),
                 reason: args.reason.clone(),
             };
@@ -1026,16 +1104,16 @@ pub async fn dispatch_bulk_unmask(
             // the FETCH helpers directly (not `dispatch_unmask`,
             // which would re-audit per pair). This is the
             // "wrap-over-many" pattern the proposal describes.
-            let plaintext = match lookup_encryption_meta(app_id, &args.collection, col)? {
+            let plaintext = match lookup_encryption_meta(app_id, &args.collection, canonical_col)? {
                 Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
                 None => fetch_plaintext_parent(app_id, &single_args).await?,
             };
-            row_map.insert(col.clone(), plaintext);
+            row_map.insert(requested_col.clone(), plaintext);
         }
     }
 
     // ---- Step 4 — single audit row for the whole call on success.
-    write_audit_bulk_row(app_id, &args, &classifications, "granted", None).await?;
+    write_audit_bulk_row(app_id, &normalized_audit_args, &classifications, "granted", None).await?;
 
     Ok(out)
 }
@@ -1755,6 +1833,29 @@ mod tests {
         assert!(check_unmask_authorization(app_id, &actor, "public").unwrap());
         assert!(!check_unmask_authorization(app_id, &actor, "pii").unwrap());
         assert!(!check_unmask_authorization(app_id, &actor, "spi").unwrap());
+    }
+
+    #[test]
+    fn lookup_mask_meta_accepts_field_name_alias_for_snake_case_schema() {
+        let app_id = "lookup_mask_meta_alias_snake_case";
+        crate::cache_schema_for_tests(
+            app_id,
+            "users",
+            json!({
+                "contact_email": {
+                    "type": "string",
+                    "mask": {
+                        "kind": "email",
+                        "classification": "pii"
+                    }
+                }
+            }),
+        );
+        let meta = lookup_mask_meta(app_id, "users", "contactEmail")
+            .unwrap()
+            .expect("mask metadata");
+        assert_eq!(meta.canonical_column, "contact_email");
+        assert_eq!(meta.classification, "pii");
     }
 
     #[test]

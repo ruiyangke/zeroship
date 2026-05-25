@@ -596,7 +596,9 @@ pub fn build_create_table_with_fks_for_dialect(
                         }
                     };
                     if should_inline {
-                        if let Ok(fk_clause) = build_fk_clause(app_id, field, def, target) {
+                        if let Ok(fk_clause) =
+                            build_fk_clause(app_id, field, def, target, dialect)
+                        {
                             deferred_fks.push(fk_clause);
                         }
                     }
@@ -822,7 +824,7 @@ pub fn build_add_foreign_key(
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
     let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
-    let fk_clause = build_fk_clause(app_id, field, def, target)?;
+    let fk_clause = build_fk_clause(app_id, field, def, target, SqlDialect::Postgres)?;
     Ok(format!("ALTER TABLE {} ADD {}", table, fk_clause))
 }
 
@@ -875,6 +877,7 @@ fn build_fk_clause(
     field: &str,
     def: &serde_json::Value,
     target: &str,
+    dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_collection(target)?;
     let constraint_name = fk_constraint_name(field, "");
@@ -886,7 +889,13 @@ fn build_fk_clause(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let target_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(target));
+    let target_qualified = match dialect {
+        SqlDialect::Postgres => format!("{}.{}", quote_ident(app_id), quote_ident(target)),
+        // SQLite rejects schema-qualified parent-table names inside
+        // REFERENCES clauses, even when the CREATE TABLE itself targets
+        // an attached database alias.
+        SqlDialect::Sqlite => quote_ident(target),
+    };
     let deferrable_clause = if deferrable {
         " DEFERRABLE INITIALLY DEFERRED"
     } else {
@@ -2258,7 +2267,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let where_clause = build_where(filter, &mut params)?;
+    let where_clause = build_where_with_dialect(filter, &mut params, dialect)?;
 
     // Build SELECT column list from projection, or default to *
     let select_expr =
@@ -2754,6 +2763,10 @@ pub fn build_set_clauses(
 /// outside the dispatch path is unchanged.
 #[derive(Debug, Clone, Default)]
 pub struct SystemFieldAutoBump<'a> {
+    /// `true` when the call came from the CRUD dispatch path rather than a
+    /// legacy direct builder caller. Controls whether version auto-bumps run
+    /// for anonymous writes.
+    pub dispatch_write: bool,
     /// Bind value for the `updated_by` placeholder. When `None`, the
     /// `updated_by` SET clause is suppressed (no actor in scope —
     /// matches the PR 3 INSERT path's "leave NULL when anonymous"
@@ -2990,10 +3003,7 @@ pub fn build_set_clauses_with_system_fields(
     // setting (which is impossible from the default and only set by
     // the new PR 4 helper). The actor presence is the discriminator
     // because the legacy callers never thread one through.
-    let on_pr4_dispatch_path = autobump.actor_id.is_some()
-        || autobump.skip_version
-        || autobump.skip_updated_at
-        || autobump.skip_updated_by;
+    let on_pr4_dispatch_path = autobump.dispatch_write;
     if on_pr4_dispatch_path && !autobump.skip_version && !already_has_version {
         set_clauses.push("\"version\" = \"version\" + 1".to_string());
     }
@@ -4318,6 +4328,14 @@ fn build_having_condition(
 /// itself is unchanged — every existing call site keeps its
 /// behaviour byte-for-byte.
 pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, QueryError> {
+    build_where_with_dialect(filter, params, SqlDialect::Postgres)
+}
+
+pub(crate) fn build_where_with_dialect(
+    filter: &Value,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+) -> Result<String, QueryError> {
     match filter {
         Value::Null => Ok(String::new()),
         Value::Object(map) if map.is_empty() => Ok(String::new()),
@@ -4333,7 +4351,7 @@ pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<St
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_where(v, params))
+                                .map(|v| build_where_with_dialect(v, params, dialect))
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> =
@@ -4348,7 +4366,7 @@ pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<St
                             })?;
                             let sub: Result<Vec<String>, _> = arr
                                 .iter()
-                                .map(|v| build_where(v, params))
+                                .map(|v| build_where_with_dialect(v, params, dialect))
                                 .collect();
                             let sub = sub?;
                             let non_empty: Vec<&str> =
@@ -4358,7 +4376,7 @@ pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<St
                             }
                         }
                         "$not" => {
-                            let sub = build_where(value, params)?;
+                            let sub = build_where_with_dialect(value, params, dialect)?;
                             if !sub.is_empty() {
                                 conditions.push(format!("NOT ({sub})"));
                             }
@@ -4371,7 +4389,7 @@ pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<St
                     }
                 } else {
                     // Field-level condition
-                    let cond = build_field_condition(key, value, params)?;
+                    let cond = build_field_condition_with_dialect(key, value, params, dialect)?;
                     conditions.push(cond);
                 }
             }
@@ -4394,6 +4412,15 @@ fn build_field_condition(
     field: &str,
     value: &Value,
     params: &mut Vec<String>,
+) -> Result<String, QueryError> {
+    build_field_condition_with_dialect(field, value, params, SqlDialect::Postgres)
+}
+
+fn build_field_condition_with_dialect(
+    field: &str,
+    value: &Value,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     validate_field_name(field)?;
     let col = quote_ident(field);
@@ -4484,7 +4511,12 @@ fn build_field_condition(
                             QueryError::InvalidFilter("$ilike must be a string".to_string())
                         })?;
                         params.push(pattern.to_string());
-                        format!("{col} ILIKE ${}", params.len())
+                        match dialect {
+                            SqlDialect::Postgres => format!("{col} ILIKE ${}", params.len()),
+                            SqlDialect::Sqlite => {
+                                format!("{col} LIKE ${} COLLATE NOCASE", params.len())
+                            }
+                        }
                     }
                     "$search" => {
                         let query_text = val.as_str().ok_or_else(|| {
@@ -4935,6 +4967,30 @@ mod tests {
         let filter = json!({"name": {"$ilike": "%alice%"}});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, r#"SELECT * FROM "app1"."users" WHERE "name" ILIKE $1"#);
+        assert_eq!(q.params, vec!["%alice%"]);
+    }
+
+    #[test]
+    fn test_ilike_operator_sqlite_uses_like_nocase() {
+        let filter = json!({"name": {"$ilike": "%alice%"}});
+        let q = build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+            "app1",
+            "users",
+            &filter,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            false,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert_eq!(
+            q.sql,
+            r#"SELECT * FROM "app1"."users" WHERE "name" LIKE $1 COLLATE NOCASE"#
+        );
         assert_eq!(q.params, vec!["%alice%"]);
     }
 
@@ -6210,6 +6266,7 @@ mod tests {
         let filter = json!({ "id": "post_x" });
         let update = json!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_actor"),
             ..Default::default()
         };
@@ -6230,10 +6287,35 @@ mod tests {
     }
 
     #[test]
+    fn update_appends_version_increment_for_anonymous_dispatch_write() {
+        let filter = json!({ "id": "post_x" });
+        let update = json!({ "title": "new" });
+        let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
+            ..Default::default()
+        };
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(r#""version" = "version" + 1"#),
+            "anonymous dispatched updates must still bump version: {}",
+            q.sql,
+        );
+    }
+
+    #[test]
     fn update_appends_updated_at_now_pg() {
         let filter = json!({ "id": "post_x" });
         let update = json!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_actor"),
             ..Default::default()
         };
@@ -6258,6 +6340,7 @@ mod tests {
         let filter = json!({ "id": "post_x" });
         let update = json!({ "title": "new" });
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_actor"),
             ..Default::default()
         };
@@ -7012,6 +7095,27 @@ mod tests {
         });
         let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(!sql.contains("DEFERRABLE"), "{sql}");
+    }
+
+    #[test]
+    fn b2_sqlite_inline_fk_uses_unqualified_parent_table() {
+        let schema = json!({
+            "authorId": {
+                "type": "ref",
+                "refTarget": "users",
+            },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
+        assert!(sql.contains("REFERENCES \"users\" (id)"), "{sql}");
+        assert!(!sql.contains("REFERENCES \"app1\".\"users\" (id)"), "{sql}");
     }
 
     #[test]
