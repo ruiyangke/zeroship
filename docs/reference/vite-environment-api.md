@@ -1,92 +1,205 @@
-# `@zeroship/vite-plugin` and the Vite Environment API
+# @zeroship/vite-plugin — Vite Environment API
 
-`@zeroship/vite-plugin` registers a custom `zeroship` Vite environment and runs server code through the real zeroship runtime during local development.
+## Overview
 
-Current implementation:
+`@zeroship/vite-plugin` uses Vite's Environment API so server code in dev is
+loaded through Vite's transform pipeline and evaluated inside the real
+zeroship V8 runtime. The architecture is still a child-process proxy in dev:
+Vite starts a zeroship runtime process, proxies server routes to it, and the
+runtime fetches transformed modules back from Vite over HTTP.
 
-- [sdks/vite-plugin/src/index.ts](sdks/vite-plugin/src/index.ts)
-- [sdks/vite-plugin/src/dev-server.ts](sdks/vite-plugin/src/dev-server.ts)
-- [sdks/vite-plugin/src/environment.ts](sdks/vite-plugin/src/environment.ts)
-- [sdks/vite-plugin/src/dev-bootstrap/index.ts](sdks/vite-plugin/src/dev-bootstrap/index.ts)
-- [sdks/vite-plugin/src/dev-bootstrap/transport.ts](sdks/vite-plugin/src/dev-bootstrap/transport.ts)
+The important constraint is simple: the zeroship runtime does **not** open an
+outbound HotChannel/WebSocket client to Vite. The dev transport is:
 
-## Public plugin options
+- `POST /__zeroship_fetch` for ModuleRunner `fetchModule` / `getBuiltins`
+- `GET /__zeroship_hmr_check` for poll-based HMR invalidation
 
-`zeroship(options)` accepts:
+Browser HMR remains Vite's normal browser-side WebSocket. The zeroship runtime
+uses its own HTTP-only control path.
 
-- `rpcEndpoint?: string` — defaults to `"/_rpc"`
-- `serverEntry?: string` — explicit server entry; otherwise auto-detected
-- `devServerPort?: number` — defaults to `3001`
-- `mode?: "full" | "static"` — production build mode
-- `rpc?.strict?: "auto" | "always" | "never"` — RPC strictness policy
+## Goals
 
-The public options type lives in [sdks/vite-plugin/src/index.ts](sdks/vite-plugin/src/index.ts).
+1. Run server code in the real zeroship V8 runtime during development.
+2. Keep Vite as the source of truth for transforms, module graph, and HMR.
+3. Preserve the existing child-process proxy model for HTTP server routes.
+4. Avoid duplicating dispatch or schema-install logic in the plugin.
 
-## What the plugin registers
+## Architecture
 
-`zeroship()` currently composes these pieces:
+```
+Browser
+  ├─ normal client assets / browser HMR ───────────────► Vite dev server
+  └─ server routes (/_zs/v1/*, /api/*, /rpc, /_rpc) ──► Vite proxy middleware
+                                                         │
+                                                         ▼
+                                                  zeroship child runtime
+                                                         │
+                                                         ▼
+                                                dev-bootstrap ModuleRunner
+                                                         │
+                       POST /__zeroship_fetch ◄──────────┤
+                       GET  /__zeroship_hmr_check ◄──────┘
+                                                         │
+                                                         ▼
+                                                 Vite zeroship environment
+```
 
-- node compat plugins
-- the `zeroship` virtual-module resolver
-- the server transform plugin
-- the dev-server/environment pair
-- the production build plugin
+### What each side owns
 
-The custom environment is registered under `environments.zeroship` via `createZeroshipEnvironmentOptions` in [sdks/vite-plugin/src/environment.ts](sdks/vite-plugin/src/environment.ts).
+- Vite:
+  - `"use server"` transforms and client/server code rewriting
+  - the `zeroship` dev environment and `fetchModule()` implementation
+  - the HTTP endpoints used by the runtime bridge
+  - proxying server routes to the child runtime
+- zeroship child runtime:
+  - the real V8 isolate with `env.*` primitives and the virtual `zeroship` module
+  - ModuleRunner evaluation of Vite-transformed server modules
+  - request handling for proxied server routes
 
-That environment currently sets:
+## Transport
 
-- `consumer: "server"`
-- resolve conditions: `["zeroship", "worker", "module", "import", "default"]`
-- `resolve.noExternal = true`
-- `build.target = "es2024"`
-- `keepProcessEnv = true`
+### Module fetch
 
-## Dev request flow
+The dev bootstrap bundles `vite/module-runner` and gives it an HTTP transport.
+When ModuleRunner needs a module, it sends JSON to Vite:
 
-In dev, [sdks/vite-plugin/src/dev-server.ts](sdks/vite-plugin/src/dev-server.ts) does three important things:
+```http
+POST /__zeroship_fetch
+Content-Type: application/json
+```
 
-1. Registers the `zeroship` environment.
-2. Spawns `zeroship serve dist/dev-bootstrap.js --port=<devServerPort> --workers=1`.
-3. Proxies `/_zs/v1/*`, `/_rpc`, `/rpc`, and `/api/*` to that child runtime.
+Vite accepts only two method names:
 
-The child process receives these plugin-internal env vars from [sdks/vite-plugin/src/constants.ts](sdks/vite-plugin/src/constants.ts):
+- `fetchModule`
+- `getBuiltins`
 
-- `ZEROSHIP_DEV`
-- `ZEROSHIP_VITE_WS`
-- `ZEROSHIP_ENTRY`
+Unknown method names are rejected. Request bodies are size-limited before they
+are buffered.
 
-If neither `.env` nor the parent environment provides `DATABASE_URL`, the dev server prepares a project-local SQLite database through [sdks/vite-plugin/src/dev-db.ts](sdks/vite-plugin/src/dev-db.ts) and passes that URL to the child process.
+### HMR
 
-## Module loading in dev
+The zeroship runtime cannot use Vite's bidirectional HMR transport, so it polls:
 
-The dev bootstrap in [sdks/vite-plugin/src/dev-bootstrap/index.ts](sdks/vite-plugin/src/dev-bootstrap/index.ts):
+```http
+GET /__zeroship_hmr_check
+```
 
-- creates a `ModuleRunner`
-- loads the user server entry on demand
-- routes schema installation through `@zeroship/bootstrap/dev`
-- keeps a procedure registry for transform-emitted `__register(...)` calls
+Vite returns the list of changed server files since the last poll and clears the
+pending set atomically. The dev bootstrap invalidates those module ids in
+ModuleRunner's evaluated-module cache so the next import re-fetches them.
 
-The current transport is HTTP, not a bidirectional ModuleRunner HMR channel. [sdks/vite-plugin/src/dev-bootstrap/transport.ts](sdks/vite-plugin/src/dev-bootstrap/transport.ts) sends module requests to:
+## Dev Database
 
-- `POST /__zeroship_fetch`
+When the dev server spawns the zeroship child process, it resolves
+`DATABASE_URL` with explicit precedence:
 
-It explicitly constructs `ModuleRunner({ transport, hmr: false }, ...)`.
+1. Shell environment (`process.env.DATABASE_URL`)
+2. `.env` (`DATABASE_URL=...`)
+3. Default SQLite fallback: `sqlite:.zeroship/dev.sqlite`
 
-## Hot reload behavior
+Notes:
 
-Hot reload is currently poll-based:
+- The shell environment wins on purpose. It is the escape hatch for pointing
+  dev at a non-default database without editing `.env`.
+- The plugin no longer creates `.zeroship/` itself. The runtime's SQLite
+  backend creates the parent directory when it opens the database.
+- The default SQLite path is relative to the spawned runtime's cwd, which the
+  plugin sets to the project root.
 
-- Vite records changed `.ts`, `.tsx`, `.js`, and `.jsx` files in `hotUpdate(...)`
-- the runtime polls `GET /__zeroship_hmr_check`
-- the bootstrap invalidates the changed entries from `runner.evaluatedModules`
-- the next import re-fetches transformed code from Vite
+## Runtime Environment Variables
 
-This is why normal source edits do not require restarting the dev runtime, even though ModuleRunner's built-in bidirectional HMR transport is disabled.
+The child process receives:
 
-## Runtime shims
+- `ZEROSHIP_DEV=1`
+- `ZEROSHIP_VITE_ORIGIN=http://localhost:<vite-port>`
+- `ZEROSHIP_ENTRY=<absolute-path-to-server-entry>` when a server entry is known
+- `DATABASE_URL=<resolved value>` per the precedence above
 
-Two runtime-specific shims matter in dev:
+`ZEROSHIP_VITE_ORIGIN` is a plain HTTP origin. It is not a WebSocket URL and
+does not include a path suffix.
 
-- `ZeroshipDevEnvironment.fetchModule(...)` in [sdks/vite-plugin/src/environment.ts](sdks/vite-plugin/src/environment.ts) intercepts `node:*` and other builtins so the runner can use zeroship-native or polyfilled modules instead of Node resolution.
-- [sdks/vite-plugin/src/zeroship-module.ts](sdks/vite-plugin/src/zeroship-module.ts) provides the dev-side `zeroship` virtual module so imports match the runtime-installed module shape.
+## Main Files
+
+```
+sdks/vite-plugin/
+  src/
+    index.ts
+    transform.ts
+    environment.ts
+    dev-server.ts
+    constants.ts
+  src/dev-bootstrap/
+    index.ts
+    transport.ts
+    evaluator.ts
+  scripts/
+    build-bootstrap.ts
+```
+
+### `src/environment.ts`
+
+Registers the `zeroship` Vite environment and customizes `fetchModule()` for
+Node-compat handling. It does **not** open or manage any WebSocket transport.
+The environment simply opts into `hot: true`, letting Vite provide its normal
+local/no-op normalized hot channel for internal bookkeeping.
+
+### `src/dev-server.ts`
+
+Owns the dev bridge:
+
+- registers `POST /__zeroship_fetch`
+- registers `GET /__zeroship_hmr_check`
+- spawns the zeroship child runtime after Vite is listening
+- proxies server routes to the child runtime
+- tracks changed server files for poll-based invalidation
+
+### `src/dev-bootstrap/transport.ts`
+
+Creates the ModuleRunner transport that POSTs to Vite's fetch endpoint using
+the `ZEROSHIP_VITE_ORIGIN` origin.
+
+### `src/dev-bootstrap/index.ts`
+
+Starts the ModuleRunner, installs the framework-internal `devEntry(...)`
+wrapper from `@zeroship/bootstrap/dev`, and runs the HMR polling loop.
+
+## Request Flow
+
+For a server route like `POST /_zs/v1/todos.add`:
+
+1. The browser sends the request to Vite.
+2. Vite's pre-middleware sees that the path is a server route and proxies it
+   to the zeroship child runtime.
+3. The zeroship runtime dispatches the request into V8.
+4. The dev bootstrap imports the server entry through ModuleRunner.
+5. If a module is missing or invalidated, ModuleRunner POSTs to
+   `/__zeroship_fetch` and Vite returns transformed code.
+6. The module executes inside the real zeroship runtime.
+7. The request resolves back through the child runtime and Vite proxy.
+
+## HMR Flow
+
+For a server-file edit:
+
+1. Vite notices a changed `.ts` / `.tsx` / `.js` / `.jsx` file.
+2. The plugin records that file path in a pending set.
+3. The zeroship runtime polls `GET /__zeroship_hmr_check`.
+4. Vite returns the changed paths and clears the set.
+5. The dev bootstrap invalidates those ids in ModuleRunner's evaluated-module
+   cache.
+6. The next request re-imports the changed module graph through Vite.
+
+This is server-side HMR by invalidation and re-import, not by push.
+
+## Production
+
+This document covers the dev-time Environment API bridge only. Production still
+uses the normal vite-plugin build path and `.zship` emission flow. The runtime
+does not talk back to Vite in production.
+
+## Non-Goals
+
+- No runtime-side WebSocket client to Vite
+- No separate HMR server for zeroship
+- No extra database daemon for local dev
+- No plugin-side request dispatch duplication

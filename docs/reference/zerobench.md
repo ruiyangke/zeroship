@@ -79,7 +79,7 @@ Supported runner flags are:
 - [`sse_bench.rs`](../../crates/runtime/benches/sse_bench.rs): standalone raw-TCP SSE probe
 - [`run_benchmark.sh`](../../crates/runtime/benches/run_benchmark.sh): legacy `wrk` runner, kept for cross-checking
 - [`run_ws_benchmark.sh`](../../crates/runtime/benches/run_ws_benchmark.sh) + [`ws_benchmark.js`](../../crates/runtime/benches/ws_benchmark.js): legacy WS-only benchmark
-- [`results-*.txt`](../../crates/runtime/benches/): immutable benchmark snapshots
+- benchmark snapshots in [`crates/runtime/benches/`](../../crates/runtime/benches/)
 
 ## Host requirements
 
