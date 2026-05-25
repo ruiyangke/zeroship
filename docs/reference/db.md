@@ -956,9 +956,9 @@ Errors carry a `.code` property where applicable:
 
 | `error.code`                | When                                                |
 |-----------------------------|-----------------------------------------------------|
-| `VALIDATION_ERROR`          | Input fails schema validation.                      |
+| `VALIDATION`                | Input fails schema validation.                      |
 | `UNIQUE_VIOLATION`          | Duplicate unique-key violation.                     |
-| `VERSION_MISMATCH`          | `update` with a CAS version that didn't match.     |
+| `OPTIMISTIC_CONCURRENCY`    | `update` with a CAS version that didn't match.     |
 | `MIGRATION_*` (see above)   | Migration lifecycle errors.                         |
 | `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `POLYGON_OPS_PG_ONLY` | Vector / FTS / geo paths — see [Vector / Full-Text / Geo § Error codes](#error-codes). |
 
@@ -1083,9 +1083,9 @@ if (error instanceof OptimisticLockError) {
 
 The native dispatch composes `UPDATE … SET title = $1, version =
 version + 1, updated_at = NOW() WHERE id = $id AND version = 5`.
-Affected-rows = 0 surfaces as the Rust error `VERSION_MISMATCH`, which
-the SDK rethrows as `OptimisticLockError` (`code:
-"VERSION_MISMATCH"`, `retryable: true`) so the standard
+Affected-rows = 0 surfaces as the runtime's optimistic-concurrency error,
+which the SDK rethrows as `OptimisticLockError` (`code:
+"OPTIMISTIC_CONCURRENCY"`, `retryable: true`) so the standard
 `instanceof OptimisticLockError` check keeps working.
 
 Omitting `version` from the filter is last-writer-wins — the UPDATE

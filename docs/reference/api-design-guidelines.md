@@ -136,11 +136,11 @@ schema({
 
 ### 9. Use stable machine-readable error codes
 
-Zeroship error codes are lowercase `snake_case`, not prose strings.
+Zeroship SDK-facing error codes are canonical `SCREAMING_SNAKE`, not prose strings.
 
 ```ts
-if (error?.code === "unique_violation") { /* ... */ }
-if (error?.code === "lock_not_available") { /* ... */ }
+if (error?.code === "UNIQUE_VIOLATION") { /* ... */ }
+if (error?.code === "LOCK_NOT_AVAILABLE") { /* ... */ }
 ```
 
 See the current database-side codes in [sdks/db/src/errors.ts](sdks/db/src/errors.ts) and [crates/plugin-db/src/backend/sqlite/error.rs](crates/plugin-db/src/backend/sqlite/error.rs).

@@ -5,11 +5,8 @@
  */
 
 const CANONICAL_CODE_OVERRIDES = Object.freeze({
-  expected_one_got_many: "NOT_UNIQUE",
-  expected_one_got_zero: "NOT_FOUND",
-  optimistic_lock_failure: "VERSION_MISMATCH",
-  validation_error: "VALIDATION_ERROR",
-  version_mismatch: "VERSION_MISMATCH",
+  fk_violation: "FOREIGN_KEY_VIOLATION",
+  version_mismatch: "OPTIMISTIC_CONCURRENCY",
 } satisfies Record<string, string>);
 
 export function canonicalErrorCode(code: string): string {
@@ -57,7 +54,7 @@ export interface FieldError {
 /** Thrown when one or more document fields fail schema validation. */
 export class ValidationError extends Error {
   name = "ValidationError";
-  code = "VALIDATION_ERROR" as const;
+  code = "VALIDATION" as const;
   errors: Record<string, FieldError>;
 
   constructor(errors: Record<string, FieldError>) {
@@ -73,26 +70,24 @@ export class ValidationError extends Error {
  * D4 — optimistic-concurrency CAS update failed. Raised when an
  * `updateOne`/`updateMany` call includes `{ version: N }` in the filter
  * but the stored `version` no longer matches N (another writer won the
- * race). The error's `code` is `"VERSION_MISMATCH"` matching the
- * A2 error-code inventory; `expectedVersion` carries the caller's N.
+ * race). The error's `code` is `"OPTIMISTIC_CONCURRENCY"`; `expectedVersion`
+ * carries the caller's N.
  *
  * **P7 PR 4** — the platform's UPDATE auto-bump path now surfaces the
- * same condition with the typed code `"VERSION_MISMATCH"` from the
- * Rust runtime (`DbError::version_mismatch`). The runtime-typed error
- * carries `retryable: true` semantically (the hint advises re-read +
- * retry). The SDK's `update()` / `updateMany()` catch the native
- * `VERSION_MISMATCH` code and rethrow as `OptimisticLockError` so
- * existing app code that `instanceof OptimisticLockError`-checks
- * keeps working — see [`mapVersionMismatchError`].
+ * same condition with its native error code. The runtime-typed error carries
+ * `retryable: true` semantically (the hint advises re-read + retry). The
+ * SDK's `update()` / `updateMany()` catch that native code and rethrow as
+ * `OptimisticLockError` so app code can branch on the error class or on
+ * `OPTIMISTIC_CONCURRENCY` — see [`mapOptimisticConcurrencyError`].
  */
 export class OptimisticLockError extends Error {
   name = "OptimisticLockError";
-  code = "VERSION_MISMATCH" as const;
+  code = "OPTIMISTIC_CONCURRENCY" as const;
   expectedVersion: number;
   /** **P7 PR 4** — always `true` for this error class; advisory flag
    *  the SDK consumer can branch on (`if (e.retryable) retry()`).
-   *  Mirrors the `retryable: true` semantics the Rust-side
-   *  `VERSION_MISMATCH` carries in its `hint`. */
+   *  Mirrors the `retryable: true` semantics the Rust side carries
+   *  in its `hint`. */
   retryable = true as const;
 
   constructor(expectedVersion: number, collection?: string) {
@@ -107,25 +102,25 @@ export class OptimisticLockError extends Error {
 /**
  * **P7 PR 4** — translate a caught error from the native UPDATE
  * dispatcher into an [`OptimisticLockError`] when it carries the
- * `VERSION_MISMATCH` code. Used by `Collection.update()` /
+ * optimistic-concurrency code. Used by `Collection.update()` /
  * `Collection.updateMany()` so the SDK contract surfaces a single
  * typed error class regardless of whether the failure came from the
  * SDK's pre-PR-4 null-result inference or the runtime's typed reject.
  *
- * Returns the original error unchanged for any code other than
- * `VERSION_MISMATCH`; the caller then handles it via the standard
- * `mapNativeError` rail. The `expectedVersion` defaults to `NaN`
+ * Returns the original error unchanged for any other code; the caller then
+ * handles it via the standard `mapNativeError` rail. The `expectedVersion`
+ * defaults to `NaN`
  * when the SDK doesn't have the original CAS value in scope (the
  * runtime's message body carries it but parsing free-text would
  * be fragile — callers that need the value have it in their own
  * filter object).
  */
-export function mapVersionMismatchError(
+export function mapOptimisticConcurrencyError(
   e: unknown,
   collection: string,
   expectedVersion: number,
 ): Error {
-  if (readCanonicalErrorCode(e) === "VERSION_MISMATCH") {
+  if (readCanonicalErrorCode(e) === "OPTIMISTIC_CONCURRENCY") {
     return new OptimisticLockError(expectedVersion, collection);
   }
   return e instanceof Error ? e : new Error(String(e));

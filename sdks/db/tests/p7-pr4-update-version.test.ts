@@ -1,6 +1,6 @@
 /**
  * **P7 PR 4** — `update(filter, patch)` interaction with the platform's
- * server-side `version` auto-bump + `VERSION_MISMATCH` typed error.
+ * server-side `version` auto-bump + optimistic-concurrency typed error.
  *
  * Two SDK-side responsibilities the runtime can't observe directly:
  *
@@ -9,10 +9,9 @@
  *    A pre-PR-4 SDK that still adds it would double-bump; we pin the
  *    behaviour change so a regression in `_augmentUpdateWithVersion`
  *    is caught.
- * 2. When the runtime throws a typed `VERSION_MISMATCH` error, the
- *    SDK's `update()` / `updateMany()` translate to
- *    `OptimisticLockError` so existing callers that
- *    `instanceof OptimisticLockError`-check keep working.
+ * 2. When the runtime throws a typed optimistic-concurrency error, the
+ *    SDK's `update()` / `updateMany()` translate to `OptimisticLockError`
+ *    so callers can branch on the class or `OPTIMISTIC_CONCURRENCY`.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -46,9 +45,9 @@ function makeNativeCapturingUpdate() {
   return { native: native as unknown as ZeroshipDb, captured };
 }
 
-/** Native double that throws a typed `VERSION_MISMATCH` Error from
- *  `update` to simulate the runtime's PR 4 CAS-failure path. */
-function makeNativeVersionMismatch() {
+/** Native double that throws the runtime's typed CAS-failure code from
+ *  `update` to simulate the PR 4 path. */
+function makeNativeOptimisticConcurrencyFailure() {
   const native = {
     registerModel: () => Promise.resolve(),
     collection(_name: string) {
@@ -57,7 +56,7 @@ function makeNativeVersionMismatch() {
           const e = new Error(
             "Optimistic concurrency check failed for posts post_x: expected version 5",
           );
-          (e as Error & { code: string }).code = "VERSION_MISMATCH";
+          (e as Error & { code: string }).code = "version_mismatch";
           throw e;
         },
       };
@@ -95,8 +94,8 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
     );
   });
 
-  test("update_with_stale_version_throws_VERSION_MISMATCH", async () => {
-    const native = makeNativeVersionMismatch();
+  test("update_with_stale_version_throws_OPTIMISTIC_CONCURRENCY", async () => {
+    const native = makeNativeOptimisticConcurrencyFailure();
     const db = installSchemaForTest(
       {
         posts: schemaWrap({
@@ -109,16 +108,16 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
       { id: "post_x", version: 5 } as never,
       { title: "renamed" },
     );
-    // Runtime threw `VERSION_MISMATCH` typed error; SDK rethrew as
-    // `OptimisticLockError`; the `_run` rail catches + returns it
-    // via `result.error`.
+    // Runtime threw its typed optimistic-concurrency error; SDK rethrew as
+    // `OptimisticLockError`; the `_run` rail catches + returns it via
+    // `result.error`.
     assert.equal(result.data, null);
     assert.ok(result.error);
     assert.ok(
       result.error instanceof OptimisticLockError,
       `expected OptimisticLockError, got ${(result.error as Error).constructor.name}`,
     );
-    assert.equal((result.error as OptimisticLockError).code, "VERSION_MISMATCH");
+    assert.equal((result.error as OptimisticLockError).code, "OPTIMISTIC_CONCURRENCY");
     assert.equal((result.error as OptimisticLockError).expectedVersion, 5);
     // The `retryable: true` advisory flag must be set.
     assert.equal((result.error as OptimisticLockError).retryable, true);
@@ -145,12 +144,12 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
     assert.ok(row);
   });
 
-  test("VERSION_MISMATCH_error_is_retryable", () => {
+  test("OPTIMISTIC_CONCURRENCY_error_is_retryable", () => {
     // Pure unit check on `OptimisticLockError`: the `retryable: true`
     // advisory flag is the SDK-side surface for the runtime's hint.
     const e = new OptimisticLockError(7, "posts");
     assert.equal(e.retryable, true);
-    assert.equal(e.code, "VERSION_MISMATCH");
+    assert.equal(e.code, "OPTIMISTIC_CONCURRENCY");
     assert.equal(e.expectedVersion, 7);
   });
 });
