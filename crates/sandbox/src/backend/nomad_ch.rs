@@ -1138,10 +1138,42 @@ impl NomadCHBackend {
                         .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
                 }
                 let workspace_img = workspace_image_path(&host_dir_owned);
-                create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
-                    .map_err(|e| format!("workspace.img: {e}"))?;
-                create_ext4_image_if_missing(&user_home_img_owned, workspace_img_size_gb)
-                    .map_err(|e| format!("home.img: {e}"))?;
+                // R32-P1: parallelise the two mkfs.ext4 subprocesses.
+                // `workspace.img` (per-sandbox, always fresh on cold-boot)
+                // and `home.img` (per-user, idempotent skip on warm-boot)
+                // touch disjoint paths and disjoint dirents; running them
+                // sequentially adds ~1.5 s on first-sandbox-per-user
+                // (perf-r32 §"Where the 8.9 s c=1 CREATE goes"). Two
+                // `std::thread::scope` threads keep ownership trivial —
+                // both children borrow from the enclosing spawn_blocking
+                // closure and join before the scope exits, so no Arc /
+                // Send dance is needed. Error semantics match the prior
+                // sequential code: if either mkfs fails, the CREATE
+                // fails; if both fail, we surface workspace.img's error
+                // (it's the per-sandbox image — the more diagnostic of
+                // the two for the cold-boot fault domain).
+                let (workspace_res, home_res) = std::thread::scope(|s| {
+                    let workspace_h = s.spawn(|| {
+                        create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
+                            .map_err(|e| format!("workspace.img: {e}"))
+                    });
+                    let home_h = s.spawn(|| {
+                        create_ext4_image_if_missing(&user_home_img_owned, workspace_img_size_gb)
+                            .map_err(|e| format!("home.img: {e}"))
+                    });
+                    // join() returns Result<R, Box<dyn Any>> for panics;
+                    // unwrap_or_else maps a panic into a string Err so
+                    // it surfaces the same way as a returned Err.
+                    let w = workspace_h
+                        .join()
+                        .unwrap_or_else(|p| Err(format!("workspace.img mkfs panic: {p:?}")));
+                    let h = home_h
+                        .join()
+                        .unwrap_or_else(|p| Err(format!("home.img mkfs panic: {p:?}")));
+                    (w, h)
+                });
+                workspace_res?;
+                home_res?;
                 Ok(workspace_img)
             })
             .await
