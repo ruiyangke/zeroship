@@ -105,6 +105,7 @@ pub(crate) mod system_fields_pass;
 pub mod system_fields_pass;
 
 mod read_pipeline;
+mod write_pipeline;
 
 // ---------------------------------------------------------------------------
 // dispatch_op template
@@ -633,26 +634,18 @@ pub(crate) fn dispatch_insert<'s>(
     // originated the insert.
     let actor_id = system_fields_pass::current_actor_id(&state);
 
-    // **P5 PR 2** — async tail so the encryption pass can `.await` the
-    // backend's `resolve_key` (PG SECURITY DEFINER round-trip) before
-    // `build_insert` consumes the doc. The non-encrypted hot path stays
-    // identical — `apply_encryption_on_write` short-circuits when the
-    // cached schema has no `t.encrypted(...)` columns.
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let mut doc = doc;
-        // **P7 PR 3** — populate `id` (auto-mint when absent) and
-        // `created_by` / `updated_by` (from the session actor when
-        // present). Runs BEFORE the encryption pass so encrypted
-        // columns declared on the same row see a fully-populated doc;
-        // runs BEFORE `build_insert` so the SQL `RETURNING *` carries
-        // every system field back to the SDK.
-        system_fields_pass::apply_system_fields_on_insert(
-            &mut doc,
+        if let Err(e) = write_pipeline::apply(
             &app,
             &coll,
-            actor_id.as_deref(),
-        );
-        if let Err(e) = apply_encryption_on_write(&app, &coll, &mut doc).await {
+            &mut doc,
+            write_pipeline::ApplyMode::Insert {
+                actor_id: actor_id.as_deref(),
+            },
+        )
+        .await
+        {
             return OpResult::JsValue {
                 resolver,
                 value: ResolveValue::RejectError(e.to_op_error()),
@@ -812,16 +805,8 @@ pub(crate) fn dispatch_update_one<'s>(
     let actor_id = system_fields_pass::current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // **P7 PR 4** — validate immutable system fields + check the
-        // pre-migration marker. Runs BEFORE the encryption pass so a
-        // bad patch fails fast before we round-trip to the key
-        // resolver.
-        let hints = match system_fields_pass::apply_system_fields_on_update(
-            &update,
-            &app,
-            &coll,
-        ) {
-            Ok(h) => h,
+        let hints = match write_pipeline::inspect_update(&app, &coll, &update) {
+            Ok(hints) => hints,
             Err(e) => {
                 return OpResult::JsValue {
                     resolver,
@@ -853,7 +838,14 @@ pub(crate) fn dispatch_update_one<'s>(
         }
 
         let mut update = update;
-        if let Err(e) = apply_encryption_on_update(&app, &coll, &filter, &mut update).await {
+        if let Err(e) = write_pipeline::apply(
+            &app,
+            &coll,
+            &mut update,
+            write_pipeline::ApplyMode::Update { filter: &filter },
+        )
+        .await
+        {
             return OpResult::JsValue {
                 resolver,
                 value: ResolveValue::RejectError(e.to_op_error()),
@@ -993,14 +985,8 @@ pub(crate) fn dispatch_update_many<'s>(
     let actor_id = system_fields_pass::current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // **P7 PR 4** — same immutable-field + marker checks as
-        // updateOne. Also refuse multi-row CAS UPDATE eagerly.
-        let hints = match system_fields_pass::apply_system_fields_on_update(
-            &update,
-            &app,
-            &coll,
-        ) {
-            Ok(h) => h,
+        let hints = match write_pipeline::inspect_update(&app, &coll, &update) {
+            Ok(hints) => hints,
             Err(e) => {
                 return OpResult::JsValue {
                     resolver,
@@ -1030,7 +1016,14 @@ pub(crate) fn dispatch_update_many<'s>(
         }
 
         let mut update = update;
-        if let Err(e) = apply_encryption_on_update(&app, &coll, &filter, &mut update).await {
+        if let Err(e) = write_pipeline::apply(
+            &app,
+            &coll,
+            &mut update,
+            write_pipeline::ApplyMode::Update { filter: &filter },
+        )
+        .await
+        {
             return OpResult::JsValue {
                 resolver,
                 value: ResolveValue::RejectError(e.to_op_error()),
@@ -2242,61 +2235,6 @@ pub(crate) fn dispatch_near<'s>(
 // P5 PR 2 — transparent column encryption hooks
 // ===========================================================================
 
-/// **P5 PR 2** — encrypt every `t.encrypted(...)`-declared column on
-/// `doc` before the query builder reads it. Short-circuits when:
-///   - the cached schema for `(app_id, collection)` is absent (the
-///     collection wasn't registered on this isolate yet), OR
-///   - no column on the schema carries the `encrypted` metadata.
-///
-/// `row_pk` defaults to `doc["id"]` (typed_ids minted SDK-side per
-/// Camp A, ALWAYS available before INSERT). When the doc has no `id`
-/// field (e.g. partial update), the empty string is used; this is OK
-/// because the encryption pass also runs on UPDATE where row_pk comes
-/// from the filter — and a Randomised column with an empty row_pk
-/// would still encrypt consistently (the AAD just doesn't bind a row
-/// identity, which is a known limitation for callers who explicitly
-/// pass a doc without an `id`).
-///
-/// **P5.5 PR 2** — also runs the mask pass after the encryption pass
-/// using the plaintext sidechannel produced by
-/// `encrypt_row_on_write_with_sidechannel`. The mask pass appends
-/// `<col>_masked` siblings to `doc` for every masked column; the SQL
-/// builder picks them up naturally because the row is iterated as a
-/// map. Non-encrypted-but-masked columns are handled by the mask pass
-/// reading `doc[col]` directly (empty sidechannel for those columns).
-async fn apply_encryption_on_write(
-    app_id: &str,
-    collection: &str,
-    doc: &mut Value,
-) -> Result<(), DbError> {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(());
-    };
-    let has_enc = schema_has_encrypted_columns(&schema);
-    let has_mask = schema_has_masked_columns(&schema);
-    if !has_enc && !has_mask {
-        return Ok(());
-    }
-    // Row PK lookup: prefer `doc["id"]` (typed_id string), fall back to
-    // empty. Numeric ids are also accepted for legacy collections.
-    let row_pk = doc
-        .get("id")
-        .and_then(|v| match v {
-            Value::String(s) => Some(s.clone()),
-            Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let mut sidechannel = mask_pass::MaskPlaintextSidechannel::new();
-    if has_enc {
-        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, doc, &mut sidechannel).await?;
-    }
-    if has_mask {
-        mask_pass::apply_mask_on_write(&schema, &sidechannel, doc)?;
-    }
-    Ok(())
-}
-
 #[cfg(not(feature = "test-helpers"))]
 async fn prepare_insert_many_docs_for_write(
     docs: &mut Value,
@@ -2304,7 +2242,13 @@ async fn prepare_insert_many_docs_for_write(
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
-    prepare_insert_many_docs_for_write_impl(docs, app_id, collection, actor_id).await
+    write_pipeline::apply(
+        app_id,
+        collection,
+        docs,
+        write_pipeline::ApplyMode::InsertMany { actor_id },
+    )
+    .await
 }
 
 #[cfg(feature = "test-helpers")]
@@ -2314,23 +2258,13 @@ pub async fn prepare_insert_many_docs_for_write(
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
-    prepare_insert_many_docs_for_write_impl(docs, app_id, collection, actor_id).await
-}
-
-async fn prepare_insert_many_docs_for_write_impl(
-    docs: &mut Value,
-    app_id: &str,
-    collection: &str,
-    actor_id: Option<&str>,
-) -> Result<(), DbError> {
-    system_fields_pass::apply_system_fields_on_insert_many(docs, app_id, collection, actor_id);
-    let Some(arr) = docs.as_array_mut() else {
-        return Ok(());
-    };
-    for doc in arr.iter_mut() {
-        apply_encryption_on_write(app_id, collection, doc).await?;
-    }
-    Ok(())
+    write_pipeline::apply(
+        app_id,
+        collection,
+        docs,
+        write_pipeline::ApplyMode::InsertMany { actor_id },
+    )
+    .await
 }
 
 #[cfg(not(feature = "test-helpers"))]
@@ -2341,7 +2275,16 @@ async fn prepare_upsert_doc_for_write(
     actor_id: Option<&str>,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
-    prepare_upsert_doc_for_write_impl(doc, app_id, collection, actor_id, conflict_fields).await
+    write_pipeline::apply(
+        app_id,
+        collection,
+        doc,
+        write_pipeline::ApplyMode::Upsert {
+            actor_id,
+            conflict_fields,
+        },
+    )
+    .await
 }
 
 #[cfg(feature = "test-helpers")]
@@ -2352,140 +2295,16 @@ pub async fn prepare_upsert_doc_for_write(
     actor_id: Option<&str>,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
-    prepare_upsert_doc_for_write_impl(doc, app_id, collection, actor_id, conflict_fields).await
-}
-
-async fn prepare_upsert_doc_for_write_impl(
-    doc: &mut Value,
-    app_id: &str,
-    collection: &str,
-    actor_id: Option<&str>,
-    conflict_fields: &Value,
-) -> Result<(), DbError> {
-    system_fields_pass::apply_system_fields_on_insert(doc, app_id, collection, actor_id);
-    rewrite_upsert_doc_id_to_existing_row_id(doc, app_id, collection, conflict_fields).await?;
-    apply_encryption_on_write(app_id, collection, doc).await
-}
-
-async fn rewrite_upsert_doc_id_to_existing_row_id(
-    doc: &mut Value,
-    app_id: &str,
-    collection: &str,
-    conflict_fields: &Value,
-) -> Result<(), DbError> {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(());
-    };
-    if !schema_has_encrypted_columns(&schema) {
-        return Ok(());
-    }
-    let Some(obj) = doc.as_object_mut() else {
-        return Ok(());
-    };
-    let Some(conflict_arr) = conflict_fields.as_array() else {
-        return Ok(());
-    };
-    if conflict_arr.is_empty() {
-        return Ok(());
-    }
-
-    let mut filter_obj = serde_json::Map::with_capacity(conflict_arr.len());
-    for field in conflict_arr.iter().filter_map(Value::as_str) {
-        let Some(value) = obj.get(field).cloned() else {
-            return Ok(());
-        };
-        filter_obj.insert(field.to_string(), value);
-    }
-    if filter_obj.len() != conflict_arr.len() {
-        return Ok(());
-    }
-
-    let mut filter = Value::Object(filter_obj);
-    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
-    let select = serde_json::json!(["id"]);
-    let built = query::build_find(
+    write_pipeline::apply(
         app_id,
         collection,
-        &filter,
-        Some(1),
-        None,
-        None,
-        Some(&select),
+        doc,
+        write_pipeline::ApplyMode::Upsert {
+            actor_id,
+            conflict_fields,
+        },
     )
-    .map_err(DbError::from)?;
-    let rows = exec_query(app_id, built).await?;
-    let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
-        Some(Value::String(id)) => Some(id.clone()),
-        Some(Value::Number(n)) => Some(n.to_string()),
-        _ => None,
-    }) else {
-        return Ok(());
-    };
-    obj.insert("id".to_string(), Value::String(existing_id));
-    Ok(())
-}
-
-/// **P5 PR 2** — UPDATE variant that pulls `row_pk` from a filter
-/// object (`{ id: ... }`). Used by `dispatch_update_one` and
-/// `dispatch_update_many` so the AAD binds the target row's PK.
-///
-/// For multi-row updates (no `id` in the filter) `row_pk` falls back to
-/// the empty string — the Randomised path will then encrypt under an
-/// AAD that doesn't bind a specific row; the resulting ciphertext only
-/// decrypts back if every target row carries the same row_pk on read
-/// (which is generally NOT the case for bulk updates). The SDK's
-/// filter-validation layer refuses range / regex predicates on
-/// encrypted columns, but bulk-updating an encrypted column via
-/// `{ status: "active" }` (a non-encrypted filter) → `{ ssn: "X" }` is
-/// a footgun that we surface conservatively rather than silently
-/// breaking decrypt later.
-async fn apply_encryption_on_update(
-    app_id: &str,
-    collection: &str,
-    filter: &Value,
-    patch: &mut Value,
-) -> Result<(), DbError> {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(());
-    };
-    let has_enc = schema_has_encrypted_columns(&schema);
-    let has_mask = schema_has_masked_columns(&schema);
-    if !has_enc && !has_mask {
-        return Ok(());
-    }
-    let row_pk = filter
-        .get("id")
-        .and_then(|v| match v {
-            Value::String(s) => Some(s.clone()),
-            Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    // Encrypt fields nested under `$set` if present, otherwise the
-    // top-level field map. We mirror the SET-clause flattening the
-    // build layer does. Same target object feeds both the encryption
-    // pass and the mask pass so the sibling `<col>_masked` lands on
-    // the same `$set` (or top-level) the SQL builder iterates.
-    let target: &mut Value = if patch.get("$set").is_some() {
-        patch.get_mut("$set").expect("checked above")
-    } else {
-        patch
-    };
-    let mut sidechannel = mask_pass::MaskPlaintextSidechannel::new();
-    if has_enc {
-        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, target, &mut sidechannel).await?;
-    }
-    if has_mask {
-        // **P5.5 PR 2** — mask pass derives `<col>_masked` ONLY for
-        // columns that are present in the patch (`apply_mask_on_write`
-        // skips absent fields). This achieves "when the parent column
-        // is NOT in the UPDATE SET, don't touch the sibling" — partial
-        // updates that don't touch a masked field leave the existing
-        // sibling untouched on disk.
-        mask_pass::apply_mask_on_write(&schema, &sidechannel, target)?;
-    }
-    Ok(())
+    .await
 }
 
 /// Run the write-side encryption pass over `doc` using the
