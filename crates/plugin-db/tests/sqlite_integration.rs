@@ -3501,7 +3501,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             .await
             .expect("acquire client");
         client
-            .query(&built.sql, &params)
+            .query_typed(&built.sql, &params)
             .await
             .expect("INSERT ... RETURNING");
 
@@ -4530,7 +4530,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             .await
             .expect("acquire client");
         let _affected = client
-            .query(&bq.sql, &param_refs)
+            .query_typed(&bq.sql, &param_refs)
             .await
             .expect("INSERT ... RETURNING via SQLite session");
 
@@ -5587,7 +5587,10 @@ fn unmask_with_auto_actor_returns_plaintext() {
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+        let _ = client
+            .query_typed(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT");
 
         // Dispatch unmask with `kind: "auto"` actor — must succeed.
         let args = unmask::UnmaskFieldArgs {
@@ -5862,7 +5865,10 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+        let _ = client
+            .query_typed(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT");
 
         // Unmask with `user` actor — must succeed via the policy.
         let args = unmask::UnmaskFieldArgs {
@@ -6775,7 +6781,10 @@ fn drift_check_handles_encrypted_column() {
             .await
             .expect("acquire client");
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let _ = client.query(&bq.sql, &param_refs).await.expect("INSERT");
+        let _ = client
+            .query_typed(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT");
 
         // The correct mask for `555-00-1234` under `last4` is
         // `***-**-1234`; stored is `***-**-9999`. Drift expected.
