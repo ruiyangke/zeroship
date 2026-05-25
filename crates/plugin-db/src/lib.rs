@@ -1,22 +1,18 @@
 //! Database plugin — backs `env.db` with a typed `#[v8_class]` surface.
 //!
 //! `env.db` is the `Db` v8_class instance (see [`v8_classes::db`]).
-//! Every operation lives on the wrapper: `registerModel`,
-//! `collection(name)` (mints a [`v8_classes::collection::Collection`]),
-//! `beginTransaction(opts?)` (mints a [`v8_classes::transaction::Transaction`]),
-//! `startReplicationConsumer(opts?)`. Subscriptions are minted via
-//! `collection(name).openSubscription()` (P9 PR 1 removed the
-//! duplicate `Db::openSubscription(name)` entry point). Two nested
-//! namespaces hang off
-//! the Db wrapper as cached `#[v8_getter]`s:
+//! The creator-facing surface on that wrapper is:
 //!
-//! - `db.migrations` — the [`v8_classes::migrations::Migrations`]
-//!   namespace (`.start(spec)` mints a `Migration` wrapper;
-//!   `.status / .cancel / .reset({name, collection})` operate on the
-//!   audit row by coordinates).
-//! - `db.replication` — the [`v8_classes::replication::Replication`]
-//!   namespace (`.setup`, `.watchdog`, `.dropAbandoned`), always scoped
-//!   to the calling app — no JS-supplied app-id override.
+//! - `collection(name)` — mints a [`v8_classes::collection::Collection`]
+//!   wrapper for CRUD, vector search, and `openSubscription()`.
+//! - `transaction(callback, opts?)` — native transaction orchestrator
+//!   that hands the callback a collections-only tx view (the old
+//!   `beginTransaction` / `Transaction` wrapper surface was deleted).
+//!
+//! Platform-internal capabilities such as model registration,
+//! migrations, and replication no longer sit on the public `Db`
+//! wrapper; they hang off the private `__platform` capability handle
+//! instead.
 //!
 //! Each wrapper carries a `v8::Weak` guaranteed finalizer that
 //! releases its backing resource on GC (broker handle, transaction
