@@ -2409,7 +2409,7 @@ async fn wait_for_alloc_running(
                             last_parse_log_at = Some(now);
                         }
                         last_parse_err = Some(msg);
-                        compio::time::sleep(Duration::from_millis(250)).await;
+                        compio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
                 };
@@ -2478,7 +2478,7 @@ async fn wait_for_alloc_running(
                 last_http_err = Some(e);
             }
         }
-        compio::time::sleep(Duration::from_millis(250)).await;
+        compio::time::sleep(Duration::from_millis(100)).await;
     }
     let mut msg = format!(
         "nomad alloc never reached running for job {job_id} (last status={:?})",
@@ -2961,8 +2961,8 @@ async fn wait_for_agent_livez(
                 }
             }
         }
-        // 150 ms livez poll cadence — matches k8s.rs.
-        compio::time::sleep(Duration::from_millis(150)).await;
+        // 50 ms livez poll cadence — matches k8s.rs.
+        compio::time::sleep(Duration::from_millis(50)).await;
     }
     // Timeout. Distinguish:
     //   - never saw /livez=200 → "agent at <url> never returned 200"
@@ -3072,7 +3072,7 @@ async fn wait_for_agent_silent(
         // 100 ms cadence — tight enough that a 0.5 s tail is caught
         // in ~5 polls; loose enough that a 30 s budget on a stuck
         // agent doesn't burn 300+ blocking tasks. (Compare against
-        // wait_for_agent_livez at 150 ms — slightly faster here
+        // wait_for_agent_livez at 50 ms — slightly faster here
         // because we're polling for ABSENCE; we want to release the
         // index as fast as is safe.)
         compio::time::sleep(Duration::from_millis(100)).await;
