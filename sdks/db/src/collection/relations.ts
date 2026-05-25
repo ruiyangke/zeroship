@@ -44,7 +44,7 @@ export async function loadRelations(
           new Error(
             `find/get: with: { ${field}: ${JSON.stringify(spec)} } — only \`true\` is supported in v1`,
           ),
-          { code: "with_unsupported_value" as const },
+          { code: "WITH_UNSUPPORTED_VALUE" as const },
         );
       }
       const fieldDef = self._schema[field];
@@ -53,7 +53,7 @@ export async function loadRelations(
           new Error(
             `find/get: with: { ${field}: true } — "${field}" is not a t.ref field on "${self._name}"`,
           ),
-          { code: "with_not_a_ref_field" as const },
+          { code: "WITH_NOT_A_REF_FIELD" as const },
         );
       }
       const targetName = fieldDef.refTarget;
@@ -62,7 +62,7 @@ export async function loadRelations(
           new Error(
             `find/get: with: { ${field}: true } — "${field}" has no refTarget`,
           ),
-          { code: "with_missing_ref_target" as const },
+          { code: "WITH_MISSING_REF_TARGET" as const },
         );
       }
       const resolve = self._resolveCollection;
@@ -72,7 +72,7 @@ export async function loadRelations(
             `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
               `so sibling collections cannot be resolved. Declare the schema via "export default { schema }" to enable relation loading.`,
           ),
-          { code: "with_no_parent_db" as const },
+          { code: "WITH_NO_PARENT_DB" as const },
         );
       }
       const targetCol = resolve(targetName);
@@ -81,7 +81,7 @@ export async function loadRelations(
           new Error(
             `find/get: with: { ${field}: true } — target collection "${targetName}" is not declared on this db`,
           ),
-          { code: "with_target_not_found" as const },
+          { code: "WITH_TARGET_NOT_FOUND" as const },
         );
       }
       const ids: string[] = [];
@@ -94,7 +94,7 @@ export async function loadRelations(
             new TypeError(
               `_loadRelations: FK value for field '${field}' must be a string id (got ${typeof v})`,
             ),
-            { code: "with_fk_not_id_shaped" as const },
+            { code: "WITH_FK_NOT_ID_SHAPED" as const },
           );
         }
         if (v.length === 0) continue;

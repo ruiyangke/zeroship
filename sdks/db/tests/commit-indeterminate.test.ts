@@ -1,9 +1,9 @@
 /**
  * Robustness — `db.transaction(...)` `commit()` rejects while `rollback()`
- * also rejects. Pins the `commit_failed_indeterminate` contract:
+ * also rejects. Pins the `COMMIT_FAILED_INDETERMINATE` contract:
  *
  *   - `result.error` is non-null
- *   - `result.error.code === "commit_failed_indeterminate"`
+ *   - `result.error.code === "COMMIT_FAILED_INDETERMINATE"`
  *   - `result.error.cause` is the original commit rejection (so callers
  *     can walk the cause chain to surface the underlying driver error)
  *
@@ -22,7 +22,7 @@ type AnyRec = Record<string, unknown>;
 // P9 PR 3: commit failure is now owned by the native orchestrator. The
 // mock's `transaction(callback)` runs the callback (begin succeeded),
 // then simulates a COMMIT that fails — rejecting with the
-// `commit_failed_indeterminate`-coded error the Rust orchestrator emits
+// `COMMIT_FAILED_INDETERMINATE`-coded error the Rust orchestrator emits
 // (`crates/plugin-db/src/orchestrator/transaction.rs::exec_settle_top_level`).
 // The `.cause` is preserved on the rejection so the SDK's `result.error`
 // keeps the cause chain the pre-PR3 JS `transactionImpl` produced.
@@ -38,7 +38,7 @@ function makeCommitFailingNative(commitErr: Error) {
         new Error(`commit failed — transaction state indeterminate: ${commitErr.message}`, {
           cause: commitErr,
         }),
-        { code: "commit_failed_indeterminate" as const },
+        { code: "COMMIT_FAILED_INDETERMINATE" as const },
       );
     },
     collection(_name: string) {
@@ -59,7 +59,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
     // models a COMMIT that fails after the body resolved, rejecting with
     // the same coded error + cause the Rust path emits.
     const commitErr = Object.assign(new Error("network drop after COMMIT"), {
-      code: "connection_lost",
+      code: "CONNECTION_LOST",
     });
     const native = makeCommitFailingNative(commitErr);
 
@@ -78,7 +78,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
     const err = result.error as Error & { code?: string; cause?: unknown };
     assert.equal(
       err.code,
-      "commit_failed_indeterminate",
+      "COMMIT_FAILED_INDETERMINATE",
       "wrapped error must carry the indeterminate code",
     );
     assert.match(err.message, /commit failed/i);
@@ -92,7 +92,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
 
   test("COMMIT failure surfaces the indeterminate code even when the body resolved", async () => {
     const commitErr = Object.assign(new Error("deadlock at commit"), {
-      code: "deadlock_detected",
+      code: "DEADLOCK_DETECTED",
     });
     const native = makeCommitFailingNative(commitErr);
 
@@ -104,7 +104,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
     const result = await db.transaction(async () => 1);
     assert.ok(result.error);
     const err = result.error as Error & { code?: string; cause?: unknown };
-    assert.equal(err.code, "commit_failed_indeterminate");
+    assert.equal(err.code, "COMMIT_FAILED_INDETERMINATE");
     assert.equal(err.cause, commitErr);
   });
 });

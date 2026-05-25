@@ -79,7 +79,7 @@ export type NativeCollection = ZeroshipCollection;
  * Converts a caught value to an Error for inclusion in a Result.
  * ValidationError instances are returned as-is (they are already well-typed).
  * All other errors are passed through mapNativeError so that, e.g., unique
- * constraint violations preserve the native string code `unique_violation`.
+ * constraint violations preserve the native string code `UNIQUE_VIOLATION`.
  */
 function toResultError(e: unknown): Error {
   let out: Error;
@@ -270,7 +270,7 @@ export class Collection<
           "@zeroship/db: env.db.collection(name) not available — " +
             "runtime is missing the Collection v8_class surface.",
         ),
-        { code: "native_collection_unavailable" as const },
+        { code: "NATIVE_COLLECTION_UNAVAILABLE" as const },
       );
     }
     this._nativeCol = dbAny.collection(this._name);

@@ -106,7 +106,7 @@ describe("P9 PR 3 — native env.db.transaction(fn)", () => {
       { native },
     );
 
-    const boom = Object.assign(new Error("nope"), { code: "user_abort" });
+    const boom = Object.assign(new Error("nope"), { code: "USER_ABORT" });
     const result = await db.transaction(async (tx) => {
       await tx.posts.insert({ title: "doomed" });
       throw boom;
@@ -115,7 +115,7 @@ describe("P9 PR 3 — native env.db.transaction(fn)", () => {
     assert.equal(result.data, null);
     assert.ok(result.error, "expected result.error");
     assert.equal(result.error, boom, "the thrown error surfaces verbatim as result.error");
-    assert.equal((result.error as { code?: string }).code, "user_abort");
+    assert.equal((result.error as { code?: string }).code, "USER_ABORT");
     assert.deepEqual(
       (native as unknown as { _settles: string[] })._settles,
       ["begin", "rollback"],

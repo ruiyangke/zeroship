@@ -8,10 +8,10 @@
  *   2. `_flushPendingMaskPolicy()` drains exactly once — second drain
  *      yields `null`.
  *   3. Invalid classifications refuse at declare-time with
- *      `invalid_mask_classification` (matched by the Rust-side
+ *      `INVALID_MASK_CLASSIFICATION` (matched by the Rust-side
  *      validation; belt-and-braces).
  *   4. Shape errors (non-array role value, non-object policy) refuse
- *      with `invalid_mask_policy_shape`.
+ *      with `INVALID_MASK_POLICY_SHAPE`.
  *   5. The stored policy is a defensive clone — mutating the caller's
  *      array after declare does not bleed into the pending slot.
  */
@@ -81,7 +81,7 @@ describe("P5.5 PR 5 — defineMaskPolicy() validation", () => {
       () => defineMaskPolicy({ admin: ["badclass"] as never }),
       (e: unknown) =>
         e instanceof Error &&
-        (e as Error & { code?: string }).code === "invalid_mask_classification",
+        (e as Error & { code?: string }).code === "INVALID_MASK_CLASSIFICATION",
     );
     // Slot must not be poisoned with a partial set.
     assert.equal(_peekPendingMaskPolicy(), null);
@@ -92,7 +92,7 @@ describe("P5.5 PR 5 — defineMaskPolicy() validation", () => {
       () => defineMaskPolicy({ user: ["" as never] }),
       (e: unknown) =>
         e instanceof Error &&
-        (e as Error & { code?: string }).code === "invalid_mask_classification",
+        (e as Error & { code?: string }).code === "INVALID_MASK_CLASSIFICATION",
     );
   });
 
@@ -104,7 +104,7 @@ describe("P5.5 PR 5 — defineMaskPolicy() validation", () => {
         }),
       (e: unknown) =>
         e instanceof Error &&
-        (e as Error & { code?: string }).code === "invalid_mask_policy_shape",
+        (e as Error & { code?: string }).code === "INVALID_MASK_POLICY_SHAPE",
     );
   });
 
@@ -113,7 +113,7 @@ describe("P5.5 PR 5 — defineMaskPolicy() validation", () => {
       () => defineMaskPolicy(null as unknown as Record<string, never>),
       (e: unknown) =>
         e instanceof Error &&
-        (e as Error & { code?: string }).code === "invalid_mask_policy_shape",
+        (e as Error & { code?: string }).code === "INVALID_MASK_POLICY_SHAPE",
     );
   });
 

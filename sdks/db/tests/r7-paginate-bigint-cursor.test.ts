@@ -48,7 +48,7 @@ describe("Query.paginate string-id cursor handling", () => {
     const { error } = await new Query("u", {}, fn).paginate({ numItems: 2 });
     assert.ok(error !== null);
     const err = error as Error & { code?: string };
-    assert.equal(err.code, "paginate_invalid_id");
+    assert.equal(err.code, "PAGINATE_INVALID_ID");
   });
 });
 

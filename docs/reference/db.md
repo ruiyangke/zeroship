@@ -248,7 +248,7 @@ fields, matching Postgres B-tree semantics:
 `UNIQUE` index — useful for compound natural keys like `["orgId", "slug"]`.
 
 **Validation at definition time.** `.index(name, fields)` throws with
-`code = "schema_invalid"` if `name` is empty or already declared on the
+`code = "SCHEMA_INVALID"` if `name` is empty or already declared on the
 schema, or if `fields` is empty or references a field absent from the
 schema. The auto-generated columns (`id`, `created_at`, `updated_at`,
 `deleted_at` under soft-delete, `version` under versioning) are accepted.
@@ -513,7 +513,7 @@ your own predicate to retry on additional coded errors:
 await withRetry(fn, {
   max: 5,
   on: (e) => isOptimisticLockError(e) ||
-             (e as { code?: string }).code === "serialization_failure",
+             (e as { code?: string }).code === "SERIALIZATION_FAILURE",
   backoff: (attempt) => attempt * 10, // 10ms, 20ms, ...
 });
 ```
@@ -605,7 +605,7 @@ export default {
 
 - `dims` is **required** and must lie in `1..=16000` (pgvector's
   hard ceiling). The SDK validates the literal at schema-parse time
-  and again at insert (`code: "vector_dimension_mismatch"` when
+  and again at insert (`code: "VECTOR_DIMENSION_MISMATCH"` when
   `vector.length !== dims`).
 - `opts.metric` selects the distance function: `"cosine"` (default),
   `"l2"` (Euclidean), or `"innerProduct"` (negated dot product;
@@ -723,7 +723,7 @@ is always the call site contract). On SQLite this is the Rust
 haversine computed during the full-scan post-filter.
 
 **Polygon ops are PG-only.** Passing a polygon to a SQLite backend
-rejects with `code: "polygon_ops_pg_only"`. Use PG for any
+rejects with `code: "POLYGON_OPS_PG_ONLY"`. Use PG for any
 production-scale geo workload.
 
 ### Backend coverage
@@ -740,7 +740,7 @@ production-scale geo workload.
   `MATCH` distance. Metric is pinned at vtable-creation time
   (`distance_metric=cosine|l2`); **inner product is not supported on
   SQLite** — vec0 supports cosine + L2 only, and `metric:
-  "inner_product"` surfaces as a typed `vector_unsupported_metric`
+  "inner_product"` surfaces as a typed `VECTOR_UNSUPPORTED_METRIC`
   error. Use PG (pgvector `vector_ip_ops`) for production inner-
   product workloads.
 - **PG FTS** — hidden `tsvector` column + GIN; `plainto_tsquery` with
@@ -762,11 +762,11 @@ top of the global error rail (§ Errors):
 
 | `error.code`                       | When                                                                 |
 |------------------------------------|----------------------------------------------------------------------|
-| `invalid_k`                        | `k` (or FTS `limit`) outside `1..=1000`. Client-side validation; the native side never sees the call. |
-| `vector_extension_missing`         | PG without `pgvector`. Hint mentions `CREATE EXTENSION vector;` and the `pgvector/pgvector:pg16` image swap. |
-| `postgis_extension_missing`        | PG without `postgis`. Hint mentions `CREATE EXTENSION postgis;` and the same image swap. |
-| `vector_dimension_mismatch`        | `args.vector.length !== <declared dims>` at insert or query time.    |
-| `polygon_ops_pg_only`              | A polygon was passed to `.near` on a SQLite backend.                 |
+| `INVALID_K`                        | `k` (or FTS `limit`) outside `1..=1000`. Client-side validation; the native side never sees the call. |
+| `VECTOR_EXTENSION_MISSING`         | PG without `pgvector`. Hint mentions `CREATE EXTENSION vector;` and the `pgvector/pgvector:pg16` image swap. |
+| `POSTGIS_EXTENSION_MISSING`        | PG without `postgis`. Hint mentions `CREATE EXTENSION postgis;` and the same image swap. |
+| `VECTOR_DIMENSION_MISMATCH`        | `args.vector.length !== <declared dims>` at insert or query time.    |
+| `POLYGON_OPS_PG_ONLY`              | A polygon was passed to `.near` on a SQLite backend.                 |
 
 All five carry a stable `.code` — branch on the code, never substring-match
 on `error.message`.
@@ -874,11 +874,11 @@ Errors have a `.code` string property:
 
 | Code                         | When                                                        |
 |------------------------------|-------------------------------------------------------------|
-| `migration_already_running`  | Another worker holds the advisory lock.                     |
-| `migration_cancelled`        | The audit row was cancelled before this run completed.      |
-| `migration_not_active`       | The Migration wrapper has been finalised/cancelled/reset.   |
-| `migration_not_cancellable`  | Audit row is already in a terminal state.                   |
-| `no_active_migration`        | Internal — `commitBatch`/`fetchBatch` outside of a run.     |
+| `MIGRATION_ALREADY_RUNNING`  | Another worker holds the advisory lock.                     |
+| `MIGRATION_CANCELLED`        | The audit row was cancelled before this run completed.      |
+| `MIGRATION_NOT_ACTIVE`       | The Migration wrapper has been finalised/cancelled/reset.   |
+| `MIGRATION_NOT_CANCELLABLE`  | Audit row is already in a terminal state.                   |
+| `NO_ACTIVE_MIGRATION`        | Internal — `commitBatch`/`fetchBatch` outside of a run.     |
 
 ## Live queries (`db.live`)
 
@@ -923,7 +923,7 @@ db.live(async () => transform(await fetch(...)), { tables: ["todos"] });
 
 **Inside a transaction.** Live queries outlive any single request, so
 calling `db.live` inside the callback to `db.transaction(tx => ...)`
-throws synchronously with `code = "live_in_transaction"`. Open the
+throws synchronously with `code = "LIVE_IN_TRANSACTION"`. Open the
 live query before (or after) the tx.
 
 **Cleanup.** `close()` is idempotent and cancels every underlying
@@ -936,11 +936,11 @@ Errors carry a `.code` property where applicable:
 
 | `error.code`                | When                                                |
 |-----------------------------|-----------------------------------------------------|
-| `ValidationError`           | Input fails schema validation.                      |
-| `unique_violation`          | Duplicate unique-key violation.                     |
-| `OptimisticLockError`       | `update` with a CAS version that didn't match.     |
-| `migration_*` (see above)   | Migration lifecycle errors.                         |
-| `invalid_k`, `vector_extension_missing`, `postgis_extension_missing`, `vector_dimension_mismatch`, `polygon_ops_pg_only` | Vector / FTS / geo paths — see [Vector / Full-Text / Geo § Error codes](#error-codes). |
+| `VALIDATION_ERROR`          | Input fails schema validation.                      |
+| `UNIQUE_VIOLATION`          | Duplicate unique-key violation.                     |
+| `VERSION_MISMATCH`          | `update` with a CAS version that didn't match.     |
+| `MIGRATION_*` (see above)   | Migration lifecycle errors.                         |
+| `INVALID_K`, `VECTOR_EXTENSION_MISSING`, `POSTGIS_EXTENSION_MISSING`, `VECTOR_DIMENSION_MISMATCH`, `POLYGON_OPS_PG_ONLY` | Vector / FTS / geo paths — see [Vector / Full-Text / Geo § Error codes](#error-codes). |
 
 Use the property directly — never substring-match on `error.message`.
 
@@ -972,7 +972,7 @@ on `env.db` under a **V8 private symbol** and hands only to
 `@zeroship/bootstrap`'s runtime-entry. They are unreachable from app
 code:
 
-- `env.db.__platform` (string access) throws `platform_internal_only`.
+- `env.db.__platform` (string access) throws `PLATFORM_INTERNAL_ONLY`.
 - The handle is invisible to `Object.keys` / `getOwnPropertyNames` /
   `getOwnPropertySymbols` / `Reflect.ownKeys` / `for..in` / JSON — a
   `v8::Private` slot is not a JS property and cannot be keyed from JS.
@@ -1017,7 +1017,7 @@ Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
 
 The field names are **reserved**. Declaring a user field named `id`,
 `created_at`, `updated_at`, `created_by`, `updated_by`, `version`, or
-`deleted_at` rejects at deploy time with `code: "reserved_field_name"`
+`deleted_at` rejects at deploy time with `code: "RESERVED_SYSTEM_FIELD_NAME"`
 and a hint listing the reserved set.
 
 ### Reading system fields
@@ -1063,9 +1063,9 @@ if (error instanceof OptimisticLockError) {
 
 The native dispatch composes `UPDATE … SET title = $1, version =
 version + 1, updated_at = NOW() WHERE id = $id AND version = 5`.
-Affected-rows = 0 surfaces as the Rust error `version_mismatch`, which
+Affected-rows = 0 surfaces as the Rust error `VERSION_MISMATCH`, which
 the SDK rethrows as `OptimisticLockError` (`code:
-"optimistic_lock_failure"`, `retryable: true`) so the standard
+"VERSION_MISMATCH"`, `retryable: true`) so the standard
 `instanceof OptimisticLockError` check keeps working.
 
 Omitting `version` from the filter is last-writer-wins — the UPDATE
@@ -1219,7 +1219,7 @@ storage-side; they're independent.
 
 `null` plaintext passes through as `null` (no mask). Empty string
 becomes `""`. Numbers and `Uint8Array` are supported by `full`;
-the string-oriented kinds throw `mask_kind_incompatible` at deploy
+the string-oriented kinds throw `MASK_KIND_INCOMPATIBLE` at deploy
 time if the column type doesn't match.
 
 ### The six classifications

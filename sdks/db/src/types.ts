@@ -632,7 +632,7 @@ export declare class MaskedValue<T extends string | number | Uint8Array = string
    * The `columns` overload fans out to a native bulk unmask pinned to
    * this MaskedValue's row, returning `Record<col, T>`. Atomic
    * authorization: one denied column rejects the whole fan-out with
-   * `bulk_unmask_partial_unauthorized`.
+   * `BULK_UNMASK_PARTIAL_UNAUTHORIZED`.
    *
    * For `wraps = bytes` the plaintext arrives base64-encoded (caller
    * decodes with `Uint8Array.from(atob(pt), c => c.charCodeAt(0))`); for
@@ -671,7 +671,7 @@ export declare class MaskedValue<T extends string | number | Uint8Array = string
  * - `wraps` — the inner primitive type, ONE OF `t.string()` /
  *   `t.number()` / `t.bytes()` (the `bytes` wrap accepts base64-encoded
  *   string at the JS layer). Defaults to `t.string()`. Other types
- *   throw synchronously with `encrypted_wraps_unsupported`.
+ *   throw synchronously with `ENCRYPTED_WRAPS_UNSUPPORTED`.
  */
 export interface EncryptedFieldOpts<Mode extends EncryptionMode = EncryptionMode> {
   /** Encryption mode. Defaults to `"randomised"`. */
@@ -681,7 +681,7 @@ export interface EncryptedFieldOpts<Mode extends EncryptionMode = EncryptionMode
   /**
    * Inner type the encrypted value wraps. Only string / number / bytes
    * are supported. Passing any other `TypeBuilder` throws with code
-   * `encrypted_wraps_unsupported` at schema-definition time.
+   * `ENCRYPTED_WRAPS_UNSUPPORTED` at schema-definition time.
    */
   wraps?: TypeBuilder<any, any, any, any>;
 }
@@ -860,7 +860,7 @@ export interface FieldDef {
    * collection (Q-P4-B); the index emitter (`build_create_indexes` on
    * the Rust side) walks all `fts === true` fields and emits one
    * `IndexSpec { kind: Fts { language } }` covering them in declared
-   * order. Reject on non-string fields with code `fts_on_non_string`.
+   * order. Reject on non-string fields with code `FTS_ON_NON_STRING`.
    */
   fts?: boolean;
   /**
@@ -885,7 +885,7 @@ export interface FieldDef {
    *   `"default"`.
    * - `wraps` — the inner primitive (`"string"` | `"number"` | `"bytes"`).
    *   Other types are refused at schema-definition time with code
-   *   `encrypted_wraps_unsupported`.
+   *   `ENCRYPTED_WRAPS_UNSUPPORTED`.
    */
   encrypted?: {
     mode: EncryptionMode;
@@ -1021,7 +1021,7 @@ export class TypeBuilder<
         new Error(
           "t.encrypted({ mode: 'randomised' }).unique(): unique enforcement requires equality on ciphertext, which randomised mode cannot provide. Switch to { mode: 'deterministic' } or drop .unique().",
         ),
-        { code: "unique_encrypted_randomised_unsupported" as const },
+        { code: "UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED" as const },
       );
     }
     this._def.unique = true;
@@ -1068,7 +1068,7 @@ export class TypeBuilder<
    * **P4 PR 3** — mark this field as a source for the per-collection
    * composite full-text-search index. Only valid on `t.string()` fields;
    * called on any other type throws synchronously with code
-   * `fts_on_non_string`.
+   * `FTS_ON_NON_STRING`.
    *
    * ```ts
    * const fields = {
@@ -1093,7 +1093,7 @@ export class TypeBuilder<
         new Error(
           `.fts(): only valid on t.string() fields, got "${this._def.type}"`,
         ),
-        { code: "fts_on_non_string" as const },
+        { code: "FTS_ON_NON_STRING" as const },
       );
     }
     const lang = language ?? "english";
@@ -1102,7 +1102,7 @@ export class TypeBuilder<
         new Error(
           `.fts(language): language must be a [A-Za-z0-9_]+ token (e.g. "english", "simple"), got "${String(lang)}"`,
         ),
-        { code: "fts_invalid_language" as const },
+        { code: "FTS_INVALID_LANGUAGE" as const },
       );
     }
     this._def.fts = true;
@@ -1121,7 +1121,7 @@ export class TypeBuilder<
    * Valid on `t.string()`, `t.number()`, `t.bytes()`, and
    * `t.encrypted()` (the encrypted column wraps one of those
    * primitive types). Refused on `t.ref()` with
-   * `encrypted_on_ref_unsupported` — FK columns must remain
+   * `ENCRYPTED_ON_REF_UNSUPPORTED` — FK columns must remain
    * unencrypted/unmasked so the JOIN integrity check works (the
    * mask sibling would itself participate in the FK semantics,
    * which is incoherent).
@@ -1146,7 +1146,7 @@ export class TypeBuilder<
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
-        { code: "mask_invalid_opts" as const },
+        { code: "MASK_INVALID_OPTS" as const },
       );
     }
     const kind = opts.kind;
@@ -1165,7 +1165,7 @@ export class TypeBuilder<
         new Error(
           `.mask({ kind }): kind must be one of ${[...VALID_KINDS].join(" | ")}, got "${String(kind)}"`,
         ),
-        { code: "mask_invalid_kind" as const },
+        { code: "MASK_INVALID_KIND" as const },
       );
     }
     const classification = opts.classification ?? "pii";
@@ -1182,7 +1182,7 @@ export class TypeBuilder<
         new Error(
           `.mask({ classification }): classification must be one of ${[...VALID_CLASSIFICATIONS].join(" | ")}, got "${String(classification)}"`,
         ),
-        { code: "mask_invalid_classification" as const },
+        { code: "MASK_INVALID_CLASSIFICATION" as const },
       );
     }
     // `t.ref()` columns must not carry a mask — see Q-P5-I in the
@@ -1195,7 +1195,7 @@ export class TypeBuilder<
         new Error(
           ".mask(): not supported on t.ref() fields (FK columns must stay unmasked for JOIN integrity)",
         ),
-        { code: "encrypted_on_ref_unsupported" as const },
+        { code: "ENCRYPTED_ON_REF_UNSUPPORTED" as const },
       );
     }
     // Mask only makes sense on column types whose stored value is
@@ -1209,7 +1209,7 @@ export class TypeBuilder<
         new Error(
           `.mask(): only valid on string / number / bytes wrapped types, got "${this._def.type}"`,
         ),
-        { code: "mask_on_unsupported_type" as const },
+        { code: "MASK_ON_UNSUPPORTED_TYPE" as const },
       );
     }
     this._def.mask = { kind, classification };
@@ -1242,7 +1242,7 @@ export class TypeBuilder<
    * INSERT auto-populate pass (PR 3) lets the DB DEFAULT fire when
    * the caller omits the column.
    *
-   * Refused on non-timestamp types with code `auto_now_on_non_timestamp`
+   * Refused on non-timestamp types with code `AUTO_NOW_ON_NON_TIMESTAMP`
    * so misuses fail loudly at schema-definition time rather than
    * silently producing wrong DDL. The validator looks at the underlying
    * `type === "date"` because `t.timestamp()` aliases to date today.
@@ -1253,7 +1253,7 @@ export class TypeBuilder<
         new Error(
           `.auto_now(): only valid on t.timestamp() fields, got "${this._def.type}"`,
         ),
-        { code: "auto_now_on_non_timestamp" as const },
+        { code: "AUTO_NOW_ON_NON_TIMESTAMP" as const },
       );
     }
     this._def.timestampAuto = "now";
@@ -1266,7 +1266,7 @@ export class TypeBuilder<
    * emits the column as `DEFAULT NOW()`; PR 4 wires the UPDATE
    * builder to append `<col> = NOW()` to every SET clause.
    *
-   * Refused on non-timestamp types with code `auto_now_on_non_timestamp`
+   * Refused on non-timestamp types with code `AUTO_NOW_ON_NON_TIMESTAMP`
    * (shares the code with `.auto_now()` since the misuse class is
    * identical).
    */
@@ -1276,7 +1276,7 @@ export class TypeBuilder<
         new Error(
           `.auto_now_on_update(): only valid on t.timestamp() fields, got "${this._def.type}"`,
         ),
-        { code: "auto_now_on_non_timestamp" as const },
+        { code: "AUTO_NOW_ON_NON_TIMESTAMP" as const },
       );
     }
     this._def.timestampAuto = "now_on_update";
@@ -1330,7 +1330,7 @@ export const t = {
    * `boolean`, `date`, `json`, `calendarDate`). Passing `t.ref(...)`,
    * `t.object({...})`, `t.union(...)`, `t.literal(...)` or a nested
    * `t.array(...)` throws synchronously with code
-   * `invalid_array_item` — the previous unchecked cast silently produced
+   * `INVALID_ARRAY_ITEM` — the previous unchecked cast silently produced
    * malformed `FieldDef`s (e.g. dropping `refTarget` so `validateRefTargets`
    * could not visit array items).
    */
@@ -1338,7 +1338,7 @@ export const t = {
     if (!(items instanceof TypeBuilder)) {
       throw Object.assign(
         new Error("t.array(items) requires a TypeBuilder (use t.string(), t.number(), ...)"),
-        { code: "invalid_array_item" as const },
+        { code: "INVALID_ARRAY_ITEM" as const },
       );
     }
     const itemDef = items.toFieldDef();
@@ -1353,7 +1353,7 @@ export const t = {
             `date, json, calendarDate). Storing arrays of refs/objects/unions ` +
             `is not implemented; model it as a separate collection with a ref.`,
         ),
-        { code: "invalid_array_item" as const },
+        { code: "INVALID_ARRAY_ITEM" as const },
       );
     }
     const itemType = itemDef.type as PrimitiveTypeName;
@@ -1378,7 +1378,7 @@ export const t = {
     if (typeof table !== "string" || table.length === 0) {
       throw Object.assign(
         new Error("t.ref(table) requires a non-empty table name"),
-        { code: "ref_empty_table" as const },
+        { code: "REF_EMPTY_TABLE" as const },
       );
     }
     return new TypeBuilder<Id<T>>({
@@ -1413,7 +1413,7 @@ export const t = {
     if (shape === null || typeof shape !== "object" || Array.isArray(shape)) {
       throw Object.assign(
         new Error("t.object(shape) requires a record of nested type builders"),
-        { code: "object_invalid_shape" as const },
+        { code: "OBJECT_INVALID_SHAPE" as const },
       );
     }
     const nested: Record<string, FieldDef> = {};
@@ -1421,7 +1421,7 @@ export const t = {
       if (!(val instanceof TypeBuilder)) {
         throw Object.assign(
           new Error(`t.object: nested field "${key}" must be a TypeBuilder (use t.string(), t.number(), ...)`),
-          { code: "object_field_not_typebuilder" as const },
+          { code: "OBJECT_FIELD_NOT_TYPEBUILDER" as const },
         );
       }
       nested[key] = { ...val.toFieldDef() };
@@ -1440,7 +1440,7 @@ export const t = {
    *
    * **Dim range**: 1..=16000 (pgvector hard ceiling). Out-of-range
    * values throw synchronously at schema-definition time with code
-   * `vector_invalid_dims`.
+   * `VECTOR_INVALID_DIMS`.
    *
    * **Default metric**: `"cosine"` — the convention for normalised
    * embedding models (OpenAI, Cohere, …). Override via
@@ -1456,7 +1456,7 @@ export const t = {
         new Error(
           `t.vector(dims): dims must be an integer in 1..=16000 (pgvector hard ceiling), got ${dims}`,
         ),
-        { code: "vector_invalid_dims" as const },
+        { code: "VECTOR_INVALID_DIMS" as const },
       );
     }
     const metric: VectorMetric = opts?.metric ?? "cosine";
@@ -1465,7 +1465,7 @@ export const t = {
         new Error(
           `t.vector(dims, { metric }): metric must be "cosine" | "l2" | "innerProduct", got "${String(metric)}"`,
         ),
-        { code: "vector_invalid_metric" as const },
+        { code: "VECTOR_INVALID_METRIC" as const },
       );
     }
     return new TypeBuilder<number[]>({
@@ -1492,7 +1492,7 @@ export const t = {
    *
    * **Note on PG**: the column type requires PostGIS to be installed on
    * the database; the runtime probes `pg_extension WHERE extname='postgis'`
-   * and surfaces a typed `postgis_extension_missing` error when absent.
+   * and surfaces a typed `POSTGIS_EXTENSION_MISSING` error when absent.
    */
   geoPoint(): TypeBuilder<{ lat: number; lng: number }> {
     return new TypeBuilder<{ lat: number; lng: number }>({ type: "geoPoint" });
@@ -1542,21 +1542,21 @@ export const t = {
    *   produce DIFFERENT ciphertext. Defeats the ciphertext-oracle
    *   attack on rows with shared columns. ALL filtering on the column
    *   is refused at the SDK boundary
-   *   (`randomised_encrypted_field_not_filterable`).
+   *   (`RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE`).
    * - `"deterministic"` — synthetic nonce HMAC-derived from plaintext;
    *   AAD binds `(collection, column)` only. Same plaintext → same
    *   ciphertext, enabling B-tree equality lookups. Only equality
    *   + `$in` filters are accepted; range / regex / LIKE are refused
-   *   with `deterministic_encrypted_op_not_supported`.
+   *   with `DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED`.
    *
    * Constraints:
    * - `wraps` must be `t.string()` / `t.number()` / `t.bytes()`. Other
-   *   types throw with `encrypted_wraps_unsupported`.
+   *   types throw with `ENCRYPTED_WRAPS_UNSUPPORTED`.
    * - The combination `mode: "randomised"` + `.unique()` is refused at
-   *   schema-definition time with `unique_encrypted_randomised_unsupported`
+   *   schema-definition time with `UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED`
    *   (randomised mode can't enforce uniqueness without equality).
    * - Applying `t.encrypted()` to a `t.ref()` field is refused with
-   *   `encrypted_on_ref_unsupported` — FK columns must remain unencrypted
+   *   `ENCRYPTED_ON_REF_UNSUPPORTED` — FK columns must remain unencrypted
    *   so the JOIN integrity check works.
    */
   encrypted<
@@ -1571,7 +1571,7 @@ export const t = {
       if (!(wrapsBuilder instanceof TypeBuilder)) {
         throw Object.assign(
           new Error("t.encrypted({ wraps }): wraps must be a TypeBuilder (t.string() / t.number() / t.bytes())"),
-          { code: "encrypted_wraps_unsupported" as const },
+          { code: "ENCRYPTED_WRAPS_UNSUPPORTED" as const },
         );
       }
       const def = wrapsBuilder.toFieldDef();
@@ -1583,7 +1583,7 @@ export const t = {
           new Error(
             `t.encrypted({ wraps }): only string / number / bytes are supported, got "${def.type}"`,
           ),
-          { code: "encrypted_wraps_unsupported" as const },
+          { code: "ENCRYPTED_WRAPS_UNSUPPORTED" as const },
         );
       }
     }
@@ -1593,7 +1593,7 @@ export const t = {
         new Error(
           `t.encrypted({ mode }): must be "randomised" or "deterministic", got "${String(mode)}"`,
         ),
-        { code: "encrypted_invalid_mode" as const },
+        { code: "ENCRYPTED_INVALID_MODE" as const },
       );
     }
     const keyId = opts?.keyId ?? "default";
@@ -1602,7 +1602,7 @@ export const t = {
         new Error(
           `t.encrypted({ keyId }): keyId must be a [A-Za-z0-9_]+ token, got "${String(keyId)}"`,
         ),
-        { code: "encrypted_invalid_key_id" as const },
+        { code: "ENCRYPTED_INVALID_KEY_ID" as const },
       );
     }
     // The DB column TYPE is BYTEA — the encryption pass + DDL emitter
@@ -1646,7 +1646,7 @@ export const t = {
     if (value === null || value === undefined) {
       throw Object.assign(
         new Error("t.literal(value) requires a non-null primitive value"),
-        { code: "literal_null_value" as const },
+        { code: "LITERAL_NULL_VALUE" as const },
       );
     }
     const ty = typeof value;
@@ -1655,7 +1655,7 @@ export const t = {
         new Error(
           `t.literal(value): value must be string | number | boolean, got ${ty}`,
         ),
-        { code: "literal_invalid_type" as const },
+        { code: "LITERAL_INVALID_TYPE" as const },
       );
     }
     // Literal values are inherently required — a literal field declares
@@ -1726,7 +1726,7 @@ export const t = {
       if (typeof prefix !== "string" || prefix.length === 0) {
         throw Object.assign(
           new Error("t.id(prefix): prefix must be a non-empty string"),
-          { code: "id_invalid_prefix" as const },
+          { code: "ID_INVALID_PREFIX" as const },
         );
       }
       if (!/^[a-z][a-z0-9_]*$/.test(prefix)) {
@@ -1734,7 +1734,7 @@ export const t = {
           new Error(
             `t.id(prefix): prefix must match /^[a-z][a-z0-9_]*$/ (got "${prefix}")`,
           ),
-          { code: "id_invalid_prefix" as const },
+          { code: "ID_INVALID_PREFIX" as const },
         );
       }
     }
@@ -1771,7 +1771,7 @@ export const t = {
         new Error(
           `t.union(...) requires at least 2 variants, got ${variants.length}`,
         ),
-        { code: "union_too_few_variants" as const },
+        { code: "UNION_TOO_FEW_VARIANTS" as const },
       );
     }
     const normalized: Record<string, FieldDef>[] = [];
@@ -1782,7 +1782,7 @@ export const t = {
           new Error(
             `t.union: variant #${i} must be a t.object(...) (got ${typeof v})`,
           ),
-          { code: "union_variant_not_typebuilder" as const },
+          { code: "UNION_VARIANT_NOT_TYPEBUILDER" as const },
         );
       }
       const def = v.toFieldDef();
@@ -1791,7 +1791,7 @@ export const t = {
           new Error(
             `t.union: variant #${i} must be a t.object(...) (got type "${def.type}")`,
           ),
-          { code: "union_variant_not_object" as const },
+          { code: "UNION_VARIANT_NOT_OBJECT" as const },
         );
       }
       // Variant shape clone — we treat it as a self-contained sub-schema.
@@ -1829,7 +1829,7 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
   if (variants.length === 0) {
     throw Object.assign(
       new Error("t.union: no variants supplied"),
-      { code: "union_no_variants" as const },
+      { code: "UNION_NO_VARIANTS" as const },
     );
   }
   // Candidate keys = keys that are `literal` in every variant.
@@ -1851,7 +1851,7 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
       new Error(
         "t.union: no discriminator field found — every variant must declare a `t.literal(...)` field with the same key (e.g. `kind: t.literal(\"login\")`)",
       ),
-      { code: "union_no_discriminator" as const },
+      { code: "UNION_NO_DISCRIMINATOR" as const },
     );
   }
   // For each candidate, the literal values must be mutually distinct.
@@ -1870,7 +1870,7 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
       new Error(
         "t.union: discriminator candidate(s) have overlapping literal values — each variant must use a distinct literal value",
       ),
-      { code: "union_discriminator_overlap" as const },
+      { code: "UNION_DISCRIMINATOR_OVERLAP" as const },
     );
   }
   if (distinctCandidates.length > 1) {
@@ -1878,7 +1878,7 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
       new Error(
         `t.union: ambiguous discriminator — multiple candidate keys with distinct literals: ${distinctCandidates.join(", ")}. Use only one literal field per variant or rename one of them.`,
       ),
-      { code: "union_discriminator_ambiguous" as const },
+      { code: "UNION_DISCRIMINATOR_AMBIGUOUS" as const },
     );
   }
   return distinctCandidates[0];
@@ -1927,7 +1927,7 @@ export interface SchemaOptions {
    * an `INTEGER NOT NULL DEFAULT 1` `version` column at DDL time and
    * `updateOne`/`updateMany` honour a `{ version: N }` filter clause for
    * compare-and-swap updates (mismatch returns an
-   * `optimistic_lock_failure` error).
+   * `VERSION_MISMATCH` error).
    */
   versioning: boolean;
 }
@@ -1978,7 +1978,7 @@ export class SchemaBuilder<S> {
    * `updated_at`, `created_by`, `updated_by`, `deleted_at`, `version`)
    * are also accepted alongside user fields.
    *
-   * Throws `Error` with `code = "schema_invalid"` at definition time if:
+   * Throws `Error` with `code = "SCHEMA_INVALID"` at definition time if:
    *  - `name` is empty or already declared on this schema, or
    *  - `fields` is empty / contains a key absent from the schema.
    */
@@ -2001,20 +2001,20 @@ export class SchemaBuilder<S> {
     if (typeof name !== "string" || name.length === 0) {
       throw Object.assign(
         new Error("schema.index(name, fields): name must be a non-empty string"),
-        { code: "schema_invalid" },
+        { code: "SCHEMA_INVALID" },
       );
     }
     if (!Array.isArray(fields) || fields.length === 0) {
       throw Object.assign(
         new Error(`schema.index("${name}", fields): fields must be a non-empty array`),
-        { code: "schema_invalid" },
+        { code: "SCHEMA_INVALID" },
       );
     }
     for (const existing of this._indexes) {
       if (existing.name === name) {
         throw Object.assign(
           new Error(`schema.index("${name}", ...): index name already declared on this schema`),
-          { code: "schema_invalid" },
+          { code: "SCHEMA_INVALID" },
         );
       }
     }
@@ -2023,7 +2023,7 @@ export class SchemaBuilder<S> {
       if (typeof f !== "string" || f.length === 0) {
         throw Object.assign(
           new Error(`schema.index("${name}", ...): every field must be a non-empty string`),
-          { code: "schema_invalid" },
+          { code: "SCHEMA_INVALID" },
         );
       }
       if (!known.has(f)) {
@@ -2031,7 +2031,7 @@ export class SchemaBuilder<S> {
           new Error(
             `schema.index("${name}", [..."${f}"...]): field "${f}" is not declared on this schema`,
           ),
-          { code: "schema_invalid" },
+          { code: "SCHEMA_INVALID" },
         );
       }
     }
@@ -2075,7 +2075,7 @@ export class SchemaBuilder<S> {
    * `{ version: N }` in the filter become compare-and-swap: rows are
    * updated and `version` is incremented only when the stored version
    * matches N. A mismatch returns
-   * `{ data: null, error: { code: "optimistic_lock_failure" } }`.
+   * `{ data: null, error: { code: "VERSION_MISMATCH" } }`.
    */
   withVersioning(): this {
     this._options.versioning = true;

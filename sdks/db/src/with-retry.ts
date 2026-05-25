@@ -3,13 +3,13 @@
  * loop that today lives at every CAS-update call site.
  *
  * The default predicate matches `OptimisticLockError` (its `.code` is
- * `"optimistic_lock_failure"`). Users who want to retry on other
- * coded errors (e.g. Postgres `serialization_failure`) can compose
+ * `"VERSION_MISMATCH"`). Users who want to retry on other
+ * coded errors (e.g. Postgres `SERIALIZATION_FAILURE`) can compose
  * via `isOptimisticLockError`:
  *
  * ```ts
  * await withRetry(() => db.x.update(...), {
- *   on: (e) => isOptimisticLockError(e) || (e as { code?: string }).code === "serialization_failure",
+ *   on: (e) => isOptimisticLockError(e) || (e as { code?: string }).code === "SERIALIZATION_FAILURE",
  * });
  * ```
  *
@@ -17,7 +17,7 @@
  */
 
 /**
- * Default retry predicate. Returns `true` iff `e.code === "optimistic_lock_failure"`,
+ * Default retry predicate. Returns `true` iff `e.code === "VERSION_MISMATCH"`,
  * which is the `code` stamped on `OptimisticLockError` and on plain
  * `Error`s the runtime mints with the same string. Exported so callers
  * can OR it with their own predicates instead of redefining the match.
@@ -25,7 +25,7 @@
 export function isOptimisticLockError(e: unknown): boolean {
   return (
     e instanceof Error &&
-    (e as { code?: unknown }).code === "optimistic_lock_failure"
+    (e as { code?: unknown }).code === "VERSION_MISMATCH"
   );
 }
 
@@ -66,7 +66,7 @@ export async function withRetry<T>(
   if (!Number.isInteger(max) || max <= 0) {
     throw Object.assign(
       new TypeError("withRetry: opts.max must be a positive integer"),
-      { code: "with_retry_invalid_max" as const },
+      { code: "WITH_RETRY_INVALID_MAX" as const },
     );
   }
   const on = opts?.on ?? isOptimisticLockError;

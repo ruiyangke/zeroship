@@ -573,7 +573,7 @@ export function purgeCollection<S, N extends string, AllSchemas extends Record<s
           "@zeroship/db: env.db.<collection>.purge not available — " +
             "runtime is missing the P7 PR 5 purge surface.",
         ),
-        { code: "purge_not_available" as const },
+        { code: "PURGE_NOT_AVAILABLE" as const },
       );
     }
     const result = await native.purge(mapped);
@@ -604,7 +604,7 @@ export function purgeManyCollection<S, N extends string, AllSchemas extends Reco
           "@zeroship/db: env.db.<collection>.purgeMany not available — " +
             "runtime is missing the P7 PR 5 purge surface.",
         ),
-        { code: "purge_not_available" as const },
+        { code: "PURGE_NOT_AVAILABLE" as const },
       );
     }
     const n = await native.purgeMany(mapped);
@@ -632,7 +632,7 @@ export function restoreCollection<S, N extends string, AllSchemas extends Record
           "@zeroship/db: env.db.<collection>.restore not available — " +
             "runtime is missing the P7 PR 5 restore surface.",
         ),
-        { code: "restore_not_available" as const },
+        { code: "RESTORE_NOT_AVAILABLE" as const },
       );
     }
     const result = await native.restore(mapped);
@@ -663,7 +663,7 @@ export function restoreManyCollection<S, N extends string, AllSchemas extends Re
           "@zeroship/db: env.db.<collection>.restoreMany not available — " +
             "runtime is missing the P7 PR 5 restore surface.",
         ),
-        { code: "restore_not_available" as const },
+        { code: "RESTORE_NOT_AVAILABLE" as const },
       );
     }
     const n = await native.restoreMany(mapped);
@@ -702,7 +702,7 @@ export function distinctCollection<S, N extends string, AllSchemas extends Recor
         new Error(
           `distinct("${field}"): encrypted columns are not distinct-able (would leak ciphertext frequencies).`,
         ),
-        { code: "distinct_on_encrypted_field_unsupported" as const },
+        { code: "DISTINCT_ON_ENCRYPTED_FIELD_UNSUPPORTED" as const },
       );
     }
   }

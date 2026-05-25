@@ -84,7 +84,7 @@ describe("db.transaction — OptimisticLockError surfaces via result.error", () 
       `expected OptimisticLockError, got ${(result.error as Error).constructor.name}`,
     );
     const occ = result.error as OptimisticLockError;
-    assert.equal(occ.code, "optimistic_lock_failure");
+    assert.equal(occ.code, "VERSION_MISMATCH");
     assert.equal(occ.expectedVersion, 7);
 
     // Outer wrapper rolled back, did not commit.

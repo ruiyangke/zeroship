@@ -209,7 +209,7 @@ export type DbExtensions<T extends Record<string, SchemaInput>> = {
    * to bypass auto-detection (e.g. when the queryFn doesn't go through
    * a Collection).
    *
-   * Throws `code = "live_in_transaction"` if called inside
+   * Throws `code = "LIVE_IN_TRANSACTION"` if called inside
    * `db.transaction(tx => ...)`. Returns an AsyncIterableIterator with
    * an explicit `close()` method for teardown.
    */

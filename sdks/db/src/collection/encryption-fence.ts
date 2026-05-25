@@ -7,7 +7,7 @@ import type { PlainObject } from "../types.js";
  * regex / LIKE require ordering or substring matching that
  * deterministic mode cannot provide. A query that mentions any other
  * operator on a deterministic-encrypted field is rejected at the SDK
- * boundary with `deterministic_encrypted_op_not_supported` so the
+ * boundary with `DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED` so the
  * call never reaches Rust.
  *
  * Bare values (`{ ssn: "X" }`) are treated as `$eq` and accepted.
@@ -21,10 +21,10 @@ const DETERMINISTIC_ENCRYPTED_OPS_ALLOWED: ReadonlySet<string> = new Set([
  * **P5 PR 2** — walk a filter looking for keys that the schema marks
  * as `encrypted`. Refuse:
  *   - ANY use of a randomised-encrypted field
- *     (`randomised_encrypted_field_not_filterable`) — the ciphertext
+ *     (`RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE`) — the ciphertext
  *     differs per write so no equality lookup can match.
  *   - Range / regex / LIKE on a deterministic-encrypted field
- *     (`deterministic_encrypted_op_not_supported`) — only `$eq`/`$in`
+ *     (`DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED`) — only `$eq`/`$in`
  *     are sound on the ciphertext.
  *
  * Recurses into `$and` / `$or` arms. The walker is intentionally
@@ -67,7 +67,7 @@ export function validateEncryptedFieldsInFilter(
             `Switch the column to { mode: "deterministic" } if you need lookup, ` +
             `or drop the filter clause.`,
         ),
-        { code: "randomised_encrypted_field_not_filterable" as const },
+        { code: "RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE" as const },
       );
     }
     if (value !== null && typeof value === "object" && !Array.isArray(value)) {
@@ -81,7 +81,7 @@ export function validateEncryptedFieldsInFilter(
               `filter on "${key}": deterministic-encrypted columns support only $eq and $in (got "${op}"). ` +
                 `Range / regex / LIKE require ordering or substring matching that deterministic mode cannot provide.`,
             ),
-            { code: "deterministic_encrypted_op_not_supported" as const },
+            { code: "DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED" as const },
           );
         }
       }

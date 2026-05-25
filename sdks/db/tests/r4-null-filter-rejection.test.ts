@@ -5,7 +5,7 @@
  * native layer as "match every row" — a delete-all bug reachable via
  * a JSON-RPC input or an `as any` escape past the TS type. The fix is
  * a defensive null/non-object reject at the top of `mapFilterOutbound`,
- * with `code = "invalid_filter"`. Inside `_run` the throw becomes a
+ * with `code = "INVALID_FILTER"`. Inside `_run` the throw becomes a
  * `Result.error`; the destructive native call never fires.
  */
 import { test, describe } from "node:test";
@@ -60,7 +60,7 @@ function makeRecordingNative() {
 }
 
 describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
-  test("deleteMany(null) resolves to Result.error with code=invalid_filter", async () => {
+  test("deleteMany(null) resolves to Result.error with code=INVALID_FILTER", async () => {
     const { native, calls } = makeRecordingNative();
     installEnv(native);
     const db = installSchemaForTest(
@@ -71,7 +71,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
     // prevent. JSON-RPC inputs land here too.
     const r = await db.todos.deleteMany(null as any);
     assert.ok(r.error instanceof Error, "expected Result.error");
-    assert.equal((r.error as { code?: string }).code, "invalid_filter");
+    assert.equal((r.error as { code?: string }).code, "INVALID_FILTER");
     assert.equal(r.data, null);
     // CRITICAL: the native deleteMany must NOT have been invoked.
     assert.equal(
@@ -81,7 +81,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
     );
   });
 
-  test("updateMany(null, patch) resolves to Result.error with code=invalid_filter", async () => {
+  test("updateMany(null, patch) resolves to Result.error with code=INVALID_FILTER", async () => {
     const { native, calls } = makeRecordingNative();
     installEnv(native);
     const db = installSchemaForTest(
@@ -90,7 +90,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
     );
     const r = await db.todos.updateMany(null as any, { $set: { title: "x" } });
     assert.ok(r.error instanceof Error, "expected Result.error");
-    assert.equal((r.error as { code?: string }).code, "invalid_filter");
+    assert.equal((r.error as { code?: string }).code, "INVALID_FILTER");
     assert.equal(r.data, null);
     assert.equal(
       calls.filter((c) => c.op === "updateMany").length,
@@ -125,7 +125,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
     );
     const r = await db.todos.deleteMany(123 as any);
     assert.ok(r.error instanceof Error);
-    assert.equal((r.error as { code?: string }).code, "invalid_filter");
+    assert.equal((r.error as { code?: string }).code, "INVALID_FILTER");
     assert.equal(
       calls.filter((c) => c.op === "deleteMany").length,
       0,

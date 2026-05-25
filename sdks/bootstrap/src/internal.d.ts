@@ -13,7 +13,7 @@
 //     Object.keys / getOwnPropertyNames / getOwnPropertySymbols /
 //     for..in / JSON, and not keyable from JS), and
 //   - `env.db.__platform` (string access) is actively refused at
-//     runtime with `platform_internal_only`.
+//     runtime with `PLATFORM_INTERNAL_ONLY`.
 //
 // This is an ambient `.d.ts` (no top-level import/export) so the
 // `Zeroship*` interfaces are global, matching how they were declared in

@@ -93,7 +93,7 @@ function getNativeDb(): NativeDb {
         "@zeroship/db/subscribe: env.db.collection not available — " +
           "runtime is missing the Db v8_class surface.",
       ),
-      { code: "native_subscription_unavailable" as const },
+      { code: "NATIVE_SUBSCRIPTION_UNAVAILABLE" as const },
     );
   }
   return db;
@@ -110,7 +110,7 @@ export function subscribe(collection: string): Subscription {
       new TypeError(
         "@zeroship/db/subscribe: collection must be a non-empty string",
       ),
-      { code: "subscribe_invalid_collection" as const },
+      { code: "SUBSCRIBE_INVALID_COLLECTION" as const },
     );
   }
   const native = getNativeDb();
@@ -121,7 +121,7 @@ export function subscribe(collection: string): Subscription {
         "@zeroship/db/subscribe: env.db.<collection>.openSubscription not available — " +
           "runtime is missing the Subscription v8_class surface.",
       ),
-      { code: "native_subscription_unavailable" as const },
+      { code: "NATIVE_SUBSCRIPTION_UNAVAILABLE" as const },
     );
   }
   const sub = col.openSubscription();

@@ -57,7 +57,7 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string
   if (depth > 20) {
     throw Object.assign(
       new Error("filter nesting too deep (max 20 levels)"),
-      { code: "filter_nesting_too_deep" as const },
+      { code: "FILTER_NESTING_TOO_DEEP" as const },
     );
   }
   // R4 IMPORTANT-1 — null/non-object filter rejection at the boundary.
@@ -70,7 +70,7 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string
   // here so every mutating method that funnels through this helper
   // (`deleteMany`, `updateMany`, `delete`, `update`, `find`, ...) gets
   // the guard for free. Inside `_run` the throw becomes `Result.error`
-  // with `code = "invalid_filter"`; outside (`find`, which returns a
+  // with `code = "INVALID_FILTER"`; outside (`find`, which returns a
   // Query synchronously) it propagates to the caller — consistent with
   // every other synchronous schema-violation throw in `Collection`.
   if (filter === null || typeof filter !== "object" || Array.isArray(filter)) {
@@ -82,7 +82,7 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string
         `An accidental null filter on deleteMany/updateMany would match every row; ` +
         `pass {} explicitly if you intend to operate on all rows.`,
       ),
-      { code: "invalid_filter" as const },
+      { code: "INVALID_FILTER" as const },
     );
   }
   // Fast path: if no key needs remapping, return the original reference

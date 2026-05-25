@@ -9,7 +9,7 @@
  * not array items).
  *
  * Option A fix: reject non-primitive item types at schema-declaration
- * time with `code: "invalid_array_item"`. Closes off a feature
+ * time with `code: "INVALID_ARRAY_ITEM"`. Closes off a feature
  * (`t.array(t.ref(...))`) that was never implemented end-to-end; a
  * future round can extend support intentionally if the use case lands.
  */
@@ -28,7 +28,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
       assert.fail("t.array(t.ref(...)) should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "invalid_array_item");
+      assert.equal(err.code, "INVALID_ARRAY_ITEM");
       assert.match(err.message, /ref/);
     }
   });
@@ -39,7 +39,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
       assert.fail("t.array(t.object(...)) should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "invalid_array_item");
+      assert.equal(err.code, "INVALID_ARRAY_ITEM");
       assert.match(err.message, /object/);
     }
   });
@@ -55,7 +55,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
       assert.fail("t.array(t.union(...)) should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "invalid_array_item");
+      assert.equal(err.code, "INVALID_ARRAY_ITEM");
       assert.match(err.message, /union/);
     }
   });
@@ -66,7 +66,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
       assert.fail("t.array(t.literal(...)) should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "invalid_array_item");
+      assert.equal(err.code, "INVALID_ARRAY_ITEM");
       assert.match(err.message, /literal/);
     }
   });
@@ -77,7 +77,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
       assert.fail("nested t.array should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "invalid_array_item");
+      assert.equal(err.code, "INVALID_ARRAY_ITEM");
       assert.match(err.message, /array/);
     }
   });
@@ -89,7 +89,7 @@ describe("R5 MINOR — t.array() rejects non-primitive item types", () => {
       assert.fail("non-TypeBuilder item should have thrown");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "invalid_array_item");
+      assert.equal(err.code, "INVALID_ARRAY_ITEM");
     }
   });
 

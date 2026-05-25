@@ -13,7 +13,7 @@ export interface MaskingCollectionInternals<S> {
  *
  * Routes through `env.db.bulkUnmaskFields`. Authorisation is
  * **atomic**: a single denied (id, column) pair rejects the WHOLE
- * call with `bulk_unmask_partial_unauthorized`. On success the
+ * call with `BULK_UNMASK_PARTIAL_UNAUTHORIZED`. On success the
  * resolved map carries plaintext for every requested pair.
  */
 export function bulkUnmaskCollection<S>(
@@ -37,7 +37,7 @@ export function bulkUnmaskCollection<S>(
           "@zeroship/db: Collection.bulkUnmask not available — " +
             "runtime is missing the P9 PR 2 bulk unmask surface.",
         ),
-        { code: "bulk_unmask_not_available" as const },
+        { code: "BULK_UNMASK_NOT_AVAILABLE" as const },
       );
     }
     const wireItems = items.map((it) => ({

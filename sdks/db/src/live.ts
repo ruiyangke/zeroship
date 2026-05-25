@@ -27,7 +27,7 @@
  *     diffing to suppress no-op events is future work.
  *
  *   - Tx awareness: calling `db.live` inside a `db.transaction(tx => ...)`
- *     callback throws synchronously with `code = "live_in_transaction"`.
+ *     callback throws synchronously with `code = "LIVE_IN_TRANSACTION"`.
  *     Live queries are by definition long-lived; a tx is per-request.
  *
  * Limitations (future work, not v1):
@@ -166,7 +166,7 @@ export function createLive<R>(
   if (anyCollectionInTx(db)) {
     throw Object.assign(
       new Error("@zeroship/db: db.live cannot be called inside db.transaction — live queries outlive the request-scoped tx"),
-      { code: "live_in_transaction" as const },
+      { code: "LIVE_IN_TRANSACTION" as const },
     );
   }
 

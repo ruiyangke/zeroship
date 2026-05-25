@@ -164,7 +164,7 @@ describe("installSchema", () => {
     // bootstrap can surface it during module evaluation.
     const native = {
       async registerModel(_name: string): Promise<void> {
-        throw Object.assign(new Error("DDL bombed"), { code: "ddl_failed" });
+        throw Object.assign(new Error("DDL bombed"), { code: "DDL_FAILED" });
       },
       // P9 PR 3: native `transaction(callback)` orchestrator stub.
       async transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
@@ -216,7 +216,7 @@ describe("installSchema", () => {
     // A schema map whose first key is read via a getter that
     // synchronously re-enters `installSchema`. The outer install
     // begins, reads `Object.entries(schemas)` (which fires the
-    // getter), and the inner call must throw `install_in_flight`.
+    // getter), and the inner call must throw `INSTALL_IN_FLIGHT`.
     const reentrantSchema = {
       get first(): { name: ReturnType<typeof t.string> } {
         try {
@@ -235,6 +235,6 @@ describe("installSchema", () => {
       makeMockNative(),
     );
     assert.ok(caught instanceof Error, "re-entrant call must throw");
-    assert.equal((caught as { code?: string }).code, "install_in_flight");
+    assert.equal((caught as { code?: string }).code, "INSTALL_IN_FLIGHT");
   });
 });

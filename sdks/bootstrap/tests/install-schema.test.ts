@@ -80,7 +80,7 @@ describe("validateRefTargets — minimal smoke", () => {
       assert.fail("expected throw");
     } catch (e) {
       const err = e as Error & { code?: string; target?: string };
-      assert.equal(err.code, "ref_target_not_found");
+      assert.equal(err.code, "REF_TARGET_NOT_FOUND");
       assert.equal(err.target, "ghost");
     }
   });

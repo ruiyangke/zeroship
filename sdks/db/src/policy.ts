@@ -43,7 +43,7 @@
  *
  * Every classification value must be one of the six built-ins listed in
  * the `Classification` taxonomy. Anything else throws
- * `invalid_mask_classification` at declare-time (and again at
+ * `INVALID_MASK_CLASSIFICATION` at declare-time (and again at
  * Rust-time, belt-and-braces — see
  * `crates/plugin-db/src/crud/unmask.rs::dispatch_set_mask_policy`).
  */
@@ -99,7 +99,7 @@ let _pendingPolicy: MaskPolicy | null = null;
  * **P5.5 PR 5** — declare the per-app mask policy. See module-level
  * doc-comment for usage examples.
  *
- * @throws `invalid_mask_classification` when any classification value
+ * @throws `INVALID_MASK_CLASSIFICATION` when any classification value
  *   is not one of the six built-ins.
  */
 export function defineMaskPolicy(policy: MaskPolicy): void {
@@ -109,7 +109,7 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
         "defineMaskPolicy: policy must be an object mapping role strings " +
           "to arrays of classifications",
       ),
-      { code: "invalid_mask_policy_shape" as const },
+      { code: "INVALID_MASK_POLICY_SHAPE" as const },
     );
   }
   for (const [role, classifications] of Object.entries(policy)) {
@@ -119,7 +119,7 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
           `defineMaskPolicy: role "${role}" must map to an array of ` +
             `classifications, got ${typeof classifications}`,
         ),
-        { code: "invalid_mask_policy_shape" as const },
+        { code: "INVALID_MASK_POLICY_SHAPE" as const },
       );
     }
     for (const c of classifications) {
@@ -129,7 +129,7 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
             `defineMaskPolicy: role "${role}" includes invalid classification ` +
               `"${String(c)}". Valid: ${VALID_CLASSIFICATIONS.join(", ")}.`,
           ),
-          { code: "invalid_mask_classification" as const },
+          { code: "INVALID_MASK_CLASSIFICATION" as const },
         );
       }
     }

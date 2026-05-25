@@ -82,7 +82,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
       assert.fail("expected throw on duplicate index name");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "schema_invalid");
+      assert.equal(err.code, "SCHEMA_INVALID");
       assert.match(err.message, /already declared/);
     }
   });
@@ -93,7 +93,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
       assert.fail("expected throw on unknown field");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "schema_invalid");
+      assert.equal(err.code, "SCHEMA_INVALID");
       assert.match(err.message, /not declared on this schema/);
     }
   });
@@ -104,7 +104,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
       assert.fail("expected throw on empty name");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "schema_invalid");
+      assert.equal(err.code, "SCHEMA_INVALID");
     }
   });
 
@@ -114,7 +114,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
       assert.fail("expected throw on empty fields");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "schema_invalid");
+      assert.equal(err.code, "SCHEMA_INVALID");
     }
   });
 });

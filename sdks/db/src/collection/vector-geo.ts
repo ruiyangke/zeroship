@@ -14,7 +14,7 @@ export interface VectorGeoCollectionInternals<S> {
 
 /**
  * Validates `k` / `limit` arguments to `.search()` are positive integers
- * in `1..=1000`. Throws ValidationError with `code: "invalid_k"` on
+ * in `1..=1000`. Throws ValidationError with `code: "INVALID_K"` on
  * violation. The 1000-row ceiling matches the engine-side practical
  * limit for kNN flat scan + GIN/ivfflat result sets.
  */

@@ -44,12 +44,12 @@ function encodeCursor(state: CursorState): string {
 }
 
 /** Decode and shape-check a base64-JSON cursor string. Throws with
- *  `code: "paginate_invalid_cursor"` on any malformed input — the
+ *  `code: "PAGINATE_INVALID_CURSOR"` on any malformed input — the
  *  paginate caller catches this and returns it as `Result.error`. */
 function decodeCursor(cursor: string): CursorState {
   const invalid = (): Error =>
     Object.assign(new Error("paginate: invalid cursor"), {
-      code: "paginate_invalid_cursor" as const,
+      code: "PAGINATE_INVALID_CURSOR" as const,
     });
   let decoded: string;
   try {
@@ -208,7 +208,7 @@ export class Query<
         new TypeError(
           "Query.with() requires the Query to be constructed via Collection.find — direct Query construction is not supported",
         ),
-        { code: "query_with_no_loader" as const },
+        { code: "QUERY_WITH_NO_LOADER" as const },
       );
     }
     this._with = { ...(this._with ?? {}), ...spec };
@@ -239,7 +239,7 @@ export class Query<
       if (allFalsy) {
         throw Object.assign(
           new Error("exclusion projections (e.g. { field: 0 }) are not supported; use inclusion style: { field: 1 }"),
-          { code: "query_exclusion_not_supported" as const },
+          { code: "QUERY_EXCLUSION_NOT_SUPPORTED" as const },
         );
       }
       this._select = entries
@@ -270,7 +270,7 @@ export class Query<
       return err(
         Object.assign(
           new TypeError("paginate: numItems must be a positive integer"),
-          { code: "paginate_invalid_num_items" as const },
+          { code: "PAGINATE_INVALID_NUM_ITEMS" as const },
         ),
       );
     }
@@ -290,7 +290,7 @@ export class Query<
       if (!sameOrderBy(cursorState.orderBy, orderBy)) {
         return err(
           Object.assign(new Error("paginate: cursor orderBy mismatch"), {
-            code: "paginate_orderby_mismatch" as const,
+            code: "PAGINATE_ORDERBY_MISMATCH" as const,
           }),
         );
       }
@@ -341,7 +341,7 @@ export class Query<
           return err(
             Object.assign(
               new TypeError(`paginate: row id must be a non-empty string (got ${typeof last.id})`),
-              { code: "paginate_invalid_id" as const },
+              { code: "PAGINATE_INVALID_ID" as const },
             ),
           );
         }
@@ -464,7 +464,7 @@ export class Query<
    * reversing the configured `.sort(...)` and taking the first row;
    * the original sort is restored before returning.
    *
-   * Throws `InvalidOperationError("last_requires_sort")` (as
+   * Throws `InvalidOperationError("LAST_REQUIRES_SORT")` (as
    * `err(...)`) if no sort was set on the query — "last" without an
    * ordering would return arbitrary rows from the storage layer.
    */
@@ -472,7 +472,7 @@ export class Query<
     if (this._sort === undefined || Object.keys(this._sort).length === 0) {
       return err(
         new InvalidOperationError(
-          "last_requires_sort",
+          "LAST_REQUIRES_SORT",
           "Query.last() requires a .sort(...) clause — 'last' is meaningless without an ordering",
         ),
       );

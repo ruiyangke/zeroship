@@ -96,14 +96,14 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     subs[0].emit({ kind: "change", op: "insert", collection: "todos", pk: 2, columns: [] });
     subs[0].emit({ kind: "change", op: "insert", collection: "todos", pk: 3, columns: [] });
 
-    const timer = new Promise<readonly ["timeout"]>((resolve) =>
-      setTimeout(() => resolve(["timeout"] as const), 1000),
+    const timer = new Promise<readonly ["TIMEOUT"]>((resolve) =>
+      setTimeout(() => resolve(["TIMEOUT"] as const), 1000),
     );
     const winner = await Promise.race([
       Promise.all([a, b]).then((v) => ["ok", v] as const),
       timer,
     ]);
-    if (winner[0] === "timeout") {
+    if (winner[0] === "TIMEOUT") {
       live.close();
       assert.fail("pending next() leaked — second call never resolved");
     }
@@ -191,14 +191,14 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     const b = live.next();
     subs[0].emit({ kind: "change", op: "insert", collection: "todos", pk: 2, columns: [] });
 
-    const timer = new Promise<readonly ["timeout"]>((resolve) =>
-      setTimeout(() => resolve(["timeout"] as const), 1000),
+    const timer = new Promise<readonly ["TIMEOUT"]>((resolve) =>
+      setTimeout(() => resolve(["TIMEOUT"] as const), 1000),
     );
     const winner = await Promise.race([
       Promise.allSettled([a, b]).then((v) => ["ok", v] as const),
       timer,
     ]);
-    if (winner[0] === "timeout") {
+    if (winner[0] === "TIMEOUT") {
       live.close();
       assert.fail("pending next() leaked — second consumer never observed the error");
     }
@@ -405,7 +405,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
       // `_txDepth`.
       async transaction(_cb: (raw: unknown) => unknown) {
         throw Object.assign(new Error("db.transaction: BEGIN failed: boom"), {
-          code: "begin_failed",
+          code: "BEGIN_FAILED",
         });
       },
       collection: () => ({
@@ -424,7 +424,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
     assert.match(res.error!.message, /BEGIN failed/);
     assert.equal(
       (res.error as { code?: string }).code,
-      "begin_failed",
+      "BEGIN_FAILED",
       "begin failure must carry code=begin_failed",
     );
 
@@ -460,7 +460,7 @@ describe("IMPORTANT #12 — loader tx-race rejection carries error.code", () => 
       assert.fail("expected the loader to reject");
     } catch (e) {
       const err = e as Error & { code?: string };
-      assert.equal(err.code, "loader_tx_race");
+      assert.equal(err.code, "LOADER_TX_RACE");
       assert.match(err.message, /transaction opened before flush/);
     }
   });

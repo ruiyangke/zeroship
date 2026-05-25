@@ -80,17 +80,17 @@ describe("Query.unique() — strict exactly-one terminal", () => {
     assert.equal(calls[0].opts.limit, 2);
   });
 
-  test("0 rows → err(NotFoundError) with code expected_one_got_zero", async () => {
+  test("0 rows → err(NotFoundError) with code NOT_FOUND", async () => {
     const { native } = makeMockNative([[]]);
     const Users = model("users", schemaUsers, native);
     const { data, error } = await Users.find({ email: "missing@x" }).unique();
     assert.equal(data, null);
     assert.ok(error);
     assert.ok(error instanceof NotFoundError);
-    assert.equal((error as Error & { code?: string }).code, "expected_one_got_zero");
+    assert.equal((error as Error & { code?: string }).code, "NOT_FOUND");
   });
 
-  test(">1 rows → err(NotUniqueError) with code expected_one_got_many", async () => {
+  test(">1 rows → err(NotUniqueError) with code NOT_UNIQUE", async () => {
     const { native } = makeMockNative([[
       { id: 1, email: "a@b.com", name: "Alice" },
       { id: 2, email: "a@b.com", name: "Bob" },
@@ -100,19 +100,19 @@ describe("Query.unique() — strict exactly-one terminal", () => {
     assert.equal(data, null);
     assert.ok(error);
     assert.ok(error instanceof NotUniqueError);
-    assert.equal((error as Error & { code?: string }).code, "expected_one_got_many");
+    assert.equal((error as Error & { code?: string }).code, "NOT_UNIQUE");
     assert.equal((error as NotUniqueError).count, 2);
   });
 
   test("native throw propagates as result.error", async () => {
     const boom = Object.assign(new Error("connection refused"), {
-      code: "conn_refused",
+      code: "CONN_REFUSED",
     });
     const native = makeFailingNative(boom);
     const Users = model("users", schemaUsers, native);
     const { error } = await Users.find({ email: "x" }).unique();
     assert.ok(error);
-    assert.equal((error as Error & { code?: string }).code, "conn_refused");
+    assert.equal((error as Error & { code?: string }).code, "CONN_REFUSED");
   });
 
   test("preserves the Query's prior limit after the terminal returns", async () => {
@@ -150,7 +150,7 @@ describe("Query.last() — last matching row in the current sort", () => {
     assert.equal(data, null);
     assert.ok(error);
     assert.ok(error instanceof InvalidOperationError);
-    assert.equal((error as Error & { code?: string }).code, "last_requires_sort");
+    assert.equal((error as Error & { code?: string }).code, "LAST_REQUIRES_SORT");
   });
 
   test("ascending sort + matches → flips to descending + first row", async () => {
@@ -191,13 +191,13 @@ describe("Query.last() — last matching row in the current sort", () => {
 
   test("native throw propagates as result.error", async () => {
     const boom = Object.assign(new Error("backend timeout"), {
-      code: "timeout",
+      code: "TIMEOUT",
     });
     const native = makeFailingNative(boom);
     const Users = model("users", schemaUsers, native);
     const { error } = await Users.find({}).sort({ id: 1 }).last();
     assert.ok(error);
-    assert.equal((error as Error & { code?: string }).code, "timeout");
+    assert.equal((error as Error & { code?: string }).code, "TIMEOUT");
   });
 
   test("preserves the Query's prior sort + limit after the terminal returns", async () => {
