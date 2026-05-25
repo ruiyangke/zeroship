@@ -479,3 +479,4 @@ Each stage gets a critic+fixer pass per the established pattern. Total: ~5 days 
 - **Dispatcher in embedded JS, not Rust:** the dispatch logic invokes user JS; Rust would only add FFI overhead. Embedded JS keeps everything one language.
 - **Schema on entry's `default.schema`:** simpler than the Stage-1 manifest-path approach. The Vite plugin re-exports `src/schema.ts` if the user split it out.
 - **Keep `@zeroship/server` wrappers separate from `@zeroship/db`:** they're a server-side ergonomic that pre-dates db auto-tx coupling.
+> Archived 2026-05-25: shipped. Live reference: docs/reference/zs-standard.md + docs/reference/vite-plugin.md.
