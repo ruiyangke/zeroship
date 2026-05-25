@@ -1,7 +1,7 @@
 import {
   ValidationError,
   OptimisticLockError,
-  mapVersionMismatchError,
+  mapOptimisticConcurrencyError,
 } from "../errors.js";
 import { trackCollectionAccess } from "../live.js";
 import { IdLoader } from "../loader.js";
@@ -456,7 +456,7 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
       result = await self._nativeCollection().update(mappedFilter, mappedUpdate);
     } catch (e) {
       if (casVersion !== null) {
-        throw mapVersionMismatchError(e, self._name, casVersion);
+        throw mapOptimisticConcurrencyError(e, self._name, casVersion);
       }
       throw e;
     }
@@ -493,7 +493,7 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
       n = await self._nativeCollection().updateMany(mappedFilter, mappedUpdate);
     } catch (e) {
       if (casVersion !== null) {
-        throw mapVersionMismatchError(e, self._name, casVersion);
+        throw mapOptimisticConcurrencyError(e, self._name, casVersion);
       }
       throw e;
     }

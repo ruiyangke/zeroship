@@ -1,9 +1,11 @@
+import { readCanonicalErrorCode } from "./errors.js";
+
 /**
  * `withRetry` — a small helper for the optimistic-concurrency retry
  * loop that today lives at every CAS-update call site.
  *
  * The default predicate matches `OptimisticLockError` (its `.code` is
- * `"VERSION_MISMATCH"`). Users who want to retry on other
+ * `"OPTIMISTIC_CONCURRENCY"`). Users who want to retry on other
  * coded errors (e.g. Postgres `SERIALIZATION_FAILURE`) can compose
  * via `isOptimisticLockError`:
  *
@@ -17,16 +19,14 @@
  */
 
 /**
- * Default retry predicate. Returns `true` iff `e.code === "VERSION_MISMATCH"`,
+ * Default retry predicate. Returns `true` iff the canonical code is
+ * `"OPTIMISTIC_CONCURRENCY"`,
  * which is the `code` stamped on `OptimisticLockError` and on plain
- * `Error`s the runtime mints with the same string. Exported so callers
- * can OR it with their own predicates instead of redefining the match.
+ * `Error`s the runtime mints for the same failure. Exported so callers can
+ * OR it with their own predicates instead of redefining the match.
  */
 export function isOptimisticLockError(e: unknown): boolean {
-  return (
-    e instanceof Error &&
-    (e as { code?: unknown }).code === "VERSION_MISMATCH"
-  );
+  return readCanonicalErrorCode(e) === "OPTIMISTIC_CONCURRENCY";
 }
 
 /** Options accepted by `withRetry`. All fields are optional. */

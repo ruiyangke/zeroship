@@ -1950,7 +1950,7 @@ export interface SchemaOptions {
    * an `INTEGER NOT NULL DEFAULT 1` `version` column at DDL time and
    * `updateOne`/`updateMany` honour a `{ version: N }` filter clause for
    * compare-and-swap updates (mismatch returns an
-   * `VERSION_MISMATCH` error).
+   * `OPTIMISTIC_CONCURRENCY` error).
    */
   versioning: boolean;
 }
@@ -2098,7 +2098,7 @@ export class SchemaBuilder<S> {
    * `{ version: N }` in the filter become compare-and-swap: rows are
    * updated and `version` is incremented only when the stored version
    * matches N. A mismatch returns
-   * `{ data: null, error: { code: "VERSION_MISMATCH" } }`.
+   * `{ data: null, error: { code: "OPTIMISTIC_CONCURRENCY" } }`.
    */
   withVersioning(): this {
     this._options.versioning = true;

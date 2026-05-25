@@ -143,7 +143,13 @@ describe("withRetry", () => {
 
   test("isOptimisticLockError matches plain Error with the right code", () => {
     const e = new Error("x");
-    (e as Error & { code: string }).code = "VERSION_MISMATCH";
+    (e as Error & { code: string }).code = "OPTIMISTIC_CONCURRENCY";
+    assert.equal(isOptimisticLockError(e), true);
+  });
+
+  test("isOptimisticLockError maps the native optimistic-concurrency code", () => {
+    const e = new Error("x");
+    (e as Error & { code: string }).code = "version_mismatch";
     assert.equal(isOptimisticLockError(e), true);
   });
 });
