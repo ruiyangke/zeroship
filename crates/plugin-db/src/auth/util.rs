@@ -36,12 +36,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// captured token can't be replayed long.
 pub const DEFAULT_TOKEN_TTL_SECS: i64 = 300;
 
-/// How long the nonce-replay-protection table retains a row. Must
-/// outlive `DEFAULT_TOKEN_TTL_SECS` plus the key-rotation grace window
-/// so a captured-and-late-arriving signature cannot bypass replay
-/// detection by being delayed past the nonce's GC.
-pub const NONCE_RETENTION_SECS: i64 = 25 * 3600;
-
 /// Best-effort random fill — prefers `/dev/urandom`; falls back to a
 /// time-perturbed XOR stream if unavailable. The XOR fallback is good
 /// enough for "nonce" uniqueness (the proposal's threat model assumes

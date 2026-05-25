@@ -1054,6 +1054,7 @@ where
 /// Internal helper for the worker shutdown path — drop any active
 /// migration lock so the connection is released. Safe to call when no
 /// migration is active.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn release_active_lock() {
     crate::context::with_mut(|c| c.clear_mig_lock());
 }
@@ -1071,7 +1072,7 @@ pub fn release_active_lock() {
 // layer.
 // ─────────────────────────────────────────────────────────────────────
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_begin_with_pool(
     pool: std::rc::Rc<compio_postgres::Pool>,
@@ -1085,7 +1086,7 @@ pub async fn exec_begin_with_pool(
     exec_begin(&backend, app_id, name, collection, dry_run, reset).await
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_fetch_batch_with_pool(
     _pool: std::rc::Rc<compio_postgres::Pool>,
@@ -1101,7 +1102,7 @@ pub async fn exec_fetch_batch_with_pool(
     exec_fetch_batch(app_id, cursor, batch_size).await
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub async fn exec_commit_batch_with_pool(
@@ -1130,7 +1131,7 @@ pub async fn exec_commit_batch_with_pool(
     .await
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_status_with_pool(
     pool: std::rc::Rc<compio_postgres::Pool>,
@@ -1142,7 +1143,7 @@ pub async fn exec_status_with_pool(
     exec_status(&backend, app_id, name, collection).await
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_cancel_with_pool(
     pool: std::rc::Rc<compio_postgres::Pool>,
@@ -1154,7 +1155,7 @@ pub async fn exec_cancel_with_pool(
     exec_cancel(&backend, app_id, name, collection).await
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_reset_with_pool(
     pool: std::rc::Rc<compio_postgres::Pool>,
@@ -1169,7 +1170,7 @@ pub async fn exec_reset_with_pool(
 /// Build an ad-hoc PostgresBackend wrapping an owned `Rc<Pool>`.
 /// Reads the URL from the per-isolate context (set by
 /// `set_db_url_for_tests` in the test harness).
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 fn make_test_backend(
     pool: std::rc::Rc<compio_postgres::Pool>,
 ) -> crate::backend::PostgresBackend {

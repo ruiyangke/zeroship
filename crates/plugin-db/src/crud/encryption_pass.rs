@@ -88,6 +88,7 @@ use crate::error::DbError;
 /// ciphertext, so the mask pass can derive the sibling
 /// `<col>_masked` column without re-decrypting. The original
 /// signature stays for callers that don't care about mask integration.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn encrypt_row_on_write<B>(
     backend: &B,
     app_id: &str,
@@ -329,69 +330,6 @@ where
     Ok(())
 }
 
-/// **P5 PR 3.5** — pre-process a row batch produced by the SQLite
-/// CRUD path so the shared [`decrypt_row_on_read`] helper can consume
-/// it without forking.
-///
-/// The SQLite CRUD read path surfaces BLOB columns as base64
-/// `Value::String` (the JSON-transport encoding for raw bytes). The
-/// shared decrypt helper expects PG's text-protocol `\xHHHH...` hex
-/// shape because the existing PG arm rides on `compio-postgres`'s
-/// BYTEA text encoding. Rather than fork the decrypt body, we rewrite
-/// SQLite-side encrypted-column values from base64 → `\x`-hex in place
-/// before invoking the shared helper.
-///
-/// **Only encrypted columns** are rewritten — non-encrypted BLOB
-/// columns (vector blobs, FTS rank, …) are left untouched.
-pub(crate) fn rewrite_sqlite_encrypted_row_blobs_to_hex(
-    schema: &Value,
-    rows: &mut [Value],
-) -> Result<(), DbError> {
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(());
-    };
-    let enc_cols: Vec<&str> = schema_obj
-        .iter()
-        .filter(|(_, def)| def.get("encrypted").is_some())
-        .map(|(name, _)| name.as_str())
-        .collect();
-    if enc_cols.is_empty() {
-        return Ok(());
-    }
-    for row in rows.iter_mut() {
-        let Some(obj) = row.as_object_mut() else {
-            continue;
-        };
-        for col in &enc_cols {
-            let Some(cur) = obj.get(*col) else { continue };
-            if cur.is_null() {
-                continue;
-            }
-            let Some(b64) = cur.as_str() else {
-                return Err(DbError::internal(format!(
-                    "rewrite_sqlite_encrypted_row_blobs_to_hex: column '{col}' expected base64 string, got {cur:?}"
-                )));
-            };
-            let raw = base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .map_err(|e| {
-                    DbError::internal(format!(
-                        "rewrite_sqlite_encrypted_row_blobs_to_hex: column '{col}' base64 decode failed: {e}"
-                    ))
-                })?;
-            let mut hex = String::with_capacity(2 + raw.len() * 2);
-            hex.push('\\');
-            hex.push('x');
-            for b in &raw {
-                use std::fmt::Write as _;
-                let _ = write!(hex, "{b:02x}");
-            }
-            obj.insert((*col).to_string(), Value::String(hex));
-        }
-    }
-    Ok(())
-}
-
 /// Serialise a plaintext `Value` into the canonical byte layout for its
 /// `wraps` type. Layouts:
 ///
@@ -540,6 +478,7 @@ fn nibble(c: u8) -> Result<u8, DbError> {
 /// has consumed them to position the BYTEA cast at the right
 /// placeholder. The markers must NOT survive to the parameter list (PG
 /// has no such column).
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn strip_encryption_markers(row: &mut Value) {
     if let Some(obj) = row.as_object_mut() {
         obj.retain(|k, _| !k.starts_with("__zsenc__"));

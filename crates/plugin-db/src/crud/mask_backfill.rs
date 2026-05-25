@@ -249,11 +249,6 @@ pub fn rewrite_audit_name(collection: &str, column: &str) -> String {
 pub struct BackfillReport {
     /// Total rows updated by this run (across every batch).
     pub processed: i64,
-    /// True when the backfill drained the IS NULL set + flipped the
-    /// sibling to NOT NULL (6a) or completed every batch (6b). False
-    /// only on a propagating error — at which point the caller has
-    /// already received an `Err` and shouldn't inspect this further.
-    pub completed: bool,
 }
 
 // ---------------------------------------------------------------------
@@ -365,7 +360,6 @@ where
 
     Ok(BackfillReport {
         processed: report.processed,
-        completed: true,
     })
 }
 
@@ -434,7 +428,6 @@ where
     let report = report?;
     Ok(BackfillReport {
         processed: report.processed,
-        completed: true,
     })
 }
 
@@ -548,7 +541,6 @@ where
             if consecutive_empty >= required_empty_polls {
                 return Ok(BackfillReport {
                     processed,
-                    completed: true,
                 });
             }
             // For 6a only: if no rows came back this round, try one

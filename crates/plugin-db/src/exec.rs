@@ -456,7 +456,7 @@ pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> 
 /// [`crate::context::IsolateDbContext::tx_conn`] (via
 /// [`crate::install_tx_marker_for_tests`]) when the test wants the
 /// queueing path to fire.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_mutation_with_emit_for_tests(
     bq: crate::query::BuiltQuery,
@@ -472,7 +472,7 @@ pub async fn exec_mutation_with_emit_for_tests(
 /// **Test-only**: exec a read query through the same shared
 /// pool-or-tx path production CRUD uses, including the Postgres
 /// autocommit per-app role fence.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn exec_query_for_tests(
     app_id: &str,

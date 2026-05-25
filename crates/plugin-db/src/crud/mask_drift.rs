@@ -20,15 +20,6 @@
 //! both already masked, so the table itself carries the same privacy
 //! posture as the parent collection.
 //!
-//! ## Scheduler hook
-//!
-//! [`schedule_drift_for_app`] is the wiring point for the time-based
-//! firing. P6a's sweeper-half will replace the stub body without
-//! touching call sites elsewhere. Today the body just logs a
-//! debug-level event; callers that want to run the check now invoke
-//! [`run_drift_check_for_app`] directly (as the unit + sqlite
-//! integration tests do).
-//!
 //! ## Sampling
 //!
 //! - **PG**: `TABLESAMPLE BERNOULLI (<pct>)` — postgres samples each
@@ -43,19 +34,11 @@
 //!   the whole table on a multi-gigabyte collection. The constant is
 //!   exposed so a future config struct can lift it per app.
 
-use std::collections::HashMap;
-
 use serde_json::Value;
 
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::MaskKind;
 use crate::error::DbError;
-
-/// Default sampling percentage per masked column per run. 1 % keeps
-/// the cron cheap on million-row tables while still surfacing drift
-/// inside a small number of runs (a 0.1 % real drift rate is
-/// detectable within ~7 runs at 95 % confidence).
-pub const DEFAULT_SAMPLE_PCT: f64 = 1.0;
 
 /// Absolute cap on rows sampled per column per run. Even when the
 /// percentage would yield more — say a 50 M-row table at 1 % = 500k
@@ -99,91 +82,13 @@ pub struct DriftReport {
 }
 
 impl DriftReport {
-    /// Merge `other` into `self` — used by [`run_drift_check_for_app`]
-    /// when iterating over every collection × every masked column.
+    /// Merge `other` into `self`.
     pub fn merge(&mut self, other: DriftReport) {
         self.sampled += other.sampled;
         self.drifted += other.drifted;
         self.samples.extend(other.samples);
     }
 }
-
-// ---------------------------------------------------------------------------
-// Scheduler hook — stub until P6a's cron loop replaces it
-// ---------------------------------------------------------------------------
-
-/// **P5.5 PR 7 / P6a hook** — register the per-app drift schedule.
-///
-/// The body is intentionally a debug-level log message until P6a's
-/// sweeper-half (the F1 maintenance cron) lands. P6a's PR replaces
-/// the body to attach an interval timer; the signature and call sites
-/// stay frozen so the wiring is a single-function diff. Documenting
-/// the contract here lets us land the call sites in PR 7 without
-/// blocking on the scheduler crate.
-///
-/// `interval`: how often the drift check should fire for this app.
-/// Recommended default (weekly) is the proposal §11 PR 7 line.
-pub fn schedule_drift_for_app(app_id: &str, interval: std::time::Duration) {
-    tracing::debug!(
-        target: "zeroship_plugin_db::mask_drift",
-        app_id = %app_id,
-        interval_secs = interval.as_secs(),
-        "drift schedule registered (P6a wiring pending)",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Per-app entry — iterate every collection × every masked column.
-// ---------------------------------------------------------------------------
-
-/// **P5.5 PR 7** — sweep every masked column on every collection
-/// registered for `app_id`.
-///
-/// The schema cache is the source of truth — we only inspect
-/// collections that have been registered through `db.registerModel`
-/// on the current isolate. A pre-warm pass would be required if we
-/// wanted to drift-check apps that haven't booted yet; PR 7 leaves
-/// that to P6a (the cron loop will iterate the catalog separately).
-///
-/// Returns a single [`DriftReport`] aggregating every per-column
-/// sweep. Errors short-circuit — a single SQL failure aborts the rest
-/// of the sweep so operators see one diagnostic, not a flood.
-pub async fn run_drift_check_for_app(app_id: &str) -> Result<DriftReport, DbError> {
-    let cached_schemas = crate::context::with(|c| c.cached_schemas_for_app(app_id));
-    let mut aggregate = DriftReport::default();
-
-    for (collection, schema) in cached_schemas {
-        let Some(schema_obj) = schema.as_object() else {
-            continue;
-        };
-        for (col, def) in schema_obj.iter() {
-            let Some(mask_meta) = def.get("mask").and_then(|v| v.as_object()) else {
-                continue;
-            };
-            let kind = mask_meta
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("full");
-            if kind == "none" {
-                continue;
-            }
-            let report = run_drift_check_for_column(
-                app_id,
-                &collection,
-                col,
-                DEFAULT_SAMPLE_PCT,
-            )
-            .await?;
-            aggregate.merge(report);
-        }
-    }
-
-    Ok(aggregate)
-}
-
-// ---------------------------------------------------------------------------
-// Per-column entry — sample rows + diff sibling
-// ---------------------------------------------------------------------------
 
 /// **P5.5 PR 7** — drift-check one masked column on one collection.
 ///
@@ -949,7 +854,7 @@ async fn ensure_drift_audit_table(app_id: &str) -> Result<(), DbError> {
 /// helper specifically tolerates the missing-table case so a
 /// zero-drift run can still assert `audit.is_empty()` without
 /// pre-provisioning the table.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn read_drift_audit_rows_for_tests(
     app_id: &str,

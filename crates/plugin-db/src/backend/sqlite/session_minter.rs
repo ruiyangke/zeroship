@@ -32,41 +32,55 @@
 //! The module compiles only under `--features sqlite` — it's
 //! reached from `backend::sqlite::mod` which is itself sqlite-gated.
 
+#[cfg(any(test, feature = "test-helpers"))]
 use std::cell::RefCell;
+#[cfg(any(test, feature = "test-helpers"))]
 use std::collections::{HashSet, VecDeque};
+#[cfg(any(test, feature = "test-helpers"))]
 use std::rc::Rc;
+#[cfg(any(test, feature = "test-helpers"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(any(test, feature = "test-helpers"))]
 use hmac::{Hmac, Mac};
+#[cfg(any(test, feature = "test-helpers"))]
 use sha2::Sha256;
 
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::auth::util::{hex_decode, hex_encode};
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::error::DbError;
 
+#[cfg(any(test, feature = "test-helpers"))]
 type HmacSha256 = Hmac<Sha256>;
 
 /// Env var that supplies the active HMAC secret (hex-encoded).
 /// Missing in `from_env()` -> `DbError::Configuration { code:
 /// "not_configured", … }`. SQLite backends without this set may
 /// still boot — the failure is deferred to first mint/init.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) const ENV_SECRET: &str = "ZEROSHIP_SESSION_SECRET";
 
 /// Env var that supplies the previous-generation HMAC secret
 /// (hex-encoded) during a rotation grace window. Optional.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) const ENV_SECRET_PREV: &str = "ZEROSHIP_SESSION_SECRET_PREV";
 
 /// Env var that overrides the nonce LRU capacity. Optional;
 /// defaults to [`DEFAULT_NONCE_CAPACITY`].
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) const ENV_NONCE_CAPACITY: &str = "ZEROSHIP_SESSION_NONCE_CAPACITY";
 
 /// Default ring-buffer capacity for the nonce LRU. Tuned per design
 /// §12 — 10K nonces × ~80 bytes ≈ 800 KB per worker.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) const DEFAULT_NONCE_CAPACITY: usize = 10_000;
 
 /// Configuration bundle for the SQLite session minter. Read from
 /// env vars by [`SqliteSessionMinterConfig::from_env`] or built
 /// explicitly by [`crate::backend::sqlite::SqliteBackend::new_with_secrets`]
 /// in tests.
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug, Clone)]
 pub(crate) struct SqliteSessionMinterConfig {
     /// Active HMAC secret. Mint signs with this; init verifies
@@ -82,6 +96,7 @@ pub(crate) struct SqliteSessionMinterConfig {
     pub(crate) nonce_capacity: usize,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl SqliteSessionMinterConfig {
     /// Read minter configuration from environment variables. Missing
     /// `ZEROSHIP_SESSION_SECRET` returns
@@ -144,6 +159,7 @@ impl SqliteSessionMinterConfig {
 /// + `HashSet::remove`). Memory bound: `capacity × (~32 bytes
 /// nonce + 8 bytes expiry + HashSet overhead)` ≈ 800 KB at the
 /// default 10K capacity.
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug)]
 pub(crate) struct NonceCache {
     /// FIFO ring: oldest at front, newest at back. Each entry is
@@ -158,6 +174,7 @@ pub(crate) struct NonceCache {
     pub(crate) capacity: usize,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl NonceCache {
     /// Construct an empty cache with the given capacity.
     pub(crate) fn new(capacity: usize) -> Self {
@@ -229,6 +246,7 @@ impl NonceCache {
 /// Compute the HMAC-SHA256 of `payload` keyed by `secret`. Returns
 /// 32 bytes. Wraps the `hmac` + `sha2` crates so callers don't
 /// import them directly.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn compute_signature(secret: &[u8], payload: &[u8]) -> Vec<u8> {
     // `Hmac::new_from_slice` only fails for HMAC backends with
     // fixed key-length requirements — `Hmac<Sha256>` accepts any
@@ -250,6 +268,7 @@ pub(crate) fn compute_signature(secret: &[u8], payload: &[u8]) -> Vec<u8> {
 /// Empty `actor_id` / `pid` mirror PG's `COALESCE(p_actor_id, '')`
 /// + `p_pid::TEXT` (the PG impl casts a `NULL`-able integer to
 /// text via `COALESCE`).
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn canonical_payload(
     actor_kind: &str,
     actor_id: &str,
@@ -289,6 +308,7 @@ pub(crate) fn canonical_payload(
 /// so the wall-clock time does not leak which key matched.
 ///
 /// Returns `true` iff at least one branch matched.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn verify_signature(
     secret: &[u8],
     secret_prev: Option<&[u8]>,
@@ -317,6 +337,7 @@ pub(crate) fn verify_signature(
 /// `min(len)` time so an attacker can't gate on early-exit
 /// length checks. Mirrors the PG `__zeroship_admin.const_eq`
 /// body.
+#[cfg(any(test, feature = "test-helpers"))]
 fn const_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff: u8 = (a.len() ^ b.len()) as u8;
     let n = a.len().min(b.len());
@@ -328,6 +349,7 @@ fn const_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Current wall-clock time in Unix milliseconds. Used by
 /// [`NonceCache::insert_if_fresh`] for opportunistic expiry.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn current_unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

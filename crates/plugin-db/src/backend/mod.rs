@@ -199,6 +199,7 @@ pub enum LockScope {
     /// one worker's Rust runtime — backed by an in-memory HashMap
     /// registry, NOT by SQL. No P0 production caller; the variant
     /// exists so future call sites can classify their intent.
+    #[allow(dead_code, reason = "LocalApp remains part of the lock model for test-helper coverage even though the release build only constructs GlobalApp.")]
     LocalApp {
         /// App identifier — first half of the key namespace.
         app_id: String,
@@ -490,6 +491,7 @@ pub trait LockManager: SqlExecutor {
     /// at every call site.
     #[doc(hidden)]
     #[allow(async_fn_in_trait)]
+    #[allow(dead_code, reason = "The blocking advisory-lock primitive is retained for lock-manager tests; production code routes through try_acquire/backoff.")]
     async fn acquire_advisory_lock(
         &self,
         client: &Self::Client,
@@ -730,6 +732,7 @@ pub trait AuditWriter: 'static {
 ///
 /// Not `Send + Sync` for the same single-threaded-per-worker reason
 /// as the rest of the capability traits (Open Q4 in P0).
+#[cfg(feature = "test-helpers")]
 pub trait SessionMinter: 'static {
     /// Mint a fresh session token. `ttl_secs = None` defers to the
     /// implementation's default (today: `auth::util::DEFAULT_TOKEN_TTL_SECS`).
@@ -765,6 +768,7 @@ pub trait SessionMinter: 'static {
 /// free-fn impl ties tokens to `pg_backend_pid()`; trait-routed PG
 /// callers can pass `pid: Some(...)` to opt into the canonical-payload
 /// shape, and `pid: None` preserves today's PG-side behaviour.
+#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub struct SessionInit {
     pub app_id: String,
@@ -779,6 +783,7 @@ pub struct SessionInit {
 /// A token minted by a [`SessionMinter`] impl. Cross-backend shape:
 /// PG fills `backend_pid` from `pg_backend_pid()` for back-compat;
 /// SQLite always sets `backend_pid = 0` (there is no PG concept).
+#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub struct MintedToken {
     pub app_id: String,
@@ -847,11 +852,13 @@ pub trait DialectBuilder: 'static {
     /// `"timestamp"`, …) to the engine's column-type vocabulary.
     /// `opts` is the per-field option object the SDK passes alongside
     /// the type (e.g. `{ length: 256 }`).
+    #[allow(dead_code, reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions.")]
     fn map_zs_type(&self, zs_type: &str, opts: &serde_json::Value) -> String;
 
     /// SQL fragment that evaluates to "now" on the server. PG: `NOW()`;
     /// SQLite: `CURRENT_TIMESTAMP`. Returned as a `&'static str` so
     /// callers can splice it into a query string without an alloc.
+    #[allow(dead_code, reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions.")]
     fn now_fn(&self) -> &'static str;
 
     /// Engine-side SQL that returns the last-inserted rowid for a
@@ -859,6 +866,7 @@ pub trait DialectBuilder: 'static {
     /// PG returns `None` (it routes through `RETURNING` instead).
     /// SQLite returns `Some("SELECT last_insert_rowid()")`. Default
     /// `None` so the PG impl doesn't need to override.
+    #[allow(dead_code, reason = "These dialect hooks are still covered by unit/integration tests while the production query builders route through free functions.")]
     fn last_insert_rowid_sql(&self) -> Option<&'static str> {
         None
     }
@@ -1053,6 +1061,7 @@ pub trait ChangeStream: 'static {
 // or any error rail). `register_model` Pass 1 is the remaining follow-up
 // caller — when that lands the construction site list will gain a
 // second member but the `pub(crate)` constructor stays internal.
+#[derive(Debug)]
 pub struct BrokerPauseGuard {
     app_id: String,
 }
@@ -1456,6 +1465,7 @@ pub enum EncryptionMode {
 /// does. PR 4 (PG) ships `pg_dump`/`pg_restore` shell-out + PITR
 /// placeholder; PR 5 (SQLite) ships `VACUUM INTO`
 /// + atomic-rename restore + `pitr_pg_only` refusal.
+#[cfg(feature = "test-helpers")]
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
     /// `dest_uri`. Returns a handle with the content hash for
@@ -1495,6 +1505,7 @@ pub trait Backup: 'static {
 /// Today carries only [`Self::if_busy`]; reserved so future PRs can
 /// add compression / encryption-at-rest knobs without changing the
 /// trait method signature.
+#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub struct SnapshotOpts {
     pub if_busy: BusyPolicy,
@@ -1502,6 +1513,7 @@ pub struct SnapshotOpts {
 
 /// Policy when a snapshot can't be taken immediately (e.g. SQLite
 /// `VACUUM INTO` hitting `SQLITE_BUSY` on a schema-change race).
+#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusyPolicy {
     /// Surface a typed `Configuration { code: "backup_busy" }` error
@@ -1513,6 +1525,7 @@ pub enum BusyPolicy {
 
 /// Handle returned by [`Backup::snapshot`] — the address + integrity
 /// metadata needed to restore.
+#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub struct SnapshotHandle {
     /// Where the snapshot lives. PR 4/5 conventions:
@@ -1533,6 +1546,7 @@ pub struct SnapshotHandle {
 /// PG accepts both forms; SQLite refuses both with `pitr_pg_only`
 /// (the SQLite arm has no WAL-archive PITR story — the placeholder
 /// exists so the trait surface is uniform).
+#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub enum PitrTarget {
     /// PG log-sequence-number, e.g. `"0/16B6300"`.
@@ -1569,7 +1583,11 @@ pub enum PitrTarget {
 /// the call site — the engage/disengage contract is the *duration*
 /// of the guard's binding, not its construction.
 #[must_use = "SchemaPendingGuard disengages the decoder on Drop — bind it to a name to keep the schema-pending state engaged for the surrounding scope"]
-#[allow(dead_code)] // No orchestrator-side caller yet — wired by `bundle_invalidated` in a follow-up.
+#[allow(
+    dead_code,
+    reason = "bundle-invalidated wiring has not landed yet; keep the guard so the resync semantics stay pinned"
+)]
+#[derive(Debug)]
 pub struct SchemaPendingGuard {
     app_id: String,
 }
@@ -1690,6 +1708,7 @@ impl<T> RegisterBackend for T where
 ///   on the per-isolate context (e.g. `MigrationLock::client`,
 ///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
 ///   of a session-scoped lock.
+#[cfg(any(test, feature = "test-helpers"))]
 pub trait Backend:
     SqlExecutor
     + LockManager
@@ -1727,7 +1746,7 @@ pub trait Backend:
 /// P1. A build with `--no-default-features` is expected to fail at
 /// compile time (no backend arm) — the failure mode is meaningful,
 /// not a silent miscompile.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum BackendHandle {
     /// Postgres backend handle. Wraps an [`Rc<PostgresBackend>`] so
     /// cloning the enum stays cheap (Rc-clone of the inner pointer);
@@ -1764,6 +1783,7 @@ impl BackendHandle {
     /// `handle.with_postgres(|pg| …)` now write
     /// `handle.with_postgres(|pg| …).ok_or_else(|| backend_unsupported_err())?`
     /// — the same shape `as_postgres()` consumers already use.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn with_postgres<R>(&self, f: impl FnOnce(&PostgresBackend) -> R) -> Option<R> {
         match self {
             Self::Postgres(b) => Some(f(b)),
@@ -1819,6 +1839,7 @@ impl BackendHandle {
     /// ```
     ///
     /// — the same shape works for SQLite via this accessor.
+    #[cfg(feature = "test-helpers")]
     pub fn with_sqlite<R>(&self, f: impl FnOnce(&SqliteBackend) -> R) -> Option<R> {
         match self {
             Self::Postgres(_) => None,
@@ -1940,6 +1961,7 @@ impl BackendHandle {
     /// Mirrors the [`Self::as_encrypted_column_pg`] shape.
     ///
     /// Returns `Some` on the PG arm; `None` on the SQLite arm.
+    #[cfg(feature = "test-helpers")]
     pub fn as_backup_pg(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
@@ -1954,6 +1976,7 @@ impl BackendHandle {
     /// restore + `pitr_pg_only` refusal.
     ///
     /// Returns `Some` on the SQLite arm; `None` on the PG arm.
+    #[cfg(feature = "test-helpers")]
     pub fn as_backup_sqlite(&self) -> Option<&SqliteBackend> {
         match self {
             Self::Postgres(_) => None,
@@ -2129,6 +2152,7 @@ mod tests {
     /// Compile-time (P5 PR 1): the [`Backup`] trait's shape is
     /// pinned. PR 1 ships stub impls on both backends; the
     /// per-backend instantiations are below.
+    #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]
     fn _assert_backup<T: Backup>() {}
 
@@ -2156,6 +2180,7 @@ mod tests {
     /// PITR placeholder writes to the `__zeroship_admin.pitr_targets`
     /// table. Mirrors the
     /// `_assert_postgres_backend_impls_encrypted_column` shape above.
+    #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]
     fn _assert_postgres_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}
@@ -2164,6 +2189,7 @@ mod tests {
 
     /// Compile-time (P5 PR 1): `SqliteBackend` satisfies [`Backup`].
     /// PR 5 backfills the `VACUUM INTO` body.
+    #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]
     fn _assert_sqlite_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}

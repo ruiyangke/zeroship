@@ -127,13 +127,6 @@ pub fn is_app_suppressed(app_id: &str) -> bool {
     SUPPRESSED_APPS.with(|s| s.borrow().contains(app_id))
 }
 
-/// True when ANY app on this thread is suppressed. Diagnostic helper —
-/// the production code path always checks a specific app.
-#[doc(hidden)]
-pub(crate) fn any_app_suppressed() -> bool {
-    SUPPRESSED_APPS.with(|s| !s.borrow().is_empty())
-}
-
 /// RAII guard: suppresses local-emit for one app on construction,
 /// unsuppresses on drop (including panic-unwind). The consumer's run
 /// loop holds one of these for the duration of its decode loop.
@@ -172,6 +165,7 @@ const LEGACY_SUPPRESSION_KEY: &str = "__legacy_thread_wide__";
 /// Internally maps to a sentinel entry in [`SUPPRESSED_APPS`] so the
 /// new per-app check still covers callers that drive this surface.
 #[doc(hidden)]
+#[cfg(test)]
 pub(crate) fn set_local_emit_suppressed(v: bool) {
     if v {
         suppress_app(LEGACY_SUPPRESSION_KEY);

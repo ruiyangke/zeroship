@@ -374,6 +374,7 @@ pub async fn mint_and_init_via_pool(
 // carries `pid` through `MintedToken` verbatim so SDK round-trips
 // don't lose data; the SECURITY DEFINER ignores it.
 //
+#[cfg(feature = "test-helpers")]
 impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
     async fn mint_session_token(
         &self,

@@ -50,7 +50,6 @@
 use compio_postgres::Pool;
 
 use crate::error::{first_row_or_internal, prefix_message, DbError};
-use crate::v8_bridge::row_to_json;
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
@@ -599,43 +598,12 @@ pub async fn drop_abandoned_slots(
     Ok(dropped)
 }
 
-// ---------------------------------------------------------------------------
-// Misc — diagnostic helpers used by the V8 callback layer
-// ---------------------------------------------------------------------------
-
-/// Cheap probe over `pg_replication_slots` used by future callers that
-/// want the current state of an app's slot without re-emitting the
-/// full `SetupOutcome`. No production caller today (api-surface r9
-/// NEW-R9-1 noted the prior "V8 `replicationStatus` callback"
-/// docstring was aspirational); kept `pub(crate)` so a future
-/// `replicationStatus` v8_class method can adopt it without surface
-/// churn.
-pub(crate) async fn slot_status(
-    pool: &Pool,
-    app_id: &str,
-) -> Result<Option<serde_json::Value>, DbError> {
-    let slot = slot_name(app_id)?;
-    let rows = pool
-        .query_text_params(
-            "SELECT slot_name, plugin, active, restart_lsn::text, confirmed_flush_lsn::text, wal_status
-             FROM pg_replication_slots WHERE slot_name = $1",
-            &[&slot],
-        )
-        .await
-        .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
-            prefix_message(&mut err, "replication: slot_status: ");
-            err
-        })?;
-    Ok(rows.first().map(row_to_json))
-}
-
-// ---------------------------------------------------------------------------
 // Drop-namespace teardown (§17.7 PG steps — slot + publication)
 // ---------------------------------------------------------------------------
 
 /// Default grace before the drop sequence force-terminates the slot's
 /// replication backend. §17.7: "after a 5s grace, … `pg_terminate_backend`".
+#[cfg(any(test, feature = "test-helpers"))]
 pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
 
 /// Tear down the per-app publication + replication slot, in the §17.7

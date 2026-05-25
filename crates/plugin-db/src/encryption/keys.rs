@@ -123,6 +123,7 @@ impl KeyStore {
     /// column is the masked text — the parent ciphertext (and
     /// therefore the key) must never be touched.
     #[must_use]
+    #[cfg(test)]
     pub fn lookups_count(&self) -> u64 {
         self.lookups.get()
     }
