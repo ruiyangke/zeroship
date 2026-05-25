@@ -477,8 +477,16 @@ impl VectorIndex for PostgresBackend {
         // which entry point fired.
         self.ensure_pgvector_available().await?;
 
+        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
         let bq = crate::query::build_vector_search(
-            app_id, collection, column, query, k, metric, filter,
+            app_id,
+            collection,
+            column,
+            query,
+            k,
+            metric,
+            filter,
+            schema_hint.as_ref(),
         )
         .map_err(DbError::from)?;
 
@@ -656,8 +664,16 @@ impl FullTextIndex for PostgresBackend {
         filter: &serde_json::Value,
         limit: Option<usize>,
     ) -> Result<Vec<serde_json::Value>, DbError> {
-        let bq = crate::query::build_fts_search(app_id, collection, query, filter, limit)
-            .map_err(DbError::from)?;
+        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+        let bq = crate::query::build_fts_search(
+            app_id,
+            collection,
+            query,
+            filter,
+            limit,
+            schema_hint.as_ref(),
+        )
+        .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let rows = self
             .pool
@@ -778,8 +794,16 @@ impl SpatialIndex for PostgresBackend {
     ) -> Result<Vec<serde_json::Value>, DbError> {
         self.ensure_postgis_available().await?;
 
+        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
         let bq = crate::query::build_spatial_near(
-            app_id, collection, column, point, radius_m, filter, limit,
+            app_id,
+            collection,
+            column,
+            point,
+            radius_m,
+            filter,
+            limit,
+            schema_hint.as_ref(),
         )
         .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();

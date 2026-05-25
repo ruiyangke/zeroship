@@ -355,11 +355,14 @@ pub(crate) fn build_fts_search_sql(
     collection: &str,
     filter_clause: &str,
     has_limit: bool,
+    schema_hint: Option<&serde_json::Value>,
 ) -> String {
     let qschema = quote_ident(app_id);
     let qcoll = quote_ident(collection);
     let qfts = quote_ident(&format!("{collection}__fts"));
     let qfts_match_col = quote_ident(&format!("{collection}__fts"));
+    let select_expr =
+        crate::query::build_masked_aware_select_expr_for_table_alias(schema_hint, "t");
     // **FTS5 `rank` column** (vs. `bm25(<fts_table>)` explicit form):
     // every FTS5 vtable exposes a hidden `rank` column that returns
     // the bm25 score for the currently-matched row. We pick the
@@ -372,7 +375,7 @@ pub(crate) fn build_fts_search_sql(
     // the ambiguity. See `https://www.sqlite.org/fts5.html` §
     // "Auxiliary Functions - bm25()".
     let mut sql = format!(
-        "SELECT t.*, f.rank AS _rank \
+        "SELECT {select_expr}, f.rank AS _rank \
          FROM {qschema}.{qcoll} t \
          JOIN {qschema}.{qfts} f ON t.rowid = f.rowid \
          WHERE f.{qfts_match_col} MATCH $1"
@@ -512,10 +515,10 @@ mod tests {
 
     #[test]
     fn fts_search_sql_no_filter_no_limit() {
-        let sql = build_fts_search_sql("myapp", "docs", "", false);
+        let sql = build_fts_search_sql("myapp", "docs", "", false, None);
         assert_eq!(
             sql,
-            "SELECT t.*, f.rank AS _rank \
+            "SELECT \"t\".*, f.rank AS _rank \
              FROM \"myapp\".\"docs\" t \
              JOIN \"myapp\".\"docs__fts\" f ON t.rowid = f.rowid \
              WHERE f.\"docs__fts\" MATCH $1 ORDER BY _rank"
@@ -524,10 +527,10 @@ mod tests {
 
     #[test]
     fn fts_search_sql_with_filter_with_limit() {
-        let sql = build_fts_search_sql("myapp", "docs", "\"lang\" = $3", true);
+        let sql = build_fts_search_sql("myapp", "docs", "\"lang\" = $3", true, None);
         assert_eq!(
             sql,
-            "SELECT t.*, f.rank AS _rank \
+            "SELECT \"t\".*, f.rank AS _rank \
              FROM \"myapp\".\"docs\" t \
              JOIN \"myapp\".\"docs__fts\" f ON t.rowid = f.rowid \
              WHERE f.\"docs__fts\" MATCH $1 AND \"lang\" = $3 ORDER BY _rank LIMIT $2"
@@ -536,9 +539,29 @@ mod tests {
 
     #[test]
     fn fts_search_sql_with_limit_no_filter() {
-        let sql = build_fts_search_sql("myapp", "docs", "", true);
+        let sql = build_fts_search_sql("myapp", "docs", "", true, None);
         assert!(sql.ends_with("ORDER BY _rank LIMIT $2"), "got: {sql}");
         assert!(!sql.contains(" AND "), "no filter -> no AND: {sql}");
+    }
+
+    #[test]
+    fn fts_search_sql_reads_masked_sibling_when_schema_cached() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "body": { "type": "string" }
+        });
+        let sql = build_fts_search_sql("app1", "docs", "", false, Some(&schema));
+        assert!(
+            !sql.starts_with("SELECT \"t\".*"),
+            "fts search must not use t.* when masked columns exist: {sql}"
+        );
+        assert!(
+            sql.contains(r#""t"."ssn_masked" AS "ssn""#),
+            "fts search must read the masked sibling: {sql}"
+        );
     }
 
     #[test]

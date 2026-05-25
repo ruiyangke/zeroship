@@ -1715,35 +1715,15 @@ impl crate::backend::VectorIndex for SqliteBackend {
         // filter; we append the `k` literal directly into the SQL
         // (it's a small integer, safe to format) so the param vec
         // doesn't need re-numbering.
-        let qschema = SqliteDialect.quote_ident(app_id);
-        let qcoll = SqliteDialect.quote_ident(collection);
-        let qvtab = SqliteDialect.quote_ident(&vector::vec_table_name(collection, column));
-        let qcol = SqliteDialect.quote_ident(column);
-
-        let extra_filter = if where_expr.is_empty() {
-            String::new()
-        } else {
-            // Compose the filter with the MATCH + k conditions via
-            // AND. The `build_where` lowering produces unqualified
-            // column references (e.g. `"name" = $1`); they resolve
-            // against the base table `t` in our JOIN. The vec0 table
-            // only exposes `rowid` + the vector column + `distance`
-            // + `k`, so collision risk is bounded — a user column
-            // accidentally named `rowid` / `distance` / `k` would
-            // shadow, but the SDK reserves `_`-prefixed names and
-            // these aren't `_`-prefixed; SQLite's identifier
-            // resolution prefers the first-listed table on collision
-            // (which is `t`), but we explicitly qualify the vec0
-            // references (`v.<col>`) to be safe.
-            format!(" AND {where_expr}")
-        };
-
-        let sql = format!(
-            "SELECT t.*, v.distance AS _distance \
-             FROM {qschema}.{qcoll} t \
-             JOIN {qschema}.{qvtab} v ON t.rowid = v.rowid \
-             WHERE v.{qcol} MATCH {query_hex} AND k = {k}{extra_filter} \
-             ORDER BY v.distance"
+        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+        let sql = vector::build_vector_search_sql(
+            app_id,
+            collection,
+            column,
+            &query_hex,
+            k,
+            &where_expr,
+            schema_hint.as_ref(),
         );
 
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
@@ -1887,12 +1867,38 @@ impl crate::backend::FullTextIndex for SqliteBackend {
 
         let filter_clause = fts::build_fts_filter_clause(filter, &mut params)
             .map_err(DbError::from)?;
-        let sql = fts::build_fts_search_sql(app_id, collection, &filter_clause, has_limit);
+        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+        let sql = fts::build_fts_search_sql(
+            app_id,
+            collection,
+            &filter_clause,
+            has_limit,
+            schema_hint.as_ref(),
+        );
 
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
         Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
     }
+}
+
+fn build_spatial_near_base_query(
+    app_id: &str,
+    collection: &str,
+    filter: &serde_json::Value,
+    schema_hint: Option<&serde_json::Value>,
+) -> Result<crate::query::BuiltQuery, DbError> {
+    crate::query::build_find_with_schema(
+        app_id,
+        collection,
+        filter,
+        /* limit  */ None,
+        /* offset */ None,
+        /* order_by */ None,
+        /* select   */ None,
+        schema_hint,
+    )
+    .map_err(DbError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1942,16 +1948,8 @@ impl crate::backend::SpatialIndex for SqliteBackend {
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
         // positionally on rusqlite). No ORDER BY at the SQL layer —
         // we sort in Rust by computed distance.
-        let bq = crate::query::build_find(
-            app_id,
-            collection,
-            filter,
-            /* limit  */ None,
-            /* offset */ None,
-            /* order_by */ None,
-            /* select   */ None,
-        )
-        .map_err(DbError::from)?;
+        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+        let bq = build_spatial_near_base_query(app_id, collection, filter, schema_hint.as_ref())?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&bq.sql, &param_refs).await?;
 
@@ -2825,6 +2823,34 @@ mod tests {
         assert!(
             !temp_dir_path.exists(),
             "TempDir-backed SQLite scratch dir should be cleaned on drop"
+        );
+    }
+
+    #[test]
+    fn spatial_near_base_query_reads_masked_sibling_when_schema_cached() {
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "mask": { "kind": "last4", "classification": "spi" }
+            },
+            "location": { "type": "geoPoint" }
+        });
+        let bq = build_spatial_near_base_query(
+            "app1",
+            "places",
+            &serde_json::json!({}),
+            Some(&schema),
+        )
+        .expect("spatial base query");
+        assert!(
+            !bq.sql.starts_with("SELECT *"),
+            "spatial base query must not use SELECT * when masked columns exist: {}",
+            bq.sql,
+        );
+        assert!(
+            bq.sql.contains("\"ssn_masked\" AS \"ssn\""),
+            "spatial base query must read the masked sibling: {}",
+            bq.sql,
         );
     }
 
