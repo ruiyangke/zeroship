@@ -3062,7 +3062,7 @@ async fn wait_for_alloc_running(
                             last_parse_log_at = Some(now);
                         }
                         last_parse_err = Some(msg);
-                        compio::time::sleep(Duration::from_millis(250)).await;
+                        compio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
                 };
