@@ -1,7 +1,7 @@
 # Native WHATWG Fetch shipped
 
 **Status:** Shipped 2026-05-02
-**Long-form design:** [`docs/proposals/fetch-native.md`](../proposals/fetch-native.md)
+**Long-form design:** [`docs/proposals/fetch-native.md`](../archive/fetch-native.md)
 **Implementation:** [`crates/runtime/src/web/fetch/`](../../crates/runtime/src/web/fetch/) (~5,400 LOC: request.rs, response.rs, body/, algorithms.rs)
 
 ## Context

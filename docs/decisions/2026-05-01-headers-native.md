@@ -1,7 +1,7 @@
 # Native WHATWG `Headers` shipped
 
 **Status:** Shipped 2026-05-01
-**Long-form design:** [`docs/proposals/headers-native.md`](../proposals/headers-native.md)
+**Long-form design:** [`docs/proposals/headers-native.md`](../archive/headers-native.md)
 **Implementation:** [`crates/runtime/src/web/headers.rs`](../../crates/runtime/src/web/headers.rs) (~930 LOC)
 
 ## Context

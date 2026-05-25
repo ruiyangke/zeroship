@@ -1,7 +1,7 @@
 # `#[v8_constructor(post_init = "fn")]` shipped (MAC-02)
 
 **Status:** Shipped 2026-05-04
-**Long-form design:** [`docs/proposals/macro-constructor-post-init.md`](../proposals/macro-constructor-post-init.md)
+**Long-form design:** [`docs/proposals/macro-constructor-post-init.md`](../archive/macro-constructor-post-init.md)
 **Implementation:** [`crates/runtime-macros/src/v8_class/parse/marker_attr.rs`](../../crates/runtime-macros/src/v8_class/parse/marker_attr.rs) (codegen lives in `crates/runtime-macros/`).
 
 ## Context
