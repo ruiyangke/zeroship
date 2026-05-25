@@ -26,7 +26,6 @@
 
 use std::future::Future;
 
-use base64::Engine as _;
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
@@ -104,6 +103,8 @@ pub mod mask_drift;
 pub(crate) mod system_fields_pass;
 #[cfg(feature = "test-helpers")]
 pub mod system_fields_pass;
+
+mod read_pipeline;
 
 // ---------------------------------------------------------------------------
 // dispatch_op template
@@ -334,22 +335,6 @@ fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
         .as_str()
 }
 
-/// Lower a `Vec<Value>` result to a single JSON value: the first row,
-/// or `null` when the result was empty. Used by `insert` / `update` /
-/// `delete` / `upsert`, all of which the SDK expects to resolve to a
-/// single row or `null`.
-///
-/// The `Vec<Value>` arrives already decoded from `compio_postgres::Row`
-/// — see [`crate::v8_bridge::rows_to_json_value`]. We serialise the
-/// single row once here; V8 then parses it via `JSON.parse` inside
-/// `ResolveValue::Json`. Net cost: one `to_string` + one
-/// `JSON.parse`, down from the pre-fix four
-/// (rows→string→parse→string→parse).
-fn first_row_or_null(rows: Vec<Value>) -> ResolveValue {
-    let value = rows.into_iter().next().unwrap_or(Value::Null).to_string();
-    ResolveValue::Json(value)
-}
-
 /// **P9 PR 2** — `first_row_or_null` variant that, when `has_masked` is
 /// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
 /// walks the parsed value and replaces `__zsmask__` sentinels with
@@ -366,15 +351,6 @@ fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue 
 #[allow(clippy::cast_precision_loss)]
 fn row_count_as_f64(rows: Vec<Value>) -> ResolveValue {
     ResolveValue::F64(rows.len() as f64)
-}
-
-/// Lower a `Vec<Value>` result to a JSON-array string. Used by `find`
-/// / `insertMany` / `aggregate` where the SDK expects an array of
-/// rows. The serialisation happens exactly once — at the V8 boundary
-/// — replacing the pre-fix "stringify the result set → parse it →
-/// re-stringify it" round-trip.
-fn rows_as_json_array(rows: Vec<Value>) -> ResolveValue {
-    ResolveValue::Json(Value::Array(rows).to_string())
 }
 
 /// **P9 PR 2** — `rows_as_json_array` variant that resolves via
@@ -398,223 +374,6 @@ fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
     } else {
         ResolveValue::Json(json)
     }
-}
-
-fn normalize_rows_on_read(
-    app_id: &str,
-    collection: &str,
-    mut rows: Vec<Value>,
-) -> Result<Vec<Value>, DbError> {
-    let schema = crate::context::with(|c| c.schema_for(app_id, collection));
-    for row in rows.iter_mut() {
-        normalize_row_on_read(schema.as_ref(), row)?;
-    }
-    Ok(rows)
-}
-
-fn normalize_row_on_read(schema: Option<&Value>, row: &mut Value) -> Result<(), DbError> {
-    let Some(obj) = row.as_object_mut() else {
-        return Ok(());
-    };
-    for (key, value) in obj.iter_mut() {
-        if matches!(key.as_str(), "created_at" | "updated_at" | "deleted_at") {
-            normalize_timestamp_value(value)?;
-            continue;
-        }
-
-        let Some(def) = schema
-            .and_then(Value::as_object)
-            .and_then(|schema_obj| schema_obj.get(key))
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-
-        if def.get("encrypted").is_some() {
-            continue;
-        }
-
-        match def.get("type").and_then(Value::as_str) {
-            Some("boolean") => normalize_boolean_value(value),
-            Some("json") | Some("object") | Some("array") | Some("union") => {
-                normalize_json_value(value)
-            }
-            Some("bytes") => normalize_bytes_value(value)?,
-            Some("date") | Some("calendarDate") => normalize_timestamp_value(value)?,
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn normalize_boolean_value(value: &mut Value) {
-    match value {
-        Value::Bool(_) | Value::Null => {}
-        Value::Number(n) => {
-            if n.as_i64() == Some(0) {
-                *value = Value::Bool(false);
-            } else if n.as_i64() == Some(1) {
-                *value = Value::Bool(true);
-            }
-        }
-        Value::String(s) => match s.as_str() {
-            "0" | "false" => *value = Value::Bool(false),
-            "1" | "true" => *value = Value::Bool(true),
-            _ => {}
-        },
-        _ => {}
-    }
-}
-
-fn normalize_json_value(value: &mut Value) {
-    if let Value::String(s) = value {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            *value = parsed;
-        }
-    }
-}
-
-fn normalize_bytes_value(value: &mut Value) -> Result<(), DbError> {
-    match value {
-        Value::Null | Value::String(_) => Ok(()),
-        Value::Array(arr) => {
-            let mut raw = Vec::with_capacity(arr.len());
-            for cell in arr.iter() {
-                let Some(n) = cell.as_u64() else {
-                    return Err(DbError::internal(format!(
-                        "normalize_row_on_read: bytes field expected byte array, got {cell:?}"
-                    )));
-                };
-                let byte = u8::try_from(n).map_err(|_| {
-                    DbError::internal(format!(
-                        "normalize_row_on_read: bytes field byte out of range: {n}"
-                    ))
-                })?;
-                raw.push(byte);
-            }
-            *value = Value::String(base64::engine::general_purpose::STANDARD.encode(raw));
-            Ok(())
-        }
-        other => Err(DbError::internal(format!(
-            "normalize_row_on_read: bytes field expected string/array/null, got {other:?}"
-        ))),
-    }
-}
-
-fn normalize_timestamp_value(value: &mut Value) -> Result<(), DbError> {
-    match value {
-        Value::Null | Value::Number(_) => Ok(()),
-        Value::String(s) => {
-            if let Some(ms) = parse_timestamp_millis(s) {
-                *value = Value::Number(serde_json::Number::from(ms));
-            }
-            Ok(())
-        }
-        other => Err(DbError::internal(format!(
-            "normalize_row_on_read: timestamp field expected string/number/null, got {other:?}"
-        ))),
-    }
-}
-
-fn parse_timestamp_millis(s: &str) -> Option<i64> {
-    if let Some(ms) = crate::backend::sqlite::session_minter::parse_iso_to_millis(s) {
-        return Some(ms);
-    }
-
-    let b = s.as_bytes();
-    if b.len() < 19 {
-        return None;
-    }
-    if b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b' ' | b'T') || b[13] != b':' || b[16] != b':' {
-        return None;
-    }
-
-    let year: i32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
-    let month: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
-    let day: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
-    let hour: i64 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
-    let minute: i64 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
-    let second: i64 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
-    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
-        return None;
-    }
-
-    let mut millis = 0i64;
-    let mut tz_offset_minutes = 0i64;
-    let mut idx = 19usize;
-
-    if idx < b.len() && b[idx] == b'.' {
-        idx += 1;
-        let frac_start = idx;
-        while idx < b.len() && b[idx].is_ascii_digit() {
-            idx += 1;
-        }
-        if idx == frac_start {
-            return None;
-        }
-        let frac = &b[frac_start..idx];
-        let frac_digits = std::str::from_utf8(frac).ok()?;
-        let mut milli_digits = frac_digits.chars().take(3).collect::<String>();
-        while milli_digits.len() < 3 {
-            milli_digits.push('0');
-        }
-        millis = milli_digits.parse().ok()?;
-    }
-
-    if idx < b.len() {
-        tz_offset_minutes = parse_timestamp_offset_minutes(&b[idx..])?;
-    }
-
-    let days = days_from_civil(year, month, day)?;
-    let total_secs = days * 86_400 + hour * 3600 + minute * 60 + second;
-    Some(total_secs * 1000 + millis - tz_offset_minutes * 60 * 1000)
-}
-
-fn parse_timestamp_offset_minutes(rest: &[u8]) -> Option<i64> {
-    match rest {
-        b"Z" | b"z" => Some(0),
-        [sign @ (b'+' | b'-'), h1, h2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            if hours > 23 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * hours * 60)
-        }
-        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * (hours * 60 + minutes))
-        }
-        [sign @ (b'+' | b'-'), h1, h2, m1, m2] => {
-            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
-            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
-            if hours > 23 || minutes > 59 {
-                return None;
-            }
-            let sign = if *sign == b'-' { -1 } else { 1 };
-            Some(sign * (hours * 60 + minutes))
-        }
-        _ => None,
-    }
-}
-
-fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    let y = if m <= 2 { i64::from(y) - 1 } else { i64::from(y) };
-    let era = y.div_euclid(400);
-    let yoe = (y - era * 400) as u64;
-    let m = m as i64;
-    let d = d as i64;
-    let doy = ((153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1) as u64;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + doe as i64 - 719_468)
 }
 
 // ---------------------------------------------------------------------------
@@ -732,32 +491,17 @@ pub(crate) fn dispatch_find<'s>(
         };
         match exec_query(bq).await {
             Ok(rows) => {
-                let rows = match normalize_rows_on_read(&app, &coll, rows) {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                // **P5 PR 2** — decrypt encrypted columns on every
-                // returned row. No-op when the schema declares none.
-                let rows = match apply_encryption_on_read(&app, &coll, rows).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                // **P5.5 PR 3** — wrap masked columns in the
-                // `__zsmask__`-tagged wire shape.
-                let (mut rows, has_masked) = match apply_mask_wrap_on_read(&app, &coll, rows) {
-                    Ok(r) => r,
+                let result = match read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions {
+                        unmask_columns: &unmask_columns,
+                    },
+                )
+                .await
+                {
+                    Ok(result) => result,
                     Err(e) => {
                         return OpResult::JsValue {
                             resolver,
@@ -767,20 +511,6 @@ pub(crate) fn dispatch_find<'s>(
                     }
                 };
                 if !unmask_columns.is_empty() {
-                    if let Err(e) = crate::crud::unmask::dispatch_unmask_for_query(
-                        &app,
-                        &coll,
-                        &unmask_columns,
-                        &mut rows,
-                    )
-                    .await
-                    {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
                     if let Err(e) = crate::crud::unmask::audit_query_hint_granted(
                         &app,
                         &coll,
@@ -799,7 +529,7 @@ pub(crate) fn dispatch_find<'s>(
                 }
                 OpResult::JsValue {
                     resolver,
-                    value: rows_as_json_array_masked(rows, has_masked),
+                    value: rows_as_json_array_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -878,32 +608,15 @@ pub(crate) fn dispatch_insert<'s>(
         };
         match result {
             Ok(rows) => {
-                let rows = match normalize_rows_on_read(&app, &coll, rows) {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                let rows = apply_encryption_on_read(&app, &coll, rows).await;
-                let rows = match rows {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                // **P5.5 PR 3** — wrap masked columns from RETURNING *
-                // so the SDK sees `MaskedValue<T>`, not the raw
-                // ciphertext / plaintext parent slot.
-                let (rows, has_masked) = match apply_mask_wrap_on_read(&app, &coll, rows) {
-                    Ok(r) => r,
+                let result = match read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
+                {
+                    Ok(result) => result,
                     Err(e) => {
                         return OpResult::JsValue {
                             resolver,
@@ -914,7 +627,7 @@ pub(crate) fn dispatch_insert<'s>(
                 };
                 OpResult::JsValue {
                     resolver,
-                    value: first_row_or_null_masked(rows, has_masked),
+                    value: first_row_or_null_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -967,9 +680,17 @@ pub(crate) fn dispatch_insert_many<'s>(
         move |bq| async move {
             let rows =
                 exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await?;
-            normalize_rows_on_read(&app, &coll, rows)
+            read_pipeline::apply(
+                &app,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
-        rows_as_json_array,
+        |result: read_pipeline::ApplyResult| {
+            rows_as_json_array_masked(result.rows, result.has_masked)
+        },
     )));
 
     promise
@@ -1079,8 +800,15 @@ pub(crate) fn dispatch_update_one<'s>(
         };
         match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
-                let rows = match normalize_rows_on_read(&app, &coll, rows) {
-                    Ok(rows) => rows,
+                let result = match read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
+                {
+                    Ok(result) => result,
                     Err(e) => {
                         return OpResult::JsValue {
                             resolver,
@@ -1095,7 +823,7 @@ pub(crate) fn dispatch_update_one<'s>(
                 // (the row exists at a different version, or the row
                 // is missing — the SDK consumer retries either way).
                 if let Some(expected_version) = cas_version {
-                    if rows.is_empty() {
+                    if result.rows.is_empty() {
                         let row_id = filter
                             .as_object()
                             .and_then(|o| o.get("id"))
@@ -1112,10 +840,10 @@ pub(crate) fn dispatch_update_one<'s>(
                     // The `id` PK ensures at most one row matches
                     // `{ id: ..., version: N }`; a result set >1 is
                     // a regression in the dispatcher contract.
-                    if rows.len() > 1 {
+                    if result.rows.len() > 1 {
                         tracing::error!(
                             collection = %coll,
-                            row_count = rows.len(),
+                            row_count = result.rows.len(),
                             "version_mismatch_unexpected_multi_row: CAS update returned >1 row"
                         );
                         return OpResult::JsValue {
@@ -1128,30 +856,9 @@ pub(crate) fn dispatch_update_one<'s>(
                         };
                     }
                 }
-                let rows = match apply_encryption_on_read(&app, &coll, rows).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                // **P5.5 PR 3** — wrap masked columns from RETURNING *.
-                let (rows, has_masked) = match apply_mask_wrap_on_read(&app, &coll, rows) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
                 OpResult::JsValue {
                     resolver,
-                    value: first_row_or_null_masked(rows, has_masked),
+                    value: first_row_or_null_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -1360,9 +1067,17 @@ pub(crate) fn dispatch_delete_one<'s>(
                 let rows =
                     exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update)
                         .await?;
-                normalize_rows_on_read(&app, &coll, rows)
+                read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
             },
-            first_row_or_null,
+            |result: read_pipeline::ApplyResult| {
+                first_row_or_null_masked(result.rows, result.has_masked)
+            },
         )));
     } else {
         system_fields_pass::warn_legacy_hard_delete(&app, &coll);
@@ -1382,9 +1097,17 @@ pub(crate) fn dispatch_delete_one<'s>(
                 let rows =
                     exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
                         .await?;
-                normalize_rows_on_read(&app, &coll, rows)
+                read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
             },
-            first_row_or_null,
+            |result: read_pipeline::ApplyResult| {
+                first_row_or_null_masked(result.rows, result.has_masked)
+            },
         )));
     }
 
@@ -1481,9 +1204,17 @@ pub(crate) fn dispatch_purge_one<'s>(
             let rows =
                 exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
                     .await?;
-            normalize_rows_on_read(&app, &coll, rows)
+            read_pipeline::apply(
+                &app,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
-        first_row_or_null,
+        |result: read_pipeline::ApplyResult| {
+            first_row_or_null_masked(result.rows, result.has_masked)
+        },
     )));
 
     promise
@@ -1567,9 +1298,17 @@ pub(crate) fn dispatch_restore_one<'s>(
         move |bq| async move {
             let rows =
                 exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
-            normalize_rows_on_read(&app, &coll, rows)
+            read_pipeline::apply(
+                &app,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
-        first_row_or_null,
+        |result: read_pipeline::ApplyResult| {
+            first_row_or_null_masked(result.rows, result.has_masked)
+        },
     )));
 
     promise
@@ -1685,9 +1424,17 @@ pub(crate) fn dispatch_aggregate<'s>(
         built,
         move |bq| async move {
             let rows = exec_query(bq).await?;
-            normalize_rows_on_read(&app, &coll, rows)
+            read_pipeline::apply(
+                &app,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
-        rows_as_json_array,
+        |result: read_pipeline::ApplyResult| {
+            rows_as_json_array_masked(result.rows, result.has_masked)
+        },
     )));
 
     promise
@@ -1734,13 +1481,20 @@ pub(crate) fn dispatch_distinct<'s>(
         built,
         move |bq| async move {
             let rows = exec_query(bq).await?;
-            normalize_rows_on_read(&app, &coll, rows)
+            read_pipeline::apply(
+                &app,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
-        |rows: Vec<Value>| {
+        |result: read_pipeline::ApplyResult| {
             // Extract single-column values into a flat array. `rows`
             // is the pre-decoded result set — no JSON parse needed
             // before reshaping.
-            let flat: Vec<Value> = rows
+            let flat: Vec<Value> = result
+                .rows
                 .into_iter()
                 .filter_map(|row| {
                     if let Value::Object(map) = row {
@@ -1750,7 +1504,7 @@ pub(crate) fn dispatch_distinct<'s>(
                     }
                 })
                 .collect();
-            ResolveValue::Json(Value::Array(flat).to_string())
+            maybe_rehydrate(Value::Array(flat).to_string(), result.has_masked)
         },
     )));
 
@@ -1841,9 +1595,17 @@ pub(crate) fn dispatch_upsert<'s>(
             // will distinguish; P8a doesn't need to.
             let rows =
                 exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await?;
-            normalize_rows_on_read(&app, &coll, rows)
+            read_pipeline::apply(
+                &app,
+                &coll,
+                rows,
+                read_pipeline::ApplyOptions::default(),
+            )
+            .await
         },
-        first_row_or_null,
+        |result: read_pipeline::ApplyResult| {
+            first_row_or_null_masked(result.rows, result.has_masked)
+        },
     )));
 
     promise
@@ -1975,8 +1737,15 @@ pub(crate) fn dispatch_search<'s>(
 
             match result {
                 Ok(rows) => {
-                    let rows = match normalize_rows_on_read(&app, &coll, rows) {
-                        Ok(rows) => rows,
+                    let result = match read_pipeline::apply(
+                        &app,
+                        &coll,
+                        rows,
+                        read_pipeline::ApplyOptions::default(),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
                         Err(e) => {
                             return zeroship_runtime::state::OpResult::JsValue {
                                 resolver,
@@ -1989,9 +1758,7 @@ pub(crate) fn dispatch_search<'s>(
                     };
                     zeroship_runtime::state::OpResult::JsValue {
                         resolver,
-                        value: zeroship_runtime::state::ResolveValue::Json(
-                            Value::Array(rows).to_string(),
-                        ),
+                        value: rows_as_json_array_masked(result.rows, result.has_masked),
                         request_id,
                     }
                 }
@@ -2117,8 +1884,15 @@ pub(crate) fn dispatch_search<'s>(
 
         match result {
             Ok(rows) => {
-                let rows = match normalize_rows_on_read(&app, &coll, rows) {
-                    Ok(rows) => rows,
+                let result = match read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
+                {
+                    Ok(result) => result,
                     Err(e) => {
                         return zeroship_runtime::state::OpResult::JsValue {
                             resolver,
@@ -2131,9 +1905,7 @@ pub(crate) fn dispatch_search<'s>(
                 };
                 zeroship_runtime::state::OpResult::JsValue {
                     resolver,
-                    value: zeroship_runtime::state::ResolveValue::Json(
-                        Value::Array(rows).to_string(),
-                    ),
+                    value: rows_as_json_array_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -2274,8 +2046,15 @@ pub(crate) fn dispatch_near<'s>(
 
         match result {
             Ok(rows) => {
-                let rows = match normalize_rows_on_read(&app, &coll, rows) {
-                    Ok(rows) => rows,
+                let result = match read_pipeline::apply(
+                    &app,
+                    &coll,
+                    rows,
+                    read_pipeline::ApplyOptions::default(),
+                )
+                .await
+                {
+                    Ok(result) => result,
                     Err(e) => {
                         return zeroship_runtime::state::OpResult::JsValue {
                             resolver,
@@ -2288,9 +2067,7 @@ pub(crate) fn dispatch_near<'s>(
                 };
                 zeroship_runtime::state::OpResult::JsValue {
                     resolver,
-                    value: zeroship_runtime::state::ResolveValue::Json(
-                        Value::Array(rows).to_string(),
-                    ),
+                    value: rows_as_json_array_masked(result.rows, result.has_masked),
                     request_id,
                 }
             }
@@ -2432,48 +2209,6 @@ async fn apply_encryption_on_update(
     Ok(())
 }
 
-/// Decrypt every encrypted column on each row of `rows`. Short-circuits
-/// when the schema has no encrypted columns OR when not registered.
-///
-/// Read rows are normalised before this pass runs, so encrypted-column
-/// values arrive in a lossless text envelope on both backends:
-/// Postgres `BYTEA` now decodes to base64, and SQLite BLOBs are
-/// base64-encoded by the typed-row adapter. The shared decrypt helper
-/// accepts either the legacy `\x...` PG text shape or base64.
-async fn apply_encryption_on_read(
-    app_id: &str,
-    collection: &str,
-    mut rows: Vec<Value>,
-) -> Result<Vec<Value>, DbError> {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok(rows);
-    };
-    if !schema_has_encrypted_columns(&schema) {
-        return Ok(rows);
-    }
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    if let Some(pg) = backend.as_encrypted_column_pg() {
-        for row in rows.iter_mut() {
-            crate::crud::encryption_pass::decrypt_row_on_read(
-                pg, app_id, collection, &schema, row,
-            )
-            .await?;
-        }
-        return Ok(rows);
-    }
-    if let Some(sq) = backend.as_encrypted_column_sqlite() {
-        for row in rows.iter_mut() {
-            crate::crud::encryption_pass::decrypt_row_on_read(
-                sq, app_id, collection, &schema, row,
-            )
-            .await?;
-        }
-        return Ok(rows);
-    }
-    Ok(rows)
-}
-
 /// Run the write-side encryption pass over `doc` using the
 /// backend-arm `EncryptedColumn` impl.
 ///
@@ -2535,52 +2270,6 @@ fn schema_has_encrypted_columns(schema: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// **P5.5 PR 3** — wrap masked columns on every row in `rows` so the
-/// SDK can construct `MaskedValue<T>` from the wire payload.
-///
-/// Synchronous (no backend round-trip) — `mask_pass::wrap_row_on_read`
-/// reads from the row map directly. Short-circuits when:
-///   - the cached schema for `(app_id, collection)` is absent (the
-///     collection wasn't registered on this isolate yet), OR
-///   - the schema declares no masked columns.
-///
-/// Two row shapes are accepted (mirrors the `wrap_row_on_read` docs):
-///
-/// 1. **Aliased-SELECT** (`find`): the SELECT clause already
-///    aliased `<col>_masked AS <col>` (via
-///    `query::build_find_with_schema`). The parent slot carries the
-///    masked string; no `<col>_masked` key is present on the row.
-///    `wrap_row_on_read` wraps the parent slot in place.
-///
-/// 2. **RETURNING-`*`** (`insert`, `update_one`): the row carries both
-///    the parent (ciphertext / plaintext) AND the sibling. The wrap
-///    prefers the sibling's value, drops the sibling key, and wraps
-///    the parent slot.
-///
-/// **P9 PR 2** — returns `(rows, has_masked)`. The `has_masked` flag is
-/// `true` iff the schema declared at least one masked column (i.e. the
-/// wrap pass ran and the rows may carry `__zsmask__` sentinels). The
-/// caller threads this into the lowering helper so the result resolves
-/// via `ResolveValue::JsonWithRehydration` — `JSON.parse` then a Rust
-/// walk that mints native `MaskedValue` instances. When `false`, the
-/// caller keeps the plain `ResolveValue::Json` path (no walk overhead).
-fn apply_mask_wrap_on_read(
-    app_id: &str,
-    collection: &str,
-    mut rows: Vec<Value>,
-) -> Result<(Vec<Value>, bool), DbError> {
-    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
-        return Ok((rows, false));
-    };
-    if !schema_has_masked_columns(&schema) {
-        return Ok((rows, false));
-    }
-    for row in rows.iter_mut() {
-        crate::crud::mask_pass::wrap_row_on_read(&schema, collection, row)?;
-    }
-    Ok((rows, true))
-}
-
 /// **P5.5 PR 2** — cheap walk: does any field def on `schema` carry a
 /// `mask` entry with `kind != "none"`? Drives the per-write decision
 /// to invoke `mask_pass::apply_mask_on_write`. A `kind: "none"` opt-out
@@ -2609,53 +2298,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_row_on_read_coerces_sqlite_wire_shapes() {
-        let schema = serde_json::json!({
-            "active": { "type": "boolean" },
-            "prefs": { "type": "object" },
-            "avatar": { "type": "bytes" },
-            "published_at": { "type": "date" }
-        });
-        let mut row = serde_json::json!({
-            "active": 1,
-            "prefs": "{\"theme\":\"dark\"}",
-            "avatar": [222, 173, 190, 239],
-            "published_at": "2026-05-24T12:34:56.789Z",
-            "created_at": "2026-05-24 12:34:56"
-        });
-
-        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
-
-        assert_eq!(row.get("active"), Some(&Value::Bool(true)));
-        assert_eq!(row.pointer("/prefs/theme"), Some(&Value::String("dark".to_string())));
-        assert_eq!(
-            row.get("avatar"),
-            Some(&Value::String(
-                base64::engine::general_purpose::STANDARD.encode([222, 173, 190, 239]),
-            )),
-        );
-        assert!(row.get("published_at").and_then(Value::as_i64).is_some());
-        assert!(row.get("created_at").and_then(Value::as_i64).is_some());
-    }
-
-    #[test]
-    fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {
-        let expected = 1_779_626_096_789i64;
-        assert_eq!(
-            parse_timestamp_millis("2026-05-24T12:34:56.789Z"),
-            Some(expected)
-        );
-        assert_eq!(
-            parse_timestamp_millis("2026-05-24T12:34:56.789123Z"),
-            Some(expected)
-        );
-        assert_eq!(
-            parse_timestamp_millis("2026-05-24T14:34:56.789+02:00"),
-            Some(expected)
-        );
-    }
-
-    #[test]
     fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
         let schema = serde_json::json!({
             "active": { "type": "boolean" },
@@ -2672,22 +2314,5 @@ mod tests {
 
         assert_eq!(filter["$and"][0]["active"]["$in"], serde_json::json!([1, 0]));
         assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
-    }
-
-    #[test]
-    fn normalize_row_on_read_skips_encrypted_columns() {
-        let schema = serde_json::json!({
-            "secret": {
-                "type": "bytes",
-                "encrypted": { "mode": "randomised", "wraps": "bytes" }
-            }
-        });
-        let mut row = serde_json::json!({
-            "secret": "c2VjcmV0"
-        });
-
-        normalize_row_on_read(Some(&schema), &mut row).expect("normalize");
-
-        assert_eq!(row.get("secret"), Some(&Value::String("c2VjcmV0".to_string())));
     }
 }
