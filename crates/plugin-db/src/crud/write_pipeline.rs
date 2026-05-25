@@ -258,6 +258,17 @@ pub(crate) fn update_requires_per_row_encryption(
     update_touches_randomised_encrypted_field(&schema, patch)
 }
 
+pub(crate) fn upsert_requires_conflict_probe(
+    app_id: &str,
+    collection: &str,
+    doc: &Value,
+) -> bool {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return false;
+    };
+    doc_touches_randomised_encrypted_field(&schema, doc)
+}
+
 fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> bool {
     let Some(schema_obj) = schema.as_object() else {
         return false;
@@ -284,6 +295,24 @@ fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> b
             .get(field)
             .is_some_and(field_is_randomised_encrypted)
             && field_update_writes_value(value)
+    })
+}
+
+fn doc_touches_randomised_encrypted_field(schema: &Value, doc: &Value) -> bool {
+    let Some(schema_obj) = schema.as_object() else {
+        return false;
+    };
+    let Some(doc_obj) = doc.as_object() else {
+        return false;
+    };
+
+    doc_obj.iter().any(|(field, value)| {
+        if field.starts_with("__zsenc__") || value.is_null() {
+            return false;
+        }
+        schema_obj
+            .get(field)
+            .is_some_and(field_is_randomised_encrypted)
     })
 }
 
@@ -317,6 +346,9 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     conflict_fields: &Value,
     schema: Option<&Value>,
 ) -> Result<(), DbError> {
+    if !upsert_requires_conflict_probe(app_id, collection, doc) {
+        return Ok(());
+    }
     let Some(schema) = schema else {
         return Ok(());
     };
@@ -354,6 +386,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         )
         .await?;
     }
+    note_upsert_conflict_probe_for_tests();
     super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let built = query::build_conflict_probe_with_dialect(
         app_id,

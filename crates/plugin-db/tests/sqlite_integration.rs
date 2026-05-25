@@ -4336,6 +4336,87 @@ const _procedures = { setup, seed, updatePlain, updateManyPlain };
 }
 
 #[test]
+fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
+    let key_id = "perf_plain_upsert_fast_path_runtime";
+    let _env = EncEnv::set(
+        "ZEROSHIP_COLUMN_KEY_PERF_PLAIN_UPSERT_FAST_PATH_RUNTIME",
+        &"a".repeat(64),
+    );
+
+    run(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = r#"
+import { env } from "zeroship";
+
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+const COLLECTION = "users";
+const KEY_ID = "__KEY_ID__";
+
+function setup(_input, _ctx) {
+    return __plat.registerModel(COLLECTION, {
+        email: { type: "string", required: true, unique: true },
+        name: { type: "string", required: true },
+        secret: {
+            type: "string",
+            encrypted: { mode: "randomised", keyId: KEY_ID, wraps: "string" }
+        }
+    });
+}
+setup.config = { kind: "action" };
+
+async function seed(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_seed",
+            email: "alice@example.com",
+            name: "Alice",
+            secret: "alpha-secret"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+seed.config = { kind: "action" };
+
+async function upsertPlainConflict(_input, _ctx) {
+    return await env.db.collection(COLLECTION).upsert(
+        {
+            id: "user_new",
+            email: "alice@example.com",
+            name: "Alice Updated"
+        },
+        { conflictFields: ["email"] },
+    );
+}
+upsertPlainConflict.config = { kind: "action" };
+
+const _procedures = { setup, seed, upsertPlainConflict };
+"#
+        .replace("__KEY_ID__", key_id)
+            + SQLITE_RUNTIME_RPC_SHIM;
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+
+        zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+        let updated =
+            parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "upsertPlainConflict"));
+        assert_eq!(
+            updated.get("id").and_then(|v| v.as_str()),
+            Some("user_seed"),
+            "plain conflict upsert should still target the existing row",
+        );
+        assert_eq!(
+            updated.get("name").and_then(|v| v.as_str()),
+            Some("Alice Updated"),
+            "plain conflict upsert should still update the plain field",
+        );
+        assert_write_path_fast_path("upsert plain field");
+    });
+}
+
+#[test]
 fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
     let key_id = "i5_update_nested_version";
     let _env = EncEnv::set(
