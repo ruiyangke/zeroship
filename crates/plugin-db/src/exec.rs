@@ -224,9 +224,8 @@ async fn exec_sqlite_json(
         return backend.query_json(sql, params).await;
     }
 
-    let client = context::with_mut(|c| c.take_tx_client())
-        .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
-    let result = match &client {
+    let client = context::TxClientSlotGuard::take()?;
+    let result = match client.client() {
         TxConnection::Sqlite(client) => {
             #[cfg(test)]
             tests::record_sqlite_tx_route();
@@ -237,7 +236,6 @@ async fn exec_sqlite_json(
             "db: sqlite backend active with postgres transaction connection",
         )),
     };
-    context::with_mut(|c| c.put_tx_client(client));
     result
 }
 
@@ -908,6 +906,96 @@ mod tests {
                 "exec_query must route through TxConnection::Sqlite",
             );
             assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("tx-row"));
+
+            if let Some(TxConnection::Sqlite(client)) = context::with_mut(|c| c.take_tx_client()) {
+                let _ = client.exec("ROLLBACK", &[]).await;
+            } else {
+                panic!("sqlite tx client should still be parked for cleanup");
+            }
+            context::with_mut(|c| c.clear_pool());
+        });
+        reset_world();
+    }
+
+    #[test]
+    fn dropping_in_flight_sqlite_query_restores_tx_slot() {
+        reset_world();
+        run(async {
+            use crate::backend::sqlite::session::arm_next_command_gate_for_tests;
+            use std::time::Duration;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+            );
+            backend
+                .ensure_app_schema("app_exec_cancel")
+                .await
+                .expect("ensure app schema");
+            backend
+                .pool_exec(
+                    r#"CREATE TABLE "app_exec_cancel"."notes" (
+                           id INTEGER PRIMARY KEY,
+                           title TEXT NOT NULL
+                       )"#,
+                    &[],
+                )
+                .await
+                .expect("CREATE TABLE notes");
+            backend
+                .pool_exec(
+                    r#"INSERT INTO "app_exec_cancel"."notes" (id, title)
+                        VALUES (1, 'persisted')"#,
+                    &[],
+                )
+                .await
+                .expect("seed row");
+
+            context::with_mut(|c| {
+                c.clear_pool();
+                c.set_sqlite_backend(Rc::clone(&backend));
+            });
+
+            let client = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire tx client");
+            backend
+                .client_exec(&client, "BEGIN", &[])
+                .await
+                .expect("BEGIN");
+            context::with_mut(|c| {
+                let prev = c.install_tx_client(TxConnection::Sqlite(client));
+                assert!(prev.is_none(), "tx slot should start empty");
+            });
+
+            let gate = arm_next_command_gate_for_tests();
+            let task = compio::runtime::spawn(async {
+                exec_query("app_exec_cancel", BuiltQuery {
+                    sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
+                    params: vec![],
+                })
+                .await
+            });
+            gate.wait_until_blocked()
+                .await
+                .expect("worker must block on test gate");
+            drop(task);
+            gate.release();
+            compio::time::sleep(Duration::from_millis(20)).await;
+
+            assert!(
+                context::with(|c| c.has_tx()),
+                "dropping the in-flight future must restore the tx slot"
+            );
+
+            let rows = exec_query("app_exec_cancel", BuiltQuery {
+                sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
+                params: vec![],
+            })
+            .await
+            .expect("subsequent query must reuse restored tx slot");
+            assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("persisted"));
 
             if let Some(TxConnection::Sqlite(client)) = context::with_mut(|c| c.take_tx_client()) {
                 let _ = client.exec("ROLLBACK", &[]).await;

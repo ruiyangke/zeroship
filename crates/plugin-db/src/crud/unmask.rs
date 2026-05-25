@@ -322,7 +322,7 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
 
     // ---- SQLite arm ----
     if let Some(sq) = backend.as_sqlite() {
-        let loaded = crate::crud::mask_policy::load_sqlite(sq, app_id)?;
+        let loaded = crate::crud::mask_policy::load_sqlite(sq, app_id).await?;
         if let Some(p) = loaded {
             crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
         }

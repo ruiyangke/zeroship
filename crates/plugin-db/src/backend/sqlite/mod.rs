@@ -139,6 +139,7 @@ pub struct SqliteBackend {
     memory_db_dir: Option<TempDir>,
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
+    cdc_name_cache_invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     db_dir: PathBuf,
     app_id_cache: RefCell<HashSet<String>>,
     /// P2 PR 2: keeps the publisher task alive for the lifetime of the
@@ -218,6 +219,15 @@ impl SqliteBackend {
     /// consumers route through `BackendHandle::Sqlite`.
     pub(crate) fn db_dir(&self) -> &std::path::Path {
         &self.db_dir
+    }
+
+    /// Mark one table's cached CDC column-name list stale. The
+    /// publisher loop clears the entry before decoding the next event
+    /// for the same `(app_id, collection)` pair.
+    pub(crate) fn invalidate_cdc_name_cache(&self, app_id: &str, collection: &str) {
+        self.cdc_name_cache_invalidations
+            .borrow_mut()
+            .insert((app_id.to_string(), collection.to_string()));
     }
 
     pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
@@ -368,6 +378,7 @@ impl SqliteBackend {
             packet_rx,
         } = opened;
         let session = Rc::new(session);
+        let cdc_name_cache_invalidations = Rc::new(RefCell::new(HashSet::new()));
 
         // Spawn the publisher task on the current compio runtime. The
         // task captures `Rc<SqliteSession>` (for lazy column-name
@@ -376,7 +387,11 @@ impl SqliteBackend {
         // the task; the channel sender on the worker thread will then
         // fail-fast on the next commit attempt (logged + dropped, no
         // commit veto).
-        let _publisher = cdc::spawn_publisher(session.clone(), packet_rx);
+        let _publisher = cdc::spawn_publisher(
+            session.clone(),
+            Rc::clone(&cdc_name_cache_invalidations),
+            packet_rx,
+        );
 
         // **P3 PR 3** — SessionMinter env-var read. Missing
         // `ZEROSHIP_SESSION_SECRET` is NOT a `new()` failure: a
@@ -409,6 +424,7 @@ impl SqliteBackend {
             memory_db_dir,
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
+            cdc_name_cache_invalidations,
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
             _publisher,
@@ -440,6 +456,7 @@ impl SqliteBackend {
         secret_prev: Option<Vec<u8>>,
     ) -> Result<Self, DbError> {
         let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
+        let cdc_name_cache_invalidations = Rc::new(RefCell::new(HashSet::new()));
 
         let session_path = db_dir.join("zs-control.sqlite");
         let session = Rc::new(SqliteSession::open(
@@ -448,7 +465,11 @@ impl SqliteBackend {
             Some(packet_tx),
         )?);
 
-        let _publisher = cdc::spawn_publisher(session.clone(), packet_rx);
+        let _publisher = cdc::spawn_publisher(
+            session.clone(),
+            Rc::clone(&cdc_name_cache_invalidations),
+            packet_rx,
+        );
 
         let nonce_cache =
             session_minter::NonceCache::new_shared(session_minter::DEFAULT_NONCE_CAPACITY);
@@ -464,6 +485,7 @@ impl SqliteBackend {
             memory_db_dir: None,
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
+            cdc_name_cache_invalidations,
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
             _publisher,

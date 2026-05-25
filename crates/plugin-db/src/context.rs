@@ -36,6 +36,7 @@ use compio_postgres::{Client, Pool};
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, BrokerPauseGuard, PostgresBackend};
 use crate::broker::ChangeEvent;
+use crate::error::DbError;
 
 /// Lock state for the in-flight migration. The `client` is held in
 /// an `Option` so callers can `take()` it across an await and
@@ -104,6 +105,44 @@ pub(crate) struct MigrationLock {
 pub(crate) enum TxConnection {
     Postgres(Client),
     Sqlite(SqliteSessionHandle),
+}
+
+/// RAII guard for a transaction client temporarily removed from the
+/// per-isolate slot.
+///
+/// SQLite needs this guard to stay cancellation-safe: dropping a future
+/// mid-await must restore the session-actor handle back into
+/// `tx_conn`, otherwise the actor keeps the transaction open while the
+/// isolate state claims there is no live tx. Restoring the slot is also
+/// harmless on Postgres and keeps the `take` / `put` contract in one
+/// typed place.
+#[must_use = "TxClientSlotGuard restores the tx slot on Drop unless consumed via into_inner()"]
+pub(crate) struct TxClientSlotGuard {
+    client: Option<TxConnection>,
+}
+
+impl TxClientSlotGuard {
+    /// Drain the transaction client out of the per-isolate slot.
+    pub(crate) fn take() -> Result<Self, DbError> {
+        let client = with_mut(|c| c.take_tx_client())
+            .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
+        Ok(Self { client: Some(client) })
+    }
+
+    /// Borrow the pinned client while the guard owns restoration.
+    pub(crate) fn client(&self) -> &TxConnection {
+        self.client
+            .as_ref()
+            .expect("TxClientSlotGuard::client called after drop-state transition")
+    }
+}
+
+impl Drop for TxClientSlotGuard {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            with_mut(|c| c.put_tx_client(client));
+        }
+    }
 }
 
 /// Per-isolate DB plug-in state. One instance per worker thread, held

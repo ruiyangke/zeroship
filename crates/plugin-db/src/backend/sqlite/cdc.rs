@@ -73,7 +73,8 @@
 //! DDL is deferred to PR 4 (per plan §10 Q-P2-B); the engaged
 //! schema-pending guard clears the cache at that point.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -488,13 +489,15 @@ fn is_filtered_relation(table: &str) -> bool {
 /// thread-safe by construction.
 pub(crate) fn spawn_publisher(
     session: Rc<SqliteSession>,
+    invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
 ) -> compio::runtime::JoinHandle<()> {
-    compio::runtime::spawn(publisher_loop(session, rx))
+    compio::runtime::spawn(publisher_loop(session, invalidations, rx))
 }
 
 async fn publisher_loop(
     session: Rc<SqliteSession>,
+    invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
 ) {
     // Per-task local cache: `(db_name, table) → Arc<Vec<String>>`. The
@@ -568,6 +571,9 @@ async fn publisher_loop(
             // safe to await here because we're on the compio thread
             // post-COMMIT, NOT inside a hook.
             let key = (pending.db_name.clone(), pending.table.clone());
+            if invalidations.borrow_mut().remove(&key) {
+                name_cache.remove(&key);
+            }
             if !name_cache.contains_key(&key) {
                 match fetch_column_names(&session, &pending.db_name, &pending.table).await {
                     Ok(names) => {

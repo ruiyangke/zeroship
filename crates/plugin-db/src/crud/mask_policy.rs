@@ -13,9 +13,10 @@
 //!   pattern from P5 PR 2.
 //!
 //! - **SQLite** (`feature = "sqlite"`): a sidecar JSON file at
-//!   `<db_dir>/mask_policies.json`. Atomic writes through
-//!   `mask_policies.json.tmp` + rename so a crash mid-write never
-//!   leaves a torn file.
+//!   `<db_dir>/mask_policies.json`. Reads/writes run off-thread via
+//!   `compio::runtime::spawn_blocking`, and a per-file process-local
+//!   mutex serialises concurrent writers so the read/modify/write cycle
+//!   cannot interleave and tear the JSON payload.
 //!
 //! The SDK calls [`dispatch_set_mask_policy`] once at app boot via the
 //! `zeroship.db.setMaskPolicy` native op (registered on [`crate::v8_classes::db::Db`]).
@@ -41,6 +42,8 @@
 //! call can't bypass the SDK-side check.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
@@ -233,7 +236,7 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
 
     // ---- SQLite arm ----
     if let Some(sq) = backend.as_sqlite() {
-        persist_sqlite(sq, app_id, &policy)?;
+        persist_sqlite(sq, app_id, &policy).await?;
         crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy.clone())));
         return Ok(());
     }
@@ -311,6 +314,23 @@ fn sqlite_policy_path(sq: &crate::backend::sqlite::SqliteBackend) -> std::path::
     sq.db_dir().join("mask_policies.json")
 }
 
+type PolicyFileLock = &'static Mutex<()>;
+
+fn sqlite_policy_file_lock(path: &Path) -> Result<std::sync::MutexGuard<'static, ()>, DbError> {
+    static POLICY_FILE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, PolicyFileLock>>> = OnceLock::new();
+    let locks = POLICY_FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let lock: PolicyFileLock = {
+        let mut locks = locks.lock().map_err(|_| {
+            DbError::internal("mask_policies.json: global lock registry poisoned")
+        })?;
+        *locks
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+    };
+    lock.lock()
+        .map_err(|_| DbError::internal("mask_policies.json: per-file lock poisoned"))
+}
+
 /// **P5.5 PR 5** — SQLite atomic write. Strategy:
 ///
 /// 1. Read existing `<dir>/mask_policies.json` (treat ENOENT as empty
@@ -322,17 +342,26 @@ fn sqlite_policy_path(sq: &crate::backend::sqlite::SqliteBackend) -> std::path::
 ///    atomic on the same filesystem; on crash mid-write the original
 ///    file survives untouched.
 ///
-/// Single-threaded per worker — no inter-process locking. The sidecar
-/// is read at backend construction + on every `setMaskPolicy`; no
-/// concurrent writers under the current model. Multi-worker
-/// coordination is a P6+ concern (see open question).
-fn persist_sqlite(
+/// The blocking file I/O runs on compio's blocking pool, NOT on the
+/// compio event loop thread. A per-file process-local mutex
+/// serialises concurrent writers so two `setMaskPolicy` calls cannot
+/// both read the same old JSON, then race their rewrites.
+async fn persist_sqlite(
     sq: &crate::backend::sqlite::SqliteBackend,
     app_id: &str,
     policy: &MaskPolicy,
 ) -> Result<(), DbError> {
-    use std::fs;
     let path = sqlite_policy_path(sq);
+    let app_id = app_id.to_string();
+    let policy = policy.clone();
+    compio::runtime::spawn_blocking(move || persist_sqlite_blocking(path, app_id, policy))
+        .await
+        .map_err(|_| DbError::internal("mask_policies.json: persist spawn_blocking task panicked"))?
+}
+
+fn persist_sqlite_blocking(path: PathBuf, app_id: String, policy: MaskPolicy) -> Result<(), DbError> {
+    use std::fs;
+    let _file_guard = sqlite_policy_file_lock(&path)?;
     let tmp = path.with_extension("json.tmp");
 
     // 1. Read existing.
@@ -360,7 +389,7 @@ fn persist_sqlite(
     };
 
     // 2. Merge.
-    obj.insert(app_id.to_string(), policy.to_json());
+    obj.insert(app_id, policy.to_json());
     let merged = Value::Object(obj);
     let serialised = serde_json::to_string_pretty(&merged).map_err(|e| {
         DbError::internal(format!("mask_policies.json: serialise: {e}"))
@@ -388,12 +417,20 @@ fn persist_sqlite(
 /// **P5.5 PR 5** — load the policy for a single app from the sidecar
 /// file. Returns `None` when the file is absent or has no entry for
 /// the app.
-pub fn load_sqlite(
+pub async fn load_sqlite(
     sq: &crate::backend::sqlite::SqliteBackend,
     app_id: &str,
 ) -> Result<Option<MaskPolicy>, DbError> {
-    use std::fs;
     let path = sqlite_policy_path(sq);
+    let app_id = app_id.to_string();
+    compio::runtime::spawn_blocking(move || load_sqlite_blocking(path, app_id))
+        .await
+        .map_err(|_| DbError::internal("mask_policies.json: load spawn_blocking task panicked"))?
+}
+
+fn load_sqlite_blocking(path: PathBuf, app_id: String) -> Result<Option<MaskPolicy>, DbError> {
+    use std::fs;
+    let _file_guard = sqlite_policy_file_lock(&path)?;
     let text = match fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -413,7 +450,7 @@ pub fn load_sqlite(
             path.display()
         ))
     })?;
-    let entry = v.get(app_id);
+    let entry = v.get(app_id.as_str());
     match entry {
         Some(p) => Ok(Some(MaskPolicy::from_json(p)?)),
         None => Ok(None),
@@ -467,7 +504,15 @@ pub(crate) fn dispatch_set_mask_policy_field<'s>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
     use serde_json::json;
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
+    }
 
     #[test]
     fn allows_grants_listed_classification() {
@@ -753,5 +798,81 @@ mod tests {
         ctx.set_mask_policy_for_app("app_a", None);
         assert!(ctx.mask_policy_for("app_a").is_none());
         assert!(ctx.mask_policy_for("app_b").is_some());
+    }
+
+    #[test]
+    fn sqlite_mask_policy_async_round_trip() {
+        run(async {
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = crate::backend::sqlite::SqliteBackend::new(PathBuf::from(dir.path()))
+                .expect("open sqlite backend");
+            let policy = MaskPolicy::from_json(&json!({
+                "admin": ["public", "pii"],
+                "support": ["public"]
+            }))
+            .expect("build policy");
+
+            persist_sqlite(&backend, "app_async", &policy)
+                .await
+                .expect("persist sqlite policy");
+            let loaded = load_sqlite(&backend, "app_async")
+                .await
+                .expect("load sqlite policy")
+                .expect("policy entry");
+
+            assert!(loaded.allows("admin", "pii"));
+            assert!(loaded.allows("support", "public"));
+            assert!(!loaded.allows("support", "pii"));
+        });
+    }
+
+    #[test]
+    fn sqlite_mask_policy_sidecar_serializes_concurrent_writers() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mask_policies.json");
+        let policy_a = MaskPolicy::from_json(&json!({
+            "admin": ["pii", "spi"]
+        }))
+        .expect("policy A");
+        let policy_b = MaskPolicy::from_json(&json!({
+            "support": ["public"]
+        }))
+        .expect("policy B");
+
+        std::thread::scope(|scope| {
+            let path_a = path.clone();
+            let path_b = path.clone();
+            let write_a = scope.spawn(move || {
+                persist_sqlite_blocking(path_a, "app_a".to_string(), policy_a)
+            });
+            let write_b = scope.spawn(move || {
+                persist_sqlite_blocking(path_b, "app_b".to_string(), policy_b)
+            });
+
+            write_a
+                .join()
+                .expect("writer A thread")
+                .expect("writer A persist");
+            write_b
+                .join()
+                .expect("writer B thread")
+                .expect("writer B persist");
+        });
+
+        let raw = std::fs::read_to_string(&path).expect("read sidecar");
+        let json: Value = serde_json::from_str(&raw).expect("parse sidecar json");
+        assert!(
+            json.get("app_a").is_some() && json.get("app_b").is_some(),
+            "serialized sidecar must retain both app entries: {raw}"
+        );
+
+        let loaded_a = load_sqlite_blocking(path.clone(), "app_a".to_string())
+            .expect("load app_a")
+            .expect("app_a entry");
+        let loaded_b = load_sqlite_blocking(path, "app_b".to_string())
+            .expect("load app_b")
+            .expect("app_b entry");
+        assert!(loaded_a.allows("admin", "pii"));
+        assert!(loaded_b.allows("support", "public"));
     }
 }
