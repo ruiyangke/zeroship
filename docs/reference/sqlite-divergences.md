@@ -23,7 +23,7 @@
 - [crates/plugin-db/src/backend/sqlite/spatial.rs](crates/plugin-db/src/backend/sqlite/spatial.rs) — haversine helper
 - [crates/plugin-db/src/backend/sqlite/session.rs](crates/plugin-db/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
 - [crates/plugin-db/src/backend/sqlite/error.rs](crates/plugin-db/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
-- [crates/plugin-db/src/orchestrator/transaction.rs](crates/plugin-db/src/orchestrator/transaction.rs) — SQLite `transaction()` begin path
+- [crates/plugin-db/src/v8_classes/transaction.rs](crates/plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
 - [crates/plugin-db/src/query.rs](crates/plugin-db/src/query.rs) — cross-backend `ORDER BY` shaping
 
 ## Test coverage
