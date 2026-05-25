@@ -345,3 +345,58 @@ func ResetStartTaskRestoreFailuresForTest() {
 		return true
 	})
 }
+
+// wakeRootfsLockHeldTotal is the process-global counter behind
+// `nomad_driver_ch_wake_rootfs_lock_held_total`. Bumped when the
+// wake-path `stage_wake_rootfs_lock_wait` exhausts its OFD-lock-
+// probe budget without observing the source alloc's CH process
+// release its exclusive write lock on `rootfs.img`.
+//
+// Background (T-8b-stress-r9-retry-6 / driver v21): the wake alloc
+// hardlinks `rootfs.img` from the source alloc's runDir. Hardlinks
+// share inode + (kernel-attributed) OFD locks. The source alloc's CH
+// process hasn't released its OFD write lock yet (kernel-deferred
+// `__fput` after the last close) when the wake CH spawns and
+// immediately `--restore`s — CH errors with
+// `Can't get Write lock for .../rootfs.img as there is already a
+// ExclusiveWrite lock` then `VM Restore failed: LockingError(
+// DiskLockError(... AlreadyLocked ...))`, and the resume RPC
+// returns HTTP 500 because the restore never happened. The c=4
+// smoke saw 0/8 WAKE on this exact mechanism (stage=resume in v20
+// labelling) while c=1 was green end-to-end.
+//
+// The wake-side fix (driver v21) polls F_OFD_SETLK acquire on the
+// rootfs.img path BEFORE spawning CH `--restore`. If we can acquire
+// the OFD write lock (releasing it immediately), `__fput` has run
+// on the source alloc's last open and the next CH spawn will
+// acquire cleanly. Mirrors the destroy-side r5-A pattern
+// (`destroy_task_lock_held_total`) with a wake-tuned 50 × 100ms
+// budget (the destroy-side budget is 25 × 200ms; same 5s wall but
+// finer cadence on wake because the kernel grant tends to be sub-
+// 100ms once the source destroy completes).
+//
+// Operators rate-graph this; a healthy fleet trends to zero. A
+// spike here means source-side destroys aren't completing before
+// wake-side spawns — orthogonal to the lock-wait fix (which only
+// closes the in-driver race window).
+var wakeRootfsLockHeldTotal atomic.Int64
+
+// incWakeRootfsLockHeld bumps `nomad_driver_ch_wake_rootfs_lock_held_total`
+// by one. Goroutine-safe; the atomic Int64 carries its own ordering.
+func incWakeRootfsLockHeld() {
+	wakeRootfsLockHeldTotal.Add(1)
+}
+
+// WakeRootfsLockHeldTotal returns the current counter value. Exported
+// for tests (asserts the wake-path OFD-lock-wait budget-exhaustion
+// branch fires); the metrics-exporter renderer also uses this read
+// path.
+func WakeRootfsLockHeldTotal() int64 {
+	return wakeRootfsLockHeldTotal.Load()
+}
+
+// ResetWakeRootfsLockHeldForTest zeroes the counter so a test can
+// pin its own baseline without depending on sibling-test ordering.
+func ResetWakeRootfsLockHeldForTest() {
+	wakeRootfsLockHeldTotal.Store(0)
+}

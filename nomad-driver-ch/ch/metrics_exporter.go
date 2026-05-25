@@ -176,6 +176,11 @@ func renderDriverMetricsProm() string {
 			help:  "Times DestroyTask's defensive VMIndex-keyed tap cleanup pass removed a tap whose name the handle didn't record (T-8b-stress-r2 driver v14).",
 			value: TapsOrphanedTotal(),
 		},
+		{
+			name:  "nomad_driver_ch_wake_rootfs_lock_held_total",
+			help:  "Times startTaskRestoreBranch exhausted its wake-side OFD-lock-probe budget without observing the source alloc release its exclusive write lock on rootfs.img before CH --restore spawn (T-8b-stress-r9-retry-6 driver v21).",
+			value: WakeRootfsLockHeldTotal(),
+		},
 	}
 
 	var b strings.Builder
