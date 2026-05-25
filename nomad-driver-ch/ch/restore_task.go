@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
@@ -625,14 +626,36 @@ func stageRootfsForRestore(src, dst string) error {
 	if dst == "" {
 		return errors.New("stageRootfsForRestore: empty dst")
 	}
-	// Idempotency: a prior attempt may have already staged the
-	// rootfs. Re-staging would either be a no-op (existing file is
-	// already a unique-inode reflink/copy) or fail with EEXIST on
-	// the O_EXCL create below — neither reflects a real error.
-	if _, err := os.Stat(dst); err == nil {
-		return nil
+	// Idempotency / symlink-replacement (v23 fix):
+	//
+	// A prior pipeline stage (symlink_snapshot_artifact) may have left a
+	// SYMLINK at dst pointing at the shared host template
+	// (/etc/zeroship/rootfs-slim.img).  os.Stat follows symlinks, so the
+	// v22 check `if os.Stat(dst) == nil { return nil }` returned early and
+	// the FICLONE+copy NEVER ran — all wake allocs dereferenced the same
+	// template inode, causing OFD write-lock collisions (wake_rootfs_lock_held_total = 8).
+	//
+	// Fix: use os.Lstat (does NOT follow symlinks) to detect whatever is at
+	// dst.  If anything exists — symlink, regular file, or other — remove it
+	// first, then proceed to COW.  Exception: a regular file with nlink == 1
+	// is a previously-staged unique-inode copy; return nil for true idempotency.
+	if fi, err := os.Lstat(dst); err == nil {
+		// dst exists.  Check shape for true idempotency.
+		if fi.Mode().IsRegular() {
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink == 1 {
+				// Already a unique-inode regular file from a prior COW — idempotent.
+				return nil
+			}
+		}
+		// dst is a symlink (from symlink_snapshot_artifact), a hardlink
+		// (nlink > 1 regular file sharing the template inode), or something
+		// else unexpected.  Remove it so the FICLONE+copy path below creates
+		// a fresh unique inode.
+		if rmErr := os.Remove(dst); rmErr != nil {
+			return fmt.Errorf("remove pre-existing dst %s (mode=%s): %w", dst, fi.Mode(), rmErr)
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat dst %s: %w", dst, err)
+		return fmt.Errorf("lstat dst %s: %w", dst, err)
 	}
 	in, err := os.Open(src)
 	if err != nil {

@@ -2631,6 +2631,77 @@ func TestStageRootfsForRestore_ReflinkFallsBackToCopy(t *testing.T) {
 	}
 }
 
+// TestStageRootfsForRestore_PreexistingSymlinkReplaced pins the v23 fix:
+// when a SYMLINK already exists at dst (as left by the symlink_snapshot_artifact
+// stage pointing to the shared host template), stageRootfsForRestore MUST
+// remove it and proceed to COW — producing a regular file with a DISTINCT
+// inode rather than early-returning nil (the v22 bug that caused all wake
+// allocs to share the template inode and collide on the OFD write-lock).
+func TestStageRootfsForRestore_PreexistingSymlinkReplaced(t *testing.T) {
+	dir := t.TempDir()
+
+	// src: the "template" rootfs the symlink would have pointed at.
+	src := filepath.Join(dir, "rootfs-slim.img")
+	if err := os.WriteFile(src, []byte("template-bytes-v23"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	// Pre-create a symlink at dst simulating what symlink_snapshot_artifact
+	// leaves behind: dst -> src (the shared host template).
+	dst := filepath.Join(dir, "rootfs.img")
+	if err := os.Symlink(src, dst); err != nil {
+		t.Fatalf("create pre-existing symlink at dst: %v", err)
+	}
+
+	// Verify the symlink is actually there before calling the function.
+	if fi, err := os.Lstat(dst); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("precondition: dst must be a symlink before calling stageRootfsForRestore")
+	}
+
+	// Force copy path so the test does not depend on FICLONE kernel support
+	// (t.TempDir() is typically tmpfs which returns EOPNOTSUPP for FICLONE).
+	prev := ch.SetReflinkFileForTest(func(_, _ *os.File) error {
+		return syscall.ENOTSUP
+	})
+	defer ch.SetReflinkFileForTest(prev)
+
+	if err := ch.StageRootfsForRestore(src, dst); err != nil {
+		t.Fatalf("StageRootfsForRestore with pre-existing symlink: %v", err)
+	}
+
+	// dst must now be a REGULAR FILE, not a symlink.
+	fi, err := os.Lstat(dst)
+	if err != nil {
+		t.Fatalf("lstat dst after stage: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("v23: dst is still a symlink after stageRootfsForRestore (COW never ran)")
+	}
+	if !fi.Mode().IsRegular() {
+		t.Errorf("v23: dst is not a regular file after stageRootfsForRestore (mode=%s)", fi.Mode())
+	}
+
+	// dst inode must be DISTINCT from src inode — unique-inode invariant.
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("stat src: %v", err)
+	}
+	srcStat, srcOk := srcInfo.Sys().(*syscall.Stat_t)
+	dstStat, dstOk := fi.Sys().(*syscall.Stat_t)
+	if srcOk && dstOk && srcStat.Ino == dstStat.Ino {
+		t.Errorf("v23: dst inode == src inode (%d) — symlink was followed instead of replaced", srcStat.Ino)
+	}
+
+	// Contents must match src bytes (copy was performed).
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dst: %v", err)
+	}
+	if string(got) != "template-bytes-v23" {
+		t.Errorf("v23: dst contents mismatch (got %q, want %q)", got, "template-bytes-v23")
+	}
+}
+
 // -- T-8b-stress-r9-retry-4 NEXT-LAYER: per-stage restore failure --
 // enrichment + labelled counter tests.
 //
