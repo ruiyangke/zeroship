@@ -1238,6 +1238,7 @@ impl NomadCHBackend {
         wait_for_alloc_running(
             &self.cfg.nomad_ch.nomad_addr,
             job_id,
+            &sandbox_id.simple().to_string(),
             Duration::from_secs(self.cfg.nomad_ch.alloc_running_timeout_secs),
         )
         .await
@@ -3084,6 +3085,7 @@ async fn stop_nomad_job(
 async fn wait_for_alloc_running(
     nomad_addr: &str,
     job_id: &str,
+    sandbox_id: &str,
     timeout: Duration,
 ) -> Result<(), String> {
     let fn_started = Instant::now();
@@ -3116,6 +3118,8 @@ async fn wait_for_alloc_running(
                             .unwrap_or(true);
                         if stale {
                             tracing::warn!(
+                                sandbox_id = %sandbox_id,
+                                job = %job_id,
                                 error = %msg,
                                 "sandbox/nomad-ch alloc poll: JSON parse error (will retry)"
                             );
@@ -3132,6 +3136,7 @@ async fn wait_for_alloc_running(
                     && alloc_arr.map(|a| !a.is_empty()).unwrap_or(false)
                 {
                     tracing::info!(
+                        sandbox_id = %sandbox_id,
                         job = %job_id,
                         elapsed_ms = %fn_started.elapsed().as_millis(),
                         "sandbox/nomad-ch alloc_first_seen"
@@ -3196,6 +3201,8 @@ async fn wait_for_alloc_running(
                     .unwrap_or(true);
                 if stale {
                     tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        job = %job_id,
                         error = %msg,
                         "sandbox/nomad-ch alloc poll: HTTP non-200 (will retry)"
                     );
@@ -3215,6 +3222,8 @@ async fn wait_for_alloc_running(
                     .unwrap_or(true);
                 if stale {
                     tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        job = %job_id,
                         error = %e,
                         "sandbox/nomad-ch alloc poll: HTTP transport error (will retry)"
                     );
@@ -5500,6 +5509,7 @@ mod tests {
         let err = wait_for_alloc_running(
             "http://127.0.0.1:1",
             "zsbx-c3-test",
+            "00000000000000000000000000000000",
             Duration::from_millis(400),
         )
         .await

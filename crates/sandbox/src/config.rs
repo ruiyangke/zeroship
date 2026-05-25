@@ -355,7 +355,7 @@ pub struct NomadCHConfig {
     /// Hypervisor + 4 GiB/VM × 155 = 620 GiB RAM, well past any
     /// realistic single-box deploy). HA operators run multiple
     /// controller hosts. `SANDBOX_NOMAD_CH_VM_INDEX_CEIL` (default
-    /// 155).
+    /// 20).
     pub vm_index_ceil: u16,
 
     /// How long to wait for an alloc to reach `ClientStatus="running"`
