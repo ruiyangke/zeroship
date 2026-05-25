@@ -96,6 +96,13 @@ entry's default export. See
 [`docs/reference/zs-standard.md`](./zs-standard.md) for the broader
 contract.
 
+### Collection names
+
+Collection keys under `default.schema` become physical table names. Keep
+them ASCII alphanumeric plus underscores, at most 63 bytes, and avoid
+the reserved prefixes `pg_` and `__zeroship`. Invalid names are refused
+at deploy time by the validator in `crates/plugin-db/src/query.rs`.
+
 ## Two return contracts
 
 The same Collection class is used in two contexts. The contract differs:
@@ -211,7 +218,11 @@ export default {
   need to be called; `update({ id, version: N }, …)` is a CAS guard on
   every collection.
 - `schema({...}).strictness("strict" | "lenient" | "off")` — deploy-time
-  data-validation policy.
+  data-validation policy. Both shorthand collections (`users: { ... }`)
+  and `schema({...})` default to `strict`; switch to the builder form if
+  you need `lenient` or `off`. The builder lives in `sdks/db/src/types.ts`
+  and the deploy-time gate lives in
+  `crates/plugin-db/src/orchestrator/register_model/validate.rs`.
 
 ### Named indexes
 
@@ -301,6 +312,15 @@ function addUser(input: UserInsert): Promise<UserId | undefined> { ... }
 ```
 
 The accessors are type-only — at runtime they return `null`.
+
+`t.ref("users")` is also the foreign-key builder. By default it emits a
+same-app FK with `onDelete: "restrict"`, `onUpdate: "restrict"`, and
+`deferrable: true`, so cyclic refs can be inserted within one
+transaction. Override with `t.ref("users", { onDelete: "cascade", deferrable: false })`
+when you want physical cascade or immediate FK checks. Cross-app targets
+are refused; FKs stay inside the calling app. See
+`sdks/db/src/types.ts`, `crates/plugin-db/src/query.rs`, and
+`crates/plugin-db/src/cross_app_fk.rs`.
 
 ## Collection CRUD
 
@@ -1353,3 +1373,39 @@ re-run the rewrite cron for the affected slice.
 
 Both tables live in the per-app schema; standard isolation rules
 apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).
+
+## System Fields (Shipped Reference)
+
+This section resolves `docs/archive/platform-system-fields.md` against the shipped implementation in `crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/system_fields_pass.rs`, `crates/plugin-db/src/crud/mod.rs`, and `sdks/db/src/types.ts`. In this worktree, the seven platform-managed fields are `id`, `created_at`, `updated_at`, `created_by`, `updated_by`, `version`, and `deleted_at`; there is no shipped `_deleted` or `_deleted_at` column in the verified implementation.
+
+| Field | Shipped behavior |
+| --- | --- |
+| `id` | `TEXT PRIMARY KEY`; auto-minted as a typed id on insert when absent, but a creator-supplied value is preserved when present. Immutable after insert. |
+| `created_at` | Server-populated at insert via dialect default (`NOW()` on Postgres, `CURRENT_TIMESTAMP` on SQLite). Immutable after insert. |
+| `updated_at` | Server-populated at insert, then auto-bumped on update, soft-delete, and restore unless the patch explicitly overrides it. |
+| `created_by` | Stamped from the current request actor on insert when an actor is in scope; otherwise left `NULL`. Immutable after insert. |
+| `updated_by` | Stamped from the current request actor on insert and update paths when an actor is in scope; otherwise left `NULL`. Auto-managed, but an explicit update-path override suppresses the automatic bump. |
+| `version` | `INTEGER NOT NULL DEFAULT 1`; starts at `1` and auto-bumps on update, soft-delete, and restore unless the patch explicitly overrides it. |
+| `deleted_at` | Nullable timestamp; `NULL` means live, `delete()` stamps it to the current time, and `restore()` clears it back to `NULL`. |
+
+`Row<S>` includes these fields automatically on every read, with `id: string`, `created_at` / `updated_at` / `deleted_at` as Unix-ms numbers, `created_by` / `updated_by` as `string | null`, and `version: number` (`sdks/db/src/types.ts`). The declaration-time reserved-name fence also follows this shipped set: creator schemas cannot declare any of those seven names (`crates/plugin-db/src/query.rs`).
+
+`delete()` is a soft-delete on tables that carry the system-fields marker. The generated SQL updates `deleted_at`, bumps `version`, updates `updated_at`, and stamps `updated_by` when an actor exists; it also adds `AND deleted_at IS NULL`, so re-deleting an already soft-deleted row is a no-op (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mod.rs`). `restore()` is the symmetric update: it clears `deleted_at`, applies the same version/timestamp/actor bump, and only affects rows where `deleted_at IS NOT NULL` (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mod.rs`). `purge()` is the explicit hard-delete path and does not rely on the soft-delete marker, so it removes matching rows from storage outright (`crates/plugin-db/src/crud/mod.rs`).
+
+Read paths auto-filter soft-deleted rows by appending `deleted_at IS NULL` unless the caller passes `include_deleted: true`; the CRUD layer threads that gate through `find`, `count`, `aggregate`, and `distinct` (`crates/plugin-db/src/crud/mod.rs`, `crates/plugin-db/src/query.rs`). New tables also get three implicit B-tree indexes on `deleted_at`, `updated_at`, and `created_by`; `id` is already covered by the primary key, and `version` is intentionally left unindexed because every update bumps it (`crates/plugin-db/src/query.rs`). On legacy tables that do not carry the system-fields marker, the runtime keeps the pre-marker fallback: `delete()` warns and hard-deletes, while `restore()` refuses because there is no guaranteed `deleted_at` column (`crates/plugin-db/src/crud/system_fields_pass.rs`, `crates/plugin-db/src/crud/mod.rs`).
+
+## Encrypted and Masked Fields (Shipped Reference)
+
+This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`, `crates/plugin-db/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`, and `crates/plugin-db/src/crud/mask_backfill.rs`.
+
+Every masked field uses the sibling-column model: the platform emits `<field>_masked` next to the parent column, writes both columns atomically, and routes default reads through the masked representation instead of plaintext (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mask_pass.rs`). `t.encrypted(...)` applies the fail-safe default mask at builder time, so an encrypted field without an explicit `.mask(...)` behaves as if it were declared with `.mask({ kind: "full", classification: "pii" })`; `.mask({ kind: "none" })` is the explicit opt-out that suppresses the sibling column and the masked read wrapper (`sdks/db/src/types.ts`, `crates/plugin-db/src/query.rs`).
+
+On writes, `apply_mask_on_write` computes the sibling value from plaintext, not from a later read-path decrypt. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values do not emit a sibling write, and `kind: "none"` skips the sibling entirely (`crates/plugin-db/src/crud/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`).
+
+Default reads surface `MaskedValue<T>`, not plaintext. The Rust read path wraps a masked cell in the `__zsmask__` sentinel shape, then the runtime rehydrates that sentinel into a native `MaskedValue` v8 class before user code sees the row (`crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`). The shipped surface is intentionally coercion-safe: `masked` and `classification` are readable, `_meta` carries `{ collection, row_pk, column }`, and `toString()` / `toJSON()` return the masked string (`crates/plugin-db/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`).
+
+Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })` reveals one field on one row, and `await row.ssn.unmask(["ssn", "dob"], { actor, reason })` fans out across multiple columns on the same row (`crates/plugin-db/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`). `Collection.bulkUnmask()` is the shipped multi-row path; it maps `(id, columns)` pairs to the native collection op and is atomic, so one unauthorized `(row, column)` pair rejects the whole call (`sdks/db/src/collection/masking.ts`, `crates/plugin-db/src/crud/unmask.rs`). The per-query hint `find(..., { unmask: [...], actor, reason })` promotes only the listed columns to plaintext while leaving other masked columns wrapped, and it writes audit only after a successful query (`crates/plugin-db/src/crud/unmask.rs`, `sdks/db/src/types.ts`).
+
+`defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the six shipped classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`), stores a single pending role-to-classification map for bootstrap to flush, and replaces rather than merges when called again in the same isolate (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
+
+Two sentinel formats are shipped. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/plugin-db/src/crud/mask_pass.rs`, `crates/plugin-db/src/v8_classes/masked_value.rs`). `__zsmask:kind=<kind>,classification=<class>` is the schema/introspection sentinel attached to `<field>_masked`, so the diff and backfill paths can recover mask metadata from the live database definition (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mask_backfill.rs`).
