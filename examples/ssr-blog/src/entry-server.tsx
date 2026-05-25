@@ -15,8 +15,8 @@
 // See README → "Known limitations" → gap (2).
 
 import { renderToString } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./components/App";
-import { POSTS } from "./components/posts";
 
 // The Vite client manifest baked at build time — Vite emits it at
 // `dist/.vite/manifest.json` when `build.manifest: true`. To get it into
@@ -50,7 +50,12 @@ export default {
       return new Response("Method Not Allowed", { status: 405 });
     }
 
-    const html = renderToString(<App url={url.pathname} posts={POSTS} />);
+    const queryClient = new QueryClient();
+    const html = renderToString(
+      <QueryClientProvider client={queryClient}>
+        <App url={url.pathname} />
+      </QueryClientProvider>,
+    );
     const props = JSON.stringify({ url: url.pathname });
     const page = SHELL
       .replace("{{HTML}}", html)

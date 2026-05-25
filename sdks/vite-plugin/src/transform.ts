@@ -392,7 +392,7 @@ function matchWrapperCall(
 }
 
 /** Import prelude emitted once per transformed client module. Pulls
- *  `__makeProcedure` (the callable + hooks-on-function builder) and
+ *  `__makeProcedure` (the callable procedure-reference builder) and
  *  `__SERVER_REFERENCE` (the brand symbol) from the canonical home
  *  `@zeroship/rpc-client`. `__makeProcedure` brands every stub
  *  internally — the symbol import is exposed for downstream consumers
@@ -704,11 +704,9 @@ function collectConfig(astBody: any[]): {
  * pass them as a single object.
  *
  * Emits a `__makeProcedure` call from `@zeroship/rpc-client` — the
- * builder attaches the `__SERVER_REFERENCE` brand, hook getters
- * (lazy-initialized via the `_hookRegistry`), and `{ id, kind, wire }`
- * metadata uniformly. `docs/proposals/rpc.md` §5 requires this so
- * RSC `<form action={fn}>` works without JS and runtime callers can
- * detect stubs passed as props by checking the brand. */
+ * builder attaches the `__SERVER_REFERENCE` brand plus `{ id, kind, wire }`
+ * metadata uniformly. Runtime callers can detect stubs passed as props by
+ * checking the brand. */
 function clientUnaryStub(name: string, methodName: string, kind: string): string {
   const meta = JSON.stringify({ id: methodName, kind, wire: "json" });
   return (
@@ -1059,34 +1057,29 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         // at build time from `state.discoveredProcedures`. The
         // user-module init has zero dispatch side effects.
         //
-        // We still monkey-patch SSR hooks (.useQuery, .prefetch, .id,
-        // .kind, .queryKey) onto each procedure export so React
-        // components rendering server-side find them on import. The
+        // Attach procedure metadata onto each procedure export. The
         // patching runs at user-module-init time, BEFORE the synthetic
         // entry's `import { fn as _pN }` resolves the import binding —
-        // the patches are visible there.
+        // the metadata is visible there.
         if (isServerEnv) {
           const s = new MagicString(code);
 
-          // Monkey-patch SSR hooks onto each procedure export. Append-only;
+          // Monkey-patch metadata onto each procedure export. Append-only;
           // doesn't touch the original declarations, so recursive references
           // inside handler bodies keep working. Properties from
-          // __makeServerProcedure (id, kind, queryKey, useQuery,
-          // useSuspenseQuery, prefetch, useMutation, useStream,
-          // useSubscription) are copied onto the original function via
-          // Object.defineProperty — components importing the export see
-          // them attached.
-          const hookKeys = '["id","kind","queryKey","useQuery","useSuspenseQuery","prefetch","useMutation","useStream","useSubscription"]';
+          // __makeServerProcedure (id, kind, wire) are copied onto the
+          // original function via Object.defineProperty.
+          const hookKeys = '["id","kind","wire"]';
           const ssrPatches = serverFns
             .map((fn) => {
-              const meta = JSON.stringify({ id: wireIdFor(fn), kind: kindFor(fn) });
-              return `__zsAttachHooks(${fn.name}, ${meta});`;
+              const meta = JSON.stringify({ id: wireIdFor(fn), kind: kindFor(fn), wire: "json" });
+              return `__zsAttachProcedureMeta(${fn.name}, ${meta});`;
             })
             .join("\n");
 
           s.prepend(
             `import { __makeServerProcedure as __zsMakeServerProc } from "@zeroship/server";\n` +
-            `function __zsAttachHooks(target, meta) {\n` +
+            `function __zsAttachProcedureMeta(target, meta) {\n` +
             `  try {\n` +
             `    const w = __zsMakeServerProc(target, meta);\n` +
             `    for (const k of ${hookKeys}) {\n` +
@@ -1094,7 +1087,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             `        try { Object.defineProperty(target, k, { value: w[k], enumerable: true, configurable: true, writable: true }); } catch (_) {}\n` +
             `      }\n` +
             `    }\n` +
-            `  } catch (_) { /* @zeroship/server not installed — SSR hooks unavailable. RPC dispatch still works. */ }\n` +
+            `  } catch (_) { /* @zeroship/server not installed — RPC dispatch still works. */ }\n` +
             `}\n`
           );
           // Emit one module-scoped registration call so the dev-bootstrap

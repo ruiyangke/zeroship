@@ -4,8 +4,8 @@ packages:
   - "examples/*"
 
 # Centralised dependency versions — referenced as "catalog:" in package.json.
-# Default catalog targets React 19; the `react18` named catalog is for the
-# RPC React adapter's dev/test deps that still pin React 18.
+# Default catalog targets React 19; the `react18` named catalog is for
+# examples that still pin React 18.
 catalog:
   typescript: ~5.9.3
   tsx: ^4.21.0

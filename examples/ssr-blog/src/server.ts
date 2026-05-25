@@ -10,8 +10,8 @@
 
 import { query } from "@zeroship/server";
 import { renderToString } from "react-dom/server";
-import { createElement } from "react";
-import { App } from "./components/App";
+import { createElement, type ComponentType, type ReactNode } from "react";
+import { App, LIST_POSTS_QUERY_KEY } from "./components/App";
 import { POSTS } from "./components/posts";
 // The Vite client manifest, exposed by the vite-plugin as a virtual
 // module. Inlined into the SSR bundle at build time so the rendered
@@ -59,20 +59,21 @@ function shell(body: string, props: string): string {
 </html>`;
 }
 
-// ── RPC procedures (also usable server-side via .useQuery) ───────────
+// ── RPC procedures ──────────────────────────────────────────────────
 //
-// `listPosts` is a regular RPC procedure marked with `query()`. The
-// vite-plugin's transform monkey-patches React Query hooks onto every
-// wrapped server-module export, so the App component can call
-// `listPosts.useQuery()` BOTH from the browser (hits HTTP
-// /_zs/v1/listPosts) AND from the SSR renderer (calls impl directly
-// via __makeServerProcedure's hook).
+// `listPosts` is a regular RPC procedure marked with `query()`. React
+// components use TanStack Query directly over the callable import.
 
 export const listPosts = query(async () => POSTS, { id: "listPosts" });
 
 // ── SSR fetch handler ────────────────────────────────────────────────
 
 import { QueryClient, QueryClientProvider, dehydrate, HydrationBoundary } from "@tanstack/react-query";
+
+const RQHydrationBoundary = HydrationBoundary as unknown as ComponentType<{
+  state?: unknown;
+  children?: ReactNode;
+}>;
 
 export default {
   async fetch(req: Request): Promise<Response> {
@@ -82,21 +83,18 @@ export default {
     }
 
     // Per-request QueryClient. Prefetch the data we know the page
-    // needs, then render — useQuery hooks land on cached data with
-    // no loading state.
+    // needs, then render with the cache already warm.
     const qc = new QueryClient();
-    // `listPosts.prefetch` is attached by __makeServerProcedure (see
-    // SSR hooks block at top of bundle). Calls impl directly, no HTTP.
-    const lp = listPosts as typeof listPosts & {
-      prefetch: (input: undefined, qc: QueryClient) => Promise<unknown>;
-    };
-    await lp.prefetch(undefined, qc);
+    await qc.prefetchQuery({
+      queryKey: LIST_POSTS_QUERY_KEY,
+      queryFn: () => listPosts(undefined),
+    });
 
     const html = renderToString(
       createElement(
         QueryClientProvider,
         { client: qc },
-        createElement(HydrationBoundary, { state: dehydrate(qc) },
+        createElement(RQHydrationBoundary, { state: dehydrate(qc) },
           createElement(App, { url: url.pathname }),
         ),
       ),

@@ -450,8 +450,8 @@ export function buildPlugin(
           // the polyfill path before Vite tries to load `node:crypto`
           // etc. as bare specifiers.
           nodeCompatPlugin(),
-          // transformPlugin rewrites server modules with SSR-hook
-          // patches (.useQuery / .prefetch / etc.) and records procedure
+          // transformPlugin rewrites server modules with procedure
+          // metadata patches and records procedure
           // metadata into `state.discoveredProcedures` for the manifest
           // emitter. It does NOT inject any registry side-effects any
           // more — the synthetic SSR entry discovers procedures at

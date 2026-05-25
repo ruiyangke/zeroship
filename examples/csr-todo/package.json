@@ -7,13 +7,13 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@tanstack/react-query": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "@zeroship/rpc-client": "workspace:*",
-    "@zeroship/rpc-react": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "react": "catalog:react18",

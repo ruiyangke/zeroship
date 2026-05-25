@@ -166,7 +166,7 @@ Use the packages that exist today:
 - `@zeroship/kv`
 - `@zeroship/payments`
 - `@zeroship/server`
-- `@zeroship/rpc-react`
+- `@zeroship/rpc-client`
 
 Keep names short, lowercase, and concrete.
 
