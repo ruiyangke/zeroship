@@ -51,6 +51,14 @@ check() {
 
 contains() { echo "$1" | grep -q -- "$2"; }
 
+# IDs are typed strings now (`"id":"user_…"` / `"id":"todo_…"`), not
+# numeric. Extract the first id's string value (falls back to a bare
+# numeric id for older shapes).
+extract_id() {
+  echo "$1" | grep -oE '"id":"[^"]+"' | head -1 | sed 's/^"id":"//;s/"$//' \
+    || echo "$1" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo ""
+}
+
 # ---------------------------------------------------------------------------
 # Setup — two users + some todos
 # ---------------------------------------------------------------------------
@@ -64,8 +72,8 @@ BOB_HANDLE="bob_$(date +%s%N | head -c10)"
 ALICE_RES=$(rpc seedUser "{\"email\":\"${ALICE_EMAIL}\",\"name\":\"Alice\",\"handle\":\"${ALICE_HANDLE}\"}")
 BOB_RES=$(rpc seedUser "{\"email\":\"${BOB_EMAIL}\",\"name\":\"Bob\",\"handle\":\"${BOB_HANDLE}\"}")
 
-ALICE_ID=$(echo "$ALICE_RES" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
-BOB_ID=$(echo "$BOB_RES"   | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
+ALICE_ID=$(extract_id "$ALICE_RES")
+BOB_ID=$(extract_id "$BOB_RES")
 
 if [ -z "$ALICE_ID" ] || [ -z "$BOB_ID" ]; then
   echo "  ✗ seedUser failed — Alice=$ALICE_RES Bob=$BOB_RES"
@@ -79,7 +87,7 @@ echo "  seeded Alice=$ALICE_ID Bob=$BOB_ID"
 
 echo "[check 1] createTodo via mutation — auto-wrapped in SERIALIZABLE tx"
 
-T1=$(rpc createTodo "{\"userId\":${ALICE_ID},\"title\":\"buy milk\",\"priority\":\"low\"}")
+T1=$(rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"buy milk\",\"priority\":\"low\"}")
 check "createTodo returned an id" contains "$T1" '"id":'
 
 # ---------------------------------------------------------------------------
@@ -88,7 +96,7 @@ check "createTodo returned an id" contains "$T1" '"id":'
 
 echo "[check 2] FK enforcement — insert with non-existent userId fails"
 
-BAD=$(rpc createTodo '{"userId":999999,"title":"orphan"}')
+BAD=$(rpc createTodo '{"userId":"user_doesNotExist0000000","title":"orphan"}')
 check "orphan insert produced an error" \
   bash -c "echo '$BAD' | grep -qiE 'error|violation|foreign'"
 check "error mentions foreign key or violation" \
@@ -105,8 +113,8 @@ echo "[check 3] capability enforcement — wrapper kinds resolve"
 # so we probe a known wrapped procedure instead: a 405 / 404 would
 # indicate the wrapper was lost; a 200 with the platform's `{json: ...}`
 # envelope confirms `query()` resolved at registration time.
-PROBE_STATUS=$(http_status listTodos "{\"userId\":${ALICE_ID}}")
-PROBE=$(rpc listTodos "{\"userId\":${ALICE_ID}}")
+PROBE_STATUS=$(http_status listTodos "{\"userId\":\"${ALICE_ID}\"}")
+PROBE=$(rpc listTodos "{\"userId\":\"${ALICE_ID}\"}")
 check "wrapper-tagged procedure dispatched" \
   bash -c "[ '$PROBE_STATUS' = '200' ] && echo '$PROBE' | grep -q '\"json\":'"
 
@@ -116,7 +124,7 @@ check "wrapper-tagged procedure dispatched" \
 
 echo "[check 4] listTodos query — read-only, returns rows"
 
-LIST=$(rpc listTodos "{\"userId\":${ALICE_ID}}")
+LIST=$(rpc listTodos "{\"userId\":\"${ALICE_ID}\"}")
 check "listTodos returned an array" contains "$LIST" '\[\|"data"'
 
 # ---------------------------------------------------------------------------
@@ -140,9 +148,9 @@ srv.listen(${SHARE_PORT}, '127.0.0.1');
 SHARE_PID=$!
 sleep 1
 
-SHARE_T=$(rpc createTodo "{\"userId\":${ALICE_ID},\"title\":\"share me\",\"priority\":\"low\"}")
-SHARE_ID=$(echo "$SHARE_T" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
-SHARE_RES=$(rpc shareToWebhook "{\"id\":${SHARE_ID:-1},\"webhookUrl\":\"http://127.0.0.1:${SHARE_PORT}/\"}")
+SHARE_T=$(rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"share me\",\"priority\":\"low\"}")
+SHARE_ID=$(extract_id "$SHARE_T")
+SHARE_RES=$(rpc shareToWebhook "{\"id\":\"${SHARE_ID}\",\"webhookUrl\":\"http://127.0.0.1:${SHARE_PORT}/\"}")
 kill $SHARE_PID 2>/dev/null || true
 
 check "shareToWebhook returned a 2xx status" \
@@ -158,10 +166,10 @@ echo "[check 5b] listTodosPage — paginate({cursor,numItems}) round-trip"
 # earlier 'buy milk' + 'share me' creates). With numItems=2 that's at
 # least 3 pages: page1, page2, page3 (isDone).
 for i in 1 2 3 4 5; do
-  rpc createTodo "{\"userId\":${ALICE_ID},\"title\":\"task-$i\",\"priority\":\"low\"}" > /dev/null
+  rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"task-$i\",\"priority\":\"low\"}" > /dev/null
 done
 
-P1=$(rpc listTodosPage "{\"userId\":${ALICE_ID},\"cursor\":null,\"numItems\":2}")
+P1=$(rpc listTodosPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":null,\"numItems\":2}")
 check "page 1 returned an envelope with page/continueCursor/isDone" \
   bash -c "echo '$P1' | grep -q '\"page\":' && echo '$P1' | grep -q '\"continueCursor\":' && echo '$P1' | grep -q '\"isDone\":'"
 
@@ -171,7 +179,7 @@ DONE1=$(echo "$P1" | grep -oE '"isDone":(true|false)' | head -1 | cut -d: -f2)
 check "page 1 not done (more rows available)" bash -c "[ \"$DONE1\" = \"false\" ]"
 check "page 1 has non-empty continueCursor" bash -c "[ -n \"$C1\" ]"
 
-P2=$(rpc listTodosPage "{\"userId\":${ALICE_ID},\"cursor\":\"${C1}\",\"numItems\":2}")
+P2=$(rpc listTodosPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":\"${C1}\",\"numItems\":2}")
 C2=$(echo "$P2" | grep -oE '"continueCursor":"[^"]*"' | head -1 | sed 's/.*"continueCursor":"//;s/"$//')
 
 check "page 2 advances past page 1 (different cursor)" bash -c "[ \"$C1\" != \"$C2\" ]"
@@ -181,7 +189,7 @@ HOPS=0
 CURRENT="$C2"
 DONE_FINAL="false"
 while [ "$HOPS" -lt 5 ] && [ "$DONE_FINAL" = "false" ]; do
-  PN=$(rpc listTodosPage "{\"userId\":${ALICE_ID},\"cursor\":\"${CURRENT}\",\"numItems\":2}")
+  PN=$(rpc listTodosPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":\"${CURRENT}\",\"numItems\":2}")
   DONE_FINAL=$(echo "$PN" | grep -oE '"isDone":(true|false)' | head -1 | cut -d: -f2)
   CURRENT=$(echo "$PN" | grep -oE '"continueCursor":"[^"]*"' | head -1 | sed 's/.*"continueCursor":"//;s/"$//')
   HOPS=$((HOPS + 1))
@@ -197,11 +205,11 @@ check "pagination terminates with isDone=true within 5 hops" bash -c "[ \"$DONE_
 
 echo "[check 5c] getUserPair — DataLoader batches concurrent db.users.get(id)"
 
-PAIR=$(rpc getUserPair "{\"aId\":${ALICE_ID},\"bId\":${BOB_ID}}")
+PAIR=$(rpc getUserPair "{\"aId\":\"${ALICE_ID}\",\"bId\":\"${BOB_ID}\"}")
 check "getUserPair returned Alice's row" \
-  bash -c "echo '$PAIR' | grep -q '\"id\":${ALICE_ID}'"
+  bash -c "echo '$PAIR' | grep -q '\"id\":\"${ALICE_ID}\"'"
 check "getUserPair returned Bob's row" \
-  bash -c "echo '$PAIR' | grep -q '\"id\":${BOB_ID}'"
+  bash -c "echo '$PAIR' | grep -q '\"id\":\"${BOB_ID}\"'"
 
 # ---------------------------------------------------------------------------
 # Check 5d: listTodosWithUser — find({}, { with: { userId: true } }) eager-
@@ -211,7 +219,7 @@ check "getUserPair returned Bob's row" \
 
 echo "[check 5d] listTodosWithUser — relation-aware reads eager-load via with"
 
-LWU=$(rpc listTodosWithUser "{\"userId\":${ALICE_ID}}")
+LWU=$(rpc listTodosWithUser "{\"userId\":\"${ALICE_ID}\"}")
 check "listTodosWithUser returned a row carrying joined user data" \
   bash -c "echo '$LWU' | grep -qE '\"userId\":\\{[^}]*\"email\":'"
 check "joined user row carries Alice's email" \
@@ -267,7 +275,7 @@ SUB_PID=$!
 sleep 0.5
 
 # Write from the same isolate — exercises the local-emit → broker path.
-rpc createTodo "{\"userId\":${ALICE_ID},\"title\":\"sub-smoke-$(date +%s)\",\"priority\":\"low\"}" > /dev/null
+rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"sub-smoke-$(date +%s)\",\"priority\":\"low\"}" > /dev/null
 
 # Wait up to 5 s for the `2:` line to appear in the SSE stream.
 DEADLINE=$(( $(date +%s) + 5 ))

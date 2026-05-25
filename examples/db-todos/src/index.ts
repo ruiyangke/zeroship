@@ -81,7 +81,7 @@ export const listTodos = query(
   async ({ userId }: { userId: UserId }) => {
     const { data, error } = await db.todos
       .find({ userId, archived: false })
-      .sort({ createdAt: -1 });
+      .sort({ created_at: -1 });
     if (error) throw error;
     return data ?? [];
   },
