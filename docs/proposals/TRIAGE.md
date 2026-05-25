@@ -27,8 +27,8 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] sandbox-snapshot-restore.md (merged d1054adb)
 - [x] sqlite-pg-parity.md (merged; reference/sqlite-divergences.md exists)
 - [x] sandbox-pg-state.md (feat/sandbox-pg merged)
-- [ ] sandbox-preview-urls.md (sandbox preview merged)
-- [ ] kv-redesign-implementation-plan-2026-05-24.md (kv redesign; reference/kv.md exists)
+- [x] sandbox-preview-urls.md (sandbox preview merged)
+- [x] kv-redesign-implementation-plan-2026-05-24.md (kv redesign; reference/kv.md exists)
 - [x] zeroship-db.md (db SDK; reference/db.md exists)
 - [x] db-system-design.md (db; reference/db.md)
 - [x] platform-system-fields.md (db system fields)
@@ -79,3 +79,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - runtime-macros-refactor.md — archived (design in plugin-system.md + macro ADRs)
 
 - zs-standard-and-vite-v2 + sandbox-pg-state — archived (shipped)
+
+- sandbox-preview-urls + kv-redesign — archived (shipped)
