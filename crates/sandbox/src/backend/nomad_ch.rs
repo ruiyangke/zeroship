@@ -3152,7 +3152,7 @@ async fn wait_for_alloc_running(
                 last_http_err = Some(e);
             }
         }
-        compio::time::sleep(Duration::from_millis(250)).await;
+        compio::time::sleep(Duration::from_millis(100)).await;
     }
     let mut msg = format!(
         "nomad alloc never reached running for job {job_id} (last status={:?})",
@@ -3860,8 +3860,8 @@ async fn wait_for_agent_livez(
         // wedge). An agent that's not yet listening turns into a
         // fast miss; we sleep the cadence and retry.
         if !probe_agent_reachable_tcp(probe_addr, CONNECT_TIMEOUT).await {
-            // 150 ms livez poll cadence — matches the post-gate path.
-            compio::time::sleep(Duration::from_millis(150)).await;
+            // 50 ms livez poll cadence — matches the post-gate path.
+            compio::time::sleep(Duration::from_millis(50)).await;
             continue;
         }
         // Phase 2: cheap unsigned /livez HTTP probe — gates the more
@@ -3932,8 +3932,8 @@ async fn wait_for_agent_livez(
                 }
             }
         }
-        // 150 ms livez poll cadence — matches k8s.rs.
-        compio::time::sleep(Duration::from_millis(150)).await;
+        // 50 ms livez poll cadence — matches k8s.rs.
+        compio::time::sleep(Duration::from_millis(50)).await;
     }
     // Timeout. Distinguish:
     //   - never saw /livez=200 → "agent at <url> never returned 200"
