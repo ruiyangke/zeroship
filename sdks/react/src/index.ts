@@ -6,9 +6,8 @@
 //
 //   import { useQuery, QueryClientProvider, createDefaultClient }
 //     from "@zeroship/react";
-//   import { subscribe } from "@zeroship/db";
 //
-//   const client = createDefaultClient(subscribe);
+//   const client = createDefaultClient();
 //
 //   function App() {
 //     return (

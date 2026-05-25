@@ -81,7 +81,7 @@ import type {
 export type SchemaInput =
   | Record<string, unknown>
   | SchemaBuilder<Record<string, unknown>>
-  | TypeBuilder<unknown, any>;
+  | TypeBuilder<unknown, any, any, any>;
 
 // ---------------------------------------------------------------------------
 // Transaction surface — TxCollection / TxQuery / TransactionOptions
@@ -174,7 +174,7 @@ export interface TransactionOptions {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UnwrapSchema<T> =
   T extends SchemaBuilder<infer S> ? S :
-  T extends TypeBuilder<infer U, any> ? U :
+  T extends TypeBuilder<infer U, any, any, any> ? U :
   T;
 
 /**

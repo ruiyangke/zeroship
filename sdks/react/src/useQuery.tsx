@@ -39,6 +39,7 @@
  */
 
 import * as React from "react";
+import { subscribe as internalSubscribe } from "@zeroship/db/internal";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -94,9 +95,10 @@ export interface UseQueryOptions {
 
 /**
  * Broker dependencies the hook needs. Injected via `<QueryProvider>` or
- * a direct `client` prop on `useQuery`; can also be defaulted to the
- * SDK-level `subscribe` import. We keep the indirection so tests can
- * stub the broker without spinning up the native runtime.
+ * a direct `client` prop on `useQuery`; `createDefaultClient()` wires
+ * up the default implementation for ordinary app code. We keep the
+ * indirection so tests can stub the broker without spinning up the
+ * native runtime.
  */
 export interface QueryClient {
   /**
@@ -131,7 +133,8 @@ export interface QueryClientProviderProps {
 /**
  * Provides the broker `QueryClient` to all `useQuery` calls below.
  * Pass an instance built via `createDefaultClient()` (which wires up
- * `@zeroship/db`'s `subscribe`) or a test stub.
+ * the framework-internal `@zeroship/db/internal` subscription bridge)
+ * or a test stub.
  */
 export function QueryClientProvider({ client, children }: QueryClientProviderProps): React.ReactElement {
   return (
@@ -142,13 +145,15 @@ export function QueryClientProvider({ client, children }: QueryClientProviderPro
 }
 
 /**
- * Build the default broker client wired to `@zeroship/db`'s
- * `subscribe`. Pure indirection — keeps `@zeroship/react` from
- * statically depending on the runtime native bindings (useful for SSR
- * + unit tests).
+ * Build the default broker client wired to the framework-internal
+ * `@zeroship/db/internal` subscription bridge. Pure indirection —
+ * keeps `@zeroship/react` testable while avoiding a public dependency
+ * on `@zeroship/db`'s low-level reactive primitive.
  */
-export function createDefaultClient(subscribe: (collection: string) => SubscriptionLike): QueryClient {
-  return { subscribe };
+export function createDefaultClient(
+  subscribeImpl: (collection: string) => SubscriptionLike = internalSubscribe,
+): QueryClient {
+  return { subscribe: subscribeImpl };
 }
 
 // ---------------------------------------------------------------------------

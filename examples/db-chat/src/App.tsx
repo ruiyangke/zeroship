@@ -20,17 +20,9 @@ import {
   QueryClientProvider,
   createDefaultClient,
   useQuery,
-  type SubscriptionLike,
 } from "@zeroship/react";
-import { subscribe } from "@zeroship/db";
 
-// `subscribe(collection)` returns the SubscriptionLike the React client
-// drives. The default-client adapter coerces our @zeroship/db Subscription
-// to the shape useQuery expects.
-const client = createDefaultClient(
-  (collection: string): SubscriptionLike =>
-    subscribe(collection) as unknown as SubscriptionLike,
-);
+const client = createDefaultClient();
 
 // In a real app, the RPC procedures are imported from a generated
 // client. This example calls them via plain fetch() to /_zs/v1/<name>

@@ -50,7 +50,7 @@ function _validateK(value: number, paramName: string): void {
  * Converts a caught value to an Error for inclusion in a Result.
  * ValidationError instances are returned as-is (they are already well-typed).
  * All other errors are passed through mapNativeError so that, e.g., unique
- * constraint violations receive code 11000.
+ * constraint violations preserve the native string code `unique_violation`.
  */
 function toResultError(e: unknown): Error {
   let out: Error;
