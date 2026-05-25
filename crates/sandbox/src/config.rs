@@ -184,6 +184,37 @@ pub struct SandboxConfig {
     /// Source-of-truth: `docs/proposals/sandbox-snapshot-restore.md`
     /// virtio-blk pivot.
     pub workspace_image_size_gb: u32,
+
+    /// Option C Phase 2 (2026-05-25 staging-locality ADR): when
+    /// `true`, the controller bypasses its local `spawn_blocking`
+    /// disk-image staging block at `backend/nomad_ch.rs:777-792` and
+    /// instead emits a `zsbx_stage_disks` task-meta field in the
+    /// Nomad jobspec telling the driver to materialize the per-alloc
+    /// disk images itself BEFORE spawning Cloud Hypervisor.
+    ///
+    /// Why: /proc/locks evidence from T-8b-stress r4/r5 showed the
+    /// wedge is cross-alloc kernel-state retention (a different
+    /// alloc's deferred `struct file` blocks the new alloc's path);
+    /// per-task predicates (r4-A exitDone-wait, r5-A F_OFD_SETLK
+    /// probe) cannot fix this. Option C collapses the surface by
+    /// making the driver stage fresh images on every StartTask on
+    /// the same node the alloc lands on — eliminating the cross-fs
+    /// boundary the controller's spawn_blocking was crossing.
+    ///
+    /// Default `false` for Phase 2 (this commit lands the capability
+    /// behind the flag; cold-boot path retains the spawn_blocking
+    /// staging block when false). Phase 4 (after cluster stress
+    /// validation of the capability) will flip the default to true
+    /// and Phase 3 will delete the spawn_blocking branch entirely.
+    ///
+    /// Cold-boot only — the restore branch stages rootfs via the
+    /// existing `RootfsSource` hardlink/copy (C-7-LT-12a) and
+    /// consumes persistent WorkspaceImg / UserHomeImg from snapshot
+    /// artifacts per ADR Phase 3; this flag has no effect on the
+    /// restore branch in Phase 2.
+    ///
+    /// `SANDBOX_DRIVER_STAGES_DISK_IMAGES` (default `false`).
+    pub driver_stages_disk_images: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -253,12 +284,12 @@ pub struct K8sConfig {
 
 /// Configuration for the **Nomad + Cloud Hypervisor** backend.
 ///
-/// In this mode the controller submits a `raw_exec` Nomad job per
-/// sandbox; the job spec invokes a wrapper script (shipped alongside
-/// the controller, configured via `wrapper_path`) which spawns a CH
-/// microVM with three virtio-fs shares (`keys`, `workspace`,
-/// `userhome`) bound to host directories the controller has
-/// pre-created.
+/// In this mode the controller submits a Nomad job using the `ch`
+/// Go plugin driver. The jobspec carries a typed `TaskConfig` block
+/// the driver decodes directly and uses to spawn a
+/// `cloud-hypervisor` microVM with virtio-blk disks (rootfs +
+/// per-sandbox workspace.img + per-user home.img) and the
+/// controller's signing pubkey hex on the kernel cmdline.
 ///
 /// Network plumbing (tap devices, /30 subnets) is assumed to be
 /// pre-provisioned out-of-band — see
@@ -277,18 +308,11 @@ pub struct NomadCHConfig {
     /// agent advertises. `SANDBOX_NOMAD_DATACENTER` (default `dc1`).
     pub datacenter: String,
 
-    /// Absolute path to the wrapper script the `raw_exec` task
-    /// invokes. The script is shipped at
-    /// `crates/sandbox/scripts/nomad-vm-wrapper.sh`; operators copy
-    /// it to a stable system path. `SANDBOX_NOMAD_CH_WRAPPER_PATH`
-    /// (default `/etc/zeroship/nomad-vm-wrapper.sh`).
-    pub wrapper_path: PathBuf,
-
     /// Host directory holding the kernel image (`vmlinuz`) and the
-    /// rootfs template (`rootfs-slim.img`). Equivalent to the
-    /// `ZSBX_HERE` env var in the demo wrapper. The wrapper `cd`s to
-    /// this dir at startup. `SANDBOX_NOMAD_CH_RUNTIME_DIR` (default
-    /// `/var/lib/zeroship/ch`).
+    /// rootfs template (`rootfs-slim.img`). Passed to the ch driver
+    /// as `ZSBX_ARTIFACT_DIR` in the Nomad job env block (renamed
+    /// from `ZSBX_HERE` in T-7 round 3 / M4).
+    /// `SANDBOX_NOMAD_CH_RUNTIME_DIR` (default `/var/lib/zeroship/ch`).
     pub runtime_dir: PathBuf,
 
     /// Root directory for per-sandbox host state. Each sandbox gets
@@ -308,9 +332,12 @@ pub struct NomadCHConfig {
     pub user_home_dir_root: PathBuf,
 
     /// Inclusive lower bound of the per-VM index pool. Each sandbox
-    /// gets a unique index; the wrapper computes `tap=zsbx-nm-<idx>`,
-    /// host IP `10.99.<100+idx>.1` and VM IP `10.99.<100+idx>.2`. The
-    /// host operator is responsible for pre-creating tap devices in
+    /// gets a unique index; the controller derives
+    /// `tap=zsbx-nm-<idx>`, host IP `10.99.<100+idx>.1` and VM IP
+    /// `10.99.<100+idx>.2` (see `derive_tap` / `derive_mac` in
+    /// `restore_handler.rs`) and passes them to the ch driver via
+    /// `TaskConfig.Net[0]`. The host operator is responsible for
+    /// pre-creating tap devices in
     /// this range. Must be ≥ 1 (an index of 0 reserves the .100
     /// subnet for what's effectively a sentinel — confusing on
     /// inspection, no upside). `SANDBOX_NOMAD_CH_VM_INDEX_FLOOR`
@@ -319,8 +346,8 @@ pub struct NomadCHConfig {
 
     /// Inclusive upper bound of the index pool. Allocator hands out
     /// indices in `[floor, ceil]`; `alloc()` returns an error past
-    /// `ceil`. Must be ≤ 155 — the IP arithmetic in the wrapper +
-    /// controller is `10.99.{100+idx}.2`, and the third octet
+    /// `ceil`. Must be ≤ 155 — the IP arithmetic in the controller
+    /// is `10.99.{100+idx}.2`, and the third octet
     /// overflows past index 155. The cleaner alternative (stretching
     /// the subnet across two octets) costs us a bigger blast radius
     /// for off-by-one bugs and a less readable IP layout; the
@@ -328,23 +355,23 @@ pub struct NomadCHConfig {
     /// Hypervisor + 4 GiB/VM × 155 = 620 GiB RAM, well past any
     /// realistic single-box deploy). HA operators run multiple
     /// controller hosts. `SANDBOX_NOMAD_CH_VM_INDEX_CEIL` (default
-    /// 155).
+    /// 20).
     pub vm_index_ceil: u16,
 
     /// How long to wait for an alloc to reach `ClientStatus="running"`
     /// after `POST /v1/jobs`. Bounds Nomad scheduling latency only —
-    /// "running" means the wrapper script started, NOT that the VM is
+    /// "running" means the ch driver task started, NOT that the VM is
     /// up. Past this we give up and the `CreateGuard` tears the job
     /// down. `SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS` (default
     /// 120). Should be enough to cover Nomad scheduling, plan-evaluate,
-    /// and `raw_exec` task launch on a healthy cluster (typically
+    /// and ch driver task launch on a healthy cluster (typically
     /// well under 5s; 120s leaves room for a reschedule under load).
     ///
     /// Was 60s pre-Phase-3 stress run; bumped to 120s after the May-5
     /// cluster stress (31/60 creates timed out before reaching
     /// alloc-running under c=60 on a single n2-standard-32 worker —
     /// concurrent VM density past round-2's 16-cap pushed Nomad
-    /// scheduler + raw_exec launch latency well past the 60s budget).
+    /// scheduler + ch driver launch latency well past the 60s budget).
     /// Mirrors the `host_fence_timeout_secs` 30→120 bump from
     /// cad098e6 — same root cause (single-worker saturation under
     /// concurrent ops), same shape of fix.
@@ -376,7 +403,7 @@ pub struct NomadCHConfig {
     /// see two consecutive failures (connection refused, timeout, or
     /// 5xx) before releasing `vm_index`. Why: Nomad's "alloc
     /// terminal" lags the host-process tree (cloud-hypervisor + 3×
-    /// virtiofsd + the bash wrapper) by 0.5–60 s under N=8 stress.
+    /// virtiofsd + the ch driver task) by 0.5–60 s under N=8 stress.
     /// Releasing the index while the previous tenant's agent is
     /// still listening on `10.99.<100+idx>.2:7777` is the exact
     /// race FM-A's fingerprint check papers over; this is the
@@ -404,12 +431,163 @@ pub struct NomadCHConfig {
     /// historical 10.99/16 layout. Operators on hosts with a corp
     /// 10.99/16 collision can shift this — both controller (which
     /// computes `agent_url = http://10.<base>.<100+idx>.2:7777`)
-    /// and the wrapper (which lays down the tap + IP) read the same
-    /// value. Validated to a non-multicast / non-loopback / non-
+    /// and the ch driver (which lays down the tap + IP via
+    /// `TaskConfig.Net[0]`) read the same value. Validated to a
+    /// non-multicast / non-loopback / non-
     /// link-local prefix so a typo'd `127` or `169` doesn't quietly
     /// produce unreachable IPs.
     /// `SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET` (default 99).
     pub subnet_second_octet: u8,
+
+    /// **T-8b-stress-r8 r24-A2-S3**: how long to wait, after a stop
+    /// ACK from Nomad, before releasing the `vm_index` back into the
+    /// allocator's free list. Closes the residual stress-r8 race
+    /// where a CREATE picks up an index whose tap netdev / fcntl
+    /// locks the kernel hasn't finished evicting from the previous
+    /// tenant. The driver's r24-A2-S2 verify gate closes the
+    /// tuntap-add window in the same release; this controller-side
+    /// delay adds defense-in-depth.
+    ///
+    /// Default reduced 5 s → 2 s after v24 OFD-probe fix verified
+    /// `destroy_task_lock_held_total=0` in cluster validation. The
+    /// 5 s margin was a safety budget against the broken probe; with
+    /// the probe working correctly, 2 s is ample (tap-cleanup max
+    /// observed at <1 s). Set to 0 to disable (NOT recommended in
+    /// production).
+    ///
+    /// `SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS` (default 2).
+    pub vm_index_release_delay_secs: u64,
+
+    /// **r30-A1 (concurrency-r30 CRITICAL #A1)**: global cap on
+    /// in-flight Nomad `/shutdown` ladders. The controller has seven
+    /// production teardown call paths (`AppStateGcStopper`,
+    /// snap-idle-evict, snap-idle-gc, admin snapshot teardown,
+    /// transient-state takeover, registry GC, restore-failure rollback)
+    /// that each call `backend.stop(id)` → `stop_inner` →
+    /// `POST /shutdown` against ONE downstream resource (the local
+    /// Nomad agent's RPC queue + host CH process budget). Each call
+    /// path historically chose its own concurrency (constant 8, env-
+    /// default 4, three serial, two unbounded); those per-loop caps
+    /// don't compose. A cluster cycle exercising two simultaneously
+    /// can overload the downstream — observed as Nomad `/shutdown`
+    /// timeouts + CH OOM at peak.
+    ///
+    /// This field is the **single global cap** enforced inside
+    /// `stop_inner` via an `Arc<NomadStopPermits>` semaphore. Every
+    /// teardown path now competes for the same permit pool. The per-
+    /// loop caps stay in place as **defense-in-depth soft caps** —
+    /// they bound runaway fan-out before it ever reaches the
+    /// semaphore — but the load-bearing cap is here.
+    ///
+    /// `SANDBOX_NOMAD_STOP_CONCURRENCY` (default 16). Must be ≥ 1
+    /// (zero would deadlock every teardown). Sized at 16 to absorb
+    /// the worst-case overlap of the 7 paths while staying well under
+    /// the empirical Nomad-`/shutdown` saturation point on a single-
+    /// worker host (≈ 30-way concurrent stop drives p99 fence past
+    /// 30s — see `host_fence_timeout_secs` rustdoc). Operators on
+    /// multi-worker hosts MAY raise this; consult the
+    /// `sandbox_nomad_stop_permits_in_use` gauge for sizing data.
+    pub nomad_stop_concurrency: usize,
+}
+
+/// r27-S1 Guard A: reject any `nomad_addr` whose host is NOT a
+/// loopback literal. Accept-list:
+///
+/// - `localhost` (resolves to 127.0.0.1 / ::1 on every sane libc)
+/// - any IPv4 in `127.0.0.0/8` (validated via `Ipv4Addr::is_loopback`)
+/// - the IPv6 loopback `::1` (validated via `Ipv6Addr::is_loopback`)
+///
+/// **Why a hand-rolled host parse, not the `url` crate**: the
+/// sandbox crate does not depend on `url` today and the upstream
+/// `nomad_addr` shape is already validated to start with `http://`
+/// or `https://`. The host substring is everything between the
+/// scheme and the first of `:` (port), `/` (path), `?` (query),
+/// `#` (fragment), or end-of-string. IPv6 literals use the bracketed
+/// `[::1]:port` form per RFC 3986 § 3.2.2; we handle that
+/// specifically before the colon-as-port-separator rule fires so
+/// `[::1]:4646` parses as host `::1` not host `[::1` (which would
+/// fail the IP literal parse) or host `[` (which would silently
+/// match nothing).
+///
+/// `nomad_addr` MUST already have the scheme prefix validated by the
+/// caller; we treat its absence as a programmer error and refuse.
+fn validate_nomad_addr_loopback(addr: &str) -> Result<(), String> {
+    // Strip scheme. The caller has already asserted one of these
+    // prefixes is present.
+    let rest = if let Some(r) = addr.strip_prefix("http://") {
+        r
+    } else if let Some(r) = addr.strip_prefix("https://") {
+        r
+    } else {
+        return Err(format!(
+            "SANDBOX_NOMAD_ADDR missing http(s):// scheme (internal: \
+             scheme check must run before loopback check); got {addr:?}",
+        ));
+    };
+
+    // Host extraction. Two shapes per RFC 3986 § 3.2.2:
+    //   - Bracketed IPv6: `[<v6>](:port)?(/path)?`
+    //   - Everything else: `<host>(:port)?(/path)?`
+    let host: &str = if let Some(after_lb) = rest.strip_prefix('[') {
+        // Find the closing bracket; everything between is the IPv6
+        // literal. An unclosed bracket is malformed.
+        match after_lb.find(']') {
+            Some(end) => &after_lb[..end],
+            None => {
+                return Err(format!(
+                    "SANDBOX_NOMAD_ADDR has unclosed IPv6 bracket; got {addr:?}",
+                ))
+            }
+        }
+    } else {
+        // Host body ends at the first of ':' / '/' / '?' / '#' /
+        // end-of-string.
+        let end = rest
+            .find(|c: char| matches!(c, ':' | '/' | '?' | '#'))
+            .unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    if host.is_empty() {
+        return Err(format!(
+            "SANDBOX_NOMAD_ADDR missing host; got {addr:?}",
+        ));
+    }
+
+    // Cheap path: literal `localhost` is always loopback on a sane
+    // libc. We do NOT call `getaddrinfo` to follow `/etc/hosts`
+    // overrides — an operator who has mapped `localhost` to a
+    // remote in `/etc/hosts` has bigger problems than this guard.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(());
+    }
+
+    // IP literal path: parse and let the std library check the
+    // loopback bit (covers 127.0.0.0/8 in v4 and ::1 in v6, neither
+    // of which we need to spell out octet-by-octet here).
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() {
+            return Ok(());
+        }
+        return Err(format!(
+            "SANDBOX_NOMAD_ADDR host {host:?} is not loopback; refusing to \
+             boot to prevent cross-cluster placement (r27-S1 Guard A). \
+             Accepted: localhost, 127.0.0.0/8, ::1.",
+        ));
+    }
+
+    // Non-IP, non-localhost hostname (e.g. `nomad.example.com`,
+    // `nomad`, `nomad.local`): refuse. We don't `getaddrinfo`
+    // because (a) startup-time DNS may not match runtime DNS and
+    // (b) operators with a `127.0.0.1 nomad-local` entry in
+    // `/etc/hosts` can use that name verbatim only if it resolves
+    // — but we'd rather they spell `127.0.0.1` so the config is
+    // self-documenting.
+    Err(format!(
+        "SANDBOX_NOMAD_ADDR host {host:?} is not a loopback literal; \
+         refusing to boot to prevent cross-cluster placement (r27-S1 \
+         Guard A). Accepted: localhost, 127.0.0.0/8, ::1.",
+    ))
 }
 
 impl NomadCHConfig {
@@ -470,45 +648,28 @@ impl NomadCHConfig {
                 self.nomad_addr,
             ));
         }
-        // m4: validate the wrapper script exists + is executable.
-        // **Caveat:** this only catches misconfig when the
-        // controller and the Nomad client share a filesystem
-        // (single-node deploys). On split deployments where the
-        // Nomad agent runs on different hosts, this check is
-        // best-effort — we can confirm the path is wrong, but a
-        // path that's correct on the controller may still be
-        // wrong on the Nomad client.
-        match std::fs::metadata(&self.wrapper_path) {
-            Ok(md) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mode = md.permissions().mode();
-                    if mode & 0o111 == 0 {
-                        return Err(format!(
-                            "SANDBOX_NOMAD_CH_WRAPPER_PATH ({}) is not \
-                             executable (mode={:o}); chmod +x or fix the \
-                             path.",
-                            self.wrapper_path.display(),
-                            mode
-                        ));
-                    }
-                }
-                let _ = md; // silence unused on non-unix
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Not fatal in split-deploy mode: the controller's
-                // FS may not be the Nomad client's FS. Log only.
-                tracing::info!(
-                    wrapper_path = %self.wrapper_path.display(),
-                    "sandbox/nomad-ch config: wrapper_path not present on controller fs (best-effort check; irrelevant if Nomad client runs on a different host)"
-                );
-            }
-            Err(_) => {
-                // Permission denied / IO error reading metadata —
-                // also likely a split-deploy artefact. Don't block.
-            }
-        }
+        // r27-S1 Guard A (fail-CLOSED): reject any nomad_addr whose
+        // host is NOT a loopback literal. Two attack vectors this
+        // closes:
+        //
+        // 1. **Tampered local Nomad agent** returns a wrong `node_id`
+        //    on `/v1/agent/self` → r3-A controller emits a Job-level
+        //    Constraints block pinning to the wrong node → cluster-
+        //    wide CREATE/WAKE DoS until a restart.
+        // 2. **Misconfigured `NOMAD_ADDR`** points at a remote
+        //    Nomad → controller stages `workspace.img` on the LOCAL
+        //    filesystem then emits Constraints pinning to a node in a
+        //    DIFFERENT cluster → allocs land cross-cluster and the
+        //    `assert_disk_image_present` driver-stat ENOENTs (the
+        //    r3-A failure mode by another route).
+        //
+        // The fix matches r3-A's strict-equality Constraints choice
+        // (Operand = "=", refusing fallback to random placement): we
+        // refuse to boot rather than emit a Constraints block keyed
+        // off an unverifiable remote node_id. Loopback enforcement is
+        // the only check that makes the assumption "the Nomad agent
+        // returns this host's node_id" structurally true.
+        validate_nomad_addr_loopback(&self.nomad_addr)?;
         // M6: subnet second octet must be a private-range value.
         // 10.0.0.0/8 is RFC1918 private, but the OPERATOR sets the
         // second octet — a typo of `127` would land on loopback
@@ -555,6 +716,20 @@ impl NomadCHConfig {
                 self.user_home_dir_root.display(),
                 self.host_state_dir.display(),
             ));
+        }
+        // r30-A1: a zero-cap semaphore would deadlock every teardown
+        // path (every `stop_inner` await would block forever on the
+        // permit recv). Catch the misconfig at boot; the lower bound
+        // is the cheapest invariant that turns "controller mysteriously
+        // never stops anything" into a one-line startup error.
+        if self.nomad_stop_concurrency == 0 {
+            return Err(
+                "SANDBOX_NOMAD_STOP_CONCURRENCY must be ≥ 1 (got 0); a \
+                 zero-permit semaphore would deadlock every teardown path. \
+                 Default is 16; raise only after profiling \
+                 sandbox_nomad_stop_permits_in_use against the cap."
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -605,7 +780,7 @@ impl SandboxConfig {
     /// integration tests. Returns a `SandboxConfig` populated with
     /// defaults that exercise the `nomad-ch` backend wiring without
     /// touching the network (the network probe runs in
-    /// `Backend::from_config`, not here). The `token` field is set
+    /// [`crate::backend::Backend::probe`], not here). The `token` field is set
     /// to a non-empty placeholder; tests that need a specific
     /// bearer chain [`Self::with_token`].
     ///
@@ -643,7 +818,6 @@ impl SandboxConfig {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
                 runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
@@ -654,6 +828,8 @@ impl SandboxConfig {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 5,
+                nomad_stop_concurrency: 16,
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -663,6 +839,7 @@ impl SandboxConfig {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 
@@ -742,10 +919,6 @@ impl SandboxConfig {
                 .unwrap_or_else(|_| "http://127.0.0.1:4646".to_string()),
             datacenter: std::env::var("SANDBOX_NOMAD_DATACENTER")
                 .unwrap_or_else(|_| "dc1".to_string()),
-            wrapper_path: PathBuf::from(
-                std::env::var("SANDBOX_NOMAD_CH_WRAPPER_PATH")
-                    .unwrap_or_else(|_| "/etc/zeroship/nomad-vm-wrapper.sh".to_string()),
-            ),
             runtime_dir: PathBuf::from(
                 std::env::var("SANDBOX_NOMAD_CH_RUNTIME_DIR")
                     .unwrap_or_else(|_| "/var/lib/zeroship/ch".to_string()),
@@ -759,7 +932,7 @@ impl SandboxConfig {
                     .unwrap_or_else(|_| "/var/zeroship/ch/users".to_string()),
             ),
             vm_index_floor: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_FLOOR", 1u16)?,
-            vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 155u16)?,
+            vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 20u16)?,
             alloc_running_timeout_secs: parse_env(
                 "SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS",
                 120u64,
@@ -779,6 +952,17 @@ impl SandboxConfig {
             subnet_second_octet: parse_env(
                 "SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET",
                 99u8,
+            )?,
+            vm_index_release_delay_secs: parse_env(
+                "SANDBOX_NOMAD_CH_VM_INDEX_RELEASE_DELAY_SECS",
+                2u64,
+            )?,
+            // r30-A1: global Nomad /shutdown concurrency cap. Default 16
+            // matches the architecture decision (see the field's rustdoc
+            // on NomadCHConfig). Validated in `validate()` below.
+            nomad_stop_concurrency: parse_env(
+                "SANDBOX_NOMAD_STOP_CONCURRENCY",
+                16usize,
             )?,
         };
 
@@ -825,6 +1009,12 @@ impl SandboxConfig {
             );
         }
 
+        // Option C Phase 2: opt-in driver-side staging. Default
+        // false; Phase 4 flips after stress validation. See the
+        // 2026-05-25 staging-locality ADR.
+        let driver_stages_disk_images =
+            parse_env("SANDBOX_DRIVER_STAGES_DISK_IMAGES", false)?;
+
         Ok(Self {
             port, token, backend, image, workspace_root, network,
             memory_mb, cpus, idle_timeout_secs, max_lifetime_secs, auto_pull,
@@ -837,6 +1027,7 @@ impl SandboxConfig {
             snapshot_gcs_bucket,
             snapshot_root_kek_path,
             workspace_image_size_gb,
+            driver_stages_disk_images,
         })
     }
 }
@@ -851,6 +1042,428 @@ where
     }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// C-7-LT wake-response mode
+// ────────────────────────────────────────────────────────────────────
+
+/// C-7-LT: wake-response contract mode.
+///
+/// - `Sync` (default): legacy 200 OK with full wake state baked into the
+///   response. Subject to C-8c (synchronous contract structurally exhausted
+///   at empirical teardown ≥ client deadline; see smoke-r11 review). Kept
+///   default during the C-7-LT migration so PR1's scaffolding ships
+///   behind a feature flag without disturbing existing tests / smoke runs.
+/// - `Async`: 202 Accepted + polling. New shape per
+///   `docs/proposals/c7-lt-async-wake.md`. PR2 reads this flag in the wake
+///   handler; PR1 only carries the flag.
+///
+/// Env: `SANDBOX_WAKE_RESPONSE_MODE` (sync|async). Defaults to `sync`.
+/// Unrecognised values cause [`from_env`] to return `Err` — the
+/// controller refuses to boot. This is fail-CLOSED (R16-S4 mirror of
+/// R15-S1's AEAD posture): a misconfigured feature flag is a config
+/// bug, not a silent fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeResponseMode {
+    /// 200 OK + full wake state baked in (legacy).
+    Sync,
+    /// 202 Accepted + polling (C-7-LT proposal).
+    Async,
+}
+
+impl WakeResponseMode {
+    /// Resolve the mode from `SANDBOX_WAKE_RESPONSE_MODE`.
+    ///
+    /// - Unset / empty → `Sync` (default; existing contract).
+    /// - `sync` → `Sync`.
+    /// - `async` → `Async`.
+    /// - Anything else → `Err` (R16-S4 fail-CLOSED). The boot path
+    ///   in `AppState::from_config` propagates the error, refusing
+    ///   to start with an ambiguous feature-flag value. Mirrors the
+    ///   R15-S1 / A1-FOLLOWUP AEAD pattern: misconfig is a config
+    ///   bug, not a silent papering-over.
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var("SANDBOX_WAKE_RESPONSE_MODE").as_deref() {
+            Ok("async") => Ok(Self::Async),
+            Ok("sync") | Ok("") | Err(_) => Ok(Self::Sync),
+            Ok(other) => Err(format!(
+                "SANDBOX_WAKE_RESPONSE_MODE={other:?} not recognized; \
+                 expected one of: sync, async, \"\" (empty)"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::Async => "async",
+        }
+    }
+
+    pub fn is_async(self) -> bool {
+        matches!(self, Self::Async)
+    }
+}
+
+/// Configuration knobs for the C-7-LT wake-job lifecycle. All
+/// fields are resolved once at boot from env vars and stored on
+/// `AppState`; the controller does not support runtime reload (the
+/// flag is structural — flipping it mid-flight would strand
+/// in-flight wakes between contracts).
+#[derive(Debug, Clone, Copy)]
+pub struct WakeLifecycleConfig {
+    /// Retention period for terminal wake_jobs rows. The GC sweep
+    /// (`sweep::run_wake_jobs_gc_once`) deletes terminal
+    /// (`ok`/`failed`) rows whose `updated_at` is older than this.
+    ///
+    /// **Minimum**: must exceed the client's max polling interval —
+    /// otherwise a client that observes a row terminal-ok at T and
+    /// re-polls at T + retention sees a 404 wake_not_found before
+    /// it gets to read the final response. 5 min is the default;
+    /// dev / test can set lower via `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`.
+    ///
+    /// Env: `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`. Default 300 s
+    /// (5 min). Values < 1 s are rejected (would race the client's
+    /// first poll).
+    pub wake_jobs_gc_retention_secs: u64,
+
+    /// R19-C1 takeover sweep threshold. The takeover sweep
+    /// (`sweep::run_wake_jobs_takeover_once`) claims non-terminal
+    /// rows whose `lessee_updated_at` is older than this — those
+    /// rows lost their controller mid-wake.
+    ///
+    /// **Minimum**: must comfortably exceed the longest single state
+    /// transition's wall-time (the wake state machine bumps
+    /// `lessee_updated_at` on every transition; a too-tight threshold
+    /// would steal in-flight rows from a still-progressing
+    /// controller). The wake ladder's worst-case is bounded by the
+    /// CH-restore + livez-poll + clock-resync + register stages,
+    /// each capped at tens of seconds. 60 s is the floor that
+    /// matches the documented agent_livez_timeout (30 s) +
+    /// host_fence (30 s) + a safety margin.
+    ///
+    /// Env: `SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS`.
+    /// Default 60 s. Values < `MIN_TAKEOVER_THRESHOLD_SECS` rejected
+    /// at boot.
+    pub takeover_threshold_secs: u64,
+}
+
+impl WakeLifecycleConfig {
+    pub const DEFAULT_GC_RETENTION_SECS: u64 = 300;
+    pub const MIN_GC_RETENTION_SECS: u64 = 1;
+    /// R19-C1 default takeover threshold: 60 s. A wake whose lessee
+    /// hasn't bumped `lessee_updated_at` in 60 s is presumed
+    /// abandoned (the wake ladder's longest single-stage timeout —
+    /// the agent /livez poll — is 30 s; doubling that gives one
+    /// safety-margin step on either side).
+    pub const DEFAULT_TAKEOVER_THRESHOLD_SECS: u64 = 60;
+    /// R19-C1 minimum takeover threshold: 30 s. Below this the
+    /// in-flight CH-restore / livez-poll stages could race a
+    /// healthy controller and steal its row. Boot refuses to start
+    /// with a value below this floor.
+    pub const MIN_TAKEOVER_THRESHOLD_SECS: u64 = 30;
+
+    /// Resolve from env. Unset → defaults; unparseable / out-of-
+    /// range → `Err` (boot refuses to start).
+    pub fn from_env() -> Result<Self, String> {
+        let retention = match std::env::var("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS") {
+            Ok(s) if !s.trim().is_empty() => {
+                let n: u64 = s.trim().parse().map_err(|e| {
+                    format!(
+                        "SANDBOX_WAKE_JOBS_GC_RETENTION_SECS={s:?}: parse: {e}"
+                    )
+                })?;
+                if n < Self::MIN_GC_RETENTION_SECS {
+                    return Err(format!(
+                        "SANDBOX_WAKE_JOBS_GC_RETENTION_SECS={n} \
+                         must be >= {} (the minimum exceeds the client's \
+                         max polling interval; a smaller value races \
+                         the client's first post-terminal poll)",
+                        Self::MIN_GC_RETENTION_SECS
+                    ));
+                }
+                n
+            }
+            _ => Self::DEFAULT_GC_RETENTION_SECS,
+        };
+        let takeover = match std::env::var("SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS") {
+            Ok(s) if !s.trim().is_empty() => {
+                let n: u64 = s.trim().parse().map_err(|e| {
+                    format!(
+                        "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS={s:?}: parse: {e}"
+                    )
+                })?;
+                if n < Self::MIN_TAKEOVER_THRESHOLD_SECS {
+                    return Err(format!(
+                        "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS={n} \
+                         must be >= {} (below this the takeover sweep \
+                         could steal rows from a healthy mid-flight \
+                         wake — the worst single-stage timeout in the \
+                         wake ladder is ~30s)",
+                        Self::MIN_TAKEOVER_THRESHOLD_SECS
+                    ));
+                }
+                n
+            }
+            _ => Self::DEFAULT_TAKEOVER_THRESHOLD_SECS,
+        };
+        Ok(Self {
+            wake_jobs_gc_retention_secs: retention,
+            takeover_threshold_secs: takeover,
+        })
+    }
+}
+
+impl Default for WakeLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            wake_jobs_gc_retention_secs: Self::DEFAULT_GC_RETENTION_SECS,
+            takeover_threshold_secs: Self::DEFAULT_TAKEOVER_THRESHOLD_SECS,
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod wake_response_mode_tests {
+    use super::*;
+
+    /// Test fixture: ENV mutation requires a serializing lock because
+    /// `std::env::set_var` is process-global. Reuse a local mutex.
+    /// Mirrors the `ENV_LOCK` / `with_env_clean` pattern in
+    /// `crate::db::tests` (which also relies on `#[allow(unsafe_code)]`
+    /// because `std::env::{set,remove}_var` is documented as unsafe in
+    /// the 2024-edition stdlib).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK serializes env mutation across this module's
+        // tests; no other concurrent reader of this specific key exists
+        // at test time (the flag is read only at boot by AppState).
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        // SAFETY: same as above — ENV_LOCK still held; lock guard
+        // dropped at end of function.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn default_when_unset() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", None, || {
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Sync
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_sync() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("sync"), || {
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Sync
+            );
+        });
+    }
+
+    #[test]
+    fn explicit_async() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("async"), || {
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Async
+            );
+            assert!(WakeResponseMode::Async.is_async());
+            assert!(!WakeResponseMode::Sync.is_async());
+            assert_eq!(WakeResponseMode::Async.as_str(), "async");
+            assert_eq!(WakeResponseMode::Sync.as_str(), "sync");
+        });
+    }
+
+    #[test]
+    fn empty_defaults_to_sync() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some(""), || {
+            assert_eq!(
+                WakeResponseMode::from_env().unwrap(),
+                WakeResponseMode::Sync
+            );
+        });
+    }
+
+    /// R16-S4: unrecognised values fail-CLOSED. The previous
+    /// contract (silent fallback to Sync) was a config-bug-papering
+    /// hazard; mirrors R15-S1's AEAD fail-CLOSED.
+    #[test]
+    fn unrecognised_value_fails_closed() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("polling"), || {
+            let err = WakeResponseMode::from_env().expect_err(
+                "unrecognised value must return Err, not silently default",
+            );
+            assert!(
+                err.contains("polling"),
+                "error must mention the offending value; got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn unrecognised_uppercase_async_fails_closed() {
+        with_env("SANDBOX_WAKE_RESPONSE_MODE", Some("ASYNC"), || {
+            let err = WakeResponseMode::from_env()
+                .expect_err("ASYNC (uppercase) must reject");
+            assert!(err.contains("ASYNC"));
+        });
+    }
+
+    #[test]
+    fn unrecognised_truthy_strings_fail_closed() {
+        for v in ["1", "true", "on", "yes"] {
+            with_env("SANDBOX_WAKE_RESPONSE_MODE", Some(v), || {
+                assert!(
+                    WakeResponseMode::from_env().is_err(),
+                    "value {v:?} must NOT silently map to Sync or Async"
+                );
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod wake_lifecycle_config_tests {
+    use super::*;
+
+    /// Distinct ENV_LOCK per-key (the R12-S1 carry — codified by
+    /// R16-S3-b). This test module touches only
+    /// `SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: ENV_LOCK serialises this module's env mutations.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        f();
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn default_retention_when_unset() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", None, || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.wake_jobs_gc_retention_secs,
+                WakeLifecycleConfig::DEFAULT_GC_RETENTION_SECS
+            );
+            assert_eq!(cfg.wake_jobs_gc_retention_secs, 300);
+        });
+    }
+
+    #[test]
+    fn explicit_retention_value_accepted() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some("600"), || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(cfg.wake_jobs_gc_retention_secs, 600);
+        });
+    }
+
+    #[test]
+    fn empty_retention_falls_through_to_default() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some(""), || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.wake_jobs_gc_retention_secs,
+                WakeLifecycleConfig::DEFAULT_GC_RETENTION_SECS
+            );
+        });
+    }
+
+    #[test]
+    fn unparseable_retention_rejected() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some("five"), || {
+            let err = WakeLifecycleConfig::from_env()
+                .expect_err("garbage value must fail-closed");
+            assert!(err.contains("five"), "error must mention value: {err}");
+        });
+    }
+
+    #[test]
+    fn zero_retention_rejected() {
+        with_env("SANDBOX_WAKE_JOBS_GC_RETENTION_SECS", Some("0"), || {
+            let err = WakeLifecycleConfig::from_env().expect_err("0 < minimum");
+            assert!(err.contains("minimum") || err.contains("polling"));
+        });
+    }
+
+    #[test]
+    fn default_struct_matches_env_default() {
+        // Confirms the `Default` impl agrees with the env-default
+        // path (so callers that use `WakeLifecycleConfig::default()`
+        // get the same retention as the env-unset path).
+        let d = WakeLifecycleConfig::default();
+        assert_eq!(d.wake_jobs_gc_retention_secs, 300);
+        // R19-C1: takeover threshold default matches the env-default
+        // path too.
+        assert_eq!(d.takeover_threshold_secs, 60);
+    }
+
+    // ─── R19-C1: takeover_threshold_secs env parsing ──────────────
+
+    #[test]
+    fn default_takeover_threshold_when_unset() {
+        with_env("SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS", None, || {
+            let cfg = WakeLifecycleConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.takeover_threshold_secs,
+                WakeLifecycleConfig::DEFAULT_TAKEOVER_THRESHOLD_SECS
+            );
+            assert_eq!(cfg.takeover_threshold_secs, 60);
+        });
+    }
+
+    #[test]
+    fn explicit_takeover_threshold_accepted() {
+        with_env(
+            "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS",
+            Some("120"),
+            || {
+                let cfg = WakeLifecycleConfig::from_env().unwrap();
+                assert_eq!(cfg.takeover_threshold_secs, 120);
+            },
+        );
+    }
+
+    #[test]
+    fn takeover_threshold_below_minimum_rejected() {
+        with_env(
+            "SANDBOX_WAKE_JOBS_TAKEOVER_THRESHOLD_SECS",
+            Some("10"),
+            || {
+                let err = WakeLifecycleConfig::from_env()
+                    .expect_err("10s threshold must fail (< MIN)");
+                assert!(
+                    err.contains("30") || err.contains("ladder"),
+                    "error must mention the floor or rationale; got: {err}"
+                );
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,7 +1472,6 @@ mod tests {
         NomadCHConfig {
             nomad_addr: "http://127.0.0.1:4646".into(),
             datacenter: "dc1".into(),
-            wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
             runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
             host_state_dir: PathBuf::from("/var/zeroship/ch"),
             user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
@@ -870,6 +1482,8 @@ mod tests {
             host_fence_timeout_secs: 30,
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
+            vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+            nomad_stop_concurrency: 16,     // r30-A1: prod default
         }
     }
 
@@ -916,6 +1530,115 @@ mod tests {
         cfg.nomad_addr = "127.0.0.1:4646".into();
         let err = cfg.validate().expect_err("must reject");
         assert!(err.contains("NOMAD_ADDR"), "{err}");
+    }
+
+    // ─── r27-S1 Guard A: nomad_addr loopback enforcement ──────────────
+
+    /// Canonical IPv4 loopback. The base fixture already uses this
+    /// shape, so a passing fixture implies acceptance, but pin it
+    /// explicitly so a refactor that flips the default doesn't
+    /// silently regress the boot-time gate.
+    #[test]
+    fn nomad_addr_loopback_127001_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.1:4646".into();
+        cfg.validate().expect("127.0.0.1 must be accepted");
+    }
+
+    /// Any IPv4 in 127.0.0.0/8 — operators sometimes bind agents on
+    /// alternate loopback aliases (e.g. 127.0.0.2) for multi-agent
+    /// testbeds. `is_loopback()` covers the full /8 per RFC 1122.
+    #[test]
+    fn nomad_addr_loopback_127_x_x_x_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.2:4646".into();
+        cfg.validate().expect("127.0.0.2 must be accepted (RFC 1122 /8)");
+    }
+
+    /// IPv6 loopback `::1` in bracketed form per RFC 3986 § 3.2.2.
+    #[test]
+    fn nomad_addr_loopback_ipv6_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://[::1]:4646".into();
+        cfg.validate().expect("[::1] must be accepted");
+    }
+
+    /// `localhost` is the documented operator-friendly default; we
+    /// accept it without `getaddrinfo` (see fn rustdoc for why).
+    #[test]
+    fn nomad_addr_localhost_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://localhost:4646".into();
+        cfg.validate().expect("localhost must be accepted");
+    }
+
+    /// Mixed-case `LocalHost` — operators paste from various sources;
+    /// the comparison is ASCII-case-insensitive.
+    #[test]
+    fn nomad_addr_localhost_mixed_case_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://LocalHost:4646".into();
+        cfg.validate().expect("LocalHost must be accepted");
+    }
+
+    /// Remote DNS name — the main misconfig vector. Refuse boot
+    /// rather than emit Constraints pinning to a remote node_id.
+    #[test]
+    fn nomad_addr_remote_rejected() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "https://nomad.example.com:4646".into();
+        let err = cfg.validate().expect_err("remote DNS must be rejected");
+        assert!(
+            err.contains("not a loopback") || err.contains("not loopback"),
+            "expected loopback-refusal text; got: {err}",
+        );
+        assert!(err.contains("r27-S1"), "expected r27-S1 marker; got: {err}");
+    }
+
+    /// IPv4 in private RFC1918 range but NOT loopback. A common
+    /// "I'll just point at the LAN Nomad" misconfig.
+    #[test]
+    fn nomad_addr_ipv4_non_loopback_rejected() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://10.0.0.5:4646".into();
+        let err = cfg.validate().expect_err("10.0.0.5 must be rejected");
+        assert!(
+            err.contains("not loopback") || err.contains("not a loopback"),
+            "expected loopback-refusal text; got: {err}",
+        );
+    }
+
+    /// IPv6 non-loopback (a public address with the documentation
+    /// prefix 2001:db8::/32). Bracket-stripping must extract the
+    /// host correctly so the IP parse runs against `2001:db8::1`,
+    /// not against `[2001:db8::1]:4646`.
+    #[test]
+    fn nomad_addr_ipv6_non_loopback_rejected() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://[2001:db8::1]:4646".into();
+        let err = cfg.validate().expect_err("2001:db8::1 must be rejected");
+        assert!(
+            err.contains("not loopback") || err.contains("not a loopback"),
+            "expected loopback-refusal text; got: {err}",
+        );
+    }
+
+    /// Loopback host with NO port and NO path — minimal valid shape.
+    /// Path-extraction must terminate the host at end-of-string.
+    #[test]
+    fn nomad_addr_loopback_no_port_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.1".into();
+        cfg.validate().expect("127.0.0.1 (no port) must be accepted");
+    }
+
+    /// Loopback host with a trailing path — the host body ends at
+    /// the first `/`, NOT at end-of-string.
+    #[test]
+    fn nomad_addr_loopback_with_path_accepted() {
+        let mut cfg = base_nomad_cfg();
+        cfg.nomad_addr = "http://127.0.0.1:4646/v1".into();
+        cfg.validate().expect("loopback + path must be accepted");
     }
 
     #[test]

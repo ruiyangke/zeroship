@@ -11,6 +11,8 @@
 //! each get their own sandbox — see the storage design.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -823,13 +825,201 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].token_id, "new");
     }
+
+    /// R29-P1 fixer pin: the snap-idle-gc per-tick stops MUST overlap
+    /// at bounded fan-out, not serialize. Pre-fix the loop was
+    /// `for id in to_kill { state.backend.stop(id).await; ... }` —
+    /// after R29-C1 added 5 s of `release_vm_index_after.await` to
+    /// every `stop_inner`, that meant N × 5 s wall per tick. With
+    /// N=12 expired sandboxes (the smoke-r9 stress shape) the GC
+    /// fell behind its 60 s tick interval, vm_index slots stayed
+    /// held, and the controller starved at boot — stress-r9-retry-5
+    /// = 0/400 CREATE with `vm-index allocator exhausted`.
+    ///
+    /// The cap-8 parallel design clears 10 expired sandboxes with a
+    /// 2 s artificial release delay in ~2 s (one full chunk) rather
+    /// than the 20 s a serial loop would take. We assert wall < 4 s
+    /// — a generous bound that still catches any regression to
+    /// serial (which would clock >18 s even on a hot CI runner).
+    ///
+    /// Mirrors the `sweep::sweep_concurrency_is_actually_concurrent`
+    /// pattern: the SleepingGcStopper records `max_in_flight` so the
+    /// concurrency level itself is asserted (== cap), not just the
+    /// wall-time which is sensitive to CI load.
+    #[compio::test]
+    async fn gc_stop_chunked_is_actually_concurrent() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct SleepingGcStopper {
+            per_stop: Duration,
+            in_flight: AtomicUsize,
+            max_in_flight: AtomicUsize,
+        }
+        impl GcStopper for SleepingGcStopper {
+            fn stop_one<'a>(
+                &'a self,
+                _id: Uuid,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>> {
+                Box::pin(async move {
+                    let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+                    compio::time::sleep(self.per_stop).await;
+                    self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        let per_stop = Duration::from_secs(2);
+        let n = 10usize;
+        let cap = GC_STOP_CONCURRENCY; // 8 — production value.
+        let stopper = SleepingGcStopper {
+            per_stop,
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+        };
+        let ids: Vec<Uuid> = (0..n).map(|_| Uuid::now_v7()).collect();
+
+        let start = std::time::Instant::now();
+        gc_stop_chunked(&ids, &stopper, cap).await;
+        let elapsed = start.elapsed();
+
+        let max_overlap = stopper.max_in_flight.load(Ordering::SeqCst);
+        eprintln!(
+            "gc_stop_chunked_is_actually_concurrent: elapsed={elapsed:?} \
+             max_in_flight={max_overlap} (cap={cap}, n={n}, per_stop={per_stop:?}, \
+             serial_floor={:?}, ideal={:?})",
+            per_stop * n as u32,
+            per_stop * 2, // two chunks (cap=8, n=10) ⇒ 2 × per_stop ideal.
+        );
+
+        // (a) Wall-time bound. Serial would be n * per_stop = 20 s;
+        // parallel at cap=8 over 10 ids = two chunks of (8, 2) at
+        // per_stop=2 s each ≈ 4 s ideal. The < 5 s bound gives ~25 %
+        // headroom over the ideal for scheduler jitter on loaded CI
+        // runners while still failing fast on any serial regression
+        // (which would clock ≥ 18 s even with a generous floor).
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "gc_stop_chunked must be parallel: elapsed={elapsed:?} \
+             (cap={cap}, n={n}, per_stop={per_stop:?}, serial would be {:?})",
+            per_stop * n as u32,
+        );
+        // (b) Semantic check — under any sane scheduler all `cap`
+        // futures of the first chunk reach the sleep before any
+        // wakes, so max_in_flight == cap. A serial regression would
+        // top out at 1.
+        assert_eq!(
+            max_overlap, cap,
+            "gc_stop_chunked must overlap within a chunk: \
+             max_in_flight={max_overlap} != cap={cap} \
+             (1 = serial regression; <cap = partial overlap)"
+        );
+    }
+}
+
+/// R29-P1 (bounded-concurrency cap for the snap-idle-gc loop): how many
+/// `backend.stop(id)` calls may overlap inside a single 60-s tick. The
+/// R29-C1 class-fix made `stop_inner` block on `release_vm_index_after`
+/// (+5 s per stop); under stress-r9-retry-5 the per-tick serial loop
+/// took N × 5 s wall to clear N expired sandboxes, growing the GC
+/// backlog faster than it drained and starving the vm_index allocator.
+/// Parallelising at this cap shrinks the wall to ⌈N / cap⌉ × 5 s
+/// without unbounded fan-out against Nomad (each stop drives a
+/// `/shutdown` request — too many at once would just trade one
+/// starvation for another).
+const GC_STOP_CONCURRENCY: usize = 8;
+
+/// Per-id action invoked by [`gc_stop_chunked`] for one expired
+/// sandbox. Trait shape mirrors `sweep::IdleSnapshotter` so the
+/// chunked-concurrency helper has a single uniform interface and the
+/// unit test can substitute a recording stub without standing up a
+/// fake `Backend` enum variant. Internal — production wires
+/// [`AppStateGcStopper`] below.
+trait GcStopper {
+    fn stop_one<'a>(
+        &'a self,
+        id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>>;
+}
+
+/// Production [`GcStopper`] — issues `state.backend.stop(id)` then
+/// removes the row from `state.sandboxes`. Both halves are wrapped
+/// (backend errors become a best-effort log; the registry remove is
+/// `catch_unwind`-guarded against a poisoned lock) so one bad row
+/// can't kill the loop.
+struct AppStateGcStopper {
+    state: Arc<AppState>,
+}
+
+impl GcStopper for AppStateGcStopper {
+    fn stop_one<'a>(
+        &'a self,
+        id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            if let Some(info) = state.sandboxes.get(&id) {
+                tracing::info!(
+                    sandbox_id = %info.sandbox_id,
+                    user_id = %info.user_id,
+                    project_id = %info.project_id,
+                    backend = %info.backend,
+                    "sandbox gc: stopping idle sandbox"
+                );
+            }
+            // Don't unwrap-or-panic — propagate the failure as a log
+            // line and move on. The registry remove below is also
+            // wrapped in case a poisoned lock would otherwise kill the
+            // loop.
+            if let Err(e) = state.backend.stop(id).await {
+                tracing::warn!(
+                    sandbox_id = %id,
+                    error = %e,
+                    "sandbox gc: backend.stop failed"
+                );
+            }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.sandboxes.remove(&id);
+            }));
+            Ok(())
+        })
+    }
+}
+
+/// Drive a batch of expired-sandbox stops in chunks of `cap`,
+/// running each chunk's `stop_one` futures through
+/// `futures::future::join_all` (single compio task — no spawn, no
+/// `Send` bound on the per-id futures). Chunks serialize so peak
+/// parallel work is bounded at `cap` regardless of batch size.
+///
+/// Mirrors `sweep::snapshot_rows_chunked` in shape; same rationale
+/// (cap × ~5 s wall instead of N × 5 s wall when each stop blocks
+/// on `release_vm_index_after`). One stop failing does NOT abort the
+/// chunk — the `GcStopper::stop_one` impl already wraps every error
+/// path as a log line + `Ok(())`.
+async fn gc_stop_chunked(ids: &[Uuid], stopper: &dyn GcStopper, cap: usize) {
+    let cap = cap.max(1);
+    for chunk in ids.chunks(cap) {
+        let _ = futures::future::join_all(chunk.iter().map(|id| stopper.stop_one(*id))).await;
+    }
 }
 
 pub fn start_idle_gc(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    // R16-I1 (R14-I2 sibling-C-6): dedicated OS thread + private compio
+    // runtime. The inner `state.backend.stop(id).await` issues a Nomad
+    // teardown (multi-second `/shutdown` await against a possibly
+    // half-dead agent — the same C-6 fingerprint as the snapshot teardown
+    // already migrated in admin_handlers). On the shared ntex worker
+    // runtime that starves sibling wake handlers; isolating the loop
+    // gives it its own runtime and removes the cross-task contention.
+    crate::detach::detach_isolated("snap-idle-gc", move || async move {
         let interval = Duration::from_secs(60);
         let idle = Duration::from_secs(state.config.idle_timeout_secs);
         let max_life = Duration::from_secs(state.config.max_lifetime_secs);
+        let stopper = AppStateGcStopper {
+            state: state.clone(),
+        };
         loop {
             compio::time::sleep(interval).await;
             // Sync portion (lock walk) wrapped for panic safety.
@@ -844,28 +1034,15 @@ pub fn start_idle_gc(state: Arc<AppState>) {
                     continue;
                 }
             };
-            for id in to_kill {
-                if let Some(info) = state.sandboxes.get(&id) {
-                    tracing::info!(
-                        sandbox_id = %info.sandbox_id,
-                        user_id = %info.user_id,
-                        project_id = %info.project_id,
-                        backend = %info.backend,
-                        "sandbox gc: stopping idle sandbox"
-                    );
-                }
-                // Don't unwrap-or-panic — propagate the failure as a
-                // log line and move on. The registry remove below
-                // is also wrapped in case a poisoned lock would
-                // otherwise kill the loop.
-                if let Err(e) = state.backend.stop(id).await {
-                    tracing::warn!(sandbox_id = %id, error = %e, "sandbox gc: backend.stop failed");
-                }
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    state.sandboxes.remove(&id);
-                }));
-            }
+            // R29-P1: parallelise the per-tick stops at bounded fan-out.
+            // Pre-R29-P1 this loop was strictly serial; combined with
+            // R29-C1's added 5 s `release_vm_index_after.await` inside
+            // `stop_inner`, N expired sandboxes took N × 5 s wall to
+            // clear, equal to the 60 s tick interval at N≈12. The vm_index
+            // slots stayed held → controller boot hit allocator exhaustion
+            // (stress-r9-retry-5: 0/400 CREATE, all `vm-index allocator
+            // exhausted (floor=1, ceil=12)`).
+            gc_stop_chunked(&to_kill, &stopper, GC_STOP_CONCURRENCY).await;
         }
-    })
-    .detach();
+    });
 }

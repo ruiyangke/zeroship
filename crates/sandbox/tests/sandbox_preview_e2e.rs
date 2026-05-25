@@ -121,7 +121,7 @@ fn make_state(
     sk: SigningKey,
 ) -> (Arc<zeroship_sandbox::AppState>, Uuid) {
     let cfg = make_cfg(token);
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     let sandbox_id = Uuid::now_v7();
     if let Backend::NomadCh(b) = &backend {
         b._test_inject_sandbox(

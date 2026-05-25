@@ -52,8 +52,21 @@ fn make_state_with_admin_token(
     database: Option<Arc<Database>>,
     admin_token: Option<String>,
 ) -> Arc<zeroship_sandbox::AppState> {
+    make_state_with_admin_tokens(database, admin_token, None)
+}
+
+/// T1: build an AppState with both the full and the read-only admin
+/// bearers populated. Either argument may be `None` to leave the
+/// corresponding field at its `new_fixture` default. Mirrors the
+/// shape of [`make_state_with_admin_token`] (which delegates here
+/// with `admin_ro_token = None`).
+fn make_state_with_admin_tokens(
+    database: Option<Arc<Database>>,
+    admin_token: Option<String>,
+    admin_ro_token: Option<String>,
+) -> Arc<zeroship_sandbox::AppState> {
     let cfg = make_cfg("ignored-creator-token");
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     // A5: `admin_token` is `pub(crate)`; out-of-crate construction
     // goes through `AppState::new_fixture` + the `with_admin_token`
     // builder (which rejects empty strings — the post-Round-4
@@ -61,6 +74,7 @@ fn make_state_with_admin_token(
     // A6b: `database` is `pub(crate)`; set via `with_database` instead
     // of struct-field assignment. `None` skips the builder entirely
     // so the field stays at its `new_fixture` default.
+    // T1: `admin_ro_token` is `pub(crate)`; set via `with_admin_ro_token`.
     let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
     if let Some(db) = database {
         state = state.with_database(db);
@@ -68,6 +82,9 @@ fn make_state_with_admin_token(
     let state = state
         .with_admin_token(admin_token)
         .expect("admin_token must be non-empty when Some");
+    let state = state
+        .with_admin_ro_token(admin_ro_token)
+        .expect("admin_ro_token must be non-empty when Some");
     Arc::new(state)
 }
 
@@ -118,6 +135,12 @@ macro_rules! make_app {
                 .service(
                     web::resource("/admin/sandboxes/{id}/wake")
                         .route(web::post().to(admin_handlers::wake_sandbox)),
+                )
+                // R26-API2: Prometheus text exporter mounted at `/metrics`
+                // (root, mirroring `main.rs`); auth is `AdminRole::ReadOnly`.
+                .service(
+                    web::resource("/metrics")
+                        .route(web::get().to(admin_handlers::metrics_endpoint)),
                 ),
         )
         .await
@@ -733,7 +756,7 @@ fn make_state_with_snapshot_wiring(
 ) -> Arc<zeroship_sandbox::AppState> {
     let mut cfg = make_cfg("ignored-creator-token");
     cfg.snapshot_enabled = true;
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     // Build the snapshot trio identically to AppState::from_config's
     // production path, but with an in-memory L1 root so the test
     // doesn't litter `/var/zeroship`.
@@ -823,4 +846,579 @@ async fn snapshot_endpoint_returns_501_when_disabled() {
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// T1: sandbox_admin_ro role — per-endpoint role gate.
+//
+// The role-gate authorization matrix (see `admin_handlers::AdminRole`):
+//
+//   - GET endpoints accept either bearer (Full ⊇ ReadOnly).
+//   - POST/DELETE/snapshot/wake/cold-boot REQUIRE Full; the RO bearer
+//     returns 403 `insufficient_role` (distinct from 401 so operator
+//     tooling can branch on the difference).
+//   - GET endpoints 503 `admin_api_disabled` when BOTH bearers are
+//     None; POST endpoints 503 when ONLY Full is missing (RO alone
+//     can't authorize a destructive call).
+//
+// These tests pin every cell. The pg-gated round-trip tests stay
+// unchanged — they assert response shape post-auth, not auth itself.
+// ────────────────────────────────────────────────────────────────────
+
+const T1_FULL_BEARER: &str = "t1-full-bearer-aaaaaaaaaaaaaaaaaaaa";
+const T1_RO_BEARER: &str = "t1-ro-bearer-bbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[ntex::test]
+async fn admin_ro_bearer_rejected_on_write_endpoint_with_403() {
+    // POST .../snapshot is a destructive endpoint. The RO bearer is a
+    // valid admin credential but not authorized for writes — must
+    // 403 `insufficient_role`, NOT 401 (which would imply unknown
+    // bearer). The 403/401 split lets operator tooling distinguish
+    // "wrong token" from "right token, wrong role".
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "RO bearer on write endpoint must yield 403 (not 401, not 200)"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "insufficient_role");
+    assert!(
+        v["message"].is_string(),
+        "§10.0 envelope must carry a message field"
+    );
+}
+
+#[ntex::test]
+async fn admin_ro_bearer_accepted_on_read_endpoint() {
+    // GET /admin/sandboxes is a read endpoint. The RO bearer is
+    // accepted; with `database = None` the handler returns 503
+    // `pg_disabled` (a post-auth concern, NOT 401/403/admin_api_disabled).
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    // Auth passed — handler reached the pg-pool-open step which
+    // 503's with `pg_disabled` (distinguishable on the wire from
+    // 401 / 403 / `admin_api_disabled` 503).
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "RO bearer on read endpoint must pass auth; got {}",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["error"], "pg_disabled",
+        "503 here is the post-auth pg-disabled shape, not admin_api_disabled"
+    );
+}
+
+#[ntex::test]
+async fn admin_full_bearer_accepted_on_read_endpoint() {
+    // Full ⊇ ReadOnly — the full bearer also satisfies a read
+    // endpoint's gate. Same post-auth 503 `pg_disabled` shape.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", &format!("Bearer {T1_FULL_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "pg_disabled");
+}
+
+#[ntex::test]
+async fn admin_full_bearer_accepted_on_write_endpoint() {
+    // Full bearer on a destructive endpoint passes auth. Without
+    // snapshot_enabled the handler returns 501 `feature_disabled`
+    // post-auth (distinguishable from 401/403).
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {T1_FULL_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "Full bearer on write endpoint must pass auth (snapshot_enabled=false → 501); got {}",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "feature_disabled");
+}
+
+#[ntex::test]
+async fn admin_unknown_bearer_rejected_with_401() {
+    // A bearer matching NEITHER configured token must 401 — same
+    // contract as the legacy `admin_check`. We test against both
+    // endpoint kinds (read + write) to confirm symmetry.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", "Bearer unknown-bearer-cccccccccc")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unknown bearer on read endpoint must yield 401"
+    );
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", "Bearer unknown-bearer-cccccccccc")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unknown bearer on write endpoint must yield 401 (not 403)"
+    );
+}
+
+#[ntex::test]
+async fn admin_read_endpoint_503_when_no_tokens_configured() {
+    // Both bearers `None` → read endpoint 503's `admin_api_disabled`.
+    // Distinct from `pg_disabled` because the role gate fires before
+    // the pg-pool open.
+    let state = make_state_with_admin_tokens(None, None, None);
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", "Bearer anything-at-all-aaaaaaaaaa")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["error"], "admin_api_disabled",
+        "no tokens configured → admin_api_disabled (not pg_disabled)"
+    );
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("SANDBOX_ADMIN_TOKEN_PATH"),
+        "503 message must point operators at the env var; got {}",
+        v["message"]
+    );
+}
+
+#[ntex::test]
+async fn admin_write_endpoint_503_when_only_ro_configured() {
+    // RO configured but Full is None → POST/destructive endpoints
+    // 503 `admin_api_disabled`. The RO bearer can authorize reads
+    // but the destructive endpoints have no candidate token to
+    // accept, so the role gate fires BEFORE the bearer compare.
+    let state = make_state_with_admin_tokens(
+        None,
+        None,
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    // Sanity: the RO bearer DOES authorize reads in this shape.
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "RO-only deploy: read endpoint must pass auth (post-auth 503 pg_disabled)"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "pg_disabled", "read endpoint reached post-auth");
+
+    // Destructive endpoint with the SAME RO bearer must 503
+    // admin_api_disabled — the Full slot is empty so even a
+    // matching presented bearer can't authorize a write.
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "RO-only deploy: write endpoint must 503 admin_api_disabled"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "admin_api_disabled");
+}
+
+#[ntex::test]
+async fn admin_ro_bearer_rejected_on_delete_user_with_403() {
+    // Belt-and-suspenders: DELETE /admin/users/{id} is the other
+    // canonical destructive endpoint. Same 403 contract as snapshot.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let uid = zeroship_core::typed_id::generate("usr");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::DELETE)
+        .uri(&format!("/admin/users/{uid}"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "RO bearer on DELETE must yield 403"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "insufficient_role");
+}
+
+#[ntex::test]
+async fn admin_ro_bearer_rejected_on_export_with_403() {
+    // T1 reclassification: GET /admin/users/{id}/export is `Full`
+    // (NOT `ReadOnly`) because it surfaces every event ever recorded
+    // for the user — same blast radius as a leak. Verifies the
+    // promotion sticks: RO bearer 403's.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let uid = zeroship_core::typed_id::generate("usr");
+    let req = test::TestRequest::default()
+        .uri(&format!("/admin/users/{uid}/export"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "GDPR export is reclassified Full (T1); RO bearer must 403"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "insufficient_role");
+}
+
+// ────────────────────────────────────────────────────────────────────
+// R26-API2 — GET /metrics (Prometheus text exporter)
+// ────────────────────────────────────────────────────────────────────
+
+#[ntex::test]
+async fn admin_ro_bearer_accepted_on_metrics() {
+    // R26-API2: GET /metrics is a read endpoint (operator scrape).
+    // The RO bearer is sufficient; the body is Prometheus text-exposition
+    // format starting with `# HELP`.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "RO bearer must authorize /metrics (got {})",
+        resp.status()
+    );
+    // Content-Type must be the Prometheus exposition hint scrapers expect.
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/plain"),
+        "Content-Type must be text/plain (version=...); got {ct}"
+    );
+    let body = test::read_body(resp).await;
+    let s = std::str::from_utf8(&body).expect("metrics body is utf-8");
+    assert!(
+        s.starts_with("# HELP "),
+        "Prometheus text body MUST start with `# HELP`; got:\n{s}"
+    );
+}
+
+#[ntex::test]
+async fn admin_full_bearer_accepted_on_metrics() {
+    // Full ⊇ ReadOnly — the full bearer also satisfies the /metrics gate.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_FULL_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[ntex::test]
+async fn unknown_bearer_rejected_on_metrics_with_401() {
+    // A bearer matching NEITHER configured token must 401 (NOT 403, NOT
+    // 503, NOT 200). The /metrics endpoint's role gate is identical to
+    // every other read endpoint's.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", "Bearer unknown-bearer-cccccccccc")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unknown bearer on /metrics must 401; got {}",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "unauthorized", "§10.0 envelope on 401");
+    assert!(
+        v["message"].is_string(),
+        "§10.0 envelope must carry a message field"
+    );
+}
+
+#[ntex::test]
+async fn no_bearer_rejected_on_metrics_with_401() {
+    // Missing `Authorization:` header → 401 (NOT 200 like Prometheus's
+    // open-by-default convention — see metrics_endpoint rustdoc for the
+    // posture rationale).
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "no bearer on /metrics must 401"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "unauthorized");
+}
+
+#[ntex::test]
+async fn metrics_503_when_no_admin_tokens_configured() {
+    // Composite-r1 #3: symmetric with `admin_503_with_correct_bearer_when_pg_disabled`
+    // for the `/admin/*` surface. The `/metrics` endpoint's role gate is
+    // `AdminRole::ReadOnly` — which `admin_check_required` resolves to 503
+    // `admin_api_disabled` when BOTH the full and the read-only bearers
+    // are absent (a single configured bearer is enough to satisfy the
+    // gate's role; both-absent is the only "no role possible" shape).
+    //
+    // Build AppState with `admin_token: None, admin_ro_token: None`,
+    // fire GET /metrics, assert 503 with §10.0 envelope
+    // `error: "admin_api_disabled"`.
+    let state = make_state_with_admin_tokens(None, None, None);
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no admin tokens configured must 503 on /metrics (got {})",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["error"], "admin_api_disabled",
+        "§10.0 envelope error code on the 'no tokens configured' shape"
+    );
+    assert!(
+        v["message"].is_string(),
+        "§10.0 envelope must carry a message field"
+    );
+}
+
+#[ntex::test]
+async fn metrics_body_contains_all_production_counters() {
+    // Every counter name promised by `crate::metrics_export::render` must
+    // appear in the response body. This is the route-level mirror of the
+    // unit test `render_emits_every_production_counter_name`; if a future
+    // refactor moves the rendering out of admin_handlers, this test will
+    // still catch a counter dropping off the wire.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = test::read_body(resp).await;
+    let s = std::str::from_utf8(&body).expect("utf-8 body");
+
+    for name in [
+        "sandbox_corrupt_id_total",
+        "sandbox_ha_clock_rewind_total",
+        "sandbox_ha_dead_hosts_observed_total",
+        "sandbox_ha_lost_leadership_total",
+        "sandbox_ha_takeover_corrupt_total",
+        "sandbox_ha_takeover_mismatched_total",
+        "sandbox_ha_takeover_orphan_total",
+        "sandbox_ha_takeover_total",
+        "sandbox_ha_takeover_unreachable_total",
+        "sandbox_nomad_node_id_lookup_failures_total",
+        "sandbox_vm_index_leaks_total",
+        "sandbox_wake_sync_uses_total",
+        "sandbox_wake_terminal_overwrite_blocked_total",
+        "sandbox_ha_heartbeat_lag_seconds",
+    ] {
+        assert!(
+            s.contains(name),
+            "/metrics body missing counter {name}; got:\n{s}"
+        );
+    }
+}
+
+#[ntex::test]
+async fn metrics_body_prometheus_format() {
+    // The body MUST be valid Prometheus text-exposition: each metric has
+    // a `# HELP ...` + `# TYPE ... counter|gauge` header and at least one
+    // value line. Spot-check a handful of metric names to keep the test
+    // robust to additions; the unit-test counterpart pins every name.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/metrics")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Cache-Control: no-store — the metrics body races forward; an
+    // intermediate cache stashing it would surface stale counters.
+    let cc = resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(cc, "no-store", "Cache-Control must be no-store; got {cc}");
+
+    let body = test::read_body(resp).await;
+    let s = std::str::from_utf8(&body).expect("utf-8 body");
+
+    // Counter blocks: HELP + TYPE counter + value line.
+    assert!(
+        s.contains("# HELP sandbox_ha_takeover_total "),
+        "missing HELP for takeover counter:\n{s}"
+    );
+    assert!(
+        s.contains("# TYPE sandbox_ha_takeover_total counter\n"),
+        "missing TYPE counter for takeover:\n{s}"
+    );
+    assert!(
+        s.contains("sandbox_ha_takeover_total{reason=\"lease_expiration\"} "),
+        "missing labelled value line for takeover:\n{s}"
+    );
+
+    // Gauge block: HELP + TYPE gauge + NaN-or-number value.
+    assert!(
+        s.contains("# TYPE sandbox_ha_heartbeat_lag_seconds gauge\n"),
+        "heartbeat-lag must be a gauge:\n{s}"
+    );
+
+    // Body MUST end with a newline (Prometheus parsers require this).
+    assert!(
+        s.ends_with('\n'),
+        "/metrics body must end with newline (Prometheus parser requirement)"
+    );
 }

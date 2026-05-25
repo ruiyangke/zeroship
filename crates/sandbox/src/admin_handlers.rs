@@ -110,54 +110,102 @@ fn constant_time_bearer_eq(presented: &[u8], expected: &[u8]) -> bool {
     p_digest.ct_eq(&e_digest).into()
 }
 
-/// Validates the admin bearer. Returns:
-///   - `Ok(())` when the request bears the configured admin token.
-///   - `Err(503)` when admin API is disabled (no `SANDBOX_ADMIN_TOKEN_PATH`).
-///   - `Err(401)` when the bearer is missing or wrong.
+/// Admin endpoint role gate. `Full` accepts only the production
+/// `sandbox_admin` bearer (`SANDBOX_ADMIN_TOKEN_PATH`); `ReadOnly`
+/// accepts EITHER bearer (Full ⊇ ReadOnly) and is mounted on the
+/// non-mutating read endpoints (T1).
 ///
-/// Reads from the boot-cached `state.admin_token` instead of
-/// stat()+read()'ing the file per request. That avoids slow-FS DoS
-/// amplification and ensures chmod/read failures fail at boot rather
-/// than on the auth path.
+/// Authorization matrix:
 ///
-/// Round-4 / IMPORTANT #2 + A5 (api-surface-2026-05-24-r1):
-/// defense-in-depth empty-token guard. The post-Round-4 footgun was
-/// that `AppState.admin_token` was a `pub` field — anyone could
-/// build `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
-/// and the constant-time compare against an empty
-/// `Authorization: Bearer ` presented bytes would PASS (silent
-/// unauthenticated admin access). A5 closed the front door by
-/// restricting the field to `pub(crate)` and routing all writes
-/// through `AppState::with_admin_token`, which rejects empty
-/// strings. The boot loader (`load_admin_token`) also rejects
-/// empty tokens loudly, so production never reaches the branch
-/// below. We KEEP this check as defense-in-depth for any future
-/// in-crate setter that bypasses the builder — treat empty
-/// `expected` as "no token configured" → 401.
-pub(crate) fn admin_check(
+/// | endpoint kind          | required        | RO bearer? | Full bearer? |
+/// |------------------------|-----------------|------------|--------------|
+/// | GET `/admin/sandboxes` | `ReadOnly`      | accepted   | accepted     |
+/// | GET `/admin/...`       | `ReadOnly`      | accepted   | accepted     |
+/// | POST/DELETE/snapshot   | `Full`          | rejected   | accepted     |
+///
+/// The matrix is enforced by [`admin_check_required`]; per-endpoint
+/// callers thread the right `AdminRole` literal in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdminRole {
+    /// Mutating endpoints (snapshot / wake / cold-boot / GDPR delete /
+    /// export). Only the `sandbox_admin` bearer is accepted.
+    Full,
+    /// Read endpoints (list, detail, hosts, share-list, poll-wake).
+    /// Either bearer is accepted; Full ⊇ ReadOnly.
+    ReadOnly,
+}
+
+/// Validates the admin bearer against the role required by the
+/// endpoint. Returns:
+///   - `Ok(())` when the request bears a bearer matching the role.
+///   - `Err(401 unauthorized)` when the bearer is missing or matches
+///     NEITHER configured token.
+///   - `Err(403 insufficient_role)` when the bearer matches the
+///     RO token but the endpoint requires `AdminRole::Full`.
+///   - `Err(503 admin_api_disabled)` when the endpoint's required
+///     role has zero configured tokens (Full requested + full=None,
+///     OR ReadOnly requested + both=None).
+///
+/// Reads from the boot-cached `state.admin_token` / `state.admin_ro_token`
+/// instead of stat()+read()'ing the file per request. That avoids slow-FS
+/// DoS amplification (bounded at 10k req/s) and ensures chmod/read failures
+/// fail at boot rather than fail-open on the auth path.
+///
+/// T1 (2026-05-25): both candidate tokens are checked unconditionally
+/// even when only one is configured, so the timing of the auth path
+/// doesn't reveal which bearer matched. The cost is a single extra
+/// SHA-256 of the (capped ~8 KiB) presented bytes per request — the
+/// admin endpoint is not a hot path. Defense-in-depth empty-token
+/// guards from Round-4 / IMPORTANT #2 stay: an empty configured token
+/// (post-A5 builders reject this, but the comparator itself doesn't
+/// special-case empty) is treated as "not configured" so the empty
+/// `Authorization: Bearer ` presented bytes can't silently pass.
+pub(crate) fn admin_check_required(
     req: &HttpRequest,
     state: &AppState,
+    required: AdminRole,
 ) -> Result<(), HttpResponse> {
-    use zeroize::Zeroizing;
-    let expected: &Zeroizing<String> = match state.admin_token.as_ref() {
-        Some(t) => t,
-        None => {
-            return Err(error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "admin_api_disabled",
-                "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH not configured)",
-            ));
+    // Step 1: load both candidate bearers. `None`/empty are mapped to
+    // `None` for the rest of the function so the "no token configured"
+    // distinction is centralised here. `Zeroizing<String>` derefs to
+    // `&str`; we grab `as_bytes()` for the constant-time compare.
+    let full: Option<&[u8]> = state
+        .admin_token
+        .as_deref()
+        .map(|s: &String| s.as_bytes())
+        .filter(|b: &&[u8]| !b.is_empty());
+    let ro: Option<&[u8]> = state
+        .admin_ro_token
+        .as_deref()
+        .map(|s: &String| s.as_bytes())
+        .filter(|b: &&[u8]| !b.is_empty());
+
+    // Step 2: 503 when the role can't possibly be satisfied.
+    //   - `Full` needs the full bearer configured.
+    //   - `ReadOnly` accepts EITHER bearer, so requires at least one.
+    match required {
+        AdminRole::Full => {
+            if full.is_none() {
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "admin_api_disabled",
+                    "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH not configured)",
+                ));
+            }
         }
-    };
-    let expected_bytes: &[u8] = expected.as_bytes();
-    // Defense-in-depth: empty configured token must never authenticate
-    // any request. Reject BEFORE the constant-time compare; we'd
-    // otherwise need the comparator itself to special-case empty
-    // input, and folding the check into admin_check keeps the
-    // comparator's invariant simple.
-    if expected_bytes.is_empty() {
-        return Err(unauthorized());
+        AdminRole::ReadOnly => {
+            if full.is_none() && ro.is_none() {
+                return Err(error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "admin_api_disabled",
+                    "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH and \
+                     SANDBOX_ADMIN_RO_TOKEN_PATH not configured)",
+                ));
+            }
+        }
     }
+
+    // Step 3: parse the bearer once.
     let header = req
         .headers()
         .get("authorization")
@@ -167,10 +215,53 @@ pub(crate) fn admin_check(
         .strip_prefix("Bearer ")
         .unwrap_or("")
         .as_bytes();
-    if constant_time_bearer_eq(presented, expected_bytes) {
-        Ok(())
-    } else {
-        Err(unauthorized())
+
+    // Step 4: compare against BOTH candidates unconditionally. Even
+    // when only one is configured, the other comparison is run against
+    // a fixed-size empty digest so the auth path's wall-time doesn't
+    // depend on which bearers exist. (The comparator is itself
+    // constant-time on its inputs; we're only equalising the
+    // "is_some/is_none" branch.)
+    let matches_full = match full {
+        Some(b) => constant_time_bearer_eq(presented, b),
+        None => {
+            // Hash anyway — discard the bool. The SHA-256 of presented
+            // is the only length-dependent work; running it on both
+            // paths means the request's wall-time is symmetric.
+            let _ = constant_time_bearer_eq(presented, b"");
+            false
+        }
+    };
+    let matches_ro = match ro {
+        Some(b) => constant_time_bearer_eq(presented, b),
+        None => {
+            let _ = constant_time_bearer_eq(presented, b"");
+            false
+        }
+    };
+
+    // Step 5: enforce the role.
+    match required {
+        AdminRole::Full => {
+            if matches_full {
+                Ok(())
+            } else if matches_ro {
+                // The bearer is a valid RO token, but the endpoint
+                // requires Full. 403, distinct from 401, so operator
+                // tooling can branch on the difference.
+                Err(insufficient_role())
+            } else {
+                Err(unauthorized())
+            }
+        }
+        AdminRole::ReadOnly => {
+            // Full ⊇ ReadOnly — either match is accepted.
+            if matches_full || matches_ro {
+                Ok(())
+            } else {
+                Err(unauthorized())
+            }
+        }
     }
 }
 
@@ -179,6 +270,15 @@ fn unauthorized() -> HttpResponse {
         StatusCode::UNAUTHORIZED,
         "unauthorized",
         "authentication required",
+    )
+}
+
+fn insufficient_role() -> HttpResponse {
+    error_response(
+        StatusCode::FORBIDDEN,
+        "insufficient_role",
+        "this endpoint requires the sandbox_admin bearer; the read-only \
+         bearer is accepted only on GET endpoints",
     )
 }
 
@@ -218,7 +318,7 @@ fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse 
 /// Operators recover the raw error from journald keyed by the
 /// `tracing::error!` line below. The `code` field on the wire is
 /// the stable client contract — clients still branch on it.
-fn err_safe(
+pub(crate) fn err_safe(
     status: u16,
     code: &'static str,
     public_msg: &'static str,
@@ -274,7 +374,7 @@ pub struct AdminSandboxRow {
     pub in_memory: bool,
 }
 
-async fn open_app_pool(state: &AppState) -> Result<Pool, HttpResponse> {
+async fn open_app_pool(state: &AppState) -> Result<std::rc::Rc<Pool>, HttpResponse> {
     let Some(db) = state.database.as_ref() else {
         return Err(err(503, "pg_disabled", "pg integration disabled"));
     };
@@ -300,7 +400,8 @@ pub async fn list_all_sandboxes(
     state: State,
     query: web::types::Query<ListSandboxesQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let pool = match open_app_pool(&state).await {
@@ -422,7 +523,8 @@ pub async fn get_sandbox_detail(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let raw = path.into_inner();
@@ -480,7 +582,8 @@ pub async fn list_user_sandboxes(
     path: web::types::Path<String>,
     query: web::types::Query<ListSandboxesQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let user_id = path.into_inner();
@@ -573,7 +676,8 @@ pub async fn list_user_shares(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let user_id = path.into_inner();
@@ -643,7 +747,8 @@ pub async fn list_hosts(
     req: HttpRequest,
     state: State,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: read endpoint — accepts either Full or ReadOnly bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
         return r;
     }
     let pool = match open_app_pool(&state).await {
@@ -710,7 +815,17 @@ pub async fn export_user(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: GDPR-cascade export is a heavyweight read (REPEATABLE READ
+    // tx + multi-table aggregation; `crates/sandbox/TODO.md` P1 §T2
+    // tracks rate-limiting for the same reason). Classified `Full`
+    // here, NOT `ReadOnly`, because (a) it surfaces every event row
+    // ever recorded for the user — same blast radius as a leak; (b)
+    // an operator-tooling bug looping the endpoint can saturate the
+    // gdpr pool; an RO-only operator (dashboard, on-call) has no
+    // legitimate need to trigger it. RO is for routine "what's the
+    // fleet doing right now" queries; export is a deliberate,
+    // gdpr-cascade-shaped operation.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     let user_id = path.into_inner();
@@ -877,7 +992,8 @@ pub async fn delete_user(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: destructive GDPR cascade — requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     let user_id = path.into_inner();
@@ -1171,6 +1287,25 @@ fn map_restore_error(e: RestoreHandlerError) -> HttpResponse {
         RestoreHandlerError::Internal(s) => {
             err_safe(500, "internal_error", "internal error", s)
         }
+        // R23-API1 / R25-S1: controller-side disk-image staging
+        // preflight rejection. Wire code matches the wake-poll
+        // contract (`staging_image_missing`) so a client triaging a
+        // failed sync-wake POST sees the same code-name they'd see
+        // on the async-wake `GET /admin/sandboxes/{id}/wake/{wake_id}`
+        // path. The `message` is path-free by construction (the
+        // `Display` impl on `RestoreHandlerError::StagingPreflight`).
+        RestoreHandlerError::StagingPreflight { which, sandbox_id_typed } => {
+            ErrorEnvelope::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "staging_image_missing",
+                format!("staging image missing: {which} for {sandbox_id_typed}"),
+            )
+            .with_extra(serde_json::json!({
+                "which": which,
+                "sandbox_id": sandbox_id_typed,
+            }))
+            .into_response()
+        }
     }
 }
 
@@ -1213,7 +1348,9 @@ pub async fn snapshot_sandbox(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: destructive state transition (running → snapshotted +
+    // detached source teardown). Requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     if !state.config.snapshot_enabled {
@@ -1299,21 +1436,66 @@ pub async fn snapshot_sandbox(
             // Errors surface as `tracing::error!` (not warn) — the
             // operator has no other signal that the background teardown
             // failed, so it must be loud in the logs.
+            //
+            // **C-6 fix** (T-8b-smoke-r7 cluster review, 2026-05-25):
+            // do NOT detach via `compio::runtime::spawn(...).detach()`.
+            // That puts the teardown future on the SAME ntex-worker
+            // compio runtime that subsequent wake requests land on
+            // (1-worker fleet → guaranteed collision; N-worker fleets
+            // pin requests per TCP connection, so a wake reusing the
+            // same client connection co-locates with the teardown too).
+            // `stop_inner`'s first await is `http_signed_async("/shutdown")`
+            // whose underlying ureq call burns up to 60 s on connection-
+            // timeout against a half-dead agent. While that future was
+            // mid-`/shutdown`, the runtime starved C-4's
+            // `reserve_vm_index_with_retry` 2 s sleep — the wake handler
+            // emitted `phase=pre_reserve_vm_index` and then nothing for
+            // the full 60 s client deadline, dropping the wake future.
+            //
+            // Mirror C-3's pattern (`snapshot_store_gcs.rs::Tiered::put`):
+            // spawn a dedicated OS thread with its own short-lived compio
+            // runtime via `compio::runtime::Runtime::new().block_on(...)`.
+            // Decoupling from the ntex worker's runtime is the only way
+            // to guarantee no cross-task starvation; `spawn_blocking` on
+            // the worker runtime is insufficient because the teardown
+            // future itself (between blocking calls) runs on the worker.
+            //
+            // R14-A1 (C-7-LT-PR1 commit 1, 3d8acc23): the open-coded
+            // OS-thread + private compio runtime pattern is now extracted
+            // into `crate::detach::detach_isolated`. This call site is the
+            // canonical C-6 fix; the helper preserves identical semantics
+            // (fire-and-forget, log-and-drop on thread/runtime spawn
+            // failure, kernel-truncated thread name).
+            //
+            // Byte-slice tail naming preserved for log/grep correlation:
+            // Linux's `pr_set_name` truncates thread names at 15 bytes
+            // (TASK_COMM_LEN-1), so only `snap-teardown-` fits in
+            // `ps`/`top -H`; the tail is preserved at the Rust thread-name
+            // level for `tracing` / `std::thread::current().name()`.
+            // Byte-slice is ASCII-safe: `uuid_to_base62` emits base62
+            // characters (0-9, a-z, A-Z) which are all single-byte UTF-8,
+            // so `s.len() - 8` lands on a char boundary.
             let state_for_teardown = Arc::clone(&state);
-            compio::runtime::spawn(async move {
-                if let Err(e) = state_for_teardown
-                    .backend
-                    .teardown_source_for_snapshot(sandbox_id)
-                    .await
-                {
-                    tracing::error!(
-                        sandbox_id = %sandbox_id,
-                        error = %e,
-                        "admin/snapshot: detached teardown_source_for_snapshot failed (non-fatal; orphan-prune will reclaim)"
-                    );
-                }
-            })
-            .detach();
+            let sandbox_id_base62 = zeroship_core::typed_id::uuid_to_base62(&sandbox_id);
+            let tail = sandbox_id_base62
+                .get(sandbox_id_base62.len().saturating_sub(8)..)
+                .unwrap_or(&sandbox_id_base62);
+            crate::detach::detach_isolated(
+                format!("snap-teardown-{tail}"),
+                move || async move {
+                    if let Err(e) = state_for_teardown
+                        .backend
+                        .teardown_source_for_snapshot(sandbox_id)
+                        .await
+                    {
+                        tracing::error!(
+                            sandbox_id = %sandbox_id,
+                            error = %e,
+                            "admin/snapshot: detached teardown_source_for_snapshot failed (non-fatal; orphan-prune will reclaim)"
+                        );
+                    }
+                },
+            );
             HttpResponse::Ok().json(&serde_json::json!({
                 "sandbox_id": format!(
                     "sbx_{}",
@@ -1340,12 +1522,44 @@ pub async fn snapshot_sandbox(
     }
 }
 
+/// Query-string for `POST /admin/sandboxes/{id}/wake`. The `?sync=1`
+/// override forces the legacy synchronous path even when the
+/// controller's default `WakeResponseMode` is `Async`. Deprecated
+/// per C-7-LT proposal § 4; tracked by the
+/// `sandbox_wake_sync_uses_total` counter (R16-API1 #5).
+#[derive(Debug, Deserialize, Default)]
+pub struct WakeQuery {
+    /// Operator override: when `1`, force the legacy 200-OK
+    /// synchronous response. Any other value (or absence) defers to
+    /// the controller's `SANDBOX_WAKE_RESPONSE_MODE` env-resolved
+    /// default.
+    pub sync: Option<u8>,
+}
+
+/// `POST /admin/sandboxes/{id}/wake` — C-7-LT-PR2 dual-mode entry.
+///
+/// Two response shapes:
+///
+/// - Sync (legacy; default until C-7-LT phase 4): 200 OK with the
+///   full wake outcome `{sandbox_id, vm_index, generation}`. Subject
+///   to the ntex client-deadline ceiling that motivated the
+///   redesign. Selected when `WakeResponseMode::Sync` (the env
+///   default) OR `?sync=1` override.
+/// - Async (C-7-LT contract): 202 Accepted with
+///   `{wake_id, poll_url, state}`. The state machine runs on a
+///   private compio runtime in [`crate::wake_machine::WakeMachine`];
+///   the client polls `GET /admin/sandboxes/{id}/wake/{wake_id}` for
+///   the terminal outcome. Idempotent: a duplicate POST while a wake
+///   is in flight returns the existing `wake_id` with `replay: true`.
 pub async fn wake_sandbox(
     req: HttpRequest,
     state: State,
     path: web::types::Path<String>,
+    query: web::types::Query<WakeQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: destructive state transition (snapshotted → running +
+    // wake-machine state-machine spawn). Requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     if !state.config.snapshot_enabled {
@@ -1356,6 +1570,43 @@ pub async fn wake_sandbox(
         Ok(u) => u,
         Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
     };
+
+    let q = query.into_inner();
+    let force_sync = matches!(q.sync, Some(1));
+    let mode = state.wake_response_mode;
+    let take_sync_path = force_sync || matches!(mode, crate::config::WakeResponseMode::Sync);
+
+    if take_sync_path {
+        // Deprecation telemetry: bump on EVERY sync use so Phase 5's
+        // "zero sync uses for one minor" gate has data. The warn log
+        // dedups in the operator's eyes by client_ua + sandbox_id;
+        // the counter is the source-of-truth for the gate.
+        crate::metrics::inc_wake_sync_deprecated();
+        let client_ua = req
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        tracing::warn!(
+            sandbox_id = %sandbox_id,
+            force_sync,
+            mode = mode.as_str(),
+            client_ua,
+            "admin/wake: sync mode used (deprecated; migrate to async polling per C-7-LT)"
+        );
+        return wake_sandbox_sync_inner(&state, sandbox_id).await;
+    }
+
+    wake_sandbox_async_inner(&state, &raw, sandbox_id).await
+}
+
+/// Legacy synchronous wake path. Drives `restore_handler::restore_sandbox`
+/// inline and emits the existing flat `{sandbox_id, vm_index, generation}`
+/// 200-OK body or the §10.0-shaped error envelope from `map_restore_error`.
+///
+/// Preserved verbatim (modulo the function-boundary extraction) through
+/// C-7-LT phase 4; phase 5 deletes it along with `do_restore_inner`.
+async fn wake_sandbox_sync_inner(state: &AppState, sandbox_id: uuid::Uuid) -> HttpResponse {
     let (Some(store), Some(rb), Some(db)) = (
         state.snapshot_store.as_ref(),
         state.restore_backend.as_ref(),
@@ -1396,14 +1647,412 @@ pub async fn wake_sandbox(
     }
 }
 
+/// Async (202 Accepted + polling) wake path per C-7-LT proposal § 2.
+///
+/// Idempotency / status matrix (R16-API1 #3):
+///
+/// | precondition                                       | response                                                 |
+/// |----------------------------------------------------|----------------------------------------------------------|
+/// | no in-flight wake for sandbox                      | 202 with newly minted `wake_id`                          |
+/// | in-flight wake exists                              | 202 with existing `wake_id` + `replay: true`             |
+/// | terminal wake within `T_KEEP`                      | (handled by `GET /wake/{wake_id}`, not this POST)        |
+/// | terminal wake evicted (>T_KEEP)                    | 202 with newly minted `wake_id` (caller retried POST)    |
+///
+/// Note: a fresh POST after a terminal wake (still in pg) is a
+/// distinct semantic from a duplicate in-flight POST — we treat
+/// "in-flight only" as the replay case. A terminal-state replay is
+/// surfaced through the GET endpoint, not the POST.
+async fn wake_sandbox_async_inner(
+    state: &AppState,
+    sandbox_id_typed: &str,
+    sandbox_id: uuid::Uuid,
+) -> HttpResponse {
+    let (Some(store), Some(rb), Some(db)) = (
+        state.snapshot_store.as_ref(),
+        state.restore_backend.as_ref(),
+        state.database.as_ref(),
+    ) else {
+        return err(
+            503,
+            "wake_wiring_unavailable",
+            "wake wiring not initialized (database/store/restore_backend None)",
+        );
+    };
+
+    // Idempotency fast-path: short-circuit duplicate in-flight wakes
+    // BEFORE the pre-flight + INSERT. The
+    // `find_pending_wake_for_sandbox` query rides the partial index
+    // (`wake_jobs_state_idx WHERE state NOT IN ('ok', 'failed')`) so
+    // this is a cheap lookup even at fleet scale. This precheck is
+    // **only** an optimisation — the GATE-C2 fix is at the INSERT
+    // site, where the migration-0011 UNIQUE INDEX
+    // `wake_jobs_sandbox_pending_uniq` enforces at-most-one
+    // non-terminal row per sandbox atomically. Two concurrent POSTs
+    // that both miss this precheck still race deterministically:
+    // one's INSERT lands, the other's `ON CONFLICT … DO NOTHING`
+    // returns 0 rows affected and the handler surfaces the winner's
+    // wake_id via [`InsertWakeJobOutcome::Replay`].
+    let typed_sandbox_id = sandbox_id_typed.to_string();
+    match db.find_pending_wake_for_sandbox(&typed_sandbox_id).await {
+        Ok(Some(existing)) => {
+            return HttpResponse::Accepted().json(&serde_json::json!({
+                "wake_id": existing.wake_id,
+                "sandbox_id": typed_sandbox_id,
+                "poll_url": format!(
+                    "/admin/sandboxes/{typed_sandbox_id}/wake/{wake_id}",
+                    wake_id = existing.wake_id,
+                ),
+                "state": existing.state.as_str(),
+                "replay": true,
+            }));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "wake idempotency lookup failed",
+                e,
+            );
+        }
+    }
+
+    // Pre-flight: refuse if the sandbox row isn't a valid wake
+    // candidate. Mirrors `restore_sandbox`'s first two checks
+    // (NotFound + StateMismatch) so the client gets the same 404/409
+    // it would have gotten on the sync path; we only spawn the
+    // machine when the wake actually has work to do.
+    let row = match db.get_sandbox_row(sandbox_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ErrorEnvelope::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "sandbox not found",
+            )
+            .with_extra(serde_json::json!({"sandbox_id": typed_sandbox_id}))
+            .into_response();
+        }
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "sandbox row lookup failed",
+                e,
+            );
+        }
+    };
+    if !matches!(
+        row.status,
+        crate::db::SandboxStatus::Snapshotted
+            | crate::db::SandboxStatus::SnapshottedSuspect
+    ) {
+        return ErrorEnvelope::new(
+            StatusCode::CONFLICT,
+            "state_mismatch",
+            format!(
+                "sandbox is in state {:?}; wake requires \"snapshotted\"",
+                row.status
+            ),
+        )
+        .with_extra(serde_json::json!({
+            "current": row.status.as_str(),
+            "expected": "snapshotted",
+        }))
+        .into_response();
+    }
+
+    // Mint wake_id (typed-id with wak_ prefix per R16-API2) and
+    // attempt the INSERT. The DB layer enforces GATE-C2 via the
+    // migration-0011 partial UNIQUE INDEX
+    // `wake_jobs_sandbox_pending_uniq` + ON CONFLICT DO NOTHING. The
+    // outcome tells us whether THIS caller's row landed (spawn the
+    // machine) or whether a concurrent POST won the race (return the
+    // winner's wake_id with `replay: true` — DO NOT spawn a second
+    // machine).
+    let wake_id = zeroship_core::typed_id::new_wake_id();
+    let lessee = db.host_id().to_string();
+    let new_row = crate::db::WakeJobRow {
+        wake_id: wake_id.clone(),
+        sandbox_id: typed_sandbox_id.clone(),
+        state: crate::db::WakeJobState::Pending,
+        error_code: None,
+        error_message: None,
+        started_at_secs: 0, // server-side default
+        updated_at_secs: 0,
+        ready_at_secs: None,
+        agent_url: None,
+        lessee: lessee.clone(),
+        lessee_updated_at_secs: 0,
+    };
+    let outcome = match db.insert_wake_job(&new_row).await {
+        Ok(o) => o,
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "wake job insert failed",
+                e,
+            );
+        }
+    };
+    // GATE-C2: race-loser branch. A concurrent POST won the
+    // partial-UNIQUE-INDEX conflict and its WakeMachine is already
+    // driving the wake. Return the winner's wake_id with
+    // `replay: true` and DO NOT spawn a duplicate machine — if we
+    // did, the loser machine's `rollback_with` would call
+    // `teardown_restore` and release the winner's vm_index
+    // (R10-C1-shape race; the fingerprint R17-C2 was filed against).
+    if let crate::db::InsertWakeJobOutcome::Replay(existing) = outcome {
+        return HttpResponse::Accepted().json(&serde_json::json!({
+            "wake_id": existing.wake_id,
+            "sandbox_id": typed_sandbox_id,
+            "poll_url": format!(
+                "/admin/sandboxes/{typed_sandbox_id}/wake/{wake_id}",
+                wake_id = existing.wake_id,
+            ),
+            "state": existing.state.as_str(),
+            "replay": true,
+        }));
+    }
+
+    // Spawn the state machine on a dedicated OS thread with a
+    // private compio runtime. The wake_id parameter is moved into
+    // the closure; ntex can't reach it after the 202 is sent.
+    let machine = crate::wake_machine::WakeMachine {
+        database: Arc::clone(db),
+        backend: Arc::clone(rb),
+        snapshot_store: Arc::clone(store),
+        persist: state.persist.clone(),
+        sandbox_id,
+        wake_id: wake_id.clone(),
+        lessee,
+    };
+    // Linux truncates thread names to 15 chars; prefix with "wake-"
+    // and a short suffix of the wake_id so dashboards / `ps -L` show
+    // a stable, debug-friendly tag without overflowing TASK_COMM_LEN.
+    let short_tail: String = wake_id
+        .as_bytes()
+        .iter()
+        .rev()
+        .take(8)
+        .rev()
+        .map(|b| *b as char)
+        .collect();
+    let thread_name = format!("wake-{short_tail}");
+    crate::detach::detach_isolated(thread_name, move || machine.drive());
+
+    HttpResponse::Accepted().json(&serde_json::json!({
+        "wake_id": wake_id,
+        "sandbox_id": typed_sandbox_id,
+        "poll_url": format!(
+            "/admin/sandboxes/{typed_sandbox_id}/wake/{wake_id}"
+        ),
+        "state": "pending",
+        "replay": false,
+    }))
+}
+
+/// `GET /admin/sandboxes/{id}/wake/{wake_id}` — C-7-LT-PR2 polling
+/// endpoint per proposal § 2.
+///
+/// Response matrix:
+///
+/// | row state                  | code | body                                                           |
+/// |----------------------------|------|----------------------------------------------------------------|
+/// | not found / GC'd           | 404  | §10.0 envelope `{error: "wake_not_found", message}`            |
+/// | sandbox_id mismatch        | 404  | §10.0 envelope `{error: "wake_not_found", message}`            |
+/// | terminal `ok`              | 200  | flat `{state: "ok", ready_at, agent_url}`                       |
+/// | terminal `failed`          | 200  | §10.0 + wake extras `{error, message, state: "failed", …}`      |
+/// | intermediate (any other)   | 202  | flat `{state, started_at}`                                      |
+///
+/// Per R16-API1 #1: the failed-state body uses the `error`/`message`
+/// keys (NOT `error_code`/`error_message`) so it's an §10.0 envelope
+/// plus a `state: "failed"` extra. Success bodies stay flat per the
+/// existing convention (success bodies in the crate's HTTP surface
+/// are flat; only error bodies wear the envelope).
+pub async fn poll_wake(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<(String, String)>,
+) -> HttpResponse {
+    // T1: pure read of `sandbox.wake_jobs` row — accepts either bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
+        return r;
+    }
+    if !state.config.snapshot_enabled {
+        return feature_disabled();
+    }
+    let (sandbox_raw, wake_raw) = path.into_inner();
+    let _sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&sandbox_raw, "sbx") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
+    };
+    let wake_uuid = match zeroship_core::typed_id::parse_with_prefix(&wake_raw, "wak") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid_wake_id", "invalid wake_id"),
+    };
+    // The typed_id parse rejects malformed shapes / wrong prefixes
+    // but lets through any valid `wak_<base62>` — even one we never
+    // minted. The pg lookup below distinguishes "valid shape, never
+    // existed" from "valid, evicted by GC sweep" by always 404'ing
+    // both: see § 2.cleanup of the proposal.
+    let _ = wake_uuid;
+
+    let Some(db) = state.database.as_ref() else {
+        return err(
+            503,
+            "wake_wiring_unavailable",
+            "wake wiring not initialized (database None)",
+        );
+    };
+
+    let row = match db.get_wake_job(&wake_raw).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ErrorEnvelope::new(
+                StatusCode::NOT_FOUND,
+                "wake_not_found",
+                "wake_id not found (may have been evicted by the GC sweep)",
+            )
+            .with_extra(serde_json::json!({"wake_id": wake_raw}))
+            .into_response();
+        }
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "wake job lookup failed",
+                e,
+            );
+        }
+    };
+
+    // Path mismatch: a wake_id valid for a different sandbox MUST
+    // 404 (not 200) so a client can't probe other tenants' wake
+    // outcomes via guessed wake_ids. Constant-time comparison is
+    // overkill (wake_ids are 22-char base62, the attacker can't
+    // narrow the search), but the path is admin-bearer-gated so
+    // narrowness isn't a primary defense — symmetric 404 is enough.
+    if row.sandbox_id != sandbox_raw {
+        return ErrorEnvelope::new(
+            StatusCode::NOT_FOUND,
+            "wake_not_found",
+            "wake_id does not belong to the requested sandbox",
+        )
+        .with_extra(serde_json::json!({"wake_id": wake_raw}))
+        .into_response();
+    }
+
+    render_wake_poll_response(&row)
+}
+
+/// Render the wake-job row into the polling-response shape per
+/// R16-API1. Extracted from [`poll_wake`] so the wire-format tests
+/// can pin §10.0 parity without a Postgres-backed AppState.
+///
+/// - intermediate states → 202 with flat `{state, wake_id, sandbox_id,
+///   started_at, updated_at}`
+/// - terminal `ok` → 200 with flat `{state: "ok", wake_id, sandbox_id,
+///   ready_at, agent_url}`
+/// - terminal `failed` → 200 with §10.0 envelope
+///   `{error: <wire_code>, message, state: "failed", wake_id,
+///   sandbox_id, updated_at}` per R16-API1 #1: field names match the
+///   envelope at `error_envelope.rs:88-110`, NOT the proposal's
+///   pre-review `error_code`/`error_message`.
+pub(crate) fn render_wake_poll_response(row: &crate::db::WakeJobRow) -> HttpResponse {
+    if !row.state.is_terminal() {
+        return HttpResponse::Accepted().json(&serde_json::json!({
+            "state": row.state.as_str(),
+            "wake_id": row.wake_id,
+            "sandbox_id": row.sandbox_id,
+            "started_at": row.started_at_secs,
+            "updated_at": row.updated_at_secs,
+        }));
+    }
+
+    match row.state {
+        crate::db::WakeJobState::Ok => HttpResponse::Ok().json(&serde_json::json!({
+            "state": "ok",
+            "wake_id": row.wake_id,
+            "sandbox_id": row.sandbox_id,
+            "ready_at": row.ready_at_secs,
+            "agent_url": row.agent_url,
+        })),
+        crate::db::WakeJobState::Failed => {
+            // §10.0 envelope on the body, plus the wake extras.
+            let code = row
+                .error_code
+                .unwrap_or(crate::db::WakeErrorCode::Internal)
+                .wire_code();
+            let message = row
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "wake failed (no message recorded)".to_string());
+            ErrorEnvelope::new(StatusCode::OK, code, message)
+                .with_extra(serde_json::json!({
+                    "state": "failed",
+                    "wake_id": row.wake_id,
+                    "sandbox_id": row.sandbox_id,
+                    "updated_at": row.updated_at_secs,
+                }))
+                .into_response()
+        }
+        // Unreachable: `is_terminal()` only matches Ok / Failed; the
+        // match-all branch is defense-in-depth in case the discriminant
+        // domain is widened in a future migration without updating
+        // this code path.
+        other => err(
+            500,
+            "internal_error",
+            format!("unexpected terminal state: {}", other.as_str()),
+        ),
+    }
+}
+
 pub async fn cold_boot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
-    if let Err(r) = admin_check(&req, &state) {
+    // T1: cold-boot is a fresh-VM state transition (no source, no
+    // memory snapshot). Mutating — requires Full bearer.
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::Full) {
         return r;
     }
     // Cold-boot is a separate state machine (no source VM, no
     // memory snapshot — it's a fresh boot from the rootfs). Stays
     // 501 until that orchestrator ships.
     feature_disabled()
+}
+
+// ────────────────────────────────────────────────────────────────────
+// GET /metrics — Prometheus text exposition (R26-API2)
+// ────────────────────────────────────────────────────────────────────
+
+/// `GET /metrics` — Prometheus text-exposition body over the atomic
+/// counters in `crate::metrics`. R26-API2: the "Phase 3 wires the
+/// exporter" TODO has carried for multiple rounds; this is its landing.
+///
+/// Auth: `AdminRole::ReadOnly` — accepts EITHER the full or the
+/// read-only admin bearer. Counter values are operator-facing telemetry
+/// (fleet topology, takeover rate, leak rate); gating them mirrors the
+/// rest of the `/admin/*` surface and keeps the bearer-leak threat
+/// model symmetric. (Prometheus convention often leaves `/metrics`
+/// open and relies on firewall, but the platform's existing posture is
+/// admin-bearer gating; we follow that.)
+///
+/// 401 / 403 / 503 responses follow the §10.0 JSON error envelope; the
+/// 200 path returns `text/plain; version=0.0.4` — the Prometheus
+/// content-type negotiation hint scrapers expect.
+///
+/// `Cache-Control: no-store` is set so an intermediate cache can never
+/// stash a stale snapshot of a metric value that's racing forward.
+pub async fn metrics_endpoint(req: HttpRequest, state: State) -> HttpResponse {
+    if let Err(r) = admin_check_required(&req, &state, AdminRole::ReadOnly) {
+        return r;
+    }
+    let body = crate::metrics_export::render();
+    HttpResponse::Ok()
+        .header("Content-Type", "text/plain; version=0.0.4")
+        .header("Cache-Control", "no-store")
+        .body(body)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1765,5 +2414,222 @@ mod tests {
         });
         let body = body_json(resp).await;
         assert_eq!(body["requested"], 42, "structural extras must survive");
+    }
+
+    // ─── C-7-LT-PR2 wake handler wire-format tests ───────────────
+    //
+    // Each test calls `render_wake_poll_response` directly with a
+    // hand-rolled `WakeJobRow` (pure pg-free fixture). The function
+    // is extracted from `poll_wake` for this purpose. End-to-end
+    // ntex integration is the cluster-smoke gate; these pin the
+    // wire shape so a refactor that drops `message` or renames
+    // `error` to `error_code` fails CI before the cluster cycle.
+
+    use crate::db::{WakeErrorCode, WakeJobRow, WakeJobState};
+
+    fn make_wake_row(state: WakeJobState) -> WakeJobRow {
+        WakeJobRow {
+            wake_id: "wak_0Bk3Np4qR5sT7uV8wYz1A2".to_string(),
+            sandbox_id: "sbx_AbCdEfGhIjKlMnOpQrStUv".to_string(),
+            state,
+            error_code: None,
+            error_message: None,
+            started_at_secs: 1_700_000_000,
+            updated_at_secs: 1_700_000_007,
+            ready_at_secs: None,
+            agent_url: None,
+            lessee: "host_id_xyz".to_string(),
+            lessee_updated_at_secs: 1_700_000_007,
+        }
+    }
+
+    #[compio::test]
+    async fn r16_api1_failed_state_body_uses_error_and_message_keys() {
+        // R16-API1 #1: the failed-state body uses §10.0
+        // `error`/`message` keys, NOT the proposal's pre-review
+        // `error_code`/`error_message`. This is the single highest-
+        // value test of the PR — if it regresses, the wire format
+        // diverges from every other endpoint in the crate.
+        let mut row = make_wake_row(WakeJobState::Failed);
+        row.error_code = Some(WakeErrorCode::LivezTimeout);
+        row.error_message = Some("/livez never returned 200".to_string());
+
+        let resp = render_wake_poll_response(&row);
+        assert_eq!(resp.status().as_u16(), 200, "failed-state is HTTP 200 OK");
+        let body = body_json(resp).await;
+
+        // §10.0 envelope fields — REQUIRED.
+        assert_eq!(body["error"], "livez_timeout", "wire code per R16-API1 #3");
+        assert_eq!(body["message"], "/livez never returned 200");
+
+        // Wake-specific extras — flat at the top level.
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["wake_id"], row.wake_id);
+        assert_eq!(body["sandbox_id"], row.sandbox_id);
+
+        // Anti-test: the proposal's pre-review field names MUST NOT
+        // appear. (Belt-and-suspenders against a regression that
+        // copies the proposal text verbatim.)
+        assert!(
+            body.get("error_code").is_none(),
+            "deprecated `error_code` key must NOT be on the wire (R16-API1 #1)"
+        );
+        assert!(
+            body.get("error_message").is_none(),
+            "deprecated `error_message` key must NOT be on the wire (R16-API1 #1)"
+        );
+    }
+
+    #[compio::test]
+    async fn r16_api1_failed_state_renders_every_wake_error_code() {
+        // Every variant of WakeErrorCode must render with the
+        // wire_code() string, not the as_str() pg form. Drift between
+        // the two is exactly the bug R16-API1 #3 forbids.
+        for code in [
+            WakeErrorCode::SlotUnavailable,
+            WakeErrorCode::SourceTeardownTimeout,
+            WakeErrorCode::RestoreFailed,
+            WakeErrorCode::LivezTimeout,
+            WakeErrorCode::ClockResyncFailed,
+            WakeErrorCode::RegisterFailed,
+            WakeErrorCode::Internal,
+            WakeErrorCode::WakeWorkerAborted,
+            // R23-API1 / R25-S1: controller-side staging preflight
+            // rejection. Distinct wire code so RO admin bearers see
+            // the operator-facing `staging_image_missing` (not the
+            // internal `staging_path_missing` pg form) AND no fs path
+            // leaks via the `error_message` field — that's enforced
+            // at the producer site (wake_machine `StagingPreflight`
+            // classification) where the typed-id form is composed
+            // path-free.
+            WakeErrorCode::StagingPathMissing,
+            // T5: restore-path /version git_commit mismatch. Distinct
+            // wire code so the SLO dashboard can route rollout-skew
+            // failures away from the `livez_timeout` and
+            // `restore_backend_failed` buckets.
+            WakeErrorCode::AgentVersionMismatch,
+        ] {
+            let mut row = make_wake_row(WakeJobState::Failed);
+            row.error_code = Some(code);
+            row.error_message = Some("explanation".to_string());
+            let resp = render_wake_poll_response(&row);
+            let body = body_json(resp).await;
+            assert_eq!(
+                body["error"], code.wire_code(),
+                "wire code drift for {:?}", code
+            );
+            assert_eq!(
+                body["state"], "failed",
+                "state must be 'failed' for {:?}", code
+            );
+            assert!(
+                body["message"].is_string(),
+                "message must be present for {:?}", code
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn poll_wake_intermediate_state_returns_202_with_state() {
+        // Every non-terminal state → 202 + state + timestamps.
+        for state in [
+            WakeJobState::Pending,
+            WakeJobState::ReservingSlot,
+            WakeJobState::Restoring,
+            WakeJobState::LivezPolling,
+            WakeJobState::ClockResyncing,
+            WakeJobState::Registering,
+        ] {
+            let row = make_wake_row(state);
+            let resp = render_wake_poll_response(&row);
+            assert_eq!(
+                resp.status().as_u16(),
+                202,
+                "intermediate state {:?} must be 202", state
+            );
+            let body = body_json(resp).await;
+            assert_eq!(body["state"], state.as_str());
+            assert_eq!(body["wake_id"], row.wake_id);
+            assert_eq!(body["sandbox_id"], row.sandbox_id);
+            assert_eq!(body["started_at"], row.started_at_secs);
+        }
+    }
+
+    #[compio::test]
+    async fn poll_wake_terminal_ok_returns_200_with_agent_url() {
+        let mut row = make_wake_row(WakeJobState::Ok);
+        row.ready_at_secs = Some(1_700_000_009);
+        row.agent_url = Some("http://10.0.100.2:7777".to_string());
+
+        let resp = render_wake_poll_response(&row);
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["state"], "ok");
+        assert_eq!(body["agent_url"], "http://10.0.100.2:7777");
+        assert_eq!(body["ready_at"], 1_700_000_009);
+    }
+
+    #[compio::test]
+    async fn poll_wake_failed_with_missing_message_falls_back() {
+        // Defensive: a row with state=failed but error_message=NULL
+        // (shouldn't happen post-PR2, but pg could regress) must still
+        // emit a well-formed §10.0 envelope. The message is opaque
+        // fallback prose.
+        let mut row = make_wake_row(WakeJobState::Failed);
+        row.error_code = Some(WakeErrorCode::Internal);
+        row.error_message = None;
+
+        let resp = render_wake_poll_response(&row);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "internal_error");
+        assert!(body["message"].is_string());
+        assert!(
+            !body["message"].as_str().unwrap().is_empty(),
+            "fallback message must be non-empty so clients have a string to display"
+        );
+    }
+
+    #[compio::test]
+    async fn poll_wake_failed_with_missing_error_code_defaults_to_internal() {
+        // Defense-in-depth: state=failed but error_code=NULL maps to
+        // `internal_error` on the wire. Migration-tolerance: future
+        // CHECK domain expansion + downgrade path mustn't crash the
+        // reader.
+        let mut row = make_wake_row(WakeJobState::Failed);
+        row.error_code = None;
+        row.error_message = Some("opaque".to_string());
+
+        let resp = render_wake_poll_response(&row);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "internal_error");
+        assert_eq!(body["state"], "failed");
+    }
+
+    #[test]
+    fn wake_query_default_is_no_override() {
+        // The default shape MUST resolve `sync=None` so the handler
+        // routes to the wake_response_mode-driven default branch. Any
+        // regression that gives `Some(0)` would also still route async
+        // (the predicate is `matches!(q.sync, Some(1))`); covered as a
+        // contract test rather than a behavior test.
+        let q = WakeQuery::default();
+        assert!(q.sync.is_none());
+    }
+
+    #[test]
+    fn wake_query_sync_one_triggers_sync_branch() {
+        // Predicate the handler uses: `matches!(q.sync, Some(1))`.
+        // Pin the only literal that flips to the legacy path. Other
+        // values (`sync=0`, `sync=2`, …) are treated as "no override"
+        // so a typo doesn't accidentally lock the operator into
+        // legacy.
+        let q = WakeQuery { sync: Some(1) };
+        assert!(matches!(q.sync, Some(1)));
+        let q = WakeQuery { sync: Some(0) };
+        assert!(!matches!(q.sync, Some(1)));
+        let q = WakeQuery { sync: Some(2) };
+        assert!(!matches!(q.sync, Some(1)));
+        let q = WakeQuery { sync: None };
+        assert!(!matches!(q.sync, Some(1)));
     }
 }

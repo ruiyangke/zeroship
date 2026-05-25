@@ -13,6 +13,7 @@ use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::admin_handlers::err_safe;
 use crate::error_envelope::error_response;
 use crate::{auth, AppState};
 
@@ -130,10 +131,13 @@ fn infer_content_type(path: &str) -> &'static str {
 
 pub async fn readyz(state: State) -> HttpResponse {
     if state.backend.is_healthy() {
-        HttpResponse::Ok().json(&serde_json::json!({"status": "ready"}))
+        HttpResponse::Ok().json(&serde_json::json!({"status": "ok"}))
     } else {
-        HttpResponse::ServiceUnavailable()
-            .json(&serde_json::json!({"status": "backend-unhealthy"}))
+        error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unhealthy",
+            "backend probe failed; service not ready",
+        )
     }
 }
 
@@ -667,7 +671,7 @@ pub async fn stop_sandbox(
         // (Pod/container) is the controller's responsibility to
         // chase down via cluster-side cleanup.
         state.sandboxes.remove(&id);
-        return err(500, "backend_stop_failed", format!("backend.stop: {e}"));
+        return err_safe(500, "backend_stop_failed", "backend stop failed", e);
     }
     state.sandboxes.remove(&id);
 
@@ -793,7 +797,7 @@ pub async fn stop_sandbox(
 // ─── POST /sandboxes/:id/exec ─────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct ExecBody {
+pub(crate) struct ExecBody {
     pub cmd: String,
     pub cwd: Option<String>,
     pub timeout_ms: Option<u64>,
@@ -803,22 +807,29 @@ pub async fn exec(
     req: HttpRequest,
     state: State,
     path: web::types::Path<String>,
-    body: web::types::Json<ExecBody>,
+    body: Bytes,
 ) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match require_owner(&req, &state, &path) { Ok(u) => u, Err(r) => return r };
 
-    let timeout_ms = body.timeout_ms.unwrap_or(60_000).min(600_000);
-    let cwd = body.cwd.as_deref();
+    // Parse the body internally so `ExecBody` can stay `pub(crate)`
+    // (it's a deserialise-only wire-shape struct with no out-of-crate
+    // consumer; only the bin's route table needs `exec` to be `pub`).
+    let parsed: ExecBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return err(400, "invalid_input", format!("invalid JSON body: {e}")),
+    };
+    let timeout_ms = parsed.timeout_ms.unwrap_or(60_000).min(600_000);
+    let cwd = parsed.cwd.as_deref();
 
-    match state.backend.exec(id, &body.cmd, cwd, Some(timeout_ms)).await {
+    match state.backend.exec(id, &parsed.cmd, cwd, Some(timeout_ms)).await {
         Ok(out) => HttpResponse::Ok().json(&serde_json::json!({
             "status": out.status,
             "stdout": out.stdout,
             "stderr": out.stderr,
             "timed_out": out.timed_out,
         })),
-        Err(e) => err(500, "backend_exec_failed", format!("backend.exec: {e}")),
+        Err(e) => err_safe(500, "backend_exec_failed", "backend exec failed", e),
     }
 }
 
@@ -834,7 +845,7 @@ pub async fn file_tree(
 
     match state.backend.file_tree(id).await {
         Ok(entries) => HttpResponse::Ok().json(&serde_json::json!({"entries": entries})),
-        Err(e) => err(500, "backend_file_tree_failed", format!("backend.file_tree: {e}")),
+        Err(e) => err_safe(500, "backend_file_tree_failed", "backend file-tree failed", e),
     }
 }
 
@@ -1280,5 +1291,125 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["error"], "invalid_sandbox_id");
         assert!(body["message"].is_string());
+    }
+
+    // ─── R10-Q1: err_safe sanitization for backend.* failures ─────
+    //
+    // Pre-fix: handlers.rs:670/821/837 wrote
+    // `format!("backend.<op>: {e}")` into the wire-visible `message`
+    // field via `err(500, ..., ...)`. The driver-error strings carry
+    // host:port, container ids, ch-remote binary paths, sometimes
+    // libkrun /dev/* paths and uid hints. Per S4 (admin) and Q1 (this
+    // file) the wire body MUST carry a fixed public message; raw `e`
+    // goes to journald via tracing::error! only.
+    //
+    // Each test below feeds a raw error with a recognisable sentinel
+    // substring through err_safe with the exact (status, code,
+    // public_msg) tuple used at the corresponding call site, then
+    // asserts (a) the sentinel is absent from the wire body and (b)
+    // the fixed public message is present.
+
+    #[compio::test]
+    async fn r10_q1_backend_stop_sanitizes_raw_driver_error() {
+        // Mirrors handlers.rs:670 — backend.stop on a nomad-ch sandbox
+        // can yield e.g. `ch-remote --api-socket=/run/zeroship/ch/vm-7.sock
+        // shutdown: connection refused`. The socket path is operator-
+        // internal.
+        let raw = "ch-remote --api-socket=/run/zeroship/ch/vm-7.sock \
+                   shutdown: connection refused";
+        let resp = err_safe(500, "backend_stop_failed", "backend stop failed", raw);
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "backend_stop_failed");
+        let msg = body["message"].as_str().expect("message must be a string");
+        assert_eq!(msg, "backend stop failed", "wire message must be the fixed public string");
+        assert!(
+            !msg.contains("/run/zeroship/ch/vm-7.sock"),
+            "raw driver path must not leak onto the wire; got {msg:?}"
+        );
+        assert!(
+            !msg.contains("ch-remote"),
+            "raw driver binary name must not leak onto the wire; got {msg:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn r10_q1_backend_exec_sanitizes_raw_driver_error() {
+        // Mirrors handlers.rs:821 — backend.exec on a libkrun VM via
+        // the agent can yield e.g. `agent at http://10.99.101.2:7777:
+        // exec timeout: child pid=4711`. The agent URL + pid are
+        // operator-internal observability.
+        let raw = "agent at http://10.99.101.2:7777: exec timeout: child pid=4711";
+        let resp = err_safe(500, "backend_exec_failed", "backend exec failed", raw);
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "backend_exec_failed");
+        let msg = body["message"].as_str().expect("message must be a string");
+        assert_eq!(msg, "backend exec failed", "wire message must be the fixed public string");
+        assert!(
+            !msg.contains("10.99.101.2"),
+            "raw agent IP must not leak onto the wire; got {msg:?}"
+        );
+        assert!(
+            !msg.contains("pid="),
+            "raw pid must not leak onto the wire; got {msg:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn r10_q1_backend_file_tree_sanitizes_raw_driver_error() {
+        // Mirrors handlers.rs:837 — backend.file_tree on a libkrun VM
+        // can yield e.g. `read /mnt/sandbox/usr_abc/workspace: permission
+        // denied (uid=1000)`. The host-side mount path + uid are
+        // operator-internal.
+        let raw = "read /mnt/sandbox/usr_abc/workspace: permission denied (uid=1000)";
+        let resp = err_safe(500, "backend_file_tree_failed", "backend file-tree failed", raw);
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "backend_file_tree_failed");
+        let msg = body["message"].as_str().expect("message must be a string");
+        assert_eq!(msg, "backend file-tree failed", "wire message must be the fixed public string");
+        assert!(
+            !msg.contains("/mnt/sandbox/"),
+            "raw host mount path must not leak onto the wire; got {msg:?}"
+        );
+        assert!(
+            !msg.contains("uid="),
+            "raw uid must not leak onto the wire; got {msg:?}"
+        );
+    }
+
+    // ─── R10-API4 + R12-API1: readyz §10.0 wire-shape pins ───────
+    //
+    // Pre-fix: 200 returned {"status":"ready"} and 503 returned
+    // {"status":"backend-unhealthy"} — the error path bypassed
+    // ErrorEnvelope entirely. Now both paths go through the
+    // standard envelope so the readyz contract matches every other
+    // admin endpoint.
+
+    #[compio::test]
+    async fn readyz_200_body_is_status_ok() {
+        let resp = HttpResponse::Ok().json(&serde_json::json!({"status": "ok"}));
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[compio::test]
+    async fn readyz_503_body_is_envelope_compliant() {
+        // Synthesise the exact response the unhealthy branch now emits.
+        let resp = error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unhealthy",
+            "backend probe failed; service not ready",
+        );
+        assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        // §10.0 envelope: `error` holds the machine-readable code,
+        // `message` holds human prose. The old {"status":"backend-unhealthy"}
+        // shape must be absent.
+        assert_eq!(body["error"], "backend_unhealthy");
+        assert!(body["message"].is_string(), "missing `message` field");
+        assert!(body.get("status").is_none(), "`status` key must not appear on error responses");
     }
 }

@@ -18,8 +18,9 @@
 //!    `serial.file`. Disks + IP are documented no-ops in v1 but the
 //!    code paths exist for the v2 cross-cluster work.
 //! 6. Submit a Nomad job (or equivalent backend op) for the new alloc
-//!    with `ZSBX_RESTORE_FROM=<alloc_dir>` env so the wrapper script's
-//!    PR 3f branch knows to invoke `cloud-hypervisor --restore`.
+//!    with `ZSBX_RESTORE_FROM=<alloc_dir>` env so the ch driver's
+//!    StartTask passes `--restore source_url=file://<alloc_dir>` to
+//!    cloud-hypervisor.
 //! 7. Wait for `/livez` to 200.
 //! 8. CAS `restoring → running`; clear snapshot metadata.
 //! 9. On any mid-flight failure: CAS `restoring → snapshotted`
@@ -55,10 +56,11 @@ pub struct RestoreOutcome {
 ///
 /// - `StateMismatch`        → 409 `state_mismatch`
 /// - `FeatureDisabled`      → 501 `feature_disabled`
-/// - `VmIndexUnavailable`   → 503 `vm_index_unavailable` (Retry-After)
+/// - `VmIndexUnavailable`   → 503 `vm_index_unavailable` (no Retry-After under async-wake contract; clients poll `GET /wake/{id}`)
 /// - `SnapshotCorrupt`      → 500 `snapshot_corrupt` (CAS to suspect)
 /// - `Backend` / `Database` → 500 (controller-internal)
 /// - `NotFound`             → 404
+/// - `StagingPreflight`     → 500 `staging_image_missing` (R23-API1 / R25-S1 — host path stays controller-side via tracing; wire carries the typed-id form + resource name only)
 #[derive(Debug, thiserror::Error)]
 pub enum RestoreHandlerError {
     #[error("snapshot feature disabled (SANDBOX_SNAPSHOT_ENABLED=false)")]
@@ -90,6 +92,302 @@ pub enum RestoreHandlerError {
 
     #[error("internal: {0}")]
     Internal(String),
+
+    /// R23-API1 / R25-S1 / R25-I1 / R25-I2: controller-side disk-image
+    /// staging preflight rejection (`submit_restore_job` refused to
+    /// hand the alloc to Nomad because `workspace.img` or
+    /// `user_home.img` was missing/empty/wrong-type on the host).
+    ///
+    /// The free-text `Display` form is intentionally PATH-FREE
+    /// because this error string ends up in `wake_jobs.error_message`
+    /// and is surfaced via `GET /admin/sandboxes/{id}/wake/{wake_id}`
+    /// to `AdminRole::ReadOnly` bearers (R25-S1 leak: paths +
+    /// locale-dependent OS errors used to flow through this channel).
+    /// The structured fields (`which`, `sandbox_id_typed`) describe
+    /// the failure resource + tenant in user-safe form; the
+    /// path-bearing detail is captured ONLY in tracing logs on the
+    /// controller side via [`SubmitRestoreError::log_detail`] at the
+    /// raising site.
+    ///
+    /// `which` is one of `"workspace.img"` / `"user_home.img"`
+    /// (operator-facing resource name, NOT the host path). The wake
+    /// state machine maps this variant to
+    /// [`crate::db::WakeErrorCode::StagingPathMissing`] which renders
+    /// as the wire code `staging_image_missing` per R23-API1.
+    #[error("staging image missing: {which} for {sandbox_id_typed}")]
+    StagingPreflight {
+        /// Operator-facing resource name (`"workspace.img"` or
+        /// `"user_home.img"`). Not a host path.
+        which: &'static str,
+        /// Typed-id form (`sbx_<base62>`) of the sandbox — matches
+        /// sibling sites at `:633-636` / `:731-734` so operators
+        /// grepping the typed-id form find preflight rejections too
+        /// (R25-I2).
+        sandbox_id_typed: String,
+    },
+}
+
+/// R23-API1 / R25-S1 / R25-I1 / R25-I2: typed error returned by
+/// [`RestoreBackend::submit_restore_job`].
+///
+/// Pre-fix shape was `Result<(), String>` — the bundle's preflight
+/// embedded the host path + locale-dependent `std::fs::metadata` error
+/// in the string. Two problems:
+///
+///   1. The string round-trips through `wake_jobs.error_message`,
+///      which RO admin bearers can read. Paths and `os error 2`
+///      "no such file or directory" strings have no place there.
+///   2. Clients (and the SLO dashboard) couldn't distinguish
+///      "controller refused to submit because a host disk image is
+///      missing" (operator-actionable) from "Nomad alloc failed
+///      mid-restore" (transient/retry).
+///
+/// Typed variants make both routing decisions explicit:
+///
+///   - `Preflight` — structured fields (`which`, `path`, `source`)
+///     stay inside the controller. The wake-machine classifier maps
+///     this to `RestoreHandlerError::StagingPreflight` (whose
+///     `Display` impl is path-free) which then maps to
+///     `WakeErrorCode::StagingPathMissing` and the wire code
+///     `staging_image_missing`. The host path is logged via tracing
+///     at the wake-machine boundary so operators have triage
+///     context without exposing it on the wire.
+///   - `Other` — every existing failure mode (Nomad POST 500,
+///     `wait_for_alloc_running` timeout, JSON serialise error) keeps
+///     its free-text shape and routes to
+///     `WakeErrorCode::RestoreFailed` as before.
+#[derive(Debug)]
+pub enum SubmitRestoreError {
+    /// Controller-side staging preflight rejection. `which` is the
+    /// operator-facing resource name (`"workspace.img"` /
+    /// `"user_home.img"`); `path` is the verbatim host path that
+    /// failed the `assert_disk_image_present` check (used ONLY for
+    /// controller-side tracing logs, never surfaced on the wire);
+    /// `source` is the raw error from `assert_disk_image_present`
+    /// (also tracing-only).
+    Preflight {
+        which: &'static str,
+        path: PathBuf,
+        source: String,
+    },
+    /// Catch-all: Nomad submit RPC failure, alloc-running timeout,
+    /// JSON serialise error, etc. Maps to
+    /// `WakeErrorCode::RestoreFailed` (the existing classification).
+    Other(String),
+}
+
+impl std::fmt::Display for SubmitRestoreError {
+    /// Path-free `Display` so accidental `{err}` formatting at a wake
+    /// edge (or via the `?` operator into a `String`-shaped sink)
+    /// doesn't leak host paths. The `Preflight` arm renders the
+    /// resource name only; the `Other` arm passes through.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preflight { which, .. } => {
+                write!(f, "staging image missing: {which}")
+            }
+            Self::Other(s) => f.write_str(s),
+        }
+    }
+}
+
+impl std::error::Error for SubmitRestoreError {}
+
+impl SubmitRestoreError {
+    /// Convenience constructor for the preflight rejection at the
+    /// `submit_restore_job` site. Captures the verbatim host path +
+    /// the `assert_disk_image_present` source error string. The wake
+    /// machine boundary calls [`Self::log_detail`] before mapping
+    /// into `RestoreHandlerError::StagingPreflight` so the host path
+    /// surfaces in tracing logs (controller-side only) but not on
+    /// the wire.
+    pub fn preflight(which: &'static str, path: PathBuf, source: String) -> Self {
+        Self::Preflight { which, path, source }
+    }
+
+    /// Emit a tracing WARN with the verbatim host path + source error
+    /// for controller-side triage. Called at the wake-machine
+    /// boundary BEFORE the error is mapped into the path-free
+    /// `RestoreHandlerError::StagingPreflight` shape that crosses the
+    /// wire.
+    pub fn log_detail(&self, sandbox_id_typed: &str) {
+        if let Self::Preflight { which, path, source } = self {
+            tracing::warn!(
+                target: "sandbox::wake::preflight",
+                sandbox_id = %sandbox_id_typed,
+                which = %which,
+                path = %path.display(),
+                source = %source,
+                "submit_restore_job: controller-side staging preflight rejected the alloc (R23-API1)"
+            );
+        }
+    }
+}
+
+/// C-4 fix (T-8b-smoke-r5 cluster review, 2026-05-25): bounded retry
+/// policy used by [`restore_sandbox`] when the source vm_index is
+/// momentarily held by an in-flight source-teardown.
+///
+/// The snapshot endpoint returns 200 **as soon as the artifact is on
+/// disk** and detaches `teardown_source_for_snapshot`. That detached
+/// task keeps `vm_index` reserved until the host-fence clears
+/// (`host_fence_timeout_secs`, default 30–120 s) + the Nomad job is
+/// purged (~30 s). A wake arriving in the millisecond range after the
+/// snapshot response races that detached teardown and the v1 sticky
+/// allocator (`reserve_vm_index(snap.vm_index)`) rejects.
+///
+/// Fix shape: **caller-side bounded retry**. The reserve is
+/// idempotent and cheap (a single mutex `.reserve()` call against
+/// `VmIndexAllocator`), so polling until the teardown releases the
+/// slot is correct *and* preserves the host-fence invariant (we do
+/// not race the fence — we wait for it).
+///
+/// Why caller-side retry rather than:
+/// - (a) snapshot blocks until teardown done — would push snapshot p50
+///   from ~6 s to ~50–90 s. Bad SLO.
+/// - (b) cross-slot fallback (drop sticky) — requires plumbing an
+///   `alloc()` path through the trait + breaks the v1 § 5.0/§ 5.1
+///   sticky contract callers depend on (cache warmth + `snap.vm_index`
+///   as a wire authority).
+/// - (c) decouple vm_index release from host-fence — host_fence is
+///   the *primary* FM-F defense against handing a live IP to a new
+///   tenant; releasing the slot before the fence clears reopens that
+///   race for any concurrent CREATE.
+///
+/// Default budget: **25 attempts × 2 s interval = 48 s total**
+/// (24 sleeps between 25 attempts — the first attempt does not sleep,
+/// so wall-time = `(max_attempts - 1) * interval`, not
+/// `max_attempts * interval`; R14-Q4 doc off-by-one fix).
+///
+/// **C-7 fix (T-8b-smoke-r8 cluster review)**: the original v1 default
+/// was 60×2s=118s wall-time (60 attempts have 59 sleeps), sized to
+/// envelope the worst observed teardown wall-time (host_fence ~60 s
+/// + Nomad purge ~30 s ≈ 90 s). That budget exceeded the stress
+/// client's 60 s deadline. When the client disconnected at 60 s, ntex
+/// dropped the wake handler future mid-`compio::time::sleep.await`,
+/// leaving no success/exhausted log — a silent failure with the row
+/// wedged at `restoring`.
+///
+/// **R14-A6 (architecture-r14)**: production backends should derive
+/// the policy from `cfg.host_fence_timeout_secs` via
+/// [`VmIndexRetryPolicy::from_host_fence_timeout`] rather than rely on
+/// the hard-coded default — so a future fence-config bump (or a
+/// per-cluster override) scales the wake budget automatically. The
+/// `Default` impl remains at the C-7 constants (25×2s=48s) as the
+/// test contract anchor and the unit-test fallback for backends
+/// without a `cfg` handle (e.g. `StubRestoreBackend` in unit tests).
+///
+/// Trade-off: under sustained `host_fence` races where the source
+/// slot does not vacate within 50 s, wake now surfaces a clean 503
+/// `vm_index_unavailable` (with the exhausted-budget warn log)
+/// instead of silently hanging until the client times out. An
+/// observable failure mode is strictly better than a silent stall.
+/// The long-term fix is async response with polling (return 202 +
+/// status URL, client polls until ready) — out of scope for the
+/// cluster-smoke unblock.
+#[derive(Debug, Clone, Copy)]
+pub struct VmIndexRetryPolicy {
+    /// Maximum number of reserve attempts before giving up and
+    /// returning `VmIndexUnavailable`. 1 = no retries (first attempt
+    /// is decisive).
+    pub max_attempts: u32,
+    /// Wall time slept between attempts. Fixed (not exponential) —
+    /// the slot frees on a roughly-deterministic ~90 s timeline; the
+    /// added jitter of exponential backoff would mostly miss the
+    /// release window.
+    pub interval: Duration,
+}
+
+impl Default for VmIndexRetryPolicy {
+    fn default() -> Self {
+        // C-7 fix: 25 attempts × 2 s = 48 s wall-time budget
+        // (24 sleeps; the first attempt fires immediately). Keeps
+        // ≥10 s headroom under the 60 s ntex/stress-client deadline
+        // so the exhausted-budget log fires before the client
+        // disconnect cancels the future. Preserved as the test
+        // contract anchor (see `c7_retry_budget_default_is_under_client_deadline`)
+        // and the fallback for backends without a `cfg` handle.
+        // Production backends should call
+        // [`Self::from_host_fence_timeout`] instead — see R14-A6.
+        Self { max_attempts: 25, interval: Duration::from_secs(2) }
+    }
+}
+
+impl VmIndexRetryPolicy {
+    /// Derive the vm-index wake-retry budget from `host_fence_timeout_secs`
+    /// so a future fence-config bump scales the budget automatically (R14-A6).
+    ///
+    /// In `Sync` mode: `budget = MIN(2×fence − 10, 50)` s — the tighter of
+    /// the fence-derived and ntex-client-deadline ceilings (C-8a/C-8b).
+    /// In `Async` mode: `budget = 2×fence + 10` s — the deadline cap is
+    /// dropped because the loop runs on `detach_isolated` with no client
+    /// cancellation (C-7-LT-1).
+    ///
+    /// See `docs/decisions/2026-05-25-vm-index-retry-policy.md` for the full
+    /// C-8/C-8a/C-8b/C-7-LT-1 tuning history and the smoke-r13 retrospective
+    /// explaining why the 2× factor is a conservative safety margin, not a
+    /// compositional model.
+    pub fn from_host_fence_timeout(
+        host_fence_timeout_secs: u64,
+        wake_mode: crate::config::WakeResponseMode,
+    ) -> Self {
+        const HEADROOM_SECS: u64 = 10;
+        const CLIENT_DEADLINE_SECS: u64 = 60;
+        const INTERVAL_SECS: u64 = 2;
+        const MIN_ATTEMPTS: u32 = 1;
+
+        // C-8b: empirical source-teardown wall-time is ~2× the
+        // host_fence_timeout — `wait_for_agent_silent` requires 2
+        // consecutive no-reply polls AND the Nomad job purge tail
+        // appends a second fence-shaped wait. The fence-derived
+        // ceiling must envelope this combined pipeline, not just the
+        // fence component. Smoke-r10 measured 60.164 s teardown at
+        // fence=30 s (deferred C-8b).
+        let teardown_estimate = host_fence_timeout_secs.saturating_mul(2);
+
+        // C-7-LT-1: branch on response mode. In sync the legacy
+        // dual-ceiling MIN protects against ntex client-disconnect
+        // cancellation; in async the wake loop runs on
+        // `detach_isolated` with no client-side cancellation, so we
+        // anchor the budget to `2×fence + HEADROOM` (a safety margin
+        // past the measured teardown wall-time).
+        let effective_budget = match wake_mode {
+            crate::config::WakeResponseMode::Sync => {
+                // Dual ceilings:
+                //   - fence-derived is the IDEAL upper bound (matches
+                //     the observed source-teardown wall-time,
+                //     post-C-8b 2× factor).
+                //   - deadline-derived is the HARD upper bound
+                //     (anything past this is silently dropped when
+                //     the ntex client disconnects — the C-7 / C-8a
+                //     failure mode).
+                // Take the MIN — the tighter of the two always wins.
+                let max_budget_from_fence =
+                    teardown_estimate.saturating_sub(HEADROOM_SECS);
+                let max_budget_from_deadline =
+                    CLIENT_DEADLINE_SECS.saturating_sub(HEADROOM_SECS);
+                max_budget_from_fence.min(max_budget_from_deadline)
+            }
+            crate::config::WakeResponseMode::Async => {
+                // No ntex client deadline binds the server-side state
+                // machine — it runs on `detach_isolated` and surfaces
+                // terminal status through `wake_jobs` polling. Budget
+                // = empirical teardown wall-time + safety margin.
+                // Smoke-r12: 60.166 s teardown at fence=30 → 70 s
+                // budget envelopes with ~10 s slack.
+                teardown_estimate.saturating_add(HEADROOM_SECS)
+            }
+        };
+
+        let attempts_from_budget = (effective_budget / INTERVAL_SECS).saturating_add(1);
+        let max_attempts = u32::try_from(attempts_from_budget)
+            .unwrap_or(u32::MAX)
+            .max(MIN_ATTEMPTS);
+        Self {
+            max_attempts,
+            interval: Duration::from_secs(INTERVAL_SECS),
+        }
+    }
 }
 
 /// Pieces of the production backend the restore handler touches.
@@ -99,9 +397,11 @@ pub enum RestoreHandlerError {
 /// `submit_nomad_job` + `wait_for_agent_livez`.
 pub trait RestoreBackend: Send + Sync {
     /// Reserve `vm_index` (the source slot) on this worker. Returns
-    /// `Ok(())` on success; `Err(_)` if the slot is already held
-    /// (cluster-fallback path; v1 doesn't try sibling workers and
-    /// surfaces this as 503 immediately).
+    /// `Ok(())` on success; `Err(_)` if the slot is already held.
+    /// C-4 fix: callers (see [`restore_sandbox`]) now retry on Err
+    /// per [`Self::vm_index_retry_policy`] before surfacing as 503,
+    /// so the source-teardown's ~90 s vm_index hold no longer races
+    /// the wake-immediately-after-snapshot client request.
     fn reserve_vm_index(&self, vm_index: i16) -> Result<(), String>;
 
     /// Release a previously-reserved vm_index. Idempotent.
@@ -114,16 +414,27 @@ pub trait RestoreBackend: Send + Sync {
 
     /// Submit a Nomad (or equivalent) job for the restored alloc.
     /// `ZSBX_RESTORE_FROM=<alloc_dir>` must be set in the spawned
-    /// task's env so the wrapper's restore branch fires (PR 3f).
+    /// task's env; the ch driver reads it via `TaskConfig.RestoreFrom`
+    /// and passes it to CH as `--restore source_url=file://<path>`.
     /// Synchronous return on success means the job was *enqueued*;
     /// readiness is signalled by [`Self::wait_for_livez`].
+    ///
+    /// R23-API1 / R25-S1 / R25-I1 / R25-I2 typed-error shape: the
+    /// `Err` arm distinguishes controller-side staging-preflight
+    /// rejection ([`SubmitRestoreError::Preflight`]) from every other
+    /// submit-time failure ([`SubmitRestoreError::Other`]). The wake
+    /// state machine routes the former to
+    /// `WakeErrorCode::StagingPathMissing` / wire
+    /// `staging_image_missing` and keeps the host path off the wire;
+    /// the latter folds into `WakeErrorCode::RestoreFailed` as
+    /// before.
     fn submit_restore_job(
         &self,
         sandbox_id: Uuid,
         vm_index: i16,
         alloc_dir: &Path,
         user_id: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), SubmitRestoreError>;
 
     /// Block until the restored VM's agent serves `/livez 200`. Best
     /// implemented over `compio::time::sleep` polling; v1 ships the
@@ -185,6 +496,94 @@ pub trait RestoreBackend: Send + Sync {
     /// Silent fail-OPEN. Removing the default forces every impl
     /// (including test stubs) to provide a real URL at compile time.
     fn derive_agent_url(&self, vm_index: i16) -> String;
+
+    /// C-4 fix (T-8b-smoke-r5 cluster review): policy the wake path
+    /// uses to retry [`Self::reserve_vm_index`] while the source's
+    /// detached teardown still holds the slot. Default budget (after
+    /// the C-7 fix at T-8b-smoke-r8) is 48 s wall-time (25 attempts ×
+    /// 2 s interval, 24 sleeps — the first attempt does not sleep).
+    /// Sized to stay strictly below the 60 s ntex/stress-client
+    /// deadline so the exhausted-budget log fires before the client
+    /// disconnect drops the wake future. Production backends override
+    /// via [`VmIndexRetryPolicy::from_host_fence_timeout`] to keep the
+    /// budget linked to `cfg.host_fence_timeout_secs` (R14-A6). Test
+    /// stubs may override with shorter budgets to keep unit tests
+    /// fast. See [`VmIndexRetryPolicy`] for the full trade-off
+    /// rationale.
+    fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
+        VmIndexRetryPolicy::default()
+    }
+}
+
+/// C-4 fix helper: bounded-retry wrapper around
+/// [`RestoreBackend::reserve_vm_index`]. Polls the allocator on a
+/// [`VmIndexRetryPolicy`] cadence; once the source-teardown releases
+/// the slot the next attempt succeeds. Surfaces 503 with the same
+/// wire shape as before only after exhausting the budget.
+///
+/// Extracted from `do_restore_inner` so the retry loop is testable
+/// without a Postgres-backed restore flow. The DB-driven happy/sad
+/// paths cover the integration; this helper's unit tests pin the
+/// loop semantics (succeeds-after-N, exhausts cleanly, single-shot
+/// when slot is free).
+pub(crate) async fn reserve_vm_index_with_retry(
+    backend: &dyn RestoreBackend,
+    sandbox_id: Uuid,
+    vm_index: i16,
+) -> Result<(), RestoreHandlerError> {
+    let retry = backend.vm_index_retry_policy();
+    let attempts = retry.max_attempts.max(1);
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=attempts {
+        // C-7 fix: per-attempt INFO marker. Smoke-r8 falsified the
+        // C-6 runtime-starvation hypothesis: the wake handler was
+        // silently canceled by ntex when the stress client's 60 s
+        // deadline elapsed, before either the success-after-retry
+        // or exhausted-budget branch fired. Emitting before each
+        // reserve attempt lets the next smoke see which attempt-N
+        // the loop is on when the cancellation lands (or that it
+        // never entered the loop at all). Volume is bounded by the
+        // policy's `max_attempts` per wake — fine at c=20.
+        tracing::info!(
+            target: "zeroship_sandbox::restore_handler",
+            sandbox_id = %sandbox_id,
+            attempt = attempt,
+            max_attempts = attempts,
+            vm_index = vm_index,
+            "restore/wake: reserve_vm_index_with_retry attempt"
+        );
+        match backend.reserve_vm_index(vm_index) {
+            Ok(()) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        sandbox_id = %sandbox_id,
+                        vm_index = vm_index,
+                        attempts = attempt,
+                        "restore/wake: vm_index reserved after retry \
+                         (raced source-teardown release)"
+                    );
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < attempts {
+                    compio::time::sleep(retry.interval).await;
+                }
+            }
+        }
+    }
+    tracing::warn!(
+        sandbox_id = %sandbox_id,
+        vm_index = vm_index,
+        attempts = attempts,
+        budget_ms = %(retry.interval.as_millis() as u64
+            * u64::from(attempts.saturating_sub(1))),
+        last_error = %last_err.as_deref().unwrap_or("<unknown>"),
+        "restore/wake: vm_index reserve exhausted retry budget; \
+         source-teardown still holding the slot — surfacing 503"
+    );
+    Err(RestoreHandlerError::VmIndexUnavailable { requested: vm_index })
 }
 
 /// Restore a snapshotted sandbox. See module doc for the full flow.
@@ -208,6 +607,22 @@ pub async fn restore_sandbox(
         return Err(RestoreHandlerError::FeatureDisabled);
     }
 
+    // C-6 trace (T-8b-smoke-r6 wake silent-stall investigation,
+    // 2026-05-25). The wake handler emitted ZERO log lines between
+    // "admin/wake started" (handler entry) and the eventual stall —
+    // every step between row read, CAS-to-restoring,
+    // reserve_vm_index_with_retry, store.get, submit_restore_job,
+    // wait_for_livez, unseal, clock_resync, register_restored, and
+    // CAS-to-running was silent. After-the-fact we could not localize
+    // which step wedged. These phase-boundary `restore: phase=*` logs
+    // let the next cluster smoke pinpoint the stall (whichever phase
+    // is the LAST `restore: phase=*` emitted before the 60 s client
+    // timeout is the wedge site). Kept at INFO so they show up in the
+    // standard controller log without per-restore `RUST_LOG` gymnastics;
+    // the volume is one batch of ~14 lines per wake which is fine at
+    // c=1 stress and easy to grep at c=20.
+    tracing::info!(sandbox_id = %sandbox_id, phase = "entry", "restore: phase");
+
     // 1. Read row + check state.
     let row = db
         .get_sandbox_row(sandbox_id)
@@ -218,6 +633,13 @@ pub async fn restore_sandbox(
                 zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
             ))
         })?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "row_read_ok",
+        status = row.status.as_str(),
+        generation = row.generation,
+        "restore: phase"
+    );
     if !matches!(
         row.status,
         SandboxStatus::Snapshotted | SandboxStatus::SnapshottedSuspect
@@ -240,11 +662,23 @@ pub async fn restore_sandbox(
     //    ripple through every existing reader; v1 keeps the read
     //    local to this handler.)
     let snap = read_snapshot_row(db, sandbox_id).await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "read_snapshot_row_ok",
+        vm_index = snap.vm_index,
+        "restore: phase"
+    );
 
     // 3. CAS to restoring.
     let g1 = db
         .update_sandbox_status(sandbox_id, SandboxStatus::Restoring, g0, None)
         .await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "cas_restoring_ok",
+        generation = g1,
+        "restore: phase"
+    );
 
     // From here on use a closure + rollback semantics.
     let result = do_restore_inner(
@@ -271,7 +705,31 @@ pub async fn restore_sandbox(
                 _ => SandboxStatus::Snapshotted,
             };
             // Best-effort teardown of the partially-spawned alloc.
-            backend.teardown_restore(sandbox_id, snap.vm_index);
+            //
+            // **R10-C2 fix (concurrency-r10 2026-05-25)**: wrap the
+            // sync call in `spawn_blocking` so the ntex worker doesn't
+            // park for up to 10 s on the ureq DELETE inside
+            // `RealRestoreBackend::teardown_restore`. R8-A3-5 wrapped
+            // submit_restore_job + wait_for_livez but missed the
+            // rollback path. Under c=N concurrent restores all hitting
+            // rollback (e.g., GCS hiccup on `store.get`), pre-fix all
+            // ntex workers would park simultaneously → 10 s of no
+            // progress, surface-level p99 spike. Pattern mirrors
+            // `store.get` at lines ~397-411 and `clock_resync_post_restore`
+            // at lines ~1530-1616.
+            //
+            // (b2 choice: wrap at call site, keep callee sync. The
+            // `RestoreBackend` trait stays sync so the in-crate
+            // `StubRestoreBackend` test scaffolding stays simple; the
+            // only async caller is this rollback closure.)
+            let backend_for_teardown = Arc::clone(&backend);
+            let snap_vm_index = snap.vm_index;
+            let sandbox_id_for_teardown = sandbox_id;
+            let _ = compio::runtime::spawn_blocking(move || {
+                backend_for_teardown
+                    .teardown_restore(sandbox_id_for_teardown, snap_vm_index);
+            })
+            .await;
             if let Err(rb_err) = db
                 .update_sandbox_status(sandbox_id, target, g1, None)
                 .await
@@ -289,15 +747,24 @@ pub async fn restore_sandbox(
     }
 }
 
+/// Focused pg read of a sandbox row's `snapshot_*` + `user_id`
+/// columns at `snapshotted` / `snapshotted_suspect` state.
+///
+/// **Visibility**: `pub(crate)` so `wake_machine` can call
+/// [`read_snapshot_row`] directly instead of mirroring the SELECT
+/// against the same columns. The wake-path consumer ignores
+/// `artifact_path` (it only needs sha + vm_index + user_id); leaving
+/// the field on the unified type costs one `String` per wake but
+/// preserves the cold-boot caller's contract (R26-I1 collapse).
 #[derive(Debug, Clone)]
-struct SnapshotRowMeta {
-    artifact_path: String,
-    sha256: [u8; 32],
-    vm_index: i16,
+pub(crate) struct SnapshotRowMeta {
+    pub(crate) artifact_path: String,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) vm_index: i16,
     /// Source sandbox's `user_id` (typed-id form `usr_<base62>`).
     /// Needed by `submit_restore_job` to derive `ZSBX_USER_HOME_IMG`
     /// per the cold-boot env contract (Phase B fix #6).
-    user_id: String,
+    pub(crate) user_id: String,
 }
 
 /// Focused pg read for the snapshot_* columns. Returns
@@ -305,7 +772,15 @@ struct SnapshotRowMeta {
 /// the 0007 CHECK should make that impossible for a `snapshotted` /
 /// `snapshotted_suspect` row, but we surface a clear error rather
 /// than panic.
-async fn read_snapshot_row(
+///
+/// **Visibility**: `pub(crate)` so the async wake machine in
+/// `wake_machine.rs` shares this single reader (R26-I1 collapse,
+/// closing the r21-A1-era duplicate carried through r22-A4 / r24-A4 /
+/// r25 / r26-I1). Pre-collapse `wake_machine` mirrored the SELECT
+/// against a `WakeSnapshotMeta` clone; that drifted by one column
+/// (`artifact_path`) and the proposal's "phase 5 will fix" promise
+/// never landed. Sync and async restore paths now share this entry.
+pub(crate) async fn read_snapshot_row(
     db: &Database,
     sandbox_id: Uuid,
 ) -> Result<SnapshotRowMeta, RestoreHandlerError> {
@@ -361,9 +836,36 @@ async fn do_restore_inner(
     // 3 (cont). Reserve vm_index. v1: source slot only. § 5.1
     // "v1 forces vm_index = source vm_index"; cross-worker fallback
     // is documented but not implemented in v1.
-    backend
-        .reserve_vm_index(snap.vm_index)
-        .map_err(|_| RestoreHandlerError::VmIndexUnavailable { requested: snap.vm_index })?;
+    //
+    // **C-4 fix** (T-8b-smoke-r5 cluster review, 2026-05-25): the
+    // snapshot endpoint detaches `teardown_source_for_snapshot`,
+    // which holds the source slot for ~90 s (host_fence + Nomad
+    // purge). A wake arriving ms after the snapshot response used to
+    // 503 immediately (sticky alloc refused the busy slot). We now
+    // retry the reserve on a bounded budget (see
+    // [`VmIndexRetryPolicy`]); the slot frees as soon as the
+    // detached teardown's `release()` fires. Total budget for
+    // production backends is derived from `cfg.host_fence_timeout_secs`
+    // via `VmIndexRetryPolicy::from_host_fence_timeout` (R14-A6); the
+    // `Default` fallback (used by test stubs without a cfg) is
+    // 48 s wall-time (25 × 2 s = 24 sleeps). Was ~118 s pre-C-7
+    // (60 × 2 s = 59 sleeps — exceeded the ntex/stress-client 60 s
+    // deadline and the wake future was canceled mid-sleep before any
+    // exhaustion log fired); exhaustion still surfaces as 503 with
+    // the same wire shape.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_reserve_vm_index",
+        vm_index = snap.vm_index,
+        "restore: phase"
+    );
+    reserve_vm_index_with_retry(backend.as_ref(), sandbox_id, snap.vm_index).await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_reserve_vm_index",
+        vm_index = snap.vm_index,
+        "restore: phase"
+    );
 
     let alloc_dir = backend.restore_alloc_dir(sandbox_id);
     if alloc_dir.exists() {
@@ -378,6 +880,12 @@ async fn do_restore_inner(
             "create alloc_dir {}: {e}", alloc_dir.display()
         ))
     })?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "alloc_dir_ready",
+        alloc_dir = %alloc_dir.display(),
+        "restore: phase"
+    );
 
     // 4. Fetch artifact. ChecksumMismatch / InvalidArtifact → corrupt.
     let sandbox_id_typed = format!(
@@ -394,6 +902,11 @@ async fn do_restore_inner(
     // `crates/sandbox/src/persist.rs:677-687`. Owned clones of the
     // by-ref args are needed because spawn_blocking requires
     // `'static + Send + FnOnce`.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_store_get",
+        "restore: phase"
+    );
     let get_result = {
         let store_clone = Arc::clone(&store);
         let sid_clone = sandbox_id_typed.clone();
@@ -409,6 +922,12 @@ async fn do_restore_inner(
             ))
         })
     };
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_store_get",
+        ok = get_result.is_ok(),
+        "restore: phase"
+    );
     // Bug-#14a diagnostic: surface what's on disk immediately after
     // store.get returns. Prior cluster smokes (2026-05-22) reported
     // the wake-time staging dir was empty despite a successful Ok
@@ -459,13 +978,18 @@ async fn do_restore_inner(
     // 5. Rewrite config.json per § 5 — controller-side rewrites
     //    ONLY the vm_index-dependent fields (net[].tap, net[].mac).
     //    The path-bearing fields (disks[].path, fs[].socket,
-    //    serial.file) are NOT touched here; the wrapper rewrites
-    //    them at exec time because only the wrapper knows the
-    //    actual NOMAD_TASK_DIR (Nomad assigns the alloc UUID after
+    //    serial.file) are NOT touched here; the ch driver receives
+    //    them as absolute paths in TaskConfig.Disks[].Path and
+    //    TaskConfig.Fs[].Socket (Nomad assigns the alloc UUID after
     //    job submission). See bug-#8 diagnostic 2026-05-22.
     let config_path = alloc_dir.join("config.json");
     rewrite_config_json(&config_path, snap.vm_index)
         .map_err(RestoreHandlerError::ConfigRewrite)?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "config_rewritten",
+        "restore: phase"
+    );
 
     // 6. Submit the restore job.
     //
@@ -481,12 +1005,17 @@ async fn do_restore_inner(
     // other RPCs while Nomad churns. Pattern mirrors R7-P1
     // (79428d53) on snapshot's ch.pause + ch.snapshot and R5-P1b
     // (cdd2e677) on store.get.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_submit_restore_job",
+        "restore: phase"
+    );
     {
         let backend_clone = Arc::clone(&backend);
         let alloc_dir_owned = alloc_dir.clone();
         let user_id_owned = snap.user_id.clone();
         let vm_index = snap.vm_index;
-        compio::runtime::spawn_blocking(move || {
+        let submit_result = compio::runtime::spawn_blocking(move || {
             backend_clone.submit_restore_job(
                 sandbox_id,
                 vm_index,
@@ -495,9 +1024,41 @@ async fn do_restore_inner(
             )
         })
         .await
-        .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
-        .map_err(RestoreHandlerError::Backend)?;
+        .unwrap_or_else(|p| Err(SubmitRestoreError::Other(format!(
+            "spawn_blocking panic: {p:?}"
+        ))));
+        // R23-API1 / R25-S1 / R25-I2: preflight failures get a typed
+        // `RestoreHandlerError::StagingPreflight` (path-free Display);
+        // every other shape folds into `Backend(_)` as before. The
+        // verbatim host path + source error are logged via tracing
+        // before the typed map so operators have triage context that
+        // doesn't cross the wire.
+        match submit_result {
+            Ok(()) => {}
+            Err(e @ SubmitRestoreError::Preflight { .. }) => {
+                let sandbox_id_typed = format!(
+                    "sbx_{}",
+                    zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+                );
+                e.log_detail(&sandbox_id_typed);
+                let SubmitRestoreError::Preflight { which, .. } = e else {
+                    unreachable!()
+                };
+                return Err(RestoreHandlerError::StagingPreflight {
+                    which,
+                    sandbox_id_typed,
+                });
+            }
+            Err(SubmitRestoreError::Other(s)) => {
+                return Err(RestoreHandlerError::Backend(s));
+            }
+        }
     }
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_submit_restore_job",
+        "restore: phase"
+    );
 
     // 7. Wait for /livez.
     //
@@ -506,6 +1067,11 @@ async fn do_restore_inner(
     // between attempts until the agent answers 200 or the deadline
     // hits (typically 1-3 s post-`running`). Same blocking-poll
     // shape as `submit_restore_job`; same spawn_blocking treatment.
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_wait_for_livez",
+        "restore: phase"
+    );
     {
         let backend_clone = Arc::clone(&backend);
         let vm_index = snap.vm_index;
@@ -516,6 +1082,11 @@ async fn do_restore_inner(
         .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
         .map_err(RestoreHandlerError::Backend)?;
     }
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_wait_for_livez",
+        "restore: phase"
+    );
 
     // 7b (B19 fix, cluster smoke 2026-05-23 r4). Install the restored
     //    VM into the backend's in-memory state map. Without this step
@@ -555,12 +1126,28 @@ async fn do_restore_inner(
     //    There is no window where the state map says "ready" but
     //    the clock is still broken.
     if let Some(p) = persist {
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "pre_unseal",
+            "restore: phase"
+        );
         let sealed = p.unseal(sandbox_id).await.map_err(|e| {
             RestoreHandlerError::Internal(format!(
                 "post-wake unseal sandbox {sandbox_id}: {e}"
             ))
         })?;
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "post_unseal",
+            "restore: phase"
+        );
         let agent_url = backend.derive_agent_url(snap.vm_index);
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "pre_clock_resync",
+            agent_url = %agent_url,
+            "restore: phase"
+        );
         clock_resync_post_restore(
             &agent_url,
             sandbox_id,
@@ -572,6 +1159,11 @@ async fn do_restore_inner(
                 "post-wake clock_resync to {agent_url}: {e}"
             ))
         })?;
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "post_clock_resync",
+            "restore: phase"
+        );
         backend
             .register_restored(
                 sandbox_id,
@@ -580,6 +1172,11 @@ async fn do_restore_inner(
                 &snap.user_id,
             )
             .map_err(RestoreHandlerError::Backend)?;
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            phase = "post_register_restored",
+            "restore: phase"
+        );
     } else {
         // Test path — `restore_sandbox` was called with persist=None
         // (StubRestoreBackend driven). The trait default impl is a
@@ -597,9 +1194,20 @@ async fn do_restore_inner(
     //    once the VM is live again. (Per § 1: snapshot is
     //    destructive of the source; restore is destructive of the
     //    snapshot. Idle-eviction will produce a fresh snapshot.)
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "pre_cas_running",
+        "restore: phase"
+    );
     let g2 = db
         .update_sandbox_status(sandbox_id, SandboxStatus::Running, expected_generation, None)
         .await?;
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        phase = "post_cas_running",
+        generation = g2,
+        "restore: phase"
+    );
     if let Err(e) = db.clear_snapshot_metadata(sandbox_id, g2).await {
         // Non-fatal: the row is `running` and serves traffic; the
         // operator's stale snapshot_* columns become a tidy-up
@@ -618,15 +1226,17 @@ async fn do_restore_inner(
 // config.json rewrite (§ 5.1)
 // ────────────────────────────────────────────────────────────────────
 
-/// MAC derivation rule from `crates/sandbox/scripts/nomad-vm-wrapper.sh`:
-/// `printf '12:34:56:78:9b:%02x' "$VM_INDEX"`. v1 vm_index is i16
-/// (max 256/worker per § 5.0); we mask to one byte for the format.
+/// MAC derivation rule: `12:34:56:78:9b:<vm_index as u8 hex>`.
+/// The controller computes this value and passes it to the ch driver
+/// via `TaskConfig.Net[0].MAC` (`nomad-driver-ch/ch/task_config.go`).
+/// v1 vm_index is i16 (max 256/worker per § 5.0); we mask to one byte.
 pub(crate) fn derive_mac(vm_index: i16) -> String {
     format!("12:34:56:78:9b:{:02x}", (vm_index as u16) & 0xff)
 }
 
-/// Tap derivation rule: `zsbx-nm-<vm_index>`. Source-of-truth is
-/// the wrapper script; this Rust copy must match.
+/// Tap derivation rule: `zsbx-nm-<vm_index>`. The controller computes
+/// this value and passes it to the ch driver via `TaskConfig.Net[0].Tap`
+/// (`nomad-driver-ch/ch/task_config.go`).
 pub(crate) fn derive_tap(vm_index: i16) -> String {
     format!("zsbx-nm-{vm_index}")
 }
@@ -652,10 +1262,10 @@ pub(crate) fn rewrite_config_json(
     // may have different vm_indices (cluster-fallback in v2). We
     // recompute from the destination vm_index. This is the ONLY
     // path the controller rewrites — path-bearing fields (disks[].path,
-    // fs[].socket, serial.file) require the runtime NOMAD_TASK_DIR
-    // which the controller cannot know at job-submit time. The
-    // wrapper handles path rewrites at exec time. See bug-#8
-    // diagnostic 2026-05-22 / proposal § 5.
+    // fs[].socket, serial.file) are passed as absolute paths in
+    // TaskConfig and the ch driver consumes them directly at launch
+    // time (the runtime NOMAD_TASK_DIR is resolved on the worker).
+    // See bug-#8 diagnostic 2026-05-22 / proposal § 5.
     let tap = derive_tap(vm_index);
     let mac = derive_mac(vm_index);
     if let Some(nets) = v.get_mut("net").and_then(|n| n.as_array_mut()) {
@@ -680,10 +1290,10 @@ pub(crate) fn rewrite_config_json(
 }
 
 // `rewrite_alloc_path` removed 2026-05-22 (bug #8 fix). The controller
-// can't fabricate a meaningful alloc UUID at job-submit time; the
-// wrapper rewrites path-bearing fields at exec time using the real
-// `NOMAD_TASK_DIR` env var. See `crates/sandbox/scripts/nomad-vm-wrapper.sh`
-// restore branch and the diagnostic at the top of this commit.
+// can't fabricate a meaningful alloc UUID at job-submit time; path-bearing
+// fields (disks[].path, fs[].socket, serial) are passed as absolute paths
+// in TaskConfig and the ch driver consumes them directly at launch time.
+// See bug-#8 diagnostic 2026-05-22.
 
 // ────────────────────────────────────────────────────────────────────
 // Test stub `RestoreBackend`.
@@ -691,7 +1301,12 @@ pub(crate) fn rewrite_config_json(
 
 /// Minimal stub for unit tests. Returns programmable success/error
 /// from each operation; records calls so tests can assert on order.
+///
+/// Gated under `cfg(any(test, feature = "test-support"))` so the
+/// scaffolding is stripped from production rlibs (R28-API2 sweep,
+/// mirrors the R27-API2 `_test_inject_sandbox` precedent).
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 pub struct StubRestoreBackend {
     pub root: PathBuf,
@@ -703,8 +1318,20 @@ pub struct StubRestoreBackend {
     pub fail_reserve: bool,
     pub fail_submit: bool,
     pub fail_livez: bool,
+    /// C-4 fix: tunable retry policy. Tests that want to exercise the
+    /// retry loop (e.g. "succeeds after N attempts") configure this;
+    /// the default keeps `fail_reserve` tests fast by limiting to a
+    /// single attempt with zero sleep.
+    pub vm_index_retry_policy: VmIndexRetryPolicy,
+    /// C-4 fix: when `Some(N)`, the Nth call to `reserve_vm_index`
+    /// (1-indexed) flips from Err to Ok. Lets tests simulate the
+    /// source-teardown finally releasing the slot after a few
+    /// retries.
+    pub reserve_succeeds_on_attempt: Option<u32>,
+    pub reserve_attempts: std::sync::atomic::AtomicU32,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StubRestoreBackend {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -717,12 +1344,40 @@ impl StubRestoreBackend {
             fail_reserve: false,
             fail_submit: false,
             fail_livez: false,
+            // Default: single attempt, zero sleep — keeps existing
+            // tests (notably `fail_reserve = true`) fast.
+            vm_index_retry_policy: VmIndexRetryPolicy {
+                max_attempts: 1,
+                interval: Duration::from_millis(0),
+            },
+            reserve_succeeds_on_attempt: None,
+            reserve_attempts: std::sync::atomic::AtomicU32::new(0),
         }
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl RestoreBackend for StubRestoreBackend {
     fn reserve_vm_index(&self, vm_index: i16) -> Result<(), String> {
+        let n = self
+            .reserve_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        // C-4 fix: "succeeds-after-N" override. Lets tests simulate
+        // the source-teardown releasing the slot after a few wake
+        // retries.
+        if let Some(target) = self.reserve_succeeds_on_attempt {
+            if n < target {
+                return Err(format!(
+                    "stub: reserve_vm_index({vm_index}) still held by source-teardown (attempt {n})"
+                ));
+            }
+            self.reserved
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(vm_index);
+            return Ok(());
+        }
         if self.fail_reserve {
             return Err(format!("stub: reserve_vm_index({vm_index}) cluster-exhausted"));
         }
@@ -731,6 +1386,9 @@ impl RestoreBackend for StubRestoreBackend {
             .unwrap_or_else(|p| p.into_inner())
             .push(vm_index);
         Ok(())
+    }
+    fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
+        self.vm_index_retry_policy
     }
     fn release_vm_index(&self, vm_index: i16) {
         self.released
@@ -747,11 +1405,13 @@ impl RestoreBackend for StubRestoreBackend {
         _vm_index: i16,
         _alloc_dir: &Path,
         _user_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SubmitRestoreError> {
         self.submit_called
             .store(true, std::sync::atomic::Ordering::SeqCst);
         if self.fail_submit {
-            return Err("stub: submit_restore_job failed".into());
+            return Err(SubmitRestoreError::Other(
+                "stub: submit_restore_job failed".into(),
+            ));
         }
         Ok(())
     }
@@ -792,14 +1452,14 @@ mod unit_tests {
     use super::*;
 
     #[test]
-    fn derive_mac_matches_wrapper_pattern() {
+    fn derive_mac_matches_pinned_format() {
         assert_eq!(derive_mac(3), "12:34:56:78:9b:03");
         assert_eq!(derive_mac(16), "12:34:56:78:9b:10");
         assert_eq!(derive_mac(255), "12:34:56:78:9b:ff");
     }
 
     #[test]
-    fn derive_tap_matches_wrapper_pattern() {
+    fn derive_tap_matches_pinned_format() {
         assert_eq!(derive_tap(0), "zsbx-nm-0");
         assert_eq!(derive_tap(42), "zsbx-nm-42");
     }
@@ -808,8 +1468,9 @@ mod unit_tests {
     /// rewrites ONLY net[].tap + net[].mac. Path-bearing fields
     /// (disks[].path, fs[].socket, serial.file) are left untouched
     /// because the controller can't know the runtime NOMAD_TASK_DIR
-    /// at job-submit time. The wrapper does that rewrite at exec
-    /// time with a `sed` against the real env-resolved task dir.
+    /// at job-submit time. The ch driver receives absolute paths
+    /// in `TaskConfig.Disks` / `TaskConfig.Fs` / `TaskConfig.Serial`
+    /// and passes them through to CH at StartTask.
     #[test]
     fn rewrite_config_json_rewrites_only_net_fields() {
         let dir = std::env::temp_dir().join(format!(
@@ -841,11 +1502,468 @@ mod unit_tests {
         // net.tap + net.mac rewritten from vm_index=7
         assert_eq!(v["net"][0]["tap"], "zsbx-nm-7");
         assert_eq!(v["net"][0]["mac"], "12:34:56:78:9b:07");
-        // Paths LEFT UNTOUCHED — the wrapper handles them at exec.
+        // Paths LEFT UNTOUCHED — the ch driver receives them as
+        // absolute TaskConfig.{Disks,Fs,Serial} fields at launch.
         assert_eq!(v["fs"][0]["socket"], source_sock);
         assert_eq!(v["disks"][0]["path"], source_disk);
         assert_eq!(v["serial"]["file"], source_serial);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── C-4 fix (T-8b-smoke-r5 cluster review, 2026-05-25) ─────
+    //
+    // Pin the wake-vs-source-teardown race fix. The snapshot endpoint
+    // returns 200 once the artifact is on disk and detaches a teardown
+    // task that holds `vm_index` for ~90 s (host_fence + Nomad purge).
+    // Pre-fix wake arrived ms later and immediately surfaced 503; now
+    // it retries on a bounded budget. These four tests pin:
+    //   - succeeds after N retries when the slot finally frees,
+    //   - exhausts the budget cleanly when the slot never frees,
+    //   - single-shot when the slot was free from the start (cache-warm
+    //     sticky preserved),
+    //   - the default policy envelopes the observed teardown profile.
+
+    /// C-4 #1: wake retries until source slot frees.
+    /// Stub backend's `reserve_vm_index` returns Err for the first 2
+    /// attempts (simulating the detached teardown still holding the
+    /// slot) and Ok on the 3rd. The retry loop must succeed.
+    #[compio::test]
+    async fn c4_wake_retries_until_source_slot_frees() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-c4-retry-frees-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut stub = StubRestoreBackend::new(root.clone());
+        stub.vm_index_retry_policy = VmIndexRetryPolicy {
+            max_attempts: 5,
+            interval: Duration::from_millis(10),
+        };
+        stub.reserve_succeeds_on_attempt = Some(3);
+        let sid = Uuid::now_v7();
+        let started = Instant::now();
+        let res = reserve_vm_index_with_retry(&stub, sid, 4).await;
+        let elapsed = started.elapsed();
+        res.expect("wake must succeed within the retry budget");
+        // Three attempts, two sleeps of 10 ms → ≥ ~20 ms; ≤ a generous
+        // ceiling that absorbs scheduler jitter on busy CI.
+        assert!(
+            elapsed >= Duration::from_millis(15),
+            "expected at least one inter-attempt sleep; elapsed={:?}",
+            elapsed
+        );
+        assert_eq!(
+            stub.reserve_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "expected exactly 3 reserve attempts"
+        );
+        let reserved = stub.reserved.lock().unwrap().clone();
+        assert_eq!(reserved, vec![4], "slot must be reserved on success");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C-4 #2: wake fails cleanly with a 503-shaped error if the slot
+    /// never frees within the retry budget. Pins the operator-visible
+    /// surface (`VmIndexUnavailable { requested: N }`).
+    #[compio::test]
+    async fn c4_wake_fails_if_slot_never_frees_within_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-c4-exhaust-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut stub = StubRestoreBackend::new(root.clone());
+        stub.fail_reserve = true; // never succeeds
+        stub.vm_index_retry_policy = VmIndexRetryPolicy {
+            max_attempts: 4,
+            interval: Duration::from_millis(5),
+        };
+        let sid = Uuid::now_v7();
+        let res = reserve_vm_index_with_retry(&stub, sid, 9).await;
+        let err = res.expect_err("must surface 503 after exhausting budget");
+        assert!(
+            matches!(err, RestoreHandlerError::VmIndexUnavailable { requested: 9 }),
+            "expected VmIndexUnavailable{{requested:9}}, got {err:?}"
+        );
+        assert_eq!(
+            stub.reserve_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "must consume the full attempt budget before surfacing 503"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C-4 #3: wake takes a single attempt when the source slot is
+    /// already free. Pins the sticky-cache-warm fast path — no
+    /// unnecessary sleep, no extra reserve calls.
+    #[compio::test]
+    async fn c4_wake_uses_single_attempt_when_slot_free() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-c4-fastpath-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut stub = StubRestoreBackend::new(root.clone());
+        // Generous retry budget — if the slot is free we should NOT
+        // use any of it.
+        stub.vm_index_retry_policy = VmIndexRetryPolicy {
+            max_attempts: 10,
+            interval: Duration::from_millis(500),
+        };
+        let sid = Uuid::now_v7();
+        let started = Instant::now();
+        reserve_vm_index_with_retry(&stub, sid, 2)
+            .await
+            .expect("free slot must succeed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "free-slot fast path must not sleep; elapsed={:?}",
+            elapsed
+        );
+        assert_eq!(
+            stub.reserve_attempts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one reserve attempt on a free slot"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C-7 #1 (supersedes C-4 #4): the default `VmIndexRetryPolicy`
+    /// budget must sit STRICTLY BELOW the 60 s ntex/stress-client
+    /// deadline. The original C-4 default (60×2 s = 120 s) exceeded
+    /// the client deadline and the wake handler future was dropped
+    /// by ntex on client disconnect mid-`compio::time::sleep.await`
+    /// — leaving no observable success or exhausted-budget log
+    /// (silent wedge at `pre_reserve_vm_index`, T-8b-smoke-r8).
+    ///
+    /// Concretely: total budget = `(max_attempts - 1) * interval`
+    /// must be ≤55 s so the exhausted-budget warn fires with ≥5 s of
+    /// headroom before the 60 s deadline closes the connection. The
+    /// trade-off is documented on `VmIndexRetryPolicy` and on the
+    /// C-7 review entry: if the source slot is held past 50 s by a
+    /// host_fence race, wake returns a clean 503 instead of hanging
+    /// silently. Observable failure mode > silent timeout.
+    ///
+    /// If a future refactor needs a longer retry window (e.g., to
+    /// re-envelope a slower teardown profile), the correct fix is
+    /// async response with polling (C-7-LT) — NOT bumping this
+    /// budget back above the client deadline.
+    #[test]
+    fn c7_retry_budget_default_is_under_client_deadline() {
+        const NTEX_CLIENT_DEADLINE_MS: u64 = 60_000;
+        const REQUIRED_HEADROOM_MS: u64 = 5_000;
+        let p = VmIndexRetryPolicy::default();
+        let total_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            total_ms + REQUIRED_HEADROOM_MS <= NTEX_CLIENT_DEADLINE_MS,
+            "default retry budget must leave ≥{} ms headroom under the \
+             {} ms ntex/stress-client deadline; current budget = {} ms \
+             (attempts={}, interval={:?}). See C-7 in \
+             docs/reviews/sandbox-snapshot-restore-deferred.md.",
+            REQUIRED_HEADROOM_MS,
+            NTEX_CLIENT_DEADLINE_MS,
+            total_ms,
+            p.max_attempts,
+            p.interval
+        );
+    }
+
+    /// **R14-A6 (architecture-r14)**: production backends derive
+    /// `VmIndexRetryPolicy` from `cfg.host_fence_timeout_secs` via
+    /// `from_host_fence_timeout`. For the platform-default fence
+    /// (60 s in many deployments), the derived budget must (a) stay
+    /// strictly below the 60 s ntex/stress-client deadline and (b)
+    /// envelope the host_fence so a wake racing a fence-clear has a
+    /// non-trivial chance of catching the release. 60 s fence →
+    /// 26×2 s = 50 s wall-time fits both constraints.
+    #[test]
+    fn r14a6_policy_from_cfg_respects_host_fence_timeout() {
+        // 60 s host-fence (the platform default after the cad098e6
+        // 30→120 bump backed off to 60 in many configs).
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            60,
+            crate::config::WakeResponseMode::Sync,
+        );
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            wall_ms <= 50_000,
+            "60 s fence → derived budget should be ≤50 s; got {} ms \
+             (attempts={}, interval={:?})",
+            wall_ms,
+            p.max_attempts,
+            p.interval
+        );
+        // And not trivially small — must actually exercise the retry
+        // loop past the first reserve attempt.
+        assert!(
+            p.max_attempts > 1,
+            "60 s fence → derived policy must allow >1 attempt; got {}",
+            p.max_attempts
+        );
+        // 2 s interval is the C-7 cadence; from_host_fence_timeout
+        // anchors to it so the loop semantics match the existing
+        // observability + tests.
+        assert_eq!(
+            p.interval,
+            Duration::from_secs(2),
+            "from_host_fence_timeout must use the C-7 2 s interval"
+        );
+    }
+
+    /// **R14-A6 short-timeout case (post-C-8b)**: a 20 s host_fence
+    /// (an aggressive per-cluster override) should yield a sensible
+    /// non-trivial budget. Post-C-8b the fence-derived ceiling uses
+    /// `teardown_estimate = 2 * fence = 40 s`, so the formula is
+    /// `(40 - 10) / 2 + 1 = 16` attempts × 2 s = 30 s wall-time
+    /// (fence-ceil binds; deadline-ceil 50 s is looser here). Pins
+    /// the formula so a future refactor can't silently collapse the
+    /// policy to `max_attempts = 1` for short fences. **Pre-C-8b
+    /// this was 6 attempts / 10 s — the 1× fence assumption that
+    /// smoke-r10 disproved.**
+    #[test]
+    fn r14a6_policy_from_cfg_short_timeout() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            20,
+            crate::config::WakeResponseMode::Sync,
+        );
+        assert_eq!(
+            p.max_attempts, 16,
+            "20 s fence post-C-8b sync: (2*20 - 10 headroom) / 2 s interval + 1 = 16"
+        );
+        assert_eq!(p.interval, Duration::from_secs(2));
+    }
+
+    /// **R14-A6 zero-fence edge case**: `host_fence_timeout_secs == 0`
+    /// is the explicit "disable the fence" knob (NOT recommended in
+    /// production but valid for some test setups). The derived policy
+    /// must still produce at least one decisive reserve attempt
+    /// rather than collapsing to a degenerate 0-attempt loop that
+    /// would skip the reserve entirely.
+    #[test]
+    fn r14a6_policy_from_cfg_zero_fence_still_attempts_once() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            0,
+            crate::config::WakeResponseMode::Sync,
+        );
+        assert!(
+            p.max_attempts >= 1,
+            "zero fence must still attempt the reserve at least once; got {}",
+            p.max_attempts
+        );
+    }
+
+    /// **C-8a (T-8b-smoke-r9 cluster review)**: the deadline-cap MUST
+    /// override a conservative `host_fence_timeout_secs`. The pre-C-8a
+    /// derivation took only the fence into account, so a production
+    /// fence of 120 s produced a 110 s budget — 50 s past the 60 s ntex
+    /// client deadline, re-introducing C-7-class silent cancellation.
+    ///
+    /// This test pins the new behaviour: for any fence ≥ 60 s the
+    /// budget caps at `CLIENT_DEADLINE - CLIENT_HEADROOM = 50 s`,
+    /// guaranteeing the exhausted-budget log fires before ntex drops
+    /// the future on client disconnect.
+    #[test]
+    fn r14a6_from_cfg_caps_at_client_deadline() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            120,
+            crate::config::WakeResponseMode::Sync,
+        );
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            wall_ms <= 50_000,
+            "120 s fence MUST cap at CLIENT_DEADLINE - HEADROOM = 50 s; \
+             got {} ms (attempts={}, interval={:?}). C-8a regression — \
+             see docs/reviews/sandbox-snapshot-restore-deferred.md.",
+            wall_ms,
+            p.max_attempts,
+            p.interval
+        );
+        // The cap is the HARD ceiling — exactly 26×2=52 ms… no, 26
+        // attempts with 25 sleeps × 2 s = 50 s wall-time. Pin the
+        // attempt count so a future regression that loosens the cap
+        // (e.g. lifts the headroom to 5 s) fails loudly here.
+        assert_eq!(
+            p.max_attempts, 26,
+            "120 s fence with deadline-cap: (60 - 10) / 2 + 1 = 26 attempts; got {}",
+            p.max_attempts
+        );
+        assert_eq!(p.interval, Duration::from_secs(2));
+    }
+
+    /// **C-8b (T-8b-smoke-r10 cluster review)**: the fence-derived
+    /// ceiling must envelope the *full* source-teardown wall-time,
+    /// which smoke-r10 empirically measured at **2× the fence** (60.164 s
+    /// at `host_fence=30 s`). Pre-C-8b the policy at fence=30 was 11
+    /// attempts / 20 s — exhausted ~40 s before the actual vm_index
+    /// release. Post-C-8b the same input yields 26 attempts / 50 s
+    /// (deadline-ceil binds since fence-ceil would be 50 s too).
+    ///
+    /// Pins: at fence=30, max_attempts ≥ 21 (≥40 s wall-time budget),
+    /// strictly more than the pre-C-8b 11. Catches a future regression
+    /// that drops the 2× factor back to 1×.
+    ///
+    /// See `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r10.md`
+    /// for the smoke trace establishing the 2× ratio.
+    #[test]
+    fn c8b_default_policy_envelopes_doubled_fence() {
+        // 30 s is the cluster-smoke fence (C-8 cluster config).
+        // Sync mode: the C-8b/C-8a contract holds under the
+        // dual-ceiling MIN (post-C-7-LT-1 the test names the mode
+        // explicitly).
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            30,
+            crate::config::WakeResponseMode::Sync,
+        );
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            p.max_attempts >= 21,
+            "C-8b: 30 s fence post-fix must yield ≥21 attempts (≥40 s budget) \
+             to envelope the 2× teardown wall-time; got {} attempts. \
+             Pre-C-8b this was 11 attempts / 20 s and silently 503-d \
+             while teardown was still 40 s away from completing.",
+            p.max_attempts,
+        );
+        // And the budget MUST still fit under the 60 s ntex deadline
+        // (C-8a invariant — silent-cancel regression remains
+        // structurally prevented by the MIN-of-two design).
+        assert!(
+            wall_ms <= 50_000,
+            "C-8b must NOT regress C-8a: budget must remain ≤50 s under \
+             the 60 s ntex deadline; got {} ms (attempts={})",
+            wall_ms,
+            p.max_attempts,
+        );
+        // Pin the exact attempt count at the cluster-smoke fence so a
+        // future refactor that subtly changes the formula (e.g. wrong
+        // headroom or wrong factor) fails loudly here. Math:
+        //   teardown_est = 2 * 30 = 60
+        //   fence_ceil   = 60 - 10 = 50
+        //   deadline_ceil = 60 - 10 = 50
+        //   MIN(50, 50) = 50, /2 + 1 = 26
+        assert_eq!(
+            p.max_attempts, 26,
+            "C-8b: 30 s fence → (2*30 - 10) / 2 + 1 = 26 attempts; got {}",
+            p.max_attempts,
+        );
+    }
+
+    /// **C-7-LT-1 (T-8b-smoke-r12 cluster review)**: under
+    /// `WakeResponseMode::Async`, the ntex client deadline no longer
+    /// binds the wake retry loop (it runs on `detach_isolated` with
+    /// no client-side cancellation). The budget therefore drops the
+    /// MIN-with-deadline ceiling and uses `2×fence + HEADROOM` as a
+    /// safety margin past the empirical source-teardown wall-time.
+    ///
+    /// Smoke-r12 measured 60.166 s teardown at fence=30 s; the sync
+    /// 50 s cap surfaced as `vm_index_unavailable` 10 s before
+    /// teardown completed. Async at fence=30 = 2*30 + 10 = 70 s
+    /// budget → 36 attempts × 2 s = 70 s, enveloping the wall-time
+    /// with ~10 s slack.
+    #[test]
+    fn c7_lt_1_async_mode_fence_30_yields_70s_budget() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            30,
+            crate::config::WakeResponseMode::Async,
+        );
+        // 2*30 + 10 = 70 s; /2 + 1 = 36 attempts (35 sleeps × 2 s = 70 s).
+        assert_eq!(
+            p.max_attempts, 36,
+            "C-7-LT-1: async fence=30 must yield 36 attempts \
+             (2*30 + 10 = 70 s budget; 70/2 + 1 = 36); got {}",
+            p.max_attempts,
+        );
+        assert_eq!(p.interval, Duration::from_secs(2));
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        // The smoke-r12 empirical teardown was 60.166 s — async budget
+        // MUST envelope that.
+        assert!(
+            wall_ms >= 60_166,
+            "C-7-LT-1 async fence=30 budget must envelope the 60.166 s \
+             smoke-r12 teardown wall-time; got {} ms",
+            wall_ms,
+        );
+    }
+
+    /// **C-7-LT-1 sync-mode regression pin**: at the same fence=30,
+    /// sync mode must still cap at 26 attempts / 50 s — the C-8b
+    /// contract is unchanged by the C-7-LT-1 split. Without this
+    /// pin a future refactor could accidentally collapse the two
+    /// branches and silently regress C-8a (sync silent-cancel).
+    #[test]
+    fn c7_lt_1_sync_mode_fence_30_preserves_c8b_budget() {
+        let p = VmIndexRetryPolicy::from_host_fence_timeout(
+            30,
+            crate::config::WakeResponseMode::Sync,
+        );
+        // C-8b dual-ceiling MIN: MIN(2*30 - 10, 60 - 10) = MIN(50, 50)
+        // = 50 s → 26 attempts.
+        assert_eq!(
+            p.max_attempts, 26,
+            "C-7-LT-1 sync fence=30 must preserve C-8b: 26 attempts; got {}",
+            p.max_attempts,
+        );
+        let wall_ms = p.interval.as_millis() as u64
+            * u64::from(p.max_attempts.saturating_sub(1));
+        assert!(
+            wall_ms <= 50_000,
+            "C-7-LT-1 sync MUST NOT regress C-8a: budget must remain \
+             ≤50 s under the 60 s ntex deadline; got {} ms",
+            wall_ms,
+        );
+    }
+
+    /// **C-7-LT-1 long-fence async case**: under async mode a large
+    /// fence value (e.g. operator-conservative fence=120 s) should
+    /// scale linearly with `2*fence + HEADROOM`. Sync mode would
+    /// clamp this at the 50 s deadline ceiling; async drops the
+    /// clamp entirely.
+    ///
+    /// Pin: fence=120 async → 2*120 + 10 = 250 s → 126 attempts.
+    /// Sync mode at the same fence still caps at 26 attempts / 50 s
+    /// (separately covered by `r14a6_from_cfg_caps_at_client_deadline`).
+    #[test]
+    fn c7_lt_1_async_mode_fence_120_unbinds_deadline() {
+        let p_async = VmIndexRetryPolicy::from_host_fence_timeout(
+            120,
+            crate::config::WakeResponseMode::Async,
+        );
+        // 2*120 + 10 = 250; /2 + 1 = 126 attempts.
+        assert_eq!(
+            p_async.max_attempts, 126,
+            "C-7-LT-1: async fence=120 must yield 126 attempts \
+             (2*120 + 10 = 250 s budget); got {}",
+            p_async.max_attempts,
+        );
+
+        // And cross-check the sync companion is STILL clamped at 26
+        // (the deadline-ceil wins in sync). This pins the MODE split
+        // — a regression collapsing async back to sync would surface
+        // here as `p_async.max_attempts == p_sync.max_attempts`.
+        let p_sync = VmIndexRetryPolicy::from_host_fence_timeout(
+            120,
+            crate::config::WakeResponseMode::Sync,
+        );
+        assert_eq!(p_sync.max_attempts, 26);
+        assert!(
+            p_async.max_attempts > p_sync.max_attempts,
+            "C-7-LT-1: at fence=120 the async budget MUST exceed sync \
+             (sync clamped by deadline-ceil; async unbound). Got \
+             async={}, sync={}",
+            p_async.max_attempts,
+            p_sync.max_attempts,
+        );
     }
 }
 
@@ -855,8 +1973,8 @@ mod unit_tests {
 // with two key differences:
 //
 //   1. ZSBX_RESTORE_FROM=<alloc_dir> set in the spawned task's env
-//      so the wrapper's PR 3f branch invokes
-//      `cloud-hypervisor --restore source_url=file://<alloc_dir>`.
+//      so the ch driver's StartTask passes
+//      `--restore source_url=file://<alloc_dir>` to cloud-hypervisor.
 //   2. The vm_index is forced to the source slot (from the snapshot
 //      row); cluster-fallback is documented but not implemented in
 //      v1. A reserve() collision surfaces as 503
@@ -910,10 +2028,11 @@ impl VmIndexReservations {
 pub struct RealRestoreBackend {
     cfg: NomadCHConfig,
     /// Controller-wide memory_mb default — written into the restore
-    /// alloc's `ZSBX_VM_MEMORY_MB` env (Phase B fix #6). The wrapper
-    /// passes this through to CH's `--memory size=${N}M,shared=on`
-    /// flag; for restore it must match the snapshot's memory size
-    /// (CH refuses to restore against a size mismatch).
+    /// alloc's `ZSBX_VM_MEMORY_MB` env (Phase B fix #6). The ch
+    /// driver passes this through to CH's
+    /// `--memory size=${N}M,shared=on` flag; for restore it must
+    /// match the snapshot's memory size (CH refuses to restore
+    /// against a size mismatch).
     memory_mb: u32,
     /// Controller-wide cpu count — for `ZSBX_VM_CPUS_BOOT`. Same
     /// match-the-snapshot constraint applies.
@@ -955,6 +2074,32 @@ pub struct RealRestoreBackend {
     /// that don't construct a `NomadCHBackend` (the default trait
     /// impl returns `Ok(())` for those).
     nomad_handle: Option<Arc<crate::backend::nomad_ch::NomadCHBackend>>,
+    /// **C-7-LT-1 (T-8b-smoke-r12)**: wake response contract mode
+    /// (Sync vs. Async). Threaded into
+    /// `VmIndexRetryPolicy::from_host_fence_timeout` so the retry
+    /// budget can drop the ntex-client-deadline cap under async —
+    /// where the wake loop runs on `detach_isolated` with no
+    /// client-side cancellation. Defaults to `Sync` so existing
+    /// unit-test constructors keep the pre-C-7-LT-1 budget shape.
+    /// Production wiring (`AppState::from_config`) sets this via
+    /// [`Self::with_wake_response_mode`] from
+    /// `WakeResponseMode::from_env()`.
+    wake_response_mode: crate::config::WakeResponseMode,
+    /// **r3-A (T-8b-stress-r3 fix)**: cached local Nomad node ID,
+    /// installed by `AppState::from_config` from
+    /// [`crate::backend::nomad_ch::fetch_local_nomad_node_id`]. When
+    /// `Some`, [`build_restore_nomad_job_json`] emits a `Constraints`
+    /// block pinning the restore alloc to THIS worker — closing the
+    /// wake-path half of the cross-node placement race. The
+    /// diagnostic report at the top of T-8b-stress-r3 review noted
+    /// 11/12 wake failures matched the same signature: controller
+    /// stages snapshot bytes on its local fs, Nomad schedules the
+    /// restore alloc elsewhere, driver ENOENTs.
+    ///
+    /// `None` is the disabled-by-detection-failure shape (boot-time
+    /// /v1/agent/self failed). Restore continues without the
+    /// constraint, falling back to pre-r3-A random placement.
+    local_nomad_node_id: Option<String>,
 }
 
 impl std::fmt::Debug for RealRestoreBackend {
@@ -983,7 +2128,49 @@ impl RealRestoreBackend {
             shared_allocator: None,
             reservations: Arc::new(Mutex::new(VmIndexReservations::new())),
             nomad_handle: None,
+            // C-7-LT-1 default: Sync preserves the pre-r12 budget
+            // shape for unit tests + back-compat fixture constructors
+            // that don't go through `AppState::from_config`. Production
+            // wiring sets this via `with_wake_response_mode` from
+            // `WakeResponseMode::from_env()`.
+            wake_response_mode: crate::config::WakeResponseMode::Sync,
+            // r3-A default: None. Production wiring sets this via
+            // `with_local_nomad_node_id` from `AppState::from_config`.
+            local_nomad_node_id: None,
         }
+    }
+
+    /// **r3-A (T-8b-stress-r3 fix)**: install the cached local Nomad
+    /// node ID. When set, [`build_restore_nomad_job_json`] emits a
+    /// `Constraints` block pinning the restore alloc to THIS worker.
+    /// Mirrors `NomadCHBackend::with_local_nomad_node_id` shape on
+    /// the cold-boot path; wired from `AppState::from_config`
+    /// alongside the other restore-backend builders
+    /// (`with_shared_allocator`, `with_nomad_handle`,
+    /// `with_wake_response_mode`).
+    pub(crate) fn with_local_nomad_node_id(
+        mut self,
+        node_id: Option<String>,
+    ) -> Self {
+        self.local_nomad_node_id = node_id;
+        self
+    }
+
+    /// **C-7-LT-1 fix (T-8b-smoke-r12)**: install the wake response
+    /// contract mode. Threaded into
+    /// `VmIndexRetryPolicy::from_host_fence_timeout` so the retry
+    /// budget drops the ntex-client-deadline cap in async mode (where
+    /// the wake loop runs on `detach_isolated` with no client-side
+    /// cancellation). Pre-C-7-LT-1, the policy capped at 50 s under
+    /// async too — racing the empirical 60.166 s source-teardown
+    /// wall-time and surfacing as `vm_index_unavailable` even though
+    /// the budget was governed by a deadline that no longer applied.
+    pub(crate) fn with_wake_response_mode(
+        mut self,
+        mode: crate::config::WakeResponseMode,
+    ) -> Self {
+        self.wake_response_mode = mode;
+        self
     }
 
     /// **B18 fix**: install a shared `vm_index` allocator. The
@@ -995,7 +2182,7 @@ impl RealRestoreBackend {
     /// surfacing as a stale-pubkey 401 on /version (cluster smoke
     /// 2026-05-24 r4; 11/16 c=4 cycles failed once slots 1-6 had
     /// been used once).
-    pub fn with_shared_allocator(
+    pub(crate) fn with_shared_allocator(
         mut self,
         allocator: Arc<Mutex<crate::backend::nomad_ch::VmIndexAllocator>>,
     ) -> Self {
@@ -1012,7 +2199,7 @@ impl RealRestoreBackend {
     /// per controller boot exhausted the allocator). Wired by
     /// `crate::AppState::from_config` from
     /// `Backend::nomad_ch_handle()`.
-    pub fn with_nomad_handle(
+    pub(crate) fn with_nomad_handle(
         mut self,
         handle: Arc<crate::backend::nomad_ch::NomadCHBackend>,
     ) -> Self {
@@ -1080,8 +2267,63 @@ impl RestoreBackend for RealRestoreBackend {
         vm_index: i16,
         alloc_dir: &Path,
         user_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SubmitRestoreError> {
         let job_id = format!("zsbx-restore-{}", sandbox_id.simple());
+        // T-8b-stress Bug 1 fix: before submitting the restore job,
+        // assert that the disk images the driver's preflight will
+        // stat are actually on disk. The wake path expects
+        // `stop_preserving_state` (snapshot's source teardown) to
+        // have left `workspace.img` in place, and the per-user
+        // `home.img` to have been mkfs'd by the source sandbox's
+        // create() — but neither is re-asserted at the wake's submit
+        // site. A missing image surfaces at the driver as a generic
+        // "Failed tasks" alloc rollup; surfacing it HERE turns it
+        // into a clean controller-side error with the offending path
+        // string, preserving the observability symmetry with the
+        // cold-boot path's post-stage assertion in
+        // `create_ext4_image_if_missing`. Mirrors the driver's
+        // `preflightDiskPaths` discipline (3-strike pattern: user_id,
+        // rootfs_source, now workspace.img + home.img).
+        //
+        // R25-I1 fix: reuse the existing `pub(crate)`
+        // path-derivation helpers (`workspace_image_path` at
+        // `nomad_ch.rs:3627`, `user_home_image_path` at `:3618`)
+        // instead of re-inlining the `{root}/{sid}/<file>` shape. The
+        // cold-boot path uses the same helpers; convergence
+        // eliminates the 3-strike DRY shape r21-A1 flagged.
+        //
+        // R23-API1 / R25-S1 / R25-I2 fix: return a typed
+        // `SubmitRestoreError::Preflight` carrying structured fields
+        // (resource name + host path) so the wake state machine can
+        // route to `WakeErrorCode::StagingPathMissing` AND keep the
+        // host path off the wire (RO admins reading
+        // `/admin/sandboxes/{id}/wake/{wake_id}` see only "staging
+        // image missing: workspace.img" with no fs path). The host
+        // path is logged via tracing at the wake-machine boundary.
+        let host_dir = self
+            .cfg
+            .host_state_dir
+            .join(sandbox_id.simple().to_string());
+        let workspace_img = crate::backend::nomad_ch::workspace_image_path(&host_dir);
+        let user_home_img = crate::backend::nomad_ch::user_home_image_path(
+            &self.cfg.user_home_dir_root,
+            user_id,
+        );
+        if let Err(e) = crate::backend::nomad_ch::assert_disk_image_present(&workspace_img) {
+            return Err(SubmitRestoreError::preflight(
+                "workspace.img",
+                workspace_img,
+                e,
+            ));
+        }
+        if let Err(e) = crate::backend::nomad_ch::assert_disk_image_present(&user_home_img) {
+            return Err(SubmitRestoreError::preflight(
+                "user_home.img",
+                user_home_img,
+                e,
+            ));
+        }
+
         let job_json = build_restore_nomad_job_json(
             &job_id,
             &self.cfg,
@@ -1091,17 +2333,21 @@ impl RestoreBackend for RealRestoreBackend {
             user_id,
             self.memory_mb,
             self.cpus,
+            self.local_nomad_node_id.as_deref(),
         );
         let body = serde_json::to_vec(&job_json)
-            .map_err(|e| format!("serialize Nomad job JSON: {e}"))?;
+            .map_err(|e| {
+                SubmitRestoreError::Other(format!("serialize Nomad job JSON: {e}"))
+            })?;
         let url = format!("{}/v1/jobs", self.cfg.nomad_addr);
-        let resp = nomad_post_blocking(&url, &body, Duration::from_secs(15))?;
+        let resp = nomad_post_blocking(&url, &body, Duration::from_secs(15))
+            .map_err(SubmitRestoreError::Other)?;
         if resp.status != 200 {
-            return Err(format!(
+            return Err(SubmitRestoreError::Other(format!(
                 "POST {url} → status {}: {}",
                 resp.status,
                 resp.body.trim()
-            ));
+            )));
         }
         // Now poll until the alloc reaches running (or terminal).
         wait_for_alloc_running_blocking(
@@ -1109,6 +2355,7 @@ impl RestoreBackend for RealRestoreBackend {
             &job_id,
             self.alloc_running_timeout,
         )
+        .map_err(SubmitRestoreError::Other)
     }
 
     fn wait_for_livez(
@@ -1118,6 +2365,26 @@ impl RestoreBackend for RealRestoreBackend {
     ) -> Result<(), String> {
         let agent_url = self.derive_agent_url(vm_index);
         wait_for_livez_blocking(&agent_url, self.agent_livez_timeout)
+    }
+
+    /// **R14-A6 (architecture-r14)**: derive the wake-retry budget
+    /// from `cfg.host_fence_timeout_secs` instead of inheriting the
+    /// hard-coded `VmIndexRetryPolicy::default()`. The source vm_index
+    /// is released only after the host-fence clears, so the wake
+    /// budget is fundamentally a function of the fence timeout — see
+    /// [`VmIndexRetryPolicy::from_host_fence_timeout`] for the formula
+    /// + the trade-off if an operator sets `host_fence_timeout_secs`
+    /// past the ntex client deadline.
+    ///
+    /// **C-7-LT-1 (T-8b-smoke-r12)**: the wake response mode is
+    /// threaded in so async-mode retries are NOT capped at the
+    /// (now-vestigial) 60 s ntex client deadline — the async wake
+    /// loop runs on `detach_isolated` with no client-side cancellation.
+    fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
+        VmIndexRetryPolicy::from_host_fence_timeout(
+            self.cfg.host_fence_timeout_secs,
+            self.wake_response_mode,
+        )
     }
 
     fn derive_agent_url(&self, vm_index: i16) -> String {
@@ -1144,6 +2411,34 @@ impl RestoreBackend for RealRestoreBackend {
                 error = %e,
                 "restore teardown: nomad DELETE failed (non-fatal)"
             );
+        }
+        // **R10-C1 fix (concurrency-r10 2026-05-25)**: drop the
+        // state-map entry that `register_restored` may have inserted.
+        // Pre-fix this was missed: if `register_restored` had run
+        // (success branch) and then a LATER step failed (e.g. the
+        // final `update_sandbox_status(Running)` returned CasLost,
+        // legitimate under a parallel admin stop), the rollback path
+        // released the vm_index BUT left the state-map entry behind.
+        // The next `create()` would then reserve the same vm_index
+        // (now free in the allocator) and end up with TWO state-map
+        // entries pointing at the same slot — and the older entry's
+        // eventual `stop_inner` would release the live tenant's slot.
+        //
+        // Mirroring `stop_inner`'s `state.write().remove(&sandbox_id)`,
+        // the call is idempotent: no-op if `register_restored` never
+        // ran on this `sandbox_id` (early-rollback path). The
+        // structural cure is R4-A2's `LeasedVmSlot` RAII; this 1-line
+        // interim is the cheap insurance until that lands.
+        if let Some(handle) = self.nomad_handle.as_ref() {
+            let removed = handle.unregister_restored(sandbox_id);
+            if removed {
+                tracing::info!(
+                    sandbox_id = %sandbox_id,
+                    vm_index,
+                    "restore teardown: removed nomad-ch state-map entry \
+                     (R10-C1 rollback path)"
+                );
+            }
         }
         // Always release the vm_index regardless of teardown outcome.
         self.release_vm_index(vm_index);
@@ -1191,12 +2486,16 @@ impl RestoreBackend for RealRestoreBackend {
     }
 }
 
-/// Build the Nomad job JSON for a restore alloc. Same shape as
-/// `build_nomad_job_json` in nomad_ch but with `ZSBX_RESTORE_FROM`
-/// set. We don't share the helper because the restore path doesn't
+/// Build the Nomad job JSON for a restore alloc. Uses the `ch` Go
+/// plugin driver unconditionally (T-7 + T-8 cutover). Same shape as
+/// `build_nomad_job_json` in nomad_ch but with the restore branch
+/// active. We don't share the helper because the restore path doesn't
 /// have a `user_id`/`project_id` to plumb through Meta — those are
-/// already recorded on the source sandbox row in pg, the wrapper
-/// doesn't need them.
+/// already recorded on the source sandbox row in pg.
+///
+/// The typed `Config.restore_from` field triggers the driver's
+/// `cloud-hypervisor --restore source_url=…` branch. The Env block
+/// is also populated for debugging parity.
 #[allow(clippy::too_many_arguments)]
 fn build_restore_nomad_job_json(
     job_id: &str,
@@ -1207,18 +2506,19 @@ fn build_restore_nomad_job_json(
     user_id: &str,
     memory_mb: u32,
     cpus: f32,
+    local_nomad_node_id: Option<&str>,
 ) -> serde_json::Value {
-    // Phase B fix #6 (later: virtio-blk pivot, bug #11): the wrapper
-    // up-front validates a 5-env block (VM_INDEX + ARTIFACT_DIR +
-    // RUNTIME + MEMORY_MB + CPUS_BOOT) on both branches, and on
-    // cold-boot it additionally validates WORKSPACE_IMG +
-    // USER_HOME_IMG + PUBKEY_HEX. Restore doesn't *need* the latter
+    // Phase B fix #6 (later: virtio-blk pivot, bug #11): the ch
+    // driver validates the typed TaskConfig block — VM index +
+    // artifact dir + memory + cpus on both branches, and on
+    // cold-boot it additionally validates workspace.img +
+    // home.img + pubkey hex. Restore doesn't *need* the latter
     // three (CH `--restore` reads the disk paths + cmdline from the
     // snapshot's saved config.json), but we still emit the image
     // paths because the controller derives them deterministically
-    // and the wrapper's defensive `[ -f $PATH ]` check on the
-    // images catches a hand-edited restore jobspec with a typo'd
-    // path before CH's "block device file" error.
+    // and the ch driver's path existence check on the images
+    // catches a hand-edited restore jobspec with a typo'd path
+    // before CH's "block device file" error.
     //
     // PUBKEY_HEX is left empty on restore: it's hex-only validated
     // only when set, and we have no separate persisted hex form on
@@ -1241,89 +2541,134 @@ fn build_restore_nomad_job_json(
         if n < 1 { 1 } else { n as u32 }
     };
 
-    serde_json::json!({
-        "Job": {
-            "ID": job_id,
-            "Name": job_id,
-            "Type": "service",
-            "Datacenters": [cfg.datacenter],
-            "Meta": {
-                "zeroship.sandbox": sandbox_id.to_string(),
-                "zeroship.user": user_id,
-                "zeroship.vm_index": vm_index.to_string(),
-                "zeroship.kind": "restore",
+    // The per-VM Env block. Largely redundant with the typed Config
+    // block below since the Go driver ignores Env, but kept for
+    // debugging parity with the cold-boot builder.
+    //
+    // virtio-blk pivot (bug #11): the three virtio-fs share dirs are
+    // gone from the cold-boot env contract; mirror that here by
+    // emitting the two image paths.
+    // PUBKEY_HEX is left unset on restore: CH ignores --cmdline on
+    // --restore.
+    let env = serde_json::json!({
+        "ZSBX_VM_INDEX": vm_index.to_string(),
+        "ZSBX_ARTIFACT_DIR": cfg.runtime_dir.display().to_string(),
+        "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
+        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
+        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
+        // Must match the snapshot's saved config — CH refuses to
+        // restore against a memory size mismatch.
+        "ZSBX_VM_MEMORY_MB": memory_mb.to_string(),
+        "ZSBX_VM_CPUS_BOOT": cpus_boot.to_string(),
+        "ZSBX_RESTORE_FROM": alloc_dir.display().to_string(),
+        "ZSBX_SUBNET_BASE_OCTET": cfg.subnet_second_octet.to_string(),
+    });
+
+    let resources = serde_json::json!({
+        // CPU MHz advisory — see nomad_ch.rs::NOMAD_CPU_MHZ_ADVISORY.
+        // Memory comes from the snapshot's saved config.
+        //
+        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix, 2026-05-22). CH
+        // v51.1 mmap-faults full guest RAM during restore which gets
+        // memcg-accounted; without 2× slack the cgroup OOM-kills CH
+        // at ~t=30s before /livez is reachable. Mirrors cold-boot's
+        // jobspec in nomad_ch.rs.
+        "CPU": 500,
+        "MemoryMB": memory_mb,
+        "MemoryMaxMB": memory_mb * 2,
+    });
+
+    // Typed Config block — field names + types mirror
+    // nomad-driver-ch/ch/task_config.go::TaskConfig.
+    // The cold-boot builder in nomad_ch.rs emits the same shape;
+    // differences here: restore_from carries the staged snapshot dir
+    // (the driver dispatches on non-empty to spawn CH --restore);
+    // pubkey_hex is empty (CH ignores --cmdline on --restore).
+    let kernel_path = cfg.runtime_dir.join("vmlinuz");
+    // C-7-LT-12a (smoke-r22): the source bytes for rootfs.img
+    // the driver hardlinks (or copies on EXDEV) into runDir
+    // before CH spawn. The restore path needs an EXPLICIT field
+    // because the snapshot's config.json names the (now-GC'd)
+    // source-alloc dir for disks[0].path.
+    let rootfs_source = cfg.runtime_dir.join("rootfs-slim.img");
+    let config = serde_json::json!({
+        "vm_index": vm_index,
+        "kernel": kernel_path.display().to_string(),
+        "cpus": cpus_boot,
+        "memory_mb": memory_mb,
+        "restore_from": alloc_dir.display().to_string(),
+        "sandbox_id": sandbox_id.simple().to_string(),
+        // C-7-LT-7 / r21-A1: user_id feeds the driver's
+        // per-user-home path allow-list. Without this the driver
+        // rejects /var/zeroship/ch/users/<user_id>/home.img.
+        "user_id": user_id,
+        "workspace_img": workspace_img.display().to_string(),
+        "user_home_img": user_home_img.display().to_string(),
+        "rootfs_source": rootfs_source.display().to_string(),
+        // Empty: CH ignores --cmdline on --restore.
+        "pubkey_hex": "",
+        "subnet_base_octet": cfg.subnet_second_octet,
+        // Option C Phase 2: the restore branch never re-stages
+        // workspace.img / home.img. Emit false so the Config
+        // field-list stays symmetric with the cold-boot emitter.
+        "stage_disk_images": false,
+        // Block-lists: empty triggers driver-side auto-synthesis.
+        "disks": [],
+        "fs": [],
+        "net": [],
+    });
+    let driver_name = "ch";
+
+    let mut job = serde_json::json!({
+        "ID": job_id,
+        "Name": job_id,
+        "Type": "service",
+        "Datacenters": [cfg.datacenter],
+        "Meta": {
+            "zeroship.sandbox": sandbox_id.to_string(),
+            "zeroship.user": user_id,
+            "zeroship.vm_index": vm_index.to_string(),
+            "zeroship.kind": "restore",
+        },
+        "TaskGroups": [{
+            "Name": "vm",
+            "Count": 1,
+            "RestartPolicy": {
+                "Attempts": 0,
+                "Mode": "fail",
+                "Interval": 30_000_000_000u64,
+                "Delay":     5_000_000_000u64,
             },
-            "TaskGroups": [{
-                "Name": "vm",
-                "Count": 1,
-                "RestartPolicy": {
-                    "Attempts": 0,
-                    "Mode": "fail",
-                    "Interval": 30_000_000_000u64,
-                    "Delay":     5_000_000_000u64,
-                },
-                "ReschedulePolicy": {
-                    "Attempts": 0,
-                    "Unlimited": false,
-                },
-                "Tasks": [{
-                    "Name": "ch",
-                    "Driver": "raw_exec",
-                    "Config": {
-                        "command": cfg.wrapper_path.display().to_string(),
-                    },
-                    "Env": {
-                        "ZSBX_VM_INDEX": vm_index.to_string(),
-                        "ZSBX_ARTIFACT_DIR": cfg.runtime_dir.display().to_string(),
-                        "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
-                        // virtio-blk pivot (bug #11): the three
-                        // virtio-fs share dirs are gone from the
-                        // cold-boot env contract; mirror that here
-                        // by emitting the two image paths. The
-                        // controller derives both paths the same
-                        // way cold-boot does (host_state_dir +
-                        // user_home_dir_root) so the wrapper's
-                        // existence checks pass. PUBKEY_HEX is left
-                        // unset on restore: CH ignores --cmdline on
-                        // --restore, and the wrapper's hex
-                        // validation now skips when
-                        // ZSBX_RESTORE_FROM is set.
-                        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
-                        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
-                        // Must match the snapshot's saved config —
-                        // CH refuses to restore against a memory
-                        // size mismatch. Pulled from the controller's
-                        // SandboxConfig at backend construction.
-                        "ZSBX_VM_MEMORY_MB": memory_mb.to_string(),
-                        "ZSBX_VM_CPUS_BOOT": cpus_boot.to_string(),
-                        // The wrapper's PR 3f restore branch reads
-                        // this and switches to `cloud-hypervisor
-                        // --restore source_url=file://<dir>`.
-                        "ZSBX_RESTORE_FROM": alloc_dir.display().to_string(),
-                        "ZSBX_SUBNET_BASE_OCTET":
-                            cfg.subnet_second_octet.to_string(),
-                    },
-                    "Resources": {
-                        // Match nomad_ch.rs: CPU MHz advisory under
-                        // raw_exec + CH; memory comes from the
-                        // snapshot's saved config.
-                        //
-                        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix,
-                        // 2026-05-22). CH v51.1 mmap-faults full
-                        // guest RAM during restore which gets
-                        // memcg-accounted; without 2× slack the
-                        // cgroup OOM-kills CH at ~t=30s before
-                        // /livez is reachable. Mirrors cold-boot's
-                        // jobspec in nomad_ch.rs.
-                        "CPU": 500,
-                        "MemoryMB": memory_mb,
-                        "MemoryMaxMB": memory_mb * 2,
-                    },
-                    "KillTimeout": 10_000_000_000u64,
-                }],
+            "ReschedulePolicy": {
+                "Attempts": 0,
+                "Unlimited": false,
+            },
+            "Tasks": [{
+                "Name": "ch",
+                "Driver": driver_name,
+                "Config": config,
+                "Env": env,
+                "Resources": resources,
+                "KillTimeout": 10_000_000_000u64,
             }],
-        }
-    })
+        }],
+    });
+    // r3-A (T-8b-stress-r3 fix): pin the restore alloc to THIS
+    // worker when the controller cached its local Nomad node_id at
+    // boot. Same shape as the cold-boot builder
+    // (`build_nomad_job_json_with`) — the diagnostic report flagged
+    // 11/12 wake failures with the same cross-node staging signature
+    // as cold-boot, so both emitters apply the constraint identically.
+    if let Some(node_id) = local_nomad_node_id {
+        job["Constraints"] = serde_json::json!([
+            {
+                "LTarget": "${node.unique.id}",
+                "Operand": "=",
+                "RTarget": node_id,
+            }
+        ]);
+    }
+    serde_json::json!({ "Job": job })
 }
 
 /// Sync HTTP response shape — mirrors `AgentResponse` in nomad_ch.
@@ -1424,9 +2769,25 @@ fn wait_for_alloc_running_blocking(
                                     .as_str()
                                     .unwrap_or("")
                                     .to_string();
-                                return Err(format!(
-                                    "nomad alloc terminal status={cs}: {desc}"
-                                ));
+                                // T-8b-stress-r2 controller v34: harvest
+                                // per-task TaskEvent DisplayMessage too
+                                // (the actionable driver-side error;
+                                // Nomad's `ClientDescription` is a
+                                // generic "Failed tasks" rollup). Single
+                                // helper shared with `nomad_ch.rs::
+                                // wait_for_alloc_running` so cold-boot
+                                // and wake errors carry the same shape.
+                                let driver_msgs =
+                                    crate::backend::nomad_ch::extract_failed_task_event_msgs(a);
+                                let composed = if driver_msgs.is_empty() {
+                                    format!("nomad alloc terminal status={cs}: {desc}")
+                                } else {
+                                    format!(
+                                        "nomad alloc terminal status={cs}: {desc}: {}",
+                                        driver_msgs.join(" | ")
+                                    )
+                                };
+                                return Err(composed);
                             }
                             last_status = Some(cs);
                         }
@@ -1527,7 +2888,7 @@ fn wait_for_livez_blocking(
 /// caller (`do_restore_inner`) maps this to a `Backend(...)` error so
 /// the wake path rolls back to `Snapshotted` rather than wedging the
 /// row at `Restoring` with a broken VM.
-async fn clock_resync_post_restore(
+pub(crate) async fn clock_resync_post_restore(
     agent_url: &str,
     sandbox_id: Uuid,
     signing_key_bytes: &[u8; 32],
@@ -1543,9 +2904,11 @@ async fn clock_resync_post_restore(
     // handler can assert it matches its own boot-time-known id. We
     // capture by value because spawn_blocking takes `'static` closures.
     // B24-FOLLOWUP: use .simple() (32-char hex, no hyphens) to match
-    // the canonical form the wrapper validator accepts and that the
-    // agent reads from SANDBOX_AGENT_SANDBOX_ID. Hyphenated form would
-    // 401 every clock_resync on the restore path.
+    // the canonical form the ch driver passes verbatim into the
+    // guest's kernel cmdline (via TaskConfig.Cmdline; the cmdline
+    // field must not contain hyphens) and that the agent reads
+    // from SANDBOX_AGENT_SANDBOX_ID. Hyphenated form would 401
+    // every clock_resync on the restore path.
     let sandbox_id_str = sandbox_id.simple().to_string();
     compio::runtime::spawn_blocking(move || {
         // Use std::time directly here (mirror of `unix_now` in
@@ -1615,6 +2978,72 @@ async fn clock_resync_post_restore(
     .unwrap_or_else(|p| Err(format!("clock_resync spawn_blocking panic: {p:?}")))
 }
 
+/// R28-I2: structured outcome of [`clock_resync_post_restore_typed`]
+/// — a thin wrapper around [`clock_resync_post_restore`] that
+/// preserves the existing `Result<(), String>` shape for the sync
+/// path while surfacing a transport-error fingerprint for the wake
+/// state machine's half-dead-agent detector. The signed-POST function
+/// itself is unchanged; only the wake_machine consumes this typed
+/// variant.
+///
+/// The half-dead-agent fingerprint (R28-I2) is: both T5 `/version`
+/// and `/_clock_resync` transport-fail against the same agent URL
+/// within the wake budget. Without the structured boolean the caller
+/// would have to `contains("transport")` on the free-text error
+/// message — fragile and not a contract. This enum makes the signal
+/// load-bearing.
+#[derive(Debug, Clone)]
+pub(crate) enum ClockResyncOutcome {
+    /// `/_clock_resync` returned 200; the guest's wall clock is in
+    /// strict 5-second skew. Wake proceeds.
+    Ok,
+    /// `/_clock_resync` failed. `transport_error == true` means the
+    /// failure was at the HTTP transport layer (port closed, timeout,
+    /// dropped connection); `false` means the agent answered with a
+    /// non-200 status (e.g., 401 from wrong signing-key bytes). The
+    /// `message` is the same opaque diagnostic string the underlying
+    /// function returns — preserved for log fidelity, but the
+    /// transport-error routing decision goes through the bool.
+    Err {
+        transport_error: bool,
+        message: String,
+    },
+}
+
+/// R28-I1: typed-outcome wrapper around [`clock_resync_post_restore`].
+/// Used by the wake state machine to pair the result against the T5
+/// `/version` probe for the half-dead-agent fingerprint (R28-I2).
+///
+/// Returns:
+/// - [`ClockResyncOutcome::Ok`] — agent replied 200.
+/// - [`ClockResyncOutcome::Err`] — agent failed; `transport_error`
+///   distinguishes transport-layer failure (paired-fail → half-dead
+///   agent) from a non-200 agent response (e.g., 401).
+pub(crate) async fn clock_resync_post_restore_typed(
+    agent_url: &str,
+    sandbox_id: Uuid,
+    signing_key_bytes: &[u8; 32],
+) -> ClockResyncOutcome {
+    match clock_resync_post_restore(agent_url, sandbox_id, signing_key_bytes).await {
+        Ok(()) => ClockResyncOutcome::Ok,
+        Err(message) => {
+            // The underlying function's only "transport" branch wraps
+            // its message with `format!("/_clock_resync transport: {e}")`
+            // (see the ureq::Error fall-through above). A panic in
+            // spawn_blocking surfaces as `clock_resync spawn_blocking
+            // panic: …`, which is neither transport-layer nor a
+            // routine non-200 — classify it as non-transport so the
+            // half-dead-agent detector doesn't fire on a runtime bug.
+            let transport_error =
+                message.starts_with("/_clock_resync transport:");
+            ClockResyncOutcome::Err {
+                transport_error,
+                message,
+            }
+        }
+    }
+}
+
 /// Random hex nonce for `/_clock_resync`. Matches the agent's
 /// `MAX_NONCE_LEN=64` ceiling with plenty of margin (32 hex chars
 /// over 128 bits of entropy). Same `/dev/urandom`-backed shape as
@@ -1642,6 +3071,262 @@ fn clock_resync_random_hex(n_bytes: usize) -> Result<String, String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// T5: outcome of [`verify_agent_version_post_restore`] reflecting why a
+/// fingerprint comparison succeeded (or failed). Distinct from a bare
+/// `Result<(), String>` so callers can branch on the structured reason
+/// — for example, the wake state machine logs `Skipped` at WARN but
+/// continues, while `Mismatch` rolls back with
+/// `WakeErrorCode::AgentVersionMismatch`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VersionCheckOutcome {
+    /// Agent's `git_commit` byte-matched the controller's
+    /// `CONTROLLER_GIT_COMMIT`. Wake proceeds.
+    Match,
+    /// Agent did not return a parseable `git_commit` (legacy agent
+    /// pre-T5 build) OR the controller itself was built with
+    /// `CONTROLLER_GIT_COMMIT="unknown"` (vendor-tarball build,
+    /// non-git checkout). Either way the comparison cannot proceed
+    /// safely; caller logs WARN and continues (the signed-auth check
+    /// at the wire layer is the existing trust anchor — see the
+    /// `wait_for_agent_livez` legacy-fallback in nomad_ch.rs).
+    ///
+    /// R28-I2: `transport_error` is a structured boolean — true iff
+    /// the probe failed at the HTTP transport layer (port closed,
+    /// timeout, dropped connection) rather than at the
+    /// parse/sentinel layer. The wake_machine pairs this with the
+    /// clock_resync transport-error signal to detect the half-dead-
+    /// agent fingerprint (both T5 + clock_resync transport-fail
+    /// against the same agent_url within budget). Callers MUST NOT
+    /// string-match on `reason` to recover this signal — the
+    /// structured bool is the contract.
+    Skipped {
+        reason: &'static str,
+        transport_error: bool,
+    },
+    /// Agent's `git_commit` is well-formed but disagrees with the
+    /// controller's `CONTROLLER_GIT_COMMIT`. Mismatched build SHAs
+    /// during a partial fleet rollout — the caller MUST fail the wake
+    /// with `WakeErrorCode::AgentVersionMismatch` so the SLO dashboard
+    /// can split rollout-skew from "real" wake failures.
+    Mismatch { expected: String, got: String },
+}
+
+impl VersionCheckOutcome {
+    /// R28-I2: structured accessor for the half-dead-agent fingerprint
+    /// signal. Returns `true` iff the outcome is `Skipped` with a
+    /// transport-layer (not parse/sentinel) cause. Stable contract for
+    /// the wake_machine — `reason` strings are operator log fidelity,
+    /// this boolean is the routing signal.
+    pub(crate) fn is_transport_error(&self) -> bool {
+        matches!(
+            self,
+            VersionCheckOutcome::Skipped {
+                transport_error: true,
+                ..
+            }
+        )
+    }
+}
+
+/// T5: probe the just-restored agent's signed `/version` endpoint and
+/// compare the reported `git_commit` to the controller's compile-time
+/// `CONTROLLER_GIT_COMMIT` (build.rs).
+///
+/// **Why post-restore.** The create-side path in `nomad_ch.rs`'s
+/// `wait_for_agent_livez` already verifies the `pubkey_fingerprint` on
+/// `/version` — that closes the stale-tenant race (a tenant that owned
+/// the IP previously cannot answer for our signing key). T5 closes a
+/// *different* race on the **restore** path: a partial fleet rollout
+/// (controller upgraded everywhere, but one Nomad node still runs the
+/// previous agent image) would let the wake land on a `git_commit` that
+/// disagrees with the controller's BUILD_GIT_SHA. The pubkey-fp check
+/// would PASS (the older agent still has our pubkey at
+/// `/run/keys/controller-pubkey`), but the agent binary is mismatched.
+/// This probe is the dedicated guard for that scenario.
+///
+/// **Option A (per T5 spec).** Expected fingerprint is the controller's
+/// own `CONTROLLER_GIT_COMMIT` (both binaries deployed together; v1
+/// has no per-sandbox typed-fingerprint plumbing — that's Option B
+/// future work).
+///
+/// **Auth.** `/version` is auth-gated (Ed25519 signed request). The
+/// per-sandbox signing key is the same one used by
+/// [`clock_resync_post_restore`]; the caller (wake_machine) supplies
+/// `signing_key_bytes` straight out of the unsealed record.
+///
+/// **Sentinel handling.** `CONTROLLER_GIT_COMMIT="unknown"` (non-git
+/// build) → return `Skipped` so vendor-tarball + sandbox-tarball
+/// builds remain usable. An agent that omits `git_commit` from
+/// `/version` (legacy pre-T5 binary) also returns `Skipped` — the
+/// existing signed-auth check at the call layer is sufficient
+/// attestation for those agents; this T5 probe is additive.
+///
+/// **Failure shape.** Transport errors on `/version` route through
+/// `Skipped { reason: "transport_error" }` rather than `Mismatch`:
+/// the wake state machine should not roll back on a flaky network
+/// when the underlying livez probe just succeeded — the agent is
+/// alive and our crypto handshake holds. Logging the transport error
+/// is the operator visibility; not failing the wake is the
+/// availability decision.
+///
+/// Returns:
+/// - `Ok(Match)` — `git_commit` matched. Wake proceeds.
+/// - `Ok(Skipped { reason })` — comparison could not run. Caller logs
+///   WARN and proceeds.
+/// - `Ok(Mismatch { expected, got })` — caller MUST fail the wake.
+pub(crate) async fn verify_agent_version_post_restore(
+    agent_url: &str,
+    signing_key_bytes: &[u8; 32],
+    expected_git_commit: &str,
+) -> VersionCheckOutcome {
+    // Sentinel #1: controller built without a git SHA. Vendor-tarball
+    // or non-git builds — comparison can't anchor on anything stable
+    // so we skip. The signed-auth on /version already attests that the
+    // agent is verifying with our pubkey.
+    if expected_git_commit == "unknown" || expected_git_commit.is_empty() {
+        return VersionCheckOutcome::Skipped {
+            reason: "controller_build_sha_unknown",
+            transport_error: false,
+        };
+    }
+
+    use ed25519_dalek::SigningKey;
+    use zeroship_sandbox_agent::sig;
+
+    let signing_key = SigningKey::from_bytes(signing_key_bytes);
+    let url = format!("{agent_url}/version");
+    let path = "/version".to_string();
+    let url_for_blocking = url.clone();
+
+    let resp_result: Result<(u16, String), String> =
+        compio::runtime::spawn_blocking(move || {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let nonce = match clock_resync_random_hex(16) {
+                Ok(n) => n,
+                Err(e) => return Err(format!("nonce gen: {e}")),
+            };
+            // Empty body — GET /version. Signature covers
+            // (method, path, body=&[], ts, nonce); body hash on the
+            // agent side hashes the empty byte slice.
+            let signature = sig::sign(&signing_key, "GET", &path, &[], ts, &nonce);
+            let resp = ureq::get(&url_for_blocking)
+                .timeout(Duration::from_secs(10))
+                .set("x-sbx-timestamp", &ts.to_string())
+                .set("x-sbx-nonce", &nonce)
+                .set("x-sbx-signature", &signature)
+                .call();
+            match resp {
+                Ok(r) => {
+                    let status = r.status();
+                    let body = r.into_string().unwrap_or_default();
+                    Ok((status, body))
+                }
+                Err(ureq::Error::Status(code, r)) => {
+                    let body = r.into_string().unwrap_or_default();
+                    Ok((code, body))
+                }
+                Err(e) => Err(format!("transport: {e}")),
+            }
+        })
+        .await
+        .unwrap_or_else(|p| Err(format!("/version spawn_blocking panic: {p:?}")));
+
+    let (status, body) = match resp_result {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::wake::version_check",
+                agent_url = %agent_url,
+                error = %e,
+                "T5 /version probe transport error — skipping comparison"
+            );
+            return VersionCheckOutcome::Skipped {
+                reason: "transport_error",
+                transport_error: true,
+            };
+        }
+    };
+    if status != 200 {
+        tracing::warn!(
+            target: "sandbox::wake::version_check",
+            agent_url = %agent_url,
+            status,
+            body_excerpt = %body.chars().take(256).collect::<String>(),
+            "T5 /version probe non-200 — skipping comparison"
+        );
+        return VersionCheckOutcome::Skipped {
+            reason: "non_200_response",
+            transport_error: false,
+        };
+    }
+    let parsed: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::wake::version_check",
+                agent_url = %agent_url,
+                error = %e,
+                "T5 /version probe body not JSON — skipping comparison"
+            );
+            return VersionCheckOutcome::Skipped {
+                reason: "body_not_json",
+                transport_error: false,
+            };
+        }
+    };
+    let got_git_commit = match parsed.get("git_commit").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            // Legacy agent: pre-T5 binary that doesn't emit
+            // `git_commit` in /version. Existing signed-auth on the
+            // GET already attests this agent is verifying with OUR
+            // pubkey — accept and skip the additive comparison.
+            tracing::warn!(
+                target: "sandbox::wake::version_check",
+                agent_url = %agent_url,
+                "T5 /version probe missing git_commit field — legacy agent, skipping comparison"
+            );
+            return VersionCheckOutcome::Skipped {
+                reason: "agent_git_commit_missing",
+                transport_error: false,
+            };
+        }
+    };
+    // Sentinel #2: the agent itself was built with
+    // `AGENT_GIT_COMMIT="unknown"`. Treat the same as the controller
+    // sentinel — skip the comparison, both sides on the rare
+    // non-git-build path.
+    if got_git_commit == "unknown" {
+        tracing::warn!(
+            target: "sandbox::wake::version_check",
+            agent_url = %agent_url,
+            "T5 /version probe agent git_commit=\"unknown\" — non-git build, skipping comparison"
+        );
+        return VersionCheckOutcome::Skipped {
+            reason: "agent_build_sha_unknown",
+            transport_error: false,
+        };
+    }
+    if got_git_commit == expected_git_commit {
+        VersionCheckOutcome::Match
+    } else {
+        VersionCheckOutcome::Mismatch {
+            expected: expected_git_commit.to_string(),
+            got: got_git_commit.to_string(),
+        }
+    }
+}
+
+/// T5: the controller's build-time git commit. Compared against the
+/// restored agent's `/version.git_commit` to detect partial-rollout
+/// build skew. `"unknown"` on non-git builds — treated as a
+/// signal-suppressed sentinel by
+/// [`verify_agent_version_post_restore`].
+pub(crate) const CONTROLLER_GIT_COMMIT: &str = env!("CONTROLLER_GIT_COMMIT");
+
 #[cfg(test)]
 mod real_backend_tests {
     use super::*;
@@ -1660,13 +3345,20 @@ mod real_backend_tests {
     }
 
     fn base_cfg(nomad_addr: String, host_state: PathBuf) -> NomadCHConfig {
+        // T-8b-stress Bug 1: route user_home_dir_root under the
+        // per-test host_state dir so `stage_disk_image_preconditions`
+        // can write to it without needing /var/zeroship/ch/users
+        // (which doesn't exist in CI). Production points both at the
+        // real layout (HOST_STATE_DIR=/var/zeroship/ch,
+        // USER_HOME_ROOT=/var/zeroship/ch/users); the relative layout
+        // is preserved.
+        let user_home_dir_root = host_state.join("users");
         NomadCHConfig {
             nomad_addr,
             datacenter: "dc1".into(),
-            wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
             runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
             host_state_dir: host_state,
-            user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
+            user_home_dir_root,
             vm_index_floor: 1,
             vm_index_ceil: 155,
             alloc_running_timeout_secs: 1,
@@ -1674,6 +3366,8 @@ mod real_backend_tests {
             host_fence_timeout_secs: 30,
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
+            vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+            nomad_stop_concurrency: 16,     // r30-A1: prod default
         }
     }
 
@@ -1714,6 +3408,32 @@ mod real_backend_tests {
         (format!("http://{addr}"), counter)
     }
 
+    /// T-8b-stress Bug 1 helper: stage the workspace.img + home.img
+    /// preconditions that `submit_restore_job` now asserts before it
+    /// even submits the Nomad job. Mirrors the on-disk state that
+    /// `stop_preserving_state` (snapshot teardown) + `create()` (source
+    /// mkfs) leave behind in production. Tests that drive
+    /// `submit_restore_job` directly need this; the full happy-path
+    /// (via `restore_sandbox`) goes through `store.get` first, which
+    /// implicitly stages a real artifact tree.
+    fn stage_disk_image_preconditions(
+        cfg: &crate::config::NomadCHConfig,
+        sandbox_id: Uuid,
+        user_id: &str,
+    ) {
+        let host_dir = cfg
+            .host_state_dir
+            .join(sandbox_id.simple().to_string());
+        std::fs::create_dir_all(&host_dir).unwrap();
+        // Non-empty content so the post-stage `assert_disk_image_present`
+        // check (size > 0) passes.
+        std::fs::write(host_dir.join("workspace.img"), b"fake-workspace").unwrap();
+
+        let user_home_dir = cfg.user_home_dir_root.join(user_id);
+        std::fs::create_dir_all(&user_home_dir).unwrap();
+        std::fs::write(user_home_dir.join("home.img"), b"fake-home").unwrap();
+    }
+
     /// Submit + alloc-running succeeds when Nomad returns 200 then a
     /// running alloc.
     #[test]
@@ -1727,10 +3447,14 @@ mod real_backend_tests {
             ),
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
+        // T-8b-stress Bug 1: submit_restore_job now asserts the disk
+        // images are present before submitting (cold-boot/restore
+        // parity check). Stage the source-create's residual files.
+        stage_disk_image_preconditions(&cfg, sid, "usr_test");
 
         backend
             .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
@@ -1752,15 +3476,27 @@ mod real_backend_tests {
             (500, r#"{"error":"nomad: backend down"}"#.to_string())
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
+        // T-8b-stress Bug 1: stage disk-image preconditions so the
+        // preflight assertion lets us actually reach the Nomad POST.
+        stage_disk_image_preconditions(&cfg, sid, "usr_test");
 
         let err = backend
             .submit_restore_job(sid, 8, &alloc_dir, "usr_test")
             .expect_err("500 must error");
-        assert!(err.contains("status 500"), "{err}");
+        // R23-API1: typed error — a Nomad 500 is the `Other` arm
+        // (the `Preflight` arm is reserved for the staging-image
+        // checks). The free-text inner string still carries the
+        // HTTP status for triage.
+        let rendered = err.to_string();
+        assert!(rendered.contains("status 500"), "{rendered}");
+        assert!(
+            matches!(err, SubmitRestoreError::Other(_)),
+            "Nomad 500 must classify as SubmitRestoreError::Other; got {err:?}"
+        );
         let _ = std::fs::remove_dir_all(&host_state);
     }
 
@@ -1865,17 +3601,135 @@ mod real_backend_tests {
             ),
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
+        // T-8b-stress Bug 1: stage disk-image preconditions so the
+        // preflight assertion lets us actually reach the
+        // wait_for_alloc_running poll loop that this test exercises.
+        stage_disk_image_preconditions(&cfg, sid, "usr_test");
 
         let err = backend
             .submit_restore_job(sid, 9, &alloc_dir, "usr_test")
             .expect_err("never-running must time out");
+        // R23-API1: the alloc-running timeout is `SubmitRestoreError::Other`
+        // (it's a Nomad-side alloc-poll exhaustion, not a controller
+        // preflight). Pin both the typed variant and the inner text.
+        let rendered = err.to_string();
         assert!(
-            err.contains("never reached running"),
-            "{err}"
+            rendered.contains("never reached running"),
+            "{rendered}"
+        );
+        assert!(
+            matches!(err, SubmitRestoreError::Other(_)),
+            "alloc-running timeout must classify as Other; got {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// T-8b-stress Bug 1 (positive parity test for the restore path):
+    /// `submit_restore_job` MUST refuse to submit a Nomad job when
+    /// workspace.img is missing — the preflight assertion catches it
+    /// at the controller side with a clear path-named error, instead
+    /// of letting the driver surface a generic "Failed tasks" alloc
+    /// rollup. Mirrors the cold-boot path's post-stage assertion in
+    /// `create_ext4_image_if_missing`.
+    #[test]
+    fn submit_restore_job_rejects_missing_workspace_img() {
+        let host_state = fresh_dir();
+        // Nomad shouldn't even be contacted — but spawn a server that
+        // counts hits so we can assert zero submit calls.
+        let (nomad_addr, calls) = spawn_fake_nomad(|_| {
+            (200, r#"[{"ClientStatus":"running"}]"#.to_string())
+        });
+        let cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
+        let sid = Uuid::now_v7();
+        let alloc_dir = backend.restore_alloc_dir(sid);
+        std::fs::create_dir_all(&alloc_dir).unwrap();
+        // INTENTIONALLY do NOT stage workspace.img/home.img.
+
+        let err = backend
+            .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
+            .expect_err("missing workspace.img must reject before submit");
+        // R23-API1 / R25-S1: the error is typed —
+        // `SubmitRestoreError::Preflight { which: "workspace.img", .. }`.
+        // The `Display` impl is path-free; the structured `which`
+        // field is what callers branch on.
+        match &err {
+            SubmitRestoreError::Preflight { which, .. } => {
+                assert_eq!(*which, "workspace.img");
+            }
+            other => panic!("expected SubmitRestoreError::Preflight; got {other:?}"),
+        }
+        // R25-S1: the path-free Display form names the resource but
+        // contains NO `/` (no host fs path on the wire).
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("workspace.img"),
+            "Display must name the resource; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains('/'),
+            "Display must not contain a path separator; got: {rendered}"
+        );
+        // Crucially, no submit RPC fired.
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            0,
+            "expected zero Nomad calls when controller-side preflight rejects",
+        );
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// T-8b-stress Bug 1: `submit_restore_job` MUST also catch
+    /// missing user_home.img (the second per-user disk). Both
+    /// preconditions must fire — the error path for the second
+    /// surfaces a different message (workspace was OK, user_home
+    /// was the gap), so an operator triaging logs can disambiguate.
+    #[test]
+    fn submit_restore_job_rejects_missing_user_home_img() {
+        let host_state = fresh_dir();
+        let (nomad_addr, calls) = spawn_fake_nomad(|_| {
+            (200, r#"[{"ClientStatus":"running"}]"#.to_string())
+        });
+        let cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(cfg.clone(), 1024, 2.0);
+        let sid = Uuid::now_v7();
+        let alloc_dir = backend.restore_alloc_dir(sid);
+        std::fs::create_dir_all(&alloc_dir).unwrap();
+        // Stage ONLY workspace.img, not home.img.
+        let host_dir = cfg
+            .host_state_dir
+            .join(sid.simple().to_string());
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("workspace.img"), b"fake-workspace").unwrap();
+
+        let err = backend
+            .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
+            .expect_err("missing user_home.img must reject before submit");
+        // R23-API1 / R25-S1: typed shape — `which: "user_home.img"`.
+        match &err {
+            SubmitRestoreError::Preflight { which, .. } => {
+                assert_eq!(*which, "user_home.img");
+            }
+            other => panic!("expected SubmitRestoreError::Preflight; got {other:?}"),
+        }
+        // R25-S1: path-free Display.
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("user_home.img"),
+            "Display must name the resource; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains('/'),
+            "Display must not contain a path separator; got: {rendered}"
+        );
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            0,
+            "expected zero Nomad calls when controller-side preflight rejects",
         );
         let _ = std::fs::remove_dir_all(&host_state);
     }
@@ -2085,9 +3939,10 @@ mod real_backend_tests {
         let parsed: serde_json::Value = serde_json::from_str(&body_str)
             .unwrap_or_else(|e| panic!("body not valid JSON: {e}: body={body_str:?}"));
         // R7-S1 + B24-FOLLOWUP: sandbox_id field carries the .simple()
-        // form (32-hex, no hyphens) — same canonical form the wrapper
-        // env-injects as SANDBOX_AGENT_SANDBOX_ID and that the agent
-        // boots with. Hyphenated form would 401 the resync.
+        // form (32-hex, no hyphens) — same canonical form the ch
+        // driver injects as SANDBOX_AGENT_SANDBOX_ID (via the guest
+        // kernel cmdline) and that the agent boots with. Hyphenated
+        // form would 401 the resync.
         assert_eq!(
             parsed["sandbox_id"].as_str().unwrap_or(""),
             sandbox_id.simple().to_string(),
@@ -2110,6 +3965,1364 @@ mod real_backend_tests {
             parsed["ts"].is_u64(),
             "R7-S1: body must carry a numeric ts; got {parsed:?}"
         );
+    }
+
+    // ─── R10-C1 + R10-C2 regression (concurrency-r10 2026-05-25):
+    //     `teardown_restore` on the rollback path must
+    //       (a) remove the nomad-ch state-map entry that
+    //           `register_restored` inserted, and
+    //       (b) release the vm_index back into the shared allocator,
+    //     so that a subsequent `register_restored` at the same slot
+    //     can succeed. Without (a), a late-rollback (e.g.
+    //     `update_sandbox_status(Running) → CasLost`) leaves a ghost
+    //     state-map entry at a slot the next `create` would land on.
+    //     Source: docs/reviews/sandbox-snapshot-restore-concurrency-2026-05-25-r10.md
+    //     R10-C1 + R10-C2.
+
+    /// R10-C1: full integration over `RealRestoreBackend` +
+    /// `NomadCHBackend` wired via `with_nomad_handle`. Walks the
+    /// rollback shape: `register_restored` (success branch) → late
+    /// failure → `teardown_restore` must wipe the state-map entry +
+    /// release the vm_index. Then a second `register_restored` at the
+    /// same `sandbox_id` succeeds (Vacant slot).
+    #[ntex::test]
+    async fn r10_c1_teardown_restore_removes_state_map_entry() {
+        use crate::backend::nomad_ch::NomadCHBackend;
+        // Fake nomad that 200s the rollback DELETE.
+        let host_state = fresh_dir();
+        let (nomad_addr, _calls) =
+            spawn_fake_nomad(|_| (200, "{}".to_string()));
+        let mut sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        sandbox_cfg.nomad_ch.nomad_addr = nomad_addr.clone();
+        sandbox_cfg.nomad_ch.host_state_dir = host_state.clone();
+        sandbox_cfg.nomad_ch.vm_index_floor = 4;
+        sandbox_cfg.nomad_ch.vm_index_ceil = 6;
+        // Construct the real NomadCH backend so we can wire it as a
+        // shared handle into RealRestoreBackend.
+        let nomad_backend =
+            Arc::new(NomadCHBackend::new(sandbox_cfg.clone(), None).expect("nomad new"));
+        let allocator = nomad_backend.vm_index_allocator();
+
+        // Build the RealRestoreBackend with both the shared allocator
+        // (so release_vm_index lands in the right pool) AND the
+        // nomad_handle (so teardown_restore can call unregister_restored).
+        let restore_cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(restore_cfg, 1024, 2.0)
+            .with_shared_allocator(allocator.clone())
+            .with_nomad_handle(nomad_backend.clone());
+
+        let id = Uuid::now_v7();
+        let vm_index: i16 = 5;
+
+        // Reserve + register: mirrors the do_restore_inner success
+        // path up to (but not including) the final CAS.
+        backend
+            .reserve_vm_index(vm_index)
+            .expect("reserve must succeed");
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0xc1u8; 32],
+                "usr_r10c1_int",
+            )
+            .expect("register_restored must succeed");
+        // Sanity: the entry landed in the state map.
+        assert!(
+            nomad_backend.contains_for_test(id),
+            "test setup: register_restored must place an entry"
+        );
+
+        // Now drive the rollback path. Pre-R10-C1 fix this would have
+        // released the vm_index but left the state-map entry behind.
+        backend.teardown_restore(id, vm_index);
+
+        // (a) State-map empty for this id: the R10-C1 invariant.
+        assert!(
+            !nomad_backend.contains_for_test(id),
+            "R10-C1 regression: teardown_restore did NOT remove the \
+             nomad-ch state-map entry; ghost entry leaks past the rollback"
+        );
+
+        // (b) vm_index released: a follow-on alloc() hands out the
+        //     freed slot 5 (freed-set wins over `next` in the
+        //     VmIndexAllocator).
+        let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(
+            reclaimed, vm_index as u16,
+            "R10-C1: vm_index slot {vm_index} not returned to allocator \
+             after teardown_restore; got {reclaimed}"
+        );
+
+        // (c) After unregister, a subsequent register_restored at the
+        //     same `sandbox_id` succeeds — symmetric inverse closure.
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0xc2u8; 32],
+                "usr_r10c1_int_re",
+            )
+            .expect(
+                "R10-C1: post-teardown, register_restored at the same \
+                 sandbox_id must succeed (Vacant slot)",
+            );
+
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// R10-C1: early-rollback path (teardown_restore fires BEFORE
+    /// register_restored ever ran). The state-map remove must be a
+    /// no-op (idempotent — matches `stop_inner`'s tolerance) and the
+    /// vm_index release must still happen.
+    #[ntex::test]
+    async fn r10_c1_teardown_restore_early_rollback_is_idempotent() {
+        use crate::backend::nomad_ch::NomadCHBackend;
+        let host_state = fresh_dir();
+        let (nomad_addr, _calls) =
+            spawn_fake_nomad(|_| (200, "{}".to_string()));
+        let mut sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        sandbox_cfg.nomad_ch.nomad_addr = nomad_addr.clone();
+        sandbox_cfg.nomad_ch.host_state_dir = host_state.clone();
+        sandbox_cfg.nomad_ch.vm_index_floor = 10;
+        sandbox_cfg.nomad_ch.vm_index_ceil = 12;
+        let nomad_backend =
+            Arc::new(NomadCHBackend::new(sandbox_cfg, None).expect("nomad new"));
+        let allocator = nomad_backend.vm_index_allocator();
+
+        let restore_cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(restore_cfg, 1024, 2.0)
+            .with_shared_allocator(allocator.clone())
+            .with_nomad_handle(nomad_backend.clone());
+
+        let id = Uuid::now_v7();
+        let vm_index: i16 = 11;
+        backend
+            .reserve_vm_index(vm_index)
+            .expect("reserve must succeed");
+        // Note: we skip register_restored — this is the early-rollback
+        // shape (e.g. submit_restore_job Err).
+        assert!(
+            !nomad_backend.contains_for_test(id),
+            "test setup: no state-map entry before teardown"
+        );
+
+        // Must not panic; must release the slot.
+        backend.teardown_restore(id, vm_index);
+        let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(
+            reclaimed, vm_index as u16,
+            "R10-C1 early-rollback: vm_index slot not released"
+        );
+
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// R10-C2: pin the structural shape of the rollback call. The
+    /// `do_restore_inner` rollback path MUST wrap `teardown_restore`
+    /// in `compio::runtime::spawn_blocking` so the ntex worker doesn't
+    /// park on the sync ureq DELETE (up to 10 s). A future contributor
+    /// who removes the wrap re-opens the worker-park; this test reads
+    /// the source via `include_str!` and asserts the wrap is present
+    /// near the rollback call site. Structural assertion because the
+    /// runtime behaviour is hard to unit-test deterministically.
+    #[test]
+    fn r10_c2_rollback_teardown_is_spawn_blocking_wrapped() {
+        const SRC: &str = include_str!("restore_handler.rs");
+        // Anchor the search at the rollback comment; require that
+        // `compio::runtime::spawn_blocking` AND the teardown call
+        // appear within the next ~2 KB and that spawn_blocking precedes
+        // the call (i.e., the call is INSIDE the wrap). We match on
+        // `.teardown_restore(` (call shape with the dot+paren) so the
+        // search ignores prose mentions of "teardown_restore" inside
+        // the comment block immediately after the anchor.
+        let anchor = "// Best-effort teardown of the partially-spawned alloc.";
+        let start = SRC
+            .find(anchor)
+            .expect("R10-C2 anchor comment moved; update the test");
+        let window = &SRC[start..start.saturating_add(2048)];
+        let sb_idx = window
+            .find("compio::runtime::spawn_blocking")
+            .unwrap_or_else(|| panic!(
+                "R10-C2 regression: rollback path no longer wraps \
+                 teardown_restore in compio::runtime::spawn_blocking; \
+                 the sync ureq DELETE will park the ntex worker for up \
+                 to 10 s."
+            ));
+        // Find the FIRST actual call (dot-form). The prose in the
+        // R10-C2 comment block mentions the bare identifier but never
+        // the `.teardown_restore(` call shape.
+        let td_idx = window.find(".teardown_restore(").unwrap_or_else(|| {
+            panic!("R10-C2: expected `.teardown_restore(` call in rollback window")
+        });
+        assert!(
+            sb_idx < td_idx,
+            "R10-C2 regression: spawn_blocking wrap must precede the \
+             teardown_restore call (got sb={sb_idx} td={td_idx})"
+        );
+    }
+
+    /// **R14-A6 wake-path call site**: `RealRestoreBackend` overrides
+    /// `vm_index_retry_policy` so the wake budget tracks
+    /// `cfg.host_fence_timeout_secs` instead of inheriting the
+    /// hard-coded `Default`. Regression-pin: if a future refactor
+    /// removes the override (or accidentally restores
+    /// `VmIndexRetryPolicy::default()` here), this test catches it by
+    /// constructing two backends with different fence timeouts and
+    /// asserting their derived policies differ. The trait-method
+    /// dispatch is what the wake loop in `reserve_vm_index_with_retry`
+    /// actually consults — so this pins the production code path, not
+    /// just the formula.
+    #[test]
+    fn r14a6_real_backend_derives_policy_from_cfg_host_fence_timeout() {
+        let root = fresh_dir();
+        let mut cfg_short = base_cfg(String::from("http://127.0.0.1:1"), root.clone());
+        cfg_short.host_fence_timeout_secs = 20;
+        let backend_short = RealRestoreBackend::new(cfg_short, 1024, 2.0);
+
+        let mut cfg_long = base_cfg(String::from("http://127.0.0.1:1"), root.clone());
+        cfg_long.host_fence_timeout_secs = 120;
+        let backend_long = RealRestoreBackend::new(cfg_long, 1024, 2.0);
+
+        let p_short = backend_short.vm_index_retry_policy();
+        let p_long = backend_long.vm_index_retry_policy();
+        assert!(
+            p_long.max_attempts > p_short.max_attempts,
+            "R14-A6 regression: RealRestoreBackend must derive policy \
+             from cfg.host_fence_timeout_secs — a longer fence should \
+             yield more attempts. short=20s→{} attempts, long=120s→{} \
+             attempts. If this fails, the wake call site likely fell \
+             back to `VmIndexRetryPolicy::default()` and is no longer \
+             cfg-driven.",
+            p_short.max_attempts,
+            p_long.max_attempts
+        );
+        // Also pin: NOT the default. 20 s fence with the cfg formula
+        // is 6 attempts (≠ default 25), so a Default-only fallback
+        // would be detected here.
+        let default = VmIndexRetryPolicy::default();
+        assert_ne!(
+            p_short.max_attempts, default.max_attempts,
+            "R14-A6 regression: short-fence backend's policy must NOT \
+             match the hard-coded Default ({} attempts) — that would \
+             mean the override is missing.",
+            default.max_attempts
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ─── T5: signed /version fingerprint check ────────────────────
+    //
+    // `verify_agent_version_post_restore` probes the just-restored
+    // agent's signed /version and compares the reported git_commit to
+    // the controller's CONTROLLER_GIT_COMMIT. These tests pin the
+    // structured outcomes:
+    //   - Match     — same git_commit on both sides → wake proceeds.
+    //   - Mismatch  — different git_commit → wake rolls back.
+    //   - Skipped   — controller sentinel / legacy agent / transport
+    //                 error → wake proceeds with a WARN.
+    //
+    // The probe is auth-gated (signed GET); the fake-agent under test
+    // intentionally does NOT verify the Ed25519 signature — these are
+    // controller-side outcome tests, not crypto tests. The signed-auth
+    // path is covered separately by the agent crate's signature tests.
+
+    /// T5: agent returns 200 with matching git_commit → `Match`.
+    #[ntex::test]
+    async fn verify_agent_version_matches_when_git_commit_aligns() {
+        let expected = "abc123def456";
+        let body = format!(
+            r#"{{"agent_version":"0.1.0","git_commit":"{expected}","protocol_version":1,"capabilities":[]}}"#
+        );
+        let (agent_url, calls) = spawn_fake_agent(move |_, _req| (200, body.clone()));
+        let signing_key_bytes = [0x11u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            expected,
+        )
+        .await;
+        assert_eq!(outcome, VersionCheckOutcome::Match);
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            1,
+            "expected exactly one signed GET to /version"
+        );
+    }
+
+    /// T5: agent returns 200 with a DIFFERENT git_commit → `Mismatch`
+    /// carrying both sides for diagnostic text. This is the partial-
+    /// rollout scenario the check is designed to catch.
+    #[ntex::test]
+    async fn verify_agent_version_returns_mismatch_when_git_commits_differ() {
+        let controller_sha = "ctrl00000001";
+        let agent_sha = "stale0000ff02";
+        let body = format!(
+            r#"{{"agent_version":"0.1.0","git_commit":"{agent_sha}","protocol_version":1,"capabilities":[]}}"#
+        );
+        let (agent_url, _) = spawn_fake_agent(move |_, _req| (200, body.clone()));
+        let signing_key_bytes = [0x22u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            controller_sha,
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Mismatch { expected, got } => {
+                assert_eq!(expected, controller_sha);
+                assert_eq!(got, agent_sha);
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    /// T5: controller built without git SHA ("unknown" sentinel) →
+    /// `Skipped`. Probe is never even issued (sentinel short-circuits
+    /// before the HTTP call) — pinned via `calls == 0`.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_controller_sha_unknown() {
+        let (agent_url, calls) = spawn_fake_agent(|_, _req| {
+            // If the probe DID fire we'd serve a Match — but the
+            // sentinel must short-circuit before the call.
+            (200, r#"{"git_commit":"unknown"}"#.to_string())
+        });
+        let signing_key_bytes = [0x33u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "unknown",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
+                assert_eq!(reason, "controller_build_sha_unknown");
+                assert!(
+                    !transport_error,
+                    "controller sentinel must NOT report transport_error"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            0,
+            "sentinel must short-circuit before any HTTP probe"
+        );
+    }
+
+    /// T5: agent's `/version` omits `git_commit` (legacy pre-T5 build)
+    /// → `Skipped` with reason `agent_git_commit_missing`. Closed-
+    /// fleet guarantee: the signed-auth check that just succeeded
+    /// is sufficient attestation for these agents.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_agent_omits_git_commit() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            // Pre-T5 agent shape: no git_commit field.
+            (
+                200,
+                r#"{"agent_version":"0.0.9","protocol_version":1}"#.to_string(),
+            )
+        });
+        let signing_key_bytes = [0x44u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "ctrl00000003",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
+                assert_eq!(reason, "agent_git_commit_missing");
+                assert!(
+                    !transport_error,
+                    "legacy-agent skip must NOT report transport_error"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: agent built without git SHA ("unknown") → `Skipped` with
+    /// reason `agent_build_sha_unknown`. The non-git-build path
+    /// (rare in production, common in CI / vendor tarballs) must
+    /// not fail the wake.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_agent_sha_unknown() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (
+                200,
+                r#"{"agent_version":"0.1.0","git_commit":"unknown","protocol_version":1}"#
+                    .to_string(),
+            )
+        });
+        let signing_key_bytes = [0x55u8; 32];
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "ctrl00000004",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
+                assert_eq!(reason, "agent_build_sha_unknown");
+                assert!(
+                    !transport_error,
+                    "agent sentinel must NOT report transport_error"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: transport error (closed port) → `Skipped` with reason
+    /// `transport_error`. The wake state machine MUST NOT fail on a
+    /// flaky GET when the underlying livez probe just succeeded —
+    /// rolling back in this case would hurt availability without
+    /// catching real version drift.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_on_transport_error() {
+        // Bind + immediately drop so the port is closed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let agent_url = format!("http://{addr}");
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &[0x66u8; 32],
+            "ctrl00000005",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
+                assert_eq!(reason, "transport_error");
+                assert!(
+                    transport_error,
+                    "transport-layer Skipped MUST set transport_error=true \
+                     (R28-I2 half-dead-agent fingerprint)"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+        // R28-I2: the structured accessor reflects the same signal.
+        let outcome2 = verify_agent_version_post_restore(
+            &format!(
+                "http://{}",
+                {
+                    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let a = l.local_addr().unwrap();
+                    drop(l);
+                    a
+                }
+            ),
+            &[0x66u8; 32],
+            "ctrl00000005",
+        )
+        .await;
+        assert!(
+            outcome2.is_transport_error(),
+            "is_transport_error() must be true for closed-port T5 probe"
+        );
+    }
+
+    /// T5: agent returns non-200 (e.g., 503 during a startup race) →
+    /// `Skipped` with reason `non_200_response`. Same availability
+    /// rationale as the transport-error case.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_on_non_200_response() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (503, r#"{"error":"draining"}"#.to_string())
+        });
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &[0x77u8; 32],
+            "ctrl00000006",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
+                assert_eq!(reason, "non_200_response");
+                assert!(
+                    !transport_error,
+                    "non-200 response is NOT a transport error \
+                     (the agent answered) — R28-I2 must not false-fire"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: agent returns 200 but body isn't JSON → `Skipped` with
+    /// reason `body_not_json`. Defensive parse — should never happen
+    /// in production but covered for robustness.
+    #[ntex::test]
+    async fn verify_agent_version_skipped_when_body_not_json() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (200, "not valid json {".to_string())
+        });
+        let outcome = verify_agent_version_post_restore(
+            &agent_url,
+            &[0x88u8; 32],
+            "ctrl00000007",
+        )
+        .await;
+        match outcome {
+            VersionCheckOutcome::Skipped {
+                reason,
+                transport_error,
+            } => {
+                assert_eq!(reason, "body_not_json");
+                assert!(
+                    !transport_error,
+                    "body-not-json is NOT a transport error"
+                );
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    /// T5: `CONTROLLER_GIT_COMMIT` const is populated by build.rs.
+    /// In a git checkout it's a 12-char short hex; in vendor-tarball
+    /// builds it's the `"unknown"` sentinel. Either is acceptable;
+    /// the const must just be present (env var was set at build time).
+    #[test]
+    fn controller_git_commit_const_is_populated_by_build_rs() {
+        assert!(
+            !CONTROLLER_GIT_COMMIT.is_empty(),
+            "build.rs must inject CONTROLLER_GIT_COMMIT"
+        );
+        // Either valid short-hex (12 chars, ascii hex) or the sentinel.
+        let is_short_hex = CONTROLLER_GIT_COMMIT.len() == 12
+            && CONTROLLER_GIT_COMMIT
+                .chars()
+                .all(|c| c.is_ascii_hexdigit());
+        let is_sentinel = CONTROLLER_GIT_COMMIT == "unknown";
+        assert!(
+            is_short_hex || is_sentinel,
+            "CONTROLLER_GIT_COMMIT must be 12-char short hex or \"unknown\"; got {CONTROLLER_GIT_COMMIT:?}"
+        );
+    }
+
+    // ─── R28-I1 + R28-I2: parallel T5 + clock_resync ──────────────
+    //
+    // These tests pin the shape the wake_machine.rs site depends on:
+    // (a) `futures::join!` on the two probes returns BOTH outcomes
+    //     after both complete, not after the first errors;
+    // (b) the typed `ClockResyncOutcome` wrapper correctly classifies
+    //     transport-layer failures distinctly from non-200 agent
+    //     responses (the R28-I2 structured boolean signal);
+    // (c) the paired half-dead-agent fingerprint — both probes
+    //     transport-fail against the same agent URL — is detectable
+    //     via the structured signals without string-matching the
+    //     diagnostic messages.
+
+    /// R28-I2: `clock_resync_post_restore_typed` returns `Err {
+    /// transport_error: true, .. }` when the agent's port is closed.
+    /// This is half of the half-dead-agent fingerprint signal — the
+    /// other half is the T5 probe's `is_transport_error()`.
+    #[ntex::test]
+    async fn clock_resync_typed_surfaces_transport_error_on_closed_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let agent_url = format!("http://{addr}");
+        let sandbox_id = Uuid::now_v7();
+        let outcome =
+            clock_resync_post_restore_typed(&agent_url, sandbox_id, &[0u8; 32]).await;
+        match outcome {
+            ClockResyncOutcome::Err {
+                transport_error,
+                message,
+            } => {
+                assert!(
+                    transport_error,
+                    "closed-port failure MUST set transport_error=true \
+                     (R28-I2 half-dead-agent fingerprint signal); got msg={message}"
+                );
+                assert!(
+                    message.contains("transport"),
+                    "underlying message preserved for log fidelity: {message}"
+                );
+            }
+            ClockResyncOutcome::Ok => panic!("closed port must not return Ok"),
+        }
+    }
+
+    /// R28-I2: `clock_resync_post_restore_typed` returns `Err {
+    /// transport_error: false, .. }` when the agent answers with a
+    /// non-200 status (e.g. 401 from wrong signing key). The
+    /// half-dead-agent detector MUST NOT fire on this case — the
+    /// agent's HTTP surface is healthy, the request was just
+    /// rejected.
+    #[ntex::test]
+    async fn clock_resync_typed_non_200_is_not_transport_error() {
+        let (agent_url, _) = spawn_fake_agent(|_, _req| {
+            (401, r#"{"error":"unauthorized"}"#.to_string())
+        });
+        let sandbox_id = Uuid::now_v7();
+        let outcome =
+            clock_resync_post_restore_typed(&agent_url, sandbox_id, &[0xcdu8; 32])
+                .await;
+        match outcome {
+            ClockResyncOutcome::Err {
+                transport_error,
+                message,
+            } => {
+                assert!(
+                    !transport_error,
+                    "401 response is NOT a transport-layer failure \
+                     (the agent answered); R28-I2 must not false-fire. msg={message}"
+                );
+                assert!(
+                    message.contains("status 401"),
+                    "401 message preserved for triage: {message}"
+                );
+            }
+            ClockResyncOutcome::Ok => panic!("401 must not return Ok"),
+        }
+    }
+
+    /// R28-I1: pin the parallel-sequence behavior. `futures::join!`
+    /// over the two probes against a healthy fake agent must:
+    /// (a) issue BOTH HTTP calls (one /version, one /_clock_resync);
+    /// (b) return both outcomes successfully;
+    /// (c) complete in roughly max(t5, clock_resync) time, not
+    ///     t5 + clock_resync — which we proxy by counting calls and
+    ///     pinning that join! awaits both (a serial sequence would
+    ///     work too for the happy path, but the structured assertion
+    ///     here also exercises the same join-arity the wake_machine
+    ///     uses, so a future contributor who replaces join! with a
+    ///     plain serial sequence drops the parallel assertion).
+    #[ntex::test]
+    async fn parallel_t5_and_clock_resync_both_succeed_against_healthy_agent() {
+        let controller_sha = "ctrl00000010";
+        let agent_sha = controller_sha.to_string();
+        // The fake agent multiplexes both endpoints over the same
+        // listener; the request body distinguishes /version (GET, no
+        // body) from /_clock_resync (POST with JSON body). For this
+        // happy-path test we don't need to discriminate — 200 on both
+        // is enough; the call-counter pins that BOTH probes fired.
+        let body_version = format!(
+            r#"{{"agent_version":"0.1.0","git_commit":"{agent_sha}","protocol_version":1,"capabilities":[]}}"#
+        );
+        let body_resync = r#"{"resynced":true,"ts":1700000000}"#.to_string();
+        let bv = body_version.clone();
+        let br = body_resync.clone();
+        let (agent_url, calls) = spawn_fake_agent(move |_, req| {
+            // Crude method-distinguishing on the first request bytes.
+            if req.starts_with(b"GET") {
+                (200, bv.clone())
+            } else {
+                (200, br.clone())
+            }
+        });
+        let signing_key_bytes = [0xa1u8; 32];
+        let sandbox_id = Uuid::now_v7();
+
+        let t5 = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            controller_sha,
+        );
+        let cr = clock_resync_post_restore_typed(
+            &agent_url,
+            sandbox_id,
+            &signing_key_bytes,
+        );
+        let (t5_outcome, cr_outcome) = futures::join!(t5, cr);
+
+        assert_eq!(
+            t5_outcome,
+            VersionCheckOutcome::Match,
+            "T5 must Match when SHAs align"
+        );
+        assert!(
+            matches!(cr_outcome, ClockResyncOutcome::Ok),
+            "clock_resync must Ok against 200; got {cr_outcome:?}"
+        );
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            2,
+            "both T5 (/version) and clock_resync (/_clock_resync) MUST fire \
+             — join! is the parallel-arity pin"
+        );
+    }
+
+    /// R28-I2: half-dead-agent fingerprint — both T5 and clock_resync
+    /// transport-fail against the same closed agent URL. The wake
+    /// machine pairs `t5.is_transport_error()` with the
+    /// `ClockResyncOutcome::Err { transport_error: true, .. }`
+    /// signal to route this case distinctly from a normal
+    /// clock_resync 401 or an isolated probe hiccup.
+    ///
+    /// This test pins the typed-signal contract: BOTH probes MUST
+    /// report transport_error=true when the agent's port is closed,
+    /// AND the wake_machine's combined check
+    /// (`t5_transport_error && clock_resync_transport_error`) MUST
+    /// evaluate true. A future contributor who reverts the typed
+    /// boolean to a string-match would fail here.
+    #[ntex::test]
+    async fn half_dead_agent_fingerprint_detected_when_both_probes_transport_fail() {
+        // Bind + drop a port so all subsequent connections fail at
+        // transport layer (ECONNREFUSED).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let agent_url = format!("http://{addr}");
+        let signing_key_bytes = [0xbbu8; 32];
+        let sandbox_id = Uuid::now_v7();
+
+        let t5 = verify_agent_version_post_restore(
+            &agent_url,
+            &signing_key_bytes,
+            "ctrl00000020",
+        );
+        let cr = clock_resync_post_restore_typed(
+            &agent_url,
+            sandbox_id,
+            &signing_key_bytes,
+        );
+        let (t5_outcome, cr_outcome) = futures::join!(t5, cr);
+
+        // Individual structured signals.
+        assert!(
+            t5_outcome.is_transport_error(),
+            "T5 must report is_transport_error()=true for closed port; \
+             got {t5_outcome:?}"
+        );
+        let cr_transport_error = matches!(
+            cr_outcome,
+            ClockResyncOutcome::Err {
+                transport_error: true,
+                ..
+            }
+        );
+        assert!(
+            cr_transport_error,
+            "clock_resync must report transport_error=true for closed port; \
+             got {cr_outcome:?}"
+        );
+
+        // The combined check — this is the literal expression the
+        // wake_machine.rs site evaluates. If a future refactor breaks
+        // it (e.g., one side becomes a string-match), this assertion
+        // catches the regression.
+        assert!(
+            t5_outcome.is_transport_error() && cr_transport_error,
+            "R28-I2 half-dead-agent fingerprint: both signals MUST be true \
+             when the agent's port is closed (typed-boolean contract)"
+        );
+    }
+
+    /// R28-I1: pin the "one succeeds, one fails" branch. If T5
+    /// transport-fails but clock_resync 401s (or vice-versa), the
+    /// half-dead-agent fingerprint MUST NOT fire — only one
+    /// transport_error signal is set. The wake will route through
+    /// the failing probe's normal branch (clock_resync's failure
+    /// → `ClockResyncFailed`; T5 Mismatch → `AgentVersionMismatch`).
+    /// This is the asymmetric case the spec calls out: "one fails /
+    /// one succeeds → wake continues with the successful one's
+    /// effect" (here adapted to "one's transport-fail does NOT
+    /// trigger half-dead-agent on its own").
+    #[ntex::test]
+    async fn parallel_asymmetric_failure_does_not_trip_half_dead_agent() {
+        // clock_resync gets a real agent that 401s; T5 hits a closed
+        // port → transport_error. Half-dead detector MUST require
+        // BOTH; with only one transport_error, the wake should route
+        // through clock_resync's normal 401 branch (or T5's
+        // Skipped-transport, depending on which side we wire to
+        // which URL).
+        let (resync_url, _) = spawn_fake_agent(|_, _req| {
+            (401, r#"{"error":"unauthorized"}"#.to_string())
+        });
+        let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_addr = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+        let t5_url = format!("http://{closed_addr}");
+        let signing_key_bytes = [0xccu8; 32];
+        let sandbox_id = Uuid::now_v7();
+
+        // Note: in the wake_machine path both probes share the SAME
+        // agent_url. We split them here to construct an asymmetric
+        // scenario at the unit-test layer — the combinator logic is
+        // what matters, not the URL identity.
+        let t5 = verify_agent_version_post_restore(
+            &t5_url,
+            &signing_key_bytes,
+            "ctrl00000030",
+        );
+        let cr = clock_resync_post_restore_typed(
+            &resync_url,
+            sandbox_id,
+            &signing_key_bytes,
+        );
+        let (t5_outcome, cr_outcome) = futures::join!(t5, cr);
+
+        // T5 transport-errors.
+        assert!(t5_outcome.is_transport_error(), "T5 closed port → true");
+        // clock_resync 401s — NOT a transport error.
+        let cr_transport_error = matches!(
+            cr_outcome,
+            ClockResyncOutcome::Err {
+                transport_error: true,
+                ..
+            }
+        );
+        assert!(
+            !cr_transport_error,
+            "clock_resync 401 must NOT report transport_error \
+             (the agent answered)"
+        );
+        // The wake_machine's combined predicate is FALSE.
+        assert!(
+            !(t5_outcome.is_transport_error() && cr_transport_error),
+            "asymmetric failure (one transport, one 401) MUST NOT trip \
+             the half-dead-agent fingerprint — that's a HARD requirement \
+             on the R28-I2 typed-boolean contract"
+        );
+    }
+}
+
+// ─── Restore-path jobspec tests (T-7 + T-8 cutover complete) ────────
+//
+// The ch driver is now unconditional. These tests pin the restore-path
+// builder's typed Config surface; the raw_exec / env-gated tests were
+// deleted with the wrapper at T-8 cutover.
+#[cfg(test)]
+mod r12_i1_tests {
+    use super::*;
+
+    fn fixture_cfg() -> NomadCHConfig {
+        NomadCHConfig {
+            nomad_addr: "http://127.0.0.1:4646".into(),
+            datacenter: "dc1".into(),
+            runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
+            host_state_dir: PathBuf::from("/var/zeroship/ch"),
+            user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
+            vm_index_floor: 1,
+            vm_index_ceil: 155,
+            alloc_running_timeout_secs: 120,
+            agent_livez_timeout_secs: 30,
+            host_fence_timeout_secs: 30,
+            startup_orphan_cleanup: false,
+            subnet_second_octet: 99,
+            vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+            nomad_stop_concurrency: 16,     // r30-A1: prod default
+        }
+    }
+
+    /// Wake-path always emits `Driver: "ch"` (T-7 + T-8 cutover).
+    /// The ch driver's PluginName const is "ch"; any drift decouples
+    /// the controller from the driver.
+    #[test]
+    fn nomad_restore_job_spec_always_uses_ch_driver() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-ch",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            None, // r3-A: no node pin
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Driver"], "ch",
+            "wake-path MUST emit Driver=\"ch\" — T-7 + T-8 cutover complete"
+        );
+        assert!(
+            task["Config"]["command"].is_null(),
+            "raw_exec `command` field must NOT appear in ch driver Config"
+        );
+        assert_eq!(
+            task["Env"]["ZSBX_RESTORE_FROM"],
+            "/var/zeroship/ch/snap/restore",
+        );
+    }
+
+    /// Wake-path populates the typed `Config.restore_from` from the
+    /// staged alloc_dir. The Go driver branches on non-empty
+    /// `RestoreFrom` to spawn `cloud-hypervisor --restore source_url=…`;
+    /// an empty value would silently mis-route through cold-boot.
+    #[test]
+    fn ch_plugin_restore_jobspec_populates_restore_from() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-deadbeef/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-rf",
+            &cfg,
+            5,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            None, // r3-A: no node pin
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert_eq!(
+            config["restore_from"].as_str(),
+            Some("/var/zeroship/ch/snap-deadbeef/restore"),
+            "ChPlugin wake-path MUST set Config.restore_from to the \
+             staged alloc_dir — driver dispatches on non-empty here"
+        );
+        // Sanity-check the rest of the typed surface (mirrors the
+        // cold-boot ch_plugin_jobspec_includes_all_task_config_fields
+        // test in nomad_ch.rs::tests).
+        assert_eq!(config["vm_index"].as_u64(), Some(5));
+        assert_eq!(
+            config["kernel"].as_str(),
+            Some("/var/lib/zeroship/ch/vmlinuz"),
+        );
+        assert_eq!(config["cpus"].as_u64(), Some(2));
+        assert_eq!(config["memory_mb"].as_u64(), Some(1024));
+        assert_eq!(config["subnet_base_octet"].as_u64(), Some(99));
+        // r21-A1: user_id MUST appear in the restore-path Config so the
+        // driver's per-user-home allow-list accepts the disk path.
+        // This assertion is what was missing and masked the gap.
+        assert_eq!(
+            config["user_id"].as_str(),
+            Some("usr_alice"),
+            "restore-path ChPlugin Config MUST carry user_id — driver \
+             v8 allow-list rejects home.img without it (r21-A1)"
+        );
+        // C-7-LT-12a (smoke-r22): rootfs_source MUST appear in the
+        // restore-path Config so the driver knows where to hardlink
+        // the rootfs.img bytes from. Pre-fix the driver's rewriter
+        // retargeted disks[0].path → <runDir>/rootfs.img and the
+        // task_dir allow-list (C-7-LT-6) accepted it, but nothing
+        // staged a real file at the destination — CH then aborted
+        // at `VM Restore failed: DeviceManager(Disk(NotFound))`. The
+        // source path matches cold-boot's materializeRootfs source
+        // (`<runtime_dir>/rootfs-slim.img`).
+        assert_eq!(
+            config["rootfs_source"].as_str(),
+            Some("/var/lib/zeroship/ch/rootfs-slim.img"),
+            "restore-path ChPlugin Config MUST carry rootfs_source — \
+             driver v12 hardlinks this into runDir/rootfs.img before \
+             CH spawn (C-7-LT-12a)"
+        );
+    }
+
+    /// C-7-LT-12a invariant: the restore-path `rootfs_source` field
+    /// MUST point at the same on-disk artifact the cold-boot path's
+    /// `materializeRootfs` copies from. Cold-boot emits the source
+    /// implicitly through `ZSBX_ARTIFACT_DIR` (== `runtime_dir`) +
+    /// the hard-coded `chRootfsSourceName = "rootfs-slim.img"` in the
+    /// driver; the restore path emits the FULL path explicitly because
+    /// the driver has no env-derived handle on the cold-boot artifact
+    /// dir once the rewriter rewrites disks[0].path away from the
+    /// source alloc. A mismatch would mean wake VMs boot off different
+    /// rootfs bytes than fresh VMs — a class of bug the test pins
+    /// preemptively.
+    #[test]
+    fn ch_plugin_restore_jobspec_rootfs_source_matches_cold_boot() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-rootfs",
+            &cfg,
+            5,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            None, // r3-A: no node pin
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
+
+        // Cold-boot source: ZSBX_ARTIFACT_DIR (== runtime_dir) +
+        // "/rootfs-slim.img" baked into the driver. The restore path
+        // emits the same composition as an absolute path so the
+        // driver-side hardlink/copy uses identical bytes.
+        let artifact_dir = env["ZSBX_ARTIFACT_DIR"]
+            .as_str()
+            .expect("ZSBX_ARTIFACT_DIR must be emitted");
+        let want = format!("{artifact_dir}/rootfs-slim.img");
+
+        assert_eq!(
+            config["rootfs_source"].as_str(),
+            Some(want.as_str()),
+            "rootfs_source MUST match cold-boot's materializeRootfs \
+             source (ZSBX_ARTIFACT_DIR + /rootfs-slim.img); a mismatch \
+             means wake VMs boot off different bytes than fresh VMs"
+        );
+    }
+
+    /// raw_exec's `Config.command` field MUST NOT appear under
+    /// ChPlugin. The Go driver's TaskConfig has no such field; an
+    /// errant `command` either is silently ignored (best case) or
+    /// fails HCL decode if the schema gets stricter. Pre-R12-I1 the
+    /// wake-path was hardcoded raw_exec — this test would never have
+    /// caught the split-brain.
+    #[test]
+    fn ch_plugin_restore_jobspec_omits_command() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-no-cmd",
+            &cfg,
+            5,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            None, // r3-A: no node pin
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert!(
+            config["command"].is_null(),
+            "ChPlugin wake-path Config must NOT carry the raw_exec \
+             `command` field — Go TaskConfig has no such tag, got: {config:?}",
+        );
+    }
+
+    /// R22-T1 / R21-API2 — ChPlugin Config field-list parity contract.
+    ///
+    /// Twice (r21-A1: `user_id`; C-7-LT-12a: `rootfs_source`) a field
+    /// landed in cold-boot's Config emitter but missed the restore-path
+    /// emitter, leading to cluster failures only caught by smoke-rN.
+    ///
+    /// This test asserts that the symmetric difference between the
+    /// cold-boot and restore-path Config key sets is EXACTLY the two
+    /// documented intentional divergences:
+    ///
+    ///   • `rootfs_source` — restore-path only: cold-boot relies on
+    ///                       `ZSBX_ARTIFACT_DIR` env + the hard-coded
+    ///                       `chRootfsSourceName` const in the driver;
+    ///                       the restore emitter provides the full path
+    ///                       explicitly because the rewriter has already
+    ///                       moved disks[0].path away from the source
+    ///                       alloc by the time the driver runs (C-7-LT-12a).
+    ///
+    /// Note: `pubkey_hex` and `restore_from` ARE present in both paths
+    /// (with different values — empty string on cold-boot / restore-path
+    /// respectively), so they are NOT in the symmetric difference.
+    ///
+    /// Any other asymmetry means a field was added to one emitter but
+    /// not the other — the test names both sides in the failure message
+    /// so the author knows exactly what to add.
+    #[test]
+    fn ch_plugin_config_field_list_parity() {
+        use std::collections::HashSet;
+
+        // ── cold-boot side ────────────────────────────────────────────
+        // `build_nomad_job_json_with` takes a &SandboxConfig; use the
+        // shared fixture (same runtime_dir / subnet_second_octet as
+        // fixture_cfg() above so paths compare cleanly if ever needed).
+        let cold_sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        let cold_v = crate::backend::nomad_ch::build_nomad_job_json_with(
+            "zsbx-parity-cold",
+            &cold_sandbox_cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/usr_alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None, // cold-boot: no restore_from
+
+            None, // r3-A: parity test omits node pin (intentionally —
+                  // the Constraints block is verified by the
+                  // r3_a_node_affinity_* sibling tests below).
+        );
+        let cold_config = &cold_v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        let cold_fields: HashSet<&str> = cold_config
+            .as_object()
+            .expect("cold-boot Config must be a JSON object")
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+
+        // ── restore-path side ─────────────────────────────────────────
+        let restore_cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-deadbeef/restore");
+        let restore_v = build_restore_nomad_job_json(
+            "zsbx-parity-restore",
+            &restore_cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            None, // r3-A: parity test omits node pin (parity check is on
+                  // Config fields, not Job-level Constraints)
+        );
+        let restore_config = &restore_v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        let restore_fields: HashSet<&str> = restore_config
+            .as_object()
+            .expect("restore-path Config must be a JSON object")
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+
+        // ── parity assertion ──────────────────────────────────────────
+        // The ONLY documented intentional divergence. Update this set
+        // only when a new deliberate asymmetry is agreed and documented.
+        // • rootfs_source — restore-path only (cold-boot uses
+        //                   ZSBX_ARTIFACT_DIR env + driver const;
+        //                   restore emits full path explicitly, C-7-LT-12a)
+        //
+        // pubkey_hex and restore_from are present in BOTH paths
+        // (with semantically different values — empty string on the
+        // non-applicable side), so they are NOT in the diff set.
+        let expected_diff: HashSet<&str> = ["rootfs_source"].iter().copied().collect();
+
+        let cold_only: HashSet<&str> = cold_fields.difference(&restore_fields).copied().collect();
+        let restore_only: HashSet<&str> =
+            restore_fields.difference(&cold_fields).copied().collect();
+        let actual_diff: HashSet<&str> = cold_fields
+            .symmetric_difference(&restore_fields)
+            .copied()
+            .collect();
+
+        assert_eq!(
+            actual_diff,
+            expected_diff,
+            "ChPlugin Config field-list drifted from the documented contract.\n\
+             cold-only (add to restore emitter?):   {cold_only:?}\n\
+             restore-only (add to cold emitter?):   {restore_only:?}\n\
+             expected symmetric diff:               {expected_diff:?}\n\
+             \n\
+             Only {{\"rootfs_source\"}} is the documented intentional divergence.\n\
+             See R22-T1 / R21-API2 for the contract history.",
+        );
+    }
+
+    /// Option C Phase 2 (2026-05-25 staging-locality ADR): the
+    /// restore-path emitter is unaffected by the controller's
+    /// `driver_stages_disk_images` flag. The restore branch always
+    /// emits `stage_disk_images=false` because rootfs.img comes from
+    /// the snapshot's RootfsSource (hardlink/copy at C-7-LT-12a) and
+    /// workspace.img / home.img come from the persistent paths the
+    /// snapshot already references — there's nothing to re-mkfs.
+    ///
+    /// This test pins the contract by exercising the restore-builder
+    /// and asserting `stage_disk_images=false` regardless. Phase 3
+    /// will revisit the restore-side staging model; in Phase 2 the
+    /// invariant is "restore branch ignores the flag entirely."
+    #[test]
+    fn restore_jobspec_unchanged_by_stage_disks_flag() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-stage-restore/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-stage-flag-noop",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            None,
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert_eq!(
+            config["stage_disk_images"], false,
+            "restore-path Config.stage_disk_images MUST be false: \
+             restore branch consumes rootfs via RootfsSource hardlink/copy \
+             and workspace/home.img from persistent snapshot artifacts — \
+             nothing to re-mkfs. The controller's driver_stages_disk_images \
+             flag is cold-boot only (ADR Phase 2)."
+        );
+    }
+
+    // ─── r3-A — restore-path node-affinity Constraints emission ──
+    //
+    // The wake path stages the snapshot bytes on THIS worker's local
+    // fs (see `restore::stage_snapshot_locally` callers); the same
+    // cross-node race the cold-boot path closed in `nomad_ch.rs`
+    // applies here. Diagnostic report flagged 11/12 wake failures
+    // with the same signature. These tests pin the Constraints
+    // emission invariants on the restore-path builder.
+
+    /// When `local_nomad_node_id` is `Some`, the restore-path jobspec
+    /// MUST carry the same Constraints shape as the cold-boot path:
+    /// LTarget=`${node.unique.id}`, Operand=`=`, RTarget=node_id.
+    #[test]
+    fn restore_jobspec_includes_node_affinity_when_node_id_set() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-r3a/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-r3a-pinned",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            Some("restore-node-id-aaaa-bbbb"),
+        );
+        let constraints = &v["Job"]["Constraints"];
+        assert!(
+            constraints.is_array(),
+            "Job.Constraints must be a JSON array on restore-path, got: {constraints:?}"
+        );
+        let arr = constraints.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "r3-A emits exactly one constraint");
+        assert_eq!(arr[0]["LTarget"], "${node.unique.id}");
+        assert_eq!(arr[0]["Operand"], "=");
+        assert_eq!(arr[0]["RTarget"], "restore-node-id-aaaa-bbbb");
+    }
+
+    /// When `local_nomad_node_id` is `None` (boot-time lookup failed,
+    /// or test fixture didn't set one), the restore-path jobspec MUST
+    /// omit the Constraints block — symmetric with the cold-boot
+    /// fallback behaviour. Restore continues with random placement.
+    #[test]
+    fn restore_jobspec_omits_node_affinity_when_node_id_absent() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap-r3a/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-r3a-unpinned",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            None,
+        );
+        assert!(
+            v["Job"].get("Constraints").is_none(),
+            "Job.Constraints must be ABSENT on restore-path when \
+             local_nomad_node_id=None — symmetric with cold-boot \
+             fallback, got: {:?}",
+            v["Job"].get("Constraints")
+        );
+    }
+
+    /// r3-A cross-emitter parity contract: when both emitters are
+    /// invoked with the SAME `local_nomad_node_id`, they MUST produce
+    /// byte-identical `Job.Constraints` arrays. This is the
+    /// load-bearing invariant for the fix — a regression that ships
+    /// the constraint on one path but not the other would re-open
+    /// the cross-node race on whichever side it dropped (the
+    /// diagnostic report flagged the gap on both sides).
+    ///
+    /// Mirrors the spirit of `ch_plugin_config_field_list_parity`
+    /// (R22-T1) but for the Job-level Constraints field rather than
+    /// the Task.Config field set.
+    #[test]
+    fn node_affinity_constraints_parity_between_cold_boot_and_restore_emitters() {
+        let node_id = "shared-node-id-42";
+        // Cold-boot side
+        let cold_sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        let cold_v = crate::backend::nomad_ch::build_nomad_job_json_with(
+            "zsbx-r3a-parity-cold",
+            &cold_sandbox_cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/usr_alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "usr_alice",
+            "proj",
+            "abcdef0123456789abcdef0123456789",
+            None,
+
+            Some(node_id),
+        );
+        // Restore-path side
+        let restore_cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let restore_v = build_restore_nomad_job_json(
+            "zsbx-r3a-parity-restore",
+            &restore_cfg,
+            7,
+            Path::new("/var/zeroship/ch/snap-x/restore"),
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            Some(node_id),
+        );
+        assert_eq!(
+            cold_v["Job"]["Constraints"], restore_v["Job"]["Constraints"],
+            "r3-A cross-emitter parity violated: cold-boot and \
+             restore-path emit DIFFERENT Job.Constraints for the same \
+             node_id. The fix is load-bearing on BOTH paths — a one-sided \
+             emission would re-open the cross-node race on the dropped \
+             side.\ncold:    {:?}\nrestore: {:?}",
+            cold_v["Job"]["Constraints"],
+            restore_v["Job"]["Constraints"],
+        );
+        // Both must also OMIT identically with the same input.
+        let cold_none = crate::backend::nomad_ch::build_nomad_job_json_with(
+            "zsbx-r3a-parity-cold-none",
+            &cold_sandbox_cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/usr_alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "usr_alice",
+            "proj",
+            "abcdef0123456789abcdef0123456789",
+            None,
+
+            None,
+        );
+        let restore_none = build_restore_nomad_job_json(
+            "zsbx-r3a-parity-restore-none",
+            &restore_cfg,
+            7,
+            Path::new("/var/zeroship/ch/snap-x/restore"),
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+
+            None,
+        );
+        assert_eq!(
+            cold_none["Job"].get("Constraints"),
+            restore_none["Job"].get("Constraints"),
+            "r3-A cross-emitter parity violated on the None path: \
+             both emitters must omit Constraints identically."
+        );
+        // Sanity: both should be None / absent.
+        assert!(cold_none["Job"].get("Constraints").is_none());
+        assert!(restore_none["Job"].get("Constraints").is_none());
     }
 }
 

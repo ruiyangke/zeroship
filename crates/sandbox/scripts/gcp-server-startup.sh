@@ -31,7 +31,7 @@
 #   - sandbox-token:      bearer token for /sandboxes/* (≥32 bytes)
 #   - sandbox-admin-token:bearer token for /admin/sandboxes/*
 #   - artifact-bucket:    gs://... bucket name (no `gs://` prefix)
-#   - controller-object:  object name in artifact-bucket (e.g. zeroship-sandbox.snapshot-v6)
+#   - controller-object:  object name in artifact-bucket (e.g. zeroship-sandbox.snapshot-v30)
 #
 # Sentinel for the provisioner: the FINAL echo at the end of the
 # script. Anything earlier means startup is still running.
@@ -214,6 +214,61 @@ if [ "$PG_HOST_FLAG" = "1" ]; then
   if ! grep -q "host all all 10.0.0.0/8 md5" "$PG_HBA"; then
     echo "host all all 10.0.0.0/8 md5" >> "$PG_HBA"
   fi
+  # T-8b-stress-r7-A — bump max_connections + shared_buffers.
+  #
+  # Debian's postgresql-15 default `max_connections=100` is far below
+  # what a 3-worker (n2-standard-32) cluster needs under stress. The
+  # R26-C1 thread-local Rc<Pool> cache (committed ee702d5f) keeps
+  # warmed pools alive per-compio-worker-thread: with 32 ntex worker
+  # threads per controller process and two cached pools per thread
+  # (`sandbox_app` + `sandbox_audit`), the steady-state floor is
+  # 32 × 2 × min_idle(2) = 128 conns per worker process; under load
+  # the pool grows to `max_size=16` per thread per role (no
+  # housekeeper task is started by the sandbox crate — pool.rs
+  # warns this leaves connections to grow unbounded to max_size).
+  # 3 workers × ~120 conns (best-case warmed-thread subset) ≈ 360
+  # steady-state; bursty growth to 600+ under sustained 3+3×20
+  # stress.
+  #
+  # T-8b-stress-r7 (controller v36) saturated PG at 9 snapshots
+  # ("FATAL: sorry, too many clients already") because the
+  # default max_connections=100 cap couldn't absorb this — even an
+  # interactive psql from the server was rejected. Pre-R26-C1
+  # rounds (r1-r6) escaped saturation only because their pools
+  # were short-lived (dropped at scope end), not because the
+  # ceiling was sized; the underlying steady-state contention is
+  # an R26-C1 interaction with worker concurrency, not a v36
+  # code-path regression (the v35→v36 diff added zero new pg
+  # query call sites — see review T-8b-stress-r7 §"r7-C verdict").
+  #
+  # Sizing — n2-standard-4 PG host has 16 GB RAM:
+  #   max_connections = 500          (vs default 100) — absorbs
+  #                                    full theoretical pool
+  #                                    warmth (3 × 32 × 4 floor
+  #                                    + bursty growth) with
+  #                                    headroom for psql /
+  #                                    nomad-agent / housekeeping.
+  #   shared_buffers  = 1GB          (vs default 128MB) — bumps
+  #                                    page-cache headroom now
+  #                                    that the conn count is 5×;
+  #                                    PG docs rule-of-thumb is
+  #                                    ~25 % of system RAM (1 GB
+  #                                    of 16 GB = 6.25 %, leaving
+  #                                    plenty for OS page cache).
+  #   work_mem        = 8MB          (vs default 4MB) — modest
+  #                                    bump; per-conn allocation,
+  #                                    500 × 8 MB worst case sort
+  #                                    scratch = 4 GB, still well
+  #                                    under 16 GB.
+  #
+  # Pre-launch / no-back-compat: this is a freshly-provisioned PG
+  # data dir per cluster cycle (provision-gcp-cluster.sh creates
+  # the cluster from scratch), so config rewrites at every boot
+  # are idempotent. `sed -i` covers both commented-out (`#max_…`)
+  # and previously-applied lines via the `#\?` guard.
+  sed -i "s/^#\?max_connections.*/max_connections = 500/" "$PG_CONF"
+  sed -i "s/^#\?shared_buffers.*/shared_buffers = 1GB/" "$PG_CONF"
+  sed -i "s/^#\?work_mem.*/work_mem = 8MB/" "$PG_CONF"
   systemctl restart postgresql
 
   # Set postgres superuser password + create the zeroship DB.

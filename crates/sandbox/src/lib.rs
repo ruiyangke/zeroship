@@ -13,10 +13,16 @@ pub mod auth;
 pub mod backend;
 pub mod config;
 pub mod db;
+pub mod detach;
 pub(crate) mod error_envelope;
 pub mod files;
 pub mod handlers;
 pub mod metrics;
+// Composite-r1 #2: sole production consumer is
+// `admin_handlers::metrics_endpoint` (same crate); sole test consumer
+// is the module's own unit tests. No integration test reaches in via
+// `zeroship_sandbox::metrics_export::*`, so the surface stays internal.
+pub(crate) mod metrics_export;
 pub mod persist;
 pub mod preview;
 pub mod preview_share;
@@ -30,6 +36,7 @@ pub mod snapshot_handler;
 pub mod snapshot_store;
 pub mod snapshot_store_gcs;
 pub mod sweep;
+pub mod wake_machine;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -132,11 +139,32 @@ pub struct AppState {
     /// A5 (api-surface-2026-05-24-r1): restricted to `pub(crate)` so
     /// no out-of-crate caller can clobber the field with an empty
     /// `Zeroizing<String>` (which would defeat the constant-time
-    /// compare — see `admin_handlers::admin_check`). Tests and other
-    /// in-crate constructors set the field via the safe
+    /// compare — see `admin_handlers::admin_check_required`). Tests
+    /// and other in-crate constructors set the field via the safe
     /// [`AppState::with_admin_token`] builder, which rejects empty
     /// strings before they can reach the auth path.
     pub(crate) admin_token: Option<zeroize::Zeroizing<String>>,
+
+    /// T1 (sandbox_admin_ro role, 2026-05-25): the read-only admin
+    /// bearer. Mirrors [`admin_token`] in lifecycle (read ONCE at
+    /// boot from `SANDBOX_ADMIN_RO_TOKEN_PATH`, mode 0o400, owner
+    /// uid 0). `None` is the disabled-by-absence shape; the admin
+    /// API's role-gate then accepts only the full bearer (when
+    /// configured) or 503's the read endpoints (when both bearers
+    /// are absent).
+    ///
+    /// Threat model: bearer leak via an unprivileged dashboard or
+    /// on-call tooling. The RO bearer authorizes GETs only —
+    /// destructive endpoints (snapshot / wake / GDPR / cold-boot)
+    /// surface 403 `insufficient_role` against this token. A leak
+    /// limits the attacker to fleet enumeration, not write actions.
+    ///
+    /// Field is `pub(crate)` for the same reason as `admin_token`:
+    /// the empty-string footgun must not be plantable from outside
+    /// the crate. The builder [`AppState::with_admin_ro_token`]
+    /// rejects empty strings; the boot loader rejects equal-content
+    /// full+ro token files at boot.
+    pub(crate) admin_ro_token: Option<zeroize::Zeroizing<String>>,
 
     /// Phase-A snapshot/restore wiring: present (`Some`) only when
     /// `config.snapshot_enabled = true`. The trio of stores +
@@ -157,6 +185,119 @@ pub struct AppState {
     pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
     pub(crate) ch_remote: Option<Arc<dyn ChRemoteClient>>,
     pub(crate) restore_backend: Option<Arc<dyn RestoreBackend>>,
+
+    /// C-7-LT (PR1 scaffolding): wake-response contract mode. Read once
+    /// at boot from `SANDBOX_WAKE_RESPONSE_MODE`; defaults to
+    /// [`config::WakeResponseMode::Sync`] for back-compat with the
+    /// existing wake contract. PR2 reads this flag in the wake handler
+    /// to switch between the legacy 200 OK shape and the 202 Accepted +
+    /// polling shape; PR1 only carries the flag (no handler branching
+    /// yet — existing tests stay green).
+    ///
+    /// Field is `pub` (no security sensitivity — a per-request mode flag
+    /// can't grant or weaken any privilege; it only selects the
+    /// response shape).
+    pub wake_response_mode: crate::config::WakeResponseMode,
+
+    /// C-7-LT (PR2-FOLLOWUP, R16-S5): wake-job lifecycle configuration.
+    /// Resolved at boot from env (`SANDBOX_WAKE_JOBS_GC_RETENTION_SECS`).
+    /// Owns the GC retention window the wake_jobs GC sweep reads at
+    /// every iteration. Static at runtime (env reload not supported).
+    pub wake_lifecycle: crate::config::WakeLifecycleConfig,
+
+    /// r3-A (T-8b-stress-r3 fix): the local Nomad agent's node ID,
+    /// fetched once at boot via `GET /v1/agent/self`. When `Some`, the
+    /// jobspec builders emit a `Constraints` block pinning every
+    /// submitted alloc to THIS worker — closing the cross-node race
+    /// where the controller stages `workspace.img` on its local fs
+    /// but Nomad's scheduler picks a different worker (78%
+    /// stress-r3 failure rate at WORKER_COUNT=3).
+    ///
+    /// `None` is the disabled-by-detection-failure shape: a boot-time
+    /// /v1/agent/self HTTP failure, non-200, parse error, or missing
+    /// `stats.client.node_id` field. Boot does NOT block on this —
+    /// the controller boots without the constraint and falls back to
+    /// the pre-r3-A random-placement behaviour (a controller restart
+    /// shouldn't fail because Nomad agent restarted). The
+    /// `sandbox_nomad_node_id_lookup_failures_total` counter (see
+    /// [`crate::metrics::inc_nomad_node_id_lookup_failure`]) bumps so
+    /// operators can alert on the degraded shape.
+    ///
+    /// Field is `pub` (no security sensitivity — a node-id is the
+    /// local agent's self-reported identifier, not a credential).
+    pub local_nomad_node_id: Option<String>,
+
+    /// **r30-A1 (concurrency-r30 CRITICAL #A1)**: global semaphore
+    /// capping concurrent Nomad `/shutdown` ladders across every
+    /// teardown call path (`AppStateGcStopper`, snap-idle-evict,
+    /// snap-idle-gc, admin snapshot teardown, transient-state takeover,
+    /// registry GC, restore-failure rollback). Sized from
+    /// `SANDBOX_NOMAD_STOP_CONCURRENCY` (default 16) in
+    /// [`Self::from_config`]. The same `Arc` is installed on the inner
+    /// `NomadCHBackend` via
+    /// [`crate::backend::nomad_ch::NomadCHBackend::install_nomad_stop_permits`]
+    /// so `stop_inner` can acquire a permit before the `/shutdown`
+    /// ladder runs — structurally impossible to bypass, even from a
+    /// future teardown call site that forgets the convention.
+    ///
+    /// **Why on `AppState` and not just on the backend**: the cap is a
+    /// process-global resource budget, not a backend-implementation
+    /// detail. Plumbing it through `AppState` makes its lifecycle
+    /// observable (one place to read for `metrics_export`, one place
+    /// to size at boot, one place for future ops/test fixtures to
+    /// inject a smaller cap for chaos testing).
+    ///
+    /// Field is `pub(crate)` for the same reason as `database` /
+    /// `persist` — a `state.nomad_stop_permits = attacker_perms` swap
+    /// from out-of-crate code could plant a capacity-0 semaphore that
+    /// silently deadlocks every teardown path (denying the cluster's
+    /// ability to reap idle sandboxes). Out-of-crate callers are
+    /// expected to go through `from_config`.
+    pub(crate) nomad_stop_permits:
+        Arc<crate::backend::nomad_ch::NomadStopPermits>,
+
+    /// **R33-I1 (concurrency-r33 IMPORTANT)**: per-user fence around the
+    /// `home.img` mkfs.ext4 step inside the cold-boot create path. The
+    /// `home.img` file is **per-USER** (cf
+    /// `nomad_ch.rs::user_home_image_path`), not per-sandbox — two
+    /// concurrent cold-boot CREATEs by the same user would race the
+    /// exists-then-mkfs sequence inside `create_ext4_image_if_missing`.
+    /// R32-P1's `std::thread::scope` parallelisation widens the window
+    /// by running both mkfs in parallel inside each CREATE, so under
+    /// c≥2 same-user cold-boot stress N `mkfs.ext4 -q -F <same-path>`
+    /// subprocesses can be in flight at once. Worst observable failure
+    /// is silent corruption surfaced only at guest mount.
+    ///
+    /// Shape: a `HashMap<UserId, Arc<Mutex<()>>>` lazily populated as
+    /// users hit their first cold-boot. The outer `Mutex` guards only
+    /// the map's structure (insert / lookup); the inner `Mutex` is what
+    /// the `home_h` thread holds across the mkfs subprocess. The
+    /// workspace_h thread is NOT gated — `workspace.img` is per-sandbox
+    /// (UUID-scoped path), so there's no cross-CREATE collision and the
+    /// parallel-mkfs perf win from R32-P1 is preserved for the
+    /// workspace half.
+    ///
+    /// Why `std::sync::Mutex` (not `tokio::sync::Mutex`): the lock is
+    /// acquired inside the `compio::runtime::spawn_blocking` closure
+    /// (sync context), and the critical section is a CPU/syscall mix
+    /// (truncate + mkfs.ext4 + fsync_dir) that already blocks the
+    /// spawn_blocking thread — async-await semantics buy nothing.
+    ///
+    /// Why `pub(crate)` (matching `nomad_stop_permits`): a planted
+    /// always-locked map from out-of-crate code could deadlock every
+    /// same-user cold-boot. Out-of-crate callers construct via
+    /// `from_config` / `new_fixture`.
+    ///
+    /// `#[allow(dead_code)]`: production reads go through the
+    /// `Arc::clone` installed on the inner `NomadCHBackend` (via
+    /// `install_user_home_mkfs_locks`), not through this field
+    /// directly. The field is kept on `AppState` for lifecycle
+    /// observability (same posture as `nomad_stop_permits`) and so
+    /// future metrics-export / chaos-test fixtures can read through
+    /// `user_home_mkfs_locks()` without going via the backend.
+    #[allow(dead_code)]
+    pub(crate) user_home_mkfs_locks:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>>,
 }
 
 impl AppState {
@@ -194,6 +335,36 @@ impl AppState {
     /// iteration to decide whether to break out.
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// r30-A1: read-only accessor for the global Nomad /shutdown
+    /// semaphore. Returned `Arc` is cheap to clone; intended for tests
+    /// + future call sites that want to inspect `permits_available()`
+    /// or `capacity()` for monitoring / chaos-test injection. Production
+    /// `stop_inner` does NOT read through this — it goes through the
+    /// `OnceLock` installed on the `NomadCHBackend` directly so the
+    /// hot teardown path doesn't take an extra `Arc::clone` per stop.
+    pub fn nomad_stop_permits(
+        &self,
+    ) -> &Arc<crate::backend::nomad_ch::NomadStopPermits> {
+        &self.nomad_stop_permits
+    }
+
+    /// R33-I1: read-only accessor for the per-user `home.img` mkfs
+    /// fence map. `pub(crate)` (not `pub`) — this is an internal fence
+    /// for the cold-boot path inside `NomadCHBackend::try_create`, not
+    /// a public lifecycle hook. Returned `Arc` is cheap to clone; the
+    /// inner `HashMap` is guarded by an `std::sync::Mutex` whose only
+    /// invariant is "outer-lock-held for insert/lookup, inner-lock-held
+    /// across the per-user mkfs". See the field doc on
+    /// [`AppState::user_home_mkfs_locks`] for the race shape this
+    /// fence closes.
+    #[allow(dead_code)]
+    pub(crate) fn user_home_mkfs_locks(
+        &self,
+    ) -> &Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>>
+    {
+        &self.user_home_mkfs_locks
     }
 
     /// A5 (api-surface-2026-05-24-r1): safe builder for
@@ -234,12 +405,48 @@ impl AppState {
 
     /// Read-only accessor for the admin bearer. Returns the raw
     /// string slice; callers MUST use constant-time comparison
-    /// (`subtle::ConstantTimeEq` via `admin_handlers::admin_check`)
-    /// rather than `==` against user-presented bytes. Mainly here
-    /// so integration tests can assert wiring without poking the
-    /// `pub(crate)` field.
+    /// (`subtle::ConstantTimeEq` via
+    /// `admin_handlers::admin_check_required`) rather than `==`
+    /// against user-presented bytes. Mainly here so integration
+    /// tests can assert wiring without poking the `pub(crate)` field.
     pub fn admin_token(&self) -> Option<&str> {
         self.admin_token.as_deref().map(|z| z.as_str())
+    }
+
+    /// T1: safe builder for the read-only admin bearer. Mirrors
+    /// [`AppState::with_admin_token`] verbatim: the field is
+    /// `pub(crate)` and the only legal out-of-crate write path is
+    /// this builder, which rejects empty strings before the auth
+    /// path can see them.
+    ///
+    /// Semantics:
+    ///   - `token = None` → clears the field (RO bearer disabled).
+    ///   - `token = Some("")` → `Err("admin_ro_token must not be empty")`.
+    ///   - `token = Some(non-empty)` → wraps in `Zeroizing<String>`.
+    pub fn with_admin_ro_token(
+        mut self,
+        token: Option<String>,
+    ) -> Result<Self, String> {
+        match token {
+            None => {
+                self.admin_ro_token = None;
+                Ok(self)
+            }
+            Some(t) if t.is_empty() => {
+                Err("admin_ro_token must not be empty".to_string())
+            }
+            Some(t) => {
+                self.admin_ro_token = Some(zeroize::Zeroizing::new(t));
+                Ok(self)
+            }
+        }
+    }
+
+    /// T1: read-only accessor for the read-only admin bearer. Mirrors
+    /// [`AppState::admin_token`]; used by integration tests to assert
+    /// wiring without poking the `pub(crate)` field.
+    pub fn admin_ro_token(&self) -> Option<&str> {
+        self.admin_ro_token.as_deref().map(|z| z.as_str())
     }
 
     /// A6 (api-surface-2026-05-24-r1): safe builder for `persist`.
@@ -390,6 +597,17 @@ impl AppState {
     ///
     /// Production code uses [`AppState::from_config`], not this.
     pub fn new_fixture(config: SandboxConfig, backend: Backend) -> Self {
+        // r30-A1: build a permits pool sized from config (default 16
+        // unless the fixture caller pre-mutated `nomad_stop_concurrency`).
+        // The fixture does NOT install the permits on the inner
+        // NomadCHBackend — unit tests that need the install go through
+        // `backend.nomad_ch_handle().install_nomad_stop_permits(...)`
+        // explicitly. Holding the Arc on AppState is enough to satisfy
+        // the field's `pub(crate)` invariant and gives test fixtures a
+        // live handle if they want one.
+        let nomad_stop_permits = crate::backend::nomad_ch::NomadStopPermits::new(
+            config.nomad_ch.nomad_stop_concurrency.max(1),
+        );
         Self {
             config,
             sandboxes: SandboxRegistry::new(),
@@ -399,9 +617,29 @@ impl AppState {
             persist: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             admin_token: None,
+            admin_ro_token: None,
             snapshot_store: None,
             ch_remote: None,
             restore_backend: None,
+            // C-7-LT (PR1): default to Sync in fixtures — tests that
+            // exercise the (PR2) async path will set this via field
+            // assignment on `let mut state = new_fixture(...)`.
+            wake_response_mode: crate::config::WakeResponseMode::Sync,
+            wake_lifecycle: crate::config::WakeLifecycleConfig::default(),
+            // r3-A: fixtures get `None` — no boot-time /v1/agent/self
+            // lookup happens for in-process tests, so the produced
+            // jobspecs omit the Constraints block (matches pre-r3-A
+            // behaviour). Tests that need to exercise the pinned-shape
+            // can set the field via plain assignment on the returned
+            // `Self`.
+            local_nomad_node_id: None,
+            nomad_stop_permits,
+            // R33-I1: empty map; lazily populated on first cold-boot per
+            // user. Fixtures get their own map so unit tests that
+            // exercise the parallel-mkfs path have an isolated fence.
+            user_home_mkfs_locks: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 }
@@ -449,6 +687,29 @@ impl AppState {
             config.snapshot_enabled,
             persist.is_some(),
             persist_test_override,
+        )?;
+
+        // A1-FOLLOWUP (arch-r9 fail-CLOSED gap). Refuse to boot in the
+        // production-shaped configuration where snapshot/restore writes
+        // to a non-local L2 (GCS) AND no AEAD root KEK is configured:
+        // bare guest RAM would land in the remote object store in clear.
+        // Local-only L1 stores still warn-and-continue (dev/test
+        // ergonomics) — the warn arm lives in the snapshot-store
+        // composition site below.
+        //
+        // Escape hatch (matching R6-A1's naming convention so operator
+        // misuse is obvious from any unit-file env block):
+        // ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1.
+        let remote_unencrypted_test_override = matches!(
+            std::env::var("ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE")
+                .as_deref(),
+            Ok("1")
+        );
+        assert_kek_required_for_remote_store(
+            config.snapshot_enabled,
+            config.snapshot_use_gcs,
+            config.snapshot_root_kek_path.is_some(),
+            remote_unencrypted_test_override,
         )?;
 
         // Phase-0 pg-backed state: build BEFORE the backend probe so
@@ -502,7 +763,119 @@ impl AppState {
             }
         }
 
-        let backend = Backend::from_config_with_persist(&config, persist.clone())?;
+        // r3-A (T-8b-stress-r3 fix): fetch THIS controller's local Nomad
+        // node_id once at boot. The jobspec builders (cold-boot +
+        // restore) emit a Nomad `Constraints` block pinning every alloc
+        // to this node when the value is `Some`, closing the cross-node
+        // placement race where `workspace.img` is staged on THIS
+        // worker's local fs but Nomad's scheduler picks a different
+        // worker → the driver's `assert_disk_image_present` ENOENTs.
+        // T-8b-stress-r3 surfaced 78% cross-node failure at
+        // WORKER_COUNT=3 from exactly this gap.
+        //
+        // Failure is NON-fatal: a transient /v1/agent/self HTTP failure
+        // or unparseable response leaves the field as `None`, the
+        // jobspec builders omit the Constraints block, and the
+        // controller falls back to pre-r3-A random-placement behaviour.
+        // Bumping `inc_nomad_node_id_lookup_failure` so operators can
+        // alert on the degraded shape; a controller restart against a
+        // transiently-unavailable Nomad agent shouldn't fail boot.
+        //
+        // Sourced from `config.nomad_ch.nomad_addr` even when the
+        // active backend isn't nomad-ch — docker/k8s deploys won't
+        // submit Nomad jobs so the field is harmlessly ignored, and we
+        // don't want to branch on backend before backend construction
+        // (chicken-and-egg with the probe).
+        let local_nomad_node_id: Option<String> =
+            match crate::backend::nomad_ch::fetch_local_nomad_node_id(
+                &config.nomad_ch.nomad_addr,
+            )
+            .await
+            {
+                Ok(id) => {
+                    tracing::info!(
+                        nomad_addr = %config.nomad_ch.nomad_addr,
+                        node_id = %id,
+                        "sandbox/nomad-ch: cached local node_id for r3-A \
+                         placement constraint"
+                    );
+                    Some(id)
+                }
+                Err(e) => {
+                    crate::metrics::inc_nomad_node_id_lookup_failure();
+                    tracing::warn!(
+                        nomad_addr = %config.nomad_ch.nomad_addr,
+                        error = %e,
+                        "sandbox/nomad-ch: boot-time /v1/agent/self lookup \
+                         failed (non-fatal — jobspecs will omit the r3-A \
+                         Constraints block; cross-node placement race \
+                         possible at WORKER_COUNT>1 until next controller \
+                         restart against a reachable Nomad agent)"
+                    );
+                    None
+                }
+            };
+
+        let backend = {
+            let mut b = Backend::builder(&config);
+            if let Some(p) = persist.clone() {
+                b = b.with_persist(p);
+            }
+            if let Some(id) = local_nomad_node_id.clone() {
+                b = b.with_local_nomad_node_id(id);
+            }
+            b.build()?
+        };
+        // r30-A1 (concurrency-r30 CRITICAL #A1): size + install the
+        // global Nomad /shutdown semaphore. The cap is read once at
+        // boot from `SANDBOX_NOMAD_STOP_CONCURRENCY` (default 16,
+        // validated > 0 by `NomadCHConfig::validate`); the SAME
+        // `Arc<NomadStopPermits>` is held on `AppState` AND installed
+        // on the inner `NomadCHBackend` so that every `stop_inner`
+        // invocation — regardless of which of the 7 teardown call
+        // paths triggered it — competes for the same permit pool.
+        //
+        // Set BEFORE the backend's first `stop_inner` could fire (the
+        // probe + cleanup_orphans_at_startup calls below DO touch
+        // backend state but none invoke stop_inner: probe is a
+        // health-check only; cleanup_orphans tears down Nomad jobs via
+        // a different code path that doesn't go through stop_inner).
+        // No race: the install happens before any HTTP handler is
+        // registered.
+        let nomad_stop_permits = crate::backend::nomad_ch::NomadStopPermits::new(
+            config.nomad_ch.nomad_stop_concurrency,
+        );
+        crate::metrics::set_nomad_stop_permits_total(
+            config.nomad_ch.nomad_stop_concurrency as u64,
+        );
+        if let Some(nch) = backend.nomad_ch_handle() {
+            nch.install_nomad_stop_permits(Arc::clone(&nomad_stop_permits));
+            tracing::info!(
+                cap = config.nomad_ch.nomad_stop_concurrency,
+                "sandbox/nomad-ch r30-A1: installed global Nomad /shutdown \
+                 semaphore (SANDBOX_NOMAD_STOP_CONCURRENCY)"
+            );
+        }
+        // R33-I1 (concurrency-r33 IMPORTANT): build + install the
+        // per-user `home.img` mkfs fence map. Held on `AppState` so the
+        // lifecycle is observable in one place (matches the
+        // `nomad_stop_permits` precedent); installed on the inner
+        // `NomadCHBackend` via `OnceLock` so the cold-boot path can
+        // acquire the inner per-user Mutex from `&self` without taking
+        // the whole-backend write-lock. Install happens BEFORE any
+        // create() can fire (probe + cleanup_orphans_at_startup don't
+        // invoke try_create).
+        let user_home_mkfs_locks: Arc<
+            std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::Mutex<()>>>>,
+        > = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        if let Some(nch) = backend.nomad_ch_handle() {
+            nch.install_user_home_mkfs_locks(Arc::clone(&user_home_mkfs_locks));
+            tracing::info!(
+                "sandbox/nomad-ch R33-I1: installed per-user home.img \
+                 mkfs fence (DashMap-equivalent: Mutex<HashMap<UserId, \
+                 Arc<Mutex<()>>>>)"
+            );
+        }
         backend.probe().await?;
         // Clean up orphan Pods + ConfigMaps from a previous run.
         // Errors here are non-fatal — operators may want to keep
@@ -580,6 +953,52 @@ impl AppState {
         let admin_token = load_admin_token(admin_token_path.as_deref())?
             .map(zeroize::Zeroizing::new);
 
+        // T1: same shape for the read-only admin bearer. Re-uses
+        // `load_admin_token` so the mode 0o400 + uid 0 + non-empty
+        // invariants apply identically.
+        let admin_ro_token_path = std::env::var("SANDBOX_ADMIN_RO_TOKEN_PATH")
+            .ok()
+            .and_then(|v| {
+                let t = v.trim();
+                if t.is_empty() { None } else { Some(std::path::PathBuf::from(t)) }
+            });
+        let admin_ro_token = load_admin_token(admin_ro_token_path.as_deref())?
+            .map(zeroize::Zeroizing::new);
+
+        // T1 boot guard: refuse to boot when both bearers resolve to
+        // the SAME secret. The whole point of the RO bearer is least-
+        // privilege; if the operator pointed both env vars at the
+        // same file (or two files with identical contents), the RO
+        // distinction is illusory and any leak of the RO bearer
+        // grants Full admin too. Fail loud at boot rather than
+        // silently equalise the two roles.
+        assert_distinct_admin_tokens(
+            admin_token.as_deref().map(|z| z.as_str()),
+            admin_ro_token.as_deref().map(|z| z.as_str()),
+        )?;
+
+        // C-7-LT (PR1): resolve wake-response mode from env at boot.
+        // Resolved BEFORE the snapshot-wiring block so the value can
+        // be threaded into `RealRestoreBackend::with_wake_response_mode`
+        // — the C-7-LT-1 (smoke-r12) fix needs the mode at wake-retry-
+        // policy construction time, not just on `AppState`.
+        //
+        // R16-S4 fail-CLOSED: any unrecognised env value aborts boot
+        // instead of silently defaulting to sync. Misconfigured
+        // feature flags are config bugs, not silent-fallback hazards.
+        let wake_response_mode = crate::config::WakeResponseMode::from_env()
+            .map_err(|e| format!("WakeResponseMode::from_env: {e}"))?;
+        // R16-S5: wake lifecycle config (GC retention). Resolved at
+        // boot; propagates to `sweep::run_wake_jobs_gc_once` via
+        // `AppState::wake_lifecycle`.
+        let wake_lifecycle = crate::config::WakeLifecycleConfig::from_env()
+            .map_err(|e| format!("WakeLifecycleConfig::from_env: {e}"))?;
+        tracing::info!(
+            mode = wake_response_mode.as_str(),
+            wake_jobs_gc_retention_secs = wake_lifecycle.wake_jobs_gc_retention_secs,
+            "sandbox wake-response: contract mode + lifecycle resolved"
+        );
+
         // Phase-A snapshot/restore wiring. When `snapshot_enabled =
         // true`, construct the production trio:
         //   - LocalDiskSnapshotStore at config.snapshot_l1_root
@@ -646,15 +1065,22 @@ impl AppState {
                         "snapshot_store: AEAD ENABLED (tiered L1+GCS)"
                     );
                 } else {
+                    // A1-FOLLOWUP: this branch is gated by
+                    // `assert_kek_required_for_remote_store` at the top
+                    // of `from_config`, which returns Err before we ever
+                    // reach the snapshot-store composition. The only way
+                    // to land here is via the named test override
+                    // `ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1`
+                    // — log loudly so a misconfigured test env can't
+                    // pretend to be prod.
                     tracing::error!(
                         l1_root = %l1_root.display(),
                         gcs_bucket = %bucket,
                         kek_env = ROOT_KEK_ENV,
-                        "snapshot_store: AEAD DISABLED — guest RAM \
-                         plaintext on disk + GCS (kek env unset). \
-                         Tiered L1+GCS without AEAD writes guest \
-                         memory in clear to the object store. Set the \
-                         kek env to a 32-byte mode-0o400 file."
+                        "snapshot_store: AEAD DISABLED via test override — \
+                         guest RAM plaintext on disk + GCS \
+                         (ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1). \
+                         NOT for production."
                     );
                 }
                 Arc::new(AeadSnapshotStore::new(tiered, aead_root_kek))
@@ -691,7 +1117,19 @@ impl AppState {
                 config.nomad_ch.clone(),
                 config.memory_mb,
                 config.cpus,
-            );
+            )
+            // C-7-LT-1 (smoke-r12): thread the wake response mode in
+            // so `VmIndexRetryPolicy::from_host_fence_timeout` drops
+            // the deadline cap under async (where the wake loop runs
+            // on `detach_isolated` with no client-side cancellation).
+            // Pre-fix the policy capped at 50 s under async too,
+            // racing the 60.166 s source-teardown wall-time.
+            .with_wake_response_mode(wake_response_mode)
+            // r3-A (T-8b-stress-r3): pin restore alloc placement to
+            // THIS worker so the staged snapshot bytes match the
+            // node the driver runs on. Same shape as the cold-boot
+            // path's `NomadCHBackend::with_local_nomad_node_id`.
+            .with_local_nomad_node_id(local_nomad_node_id.clone());
             let rb_inner = match shared_allocator {
                 Some(a) => {
                     tracing::info!(
@@ -753,9 +1191,18 @@ impl AppState {
             persist,
             shutdown: Arc::new(AtomicBool::new(false)),
             admin_token,
+            admin_ro_token,
             snapshot_store,
             ch_remote,
             restore_backend,
+            wake_response_mode,
+            wake_lifecycle,
+            local_nomad_node_id,
+            nomad_stop_permits,
+            // R33-I1: same `Arc` installed on the inner NomadCHBackend
+            // above; AppState's handle is what production tests / future
+            // metrics-export reads through.
+            user_home_mkfs_locks,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
@@ -819,6 +1266,45 @@ impl AppState {
         // `snapshot_enabled = false` or the threshold env is 0.
         if state.database.is_some() {
             sweep::spawn_transient_state_takeover(state.clone());
+        }
+        // C-7-LT-PR2: periodically GC terminal wake_jobs rows older
+        // than T_KEEP (5 min). Without this loop a row stays in pg
+        // forever after wake completes; polls keep returning the
+        // terminal state and the table grows unbounded. The proposal
+        // (§ 5) chose to wire GC at 60 s cadence — cheap (one
+        // indexed DELETE) and responsive enough that clients hitting
+        // the T_KEEP boundary observe the 404 cleanly.
+        if state.database.is_some() {
+            sweep::spawn_wake_jobs_gc(state.clone());
+        }
+        // R19-C1: periodic takeover sweep that flips non-terminal
+        // wake_jobs rows whose `lessee_updated_at` has gone stale
+        // (controller crashed mid-wake) to `failed`/
+        // `wake_worker_aborted`. Without it, GATE-C2's UNIQUE INDEX
+        // (migration 0011) wedges the sandbox permanently after any
+        // mid-wake controller crash — every subsequent wake POST
+        // returns a 202 pointing at the dead wake_id and the client
+        // polls forever. Spawn is gated on `database.is_some()` for
+        // the same reason as `spawn_wake_jobs_gc`: no pg → no rows
+        // to sweep. Sibling concern of `spawn_transient_state_takeover`
+        // but on the `wake_jobs` table instead of `sandboxes`.
+        if state.database.is_some() {
+            sweep::spawn_wake_jobs_takeover(state.clone());
+        }
+        // T-8b-stress-r2 controller v34: host_dir GC sweep. Reaps
+        // `<host_state_dir>/<sandbox-id>/` directories whose sandbox is
+        // in a terminal state (or absent from the DB) with no pending
+        // wake_jobs row, after a 1-hour grace. THIS is the load-bearing
+        // fix for Bug 1 (`workspace.img does not exist`) — the per-alloc
+        // `rm -rf` paths in CreateGuard::drop / stop_inner now leak the
+        // dir on purpose; this sweeper is the catchall. See
+        // `crates/sandbox/src/backend/nomad_ch.rs` doc comment ("Cleanup
+        // contract") and `docs/reviews/sandbox-snapshot-restore-cluster-
+        // 2026-05-25-T8b-stress-r2.md` for the full diagnosis. Gated on
+        // `database.is_some()` for the same reason as the other pg-only
+        // sweeps; single-tenant deploys keep the operator-wipe story.
+        if state.database.is_some() {
+            sweep::spawn_host_dir_gc(state.clone());
         }
         // T6: auto-spawn idle eviction sweep. Production now has all
         // deps wired (snapshot_store + ch_remote + restore_backend
@@ -898,6 +1384,71 @@ pub(crate) fn assert_persist_required_when_snapshot_enabled(
     Ok(())
 }
 
+/// A1-FOLLOWUP (arch-r9 fail-CLOSED gap). Refuse to boot in the silent
+/// fail-OPEN configuration where snapshot/restore writes to a non-local
+/// L2 (GCS) AND no AEAD root KEK is configured: bare guest RAM would
+/// land in the remote object store in clear, while the audit trail in
+/// pg (`snapshot_aead_dek_id="v1"`, stamped unconditionally by
+/// `snapshot_handler.rs`) would still claim the snapshot is encrypted.
+///
+/// **Why this matters.** A1 (commit `18e2034b`) wrapped the inner
+/// snapshot store in `AeadSnapshotStore` when `RootKek::from_env`
+/// returned `Ok(Some(_))`. But when the operator FORGOT to set
+/// `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` in a production-shaped
+/// `tiered+GCS` deploy, boot logged a warning and continued — the
+/// AEAD wrapper composed in passthrough mode, plaintext guest RAM
+/// landed in GCS. The boot warning is invisible compared to the pg
+/// audit row's "encrypted=v1" claim; an operator reading the row
+/// would believe the snapshot is encrypted at rest when it is not.
+///
+/// **What this checks.** When `snapshot_enabled=true && use_gcs=true`:
+///   - `kek_present=true` → `Ok(())` (the production-correct shape).
+///   - `kek_present=false` + `test_override=true` → `Ok(())` (the
+///     `ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1` escape hatch
+///     for non-prod envs that explicitly opt in to plaintext-to-GCS).
+///   - `kek_present=false` + `test_override=false` → `Err(...)`
+///     (fail-CLOSED).
+///
+/// When `snapshot_enabled=false` OR `use_gcs=false` (local-only L1
+/// store), the KEK is optional; the local-only warn-and-continue path
+/// lives in the snapshot-store composition site (dev/test ergonomics —
+/// a single-node dev box doesn't need at-rest encryption to a
+/// non-existent L2).
+///
+/// **Why the override env var has a `ZEROSHIP_SANDBOX_TEST_` prefix**
+/// (matches R6-A1's reasoning for the persist assertion's override).
+/// The env var is read on the production boot path; an operator who
+/// set a confusingly-named `SANDBOX_*` variant would re-enable the
+/// exact audit-trail-vs-reality gap A1-FOLLOWUP closes. The explicit
+/// `TEST_ALLOW_UNENCRYPTED_REMOTE` suffix screams operator-misuse the
+/// moment it appears in a unit file's environment block.
+pub(crate) fn assert_kek_required_for_remote_store(
+    snapshot_enabled: bool,
+    snapshot_use_gcs: bool,
+    kek_present: bool,
+    test_override: bool,
+) -> Result<(), String> {
+    if snapshot_enabled
+        && snapshot_use_gcs
+        && !kek_present
+        && !test_override
+    {
+        return Err(
+            "FATAL: SANDBOX_SNAPSHOT_ENABLED=true + SANDBOX_SNAPSHOT_USE_GCS=true \
+             but SANDBOX_SNAPSHOT_ROOT_KEK_PATH is unset. Tiered L1+GCS without \
+             AEAD writes guest RAM in clear to the remote object store, while \
+             the pg audit row stamps snapshot_aead_dek_id=\"v1\" \
+             (audit-trail-vs-reality gap, arch-r9 fail-CLOSED). \
+             Fix: set SANDBOX_SNAPSHOT_ROOT_KEK_PATH to a 32-byte mode-0o400 \
+             file owned by uid 0. \
+             Test-only override (NOT for production): \
+             ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Round-3 / Phase-3 CRITICAL #3: read the admin bearer ONCE at
 /// boot. Mirrors `Persistence::AeadKey::from_path`.
 ///
@@ -909,12 +1460,24 @@ pub(crate) fn assert_persist_required_when_snapshot_enabled(
 ///
 /// Three outcomes:
 ///   - `path = None` → `Ok(None)` (admin API disabled by config)
-///   - file readable + mode 0o400 + non-empty → `Ok(Some(token))`
+///   - file readable + mode 0o400 + owner uid 0 + non-empty → `Ok(Some(token))`
 ///   - ANYTHING else → `Err(...)` (refuse to boot loudly)
 ///
 /// Distinguishes "admin API disabled" (legitimate config) from
-/// "admin token misconfigured" (operator error). Misconfiguration
-/// should fail loudly instead of turning into a silent fail-open.
+/// "admin token misconfigured" (operator error) — Round-2 leaked
+/// the latter as a silent fail-open via `.ok()?` on metadata().
+///
+/// The file's owner uid is also checked: only uid 0 (root) is
+/// accepted (R9-S4d) — mode 0o400 alone is insufficient because a
+/// non-root attacker who pre-creates a chmod-400 file at
+/// `SANDBOX_ADMIN_TOKEN_PATH` before systemd starts could inject
+/// an attacker-known admin bearer; the controller would then
+/// register that token as the admin credential on boot, granting
+/// the attacker full admin-API access (sandbox create/delete/exec/
+/// file-tree everywhere) on first request. Strict "uid == 0"
+/// matches the R9-S4 (snapshot KEK), R9-S4b (sealed-records AEAD
+/// key) and R9-S4c (pg-password file) sibling invariants and the
+/// systemd-style secret-loading convention at `/etc/zeroship/`.
 pub(crate) fn load_admin_token(
     path: Option<&std::path::Path>,
 ) -> Result<Option<String>, String> {
@@ -924,6 +1487,7 @@ pub(crate) fn load_admin_token(
 
     #[cfg(unix)]
     {
+        use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
         let meta = std::fs::metadata(path).map_err(|e| {
             format!("SANDBOX_ADMIN_TOKEN_PATH={path:?}: stat: {e}")
@@ -932,6 +1496,13 @@ pub(crate) fn load_admin_token(
         if mode != 0o400 {
             return Err(format!(
                 "SANDBOX_ADMIN_TOKEN_PATH={path:?}: mode={mode:o} must be 0o400"
+            ));
+        }
+        let uid = meta.uid();
+        if uid != 0 {
+            return Err(format!(
+                "SANDBOX_ADMIN_TOKEN_PATH={path:?}: owner uid {uid} != 0 \
+                 (chown root:root the file)"
             ));
         }
     }
@@ -950,17 +1521,79 @@ pub(crate) fn load_admin_token(
     Ok(Some(trimmed))
 }
 
+/// T1: boot-time guard against the operator footgun where both
+/// `SANDBOX_ADMIN_TOKEN_PATH` and `SANDBOX_ADMIN_RO_TOKEN_PATH` point
+/// at files containing the same secret (whether by symlink, identical
+/// generated content, or paste error). If both bearers resolve to
+/// the same string, the role-gate's "full ⊋ read-only" distinction
+/// collapses: the RO bearer matches the Full ct_eq compare, so an
+/// attacker who leaks the RO bearer trivially escalates to Full
+/// admin via any destructive endpoint.
+///
+/// The check runs in `AppState::from_config` AFTER both env-resolved
+/// `load_admin_token` calls have succeeded. We compare in
+/// constant-time so the boot log doesn't leak which prefix of the
+/// secrets matched — irrelevant in practice (boot happens once and
+/// the error is fatal), but it keeps the invariant local to the
+/// auth path's overall posture.
+///
+/// Three outcomes:
+///   - both `None` → `Ok(())` (no tokens configured; admin API is
+///     disabled by either env var being absent).
+///   - one `Some`, other `None` → `Ok(())` (the asymmetric, legal
+///     "Full only" or "RO only" deployment shapes).
+///   - both `Some` with EQUAL contents → `Err(...)` (the footgun).
+///   - both `Some` with DISTINCT contents → `Ok(())`.
+pub(crate) fn assert_distinct_admin_tokens(
+    full: Option<&str>,
+    ro: Option<&str>,
+) -> Result<(), String> {
+    let (Some(f), Some(r)) = (full, ro) else {
+        return Ok(());
+    };
+    // Constant-time compare of two configured boot-time secrets. The
+    // boot path runs once; this is purely defense-in-depth so the
+    // error log doesn't telegraph a partial match.
+    use subtle::ConstantTimeEq;
+    if f.as_bytes().ct_eq(r.as_bytes()).into() {
+        return Err(
+            "FATAL: SANDBOX_ADMIN_TOKEN_PATH and SANDBOX_ADMIN_RO_TOKEN_PATH \
+             contain identical secrets. The read-only role exists to \
+             limit blast radius on bearer leak; pointing both env vars \
+             at the same secret collapses the Full ⊋ ReadOnly \
+             distinction. Fix: generate two distinct random tokens, one \
+             per file (chmod 0o400, chown root:root each). To run with \
+             only the full bearer, unset SANDBOX_ADMIN_RO_TOKEN_PATH. \
+             To run with only the RO bearer, unset \
+             SANDBOX_ADMIN_TOKEN_PATH."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Periodic backend probe. `probe()` updates the `healthy` flag
 /// that `/readyz` exposes; without this loop the flag is set once
 /// at boot and stays stale forever (e.g. true after kubectl auth
-/// has expired). Re-probes every 30s on a detached compio task.
+/// has expired). Re-probes every 30s on a dedicated OS thread with
+/// its own compio runtime (R16-I1: same C-6 wedge fingerprint as
+/// admin_handlers::teardown_source_for_snapshot — `backend.probe()`
+/// can issue a multi-second blocking HTTP call against an unhealthy
+/// agent; on the shared ntex worker runtime it would starve sibling
+/// per-request tasks).
 ///
 /// We don't wrap async calls in `catch_unwind` — `probe` is
 /// designed to return `Result`, not panic. If it does panic the
 /// task dies and re-probes stop; that's a real bug worth crashing
 /// loudly rather than papering over.
 fn start_health_loop(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    // Thread name MUST be ≤ 15 bytes — Linux `pr_set_name` truncates
+    // anything longer, so the OS-level name visible in `ps`/`top -H`
+    // gets clipped. Earlier draft `snap-health-loop` (16 B) silently
+    // became `snap-health-loo` (R17-I1). The
+    // `detach::tests::all_known_thread_names_fit_kernel_limit`
+    // regression test pins this contract.
+    crate::detach::detach_isolated("snap-health", move || async move {
         loop {
             // Top-of-loop shutdown
             // check. The previous iteration's sleep will have
@@ -978,8 +1611,7 @@ fn start_health_loop(state: Arc<AppState>) {
                 tracing::warn!(error = %e, "sandbox health re-probe failed");
             }
         }
-    })
-    .detach();
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1043,7 +1675,12 @@ fn read_u64_env(name: &str, default: u64) -> u64 {
 /// hangs longer than `lease_ttl`, peers will fairly mark this host
 /// dead — which is the lease semantics by design.
 pub fn spawn_heartbeat_task(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    // R16-I1: dedicated OS thread + private compio runtime. The pg
+    // `heartbeat()` call is a single SQL UPDATE; the wedge risk here
+    // is lower than for the takeover task (which runs probes), but
+    // uniformity + decoupling from the ntex worker runtime means a
+    // pg-side stall cannot back-pressure HTTP wake handlers.
+    crate::detach::detach_isolated("snap-heartbeat", move || async move {
         let secs = read_u64_env("SANDBOX_HA_HEARTBEAT_SECS", DEFAULT_HEARTBEAT_SECS).max(1);
         let interval = Duration::from_secs(secs);
         let Some(db) = state.database.clone() else {
@@ -1078,8 +1715,7 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
                 }
             }
         }
-    })
-    .detach();
+    });
 }
 
 /// For each newly-owned sandbox the takeover SQL produced, run the
@@ -1242,7 +1878,14 @@ async fn rehydrate_after_takeover(
 /// a single SQL statement plus a host-status flip in the same
 /// transaction.
 pub fn spawn_takeover_task(state: Arc<AppState>) {
-    compio::runtime::spawn(async move {
+    // R16-I1: dedicated OS thread + private compio runtime. This loop
+    // is the most wedge-prone of the periodic tasks — `rehydrate_after_takeover`
+    // issues per-sandbox signed `/version` probes via the backend, each of
+    // which can sit on a multi-second `ureq` timeout against a half-dead
+    // worker. On the shared ntex worker runtime that would starve every
+    // sibling wake/heartbeat task for the duration of the probe (the
+    // same C-6 fingerprint as admin_handlers::teardown_source_for_snapshot).
+    crate::detach::detach_isolated("snap-takeover", move || async move {
         let poll_secs = read_u64_env(
             "SANDBOX_HA_TAKEOVER_POLL_SECS",
             DEFAULT_TAKEOVER_POLL_SECS,
@@ -1379,8 +2022,7 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
                 }
             }
         }
-    })
-    .detach();
+    });
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1448,14 +2090,45 @@ mod boot_loader_tests {
         assert!(matches!(got, Ok(None)), "None path must yield Ok(None); got {got:?}");
     }
 
+    /// Helper for R9-S4d tests whose 0o400 positive arm depends
+    /// on whether the test-runner is root: non-root runners can't
+    /// materialise a uid-0 file, so the loader correctly rejects
+    /// with the owner-uid error; root runners exercise the happy
+    /// path. Returns the runner's effective uid (always 0 on
+    /// non-unix targets, where the uid check is compiled out).
+    #[cfg(unix)]
+    fn current_file_uid(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(path).unwrap().uid()
+    }
+    #[cfg(not(unix))]
+    fn current_file_uid(_path: &std::path::Path) -> u32 {
+        0
+    }
+
     #[test]
     fn loader_reads_token_when_mode_0o400() {
         let path = temp_path();
         let token = "boot-loader-token-0o400-aaaa";
         write_with_mode(&path, token, 0o400);
+        // R9-S4d: the "0o400 must pass" arm only holds when the
+        // file is root-owned. In CI/dev the test-runner uid is
+        // non-zero, so the loader now correctly refuses the file.
+        // Pin the positive case behind a uid guard; the
+        // non-root-owned-rejection assertion is covered by
+        // `load_admin_token_rejects_non_root_owned_file` below.
+        let runner_uid = current_file_uid(&path);
         let got = load_admin_token(Some(&path));
         cleanup(&path);
-        assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        if runner_uid == 0 {
+            assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        } else {
+            let err = got.expect_err("0o400 non-root-owned must be rejected (R9-S4d)");
+            assert!(
+                err.contains("owner uid") && err.contains("!= 0"),
+                "error must mention owner uid != 0; got: {err}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1473,10 +2146,24 @@ mod boot_loader_tests {
     fn loader_refuses_empty_file() {
         let path = temp_path();
         write_with_mode(&path, "", 0o400);
+        // R9-S4d: the empty-file check fires AFTER the mode + uid
+        // checks pass. In a non-root test runner the uid check
+        // trips first; assert whichever error surfaces. Both
+        // branches are correct refusals — this test pins "loader
+        // rejects an empty 0o400 file" rather than the specific
+        // message.
+        let runner_uid = current_file_uid(&path);
         let got = load_admin_token(Some(&path));
         cleanup(&path);
-        let err = got.expect_err("empty file must yield Err");
-        assert!(err.contains("empty"), "error must mention 'empty'; got {err}");
+        let err = got.expect_err("empty / non-root file must yield Err");
+        if runner_uid == 0 {
+            assert!(err.contains("empty"), "error must mention 'empty'; got {err}");
+        } else {
+            assert!(
+                err.contains("owner uid") && err.contains("!= 0"),
+                "error must mention owner uid != 0; got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1484,9 +2171,169 @@ mod boot_loader_tests {
         let path = temp_path();
         let token = "trim-newline-token-bbbb";
         write_with_mode(&path, &format!("{token}\n"), 0o400);
+        // R9-S4d: same uid-guard logic as
+        // `loader_reads_token_when_mode_0o400`.
+        let runner_uid = current_file_uid(&path);
         let got = load_admin_token(Some(&path));
         cleanup(&path);
-        assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        if runner_uid == 0 {
+            assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        } else {
+            let err = got.expect_err("0o400 non-root-owned must be rejected (R9-S4d)");
+            assert!(
+                err.contains("owner uid") && err.contains("!= 0"),
+                "error must mention owner uid != 0; got: {err}"
+            );
+        }
+    }
+
+    /// R9-S4d: a 0o400 admin-token file owned by a non-root uid
+    /// (i.e. the test-runner user, which is uid != 0 in CI/dev)
+    /// MUST be refused. Without the owner check, a non-root
+    /// attacker who pre-creates a chmod-400 file at
+    /// `SANDBOX_ADMIN_TOKEN_PATH` before the controller starts can
+    /// inject an attacker-known admin bearer; the controller
+    /// registers it as the admin credential on boot, yielding full
+    /// admin-API access (sandbox create/delete/exec/file-tree
+    /// everywhere) on first request. Sibling of R9-S4 (snapshot
+    /// KEK), R9-S4b (sealed-records AEAD key) and R9-S4c (pg
+    /// password file).
+    #[cfg(unix)]
+    #[test]
+    fn load_admin_token_rejects_non_root_owned_file() {
+        let path = temp_path();
+        write_with_mode(&path, "attacker-known-admin-bearer", 0o400);
+        // The file is created by the test-runner process, so its
+        // uid == effective uid of the runner. If that's 0 there's
+        // no non-root-owned file to materialise — skip (the
+        // positive arm is covered by
+        // `load_admin_token_accepts_root_owned_file_when_running_as_root`).
+        let runner_uid = current_file_uid(&path);
+        if runner_uid == 0 {
+            cleanup(&path);
+            eprintln!(
+                "skipping load_admin_token_rejects_non_root_owned_file: \
+                 running as root, can't materialise a non-root-owned file"
+            );
+            return;
+        }
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        let err = got.expect_err(
+            "non-root-owned admin-token file must be refused even at 0o400",
+        );
+        assert!(
+            err.contains("owner uid") && err.contains("!= 0"),
+            "error must mention owner uid != 0; got: {err}"
+        );
+    }
+
+    // ─── T1: distinct-token boot guard ──────────────────────────
+    //
+    // Pure-function tests over `assert_distinct_admin_tokens`. The
+    // production caller in `AppState::from_config` runs this AFTER
+    // both `load_admin_token` calls succeed; we test the truth
+    // table here without spinning up a backend probe.
+
+    #[test]
+    fn distinct_admin_tokens_both_none_is_ok() {
+        // Default-disabled shape. The role-gate will 503 every
+        // /admin/* endpoint; nothing to compare.
+        assert_distinct_admin_tokens(None, None)
+            .expect("both None → admin API disabled, no comparison needed");
+    }
+
+    #[test]
+    fn distinct_admin_tokens_only_full_configured_is_ok() {
+        // Legal asymmetric shape: operator wired the full bearer but
+        // hasn't provisioned an RO yet. Read endpoints still work
+        // via the full bearer; RO bearers don't exist on the wire.
+        assert_distinct_admin_tokens(Some("full-bearer-aaaa"), None)
+            .expect("full only → legal");
+    }
+
+    #[test]
+    fn distinct_admin_tokens_only_ro_configured_is_ok() {
+        // Legal asymmetric shape: operator wired only the RO
+        // bearer (e.g. a dashboard-only deploy where there's no
+        // operator with destructive privileges). Destructive
+        // endpoints 503 `admin_api_disabled`; read endpoints work
+        // via the RO bearer.
+        assert_distinct_admin_tokens(None, Some("ro-bearer-aaaaa"))
+            .expect("ro only → legal");
+    }
+
+    #[test]
+    fn distinct_admin_tokens_with_distinct_contents_is_ok() {
+        // The intended production shape: two distinct random tokens,
+        // one per file.
+        assert_distinct_admin_tokens(
+            Some("full-bearer-aaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("ro-bearer-bbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .expect("two distinct tokens → legal");
+    }
+
+    /// T1 boot guard: equal contents on both paths must refuse to
+    /// boot. The footgun this closes is an operator who symlinks
+    /// `SANDBOX_ADMIN_RO_TOKEN_PATH` at the full-bearer file, or
+    /// generates the two files from the same source — silently
+    /// collapsing the role distinction.
+    #[test]
+    fn distinct_admin_tokens_with_equal_contents_is_err() {
+        let shared = "secret-pasted-into-both-files-aaaa";
+        let err = assert_distinct_admin_tokens(Some(shared), Some(shared))
+            .expect_err("equal contents must refuse to boot");
+        assert!(
+            err.contains("FATAL"),
+            "error must announce FATAL severity; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_ADMIN_TOKEN_PATH")
+                && err.contains("SANDBOX_ADMIN_RO_TOKEN_PATH"),
+            "error must name both env vars so the operator can locate \
+             the misconfig; got: {err}"
+        );
+    }
+
+    /// Negative test: tokens differing in only one byte are still
+    /// distinct. Belt-and-suspenders against a sloppy substring
+    /// compare regression.
+    #[test]
+    fn distinct_admin_tokens_with_one_byte_difference_is_ok() {
+        assert_distinct_admin_tokens(
+            Some("matching-prefix-aaaaaaaaaaaaaaa1"),
+            Some("matching-prefix-aaaaaaaaaaaaaaa2"),
+        )
+        .expect("one-byte difference is still distinct");
+    }
+
+    /// R9-S4d positive arm: when the test runs as root, a 0o400
+    /// admin-token file owned by root passes the check. Skipped
+    /// when not running as root (the common case in CI/dev) — the
+    /// negative arm above already pins the bug-fix assertion in
+    /// non-root environments.
+    #[cfg(unix)]
+    #[test]
+    fn load_admin_token_accepts_root_owned_file_when_running_as_root() {
+        let path = temp_path();
+        let token = "root-owned-admin-bearer-cccc";
+        write_with_mode(&path, token, 0o400);
+        let runner_uid = current_file_uid(&path);
+        if runner_uid != 0 {
+            cleanup(&path);
+            eprintln!(
+                "skipping load_admin_token_accepts_root_owned_file_when_running_as_root: \
+                 not running as root, can't create a root-owned admin-token file"
+            );
+            return;
+        }
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        assert!(
+            matches!(&got, Ok(Some(s)) if s == token),
+            "root-owned 0o400 admin-token file must load; got {got:?}"
+        );
     }
 }
 
@@ -1502,7 +2349,7 @@ mod admin_token_setter_tests {
     use crate::backend::Backend;
     use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
 
-    /// Minimal config that satisfies `Backend::from_config` for the
+    /// Minimal config that satisfies `Backend::builder(&cfg).build()` for the
     /// nomad-ch backend WITHOUT touching the network — the builder
     /// only needs `SandboxConfig` to populate the field; no probe
     /// runs here.
@@ -1533,9 +2380,6 @@ mod admin_token_setter_tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: std::path::PathBuf::from(
-                    "/etc/zeroship/nomad-vm-wrapper.sh",
-                ),
                 runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: std::path::PathBuf::from(
@@ -1548,6 +2392,8 @@ mod admin_token_setter_tests {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -1559,12 +2405,13 @@ mod admin_token_setter_tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 
     fn min_state() -> AppState {
         let cfg = min_cfg();
-        let backend = Backend::from_config(&cfg).expect("backend");
+        let backend = Backend::builder(&cfg).build().expect("backend");
         AppState::new_fixture(cfg, backend)
     }
 
@@ -1614,6 +2461,79 @@ mod admin_token_setter_tests {
         };
         assert!(state.admin_token().is_none(), "None must clear the field");
     }
+
+    // ─── T1: with_admin_ro_token mirror tests ─────────────────────
+
+    #[test]
+    fn admin_ro_token_setter_rejects_empty() {
+        let state = min_state();
+        match state.with_admin_ro_token(Some(String::new())) {
+            Ok(_) => panic!("empty string must yield Err"),
+            Err(e) => assert!(
+                e.contains("empty"),
+                "error message must mention 'empty'; got {e}"
+            ),
+        }
+    }
+
+    #[test]
+    fn admin_ro_token_setter_accepts_non_empty() {
+        let state = min_state();
+        let state = match state
+            .with_admin_ro_token(Some("ro-bearer-abcdef".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty string must be accepted: {e}"),
+        };
+        assert_eq!(
+            state.admin_ro_token(),
+            Some("ro-bearer-abcdef"),
+            "the reader must surface the wrapped RO token"
+        );
+        assert!(
+            state.admin_token().is_none(),
+            "with_admin_ro_token must not touch the full-bearer field"
+        );
+    }
+
+    #[test]
+    fn admin_ro_token_setter_none_clears_field() {
+        let state = min_state();
+        let state = match state
+            .with_admin_ro_token(Some("ro-bearer-to-clear-aaaa".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty accepted: {e}"),
+        };
+        assert!(state.admin_ro_token().is_some(), "precondition: set");
+        let state = match state.with_admin_ro_token(None) {
+            Ok(s) => s,
+            Err(e) => panic!("None clears unconditionally: {e}"),
+        };
+        assert!(state.admin_ro_token().is_none(), "None must clear the field");
+    }
+
+    #[test]
+    fn full_and_ro_setters_are_independent() {
+        // Both bearers can be set without one clobbering the other.
+        // The role-gate distinguishes them on the auth path; the
+        // builders are pure field setters.
+        let state = min_state();
+        let state = state
+            .with_admin_token(Some("full-bearer-aaaaaaaaaaaaaaaa".into()))
+            .expect("non-empty full accepted");
+        let state = state
+            .with_admin_ro_token(Some("ro-bearer-bbbbbbbbbbbbbbbb".into()))
+            .expect("non-empty ro accepted");
+        assert_eq!(
+            state.admin_token(),
+            Some("full-bearer-aaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            state.admin_ro_token(),
+            Some("ro-bearer-bbbbbbbbbbbbbbbb")
+        );
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1632,7 +2552,7 @@ mod persist_setter_tests {
     use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
     use crate::persist::{AeadKey, Persistence};
 
-    /// Minimal config that satisfies `Backend::from_config` for the
+    /// Minimal config that satisfies `Backend::builder(&cfg).build()` for the
     /// nomad-ch backend WITHOUT touching the network. Mirrors the
     /// fixture in `admin_token_setter_tests` — duplicated rather
     /// than shared so each test module's helpers stay self-contained
@@ -1665,9 +2585,6 @@ mod persist_setter_tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: std::path::PathBuf::from(
-                    "/etc/zeroship/nomad-vm-wrapper.sh",
-                ),
                 runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: std::path::PathBuf::from(
@@ -1680,6 +2597,8 @@ mod persist_setter_tests {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -1691,12 +2610,13 @@ mod persist_setter_tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 
     fn min_state() -> AppState {
         let cfg = min_cfg();
-        let backend = Backend::from_config(&cfg).expect("backend");
+        let backend = Backend::builder(&cfg).build().expect("backend");
         AppState::new_fixture(cfg, backend)
     }
 
@@ -1775,7 +2695,7 @@ mod field_setter_tests {
     use crate::snapshot_handler::MockChRemoteClient;
     use crate::snapshot_store::LocalDiskSnapshotStore;
 
-    /// Minimal config that satisfies `Backend::from_config` for the
+    /// Minimal config that satisfies `Backend::builder(&cfg).build()` for the
     /// nomad-ch backend WITHOUT touching the network. Duplicated from
     /// the sibling test modules for self-containment (same rationale
     /// as `persist_setter_tests::min_cfg`).
@@ -1806,9 +2726,6 @@ mod field_setter_tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: std::path::PathBuf::from(
-                    "/etc/zeroship/nomad-vm-wrapper.sh",
-                ),
                 runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: std::path::PathBuf::from(
@@ -1821,6 +2738,8 @@ mod field_setter_tests {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -1832,12 +2751,13 @@ mod field_setter_tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         }
     }
 
     fn min_state() -> AppState {
         let cfg = min_cfg();
-        let backend = Backend::from_config(&cfg).expect("backend");
+        let backend = Backend::builder(&cfg).build().expect("backend");
         AppState::new_fixture(cfg, backend)
     }
 
@@ -1848,7 +2768,7 @@ mod field_setter_tests {
         // new config landed.
         let mut first = min_cfg();
         first.port = 11111;
-        let backend = Backend::from_config(&first).expect("backend");
+        let backend = Backend::builder(&first).build().expect("backend");
         let state = AppState::new_fixture(first, backend);
         assert_eq!(state.config.port, 11111, "fixture starts with first cfg");
 
@@ -2070,6 +2990,93 @@ mod persist_required_assertion_tests {
         // block of any production unit it appears in.
         check(true, false, true).expect(
             "ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1 \
+             overrides the assertion",
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// A1-FOLLOWUP (arch-r9 fail-CLOSED gap) — boot-time fail-CLOSED for the
+// `snapshot_enabled=true && snapshot_use_gcs=true && kek_path=None`
+// configuration. Truth table is pinned per-cell so a future drift in
+// the assertion (e.g. accidentally gating on `snapshot_enabled` alone,
+// which would break L1-only dev fixtures) fails loudly.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod kek_required_for_remote_store_tests {
+    use super::assert_kek_required_for_remote_store as check;
+
+    #[test]
+    fn tiered_gcs_with_kek_is_ok() {
+        // The production-correct shape: snapshot enabled, GCS tier
+        // wired, KEK file path set. AEAD wraps the tiered store.
+        check(true, true, true, false).expect(
+            "snapshot_enabled + use_gcs + kek_present → ok (prod shape)",
+        );
+    }
+
+    #[test]
+    fn tiered_gcs_without_kek_is_err() {
+        // The fail-OPEN shape A1-FOLLOWUP closes: prod-shaped deploy
+        // with GCS enabled but the operator forgot the KEK env. MUST
+        // refuse to boot — plaintext guest RAM in GCS while the pg
+        // audit row claims "encrypted=v1" is the exact
+        // audit-trail-vs-reality gap the assertion exists to prevent.
+        let err = check(true, true, false, false).expect_err(
+            "snapshot_enabled + use_gcs + kek_unset must refuse to boot",
+        );
+        assert!(
+            err.contains("FATAL"),
+            "error must announce FATAL severity; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_SNAPSHOT_ROOT_KEK_PATH"),
+            "error must name the env var the operator must set; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_SNAPSHOT_USE_GCS"),
+            "error must name the GCS flag so the operator sees which \
+             mode triggered the assertion; got: {err}"
+        );
+    }
+
+    #[test]
+    fn local_only_with_kek_is_ok() {
+        // Operator wired the KEK even though the store is L1-only —
+        // perfectly fine; AEAD encrypts at rest on disk too.
+        check(true, false, true, false).expect(
+            "snapshot_enabled + L1-only + kek_present → ok",
+        );
+    }
+
+    #[test]
+    fn local_only_without_kek_is_ok() {
+        // Dev/test shape: snapshot enabled but L1-only, no KEK. The
+        // assertion does NOT fire — the warn-and-continue path lives in
+        // the snapshot-store composition site for local-only stores
+        // (dev-box ergonomics; no remote leak surface).
+        check(true, false, false, false).expect(
+            "snapshot_enabled + L1-only + kek_unset → ok (dev ergonomics)",
+        );
+    }
+
+    #[test]
+    fn snapshot_disabled_is_ok_regardless_of_kek() {
+        // Feature flag off: KEK is irrelevant. Phase-A default shape.
+        check(false, false, false, false).expect("snap off → ok");
+        check(false, false, true, false).expect("snap off + kek set → ok");
+        check(false, true, false, false).expect("snap off + use_gcs ignored → ok");
+        check(false, true, true, false).expect("snap off + use_gcs + kek → ok");
+    }
+
+    #[test]
+    fn tiered_gcs_without_kek_with_test_override_is_ok() {
+        // Non-prod envs that need plaintext-to-GCS for debugging set
+        // ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1. The
+        // override is intentional, named, and visible in any unit
+        // file's environment block.
+        check(true, true, false, true).expect(
+            "ZEROSHIP_SANDBOX_TEST_ALLOW_UNENCRYPTED_REMOTE=1 \
              overrides the assertion",
         );
     }

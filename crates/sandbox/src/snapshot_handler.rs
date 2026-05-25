@@ -686,7 +686,12 @@ fn run_with_timeout(
 /// configurable). Real impl lives in `nomad_ch.rs` alongside the
 /// existing alloc registry — wired in PR 3b's caller (admin handler)
 /// once the controller end-to-end ships.
+///
+/// Gated under `cfg(any(test, feature = "test-support"))` so the
+/// scaffolding is stripped from production rlibs (R28-API2 sweep,
+/// mirrors the R27-API2 `_test_inject_sandbox` precedent).
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug)]
 pub struct StubSourceVmOps {
     pub api_socket: PathBuf,
@@ -695,6 +700,7 @@ pub struct StubSourceVmOps {
     pub teardown_called: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl StubSourceVmOps {
     pub fn new(api_socket: PathBuf, vm_index: i16) -> Self {
         Self {
@@ -706,6 +712,7 @@ impl StubSourceVmOps {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl SourceVmOps for StubSourceVmOps {
     fn locate_api_socket(&self, _sandbox_id: Uuid) -> Option<PathBuf> {
         Some(self.api_socket.clone())

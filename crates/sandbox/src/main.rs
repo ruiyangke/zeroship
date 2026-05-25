@@ -70,7 +70,6 @@ async fn main() -> std::io::Result<()> {
             tracing::info!(
                 nomad_addr = %config.nomad_ch.nomad_addr,
                 datacenter = %config.nomad_ch.datacenter,
-                wrapper_path = %config.nomad_ch.wrapper_path.display(),
                 runtime_dir = %config.nomad_ch.runtime_dir.display(),
                 host_state_dir = %config.nomad_ch.host_state_dir.display(),
                 user_home_dir_root = %config.nomad_ch.user_home_dir_root.display(),
@@ -162,6 +161,18 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/readyz").route(web::get().to(handlers::readyz)),
             )
+            // R26-API2: Prometheus text-exposition exporter over the
+            // atomic counters in `crate::metrics`. Mounted at the
+            // conventional `/metrics` path (root, NOT under /admin/*)
+            // because Prometheus scrapers default to that location;
+            // auth is `AdminRole::ReadOnly` so the bearer-leak threat
+            // model stays symmetric with the rest of the operator API.
+            // See `admin_handlers::metrics_endpoint` for the §10.0
+            // envelope contract on 401/403/503.
+            .service(
+                web::resource("/metrics")
+                    .route(web::get().to(admin_handlers::metrics_endpoint)),
+            )
             .service(
                 web::resource("/sandboxes")
                     .route(web::post().to(handlers::create_sandbox))
@@ -228,6 +239,15 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/admin/sandboxes/{id}/wake")
                     .route(web::post().to(admin_handlers::wake_sandbox)),
+            )
+            // C-7-LT-PR2: GET /wake/{wake_id} polling endpoint paired
+            // with the POST above. Registered as a sibling resource so
+            // ntex's path-matcher routes both shapes correctly (the
+            // 1-param `{id}/wake` POST vs the 2-param
+            // `{id}/wake/{wake_id}` GET).
+            .service(
+                web::resource("/admin/sandboxes/{id}/wake/{wake_id}")
+                    .route(web::get().to(admin_handlers::poll_wake)),
             )
             .service(
                 web::resource("/admin/sandboxes/{id}/cold-boot")

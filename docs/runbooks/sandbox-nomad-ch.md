@@ -60,6 +60,7 @@ All env-var defaults match what the controller validates at boot. Failing-fast o
 | `SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS` | `60` | Bound on Nomad scheduling latency to "alloc running". |
 | `SANDBOX_NOMAD_CH_AGENT_LIVEZ_TIMEOUT_SECS` | `30` | Bound on CH boot + kernel + init.sh + agent up. Separate budget from alloc-running so operators can tell apart "Nomad slow" from "in-VM slow". |
 | `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP` | `false` | On startup, list every Nomad job with prefix `zsbx-` and stop+purge. **Defaults OFF**; opt-in for single-replica deployments. **Dangerous in HA**: the first replica nukes every other replica's active sandboxes on rolling restart. |
+| `SANDBOX_NOMAD_STOP_CONCURRENCY` | `16` | **r30-A1**: global cap on in-flight Nomad `/shutdown` ladders across all 7 production teardown call paths (registry GC, snap-idle-evict, snap-idle-gc, admin snapshot teardown, transient-state takeover, restore-failure rollback, deploy-time stop). Enforced inside `stop_inner` via a semaphore so per-loop caps don't compound on the single downstream (Nomad RPC queue + host CH process budget). Must be ≥ 1. Surface saturation via the `sandbox_nomad_stop_permits_in_use` / `sandbox_nomad_stop_permits_total` gauges; raise the cap only after observing sustained `in_use ≈ total`. |
 
 ## Health and the circuit-breaker
 

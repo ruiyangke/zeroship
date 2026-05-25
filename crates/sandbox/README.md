@@ -128,6 +128,58 @@ PG_TEST_URL='postgres://postgres:zeroship@localhost:5440/zeroship' \
     cargo test -p zeroship-sandbox --tests -- --ignored --test-threads=1
 ```
 
+## Building the controller binary for cluster deploy
+
+The controller binary that ships to GCP / GCS-backed worker fleets MUST be
+built against a glibc compatible with the worker OS. The Debian 12 (bookworm)
+worker images ship `glibc-2.36`; binaries linked against newer glibc
+versions (e.g. `glibc-2.42` from a recent nixpkgs revision) fail at
+`execve(2)` with the misleading shape
+
+```
+systemd: Failed to execute /usr/local/bin/zeroship-sandbox:
+  No such file or directory
+```
+
+— the kernel's ENOENT actually refers to the binary's embedded
+dynamic-loader path (`/nix/store/.../ld-linux-x86-64.so.2`), not the
+binary itself. T-8b-stress-r2 (2026-05-25) lost ~15 minutes diagnosing
+this; T-8b-stress-r3 must not.
+
+### Recipe: docker-build for Debian-12 compat
+
+```bash
+# Run from the repo root inside the sandbox-snapshot-restore worktree.
+docker run --rm \
+    -v "$PWD":/work -w /work \
+    -v "$HOME/.cargo/registry":/usr/local/cargo/registry \
+    rust:1.94-bookworm \
+    cargo build -p zeroship-sandbox --release --bin zeroship-sandbox
+
+# Pre-flight check before any GCS upload:
+file ./target/release/zeroship-sandbox | grep 'interpreter /lib64'
+# Expected:
+#   ELF 64-bit LSB pie executable, x86-64, ..., interpreter /lib64/ld-linux-x86-64.so.2
+# If you see `interpreter /nix/store/...` instead, the binary will NOT
+# execve on Debian 12 — rebuild with the docker recipe above.
+```
+
+The pin `rust:1.94-bookworm` gives max GLIBC_2.34 + the stdlib interpreter
+`/lib64/ld-linux-x86-64.so.2`. Bump the rust pin only when an explicit cluster
+cycle validates the new image; do NOT silently track upstream.
+
+### Why not pin the nix flake?
+
+Pinning `nixpkgs` to a `glibc-2.36`-or-older revision is the alternative;
+the current flake tracks a recent nixpkgs (for the v8 / compio / ureq /
+tokio drift other crates need) so the controller's local-dev shell uses
+the same glibc as the rest of the workspace. Pinning JUST for the
+controller would split the dev shell into two; the docker route avoids
+that split at the cost of one container build per controller release.
+
+If a future cluster sprint flips this trade-off, document the new policy
+here.
+
 ## See also
 
 - [`docs/proposals/sandbox-pg-state.md`](../../docs/proposals/sandbox-pg-state.md) — full pg-state design (Draft v9)

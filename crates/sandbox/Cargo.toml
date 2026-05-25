@@ -3,6 +3,7 @@ name = "zeroship-sandbox"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship sandbox service — pluggable backends (docker, k8s+libkrun) for AI builder sessions"
+build = "build.rs"
 
 [[bin]]
 name = "zeroship-sandbox"
@@ -67,8 +68,20 @@ thiserror = { workspace = true }
 # isn't wired yet — the dep churn is paid once.
 flume = { workspace = true }
 
+[features]
+# Exposes test-only helpers (e.g. `NomadChBackend::_test_inject_sandbox`)
+# to integration tests in `crates/sandbox/tests/`. Off by default so
+# production binaries don't carry the scaffolding. Mirrors the
+# `#[cfg(test)] pub fn freed_for_test` precedent in
+# `src/backend/nomad_ch.rs` at :399 (R27-API2).
+test-support = []
+
 [dev-dependencies]
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# Self dev-dep so `cargo test -p zeroship-sandbox` auto-enables the
+# `test-support` feature for integration tests (which link the library
+# as an external crate where `cfg(test)` does NOT apply).
+zeroship-sandbox = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true

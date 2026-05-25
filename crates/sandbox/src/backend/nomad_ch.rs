@@ -1,8 +1,8 @@
 //! Nomad + Cloud Hypervisor backend.
 //!
-//! Submits a `raw_exec` Nomad job per sandbox; the job invokes a
-//! wrapper script (shipped at `crates/sandbox/scripts/nomad-vm-wrapper.sh`,
-//! installed on the host out-of-band) that spawns:
+//! Submits a Nomad job (using the `ch` Go plugin driver) per sandbox.
+//! The jobspec carries a typed `TaskConfig` block the driver decodes
+//! directly; the driver spawns:
 //!
 //!   - 1 × `cloud-hypervisor` foreground process
 //!
@@ -26,11 +26,11 @@
 //!
 //! ## Why this exists
 //!
-//! Kubernetes is heavyweight to operate on bare metal — kubelet,
+//! Kubernetes is heavyweight to operate on bare metal �� kubelet,
 //! coredns, CNI, RuntimeClass + crun + libkrun, PVC + StorageClass.
 //! For single-node / small-cluster operators who already run Nomad,
-//! `raw_exec + cloud-hypervisor` is the bare minimum: no cluster
-//! networking abstraction, no CSI, just a shell wrapper that ties
+//! the `ch` Go plugin driver is the production transport: no cluster
+//! networking abstraction, no CSI, just the driver that ties
 //! one VM's lifetime to one Nomad alloc.
 //!
 //! ## Per-sandbox host layout
@@ -47,11 +47,12 @@
 //! ```
 //!
 //! The controller's signing pubkey is no longer a file on the host —
-//! it's hex-encoded into `ZSBX_PUBKEY_HEX` and the wrapper injects
-//! it into the guest's kernel cmdline as `zsbx_pubkey=<hex>`. The
-//! guest's /sbin/init decodes it back into 32 raw bytes at
-//! `/run/keys/controller-pubkey`, which is the path the agent's
-//! `auth.rs::DEFAULT_PUBKEY_PATH` already points at.
+//! it's hex-encoded into `ZSBX_PUBKEY_HEX` and the ch driver injects
+//! it into the guest's kernel cmdline as `zsbx_pubkey=<hex>` (legacy:
+//! pre-T-8 cutover the deleted bash wrapper did this; the Go driver
+//! took over). The guest's /sbin/init decodes it back into 32 raw
+//! bytes at `/run/keys/controller-pubkey`, which is the path the
+//! agent's `auth.rs::DEFAULT_PUBKEY_PATH` already points at.
 //!
 //! ## Network
 //!
@@ -65,9 +66,10 @@
 //!   MAC         : 12:34:56:78:9b:<idx hex>
 //! ```
 //!
-//! The controller computes only the **VM IP** (to reach the agent at
-//! `http://10.99.<100+idx>.2:7777`); the wrapper script computes
-//! everything else from `ZSBX_VM_INDEX`.
+//! The controller computes tap name, MAC, and VM IP from `vm_index`
+//! (see `derive_tap` / `derive_mac` in `restore_handler.rs`) and
+//! passes them to the ch driver via `TaskConfig.Net[0]`. The VM IP
+//! (`http://10.99.<100+idx>.2:7777`) is also used for agent reachability.
 //!
 //! ## Agent reachability
 //!
@@ -81,28 +83,52 @@
 //!
 //! ## Cleanup contract
 //!
+//! **T-8b-stress-r2 controller v34: host_dir cleanup is sweeper-owned,
+//! not per-alloc.** Stress-r2 (`docs/reviews/sandbox-snapshot-restore-
+//! cluster-2026-05-25-T8b-stress-r2.md`) showed that the per-alloc
+//! `rm -rf host_dir` in CreateGuard::drop and stop_inner's step 5 was
+//! racing with concurrent retry-`create` for the same sandbox_id: the
+//! failing alloc's DestroyTask removed `workspace.img` while the retry's
+//! StartTask was running, causing 48/60 CREATEs to fail with
+//! "workspace.img does not exist (controller must stage before spawn)".
+//! v34 moves host_dir GC out of the per-alloc hot path entirely.
+//!
+//! Lifecycle:
+//!
 //! - `create` is wrapped in a `CreateGuard` whose Drop spawns a
 //!   detached compio task that tears down partial state. The task:
 //!   (a) purges the Nomad job, (b) on confirmed-purge releases the
-//!   vm_index back to the pool, (c) on confirmed-purge `rm -rf`s the
-//!   host_dir. **The vm_index is intentionally NOT released until
-//!   the Nomad purge confirms** — releasing it earlier risks a
-//!   retry-`create` for the same user grabbing the same index and
-//!   racing the still-alive prior wrapper for `tap=zsbx-nm-<idx>`.
-//!   Same policy as the `stop` path: "release on confirmed purge;
-//!   leak otherwise; orphan-prune mops up later."
+//!   vm_index back to the pool, **(c) intentionally LEAKS the host_dir
+//!   for the sweeper to reap.** The vm_index is intentionally NOT
+//!   released until the Nomad purge confirms — releasing it earlier
+//!   risks a retry-`create` for the same user grabbing the same index
+//!   and racing the still-alive prior ch driver task for
+//!   `tap=zsbx-nm-<idx>`.
+//!   "release on confirmed purge; leak otherwise; orphan-prune mops
+//!   up later."
 //! - On controller crash or runtime-shutdown the cleanup task may
 //!   not run; any leaked Nomad jobs persist until
 //!   [`NomadCHBackend::cleanup_orphans_at_startup`] reclaims them at
 //!   next boot. **That cleanup defaults OFF and is opt-in via
 //!   `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP=true`** — single-
-//!   replica operators should turn it on. host_dir cleanup is best-
-//!   effort.
+//!   replica operators should turn it on. host_dir cleanup is sweeper-
+//!   owned regardless of opt-in.
 //! - `stop` is idempotent (returns Ok if the sandbox isn't in the
 //!   in-memory map). The Nomad job is purged, vm_index returned to
 //!   the pool **only on confirmed purge** (else leaked), and the
-//!   per-sandbox host_dir is `rm -rf`'d. The per-user home dir is
-//!   **never** deleted by `stop` — it's user-scoped state.
+//!   sealed-auth record is `persist.delete`d. **The per-sandbox
+//!   host_dir is LEAKED for sweeper cleanup** — see the v34 note
+//!   above. The per-user home dir is **never** deleted by `stop` —
+//!   it's user-scoped state owned by the user lifecycle, not the
+//!   sandbox lifecycle.
+//! - **host_dir GC (sweeper-owned, v34)**:
+//!   [`crate::sweep::spawn_host_dir_gc`] runs every 5 minutes,
+//!   enumerates `<host_state_dir>/<uuid>/` entries, looks each up in
+//!   the `sandboxes` table, and `rm -rf`s the dir when the sandbox is
+//!   in a terminal state (`stopped`/`lost`/`orphan`), no pending
+//!   `wake_jobs` row exists, and the directory mtime is older than
+//!   `GRACE_SECS` (default 1 hour). Operators retain on-disk artefacts
+//!   during the grace window for inspection.
 //!
 //! ## Note on rootfs init.sh
 //!
@@ -132,8 +158,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// `<NOMAD_ALLOC_ROOT>/<alloc-id>/ch/local/ch.sock` to reach
 /// cloud-hypervisor's API socket on the same worker. This matches
 /// Nomad's default `data_dir = /opt/nomad/data`; the path is wired
-/// here as a const because (a) it's already implicit in the wrapper's
-/// `ZSBX_RUNTIME=${NOMAD_TASK_DIR}` expansion that the controller
+/// here as a const because (a) it's already implicit in the ch
+/// driver's `NOMAD_TASK_DIR`-rooted runtime layout (the driver
+/// writes the CH API socket at `<task_dir>/ch.sock`) that the
+/// controller
 /// reads back, and (b) the wider Nomad agent config isn't surfaced
 /// to the controller crate.
 const NOMAD_ALLOC_ROOT: &str = "/opt/nomad/data/alloc";
@@ -168,6 +196,49 @@ pub struct NomadCHBackend {
     /// [`crate::persist::Persistence`]. `None` when
     /// `SANDBOX_PERSIST_AUTH` is unset.
     persist: Option<Arc<crate::persist::Persistence>>,
+    /// r3-A (T-8b-stress-r3 fix): cached local Nomad node ID for
+    /// the `Constraints` block emitted on every cold-boot jobspec.
+    /// `Some` when [`fetch_local_nomad_node_id`] returned Ok at
+    /// boot; `None` (fallback to random cross-node placement) when
+    /// the boot-time lookup failed. Installed via
+    /// [`Self::with_local_nomad_node_id`] from
+    /// `crate::AppState::from_config`; tests construct `None` by
+    /// default and exercise the `Some` shape via the builder.
+    local_nomad_node_id: Option<String>,
+    /// r30-A1: global cap on in-flight `stop_inner` calls, shared with
+    /// `AppState::nomad_stop_permits`. Set via
+    /// [`Self::install_nomad_stop_permits`] from `AppState::from_config`
+    /// after the semaphore is sized from `SANDBOX_NOMAD_STOP_CONCURRENCY`.
+    /// `OnceLock` (not `Option`) so the install is observable from
+    /// `&self` paths (`stop_inner`) without taking a write-lock on the
+    /// whole backend; uninstalled → `stop_inner` runs without the cap
+    /// (the unit-test default + the legacy single-tenant binary path).
+    /// In production the cap is always installed because
+    /// `AppState::from_config` is the only construction path that reaches
+    /// the HTTP server.
+    nomad_stop_permits: std::sync::OnceLock<Arc<NomadStopPermits>>,
+    /// **R33-I1 (concurrency-r33 IMPORTANT)**: per-user fence around
+    /// the cold-boot `home.img` mkfs step. `home.img` is per-USER (see
+    /// `user_home_image_path`); two concurrent same-user CREATEs would
+    /// otherwise race the exists-then-mkfs sequence inside
+    /// `create_ext4_image_if_missing`. R32-P1's `std::thread::scope`
+    /// parallelisation widens the window. The home_h thread acquires
+    /// the per-user inner `Mutex` before its
+    /// `create_ext4_image_if_missing(&user_home_img, ...)` call and
+    /// drops it as the spawned thread exits. The workspace_h thread is
+    /// NOT gated — workspace.img is per-sandbox (UUID-scoped), so the
+    /// parallelism win from R32-P1 is preserved for the workspace half.
+    ///
+    /// Holds `Arc<...>` of the same `HashMap` `AppState` holds, so the
+    /// fence is process-global (one user can't race themselves across
+    /// the controller's pool of compio blocking threads). Installed
+    /// once at boot from `AppState::from_config` via
+    /// [`Self::install_user_home_mkfs_locks`]. Unit tests that don't
+    /// exercise the fence leave it empty — the cold-boot path falls
+    /// back to running mkfs without the gate (legacy R32-P1 behaviour).
+    user_home_mkfs_locks: std::sync::OnceLock<
+        Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    >,
 }
 
 /// Phase B / snapshot wiring: resolved source-VM identity for a
@@ -177,7 +248,8 @@ pub struct NomadCHBackend {
 ///
 /// All three fields are derived from the live Nomad alloc:
 ///   - `api_socket` — path to cloud-hypervisor's HTTP API UDS,
-///     `<alloc_dir>/ch/local/ch.sock` (the wrapper's `${ZSBX_RUNTIME}/ch.sock`).
+///     `<alloc_dir>/ch/local/ch.sock` (the ch driver writes it at
+///     `<NOMAD_TASK_DIR>/ch.sock`).
 ///   - `vm_index` — pulled from the in-memory backend record (NOT from
 ///     Nomad meta) so it stays consistent with the registry's view of
 ///     the IP/MAC/tap derivation.
@@ -310,6 +382,121 @@ impl VmIndexAllocator {
         }
     }
 
+    /// T-8b-stress-r8 r24-A2-S3 / r29-A2: inline-await variant of
+    /// the delayed release. Sleeps `delay`, then releases slot `i`
+    /// back into the allocator + emits the operator-facing log
+    /// line. This is the safe default everywhere — the caller's
+    /// runtime stays alive for the full sleep because the future is
+    /// driven by `.await`, not detached.
+    ///
+    /// Use this from:
+    ///
+    /// - `stop_inner` (long-lived ntex-worker runtime — could also
+    ///   use the detached variant, but inline keeps the call sites
+    ///   uniform with the short-lived runtime paths)
+    /// - `CreateGuard::drop`'s detached cleanup future (runs under
+    ///   `detach_isolated`'s SHORT-LIVED private compio runtime —
+    ///   detaching here would lose the timer, see r29-A2 below)
+    /// - any future caller running under `detach_isolated` that
+    ///   needs to release a slot after a delay
+    ///
+    /// r29-A2 history: this replaces the pre-r29 `spawn_delayed_release`
+    /// fire-and-forget helper. That helper used
+    /// `compio::runtime::spawn(...).detach()` against the CURRENT
+    /// runtime — fine on the long-lived worker, but planted a
+    /// timer task that got discarded by `Scheduler::clear()` when
+    /// any short-lived runtime (`detach_isolated`'s private mint)
+    /// dropped. R28-C1 found one such leak (CreateGuard::drop);
+    /// R29-C1 found the second (`snap-teardown-<tail>` →
+    /// `stop_preserving_state` → `stop_inner` → spawn_delayed_release).
+    /// Both close by routing through this inline-await helper so
+    /// the timer is bound to the caller's task, not detached onto a
+    /// runtime that may not outlive the delay.
+    ///
+    /// If a caller genuinely cannot await (returning a `Task`
+    /// JoinHandle is acceptable but `.detach()` is not), use
+    /// [`Self::spawn_delayed_release_in_worker`] — which makes the
+    /// runtime-lifetime decision explicit via the return type.
+    ///
+    /// Behaviour at `delay == 0`: skips the sleep and releases
+    /// synchronously inside the calling task.
+    pub async fn release_vm_index_after(
+        allocator: Arc<Mutex<Self>>,
+        i: u16,
+        delay: Duration,
+        reason: &'static str,
+        sandbox_id: Uuid,
+    ) {
+        if !delay.is_zero() {
+            compio::time::sleep(delay).await;
+        }
+        allocator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .release(i);
+        tracing::info!(
+            vm_index = i,
+            reason = %reason,
+            sandbox_id = %sandbox_id,
+            delay_ms = delay.as_millis() as u64,
+            "sandbox/nomad-ch vm_index released (r24-A2-S3 delayed)"
+        );
+    }
+
+    /// r29-A2: spawn the delayed release on the CURRENT compio
+    /// runtime and return a `Task<()>` JoinHandle. The caller MUST
+    /// either hold the task to completion OR call `.detach()` on it
+    /// — but `.detach()` is only sound when the current runtime is
+    /// guaranteed to outlive the delay. The pre-r29
+    /// `spawn_delayed_release` helper hid this decision; returning
+    /// `Task<()>` here forces the caller to confront it.
+    ///
+    /// Long-lived ntex / snap-idle-gc / sweep loop callers can
+    /// safely call `.detach()` on the returned task. Short-lived
+    /// runtimes (`detach_isolated`'s private mint) MUST use
+    /// [`Self::release_vm_index_after`] instead — `.await`-ing it
+    /// inline keeps the timer alive across the sleep.
+    ///
+    /// No current call site in this crate uses this helper; it
+    /// exists as the type-safe escape hatch for any future
+    /// background-task path that needs fire-and-forget delayed
+    /// release on a long-lived runtime without blocking the caller.
+    #[allow(dead_code)] // typed escape hatch — see rustdoc
+    pub fn spawn_delayed_release_in_worker(
+        allocator: Arc<Mutex<Self>>,
+        i: u16,
+        delay: Duration,
+        reason: &'static str,
+        sandbox_id: Uuid,
+    ) -> compio::runtime::Task<
+        Result<(), Box<dyn std::any::Any + Send>>,
+    > {
+        // `compio::runtime::spawn` wraps the spawned future's output
+        // in `Result<T, Box<dyn Any + Send>>` (panic-catch). We
+        // surface that wrapper in the return type rather than
+        // hide it — if a caller `.await`s the Task and the release
+        // panicked (it doesn't today; `release` is a BTreeSet
+        // insert that can't panic), the Err is reachable.
+        compio::runtime::spawn(Self::release_vm_index_after(
+            allocator, i, delay, reason, sandbox_id,
+        ))
+    }
+
+    /// Non-destructive read of the `freed` set so tests can pin
+    /// "was slot N released?" without consuming the slot via
+    /// `alloc()`. The r24-A2-S3 release happens asynchronously
+    /// (detached compio task); a destructive `alloc()` poll could
+    /// race against `next` and return a different slot, masking
+    /// the release.
+    ///
+    /// Test-only because the freed set is a private implementation
+    /// detail — production code should only call `alloc` /
+    /// `release` / `reserve`.
+    #[cfg(test)]
+    pub fn freed_for_test(&self) -> &BTreeSet<u16> {
+        &self.freed
+    }
+
     /// Mark `i` as in-use without taking it from the free list. Used
     /// by the controller's restart-restore path (`docs/proposals/sandbox-preview-urls.md` § II.0):
     /// a sealed record's `vm_index` must be claimed in the allocator
@@ -351,6 +538,164 @@ impl VmIndexAllocator {
     }
 }
 
+// ─── NomadStopPermits ────────────────────────────────────────────
+//
+// r30-A1 (concurrency-r30 CRITICAL #A1): global semaphore gating
+// concurrent `stop_inner` calls — and thereby every in-flight Nomad
+// `/shutdown` ladder. Shared across all 7 production teardown call
+// sites (`AppStateGcStopper`, snap-idle-evict, snap-idle-gc, admin
+// snapshot teardown, transient-state takeover, registry GC, restore-
+// failure rollback) so per-loop caps don't compound on the same
+// downstream (Nomad RPC queue + host CH process budget).
+//
+// **Why a flume bounded channel and not `compio::sync::Semaphore`**:
+// `compio` 0.18 (this workspace's pin) does not ship a `sync::Semaphore`.
+// `tokio::sync::Semaphore` is off-limits — this workspace is zero-tokio
+// (see AGENTS.md "Key invariants"). flume is already in the dep graph
+// (`crates/sandbox/src/db.rs` Phase-1 worker queue), its `async`
+// feature is runtime-agnostic by design, and a bounded channel of N
+// `()` tokens IS the canonical async-semaphore pattern in
+// zero-tokio Rust: `acquire = recv_async()`, `release =
+// guard-Drop-try_send(())`. Capacity-bounded by construction, never
+// negative, no busy spin.
+//
+// **Lifecycle**:
+//
+// 1. `AppState::from_config` reads `SANDBOX_NOMAD_STOP_CONCURRENCY`
+//    (default 16), constructs `Arc<NomadStopPermits>` with that
+//    capacity, calls `crate::metrics::set_nomad_stop_permits_total`,
+//    holds it on `AppState.nomad_stop_permits`, and calls
+//    `nomad_ch_backend.install_nomad_stop_permits(perms.clone())`.
+//
+// 2. Every `stop_inner` invocation calls `permits.acquire().await`
+//    BEFORE the `/shutdown` ladder; the returned `NomadStopPermitGuard`
+//    holds the permit for the full `/shutdown` → Nomad-purge →
+//    host-fence → vm_index-release tail. The guard's Drop releases
+//    the permit + decrements the gauge.
+//
+// 3. Tests assert N permits is enforced by spawning N+1 concurrent
+//    `acquire()` calls and verifying exactly N complete before any
+//    guard drops.
+//
+// Per-loop caps (`GC_STOP_CONCURRENCY=8` in registry.rs, the snap-
+// idle-evict default-4 in sweep.rs) stay in place as defense-in-depth
+// soft caps — they bound runaway fan-out BEFORE it ever reaches the
+// semaphore. The load-bearing global cap is here.
+#[derive(Debug)]
+pub struct NomadStopPermits {
+    /// The token pool. Each `recv_async()` ≡ acquire one permit;
+    /// each `try_send(())` on the matching Sender ≡ release.
+    tokens: flume::Receiver<()>,
+    /// Refill channel — the guard's Drop calls `try_send(())` to put
+    /// the permit back. `Sender` is Clone (cheap; refcounts the inner
+    /// flume state), so the guard owns a clone and the semaphore can
+    /// outlive any individual guard.
+    refill: flume::Sender<()>,
+    /// Configured capacity. Pinned at construction; `permits_available()`
+    /// + `in_use()` derive from this and the live channel state.
+    capacity: usize,
+}
+
+impl NomadStopPermits {
+    /// Construct a semaphore pre-loaded with `capacity` permits. Panics
+    /// on `capacity == 0` (a zero-permit semaphore would deadlock every
+    /// caller); production config validation rejects 0 at boot —
+    /// `crate::config::NomadCHConfig::validate` — so this panic is the
+    /// belt-and-suspenders backstop for an in-process bug, not a user-
+    /// facing failure mode.
+    pub fn new(capacity: usize) -> Arc<Self> {
+        assert!(
+            capacity > 0,
+            "NomadStopPermits capacity must be ≥ 1 (got 0); a zero-permit \
+             semaphore deadlocks every teardown path. Boot-time config \
+             validation rejects 0 at the env-parse layer — reaching this \
+             panic means an in-process caller built a Self with capacity=0.",
+        );
+        let (tx, rx) = flume::bounded::<()>(capacity);
+        for _ in 0..capacity {
+            // bounded channel cap == capacity ⇒ first `capacity` sends
+            // always succeed. `try_send` is the right primitive because
+            // we never want this to block (we're in `new`, not on a
+            // hot path); the `expect` is the assertion this invariant
+            // holds for the lifetime of the cargo build.
+            tx.try_send(())
+                .expect("flume::bounded(N) accepts first N try_sends");
+        }
+        Arc::new(Self {
+            tokens: rx,
+            refill: tx,
+            capacity,
+        })
+    }
+
+    /// Acquire one permit. Awaits if the pool is exhausted; resolves
+    /// (and bumps `sandbox_nomad_stop_permits_in_use`) once a permit is
+    /// available. The returned guard releases the permit on Drop —
+    /// callers should hold it for exactly the lifetime of the
+    /// downstream operation (the full `stop_inner` `/shutdown` ladder).
+    pub async fn acquire(&self) -> NomadStopPermitGuard {
+        // `recv_async()` resolves to `Err` only if the channel is
+        // disconnected (every Sender dropped). The semaphore holds its
+        // own `Sender` clone (`refill`), so disconnection is impossible
+        // for the lifetime of `self` — `expect` documents that invariant
+        // explicitly rather than silently swallowing the result.
+        self.tokens
+            .recv_async()
+            .await
+            .expect(
+                "NomadStopPermits tokens channel is never disconnected — \
+                 the semaphore holds the matching Sender for its lifetime",
+            );
+        crate::metrics::inc_nomad_stop_permits_in_use();
+        NomadStopPermitGuard {
+            refill: self.refill.clone(),
+        }
+    }
+
+    /// Number of permits currently available (not in flight). Cheap —
+    /// `flume::Receiver::len()` reads the channel's pending-item count.
+    /// Used by tests + `metrics_export` (the live in-use gauge is
+    /// derived as `capacity - permits_available`).
+    pub fn permits_available(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Boot-resolved capacity (does not change at runtime). Pair with
+    /// `permits_available()` to compute in-use: `capacity - available`.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+/// RAII guard returned by [`NomadStopPermits::acquire`]. Drop releases
+/// the permit back to the pool AND decrements
+/// `sandbox_nomad_stop_permits_in_use`. The guard holds a clone of the
+/// refill `Sender` (not a borrow) so the caller can stash it on the
+/// stack across awaits without lifetime gymnastics.
+///
+/// `must_use`: dropping a permit guard without using it (`let _ =
+/// permits.acquire().await`) IS the release-it-immediately shape and
+/// is legal — `must_use` would flag legitimate test patterns. The
+/// guard does its work in `Drop`, not via a method call.
+#[derive(Debug)]
+pub struct NomadStopPermitGuard {
+    refill: flume::Sender<()>,
+}
+
+impl Drop for NomadStopPermitGuard {
+    fn drop(&mut self) {
+        // `try_send(())` on a bounded channel of capacity N MUST succeed
+        // for the first N sends — and we never send more than `capacity`
+        // tokens (every send is paired 1:1 with an acquire-recv). The
+        // only failure mode would be a programming error (someone
+        // smuggled an extra `Sender` outside this module and over-sent);
+        // even then we'd rather lose a permit than panic in a Drop on
+        // a teardown path.
+        let _ = self.refill.try_send(());
+        crate::metrics::dec_nomad_stop_permits_in_use();
+    }
+}
+
 impl NomadCHBackend {
     pub fn new(
         cfg: SandboxConfig,
@@ -368,7 +713,108 @@ impl NomadCHBackend {
             healthy: Arc::new(AtomicBool::new(false)),
             last_probe_err: Arc::new(Mutex::new(None)),
             persist,
+            // r3-A default: None. Production wiring sets this via
+            // `with_local_nomad_node_id` from
+            // `AppState::from_config` after the boot-time
+            // `/v1/agent/self` lookup succeeds.
+            local_nomad_node_id: None,
+            // r30-A1: empty by default; production installs the shared
+            // semaphore via `install_nomad_stop_permits` from
+            // `AppState::from_config`. Unit tests that don't exercise
+            // the cap leave it empty (stop_inner skips the acquire).
+            nomad_stop_permits: std::sync::OnceLock::new(),
+            // R33-I1: empty by default; production installs the shared
+            // per-user mkfs fence map via `install_user_home_mkfs_locks`
+            // from `AppState::from_config`. Unit tests that don't
+            // exercise the fence leave it empty (try_create skips the
+            // acquire — legacy R32-P1 unguarded behaviour).
+            user_home_mkfs_locks: std::sync::OnceLock::new(),
         })
+    }
+
+    /// r30-A1: install the shared `Arc<NomadStopPermits>` semaphore.
+    /// Called exactly once from `AppState::from_config`, after the
+    /// boot-time parse of `SANDBOX_NOMAD_STOP_CONCURRENCY` sizes the
+    /// pool. Idempotent — a second install attempt is a silent no-op
+    /// (the `OnceLock::set` Err arm), because the shared semaphore is
+    /// process-global and there is exactly one `AppState` per process.
+    ///
+    /// Why `&self` (not `&mut self`) + `OnceLock`: the backend is held
+    /// behind `Arc<NomadCHBackend>` inside the `Backend::NomadCh(arc)`
+    /// enum variant, so the post-construction install can't take
+    /// `&mut self`. `OnceLock` gives a publish-once, read-many shape
+    /// that `stop_inner` consults from `&self` without contending the
+    /// rest of the backend's locks.
+    pub fn install_nomad_stop_permits(&self, permits: Arc<NomadStopPermits>) {
+        // Silent on duplicate-install: the only legitimate caller is
+        // `AppState::from_config`, and that path runs once. A test
+        // re-install would be a footgun (the second semaphore is
+        // dropped, leaving the first wired) — but explicit panic /
+        // error here would break the `from_config` reentrancy the
+        // sandbox_pg_e2e fixtures lean on.
+        let _ = self.nomad_stop_permits.set(permits);
+    }
+
+    /// r30-A1: read-side accessor for the installed semaphore. Returns
+    /// `None` when the cap is uninstalled (unit-test / single-tenant
+    /// binary path). Used by `stop_inner` to acquire a permit before
+    /// the `/shutdown` ladder, and by tests to inspect the live cap.
+    pub fn nomad_stop_permits(&self) -> Option<&Arc<NomadStopPermits>> {
+        self.nomad_stop_permits.get()
+    }
+
+    /// R33-I1: install the shared per-user `home.img` mkfs fence map.
+    /// Called exactly once from `AppState::from_config` after the
+    /// `Arc<Mutex<HashMap<_, _>>>` is constructed there. Same
+    /// publish-once `OnceLock` shape as `install_nomad_stop_permits`
+    /// (backend held behind `Arc<NomadCHBackend>`; the post-construction
+    /// install can't take `&mut self`). Idempotent — a second install
+    /// attempt is a silent no-op.
+    pub fn install_user_home_mkfs_locks(
+        &self,
+        locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    ) {
+        let _ = self.user_home_mkfs_locks.set(locks);
+    }
+
+    /// R33-I1: read-side accessor for the installed per-user mkfs
+    /// fence map. Returns `None` when uninstalled (unit-test /
+    /// single-tenant binary path) — `try_create` then runs the
+    /// home.img mkfs without the fence (legacy R32-P1 behaviour). Used
+    /// by `try_create` to acquire the per-user inner Mutex before
+    /// spawning the `home_h` thread, and by tests to inspect the live
+    /// map (assert insertion / drop semantics).
+    pub fn user_home_mkfs_locks(
+        &self,
+    ) -> Option<&Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>> {
+        self.user_home_mkfs_locks.get()
+    }
+
+    /// r3-A (T-8b-stress-r3 fix): install the cached local Nomad
+    /// node_id. When set, [`build_nomad_job_json_with`] emits a
+    /// `Constraints` block pinning every cold-boot alloc to THIS
+    /// worker — closing the cross-node placement race where
+    /// `workspace.img` is staged on local fs but Nomad schedules
+    /// the alloc on a different worker (the driver's
+    /// `assert_disk_image_present` ENOENTs there).
+    ///
+    /// Mirrors the [`Self::vm_index_allocator`] / [`RealRestoreBackend::
+    /// with_nomad_handle`] builder shape: replaces any prior value;
+    /// `None` (the constructor default) disables the constraint
+    /// emission entirely. The production wiring (`AppState::from_config`)
+    /// passes either `Some(id)` (lookup succeeded) or never calls
+    /// the builder (lookup failed → metric bumped at boot).
+    pub fn with_local_nomad_node_id(mut self, node_id: Option<String>) -> Self {
+        self.local_nomad_node_id = node_id;
+        self
+    }
+
+    /// r3-A: read accessor for the cached local Nomad node_id. Mainly
+    /// here so the AppState wiring (which constructs the backend via
+    /// `Backend::builder(&cfg).with_persist(...).with_local_nomad_node_id(...).build()`)
+    /// can assert post-install state.
+    pub fn local_nomad_node_id(&self) -> Option<&str> {
+        self.local_nomad_node_id.as_deref()
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -559,7 +1005,7 @@ impl NomadCHBackend {
         // raw ext4 image file rather than a directory. The file lives
         // at `<user_home_dir_root>/<user_id>/home.img` and is reused
         // across all of that user's sandboxes (package caches, dotfiles
-        // persist). The wrapper attaches it as the guest's /dev/vdc.
+        // persist). The ch driver attaches it as the guest's /dev/vdc.
         let user_home_img = user_home_image_path(
             &self.cfg.nomad_ch.user_home_dir_root,
             user_id,
@@ -571,6 +1017,9 @@ impl NomadCHBackend {
             job_id.clone(),
             host_dir.clone(),
             sandbox_id,
+            Duration::from_secs(
+                self.cfg.nomad_ch.vm_index_release_delay_secs,
+            ),
         );
 
         let result = self
@@ -628,7 +1077,7 @@ impl NomadCHBackend {
         let pubkey = signing_key.verifying_key();
         // virtio-blk pivot (bug #11): the pubkey no longer travels
         // through a virtiofs-mounted file; we hex-encode it and the
-        // wrapper injects it into the guest's kernel cmdline as
+        // ch driver injects it into the guest's kernel cmdline as
         // `zsbx_pubkey=<hex>`. The guest's /sbin/init decodes the
         // hex back to 32 raw bytes at /run/keys/controller-pubkey,
         // which is the path the agent's auth loader reads. base64
@@ -668,7 +1117,7 @@ impl NomadCHBackend {
         );
 
         // 3. Materialize host disk images for the two virtio-blk
-        //    devices the wrapper attaches:
+        //    devices the ch driver attaches:
         //      - `<host_dir>/workspace.img` — per-sandbox; freshly
         //        created (sparse `truncate -s … + mkfs.ext4`).
         //      - `<user_home_dir_root>/<user>/home.img` — per-user;
@@ -687,32 +1136,163 @@ impl NomadCHBackend {
         //    (mostly the mkfs.ext4 metadata write); per-user reuse
         //    means the cost amortizes to ~0 after the user's first
         //    sandbox.
-        std::fs::create_dir_all(host_dir)
-            .map_err(|e| format!("mkdir {}: {}", host_dir.display(), e))?;
-        if let Some(parent) = user_home_img.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
-        }
-        guard.host_dir_created = true;
+        //
+        //    R26-I2 / R25-I1 / R23-A2: the bundle of sync-IO ops below
+        //    (`create_dir_all` ×2, `mkfs.ext4` subprocess ×2 via
+        //    `create_ext4_image_if_missing`, plus the inner `fsync_dir`
+        //    on the image parents) is moved off the ntex worker via
+        //    `compio::runtime::spawn_blocking`. Without this, cold-boot
+        //    first-sandbox-per-user pegged a ntex worker for ~3-5s on
+        //    the mkfs metadata writes; at c=20 stress (post r3-A node-
+        //    pin where all CREATEs land on one controller's pool of
+        //    4-8 ntex workers) sibling requests added ~9-15s to their
+        //    p99. The wrap unblocks the worker; per-CREATE wall time
+        //    is unchanged.
+        //
+        //    CreateGuard handling: `host_dir_created` is set on the
+        //    calling thread AFTER spawn_blocking returns Ok, mirroring
+        //    the pre-wrap behaviour. The guard reference stays on the
+        //    ntex worker; only owned clones of `host_dir` and
+        //    `user_home_img` cross the spawn_blocking boundary. This
+        //    keeps guard ownership trivial — no Send/Sync threading
+        //    through the closure required.
+        // Option C Phase 2 (2026-05-25 staging-locality ADR): if the
+        // operator has flipped `driver_stages_disk_images=true`, we
+        // BYPASS the spawn_blocking truncate+mkfs.ext4 block below
+        // and let the driver materialize the images on the worker
+        // that runs the alloc. The jobspec carries a typed meta
+        // field (`zsbx_stage_disks`) plus the typed driver Config
+        // field (`stage_disk_images`) the Go driver decodes from
+        // its TaskConfig HCL schema.
+        //
+        // The workspace_img path itself is STILL derived
+        // declaratively here so the existing `build_nomad_job_json`
+        // signature is unchanged — the path is what the driver
+        // creates an image at, regardless of which side does the
+        // mkfs.ext4. `guard.host_dir_created` stays FALSE in this
+        // branch (the driver owns the dirent's lifecycle now;
+        // CreateGuard's host_dir rollback is a no-op under
+        // driver-side staging, per the ADR Phase 2 plan).
+        //
+        // When the flag is false (Phase 2 default), the legacy
+        // spawn_blocking block runs verbatim — controller stages,
+        // driver consumes pre-staged paths via preflightDiskPaths.
+        // Phase 4 cluster validation flips the default; Phase 3
+        // deletes the spawn_blocking branch entirely.
+        let workspace_img: PathBuf = if self.cfg.driver_stages_disk_images {
+            workspace_image_path(host_dir)
+        } else {
+            let host_dir_owned = host_dir.to_path_buf();
+            let user_home_img_owned = user_home_img.to_path_buf();
+            let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
+            // R33-I1: resolve the per-user `home.img` mkfs fence BEFORE
+            // entering spawn_blocking. We need the outer-map lock briefly
+            // to `.entry(user_id).or_insert_with(...)` a fresh per-user
+            // `Arc<Mutex<()>>`; that operation runs on the ntex worker
+            // (~1 µs, no IO), then the per-user `Arc` is moved into the
+            // spawn_blocking closure and the home_h spawned thread
+            // acquires it across the mkfs subprocess. When the fence map
+            // is uninstalled (unit-test / single-tenant binary path),
+            // `user_home_lock` is `None` and home_h runs unguarded —
+            // legacy R32-P1 behaviour, intentional fallback.
+            //
+            // The workspace_h thread is NOT gated: `workspace.img` is
+            // per-sandbox (UUID-scoped dirent under `host_dir`), so the
+            // R32-P1 parallelism win for the cold-boot wall is preserved
+            // for the workspace half.
+            let user_home_lock: Option<Arc<Mutex<()>>> =
+                self.user_home_mkfs_locks().map(|map_arc| {
+                    let mut map = map_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    map.entry(user_id.to_string())
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                });
+            let staged = compio::runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+                std::fs::create_dir_all(&host_dir_owned)
+                    .map_err(|e| format!("mkdir {}: {}", host_dir_owned.display(), e))?;
+                if let Some(parent) = user_home_img_owned.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+                }
+                let workspace_img = workspace_image_path(&host_dir_owned);
+                // R32-P1: parallelise the two mkfs.ext4 subprocesses.
+                // `workspace.img` (per-sandbox, always fresh on cold-boot)
+                // and `home.img` (per-user, idempotent skip on warm-boot)
+                // touch disjoint paths per-sandbox; running them
+                // sequentially adds ~1.5 s on first-sandbox-per-user
+                // (perf-r32 §"Where the 8.9 s c=1 CREATE goes"). Two
+                // `std::thread::scope` threads keep ownership trivial —
+                // both children borrow from the enclosing spawn_blocking
+                // closure and join before the scope exits, so no Arc /
+                // Send dance is needed. Error semantics match the prior
+                // sequential code: if either mkfs fails, the CREATE
+                // fails; if both fail, we surface workspace.img's error
+                // (it's the per-sandbox image — the more diagnostic of
+                // the two for the cold-boot fault domain).
+                //
+                // R33-I1 (concurrency-r33 IMPORTANT): the home_h thread
+                // ACQUIRES `user_home_lock` across its mkfs call when the
+                // fence is installed. `home.img` is per-USER, not
+                // per-sandbox — two same-user concurrent cold-boot
+                // CREATEs would otherwise race two `mkfs.ext4 -q -F
+                // <same-path>` subprocesses. The fence serialises the
+                // per-user mkfs only; workspace_h stays unconditionally
+                // parallel because workspace.img is per-sandbox (no
+                // collision surface).
+                let (workspace_res, home_res) = std::thread::scope(|s| {
+                    let workspace_h = s.spawn(|| {
+                        create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
+                            .map_err(|e| format!("workspace.img: {e}"))
+                    });
+                    let home_h = s.spawn(|| {
+                        // R33-I1: hold the per-user fence across the
+                        // mkfs subprocess. `_guard` lives until this
+                        // closure returns (thread joins), which is the
+                        // critical-section semantics we want — drop
+                        // happens before scope's `.join()` for this
+                        // handle returns to the parent. Poison recovery
+                        // mirrors the rest of the file: a poisoned mutex
+                        // means a prior thread panicked across the
+                        // mkfs, which is recoverable for our purposes
+                        // (the inner () has no invariants to corrupt).
+                        let _guard = user_home_lock
+                            .as_ref()
+                            .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()));
+                        create_ext4_image_if_missing(&user_home_img_owned, workspace_img_size_gb)
+                            .map_err(|e| format!("home.img: {e}"))
+                    });
+                    // join() returns Result<R, Box<dyn Any>> for panics;
+                    // unwrap_or_else maps a panic into a string Err so
+                    // it surfaces the same way as a returned Err.
+                    let w = workspace_h
+                        .join()
+                        .unwrap_or_else(|p| Err(format!("workspace.img mkfs panic: {p:?}")));
+                    let h = home_h
+                        .join()
+                        .unwrap_or_else(|p| Err(format!("home.img mkfs panic: {p:?}")));
+                    (w, h)
+                });
+                workspace_res?;
+                home_res?;
+                Ok(workspace_img)
+            })
+            .await
+            .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))?;
+            guard.host_dir_created = true;
+            staged
+        };
 
-        let workspace_img = workspace_image_path(host_dir);
-        let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
-        create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
-            .map_err(|e| format!("workspace.img: {e}"))?;
-        create_ext4_image_if_missing(user_home_img, workspace_img_size_gb)
-            .map_err(|e| format!("home.img: {e}"))?;
-
-        // 4. (was: write pubkey file — now baked into the cmdline by
-        //    the wrapper, see step 5's ZSBX_PUBKEY_HEX env var.)
+        // 4. (was: write pubkey file — now passed as ZSBX_PUBKEY_HEX
+        //    in the Nomad job env and baked into the cmdline by the
+        //    ch driver's StartTask, see step 5.)
 
         // 5. Build + submit the Nomad job spec.
         //
         // B24 / R8-DEPLOY1: the sandbox_id flows into
-        // `ZSBX_SANDBOX_ID`, which the wrapper embeds VERBATIM in
-        // the guest's kernel cmdline. The wrapper's validator
-        // (nomad-vm-wrapper.sh:222) rejects any character outside
-        // `[0-9a-zA-Z_]` — that's hyphens too. Uuid's hyphenated
-        // form (`to_string()`) would fail it; `.simple()` (32-hex,
+        // `ZSBX_SANDBOX_ID`, which the ch driver embeds VERBATIM in
+        // the guest's kernel cmdline (`TaskConfig.Cmdline`). The
+        // cmdline field must not contain hyphens; Uuid's hyphenated
+        // form (`to_string()`) would break parsing; `.simple()` (32-hex,
         // no hyphens) passes and matches the format the rest of
         // this file already uses for `job_id` and `host_dir`.
         let job_json = build_nomad_job_json(
@@ -725,6 +1305,7 @@ impl NomadCHBackend {
             user_id,
             project_id,
             &sandbox_id.simple().to_string(),
+            self.local_nomad_node_id.as_deref(),
         );
         submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json)
             .await
@@ -739,15 +1320,25 @@ impl NomadCHBackend {
                 e
             })?;
         guard.job_submitted = true;
+        // r32-T1 trace: emit submit-done milestone so the CREATE
+        // breakdown can attribute "Nomad scheduling" to (submit_done →
+        // alloc_visible) vs. (alloc_visible → alloc_running).
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            job = %job_id,
+            elapsed_ms = %create_started.elapsed().as_millis(),
+            "sandbox/nomad-ch create submit_done"
+        );
 
         // 6. Poll until at least one alloc reaches running. Bounded
         //    by the Nomad-scheduling budget (alloc_running_timeout_secs);
-        //    "running" here means the wrapper script started, NOT that
-        //    the VM is up — the agent /livez wait below covers the
-        //    in-VM boot path.
+        //    "running" here means the ch driver task started, NOT
+        //    that the VM is up — the agent /livez wait below covers
+        //    the in-VM boot path.
         wait_for_alloc_running(
             &self.cfg.nomad_ch.nomad_addr,
             job_id,
+            &sandbox_id.simple().to_string(),
             Duration::from_secs(self.cfg.nomad_ch.alloc_running_timeout_secs),
         )
         .await
@@ -768,16 +1359,17 @@ impl NomadCHBackend {
             "sandbox/nomad-ch create alloc running"
         );
 
-        // 7. Wait for the in-VM agent to come up. The wrapper boots
-        //    CH; CH boots Linux; init.sh execs sandbox-agent. Bound
+        // 7. Wait for the in-VM agent to come up. The ch driver
+        //    starts CH; CH boots Linux; init.sh execs sandbox-agent.
+        //    Bound
         //    this with its own budget (agent_livez_timeout_secs) so
         //    operators can tell apart "Nomad slow to schedule" from
         //    "VM/kernel/agent slow to boot".
         // M6: second octet is configurable so an operator with a
         // corp 10.99/16 collision can shift to a different private
-        // /16. Both the controller and the wrapper read the same
+        // /16. Both the controller and the ch driver read the same
         // value (controller from `cfg.nomad_ch.subnet_second_octet`,
-        // wrapper from `ZSBX_SUBNET_BASE_OCTET` env var passed by
+        // ch driver from `ZSBX_SUBNET_BASE_OCTET` env var passed by
         // build_nomad_job_json).
         //
         // FM-A: also pass `key_fp` + signing_key so wait_for_agent_livez
@@ -785,8 +1377,9 @@ impl NomadCHBackend {
         // our pubkey on /version), not a stale tenant whose CH is
         // still alive after Nomad already reported the prior alloc
         // terminal. Without this, a fresh create() racing the prior
-        // wrapper's process tree returns 201 in 0.25 s pointing at
-        // an agent that dies seconds later → "No route to host" on
+        // ch driver's CH process tree returns 201 in 0.25 s pointing
+        // at an agent that dies seconds later → "No route to host"
+        // on
         // every subsequent /exec.
         let agent_url = format!(
             "http://10.{}.{}.2:{AGENT_PORT}",
@@ -951,8 +1544,11 @@ impl NomadCHBackend {
     ///
     /// Bug #15 fix (`docs/reviews/sandbox-snapshot-restore-cluster-
     /// 2026-05-23-r1.md`): the prior code called `stop` directly,
-    /// which deleted `host_dir/workspace.img`, and the next wake's
-    /// wrapper `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then tripped. C2
+    /// which deleted `host_dir/workspace.img`, and the next wake
+    /// failed because the ch driver received a missing disk path
+    /// (`TaskConfig.Disks`) and CH refused to start. (legacy: pre-T-8
+    /// this surfaced as the deleted bash wrapper's
+    /// `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate tripping.) C2
     /// (deferred 2026-05-24): the B15 fix only gated the host_dir
     /// rm; `persist.delete` still fired unconditionally. Now both
     /// share the gate.
@@ -978,9 +1574,10 @@ impl NomadCHBackend {
     /// [`Self::stop_preserving_state`]) both are skipped: the
     /// per-sandbox `workspace.img` AND its sealed record survive
     /// across the snapshot → wake gap. Wiping either would silently
-    /// break wake — `workspace.img` because the wrapper's
-    /// `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate trips (bug #15), the
-    /// sealed record because the moment wake plumbs sealed-record-
+    /// break wake — `workspace.img` because the ch driver hands the
+    /// missing disk path to CH at StartTask and CH refuses to boot
+    /// (bug #15), the sealed record because the moment wake plumbs
+    /// sealed-record-
     /// based key recovery the agent becomes unreachable (deferred
     /// item C2).
     async fn stop_inner(
@@ -996,6 +1593,32 @@ impl NomadCHBackend {
         {
             Some(s) => s,
             None => return Ok(()), // idempotent
+        };
+        // r30-A1 (concurrency-r30 CRITICAL #A1): acquire one permit
+        // from the global `NomadStopPermits` semaphore BEFORE the
+        // `/shutdown` ladder fires. All 7 production teardown call sites
+        // funnel here; without the global cap the per-loop caps (snap-
+        // idle-gc=8, snap-idle-evict default 4, three serial loops, two
+        // unbounded admin paths) don't compose against the single
+        // downstream (Nomad /shutdown RPC queue + host CH process
+        // budget). Acquired inside stop_inner (not at the call sites)
+        // so the cap is structurally impossible to bypass — even a
+        // future teardown caller that forgets the convention still
+        // contends for the global pool.
+        //
+        // The acquire happens AFTER the in-memory state remove so an
+        // idempotent re-stop (Ok branch above) doesn't burn a permit.
+        // The guard binds to `_permit` so its Drop runs at the END of
+        // this function (post host_dir leak log + persist.delete tail),
+        // covering every observable downstream interaction.
+        //
+        // `nomad_stop_permits().is_none()` is the unit-test +
+        // single-tenant binary path; in those builds the field is
+        // uninstalled, and the cap is a no-op (matches the legacy
+        // behaviour those paths already tolerate).
+        let _permit: Option<NomadStopPermitGuard> = match self.nomad_stop_permits() {
+            Some(p) => Some(p.acquire().await),
+            None => None,
         };
         let stop_started = Instant::now();
         tracing::info!(
@@ -1044,7 +1667,7 @@ impl NomadCHBackend {
         // 3. Wait for the job to actually be gone before we hand the
         //    vm_index back to the pool. Otherwise a follow-up
         //    `create` for the same user races a still-running
-        //    wrapper script binding the same tap device + IP.
+        //    ch driver task binding the same tap device + IP.
         let job_gone = wait_for_job_gone(
             &self.cfg.nomad_ch.nomad_addr,
             &sandbox.job_id,
@@ -1132,17 +1755,45 @@ impl NomadCHBackend {
         }
 
         if fence_passed {
-            self.vm_index_allocator
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .release(sandbox.vm_index);
-            tracing::info!(
-                vm_index = sandbox.vm_index,
-                sandbox_id = %sandbox_id,
-                "sandbox/nomad-ch vm_index released"
-            );
+            // T-8b-stress-r8 r24-A2-S3: delay the release so the
+            // host kernel has time to evict the tap netdev / drain
+            // fcntl locks from this tenant's CH process before a
+            // fresh CREATE picks up the same vm_index. The driver's
+            // r24-A2-S2 closes the worker-side tuntap-add window;
+            // this controller-side delay adds defense-in-depth.
+            // Production default 5 s; 0 in tests via the
+            // vm_index_release_delay_secs config knob.
+            //
+            // r29-A2 (R29-C1 class-fix): inline-await the release
+            // instead of detaching the timer task. `stop_inner` is
+            // reached from BOTH long-lived (ntex-worker, snap-idle-
+            // gc, sweeper) and short-lived (`detach_isolated`'s
+            // private compio runtime, used by `snap-teardown-<tail>`)
+            // call paths. The detach-onto-current-runtime shape that
+            // pre-r29 `spawn_delayed_release` used silently dropped
+            // the timer on the short-lived path → vm_index leaked on
+            // every successful admin-snapshot teardown (R29-C1).
+            // Awaiting inline adds the delay to stop_inner's wall
+            // (5 s in prod), which is negligible compared to the
+            // host_fence + Nomad-purge waits already on this path.
+            VmIndexAllocator::release_vm_index_after(
+                Arc::clone(&self.vm_index_allocator),
+                sandbox.vm_index,
+                Duration::from_secs(
+                    self.cfg.nomad_ch.vm_index_release_delay_secs,
+                ),
+                "stop-fence-passed",
+                sandbox_id,
+            )
+            .await;
         } else if !job_confirmed_gone {
+            // C-7-LT-2-PR2 defense-in-depth: bump the per-reason leak
+            // counter so operators can `rate(sandbox_vm_index_leaks_total{
+            // reason="wait_failed"})` and alert on a slot-leak storm
+            // independently of the host_fence_timeout bucket.
+            crate::metrics::inc_vm_index_leak("wait_failed");
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 vm_index = sandbox.vm_index,
                 reason = "wait_failed",
                 sandbox_id = %sandbox_id,
@@ -1150,13 +1801,20 @@ impl NomadCHBackend {
                 "sandbox/nomad-ch vm_index leak"
             );
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 job = %sandbox.job_id,
                 vm_index = sandbox.vm_index,
                 "sandbox/nomad-ch stop: wait_for_job_gone failed; leaking vm_index to avoid tap collision (orphan-prune will reclaim on next boot)"
             );
         } else {
             // job_confirmed_gone but fence_err is Some.
+            // C-7-LT-2-PR2 defense-in-depth: bump the per-reason leak
+            // counter so smoke-r14 has a quantitative signal even when
+            // logs are sampled. A healthy cluster's rate(…{
+            // reason="host_fence_timeout"}) is near zero post-PR1.
+            crate::metrics::inc_vm_index_leak("host_fence_timeout");
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 vm_index = sandbox.vm_index,
                 reason = "host_fence_timeout",
                 sandbox_id = %sandbox_id,
@@ -1164,6 +1822,7 @@ impl NomadCHBackend {
                 "sandbox/nomad-ch vm_index leak"
             );
             tracing::warn!(
+                target: "sandbox::teardown::leak",
                 job = %sandbox.job_id,
                 vm_index = sandbox.vm_index,
                 error = %fence_err.as_deref().unwrap_or("<unknown>"),
@@ -1171,51 +1830,45 @@ impl NomadCHBackend {
             );
         }
 
-        // 5. Remove per-sandbox host dir. Per-user home dir is
-        //    intentionally **not** touched. Skip the rm if the job
-        //    teardown didn't confirm OR the host fence failed —
-        //    virtiofsd may still hold the socket / share open, and
-        //    pulling the dir from under it would just produce
-        //    confusing logs.
+        // 5. host_dir — INTENTIONALLY NOT REMOVED.
         //
-        //    `remove_host_dir == false` is the snapshot-teardown path
-        //    (bug #15): callers want the per-sandbox `workspace.img`
-        //    (and the dir holding it) to survive across the snapshot
-        //    → wake gap. The next regular `stop` reaps it.
+        //    T-8b-stress-r2 controller v34: per-alloc host_dir cleanup
+        //    is the load-bearing race behind Bug 1 (`workspace.img does
+        //    not exist`). See the doc-comment block at the top of this
+        //    file ("Cleanup contract") and the matching block in
+        //    CreateGuard::drop's step-3 comment for the full diagnosis.
+        //
+        //    New invariant: host_dir is reaped EXCLUSIVELY by the
+        //    sweeper task (`crate::sweep::spawn_host_dir_gc`). Per-alloc
+        //    paths — CreateGuard rollback, stop_inner, the
+        //    restore-failure tail — leak the host_dir deliberately so
+        //    a concurrent retry's StartTask never observes a missing
+        //    workspace.img. The sweeper's 1-hour grace + terminal-state
+        //    + no-pending-wake-jobs gate ensures we don't reap data
+        //    out from under an in-flight retry or a wake.
+        //
+        //    `remove_host_dir == false` (snapshot-aware teardown, bug
+        //    #15) was the original gate; under v34 both branches behave
+        //    the same way w.r.t. host_dir — the variable now only gates
+        //    `persist.delete` below. Logging the difference so an
+        //    operator can still distinguish the two stop_inner shapes
+        //    in journalctl.
         if !remove_host_dir {
             tracing::info!(
                 sandbox_id = %sandbox_id,
                 job = %sandbox.job_id,
                 host_dir = %sandbox.host_dir.display(),
-                "sandbox/nomad-ch stop_preserving_state: skipping host_dir rm (snapshot-aware teardown; workspace.img must survive to wake)"
+                "sandbox/nomad-ch stop_preserving_state: leaking host_dir (sweeper-owned, snapshot-aware teardown)"
             );
         } else {
-            let host_dir_safe_to_rm = job_confirmed_gone && fence_passed;
-            if host_dir_safe_to_rm && sandbox.host_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
-                    errs.push(format!(
-                        "rm -rf {}: {}",
-                        sandbox.host_dir.display(),
-                        e
-                    ));
-                }
-            } else if sandbox.host_dir.exists() {
-                // Either the Nomad purge didn't confirm or the host
-                // fence failed. Either way virtiofsd may still hold
-                // the share; leaking the dir for orphan-prune is the
-                // safer choice.
-                let reason = if !job_confirmed_gone {
-                    "job not confirmed gone"
-                } else {
-                    "host_fence timeout"
-                };
-                tracing::warn!(
-                    job = %sandbox.job_id,
-                    host_dir = %sandbox.host_dir.display(),
-                    reason,
-                    "sandbox/nomad-ch stop: leaking host_dir"
-                );
-            }
+            tracing::info!(
+                sandbox_id = %sandbox_id,
+                job = %sandbox.job_id,
+                host_dir = %sandbox.host_dir.display(),
+                job_confirmed_gone,
+                fence_passed,
+                "sandbox/nomad-ch stop: leaking host_dir (sweeper-owned; v34 invariant)"
+            );
         }
 
         // Delete the sealed record (`docs/proposals/sandbox-preview-urls.md` § II.0 §4). BEST-EFFORT:
@@ -1493,12 +2146,14 @@ impl NomadCHBackend {
     /// to point the controller at a fixture HTTP listener on
     /// `127.0.0.1:<ephemeral>`.
     ///
-    /// Marked `pub` rather than `pub(crate)` so integration tests
-    /// in `tests/` can call it; the `#[cfg(any(test, feature =
-    /// "test-support"))]` gate would be cleaner if we want to
-    /// strip it from production binaries — the current code leaves it
-    /// unconditionally public with a "tests only" doc-comment
-    /// (the function name self-identifies as test scaffolding).
+    /// Gated under `#[cfg(any(test, feature = "test-support"))]`
+    /// so the symbol is stripped from production binaries (R27-API2
+    /// close-out, mirrors the `freed_for_test` precedent at :399).
+    /// Integration tests in `tests/` link as external crates and
+    /// pick the function up via the `test-support` feature, which
+    /// the in-crate self dev-dep enables automatically (see
+    /// `Cargo.toml [dev-dependencies] zeroship-sandbox`).
+    #[cfg(any(test, feature = "test-support"))]
     pub fn _test_inject_sandbox(
         &self,
         sandbox_id: Uuid,
@@ -1689,6 +2344,41 @@ impl NomadCHBackend {
         }
     }
 
+    /// **R10-C1 fix (concurrency-r10 2026-05-25)**: the symmetric
+    /// inverse of [`Self::register_restored`]. Removes the state-map
+    /// entry the restore-success branch inserted. Called from
+    /// `RealRestoreBackend::teardown_restore` on the rollback path so
+    /// that, after a late failure (e.g. `update_sandbox_status(Running)`
+    /// returning CasLost), the vm_index release is matched by a
+    /// state-map remove — preventing a ghost entry at the released slot
+    /// that the next `create` would land on top of.
+    ///
+    /// Mirrors [`Self::stop_inner`]'s `state.write().remove(&sandbox_id)`
+    /// pattern (the idempotent-on-missing case). Returns `true` if an
+    /// entry was actually removed, `false` if there was nothing to
+    /// remove (early-rollback before `register_restored` ever ran — the
+    /// no-op branch matches stop_inner's tolerance).
+    pub(crate) fn unregister_restored(&self, sandbox_id: Uuid) -> bool {
+        self.state
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&sandbox_id)
+            .is_some()
+    }
+
+    /// Test-only helper: returns `true` iff the state map holds an
+    /// entry for `sandbox_id`. Used by the cross-module R10-C1
+    /// integration test in `restore_handler.rs` that needs to peek at
+    /// the state map after a `teardown_restore`. Kept `pub(crate)` so
+    /// it can't leak to out-of-crate callers.
+    #[cfg(test)]
+    pub(crate) fn contains_for_test(&self, sandbox_id: Uuid) -> bool {
+        self.state
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(&sandbox_id)
+    }
+
     /// Legacy v2-shape restore. Round-8 keeps this so existing tests
     /// in `tests/sandbox_persist_e2e.rs` still compile; new code goes
     /// through [`Self::restore_from_pg_and_sealed`].
@@ -1773,10 +2463,11 @@ impl NomadCHBackend {
         })?;
 
         // 3. Derive alloc_dir + api_socket. Same convention used by
-        //    Phase 3's stop path and the wrapper's `ZSBX_RUNTIME =
-        //    ${NOMAD_TASK_DIR}` expansion: the task is named "ch", so
-        //    the per-task dir is `<alloc_dir>/ch/local/`, and the
-        //    wrapper writes its API socket as `${ZSBX_RUNTIME}/ch.sock`.
+        //    Phase 3's stop path and the ch driver's
+        //    `NOMAD_TASK_DIR`-rooted runtime layout: the task is
+        //    named "ch", so the per-task dir is
+        //    `<alloc_dir>/ch/local/`, and the ch driver writes its
+        //    API socket at `<NOMAD_TASK_DIR>/ch.sock`.
         let alloc_dir = PathBuf::from(NOMAD_ALLOC_ROOT).join(&alloc_id);
         let api_socket = alloc_dir.join("ch").join("local").join("ch.sock");
 
@@ -1784,7 +2475,7 @@ impl NomadCHBackend {
         //    per-worker model puts the alloc on the same host as us;
         //    a missing socket means either (a) the alloc is on a
         //    different worker (peer-owned via lease-takeover), or
-        //    (b) the wrapper has already torn down. Either case is
+        //    (b) the ch driver has already torn down. Either case is
         //    a snapshot-impossible signal.
         match std::fs::metadata(&api_socket) {
             Ok(md) => {
@@ -1871,7 +2562,7 @@ impl Drop for ReleaseCreating {
 /// the Nomad purge HTTP call confirms (status 200/404). Mirrors the
 /// `stop` path's policy: a follow-up `create` for the same user
 /// could otherwise reuse the index and race the still-alive prior
-/// `raw_exec` wrapper for `tap=zsbx-nm-<idx>`. Up to ~10s elapse
+/// ch driver task for `tap=zsbx-nm-<idx>`. Up to ~10s elapse
 /// between "Drop fires" and "purge confirms"; releasing the index
 /// inline (as a previous revision did) reopened the same window the
 /// `stop`-path I1 fix was guarding against. On purge failure (5xx,
@@ -1879,12 +2570,23 @@ impl Drop for ReleaseCreating {
 /// the next-boot orphan prune) reclaims it indirectly by deleting
 /// the surviving job.
 ///
-/// **Limitation:** if the runtime is already shutting down (process
-/// exit, panic in main), `compio::runtime::spawn` may panic — we
-/// catch that so a tearing-down process doesn't abort, and rely on
-/// `cleanup_orphans_at_startup` (or a periodic prune) on the next
-/// controller boot to mop up. This is the same best-effort contract
-/// the prior "blocking ureq in Drop" had.
+/// **Isolation (R17-A5, C-6 family).** Dispatch goes through
+/// [`crate::detach::detach_isolated`] — a dedicated OS thread with a
+/// private compio runtime — so the cleanup tail (Nomad purge, host_dir
+/// rm -rf, vm_index release) never lands on the shared ntex-worker
+/// compio runtime where subsequent HTTP requests / wake-machine ticks
+/// run. Without this isolation, a stuck 10s `http_delete_unsigned`
+/// against a half-dead Nomad would block sibling tasks on the worker
+/// runtime; the symptom would be identical to the C-3/C-6 fingerprint
+/// the production sites already migrated. Risk here is lower because
+/// the create failed → no live agent racing concurrent work — but the
+/// detach pattern is uniform across the crate now.
+///
+/// `detach_isolated` mints its own runtime; the only failure mode is
+/// OS-thread spawn failure (ENOMEM/EAGAIN), which the helper logs at
+/// `tracing::error!`. There is no "runtime-down" branch to fall back
+/// to — the next-boot orphan prune is the recovery path, same as it
+/// was for the prior `compio::runtime::spawn` panic fallback.
 struct CreateGuard {
     vm_index_allocator: Arc<Mutex<VmIndexAllocator>>,
     nomad_addr: String,
@@ -1899,6 +2601,11 @@ struct CreateGuard {
     pub vm_index: Option<u16>,
     pub host_dir_created: bool,
     pub job_submitted: bool,
+    /// T-8b-stress-r8 r24-A2-S3: the configured delay before
+    /// releasing `vm_index` back to the allocator. Captured at
+    /// guard construction so the detached drop task doesn't need
+    /// to re-read the cfg; production default 5 s, 0 in tests.
+    release_delay: Duration,
     armed: bool,
 }
 
@@ -1909,6 +2616,7 @@ impl CreateGuard {
         job_id: String,
         host_dir: PathBuf,
         sandbox_id: Uuid,
+        release_delay: Duration,
     ) -> Self {
         Self {
             vm_index_allocator,
@@ -1919,6 +2627,7 @@ impl CreateGuard {
             vm_index: None,
             host_dir_created: false,
             job_submitted: false,
+            release_delay,
             armed: true,
         }
     }
@@ -1939,7 +2648,7 @@ impl Drop for CreateGuard {
         // index inline (before the Nomad purge confirms) is a race
         // window: a retry-`create` for the same user could grab the
         // same index and bind a tap device the still-alive prior
-        // wrapper is using.
+        // ch driver task is using.
         let job_submitted = self.job_submitted;
         let nomad_addr = std::mem::take(&mut self.nomad_addr);
         let job_id = std::mem::take(&mut self.job_id);
@@ -1948,173 +2657,155 @@ impl Drop for CreateGuard {
         let vm_index_allocator = self.vm_index_allocator.clone();
         let vm_index_opt = self.vm_index.take();
         let sandbox_id = self.sandbox_id;
+        let release_delay = self.release_delay;
 
-        // Captures for the runtime-down (no-spawn) fallback branch
-        // below. The clones inside the spawn closure are separate
-        // from these — the closure may run on another thread and
-        // may run after this `drop` returns.
-        let job_id_for_fallback = job_id.clone();
-        let host_dir_for_fallback = host_dir.clone();
-        let vm_index_allocator_for_fallback = vm_index_allocator.clone();
-
-        // `compio::runtime::spawn` panics if there is no current
-        // runtime (e.g., this Drop fires during process teardown
-        // *after* the runtime has already stopped). Catch that so we
-        // don't turn a teardown into an abort. The work is best-
-        // effort by contract — `cleanup_orphans_at_startup` (or a
-        // periodic prune) covers leaked Nomad jobs on next boot.
-        let spawn_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compio::runtime::spawn(async move {
-                // Local equivalent of the runtime crate's
-                // `panic_util::guard` (which is pub(crate) to
-                // `zeroship-runtime` and not reachable from here
-                // without taking a heavy crate-graph edge). Wraps
-                // the body in `catch_unwind` so a panic inside the
-                // detached task doesn't get swallowed silently.
-                guard_detached("nomad_ch_create_guard_cleanup", async move {
-                    // 1. Nomad purge — gates the vm_index release.
-                    let purge_ok = if job_submitted {
-                        let url =
-                            format!("{nomad_addr}/v1/job/{job_id}?purge=true");
-                        match http_delete_unsigned(&url, Duration::from_secs(10))
-                            .await
-                        {
-                            Ok(r) if r.status == 200 || r.status == 404 => true,
-                            Ok(r) => {
-                                tracing::warn!(
-                                    job = %job_id,
-                                    status = r.status,
-                                    body = %r.body.trim(),
-                                    "sandbox/nomad-ch guard cleanup: purge non-2xx (best-effort; vm_index will be leaked)"
-                                );
-                                false
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    job = %job_id,
-                                    error = %e,
-                                    "sandbox/nomad-ch guard cleanup: purge failed (best-effort; vm_index will be leaked)"
-                                );
-                                false
-                            }
-                        }
-                    } else {
-                        // Job was never submitted, so there's
-                        // nothing on the Nomad side to race; the
-                        // vm_index is safe to release immediately.
-                        true
-                    };
-
-                    // 2. vm_index release — only on confirmed purge.
-                    //    Same policy as the `stop` path (lines
-                    //    644-649 of the file's stable doc-comment).
-                    //
-                    //    FM-B': mirror the `stop()` path's
-                    //    `vm_index: release=<n>` log line so an
-                    //    operator scanning for "where did the index
-                    //    go?" finds the cleanup-tail event. Tagged
-                    //    `reason=create-failure-cleanup` so it's
-                    //    distinguishable from the normal stop()
-                    //    path; previously the detached task did the
-                    //    release silently and a failed create looked
-                    //    like a leak.
-                    if purge_ok {
-                        if let Some(i) = vm_index_opt {
-                            vm_index_allocator
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner())
-                                .release(i);
-                            tracing::info!(
-                                vm_index = i,
-                                reason = "create-failure-cleanup",
-                                sandbox_id = %sandbox_id,
+        // R17-A5: dispatch through `detach_isolated` so the cleanup
+        // tail runs on a dedicated OS thread with its own private
+        // compio runtime — never on the shared ntex-worker runtime
+        // where wake/heartbeat work also runs. Thread name
+        // `create-rollbk` (13 bytes) fits under Linux's 15-byte
+        // `pr_set_name` limit (TASK_COMM_LEN-1). `detach_isolated`
+        // already logs OS-thread spawn failures internally; no
+        // caller-side fallback path is needed (the next-boot orphan
+        // prune is the recovery, same as it was for the prior
+        // `compio::runtime::spawn` panic-catch fallback).
+        crate::detach::detach_isolated("create-rollbk", move || async move {
+            // Local equivalent of the runtime crate's
+            // `panic_util::guard` (which is pub(crate) to
+            // `zeroship-runtime` and not reachable from here
+            // without taking a heavy crate-graph edge). Wraps
+            // the body in `catch_unwind` so a panic inside the
+            // detached task doesn't get swallowed silently.
+            guard_detached("nomad_ch_create_guard_cleanup", async move {
+                // 1. Nomad purge — gates the vm_index release.
+                let purge_ok = if job_submitted {
+                    let url = format!("{nomad_addr}/v1/job/{job_id}?purge=true");
+                    match http_delete_unsigned(&url, Duration::from_secs(10)).await {
+                        Ok(r) if r.status == 200 || r.status == 404 => true,
+                        Ok(r) => {
+                            tracing::warn!(
                                 job = %job_id,
-                                "sandbox/nomad-ch vm_index released"
+                                status = r.status,
+                                body = %r.body.trim(),
+                                "sandbox/nomad-ch guard cleanup: purge non-2xx (best-effort; vm_index will be leaked)"
                             );
+                            false
                         }
-                    } else if let Some(i) = vm_index_opt {
-                        tracing::warn!(
-                            vm_index = i,
-                            reason = "create-failure-cleanup-purge-failed",
-                            sandbox_id = %sandbox_id,
-                            job = %job_id,
-                            "sandbox/nomad-ch vm_index leak (orphan-prune will reclaim on next boot)"
-                        );
-                    }
-
-                    // 3. host_dir rm -rf — wrapped in spawn_blocking
-                    //    because std::fs::remove_dir_all on an
-                    //    active workspace tree (think 100k+
-                    //    node_modules inodes) is uncomfortable on
-                    //    the compio worker; at 50 concurrent
-                    //    CreateGuard drops it would serialize
-                    //    against every other compio task. Skip on
-                    //    purge-failure for the same reason `stop`
-                    //    skips: virtiofsd may still hold the share
-                    //    open, and pulling the dir from under it
-                    //    just produces confusing logs.
-                    if purge_ok && host_dir_created {
-                        let host_dir_clone = host_dir.clone();
-                        let blocking = compio::runtime::spawn_blocking(move || {
-                            if host_dir_clone.exists() {
-                                std::fs::remove_dir_all(&host_dir_clone)
-                                    .map_err(|e| {
-                                        format!(
-                                            "rm -rf {}: {e}",
-                                            host_dir_clone.display()
-                                        )
-                                    })
-                            } else {
-                                Ok(())
-                            }
-                        })
-                        .await;
-                        match blocking {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => tracing::warn!(
+                        Err(e) => {
+                            tracing::warn!(
+                                job = %job_id,
                                 error = %e,
-                                "sandbox/nomad-ch guard cleanup (best-effort)"
-                            ),
-                            Err(e) => tracing::error!(
-                                panic = ?e,
-                                "sandbox/nomad-ch guard cleanup: host_dir spawn_blocking panic"
-                            ),
+                                "sandbox/nomad-ch guard cleanup: purge failed (best-effort; vm_index will be leaked)"
+                            );
+                            false
                         }
-                    } else if !purge_ok && host_dir_created {
-                        tracing::warn!(
-                            host_dir = %host_dir.display(),
-                            "sandbox/nomad-ch guard cleanup: leaking host_dir (Nomad purge not confirmed)"
-                        );
                     }
-                })
-                .await;
+                } else {
+                    // Job was never submitted, so there's nothing on
+                    // the Nomad side to race; the vm_index is safe
+                    // to release immediately.
+                    true
+                };
+
+                // 2. vm_index release — only on confirmed purge.
+                //    Same policy as the `stop` path (lines 644-649
+                //    of the file's stable doc-comment).
+                //
+                //    FM-B': mirror the `stop()` path's
+                //    `vm_index: release=<n>` log line so an operator
+                //    scanning for "where did the index go?" finds
+                //    the cleanup-tail event. Tagged
+                //    `reason=create-failure-cleanup` so it's
+                //    distinguishable from the normal stop() path;
+                //    previously the detached task did the release
+                //    silently and a failed create looked like a
+                //    leak.
+                if purge_ok {
+                    if let Some(i) = vm_index_opt {
+                        // T-8b-stress-r8 r24-A2-S3: delay release
+                        // same as the stop path so a retry-CREATE
+                        // doesn't pick up an index whose kernel
+                        // state is still being torn down. Tagged
+                        // `reason=create-failure-cleanup` to keep
+                        // FM-B's failed-create attribution.
+                        //
+                        // r29-A2 (R28-C1 + R29-C1 class-fix): use
+                        // the inline-await helper so the timer is
+                        // bound to THIS task, not detached onto the
+                        // short-lived private compio runtime minted
+                        // by `detach_isolated("create-rollbk", …)`.
+                        // Detaching here would land the timer task
+                        // on the same runtime the cleanup future is
+                        // on — when `block_on` returns Ready and the
+                        // private runtime drops, `Scheduler::clear`
+                        // discards the pending timer, leaking the
+                        // vm_index until the next controller-boot
+                        // orphan prune. See `release_vm_index_after`
+                        // rustdoc for the full r29-A2 history.
+                        VmIndexAllocator::release_vm_index_after(
+                            Arc::clone(&vm_index_allocator),
+                            i,
+                            release_delay,
+                            "create-failure-cleanup",
+                            sandbox_id,
+                        )
+                        .await;
+                    }
+                } else if let Some(i) = vm_index_opt {
+                    tracing::warn!(
+                        vm_index = i,
+                        reason = "create-failure-cleanup-purge-failed",
+                        sandbox_id = %sandbox_id,
+                        job = %job_id,
+                        "sandbox/nomad-ch vm_index leak (orphan-prune will reclaim on next boot)"
+                    );
+                }
+
+                // 3. host_dir — INTENTIONALLY NOT REMOVED.
+                //
+                //    T-8b-stress-r2 controller v34: the per-alloc
+                //    host_dir cleanup path is THE load-bearing race
+                //    that caused Bug 1 (48/60 CREATEs failing with
+                //    `workspace.img does not exist` — the failing
+                //    alloc's DestroyTask `rm -rf`'d the dir while a
+                //    concurrent retry's StartTask was still running).
+                //    See the stress-r2 review file and the doc-comment
+                //    block at the top of this file ("Cleanup contract")
+                //    for the full diagnosis.
+                //
+                //    New invariant: host_dir is created on-demand by
+                //    `create_ext4_image_if_missing` and reaped EXCLUSIVELY
+                //    by the sweeper task (`crate::sweep::spawn_host_dir_gc`).
+                //    Per-alloc paths — CreateGuard rollback, stop_inner,
+                //    the restore-failure tail — all LEAK the host_dir
+                //    deliberately. Retries that re-use the same
+                //    sandbox_id see workspace.img still on disk (the
+                //    `[ ! -f $WORKSPACE_IMG ]` cold-boot gate flips
+                //    to "exists, skip mkfs"); retries with a fresh
+                //    sandbox_id get a fresh host_dir mkdir'd by step
+                //    3 of try_create. Either way, no race.
+                //
+                //    Sweeper grace: 1 hour after the sandbox transitions
+                //    to a terminal state with no pending wake_jobs (cf.
+                //    `crate::sweep::spawn_host_dir_gc`'s `GRACE_SECS`).
+                //    Operators retain on-disk artefacts during the grace
+                //    window for inspection.
+                //
+                //    Note: `host_dir_created` is still tracked above for
+                //    diagnostic logging — a guard that never mkdir'd
+                //    nothing is a different failure shape from one that
+                //    successfully mkdir'd but failed on a later step.
+                if host_dir_created {
+                    tracing::info!(
+                        host_dir = %host_dir.display(),
+                        purge_ok,
+                        sandbox_id = %sandbox_id,
+                        "sandbox/nomad-ch guard cleanup: leaking host_dir (sweeper will GC after 1h grace + terminal state)"
+                    );
+                }
             })
-            .detach();
-        }));
-        if spawn_res.is_err() {
-            // Best-effort sync vm_index reclaim on the runtime-down
-            // path. There's no Nomad call to gate against here —
-            // the runtime is gone, the controller is shutting down,
-            // there can't be a concurrent retry-`create` racing us.
-            if let Some(i) = vm_index_opt {
-                vm_index_allocator_for_fallback
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .release(i);
-                tracing::info!(
-                    vm_index = i,
-                    reason = "create-failure-cleanup-runtime-down",
-                    sandbox_id = %sandbox_id,
-                    job = %job_id_for_fallback,
-                    "sandbox/nomad-ch vm_index released"
-                );
-            }
-            tracing::warn!(
-                job = %job_id_for_fallback,
-                host_dir = %host_dir_for_fallback.display(),
-                "sandbox/nomad-ch guard cleanup: compio::spawn failed (no current runtime?); job and dir left for next-boot orphan prune"
-            );
-        }
+            .await;
+        });
     }
 }
 
@@ -2179,14 +2870,22 @@ pub(crate) const NOMAD_CPU_MHZ_ADVISORY: u32 = 500;
 /// envelope ready to ship.
 ///
 /// The shape is the absolute minimum that Nomad accepts for a
-/// service-type raw_exec job: TaskGroup count=1, RestartPolicy with
-/// 0 attempts (the wrapper exits = the alloc dies; we don't want
-/// Nomad to retry, the controller is the orchestrator), one Task
-/// with `command = wrapper_path` and the env vars the wrapper
-/// reads. Resources are advisory — `raw_exec` doesn't enforce them
-/// (the cgroup is owned by the Nomad client, but CH ignores CPU
-/// quota anyway). KillTimeout=10s is the same window the demo
-/// wrapper's cleanup trap uses.
+/// service-type job: TaskGroup count=1, RestartPolicy with 0 attempts
+/// (the ch driver exits = the alloc dies; we don't want Nomad
+/// to retry, the controller is the orchestrator), one Task using
+/// `Driver: "ch"` with a typed `Config` block matching
+/// `nomad-driver-ch/ch/task_config.go::TaskConfig`.
+///
+/// The Env block is populated alongside the typed Config for
+/// debugging + the B24 / R8-DEPLOY1 regression pin on
+/// `ZSBX_SANDBOX_ID`. The Go driver ignores Env.
+///
+/// `restore_from`, when `Some`, switches the per-task surface to the
+/// restore branch: it sets the typed `RestoreFrom` Config field
+/// (`task_config.go:73`). When `None`, cold-boot (the original
+/// behaviour and the only path used by `Self::create` callers).
+///
+/// KillTimeout=10s is the same window the cleanup trap uses.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_nomad_job_json(
     job_id: &str,
@@ -2198,120 +2897,228 @@ pub(crate) fn build_nomad_job_json(
     user_id: &str,
     project_id: &str,
     sandbox_id: &str,
+    local_nomad_node_id: Option<&str>,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "Job": {
-            "ID": job_id,
-            "Name": job_id,
-            "Type": "service",
-            "Datacenters": [cfg.nomad_ch.datacenter],
-            "Meta": {
-                "zeroship.user": user_id,
-                "zeroship.project": project_id,
-                "zeroship.sandbox": sandbox_id,
-                "zeroship.vm_index": vm_index.to_string(),
+    build_nomad_job_json_with(
+        job_id,
+        cfg,
+        vm_index,
+        workspace_img,
+        user_home_img,
+        pubkey_hex,
+        user_id,
+        project_id,
+        sandbox_id,
+        None,
+        local_nomad_node_id,
+    )
+}
+
+/// Lower-level builder used by [`build_nomad_job_json`] and by tests
+/// that want to pin a restore path without reaching for
+/// `std::env::set_var`. Production code paths go through
+/// `build_nomad_job_json`; this helper is `pub(crate)` to keep the
+/// test surface clean.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_nomad_job_json_with(
+    job_id: &str,
+    cfg: &SandboxConfig,
+    vm_index: u16,
+    workspace_img: &Path,
+    user_home_img: &Path,
+    pubkey_hex: &str,
+    user_id: &str,
+    project_id: &str,
+    sandbox_id: &str,
+    restore_from: Option<&Path>,
+    local_nomad_node_id: Option<&str>,
+) -> serde_json::Value {
+    // Per-VM env block. Largely redundant with the typed Config block
+    // below, but kept for debugging + the B24 / R8-DEPLOY1 regression
+    // pin on `ZSBX_SANDBOX_ID`. The Go driver ignores Env.
+    //
+    // virtio-blk pivot (bug #11): the three virtio-fs share dirs
+    // are gone — we pass the two image paths + the controller pubkey
+    // as hex. The driver attaches the images as /dev/vdb,/vdc and
+    // injects the pubkey into the kernel cmdline.
+    let mut env = serde_json::json!({
+        "ZSBX_VM_INDEX": vm_index.to_string(),
+        // Artifact directory holding kernel + rootfs. Renamed from
+        // ZSBX_HERE in round 3 (M4) — the new name matches the Rust
+        // struct field `runtime_dir`'s intent.
+        "ZSBX_ARTIFACT_DIR": cfg.nomad_ch.runtime_dir.display().to_string(),
+        // ZSBX_RUNTIME is the per-allocation working dir Nomad
+        // provisions per task; the literal `${NOMAD_TASK_DIR}` here
+        // is a Nomad template variable the agent expands at launch.
+        "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
+        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
+        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
+        "ZSBX_PUBKEY_HEX": pubkey_hex,
+        // Memory / CPU — debugging parity with the typed Config block.
+        "ZSBX_VM_MEMORY_MB": cfg.memory_mb.to_string(),
+        "ZSBX_VM_CPUS_BOOT": cpus_boot(cfg.cpus).to_string(),
+        // M6: pair the second octet with the controller-side
+        // computation of `agent_url`. Both sides MUST read the
+        // same value so the tap/IP the driver provisions matches
+        // the IP the controller dials.
+        "ZSBX_SUBNET_BASE_OCTET":
+            cfg.nomad_ch.subnet_second_octet.to_string(),
+        // B24 / R8-DEPLOY1 regression pin: ZSBX_SANDBOX_ID must be
+        // present. The value is passed in Uuid::simple() form
+        // (32-hex, no hyphens) — matching the format used by job_id
+        // and host_dir derivation elsewhere in this file.
+        "ZSBX_SANDBOX_ID": sandbox_id,
+    });
+    // Restore-path env entry. Cold-boot leaves it unset.
+    if let Some(p) = restore_from {
+        env["ZSBX_RESTORE_FROM"] = serde_json::Value::String(p.display().to_string());
+    }
+
+    let resources = serde_json::json!({
+        // CPU MHz is advisory — see `NOMAD_CPU_MHZ_ADVISORY`. Memory
+        // is the real bin-packing input.
+        //
+        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix, 2026-05-22 cluster
+        // validation). CH v51.1 mmap-faults the full guest RAM
+        // during snapshot/restore which gets accounted to the task's
+        // memcg; without slack the cgroup OOM-killer fires when CH
+        // approaches the hard limit. MemoryMB stays as the
+        // bin-packing input; MemoryMaxMB is the oversubscription
+        // ceiling Nomad enforces via memory.high.
+        "CPU": NOMAD_CPU_MHZ_ADVISORY,
+        "MemoryMB": cfg.memory_mb as u32,
+        "MemoryMaxMB": (cfg.memory_mb * 2) as u32,
+    });
+
+    // Typed Config block — field names + types mirror
+    // `nomad-driver-ch/ch/task_config.go::TaskConfig`:
+    //
+    //   vm_index          uint16 (1..ceil)
+    //   kernel            string  (host path to vmlinux)
+    //   cpus              uint8
+    //   memory_mb         uint32
+    //   restore_from      string  (empty for cold-boot)
+    //   sandbox_id        string  (32-hex, no hyphens)
+    //   user_id           string  (typed_id `usr_...`, C-7-LT-7)
+    //   workspace_img     string  (host path)
+    //   user_home_img     string  (host path)
+    //   pubkey_hex        string  (64-hex, no `0x`)
+    //   subnet_base_octet uint16  (0..255, default 99)
+    //   disks/fs/net      block-lists (empty → driver auto-
+    //                     synthesises from the above)
+    //
+    // `kernel` path: the driver's StartTask appends `/vmlinuz` to the
+    // runtime_dir. We forward the full path derived here for
+    // explicitness; if the driver evolves its schema the controller
+    // side picks up the change in one place.
+    let kernel_path = cfg.nomad_ch.runtime_dir.join("vmlinuz");
+    let restore_str = restore_from
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    // Option C Phase 2 (2026-05-25 staging-locality ADR):
+    // emit `stage_disk_images: true` ONLY when the operator
+    // has flipped the controller-side flag AND we're on the
+    // cold-boot branch (the restore branch stages rootfs
+    // via its own RootfsSource hardlink/copy and does not
+    // re-stage workspace.img / home.img). The Go driver's
+    // TaskConfig decodes this from the HCL schema; when
+    // false (Phase 2 default), the driver's StartTask
+    // skips its stageDiskImages op and the controller-side
+    // spawn_blocking block above retains responsibility.
+    let stage_disk_images = cfg.driver_stages_disk_images
+        && restore_from.is_none();
+    let config = serde_json::json!({
+        "vm_index": vm_index,
+        "kernel": kernel_path.display().to_string(),
+        "cpus": cpus_boot(cfg.cpus),
+        "memory_mb": cfg.memory_mb as u32,
+        "restore_from": restore_str,
+        "sandbox_id": sandbox_id,
+        // C-7-LT-7: user_id feeds the driver's per-user-home
+        // path allow-list. Without this, the restore-branch
+        // rewriter rejects /var/zeroship/ch/users/<usr>/home.img
+        // (smoke-r17 verbatim failure mode). Cross-tenant
+        // isolation is preserved on the driver side via
+        // strict user_id equality in the prefix check.
+        "user_id": user_id,
+        "workspace_img": workspace_img.display().to_string(),
+        "user_home_img": user_home_img.display().to_string(),
+        "pubkey_hex": pubkey_hex,
+        "subnet_base_octet": cfg.nomad_ch.subnet_second_octet,
+        "stage_disk_images": stage_disk_images,
+        // Block-lists — empty triggers driver-side
+        // auto-synthesis from the typed fields above
+        // (matches T-3 default behaviour).
+        "disks": [],
+        "fs": [],
+        "net": [],
+    });
+
+    // Option C Phase 2: also propagate the staging-locality flag
+    // via job-level Meta. The driver reads `stage_disk_images` from
+    // its typed TaskConfig (above), so this Meta entry is observer-
+    // facing only (Nomad UI / `nomad job inspect` / log aggregators);
+    // it gives operators a one-glance signal that the alloc was
+    // submitted under driver-side staging. Cold-boot only (the
+    // restore branch sets stage_disk_images=false above).
+    let stage_disk_images_meta = cfg.driver_stages_disk_images
+        && restore_from.is_none();
+    let mut job = serde_json::json!({
+        "ID": job_id,
+        "Name": job_id,
+        "Type": "service",
+        "Datacenters": [cfg.nomad_ch.datacenter],
+        "Meta": {
+            "zeroship.user": user_id,
+            "zeroship.project": project_id,
+            "zeroship.sandbox": sandbox_id,
+            "zeroship.vm_index": vm_index.to_string(),
+            "zsbx_stage_disks": stage_disk_images_meta.to_string(),
+        },
+        "TaskGroups": [{
+            "Name": "vm",
+            "Count": 1,
+            "RestartPolicy": {
+                "Attempts": 0,
+                "Mode": "fail",
+                "Interval": 30_000_000_000u64,    // 30s, ns
+                "Delay":     5_000_000_000u64,    //  5s, ns
             },
-            "TaskGroups": [{
-                "Name": "vm",
-                "Count": 1,
-                "RestartPolicy": {
-                    "Attempts": 0,
-                    "Mode": "fail",
-                    "Interval": 30_000_000_000u64,    // 30s, ns
-                    "Delay":     5_000_000_000u64,    //  5s, ns
-                },
-                "ReschedulePolicy": {
-                    "Attempts": 0,
-                    "Unlimited": false,
-                },
-                "Tasks": [{
-                    "Name": "ch",
-                    "Driver": "raw_exec",
-                    "Config": {
-                        "command": cfg.nomad_ch.wrapper_path.display().to_string(),
-                    },
-                    "Env": {
-                        "ZSBX_VM_INDEX": vm_index.to_string(),
-                        // Artifact directory holding kernel + rootfs.
-                        // Renamed from ZSBX_HERE in round 3 (M4) —
-                        // the previous name was meaningless on the
-                        // bash side; this matches the Rust struct
-                        // field `runtime_dir`'s intent.
-                        "ZSBX_ARTIFACT_DIR": cfg.nomad_ch.runtime_dir.display().to_string(),
-                        // ZSBX_RUNTIME is the per-allocation working
-                        // dir Nomad provisions per task; the literal
-                        // `${NOMAD_TASK_DIR}` here is a Nomad
-                        // template variable that the agent expands
-                        // before invoking the wrapper, NOT a bash
-                        // expansion at our level. See
-                        // https://developer.hashicorp.com/nomad/docs/runtime/environment
-                        "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
-                        // virtio-blk pivot (bug #11): the three virtio-fs
-                        // share dirs are gone. We now pass full image
-                        // paths (per-sandbox workspace + per-user home)
-                        // and the controller pubkey as hex. The wrapper
-                        // attaches the images as /dev/vdb,/vdc and
-                        // injects the pubkey into the kernel cmdline.
-                        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
-                        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
-                        "ZSBX_PUBKEY_HEX": pubkey_hex,
-                        // Memory / CPU. The wrapper substitutes these
-                        // into CH's `--memory size=${N}M,shared=on` and
-                        // `--cpus boot=${N}` flags. Without these the
-                        // wrapper would have no way to honour
-                        // SandboxConfig.{memory_mb,cpus} — the Resources
-                        // block is advisory-only on raw_exec.
-                        "ZSBX_VM_MEMORY_MB": cfg.memory_mb.to_string(),
-                        "ZSBX_VM_CPUS_BOOT": cpus_boot(cfg.cpus).to_string(),
-                        // M6: pair the second octet with the
-                        // controller-side computation of `agent_url`.
-                        // Both sides MUST read the same value so the
-                        // tap/IP the wrapper provisions matches the IP
-                        // the controller dials.
-                        "ZSBX_SUBNET_BASE_OCTET":
-                            cfg.nomad_ch.subnet_second_octet.to_string(),
-                        // B24 / R8-DEPLOY1: the wrapper's cold-boot
-                        // env validator (nomad-vm-wrapper.sh:153)
-                        // hard-errors when ZSBX_SANDBOX_ID is unset;
-                        // missing it terminated cluster-smoke allocs
-                        // ~50ms into spawn (0/16 CREATE at HEAD
-                        // cf702457). The value is embedded VERBATIM
-                        // in the guest's kernel cmdline as
-                        // `SANDBOX_AGENT_SANDBOX_ID=<value>` (wrapper
-                        // line 641) and feeds the in-VM agent's
-                        // `init_sandbox_id_from_env` (R7-S1). The
-                        // wrapper's `[!0-9a-zA-Z_]` validator at
-                        // line 222 rejects hyphens, so the caller
-                        // passes Uuid::simple() (32-hex, no hyphens)
-                        // — matching the format used by job_id and
-                        // host_dir derivation elsewhere in this file.
-                        "ZSBX_SANDBOX_ID": sandbox_id,
-                    },
-                    "Resources": {
-                        // CPU MHz is advisory under raw_exec + CH —
-                        // see `NOMAD_CPU_MHZ_ADVISORY`. Memory is the
-                        // real bin-packing input.
-                        //
-                        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix,
-                        // 2026-05-22 cluster validation). CH v51.1
-                        // mmap-faults the full guest RAM during
-                        // snapshot/restore which gets accounted to
-                        // the task's memcg; without slack the cgroup
-                        // OOM-killer fires when CH approaches the
-                        // hard limit. Matches the proposal's § 2
-                        // architectural recommendation. MemoryMB
-                        // stays as the bin-packing input;
-                        // MemoryMaxMB is the oversubscription
-                        // ceiling Nomad enforces via memory.high.
-                        "CPU": NOMAD_CPU_MHZ_ADVISORY,
-                        "MemoryMB": cfg.memory_mb as u32,
-                        "MemoryMaxMB": (cfg.memory_mb * 2) as u32,
-                    },
-                    "KillTimeout": 10_000_000_000u64,  // 10s, ns
-                }],
+            "ReschedulePolicy": {
+                "Attempts": 0,
+                "Unlimited": false,
+            },
+            "Tasks": [{
+                "Name": "ch",
+                "Driver": "ch",
+                "Config": config,
+                "Env": env,
+                "Resources": resources,
+                "KillTimeout": 10_000_000_000u64,  // 10s, ns
             }],
-        }
-    })
+        }],
+    });
+    // r3-A (T-8b-stress-r3 fix): pin alloc placement to THIS worker
+    // when the controller cached its local Nomad node_id at boot.
+    // The constraint targets `${node.unique.id}` (Nomad's per-client
+    // unique-ID interpolation, equal to `stats.client.node_id`) with
+    // a strict equality operand — Nomad rejects the alloc as
+    // unschedulable if no client matches, surfacing the
+    // misconfiguration loudly rather than silently scheduling
+    // elsewhere. See `crate::backend::nomad_ch::fetch_local_nomad_node_id`
+    // for the boot-time lookup; `None` (lookup failed / dev tests)
+    // omits the Constraints block entirely so the pre-r3-A
+    // random-placement shape is preserved as the fallback.
+    if let Some(node_id) = local_nomad_node_id {
+        job["Constraints"] = serde_json::json!([
+            {
+                "LTarget": "${node.unique.id}",
+                "Operand": "=",
+                "RTarget": node_id,
+            }
+        ]);
+    }
+    serde_json::json!({ "Job": job })
 }
 
 // ─── Nomad HTTP helpers ─────────────────────────────────────────
@@ -2378,15 +3185,23 @@ async fn stop_nomad_job(
 async fn wait_for_alloc_running(
     nomad_addr: &str,
     job_id: &str,
+    sandbox_id: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
+    let fn_started = Instant::now();
+    let deadline = fn_started + timeout;
     let url = format!("{nomad_addr}/v1/job/{job_id}/allocations");
     let mut last_status: Option<String> = None;
     let mut last_parse_err: Option<String> = None;
     let mut last_parse_log_at: Option<Instant> = None;
     let mut last_http_err: Option<String> = None;
     let mut last_http_log_at: Option<Instant> = None;
+    // r32-T1 trace: emit first time ANY alloc becomes visible from
+    // the /allocations endpoint — separates "Nomad accepted job" from
+    // "client picked it up and reported running". The gap between
+    // submit_done (controller emit) and this log is the eval+placement
+    // window inside Nomad.
+    let mut alloc_first_seen_logged = false;
     while Instant::now() < deadline {
         let resp = http_get_unsigned(&url, Duration::from_secs(5)).await;
         match resp {
@@ -2403,6 +3218,8 @@ async fn wait_for_alloc_running(
                             .unwrap_or(true);
                         if stale {
                             tracing::warn!(
+                                sandbox_id = %sandbox_id,
+                                job = %job_id,
                                 error = %msg,
                                 "sandbox/nomad-ch alloc poll: JSON parse error (will retry)"
                             );
@@ -2414,7 +3231,19 @@ async fn wait_for_alloc_running(
                     }
                 };
                 let mut latest: Option<String> = None;
-                for a in allocs.as_array().into_iter().flatten() {
+                let alloc_arr = allocs.as_array();
+                if !alloc_first_seen_logged
+                    && alloc_arr.map(|a| !a.is_empty()).unwrap_or(false)
+                {
+                    tracing::info!(
+                        sandbox_id = %sandbox_id,
+                        job = %job_id,
+                        elapsed_ms = %fn_started.elapsed().as_millis(),
+                        "sandbox/nomad-ch alloc_first_seen"
+                    );
+                    alloc_first_seen_logged = true;
+                }
+                for a in alloc_arr.into_iter().flatten() {
                     let cs = a["ClientStatus"].as_str().unwrap_or("").to_string();
                     if cs == "running" {
                         return Ok(());
@@ -2427,9 +3256,30 @@ async fn wait_for_alloc_running(
                             .as_str()
                             .unwrap_or("")
                             .to_string();
-                        return Err(format!(
-                            "nomad alloc terminal status={cs}: {desc}"
-                        ));
+                        // T-8b-stress-r2 controller v34: also harvest
+                        // the per-task TaskEvent DisplayMessage. Nomad's
+                        // alloc-level `ClientDescription` is a generic
+                        // rollup ("Failed tasks") that loses the
+                        // actionable driver-side message — operators
+                        // SSH'ing the worker to read `nomad alloc
+                        // status` is the friction this surface
+                        // removes. The driver-side msg lives at
+                        // `TaskStates[<task>].Events[].DisplayMessage`;
+                        // we collate the messages from any task with
+                        // `Failed: true` so the controller's wire
+                        // envelope carries the full chain
+                        // (`backend_create_failed: <generic>: <driver
+                        // verbatim>`).
+                        let driver_msgs = extract_failed_task_event_msgs(a);
+                        let composed = if driver_msgs.is_empty() {
+                            format!("nomad alloc terminal status={cs}: {desc}")
+                        } else {
+                            format!(
+                                "nomad alloc terminal status={cs}: {desc}: {}",
+                                driver_msgs.join(" | ")
+                            )
+                        };
+                        return Err(composed);
                     }
                     latest = Some(cs);
                 }
@@ -2451,6 +3301,8 @@ async fn wait_for_alloc_running(
                     .unwrap_or(true);
                 if stale {
                     tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        job = %job_id,
                         error = %msg,
                         "sandbox/nomad-ch alloc poll: HTTP non-200 (will retry)"
                     );
@@ -2470,6 +3322,8 @@ async fn wait_for_alloc_running(
                     .unwrap_or(true);
                 if stale {
                     tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        job = %job_id,
                         error = %e,
                         "sandbox/nomad-ch alloc poll: HTTP transport error (will retry)"
                     );
@@ -2495,6 +3349,173 @@ async fn wait_for_alloc_running(
     Err(msg)
 }
 
+/// T-8b-stress-r2 controller v34: collate the per-task DisplayMessage
+/// strings from any TaskState marked `Failed: true` so the controller's
+/// terminal-error envelope carries the driver-side verbatim message
+/// instead of just Nomad's generic "Failed tasks" rollup.
+///
+/// Shape of the Nomad alloc JSON the function walks:
+///
+/// ```json
+/// {
+///   "ClientStatus": "failed",
+///   "TaskStates": {
+///     "ch": {
+///       "State": "dead",
+///       "Failed": true,
+///       "Events": [
+///         {"Type": "Driver Failure", "DisplayMessage": "...verbatim...", "Time": ...},
+///         {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"},
+///         ...
+///       ]
+///     }
+///   }
+/// }
+/// ```
+///
+/// Returns a deduplicated, ordered list of `"<task>=<msg>"` strings
+/// from one diagnostic event per failed task. Multiple failed tasks
+/// (rare — a Nomad alloc typically has one) are joined by
+/// `wait_for_alloc_running` with ` | `.
+///
+/// Empty list if the alloc has no `TaskStates` or no failed tasks.
+/// Pure function, no I/O — pinned by unit tests below.
+///
+/// `pub(crate)` so the restore-path sibling (`restore_handler.rs::
+/// wait_for_alloc_running_blocking`) reuses the same extraction. Keeping
+/// the implementations in lockstep is the whole point of the v34
+/// verbatim-msg propagation — divergence would silently re-introduce
+/// the observability gap on the wake path.
+///
+/// ### T-8b-stress-r3 fix: event-type preference
+///
+/// Pre-r3 logic walked `Events[]` in REVERSE and took the first non-
+/// empty DisplayMessage. That selects the LAST event, which on a
+/// failed alloc is almost always Nomad's `Alloc Unhealthy` event with
+/// the useless generic message `"Unhealthy because of failed task"`.
+/// The actionable driver-emitted message (`Driver Failure` with the
+/// `StartTask: disk[1] workspace.img does not exist ...` text) appears
+/// EARLIER in the array and was silently masked.
+///
+/// Stress-r3 verbatim: 47/47 CREATE failures surfaced as `... Failed
+/// tasks: ch: Unhealthy because of failed task` — confirming the
+/// regression. The fix walks the Events array and prefers any event
+/// whose `Type` is in [`DIAGNOSTIC_EVENT_TYPES`] (Driver Failure, Task
+/// Setup Failure, etc.) over the generic Nomad-emitted `Alloc
+/// Unhealthy` / `Restart Signaled` etc. If no diagnostic event is
+/// present, falls back to the last non-empty DisplayMessage (the
+/// pre-r3 behaviour) so we never lose information.
+pub(crate) fn extract_failed_task_event_msgs(alloc: &serde_json::Value) -> Vec<String> {
+    let task_states = match alloc["TaskStates"].as_object() {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::with_capacity(task_states.len());
+    for (task_name, ts) in task_states {
+        let failed = ts["Failed"].as_bool().unwrap_or(false);
+        if !failed {
+            continue;
+        }
+        let events = match ts["Events"].as_array() {
+            Some(e) => e,
+            None => continue,
+        };
+        // Two-pass selection:
+        //   pass 1: prefer an event whose Type is in the diagnostic
+        //           allow-list (Driver Failure et al.). Walk forward so
+        //           the FIRST diagnostic event wins (drivers typically
+        //           emit only one Driver Failure event per alloc; if
+        //           multiple appear, the first one is the root cause
+        //           and subsequent ones are restart-retry side effects).
+        //   pass 2: fall back to the LAST non-empty DisplayMessage —
+        //           previous behaviour, retained so we never lose
+        //           information when the driver omits a typed event.
+        let mut picked: Option<&str> = None;
+        for ev in events.iter() {
+            let ty = ev["Type"].as_str().unwrap_or("");
+            if !is_diagnostic_event_type(ty) {
+                continue;
+            }
+            if let Some(msg) = ev["DisplayMessage"].as_str() {
+                let trimmed = msg.trim();
+                if !trimmed.is_empty() {
+                    picked = Some(trimmed);
+                    break;
+                }
+            }
+        }
+        if picked.is_none() {
+            for ev in events.iter().rev() {
+                if let Some(msg) = ev["DisplayMessage"].as_str() {
+                    let trimmed = msg.trim();
+                    if !trimmed.is_empty() {
+                        picked = Some(trimmed);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(trimmed) = picked {
+            // Cap each task's message at 2 KiB so a pathological
+            // driver that emits a multi-MB error doesn't bloat
+            // the wire envelope. Truncation is rare but bounded.
+            //
+            // r27-M2: byte-indexing `&trimmed[..PER_TASK_CAP]` would
+            // panic if the boundary lands mid-UTF-8 codepoint (e.g. a
+            // driver-emitted error containing a multi-byte char that
+            // straddles byte 2048). Mirror the canonical char-boundary
+            // decrement pattern from `wake_machine::sanitize_error_message`
+            // (the `is_char_boundary` loop at `wake_machine.rs:811`)
+            // so any input — including ones engineered to land a
+            // multi-byte char on the cap boundary — produces a valid
+            // `&str` slice. Cost: a handful of byte comparisons per
+            // truncation event (truncations are rare; the
+            // `extract_failed_task_event_msgs_caps_oversized_message`
+            // test is the only fixture that hits this path today).
+            const PER_TASK_CAP: usize = 2048;
+            let bounded: String = if trimmed.len() > PER_TASK_CAP {
+                let mut end = PER_TASK_CAP;
+                while end > 0 && !trimmed.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…(truncated)", &trimmed[..end])
+            } else {
+                trimmed.to_string()
+            };
+            out.push(format!("{task_name}: {bounded}"));
+        }
+    }
+    out
+}
+
+/// Nomad TaskEvent `Type` strings that carry the load-bearing driver-
+/// side or scheduler-side failure cause. Source-of-truth is Nomad's
+/// `nomad/structs/structs.go::TaskEvent*` constants; this list pins
+/// the subset where DisplayMessage is the actionable error rather
+/// than a generic rollup. Match is case-insensitive on full string
+/// equality to avoid substring false-positives ("Driver" alone is a
+/// healthy event type for happy-path "downloading artifacts" lines).
+///
+/// `Alloc Unhealthy`, `Restart Signaled`, `Terminated`, `Killing`,
+/// `Killed` are deliberately EXCLUDED: they're emitted by Nomad's
+/// alloc/task state machine AFTER the underlying failure and their
+/// DisplayMessage is the generic envelope ("Unhealthy because of
+/// failed task" etc.). The diagnostic-source event always precedes
+/// these in the Events array.
+fn is_diagnostic_event_type(ty: &str) -> bool {
+    // Lower-case once; full-string equality on each candidate.
+    let t = ty.trim().to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "driver failure"
+            | "task setup failure"
+            | "setup failure"
+            | "failed validating task"
+            | "failed artifact download"
+            | "exec plugin"
+    )
+}
+
 /// True when every alloc in the array has a terminal client status.
 /// An empty / missing array is treated as terminal (no allocs to
 /// wait on). Pulled out as a free helper for unit testing —
@@ -2517,7 +3538,7 @@ fn allocs_all_terminal(allocs: Option<&Vec<serde_json::Value>>) -> bool {
 }
 
 /// Block until the job's allocations are all in a terminal client
-/// state (the wrapper script has exited → tap device + IP + virtiofsd
+/// state (the ch driver task has exited → tap device + IP + virtiofsd
 /// sockets released). Returns Ok on:
 ///
 ///   - `GET /v1/job/<id>` → 404 (Nomad GC removed the record), OR
@@ -2526,9 +3547,9 @@ fn allocs_all_terminal(allocs: Option<&Vec<serde_json::Value>>) -> bool {
 ///     empty / 404).
 ///
 /// We previously short-circuited on `Status == "dead" && Stop == true`
-/// at the *job* level, but that races the wrapper-script teardown:
+/// at the *job* level, but that races the ch driver teardown:
 /// the job record is dead while individual alloc tasks (the
-/// `raw_exec` wrapper, virtiofsd children) are still reaping. A
+/// ch driver's CH + virtiofsd children) are still reaping. A
 /// follow-up `create` reusing the released vm_index can collide on
 /// the still-bound tap device. Polling the allocation client-status
 /// instead catches the actual underlying-process termination.
@@ -2679,6 +3700,87 @@ async fn wait_for_job_gone(
         msg.push_str(&format!("; last parse error: {e}"));
     }
     Err(msg)
+}
+
+// ─── Nomad agent self-identification ─────────────────────────────
+
+/// r3-A (T-8b-stress-r3 fix). Fetch the Nomad agent's local node ID by
+/// querying `GET /v1/agent/self` against `nomad_addr`. Returns the node
+/// ID string (`Stats.client.node_id`) when the local Nomad agent is
+/// reachable and running in client mode.
+///
+/// **Why this matters**: the controller stages `workspace.img` on its
+/// LOCAL filesystem before submitting the Nomad job. Without a placement
+/// constraint pinning the alloc to THIS node, Nomad's scheduler can pick
+/// any client in the cluster — when it picks a different worker, the
+/// driver's `assert_disk_image_present` stats the path on that node's
+/// local fs and ENOENTs. T-8b-stress-r3 surfaced 78% cross-node-placement
+/// failure at WORKER_COUNT=3 from exactly this gap.
+///
+/// **Failure shape**: returns `Err(_)` when Nomad is unreachable, the
+/// response is non-200, the JSON is unparseable, or `Stats.client.node_id`
+/// is absent (single-server mode, or an unexpected agent shape). Callers
+/// at boot are expected to demote the failure to a WARN + bump the
+/// `inc_nomad_node_id_lookup_failure` counter, then continue with the
+/// `Option<String>` set to `None`. The fallback shape (no Constraints
+/// block) restores the pre-r3-A behaviour — random cross-node placement
+/// — so a controller restart against a transiently-unavailable Nomad
+/// agent doesn't fail the boot path.
+pub(crate) async fn fetch_local_nomad_node_id(
+    nomad_addr: &str,
+) -> Result<String, String> {
+    let url = format!("{nomad_addr}/v1/agent/self");
+    let resp = http_get_unsigned(&url, Duration::from_secs(5)).await?;
+    if resp.status != 200 {
+        return Err(format!(
+            "GET {url} → status {}: {}",
+            resp.status,
+            resp.body.trim()
+        ));
+    }
+    parse_nomad_agent_self_node_id(&resp.body)
+}
+
+/// Pure parser for the `/v1/agent/self` body. Extracted from
+/// [`fetch_local_nomad_node_id`] so unit tests can exercise the
+/// response-shape handling (Nomad-version drift, missing fields,
+/// empty strings) without launching an HTTP fixture.
+///
+/// **Field path**: `stats.client.node_id`. Live Nomad 1.x agents emit
+/// lower-case Go-json-tag keys (`stats`/`client`/`node_id`); some
+/// older API references show PascalCase. Accept both for defensiveness
+/// — a server-mode-only agent has no `stats.client` block, which is
+/// the legitimate "no client node_id" shape and surfaces here as
+/// `Err("missing stats.client.node_id…")`.
+pub(crate) fn parse_nomad_agent_self_node_id(body: &str) -> Result<String, String> {
+    let body: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("parse /v1/agent/self body: {e}"))?;
+    // Nomad's /v1/agent/self body shape (verified against Nomad 1.x):
+    //   { "config": {...}, "stats": {...}, "member": {...} }
+    // The client's node ID lives under `stats.client.node_id`. Note the
+    // lowercase `stats` / `client` — older docs sometimes show `Stats`,
+    // but the live API response is lower-case (Go json tags). Accept
+    // both for defensiveness against agent-version drift.
+    let node_id = body
+        .get("stats")
+        .or_else(|| body.get("Stats"))
+        .and_then(|stats| stats.get("client").or_else(|| stats.get("Client")))
+        .and_then(|client| {
+            client.get("node_id").or_else(|| client.get("NodeID"))
+        })
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            "missing stats.client.node_id in /v1/agent/self response \
+             (single-server-only agent? unexpected response shape?)"
+                .to_string()
+        })?;
+    if node_id.is_empty() {
+        return Err(
+            "stats.client.node_id present but empty in /v1/agent/self response"
+                .to_string(),
+        );
+    }
+    Ok(node_id.to_string())
 }
 
 // ─── Generic HTTP (unsigned — Nomad API) ─────────────────────────
@@ -2853,7 +3955,7 @@ fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
 ///
 /// **Why both checks?** During N=8 rapid-recycle stress testing the
 /// host-side process tree (cloud-hypervisor + 3× virtiofsd + the
-/// bash wrapper + the tap binding) was observed to lag Nomad's view
+/// ch driver task + the tap binding) was observed to lag Nomad's view
 /// of alloc-terminal by 0.5–2 s. A fresh `create()` for the same VM
 /// index could land while a *previous* tenant's agent was still
 /// answering `/livez=200` on the same IP — the controller would
@@ -2883,21 +3985,70 @@ fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
 /// emit a one-shot warning and fall back to /livez-only behaviour.
 /// Removing this fallback once the agent fleet is fully upgraded is
 /// a one-line change.
+///
+/// ## R19-I1: two-phase probe (compio-native connect gate, then ureq)
+///
+/// Previous implementation: a single `compio::runtime::spawn_blocking(||
+/// ureq::get(livez).timeout(500ms).call())` per loop iteration. That
+/// carried the *same* wedge shape C-7-LT-2-PR1 just fixed on the
+/// teardown side: ureq's `.timeout()` is a request-deadline timeout,
+/// not a connect timeout. A half-collapsed TAP route at create time
+/// (stale-tenant CH still alive, new TAP not fully wired) hangs SYN
+/// for the kernel's retransmit ceiling (~30 s on Linux defaults). Each
+/// stuck probe burns the entire intended cadence; `agent_livez_timeout`
+/// then collapses to "one probe" instead of the designed poll loop.
+///
+/// Today: a per-iteration `probe_agent_reachable_tcp(addr, 150ms)`
+/// gate (Phase 1) decides whether to issue the ureq /livez call
+/// (Phase 2). Phase 1's outer `compio::time::timeout` caps a stuck
+/// SYN at 150 ms exactly — independent of kernel SYN-retransmit. Only
+/// once the TCP layer ACKs do we spend a spawn_blocking + ureq on the
+/// /livez HTTP check; a stuck ureq there now means the agent's TCP
+/// listener is up but its HTTP server is wedged, a much rarer failure
+/// shape and one that's still bounded by `agent_livez_timeout_secs` +
+/// `CreateGuard::drop` tear-down via the fixed teardown probe.
+///
+/// Closes the second of two ureq-probe wedge sites flagged by r19-A5
+/// / R19-I1 (`docs/reviews/sandbox-snapshot-restore-concurrency-2026-05-25-r19.md`).
 async fn wait_for_agent_livez(
     base_url: &str,
     expected_fp: &str,
     signing_key: &Arc<SigningKey>,
     timeout: Duration,
 ) -> Result<(), String> {
+    const CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
     let deadline = Instant::now() + timeout;
     let livez_url = format!("{base_url}/livez");
+    // Parse host:port from the base_url ONCE — every Phase 1 probe in
+    // the loop reuses the SocketAddr. If we can't parse it the gate
+    // can't proceed; surface that immediately rather than burning
+    // budget on doomed probes (mirrors `wait_for_agent_silent`).
+    let probe_addr = match parse_agent_probe_addr(base_url) {
+        Ok(a) => a,
+        Err(e) => {
+            return Err(format!(
+                "agent at {base_url} unparseable; refusing to probe \
+                 (parse error: {e}; expected fp={expected_fp})"
+            ));
+        }
+    };
     let mut last_fp: Option<String> = None;
     let mut last_version_status: Option<u16> = None;
     while Instant::now() < deadline {
-        // 1. Cheap unsigned /livez probe — gates the more expensive
-        //    signed /version call. An agent that's not yet listening
-        //    won't even answer /livez, so we save a sign+RPC round
-        //    on every poll where the agent simply hasn't booted yet.
+        // Phase 1 (R19-I1): compio-native TCP-connect gate. Caps a
+        // stuck SYN at CONNECT_TIMEOUT (no kernel SYN-retransmit
+        // wedge). An agent that's not yet listening turns into a
+        // fast miss; we sleep the cadence and retry.
+        if !probe_agent_reachable_tcp(probe_addr, CONNECT_TIMEOUT).await {
+            // 50 ms livez poll cadence — matches the post-gate path.
+            compio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        // Phase 2: cheap unsigned /livez HTTP probe — gates the more
+        //    expensive signed /version call. TCP layer just verified
+        //    above, so a stuck ureq here is "HTTP server wedged after
+        //    socket up" — rarer than the SYN-retransmit wedge, and
+        //    still bounded by the outer deadline.
         let probe_url = livez_url.clone();
         let livez_status = compio::runtime::spawn_blocking(move || {
             ureq::get(&probe_url)
@@ -2971,7 +4122,7 @@ async fn wait_for_agent_livez(
     if let Some(actual_fp) = last_fp {
         Err(format!(
             "stale agent at {base_url}: expected pubkey_fingerprint={expected_fp}, \
-             got {actual_fp}; previous tenant's wrapper still owns the IP"
+             got {actual_fp}; previous tenant's ch driver task still owns the IP"
         ))
     } else if last_version_status == Some(401) {
         Err(format!(
@@ -2988,7 +4139,7 @@ async fn wait_for_agent_livez(
 ///
 /// `wait_for_job_gone` returns Ok when Nomad reports the alloc
 /// terminal + job purged, but that lags the host process tree
-/// (cloud-hypervisor + 3× virtiofsd + the bash wrapper) by 0.5–60 s
+/// (cloud-hypervisor + 3× virtiofsd + the ch driver task) by 0.5–60 s
 /// under N=8 concurrent stop+create cycles. Releasing the vm_index
 /// inside that window hands the same `10.99.<100+idx>.2:7777` IP to
 /// a fresh tenant whose `/livez=200` probe succeeds — but against
@@ -3001,14 +4152,36 @@ async fn wait_for_agent_livez(
 /// 100 ms cadence is overwhelmingly indicative of "no listener" —
 /// the agent process is gone.
 ///
-/// Failure here means any of:
-///   - connection refused
-///   - timeout
-///   - 5xx (agent process panicked mid-shutdown)
+/// A "miss" is a TCP-connect failure (refused / unreachable / our
+/// 150 ms connect-timeout exceeded). A successful connect counts as
+/// "agent still answering" and resets the counter — the socket is
+/// alive regardless of what HTTP status it would have returned.
 ///
-/// 200 OR any 1xx/2xx/3xx/4xx counts as "agent still answering" and
-/// resets the consecutive-failure counter — a stale 401 from the
-/// previous tenant means the *socket* is still alive.
+/// ## C-7-LT-2-PR1: compio-native TCP-connect probe (NOT ureq HTTP)
+///
+/// Previous implementation: `compio::runtime::spawn_blocking(|| ureq::
+/// get(&probe_url).timeout(Duration::from_millis(500)).call()).await`.
+/// That looked correct but had a fatal pathology on the TAP-collapsing
+/// teardown path: ureq's `.timeout()` is a *request-deadline* timeout,
+/// not a *connect* timeout. On a half-collapsed TAP route, TCP-connect
+/// hangs waiting for the OS to surface ECONNREFUSED/ETIMEDOUT (Linux
+/// SYN-retransmit ceiling ~30 s), so the single `ureq.call()` consumed
+/// the entire fence budget. Smoke-r13 (`docs/reviews/…T8b-smoke-r13.md`)
+/// observed `probes=1, consecutive_misses=1, elapsed_ms=30129` —
+/// exactly the "one probe in 30 s" wedge.
+///
+/// Today: a `compio::net::TcpStream::connect(addr)` wrapped in
+/// `compio::time::timeout(150ms, …)`. compio's outer timeout is a
+/// hard cancellation on a stuck connect future (io_uring CANCEL),
+/// independent of any kernel-level SYN-retransmit behaviour. So a
+/// black-hole TAP returns "miss" at 150 ms exactly, the 100 ms cadence
+/// runs as designed, and the 2-in-a-row contract clears the fence.
+///
+/// Connect-only: we don't need an HTTP request to know the agent is
+/// up — the socket either accepts SYN+ACK or it doesn't. The 150 ms
+/// connect-timeout is slightly larger than the 100 ms probe cadence
+/// so a normally-responsive agent (loopback ms latency) ACKs well
+/// inside the window.
 ///
 /// Returns:
 ///   - Ok(()) — fence passed (two consecutive misses); safe to
@@ -3019,70 +4192,220 @@ async fn wait_for_agent_silent(
     base_url: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    let livez_url = format!("{base_url}/livez");
+    // R16-A2 / R16-I2 phase instrumentation. Log target lets
+    // smoke-r12 (and future cluster runs) `RUST_LOG` just this
+    // module: `sandbox::teardown::fence=debug`. Threshold (2) is
+    // the structural invariant the smoke-r10 LEAK case violates;
+    // it's logged on entry so a future tuning is immediately
+    // visible in the trace.
+    const MISS_THRESHOLD: u32 = 2;
+    const PROBE_CADENCE: Duration = Duration::from_millis(100);
+    const CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
+    let fn_started = Instant::now();
+    let deadline = fn_started + timeout;
+    // Parse host:port from the base_url ONCE — every probe in the
+    // loop reuses the SocketAddr. If we can't parse it the fence
+    // can't proceed; surface that immediately rather than burning
+    // the budget on doomed probes.
+    let probe_addr = match parse_agent_probe_addr(base_url) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(
+                target: "sandbox::teardown::fence",
+                base_url = %base_url,
+                error = %e,
+                "host_fence: refusing to probe — base_url unparseable"
+            );
+            return Err(format!(
+                "agent at {base_url} unparseable; leaking vm_index to avoid \
+                 handing out a live IP (parse error: {e})"
+            ));
+        }
+    };
     let mut consecutive_misses = 0u32;
-    // Keep enough state to produce a useful timeout error.
-    let mut last_status: Option<u16> = None;
+    // Keep enough state to produce a useful timeout error. With the
+    // PR1 connect-only probe we no longer have a per-probe HTTP
+    // status; `last_status` stays `None` and is preserved in the
+    // error format only for log-pattern stability with prior
+    // smoke logs (operators grep for `last_http_status=`).
+    let last_status: Option<u16> = None;
     let mut probe_count: u32 = 0;
+    tracing::debug!(
+        target: "sandbox::teardown::fence",
+        base_url = %base_url,
+        probe_addr = %probe_addr,
+        timeout_ms = %timeout.as_millis(),
+        miss_threshold = MISS_THRESHOLD,
+        connect_timeout_ms = %CONNECT_TIMEOUT.as_millis(),
+        cadence_ms = %PROBE_CADENCE.as_millis(),
+        "host_fence: entered"
+    );
     loop {
         if Instant::now() >= deadline {
             break;
         }
-        let probe_url = livez_url.clone();
-        // Same compio::spawn_blocking + ureq pattern the rest of the
-        // file uses (see `wait_for_agent_livez`); blocking the runtime
-        // worker on a TCP probe would tank concurrent stop()s.
-        let outcome = compio::runtime::spawn_blocking(move || {
-            ureq::get(&probe_url)
-                .timeout(Duration::from_millis(500))
-                .call()
-        })
-        .await;
+        let probe_start = Instant::now();
+        tracing::debug!(
+            target: "sandbox::teardown::fence",
+            base_url = %base_url,
+            probe = probe_count + 1,
+            elapsed_ms = %fn_started.elapsed().as_millis(),
+            "host_fence: poll start"
+        );
+        let reachable =
+            probe_agent_reachable_tcp(probe_addr, CONNECT_TIMEOUT).await;
         probe_count += 1;
-        // Classify: "answer" (any non-5xx HTTP response or a status
-        // we got a number from) vs "miss" (connection refused,
-        // timeout, transport error, or 5xx). Bare ureq::Error::Status
-        // means an HTTP response did come back — the socket is alive.
-        let is_miss = match outcome {
-            Ok(Ok(resp)) => {
-                let s = resp.status();
-                last_status = Some(s);
-                // 5xx = agent process is mid-crash, count as miss.
-                s >= 500
-            }
-            Ok(Err(ureq::Error::Status(code, _))) => {
-                last_status = Some(code);
-                // 5xx counts as miss; 4xx (e.g. 401 from a stale
-                // tenant whose agent has our pubkey-not-yet) means
-                // the socket IS alive — NOT a miss.
-                code >= 500
-            }
-            Ok(Err(_)) => true, // transport error: connect refused, timeout, etc.
-            Err(_) => true,     // spawn_blocking panic — count as miss
-        };
+        // C-7-LT-2-PR1: classify is now connect-only. Reachable =>
+        // socket alive (the agent OR the ch driver's tap is still
+        // ACKing SYN); not reachable => miss (connect-refused,
+        // connect-unreachable, or our 150 ms connect-timeout
+        // exceeded — all three classify identically).
+        let is_miss = !reachable;
         if is_miss {
             consecutive_misses += 1;
-            if consecutive_misses >= 2 {
+            tracing::debug!(
+                target: "sandbox::teardown::fence",
+                base_url = %base_url,
+                probe = probe_count,
+                consecutive_misses,
+                miss_threshold = MISS_THRESHOLD,
+                probe_duration_ms = %probe_start.elapsed().as_millis(),
+                "host_fence: miss"
+            );
+            if consecutive_misses >= MISS_THRESHOLD {
+                tracing::info!(
+                    target: "sandbox::teardown::fence",
+                    base_url = %base_url,
+                    probes = probe_count,
+                    consecutive_misses,
+                    elapsed_ms = %fn_started.elapsed().as_millis(),
+                    "host_fence: threshold reached — agent silent fence cleared"
+                );
                 return Ok(());
             }
         } else {
+            // R16-I2 diagnostic surface: a non-zero -> 0 transition
+            // here is the alternating-answer LEAK pathology.
+            // Logged at info so smoke-r12 catches it without a
+            // verbose subscriber.
+            if consecutive_misses > 0 {
+                tracing::info!(
+                    target: "sandbox::teardown::fence",
+                    base_url = %base_url,
+                    probe = probe_count,
+                    prev_consecutive_misses = consecutive_misses,
+                    probe_duration_ms = %probe_start.elapsed().as_millis(),
+                    "host_fence: agent reachable mid-fence — consecutive_misses counter reset (R16-I2 LEAK signal)"
+                );
+            } else {
+                tracing::debug!(
+                    target: "sandbox::teardown::fence",
+                    base_url = %base_url,
+                    probe = probe_count,
+                    probe_duration_ms = %probe_start.elapsed().as_millis(),
+                    "host_fence: agent reachable"
+                );
+            }
             consecutive_misses = 0;
         }
         // 100 ms cadence — tight enough that a 0.5 s tail is caught
         // in ~5 polls; loose enough that a 30 s budget on a stuck
-        // agent doesn't burn 300+ blocking tasks. (Compare against
-        // wait_for_agent_livez at 50 ms — slightly faster here
-        // because we're polling for ABSENCE; we want to release the
-        // index as fast as is safe.)
-        compio::time::sleep(Duration::from_millis(100)).await;
+        // agent doesn't burn 300+ tasks. PR1 changes: subtract the
+        // probe's own elapsed from the cadence so a probe that
+        // takes 0 ms (loopback ACK) and a probe that takes 150 ms
+        // (connect-timeout) BOTH produce the same ~100 ms inter-
+        // probe interval — the loop's wall-time pacing is now
+        // decoupled from probe latency, which is the structural
+        // invariant smoke-r13's "probes=1" pathology violated.
+        let probe_elapsed = probe_start.elapsed();
+        if probe_elapsed < PROBE_CADENCE {
+            compio::time::sleep(PROBE_CADENCE - probe_elapsed).await;
+        }
     }
+    tracing::warn!(
+        target: "sandbox::teardown::fence",
+        base_url = %base_url,
+        probes = probe_count,
+        consecutive_misses,
+        last_status = ?last_status,
+        elapsed_ms = %fn_started.elapsed().as_millis(),
+        fence_passed = false,
+        "host_fence: deadline reached — agent still answering (R16-I2 final consecutive_misses)"
+    );
     Err(format!(
         "agent at {base_url} still answering at fence deadline \
          (probes={probe_count}, last_http_status={:?}, consecutive_misses={consecutive_misses}); \
          leaking vm_index to avoid handing out a live IP",
         last_status,
     ))
+}
+
+/// C-7-LT-2-PR1: parse the `host:port` `SocketAddr` from a probe
+/// `base_url` like `http://10.99.101.2:7777`. Connect-only — no path
+/// segment, no scheme validation beyond the `://` separator the
+/// `wait_for_agent_silent` caller's url-shape requires.
+///
+/// The agent URL the controller passes in is built locally from
+/// `vm_index` (`http://10.99.<100+idx>.2:7777`); it's never
+/// user-input. We still parse defensively because a future caller
+/// (e.g. a wake-side smoke probe) might hand in an ipv6-literal or
+/// a slightly different shape, and the fence MUST surface a parse
+/// error rather than silently probe a wrong address.
+fn parse_agent_probe_addr(base_url: &str) -> Result<std::net::SocketAddr, String> {
+    // Strip the scheme if present.
+    let after_scheme = match base_url.find("://") {
+        Some(i) => &base_url[i + 3..],
+        None => base_url,
+    };
+    // Strip any path segment (e.g. `/livez`).
+    let host_port = match after_scheme.find('/') {
+        Some(i) => &after_scheme[..i],
+        None => after_scheme,
+    };
+    if host_port.is_empty() {
+        return Err("empty host:port".into());
+    }
+    // `SocketAddr::from_str` handles both ipv4 (`a.b.c.d:port`) and
+    // ipv6-literal-with-brackets (`[::1]:port`). For non-literal
+    // hostnames we fall through to `ToSocketAddrs` (DNS).
+    use std::str::FromStr;
+    if let Ok(addr) = std::net::SocketAddr::from_str(host_port) {
+        return Ok(addr);
+    }
+    // Hostname path. The fence's caller only ever passes the
+    // controller-derived IP literal, so this branch is "be liberal in
+    // what you accept" — picks the first resolved addr.
+    use std::net::ToSocketAddrs;
+    match host_port.to_socket_addrs() {
+        Ok(mut iter) => iter
+            .next()
+            .ok_or_else(|| format!("no addresses resolved for {host_port}")),
+        Err(e) => Err(format!("resolve {host_port}: {e}")),
+    }
+}
+
+/// C-7-LT-2-PR1: compio-native TCP-connect probe with a hard outer
+/// timeout. Returns `true` iff the kernel ACKs the SYN within
+/// `connect_timeout`; `false` for refused / unreachable / our own
+/// timeout (all three are equivalent "miss" outcomes for the fence).
+///
+/// Why `compio::time::timeout` over the kernel's TCP retry behaviour:
+/// the kernel's SYN-retransmit ceiling on Linux is typically 30-90 s
+/// before ECONNREFUSED/ETIMEDOUT surfaces, which is what produced
+/// the smoke-r13 "1 probe in 30 s" wedge with ureq. compio's outer
+/// timeout cancels the connect future at exactly the budget; the
+/// underlying TCP socket is dropped via io_uring CANCEL on the next
+/// runtime tick.
+async fn probe_agent_reachable_tcp(
+    addr: std::net::SocketAddr,
+    connect_timeout: Duration,
+) -> bool {
+    let connect_fut = compio::net::TcpStream::connect(addr);
+    match compio::time::timeout(connect_timeout, connect_fut).await {
+        Ok(Ok(_stream)) => true, // SYN ACKed → socket alive
+        Ok(Err(_)) => false,     // ECONNREFUSED / EHOSTUNREACH / etc.
+        Err(_) => false,         // connect_timeout exceeded
+    }
 }
 
 // ─── small utilities (mirrored from k8s.rs) ─────────────────────
@@ -3113,6 +4436,18 @@ pub(crate) fn workspace_image_path(host_dir: &Path) -> PathBuf {
 /// The `-F` flag on mkfs.ext4 is required to format a regular file
 /// that isn't a block device; without it mkfs prompts and aborts.
 ///
+/// **Post-condition (T-8b-stress Bug 1 fix):** after either branch
+/// (skip-because-exists OR truncate+mkfs), the function asserts that
+/// `path` exists, is a file, and has non-zero size via [`assert_disk_image_present`]
+/// before returning Ok. This catches a silent-staging-failure mode
+/// (e.g., a future refactor that no-op's the truncate step would
+/// otherwise return Ok and let the driver's preflight surface the
+/// confusing "disk[N] /…/<img> does not exist" error far from the
+/// real fault). The parent directory is fsync'd so the dirent is
+/// visible to a peer process (the Nomad client) that may stat the
+/// path on a different mount-namespace or before the kernel's lazy
+/// dirent commit.
+///
 /// Returns `Err` with a String describing which subprocess failed.
 /// The caller maps that into a controller-side error log; the
 /// `CreateGuard` Drop on the calling path tears down the partial
@@ -3122,7 +4457,10 @@ pub(crate) fn create_ext4_image_if_missing(
     size_gb: u32,
 ) -> Result<(), String> {
     if path.exists() {
-        return Ok(());
+        // Idempotent skip path. Still re-assert the post-condition so
+        // a stale dirent or zero-byte sentinel surfaces here at the
+        // controller, not later at the driver's preflight stat.
+        return assert_disk_image_present(path);
     }
     // truncate(1) is universally present on debian + bash; using it
     // (rather than `std::fs::File::set_len`) keeps the path-and-size
@@ -3156,6 +4494,94 @@ pub(crate) fn create_ext4_image_if_missing(
             mkfs_status,
         ));
     }
+    // Fsync the parent directory so the new dirent is durable AND
+    // visible to a peer process statting the path before the kernel
+    // would otherwise commit. Best-effort: a failure here is logged
+    // by the caller via the returned Err but doesn't unwind the
+    // mkfs; the file is still on disk (just not necessarily
+    // crash-safe). See T-8b-stress Bug 1: 49/60 CREATEs failed with
+    // the driver reporting "workspace.img does not exist" despite
+    // the controller having just staged it — the staging-and-submit
+    // window is tight enough that a missing fsync is plausible.
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fsync_dir(parent) {
+            return Err(format!(
+                "fsync parent of {}: {e}",
+                path.display()
+            ));
+        }
+    }
+    assert_disk_image_present(path)
+}
+
+/// Post-condition assertion for [`create_ext4_image_if_missing`] and
+/// any sibling staging path that needs to guarantee a disk image is
+/// on disk before the controller hands the path off to Nomad.
+///
+/// Mirrors the driver-side `preflightDiskPaths` check
+/// (`nomad-driver-ch/ch/start_task.go::preflightDiskPaths`) so a
+/// missing-or-empty image is surfaced at the CONTROLLER's submit
+/// site, not buried in an alloc-failure rollup. Same three checks:
+///
+///   1. `path` exists (otherwise: dirent never landed).
+///   2. `path` is a regular file (otherwise: a directory at the same
+///      name, structural surprise).
+///   3. `path`'s size > 0 (otherwise: `truncate` produced a sparse
+///      file but `mkfs.ext4` was skipped, or a half-written image
+///      lingered after a prior failure).
+///
+/// T-8b-stress Bug 1 trace: the driver's preflight reported "disk[1]
+/// <path> does not exist" in 49/60 cold-boot creates. This helper
+/// makes that observation symmetrical on the controller side so a
+/// repeat of the bug surfaces at the staging step (where the
+/// CreateGuard's host_dir teardown can fire cleanly) instead of mid-
+/// alloc (where the failure is generic "Failed tasks").
+pub(crate) fn assert_disk_image_present(path: &Path) -> Result<(), String> {
+    let md = std::fs::metadata(path).map_err(|e| {
+        format!(
+            "disk image post-stage stat failed: {} ({e}); \
+             controller-side parity check for driver preflight",
+            path.display()
+        )
+    })?;
+    if md.is_dir() {
+        return Err(format!(
+            "disk image post-stage check: {} is a directory \
+             (must be a file)",
+            path.display()
+        ));
+    }
+    if md.len() == 0 {
+        return Err(format!(
+            "disk image post-stage check: {} is empty (size 0); \
+             truncate likely succeeded but mkfs.ext4 was skipped \
+             or the image was overwritten by an empty file",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Fsync a directory inode so dirent changes (file creates, renames,
+/// deletes) are durable AND visible to peer processes that stat the
+/// directory's contents before the kernel's lazy dirent commit. Used
+/// after [`create_ext4_image_if_missing`] stages a new disk image so
+/// the Nomad client's driver-side stat sees the inode immediately
+/// rather than a brief NotFound window.
+///
+/// Implemented via [`std::fs::File::sync_all`] on a `File::open`-ed
+/// directory handle. On Linux this issues `fsync(dirfd)` (the kernel
+/// accepts fsync on directory fds since forever — it's the
+/// canonical way to flush dirent changes on ext4 / xfs / btrfs).
+///
+/// Best-effort error semantics: the caller treats failure as a
+/// staging error (returns Err), since a non-durable dirent is the
+/// exact failure mode T-8b-stress Bug 1 produced.
+fn fsync_dir(dir: &Path) -> Result<(), String> {
+    let f = std::fs::File::open(dir)
+        .map_err(|e| format!("open {}: {e}", dir.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("fsync {}: {e}", dir.display()))?;
     Ok(())
 }
 
@@ -3346,6 +4772,7 @@ mod tests {
                 "zsbx-test-no-purge".to_string(),
                 PathBuf::from("/tmp/zsbx-c1-test"),
                 Uuid::nil(),
+                Duration::ZERO, // r24-A2-S3: no delay in this test
             );
             g.vm_index = Some(allocated);
             g.job_submitted = false; // skip http_delete entirely
@@ -3403,6 +4830,7 @@ mod tests {
                 "zsbx-test-leak".to_string(),
                 PathBuf::from("/tmp/zsbx-c1-leak"),
                 Uuid::nil(),
+                Duration::ZERO, // r24-A2-S3: no delay in this test
             );
             g.vm_index = Some(allocated);
             g.job_submitted = true;
@@ -3424,6 +4852,151 @@ mod tests {
         );
     }
 
+    /// R17-A5: post-migration to `detach_isolated`, `CreateGuard::drop`
+    /// dispatches the cleanup tail onto a dedicated OS thread with its
+    /// own private compio runtime — so Drop is callable without any
+    /// ambient compio runtime. Pre-migration, this exact construction
+    /// would have hit the `compio::runtime::spawn` panic-catch fallback
+    /// (no current runtime → panic → `catch_unwind` → sync vm_index
+    /// reclaim). Post-migration, the same cleanup tail runs to
+    /// completion on its private runtime and the vm_index reappears
+    /// in the pool.
+    ///
+    /// This is a `#[test]` (NOT `#[compio::test]`) on purpose — the
+    /// whole point is that no compio runtime is running on the
+    /// thread where Drop fires.
+    #[test]
+    fn create_guard_drop_runs_without_ambient_compio_runtime() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(42, 42)));
+        let allocated = pool.lock().unwrap().alloc().expect("first alloc");
+        assert_eq!(allocated, 42);
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        {
+            let mut g = CreateGuard::new(
+                pool.clone(),
+                "http://127.0.0.1:1".to_string(),
+                "zsbx-test-no-runtime".to_string(),
+                PathBuf::from("/tmp/zsbx-r17a5-test"),
+                Uuid::nil(),
+                Duration::ZERO, // r24-A2-S3: no delay in this test
+            );
+            g.vm_index = Some(allocated);
+            g.job_submitted = false; // skip http_delete; purge_ok = true
+            g.host_dir_created = false; // skip rm -rf
+            // Drop fires HERE on a plain std::thread (no compio
+            // runtime). `detach_isolated` mints its own runtime on a
+            // dedicated OS thread.
+        }
+
+        // Poll for the index to reappear (the detached cleanup must
+        // make it back to the pool). Bounded so a regression of
+        // "Drop did nothing" fails the test rather than hanging.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while Instant::now() < deadline {
+            if let Ok(i) = pool.lock().unwrap().alloc() {
+                assert_eq!(i, 42);
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            released,
+            "CreateGuard::drop did not release vm_index when called \
+             outside an ambient compio runtime — R17-A5 regression: \
+             `detach_isolated` should mint its own runtime"
+        );
+    }
+
+    /// R28-C1: regression test for the vm_index leak that fires
+    /// when `CreateGuard::drop` runs under `detach_isolated`'s
+    /// short-lived runtime AND `release_delay > 0`.
+    ///
+    /// Pre-fix behaviour: `spawn_delayed_release` planted a
+    /// `compio::runtime::spawn(sleep(delay).then(release)).detach()`
+    /// task on the SAME short-lived runtime the cleanup future was
+    /// running on. The cleanup future returns Ready before the
+    /// delay elapses → `block_on` returns → `Runtime::Drop` runs
+    /// `Scheduler::clear()` (compio 0.11) → the pending timer task
+    /// is dropped → release never fires → vm_index leaks until the
+    /// next controller-boot orphan prune. The
+    /// `create_guard_releases_vm_index_when_no_job_submitted` and
+    /// `create_guard_drop_runs_without_ambient_compio_runtime`
+    /// tests above do NOT catch this because they use
+    /// `Duration::ZERO`, which collapses the spawn-and-sleep to a
+    /// near-synchronous shape that fits inside the post-Ready
+    /// `self.run()` cycle.
+    ///
+    /// Post-fix behaviour: the delay + release is inlined into the
+    /// cleanup future itself, so `block_on` cannot return until the
+    /// release has happened.
+    ///
+    /// This is a `#[test]` (NOT `#[compio::test]`) so the ambient
+    /// runtime is plain `std::thread`, exactly mirroring the
+    /// `detach_isolated` dispatch shape that triggers the bug.
+    #[test]
+    fn create_guard_drop_releases_vm_index_under_isolated_runtime() {
+        // Single-element pool so a leak is observable as a failed
+        // alloc and a correct release as a successful one.
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(99, 99)));
+        let allocated = pool.lock().unwrap().alloc().expect("first alloc");
+        assert_eq!(allocated, 99);
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        {
+            let mut g = CreateGuard::new(
+                pool.clone(),
+                "http://127.0.0.1:1".to_string(), // unreachable
+                "zsbx-test-r28-c1".to_string(),
+                PathBuf::from("/tmp/zsbx-r28-c1-test"),
+                Uuid::nil(),
+                // Non-zero delay is the load-bearing detail: the
+                // pre-fix bug was specifically that a delay > 0
+                // gave the short-lived runtime time to drop before
+                // the timer fired. 100 ms is long enough to outlive
+                // the post-Ready `self.run()` cycle (well under 1
+                // ms) yet short enough that the test wall-time
+                // stays cheap.
+                Duration::from_millis(100),
+            );
+            g.vm_index = Some(allocated);
+            g.job_submitted = false; // skip http_delete; purge_ok = true
+            g.host_dir_created = false; // skip rm -rf
+            // Drop fires HERE on a plain std::thread. Inside Drop,
+            // `detach_isolated("create-rollbk", …)` spawns a fresh
+            // OS thread + private compio runtime that block_on's
+            // the cleanup future. With the fix in place the
+            // inlined `sleep(100ms).await; release` runs to
+            // completion before `block_on` returns; without the
+            // fix the detached timer is discarded when the
+            // private runtime drops.
+        }
+
+        // Poll up to 5 s for the index to reappear. The fix means
+        // it should show up ~100 ms after Drop (delay + OS thread
+        // spawn + runtime mint). Without the fix it never does.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while Instant::now() < deadline {
+            if let Ok(i) = pool.lock().unwrap().alloc() {
+                assert_eq!(i, 99);
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            released,
+            "CreateGuard::drop did not release vm_index when \
+             release_delay > 0 and Drop runs under a short-lived \
+             detach_isolated runtime — R28-C1 regression: the \
+             delayed-release task is being planted on a runtime \
+             that drops before the timer fires"
+        );
+    }
+
     #[test]
     fn vm_alloc_release_is_idempotent() {
         // M8: releasing an index that's already in `freed` should
@@ -3441,6 +5014,190 @@ mod tests {
             j2, j1,
             "second alloc must NOT hand back the same index — \
              double-release must not double-insert"
+        );
+    }
+
+    // ─── T-8b-stress-r8 r24-A2-S3 / r29-A2 delayed release ────
+
+    /// Zero-delay path: `release_vm_index_after` collapses to a
+    /// synchronous release inside the calling task — the slot is in
+    /// freed by the time the future returns Ready.
+    #[compio::test]
+    async fn release_vm_index_after_with_zero_delay_releases_immediately() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(11, 11)));
+        let i = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(i, 11);
+
+        VmIndexAllocator::release_vm_index_after(
+            Arc::clone(&pool),
+            i,
+            Duration::ZERO,
+            "test-zero-delay",
+            Uuid::nil(),
+        )
+        .await;
+
+        assert!(
+            pool.lock().unwrap().freed_for_test().contains(&11),
+            "release_vm_index_after(ZERO) did not release inline"
+        );
+    }
+
+    /// Non-zero delay path: the release waits the configured delay
+    /// before releasing. We pin (a) the slot is NOT in freed before
+    /// the delay elapses, and (b) IS in freed after. The inline-
+    /// await shape means we drive the future via a sibling spawn so
+    /// we can observe the "halfway" state from the main task.
+    #[compio::test]
+    async fn release_vm_index_after_honors_configured_delay() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(22, 22)));
+        let i = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(i, 22);
+
+        let delay = Duration::from_millis(200);
+        // Spawn the release on a sibling task (joinable) so the main
+        // task can poll the allocator while the delay elapses. This
+        // mirrors how `spawn_delayed_release_in_worker` would land
+        // in a long-lived caller — the Task handle gives us the
+        // joinable shape needed for the halfway-check.
+        let task = VmIndexAllocator::spawn_delayed_release_in_worker(
+            Arc::clone(&pool),
+            i,
+            delay,
+            "test-honor-delay",
+            Uuid::nil(),
+        );
+
+        // Before the delay elapses, slot 22 MUST still be allocated.
+        compio::time::sleep(delay / 2).await;
+        let halfway_present = pool.lock().unwrap().freed_for_test().contains(&22);
+        assert!(
+            !halfway_present,
+            "release_vm_index_after fired before the configured delay \
+             ({delay:?} elapsed 50%) — r24-A2-S3 release MUST be deferred"
+        );
+
+        // Await the task: by the time it returns, the release has
+        // happened. The Result wrapper is the compio spawn panic-
+        // catch wrapper; `release_vm_index_after` cannot panic so
+        // Ok is the only observed shape today.
+        task.await.expect("release_vm_index_after must not panic");
+        assert!(
+            pool.lock().unwrap().freed_for_test().contains(&22),
+            "release_vm_index_after did not fire after delay ({delay:?}) elapsed"
+        );
+    }
+
+    /// r29-A2: `spawn_delayed_release_in_worker` returns a typed
+    /// `compio::runtime::Task<()>` JoinHandle. The contract is "if
+    /// you don't await or detach, the timer is bound to the Task
+    /// you hold." This test pins that the return type IS joinable
+    /// and that awaiting it observes the release deterministically
+    /// — the property the deleted `spawn_delayed_release`
+    /// fire-and-forget shape did NOT give callers (R28-C1 / R29-C1
+    /// both surfaced because callers couldn't observe the timer's
+    /// fate, only hope the current runtime outlived it).
+    #[compio::test]
+    async fn spawn_delayed_release_in_worker_returns_joinable_task() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(33, 33)));
+        let i = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(i, 33);
+
+        let task = VmIndexAllocator::spawn_delayed_release_in_worker(
+            Arc::clone(&pool),
+            i,
+            Duration::from_millis(50),
+            "test-joinable",
+            Uuid::nil(),
+        );
+        // Type-level assertion via shadowing: the returned value
+        // MUST be `compio::runtime::Task<Result<(), Box<dyn Any+Send>>>`.
+        // The `Result` wrapper is compio's panic-catch shape on
+        // `spawn`. If a future refactor changes this contract the
+        // compiler catches it here before the rustdoc drifts.
+        let task: compio::runtime::Task<
+            Result<(), Box<dyn std::any::Any + Send>>,
+        > = task;
+
+        // Joining the task waits for the release to complete; the
+        // slot is then guaranteed to be in `freed` without a poll.
+        task.await.expect("release_vm_index_after must not panic");
+        assert!(
+            pool.lock().unwrap().freed_for_test().contains(&33),
+            "spawn_delayed_release_in_worker: awaiting the Task did \
+             not observe a completed release"
+        );
+    }
+
+    /// R29-C1 regression: a release dispatched from inside a
+    /// `detach_isolated` body (short-lived private compio runtime)
+    /// MUST complete before `block_on` returns. The pre-r29
+    /// `spawn_delayed_release` planted a detached timer on the same
+    /// short-lived runtime; `Scheduler::clear` discarded the timer
+    /// at runtime drop, leaking the slot.
+    ///
+    /// This mirrors the R28-C1 `CreateGuard::drop` regression test
+    /// but exercises the helper that's reachable from
+    /// `admin_handlers.rs::snap-teardown-<tail>` →
+    /// `teardown_source_for_snapshot` → `stop_preserving_state` →
+    /// `stop_inner` (which now awaits `release_vm_index_after`
+    /// inline). We don't need the full stack; what we're pinning is
+    /// the helper's behaviour: when invoked inside a detached
+    /// future on a short-lived runtime with `delay > 0`, the
+    /// release MUST still observe before the runtime drops.
+    ///
+    /// `#[test]` (not `#[compio::test]`) so the outer thread is
+    /// plain `std::thread`, exactly the shape `detach_isolated`
+    /// uses (a fresh OS thread + private runtime per dispatch).
+    #[test]
+    fn release_vm_index_after_survives_short_lived_runtime() {
+        let pool = Arc::new(Mutex::new(VmIndexAllocator::new(77, 77)));
+        let allocated = pool.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(allocated, 77);
+        assert!(pool.lock().unwrap().alloc().is_err());
+
+        // Non-zero delay is the load-bearing detail: the pre-fix
+        // R29-C1 bug fired specifically when `delay > 0` gave the
+        // short-lived runtime time to drop before a detached timer
+        // task could run. 100 ms is enough to outlive the post-Ready
+        // `block_on` cycle yet short enough for cheap test wall.
+        let pool_for_fut = Arc::clone(&pool);
+        crate::detach::detach_isolated(
+            "test-r29-c1",
+            move || async move {
+                VmIndexAllocator::release_vm_index_after(
+                    pool_for_fut,
+                    allocated,
+                    Duration::from_millis(100),
+                    "test-r29-c1",
+                    Uuid::nil(),
+                )
+                .await;
+            },
+        );
+
+        // Poll up to 5 s for the index to reappear. With the
+        // inline-await fix it shows up ~100 ms after dispatch (delay
+        // + OS-thread spawn + runtime mint). Without the fix (the
+        // pre-r29 `.detach()`-onto-current-runtime shape) it never
+        // does — the timer task is discarded when the private
+        // runtime drops.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while Instant::now() < deadline {
+            if let Ok(i) = pool.lock().unwrap().alloc() {
+                assert_eq!(i, 77);
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            released,
+            "R29-C1 regression: release dispatched from inside a \
+             `detach_isolated` body with delay > 0 did not observe \
+             before the short-lived runtime dropped — `Scheduler::clear` \
+             discarded the timer task"
         );
     }
 
@@ -3484,6 +5241,357 @@ mod tests {
         assert!(!allocs_all_terminal(Some(&v)));
     }
 
+    // ─── T-8b-stress-r2 v34: verbatim driver-msg propagation ────
+    //
+    // `extract_failed_task_event_msgs` walks the alloc JSON's
+    // `TaskStates[<task>].Events[]` chain to harvest the per-task
+    // DisplayMessage from any task marked `Failed: true`. Pre-v34 the
+    // controller surfaced only Nomad's generic `ClientDescription`
+    // ("Failed tasks") and operators had to SSH the worker to read
+    // the actionable driver-side error. v34 threads the verbatim msg
+    // into the wire envelope.
+
+    #[test]
+    fn extract_failed_task_event_msgs_collates_driver_failure_text() {
+        // Shape mirrors the verbatim T-8b-stress-r2 review excerpt:
+        // a single failed `ch` task with a Driver Failure event
+        // carrying the `disk[1] /var/zeroship/ch/<uuid>/workspace.img
+        // does not exist (controller must stage before spawn)` text.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "ClientDescription": "Failed tasks",
+            "TaskStates": {
+                "ch": {
+                    "State": "dead",
+                    "Failed": true,
+                    "Events": [
+                        {
+                            "Type": "Driver",
+                            "DisplayMessage": "Downloading artifacts"
+                        },
+                        {
+                            "Type": "Driver Failure",
+                            "DisplayMessage": "rpc error: code = Unknown desc = ch: StartTask: disk[1] /var/zeroship/ch/019e5a6bf7e67280953fc425c2fc3487/workspace.img does not exist (controller must stage before spawn)"
+                        }
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1, "single failed task → one entry; got {msgs:?}");
+        let m = &msgs[0];
+        assert!(m.starts_with("ch: "), "task name prefix missing: {m:?}");
+        assert!(
+            m.contains("workspace.img does not exist"),
+            "verbatim driver msg lost: {m:?}"
+        );
+        assert!(
+            m.contains("controller must stage before spawn"),
+            "verbatim driver msg lost: {m:?}"
+        );
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_returns_empty_on_no_failed_tasks() {
+        // Healthy alloc: every TaskState has Failed=false. The helper
+        // returns an empty vec so the caller falls back to the
+        // ClientDescription path.
+        let alloc = serde_json::json!({
+            "ClientStatus": "running",
+            "TaskStates": {
+                "ch": {
+                    "State": "running",
+                    "Failed": false,
+                    "Events": [
+                        {"Type": "Started", "DisplayMessage": "Task started by user"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert!(msgs.is_empty(), "no failed task → empty list; got {msgs:?}");
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_returns_empty_when_taskstates_missing() {
+        // Defensive: malformed / partial alloc JSON. The helper must
+        // not panic — caller's fallback path is the ClientDescription.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "ClientDescription": "Failed tasks"
+            // no TaskStates at all
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert!(msgs.is_empty(), "missing TaskStates → empty; got {msgs:?}");
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_skips_failed_task_with_empty_display() {
+        // A failed task with no DisplayMessage on any event yields no
+        // entry (caller's fallback handles the empty-list case). This
+        // is defensive — a buggy driver could emit a Failed=true state
+        // with empty events; we don't want to surface a misleading
+        // "ch: " (just the task name with no message) in that case.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": ""}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert!(msgs.is_empty(), "empty DisplayMessage → no entry; got {msgs:?}");
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_caps_oversized_message() {
+        // A pathological driver emitting a multi-MB error must not
+        // bloat the wire envelope. The 2 KiB per-task cap kicks in
+        // with a "…(truncated)" sentinel.
+        let big = "X".repeat(10_000);
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": big}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        assert!(m.contains("…(truncated)"), "truncation sentinel missing: starts={:?}", &m[..50.min(m.len())]);
+        // Bounded: task-name prefix (~4 chars) + 2 KiB body + sentinel
+        // (~14 chars). Tolerate a small slack for the prefix.
+        assert!(
+            m.len() < 2200,
+            "truncation cap not enforced; got len={}",
+            m.len()
+        );
+    }
+
+    /// r27-M2: a driver-emitted error containing a multi-byte UTF-8
+    /// character that straddles the PER_TASK_CAP byte boundary must
+    /// NOT panic. Pre-fix, `&trimmed[..PER_TASK_CAP]` byte-indexed
+    /// without a char-boundary check; if the boundary landed
+    /// mid-codepoint the slice constructor would panic. The fix
+    /// mirrors `sanitize_error_message`'s `is_char_boundary`
+    /// decrement loop: walk down byte-by-byte until the boundary
+    /// lands on a valid char.
+    ///
+    /// Construction: build a body whose total byte length crosses
+    /// 2048 AND whose 2048th byte is the middle of a 3-byte UTF-8
+    /// codepoint (`€` = `\xE2\x82\xAC`). Specifically: 2047 ASCII
+    /// `X`s + `€` + filler. Byte 2048 is the SECOND byte of `€`'s
+    /// 3-byte encoding, which is NOT a char boundary. The cap must
+    /// decrement to 2047 (the start of `€`) and slice there.
+    #[test]
+    fn extract_failed_task_event_msgs_truncate_handles_multibyte_at_boundary() {
+        // 2047 ASCII filler so the next codepoint starts at byte 2047.
+        // Then `€` (3 bytes: E2 82 AC) occupies bytes 2047-2049, so
+        // byte 2048 lands MID-codepoint. Append enough trailing
+        // bytes to push total length well past PER_TASK_CAP so the
+        // truncation branch fires.
+        let mut body = "X".repeat(2047);
+        body.push('€'); // bytes 2047-2049
+        body.push_str(&"Y".repeat(1000)); // pad past the cap
+        // Sanity check the fixture: the boundary IS mid-codepoint.
+        assert!(
+            !body.is_char_boundary(2048),
+            "fixture must put a non-boundary at byte 2048; \
+             otherwise the test doesn't exercise the fix",
+        );
+        assert!(
+            body.len() > 2048,
+            "fixture must exceed PER_TASK_CAP so truncation fires",
+        );
+
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": body}
+                    ]
+                }
+            }
+        });
+        // The whole call would panic pre-fix at the `&trimmed[..2048]`
+        // line because byte 2048 is not a char boundary. Post-fix it
+        // succeeds and the slice ends at byte 2047 (the start of `€`).
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        // The output must contain the truncation sentinel.
+        assert!(
+            m.contains("…(truncated)"),
+            "expected truncation sentinel; got starts={:?}",
+            &m[..50.min(m.len())],
+        );
+        // The truncated body ends just before `€` (byte 2047), so the
+        // last non-sentinel character of the body is the ASCII `X`,
+        // never a partial codepoint. Confirm `€` is NOT in the
+        // pre-sentinel slice — if char-boundary decrement worked,
+        // the body cut at 2047 (well below 2049 where `€` ends).
+        let sentinel_at = m
+            .rfind("…(truncated)")
+            .expect("sentinel must be present");
+        let body_slice = &m[..sentinel_at];
+        // Body slice = "ch: " + 2047 X's. No `€` in there.
+        assert!(
+            !body_slice.contains('€'),
+            "decrement must have cut at 2047 (before €); got body containing €",
+        );
+    }
+    //
+    // The r3 regression: 47/47 CREATE failures surfaced as the generic
+    // "Unhealthy because of failed task" envelope despite the v34 commit
+    // having added `extract_failed_task_event_msgs`. The root cause: the
+    // extractor walked Events[] in REVERSE and took the first non-empty
+    // DisplayMessage — which is the LAST event in the array. Nomad emits
+    // `Alloc Unhealthy` AFTER `Driver Failure` in the temporal ordering;
+    // reverse-walk picked the useless Nomad-side `Alloc Unhealthy` event
+    // and masked the load-bearing driver-emitted `StartTask: workspace.img
+    // does not exist ...` text.
+    //
+    // The fix prefers events whose Type is in the diagnostic allow-list
+    // (Driver Failure, Task Setup Failure, ...) and falls back to the
+    // reverse-walk only if none are present.
+
+    #[test]
+    fn extract_failed_task_event_msgs_prefers_driver_failure_over_alloc_unhealthy() {
+        // VERBATIM CLUSTER SHAPE from T-8b-stress-r3 (review: docs/reviews/
+        // sandbox-snapshot-restore-cluster-2026-05-25-T8b-stress-r3.md).
+        // Nomad emits Events[] in temporal order: Driver Failure first,
+        // Alloc Unhealthy last. Pre-r3 reverse-walk picked Alloc Unhealthy
+        // and the cluster envelope was useless.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "ClientDescription": "Failed tasks",
+            "TaskStates": {
+                "ch": {
+                    "State": "dead",
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Received", "DisplayMessage": "Task received by client"},
+                        {"Type": "Task Setup", "DisplayMessage": "Building Task Directory"},
+                        {
+                            "Type": "Driver Failure",
+                            "DisplayMessage": "rpc error: code = Unknown desc = ch: StartTask: disk[1] /var/zeroship/ch/019e5a6bf7e67280953fc425c2fc3487/workspace.img does not exist (controller must stage before spawn)"
+                        },
+                        {"Type": "Restart Signaled", "DisplayMessage": "Policy allows no restarts"},
+                        {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1, "single failed task → one entry; got {msgs:?}");
+        let m = &msgs[0];
+        assert!(
+            m.contains("workspace.img does not exist"),
+            "verbatim driver msg lost — reverse-walk picked Alloc Unhealthy instead of Driver Failure: {m:?}"
+        );
+        assert!(
+            m.contains("controller must stage before spawn"),
+            "verbatim driver msg lost — reverse-walk picked Alloc Unhealthy instead of Driver Failure: {m:?}"
+        );
+        // Negative assertion: the generic Nomad envelope MUST NOT be
+        // the chosen message; if it is, we've regressed back to the
+        // r2/r3 silent no-op.
+        assert!(
+            !m.contains("Unhealthy because of failed task"),
+            "the diagnostic preference is silently no-op — picked Alloc Unhealthy instead of Driver Failure: {m:?}"
+        );
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_falls_back_to_last_event_when_no_diagnostic_type() {
+        // Defensive: if Nomad's event chain has no Driver Failure /
+        // Task Setup Failure event (e.g., the driver crashed without
+        // emitting a typed event), the pre-r3 behaviour of taking the
+        // last non-empty DisplayMessage is the correct fallback. We
+        // must not return empty.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Received", "DisplayMessage": "Task received by client"},
+                        {"Type": "Restart Signaled", "DisplayMessage": "Policy allows no restarts"},
+                        {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1, "fallback path lost the entry; got {msgs:?}");
+        assert!(
+            msgs[0].contains("Unhealthy because of failed task"),
+            "fallback path didn't pick the last non-empty event; got {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_picks_first_driver_failure_when_multiple() {
+        // Edge case: if the driver emits MULTIPLE Driver Failure events
+        // (e.g., retry budget > 1; not currently configured for the ch
+        // driver but defensive), the FIRST one is the root cause and
+        // subsequent ones are retry-cascade side effects. Pin this.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": "root cause: tap collision EBUSY"},
+                        {"Type": "Restart Signaled", "DisplayMessage": "Restarting"},
+                        {"Type": "Driver Failure", "DisplayMessage": "cascade: tap still busy"},
+                        {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].contains("root cause"),
+            "must pick FIRST Driver Failure (root cause), got: {msgs:?}"
+        );
+        assert!(
+            !msgs[0].contains("cascade"),
+            "must NOT pick the cascade Driver Failure, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn is_diagnostic_event_type_matches_known_types() {
+        // Positive cases — these must surface the driver-side error.
+        assert!(is_diagnostic_event_type("Driver Failure"));
+        assert!(is_diagnostic_event_type("Task Setup Failure"));
+        assert!(is_diagnostic_event_type("driver failure")); // case-insensitive
+        assert!(is_diagnostic_event_type("  Driver Failure  ")); // trim
+        // Negative cases — these are envelope/orchestration events.
+        assert!(!is_diagnostic_event_type("Alloc Unhealthy"));
+        assert!(!is_diagnostic_event_type("Restart Signaled"));
+        assert!(!is_diagnostic_event_type("Terminated"));
+        assert!(!is_diagnostic_event_type("Killing"));
+        assert!(!is_diagnostic_event_type("Killed"));
+        assert!(!is_diagnostic_event_type("Started"));
+        assert!(!is_diagnostic_event_type("Task Setup")); // happy-path setup, NOT failure
+        assert!(!is_diagnostic_event_type("Received"));
+        assert!(!is_diagnostic_event_type(""));
+    }
+
     // ─── C3: HTTP error tracked in poll-loop timeout messages ──
     //
     // Without these the timeout message lies: a Nomad-unreachable
@@ -3501,6 +5609,7 @@ mod tests {
         let err = wait_for_alloc_running(
             "http://127.0.0.1:1",
             "zsbx-c3-test",
+            "00000000000000000000000000000000",
             Duration::from_millis(400),
         )
         .await
@@ -3599,7 +5708,6 @@ mod tests {
             nomad_ch: crate::config::NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
                 runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
@@ -3610,6 +5718,8 @@ mod tests {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16,     // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -3619,6 +5729,7 @@ mod tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         };
         cfg
     }
@@ -3652,13 +5763,11 @@ mod tests {
     #[test]
     fn nomad_job_json_basic_shape() {
         let cfg = make_cfg();
-        // virtio-blk pivot (bug #11): build_nomad_job_json now takes
-        // workspace.img + home.img paths + pubkey hex (not three
-        // share dirs). The wrapper attaches these as virtio-blk and
-        // injects the pubkey on the cmdline. The fixture pubkey is
-        // 64 hex chars (32 bytes); short enough to read in error
-        // messages but long enough to exercise the hex path.
-        let v = build_nomad_job_json(
+        // virtio-blk pivot (bug #11): build_nomad_job_json takes
+        // workspace.img + home.img paths + pubkey hex. The driver
+        // attaches these as virtio-blk and injects the pubkey on
+        // the cmdline. The fixture pubkey is 64 hex chars (32 bytes).
+        let v = build_nomad_job_json_with(
             "zsbx-abc",
             &cfg,
             7,
@@ -3668,6 +5777,8 @@ mod tests {
             "alice",
             "proj1",
             "abc",
+            None,
+            None, // r3-A: no node pin in tests
         );
         let job = &v["Job"];
         assert_eq!(job["ID"], "zsbx-abc");
@@ -3684,10 +5795,12 @@ mod tests {
         assert_eq!(group["ReschedulePolicy"]["Attempts"], 0);
 
         let task = &group["Tasks"][0];
-        assert_eq!(task["Driver"], "raw_exec");
-        assert_eq!(
-            task["Config"]["command"],
-            "/etc/zeroship/nomad-vm-wrapper.sh"
+        // T-7 + T-8 cutover: ch driver is the unconditional default.
+        assert_eq!(task["Driver"], "ch");
+        // Config carries typed fields; raw_exec `command` MUST NOT appear.
+        assert!(
+            task["Config"]["command"].is_null(),
+            "ch driver Config must NOT carry raw_exec `command` field"
         );
         assert_eq!(task["Env"]["ZSBX_VM_INDEX"], "7");
         // M4: ZSBX_HERE renamed to ZSBX_ARTIFACT_DIR; verify the
@@ -3727,13 +5840,9 @@ mod tests {
                 "{legacy} should be gone (virtio-blk pivot)",
             );
         }
-        // The wrapper reads memory + cpu count from these two env vars.
-        // Resources.{CPU,MemoryMB} are advisory-only on raw_exec; the
-        // wrapper would otherwise hardcode 1024M/2vCPU and lie to
-        // bin-packing.
         assert_eq!(task["Env"]["ZSBX_VM_MEMORY_MB"], "1024");
         assert_eq!(task["Env"]["ZSBX_VM_CPUS_BOOT"], "2");
-        // M6: subnet base octet is paired between Rust and bash.
+        // M6: subnet base octet is paired between Rust and driver.
         // Default 99 keeps the historical 10.99/16 layout.
         assert_eq!(task["Env"]["ZSBX_SUBNET_BASE_OCTET"], "99");
         // Constant 500 MHz advisory; see NOMAD_CPU_MHZ_ADVISORY.
@@ -3746,16 +5855,17 @@ mod tests {
     #[test]
     fn nomad_job_json_uses_configured_subnet_base_octet() {
         // M6: changing the config's subnet_second_octet must flow
-        // into the env var the wrapper reads. The unit test for the
-        // controller-side IP computation lives in
-        // create_guard_uses_subnet_octet (further down) — these
-        // two together pin the pairing.
+        // into the env var. The unit test for the controller-side IP
+        // computation lives in create_guard_uses_subnet_octet (further
+        // down) — these two together pin the pairing.
         let mut cfg = make_cfg();
         cfg.nomad_ch.subnet_second_octet = 50;
-        let v = build_nomad_job_json(
+        let v = build_nomad_job_json_with(
             "zsbx-y", &cfg, 1,
             Path::new("/w.img"), Path::new("/u.img"), "ab",
             "u", "p", "s",
+            None,
+            None, // r3-A: no node pin
         );
         assert_eq!(
             v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["ZSBX_SUBNET_BASE_OCTET"],
@@ -3763,26 +5873,17 @@ mod tests {
         );
     }
 
-    /// B24 / R8-DEPLOY1 regression pin: the wrapper's cold-boot
-    /// env-validator (nomad-vm-wrapper.sh:153) hard-errors when
-    /// `ZSBX_SANDBOX_ID` is unset — cluster smoke at cf702457
-    /// failed 0/16 CREATE because the controller's Nomad task
-    /// template never set it. This test fails if the env entry is
-    /// ever removed, AND asserts the value passes the wrapper's
-    /// `[0-9a-zA-Z_]+` character-set validator (line 222) by
-    /// rejecting hyphens. The hyphenated Uuid form would corrupt
-    /// the kernel cmdline that embeds the value verbatim as
-    /// `SANDBOX_AGENT_SANDBOX_ID=<value>`.
+    /// B24 / R8-DEPLOY1 regression pin: `ZSBX_SANDBOX_ID` must be
+    /// present in the Env block. This test fails if the env entry is
+    /// ever removed, AND asserts the value is in Uuid::simple() form
+    /// (32-hex, no hyphens) — the value is embedded verbatim in the
+    /// guest's kernel cmdline as `SANDBOX_AGENT_SANDBOX_ID=<value>`.
     #[test]
     fn nomad_job_spec_includes_sandbox_id_env() {
         let cfg = make_cfg();
-        // Use the same encoding the production caller uses
-        // (`sandbox_id.simple().to_string()`) so the test pins
-        // both that the entry exists AND that we pass it in the
-        // wrapper-validator-safe shape.
         let sandbox_id = Uuid::now_v7();
         let sandbox_id_simple = sandbox_id.simple().to_string();
-        let v = build_nomad_job_json(
+        let v = build_nomad_job_json_with(
             "zsbx-r8",
             &cfg,
             3,
@@ -3792,30 +5893,25 @@ mod tests {
             "alice",
             "proj1",
             &sandbox_id_simple,
+            None,
+            None, // r3-A: no node pin
         );
         let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
         // 1. The entry exists and equals the passed value.
         assert_eq!(
             env["ZSBX_SANDBOX_ID"],
             sandbox_id_simple,
-            "ZSBX_SANDBOX_ID must be wired through verbatim — wrapper \
-             line 153 hard-errors otherwise (B24 / R8-DEPLOY1)"
+            "ZSBX_SANDBOX_ID must be wired through verbatim (B24 / R8-DEPLOY1)"
         );
-        // 2. The value passes the wrapper's character-set
-        //    validator at line 222 (`*[!0-9a-zA-Z_]*` rejects
-        //    anything outside that class). simple() produces 32
-        //    hex chars, no hyphens — should pass.
+        // 2. The value is alphanumeric-only (no hyphens) — must pass
+        //    the kernel cmdline embedding without corruption.
         let val = env["ZSBX_SANDBOX_ID"].as_str().expect("string env value");
         assert!(
             val.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_'),
-            "ZSBX_SANDBOX_ID='{val}' contains chars outside [0-9a-zA-Z_] — \
-             would be rejected by nomad-vm-wrapper.sh:222 and corrupt the \
-             kernel cmdline"
+            "ZSBX_SANDBOX_ID='{val}' contains chars outside [0-9a-zA-Z_]"
         );
         // 3. Defense-in-depth: Uuid::simple() is exactly 32 hex chars.
-        //    If a future refactor swaps to hyphenated `to_string()`
-        //    (36 chars w/ 4 hyphens) this catches it.
         assert_eq!(
             val.len(),
             32,
@@ -3825,15 +5921,14 @@ mod tests {
         );
         assert!(
             !val.contains('-'),
-            "ZSBX_SANDBOX_ID must not contain hyphens — \
-             nomad-vm-wrapper.sh:222 would reject"
+            "ZSBX_SANDBOX_ID must not contain hyphens"
         );
     }
 
     #[test]
     fn nomad_job_json_serializes_to_valid_json() {
         let cfg = make_cfg();
-        let v = build_nomad_job_json(
+        let v = build_nomad_job_json_with(
             "zsbx-x",
             &cfg,
             1,
@@ -3843,6 +5938,8 @@ mod tests {
             "u",
             "p",
             "s",
+            None,
+            None, // r3-A: no node pin
         );
         let s = serde_json::to_string(&v).expect("serialize");
         // Round-trip — Nomad parses as JSON, so we should too.
@@ -3850,11 +5947,199 @@ mod tests {
             serde_json::from_str(&s).expect("round-trip parse");
     }
 
+    /// The ch driver is the unconditional default (T-7 + T-8 cutover).
+    /// Driver MUST equal "ch" — matches nomad-driver-ch::ch::PluginName.
+    #[test]
+    fn nomad_job_spec_always_uses_ch_driver() {
+        let cfg = make_cfg();
+        let v = build_nomad_job_json(
+            "zsbx-ch", &cfg, 4,
+            Path::new("/w.img"), Path::new("/u.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "alice", "proj1", "abcdef0123456789abcdef0123456789",
+            None, // r3-A: no node pin
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Driver"], "ch",
+            "ch driver is unconditional — T-7 + T-8 cutover complete"
+        );
+        assert!(
+            task["Config"]["command"].is_null(),
+            "raw_exec `command` field must NOT appear in ch driver Config"
+        );
+    }
+
+    /// Every field in the Go driver's `TaskConfig` struct
+    /// (`nomad-driver-ch/ch/task_config.go`) must be present in
+    /// the Nomad Config block, with
+    /// the correct JSON type. This is the controller↔driver
+    /// wire-format pin — a rename / drop on either side breaks
+    /// jobspec decode.
+    #[test]
+    fn ch_plugin_jobspec_includes_all_task_config_fields() {
+        let cfg = make_cfg();
+        let v = build_nomad_job_json_with(
+            "zsbx-typed",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            None, // r3-A: no node pin
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+
+        // Scalars — types matter, the Go driver decodes via msgpack
+        // codec tags so JSON-number-vs-string mismatches drop fields
+        // silently.
+        assert_eq!(config["vm_index"].as_u64(), Some(7));
+        assert_eq!(
+            config["kernel"].as_str(),
+            Some("/var/lib/zeroship/ch/vmlinuz"),
+            "kernel is derived from cfg.nomad_ch.runtime_dir + /vmlinuz",
+        );
+        assert_eq!(config["cpus"].as_u64(), Some(2));
+        assert_eq!(config["memory_mb"].as_u64(), Some(1024));
+        assert_eq!(
+            config["sandbox_id"].as_str(),
+            Some("abcdef0123456789abcdef0123456789"),
+        );
+        // C-7-LT-7: user_id feeds the driver's per-user-home path
+        // allow-list. Without this, the restore-branch rewriter
+        // rejects /var/zeroship/ch/users/<usr>/home.img.
+        assert_eq!(
+            config["user_id"].as_str(),
+            Some("alice"),
+        );
+        assert_eq!(
+            config["workspace_img"].as_str(),
+            Some("/var/zeroship/ch/abc/workspace.img"),
+        );
+        assert_eq!(
+            config["user_home_img"].as_str(),
+            Some("/var/zeroship/ch/users/alice/home.img"),
+        );
+        assert_eq!(
+            config["pubkey_hex"].as_str(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        );
+        assert_eq!(config["subnet_base_octet"].as_u64(), Some(99));
+
+        // Block-lists must be present as empty arrays — an absent
+        // field decodes to nil in the Go driver, which is also "auto-
+        // synthesise", but emitting `[]` pins the contract.
+        assert!(config["disks"].is_array());
+        assert_eq!(config["disks"].as_array().unwrap().len(), 0);
+        assert!(config["fs"].is_array());
+        assert_eq!(config["fs"].as_array().unwrap().len(), 0);
+        assert!(config["net"].is_array());
+        assert_eq!(config["net"].as_array().unwrap().len(), 0);
+
+        // restore_from is present as an empty string on cold-boot —
+        // separate test below pins the non-empty case.
+        assert_eq!(config["restore_from"].as_str(), Some(""));
+    }
+
+    /// Restore path: when `restore_from` is `Some`, the typed Config
+    /// MUST carry the non-empty path under ChPlugin mode. The Go
+    /// driver's `StartTask` branches on
+    /// `TaskConfig.RestoreFrom != ""` to choose `cloud-hypervisor
+    /// --restore source_url=file://…` vs. cold-boot.
+    #[test]
+    fn ch_plugin_restore_jobspec_includes_restore_from() {
+        let cfg = make_cfg();
+        let restore_dir = Path::new("/var/zeroship/ch/snapshots/snap-abc");
+        let v = build_nomad_job_json_with(
+            "zsbx-restore",
+            &cfg,
+            5,
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            Some(restore_dir),
+            None, // r3-A: no node pin
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert_eq!(
+            config["restore_from"].as_str(),
+            Some("/var/zeroship/ch/snapshots/snap-abc"),
+            "ChPlugin restore path MUST set Config.restore_from — \
+             the Go driver dispatches on the empty/non-empty test",
+        );
+    }
+
+    /// Cold-boot path: `restore_from = None` → typed Config has
+    /// `restore_from = ""`. The driver treats empty as cold-boot.
+    #[test]
+    fn ch_plugin_cold_boot_jobspec_has_empty_restore_from() {
+        let cfg = make_cfg();
+        let v = build_nomad_job_json_with(
+            "zsbx-cold",
+            &cfg,
+            2,
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            None, // r3-A: no node pin
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        // Cold-boot: the field must be PRESENT (so the Go driver's
+        // codec decode never sees a nil/missing) and empty. A
+        // non-empty value would mis-route cold-boot through the
+        // restore branch and crash CH on a phantom snapshot path.
+        assert_eq!(
+            config["restore_from"].as_str(),
+            Some(""),
+            "cold-boot ChPlugin Config.restore_from must be empty",
+        );
+    }
+
+    /// The `command` field (raw_exec-only) MUST NOT appear in the
+    /// ch driver Config block. The Go driver's TaskConfig has no
+    /// such field, and forwarding it would be either silently
+    /// ignored or (under stricter HCL decode) fail jobspec
+    /// validation at submit time.
+    #[test]
+    fn ch_plugin_jobspec_does_not_include_command_field() {
+        let cfg = make_cfg();
+        let v = build_nomad_job_json_with(
+            "zsbx-no-cmd",
+            &cfg,
+            1,
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            None, // r3-A: no node pin
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert!(
+            config["command"].is_null(),
+            "ch driver Config must NOT carry `command` \
+             field — Go driver TaskConfig has no such tag, got: {config:?}",
+        );
+    }
+
     // ─── virtio-blk disk-image helpers (bug #11 pivot) ───────
 
     /// `workspace_image_path` derivation: per-sandbox image lives
     /// inside the sandbox's host_dir, always named `workspace.img`.
-    /// The wrapper attaches this as /dev/vdb.
+    /// The ch driver attaches this as /dev/vdb.
     #[test]
     fn workspace_image_path_is_host_dir_join_workspace_img() {
         let host_dir = Path::new("/var/zeroship/ch/abc123");
@@ -3865,7 +6150,7 @@ mod tests {
     }
 
     /// `user_home_image_path` derivation: per-user image lives
-    /// under <user_home_dir_root>/<user_id>/home.img. The wrapper
+    /// under <user_home_dir_root>/<user_id>/home.img. The ch driver
     /// attaches this as /dev/vdc. The path is reused across the
     /// user's sandboxes; the controller idempotently mkfs's it
     /// on first use only.
@@ -3921,6 +6206,121 @@ mod tests {
             std::fs::read(&img).unwrap(),
             sentinel,
             "contents must survive the idempotent call",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #1:
+    /// `create_ext4_image_if_missing`'s idempotent skip-because-exists
+    /// branch MUST re-assert the post-condition (file present, > 0
+    /// bytes). Without this, a zero-byte sentinel left at the path
+    /// (e.g., a `truncate` that partially succeeded then was
+    /// interrupted) would slip through as Ok, and the driver's
+    /// preflight stat would catch it far later with a generic
+    /// "Failed tasks" rollup. This test pins the "skip path must
+    /// still validate" invariant.
+    #[test]
+    fn create_ext4_image_if_missing_skip_path_rejects_zero_byte_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-img-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("workspace.img");
+
+        // Touch a zero-byte sentinel. `path.exists()` returns true →
+        // skip-because-exists branch fires → post-condition assertion
+        // catches the size==0 case.
+        std::fs::write(&img, b"").unwrap();
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 0);
+
+        let err = create_ext4_image_if_missing(&img, 20)
+            .expect_err("zero-byte file must be rejected by the post-condition");
+        assert!(
+            err.contains("empty (size 0)"),
+            "err must mention empty/size; got: {err}"
+        );
+        assert!(
+            err.contains("workspace.img"),
+            "err must name the path; got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #2:
+    /// `assert_disk_image_present` returns Ok for a normal file with
+    /// > 0 bytes. Direct test of the post-condition helper so the
+    /// CI signal is precise.
+    #[test]
+    fn assert_disk_image_present_accepts_normal_nonempty_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-assert-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("workspace.img");
+        std::fs::write(&img, b"non-empty").unwrap();
+
+        assert_disk_image_present(&img).expect("normal non-empty file must pass");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #3:
+    /// `assert_disk_image_present` rejects a missing path with an
+    /// error message that names the path (so an operator can grep
+    /// for it in the controller log). Pins the "controller catches
+    /// missing image at submit time, not after the alloc burns its
+    /// $0.20" contract.
+    #[test]
+    fn assert_disk_image_present_rejects_missing_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-assert-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("nope.img"); // do not create
+
+        let err = assert_disk_image_present(&img)
+            .expect_err("missing path must be rejected");
+        assert!(
+            err.contains("nope.img"),
+            "err must name the path; got: {err}"
+        );
+        assert!(
+            err.contains("post-stage stat failed"),
+            "err must say what step failed; got: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-8b-stress Bug 1 / 3-strike cross-emitter parity test #4:
+    /// `assert_disk_image_present` rejects a directory at the same
+    /// name (the structural-surprise case). Catches a future bug
+    /// where some staging path mkdir's where it should be touching a
+    /// file.
+    #[test]
+    fn assert_disk_image_present_rejects_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-assert-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img_as_dir = dir.join("workspace.img");
+        std::fs::create_dir(&img_as_dir).unwrap();
+
+        let err = assert_disk_image_present(&img_as_dir)
+            .expect_err("directory at image path must be rejected");
+        assert!(
+            err.contains("is a directory"),
+            "err must say 'directory'; got: {err}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -4177,6 +6577,318 @@ mod tests {
         );
     }
 
+    // ─── R19-I1: two-phase probe (TCP-connect gate, then ureq /livez) ─
+    //
+    // wait_for_agent_livez's R19-I1 fix mirrors the C-7-LT-2-PR1
+    // pattern: a compio-native TCP-connect probe gates the ureq HTTP
+    // call so a half-collapsed TAP route doesn't burn the entire
+    // agent_livez_timeout budget on one stuck SYN. These tests pin:
+    //   1. happy path: socket up + /livez=200 + /version=200 with
+    //      matching fp → Ok (Phase 1 + Phase 2 + signed /version
+    //      compose correctly).
+    //   2. unroutable address (TEST-NET-1): Phase 1 times out
+    //      cleanly at the connect-timeout ceiling, never spending a
+    //      spawn_blocking+ureq on a doomed HTTP call; total wall-time
+    //      stays well under the kernel's SYN-retransmit ceiling.
+    //   3. socket accepts late: listener binds mid-deadline; first
+    //      few Phase 1 probes miss, subsequent ones succeed → Ok
+    //      within budget.
+    //   4. HTTP-layer wedge: socket accepts but /livez returns 500 →
+    //      Phase 2 rejects the probe; loop polls until deadline with
+    //      "never returned 200" error.
+
+    /// Variant of `spawn_mock_agent` that lets the caller control the
+    /// /livez response status (the original always answers 200). Used
+    /// by the R19-I1 "HTTP-layer wedge" test where the TCP layer is
+    /// up but the HTTP /livez handler refuses.
+    fn spawn_mock_agent_with_livez_status(
+        livez_status: u16,
+        version_body: String,
+        version_status: u16,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        let mut buf = [0u8; 1024];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("");
+                        let resp = if path == "/livez" {
+                            let status_text = match livez_status {
+                                200 => "200 OK",
+                                500 => "500 Internal Server Error",
+                                503 => "503 Service Unavailable",
+                                _ => "500 Internal Server Error",
+                            };
+                            format!(
+                                "HTTP/1.1 {}\r\nContent-Length: 16\r\n\r\n{}",
+                                status_text,
+                                "{\"status\":\"x\"}"
+                            )
+                        } else if path == "/version" {
+                            let status_text = match version_status {
+                                200 => "200 OK",
+                                401 => "401 Unauthorized",
+                                _ => "500 Internal Server Error",
+                            };
+                            format!(
+                                "HTTP/1.1 {}\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\n\r\n{}",
+                                status_text,
+                                version_body.len(),
+                                version_body,
+                            )
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, stop)
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_happy_socket_then_livez_ok() {
+        // R19-I1 happy path under the two-phase probe: TCP listener
+        // accepts (Phase 1 reachable), /livez returns 200 (Phase 2
+        // gate passes), /version returns 200 with matching fp →
+        // function returns Ok well inside the budget.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{our_fp}"}}"#
+        );
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let started = Instant::now();
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_secs(2),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(res.is_ok(), "expected Ok on happy path, got {res:?}");
+        // Loopback connect + ureq /livez + signed /version on a
+        // healthy mock should clear in well under 500 ms. If this
+        // ever takes seconds, Phase 1 is wedging — exactly what
+        // R19-I1 closes.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "R19-I1 regression: happy path took {elapsed:?}; \
+             two-phase probe should resolve in tens of ms on loopback"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_socket_never_accepts_returns_timeout_clean() {
+        // R19-I1 wedge-fix invariant: an unroutable address (RFC 5737
+        // TEST-NET-1, no host) MUST surface a clean timeout bounded
+        // by our compio-side 150 ms connect-timeout * (poll cadence),
+        // NOT by the kernel's 30-90 s SYN-retransmit ceiling.
+        //
+        // The pre-R19-I1 code spent ureq.timeout(500ms) on a request-
+        // deadline, not connect-deadline, and so could burn 30 s on a
+        // single probe. With Phase 1 in place, every iteration costs
+        // at most CONNECT_TIMEOUT + cadence; the 700 ms budget below
+        // exits cleanly with the "never returned 200" message.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let started = Instant::now();
+        let res = wait_for_agent_livez(
+            "http://192.0.2.1:7777",
+            &our_fp,
+            &sk,
+            Duration::from_millis(700),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let err = res.expect_err("must time out cleanly");
+        // The error path for "/livez never 200" surfaces this string.
+        assert!(
+            err.contains("never returned 200"),
+            "expected /livez-unreachable timeout text; got {err:?}"
+        );
+        // The load-bearing R19-I1 assertion: the deadline holds. A
+        // regression that drops Phase 1 and reverts to ureq.timeout()
+        // would burn 30+ s here. 3 s is a generous CI cap above the
+        // 700 ms budget (allowing one ~150 ms in-flight probe at
+        // deadline + spawn_blocking scheduling jitter).
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "R19-I1 regression: unroutable connect ran {elapsed:?} on \
+             a 700 ms budget — Phase 1 connect-gate is not capping the \
+             stuck SYN. Did the ureq probe come back without the TCP \
+             pre-gate?"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_socket_accepts_late_succeeds_within_budget() {
+        // R19-I1: agent comes up partway through the budget. The
+        // helper thread holds the port closed for ~250 ms, then
+        // binds + serves /livez+/version. Initial Phase 1 probes
+        // miss (kernel returns ECONNREFUSED on an unbound port,
+        // fast); once the listener is up, Phase 1 returns reachable,
+        // Phase 2 hits /livez=200, signed /version returns matching
+        // fp → Ok before the deadline. Exercises the poll-cadence
+        // loop end-to-end across an empty→up transition.
+        //
+        // Port-reservation dance: bind a listener to grab a free
+        // port, drop it, then re-bind in the helper thread after a
+        // delay. The drop-then-rebind window relies on SO_REUSEADDR
+        // semantics; if the kernel hands out the same port to a
+        // different process during the gap, the helper's bind retry
+        // loop falls through to its panic — which fails the test
+        // with a clear message rather than silently mis-asserting.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{our_fp}"}}"#
+        );
+        let probe_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let probe_port = probe_listener.local_addr().unwrap().port();
+        drop(probe_listener);
+        let body_for_thread = body.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+            use std::sync::atomic::Ordering;
+            // Retry-bind: tolerate a brief TIME_WAIT race on the
+            // dropped listener. Up to 20×25ms = 500ms — well inside
+            // the test's 2s outer budget.
+            let listener = {
+                let mut attempts = 0;
+                loop {
+                    match TcpListener::bind(format!("127.0.0.1:{probe_port}")) {
+                        Ok(l) => break l,
+                        Err(_) if attempts < 20 => {
+                            attempts += 1;
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Err(e) => panic!("R19-I1 late-bind fixture failed: {e}"),
+                    }
+                }
+            };
+            listener.set_nonblocking(true).ok();
+            while !stop_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        let mut buf = [0u8; 1024];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let path = req
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("");
+                        let resp = if path == "/livez" {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"status\":\"ok\"}"
+                                .to_string()
+                        } else if path == "/version" {
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\n\r\n{}",
+                                body_for_thread.len(),
+                                body_for_thread,
+                            )
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let url = format!("http://127.0.0.1:{probe_port}");
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_millis(2000),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            res.is_ok(),
+            "R19-I1: late-bind agent must clear inside 2000 ms \
+             budget once the socket comes up; got {res:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn wait_for_agent_livez_socket_accepts_but_livez_500() {
+        // R19-I1 Phase 2 contract: TCP-layer up but /livez returns
+        // 500 → loop polls until deadline because Phase 2 never
+        // observes status==200. Surfaces "never returned 200" error.
+        // This is the "HTTP server wedged after socket up" failure
+        // shape; it's the rarer post-fix wedge surface noted in the
+        // R19-I1 doc.
+        let sk = make_sk();
+        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let body = format!(
+            r#"{{"agent_version":"x","pubkey_fingerprint":"{our_fp}"}}"#
+        );
+        let (port, stop) =
+            spawn_mock_agent_with_livez_status(500, body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let res = wait_for_agent_livez(
+            &url,
+            &our_fp,
+            &sk,
+            Duration::from_millis(600),
+        )
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("must time out with /livez 500");
+        assert!(
+            err.contains("never returned 200"),
+            "expected /livez-not-200 timeout text; got {err:?}"
+        );
+    }
+
     // ─── FM-F: host-side fence in stop() before vm_index release ──
     //
     // The fence verifies the previous tenant's agent has stopped
@@ -4242,6 +6954,333 @@ mod tests {
             elapsed < Duration::from_millis(800),
             "FM-F: fence took {elapsed:?} for two-in-a-row misses on a \
              refused port; expected well under 800ms — cadence regression?"
+        );
+    }
+
+    /// C-7-LT-2-PR1 regression pin: the R16-I2 "alternating-answer
+    /// LEAK" pathology is structurally impossible under the new
+    /// connect-only probe. Previously a mock that accepted-then-dropped
+    /// the socket (counter % 2 == 1) returned an HTTP transport error
+    /// (= miss) via ureq; the cycle 0→1→0→1 produced a permanent
+    /// `consecutive_misses=1` LEAK signal. With the PR1 compio-native
+    /// TCP-connect probe, `accept()` succeeded means SYN was ACKed
+    /// means socket is alive — there's no HTTP-layer disambiguation
+    /// of "accepted but dropped" anymore. The same mock under PR1
+    /// now produces `consecutive_misses=0` (persistent reachability)
+    /// at deadline. This is THE fix: the LEAK shape cannot manifest.
+    ///
+    /// Test invariant: alternating accept-vs-drop must time out with
+    /// `consecutive_misses=0`, NOT `=1`. If a future regression
+    /// re-introduces HTTP-layer classification, this test fires.
+    #[compio::test]
+    async fn host_fence_pr1_alternating_accept_drop_times_out_with_misses_zero()
+    {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 1024];
+                        let _ = s.set_read_timeout(Some(
+                            Duration::from_millis(200),
+                        ));
+                        let _ = s.read(&mut buf);
+                        let n = counter.fetch_add(1, Ordering::Relaxed);
+                        if n % 2 == 0 {
+                            let _ = s.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                            );
+                        } else {
+                            // Old probe: ureq saw transport error → miss.
+                            // New probe: connect already succeeded → hit.
+                            drop(s);
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}");
+        let res =
+            wait_for_agent_silent(&url, Duration::from_millis(800)).await;
+        stop.store(true, Ordering::Relaxed);
+        let err = res.expect_err("alternating-accept must still time out");
+        // PR1 inversion of the prior R16-I2 invariant: persistent
+        // accept → counter stays at 0, regardless of post-accept
+        // drop semantics.
+        assert!(
+            err.contains("consecutive_misses=0"),
+            "PR1 regression: connect-only probe must NOT classify \
+             post-accept drop as a miss; expected final \
+             consecutive_misses=0; got {err:?}"
+        );
+        assert!(
+            err.contains("still answering"),
+            "fence-timeout text invariant; got {err:?}"
+        );
+    }
+
+    /// R16-A2 / R16-I2 TIMEOUT-case pin. Persistent 200 means
+    /// `consecutive_misses` never increments past 0 — that's the
+    /// observable difference from the LEAK case above. The final
+    /// counter value MUST land in the error string so the
+    /// `host_fence: deadline reached` log + the propagated `errs`
+    /// vector both carry the disambiguator.
+    #[compio::test]
+    async fn host_fence_timeout_case_persistent_answer_reports_misses_zero() {
+        let body = r#"{"agent_version":"x","pubkey_fingerprint":"deadbeef00112233"}"#
+            .to_string();
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let res =
+            wait_for_agent_silent(&url, Duration::from_millis(500)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("persistent-200 must time out");
+        // Persistent answer → counter resets every probe → final 0.
+        // This is the discriminator from the LEAK case (=1).
+        assert!(
+            err.contains("consecutive_misses=0"),
+            "TIMEOUT case must report consecutive_misses=0 in the \
+             error string (vs LEAK's =1); got {err:?}"
+        );
+    }
+
+    /// R16-A2 cadence + 2-in-a-row contract pin. Locks the two
+    /// load-bearing magic numbers in `wait_for_agent_silent` so a
+    /// future "tune the cadence" PR can't silently break the
+    /// smoke-r12 phase-log latency assumptions:
+    ///   • 100 ms sleep between polls (lower bound: 2 misses → ≥ 100 ms)
+    ///   • 2-consecutive-misses threshold (upper bound: ≤ 800 ms for
+    ///     a refused port).
+    /// If either constant changes, this test fires.
+    #[compio::test]
+    async fn host_fence_cadence_and_threshold_pin() {
+        let started = Instant::now();
+        let res = wait_for_agent_silent(
+            "http://127.0.0.1:1",
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(res.is_ok());
+        let elapsed = started.elapsed();
+        // Lower bound: 2 misses at 100 ms cadence → first miss is
+        // immediate, second is after >= 100 ms of sleep. If someone
+        // shrinks the cadence below 50 ms the OK case becomes too
+        // tight for the smoke phase-log heuristics; this fires.
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "R16-A2 cadence floor: 2-miss path returned in {elapsed:?}; \
+             expected >= 50ms (100ms cadence between miss #1 and miss #2). \
+             Did the inter-probe sleep change?"
+        );
+        // Upper bound: the existing 800ms cap, kept for redundancy
+        // with `host_fence_clears_quickly_after_two_consecutive_misses`
+        // so a regression flips both tests.
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "R16-A2 threshold pin: 2-in-a-row took {elapsed:?}; if the \
+             threshold moved from 2 the smoke-r12 phase-log latency \
+             window needs to follow."
+        );
+    }
+
+    // ─── C-7-LT-2-PR1: compio-native TCP-connect probe behavior ──
+    //
+    // The smoke-r13 wedge ("probes=1 in 30 s") came from ureq's
+    // request-deadline timeout NOT being a connect-timeout on a
+    // half-collapsed TAP. PR1 replaces that with an outer
+    // `compio::time::timeout` over `TcpStream::connect`. These
+    // tests pin the contract:
+    //   1. reachable port → returns true fast (~ms)
+    //   2. refused port → returns false fast (~ms; ECONNREFUSED)
+    //   3. unroutable / black-hole address → returns false bounded by
+    //      our connect_timeout (NOT by the kernel's SYN-retransmit).
+
+    #[compio::test]
+    async fn pr1_probe_reachable_port_returns_true() {
+        // Bind + accept on loopback. The probe must see SYN-ACK and
+        // return true well inside the 150 ms connect window.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((_s, _)) => {} // accept-and-drop; we only care about SYN
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        let addr: std::net::SocketAddr =
+            format!("127.0.0.1:{port}").parse().unwrap();
+        let started = Instant::now();
+        let r =
+            probe_agent_reachable_tcp(addr, Duration::from_millis(150)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(r, "loopback listener must read as reachable");
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "reachable connect should complete well under timeout; \
+             got {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[compio::test]
+    async fn pr1_probe_refused_port_returns_false_fast() {
+        // 127.0.0.1:1 is reserved + bound to nothing on every CI host
+        // we run; kernel returns ECONNREFUSED ~immediately (no SYN
+        // retransmit on the loopback). Must be < 10 ms.
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let started = Instant::now();
+        let r =
+            probe_agent_reachable_tcp(addr, Duration::from_millis(150)).await;
+        let elapsed = started.elapsed();
+        assert!(!r, "refused port must read as miss");
+        // 50 ms is conservative for CI; loopback refused is typically
+        // sub-millisecond. This is the "kernel says no fast" lane —
+        // confirms we're not stuck in the timeout path.
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "refused connect on loopback should be fast (<50ms); \
+             got {elapsed:?} — is the kernel SYN-retransmitting?"
+        );
+    }
+
+    /// The wedge fix invariant: a connect target that the kernel
+    /// can't reach (no route OR firewall DROP) MUST surface "miss"
+    /// within our compio-side `connect_timeout`, NOT after the
+    /// kernel's SYN-retransmit ceiling (typically 30-90 s on Linux
+    /// defaults). This is the difference between smoke-r13's
+    /// "1 probe in 30 s" pathology and a healthy fence.
+    ///
+    /// TEST-NET-1 (`192.0.2.0/24`, RFC 5737) is documentation-only —
+    /// no host should answer. On most Linux configs the kernel
+    /// either:
+    ///   (a) returns EHOSTUNREACH/ENETUNREACH at connect() — fast miss; OR
+    ///   (b) sends SYNs that get no reply — slow miss, capped by our
+    ///       outer compio timeout at 150 ms (this is the wedge case).
+    /// Either way the probe MUST return false in well under 1 second
+    /// — if a future regression drops the outer timeout, the kernel's
+    /// 30-90 s SYN-retransmit ceiling will fire this test.
+    #[compio::test]
+    async fn pr1_probe_unroutable_address_returns_false_within_timeout() {
+        // 192.0.2.1 is RFC 5737 TEST-NET-1 — should never route.
+        let addr: std::net::SocketAddr = "192.0.2.1:7777".parse().unwrap();
+        let started = Instant::now();
+        let r =
+            probe_agent_reachable_tcp(addr, Duration::from_millis(150)).await;
+        let elapsed = started.elapsed();
+        assert!(!r, "unroutable address must read as miss");
+        // The wedge fix's load-bearing assertion: the outer compio
+        // timeout caps the connect; the kernel's SYN-retransmit
+        // ceiling MUST NOT govern. 750 ms is a generous CI cap;
+        // healthy machines see this in <200 ms (timeout case) or
+        // ~10 ms (EHOSTUNREACH-at-connect case).
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "C-7-LT-2-PR1 regression: unroutable connect took \
+             {elapsed:?} — the outer compio::time::timeout is NOT \
+             capping a stuck SYN. Did the timeout get removed or did \
+             a future regression bring back ureq's request-deadline?"
+        );
+    }
+
+    /// Counter-reset contract. With the new connect-only probe:
+    /// 1 miss (e.g. refused) followed by a reachable port → counter
+    /// returns to 0. This invariant is what prevents the
+    /// alternating-shape failures from compounding.
+    ///
+    /// Verified indirectly via the PR1-alternating test above (which
+    /// pins `consecutive_misses=0` at deadline → counter MUST be
+    /// resetting each reachable probe). This unit-level test fixes
+    /// the property at the function boundary: 1 refused + N reachable
+    /// in a row → fence does NOT clear at "2 in a row" because the
+    /// first miss is followed by a hit (counter resets), and a single
+    /// reachable forever after pins to 0.
+    #[compio::test]
+    async fn pr1_one_miss_then_reachable_resets_counter() {
+        // Listener that goes ACTIVE after a brief delay: first probe
+        // refused → second+ probe reachable. Implementation: bind
+        // 50 ms after the fence starts. While bound and accepting,
+        // the connect-probe returns reachable; the fence then
+        // persistently reads "agent answering" and must time out
+        // with consecutive_misses=0 (NOT cleared at threshold=2).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = stop.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((_s, _)) => {} // accept-and-drop
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        // Drive the fence at this listener for a short budget. The
+        // socket is up immediately, so every probe sees reachable
+        // and the fence times out cleanly with consecutive_misses=0.
+        let url = format!("http://127.0.0.1:{port}");
+        let res =
+            wait_for_agent_silent(&url, Duration::from_millis(500)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("reachable listener must time out");
+        assert!(
+            err.contains("consecutive_misses=0"),
+            "PR1 counter-reset: every reachable probe must reset the \
+             miss counter; expected final consecutive_misses=0; got \
+             {err:?}"
+        );
+    }
+
+    /// Host-port parser surface check. The fence's caller hands in
+    /// `http://<ipv4>:<port>` strings built from `vm_index`; PR1's
+    /// new `parse_agent_probe_addr` must handle that shape AND a few
+    /// reasonable variants without burning fence budget on a parse
+    /// failure mid-loop. Also pins the empty-input failure path
+    /// because a malformed `agent_url` should surface as a leak with
+    /// a clear error (not a panic, not a silent OK).
+    #[test]
+    fn pr1_parse_agent_probe_addr_accepts_expected_shapes() {
+        // The canonical shape the controller builds.
+        let a = parse_agent_probe_addr("http://10.99.101.2:7777")
+            .expect("canonical http://ipv4:port must parse");
+        assert_eq!(a.port(), 7777);
+        assert_eq!(a.ip(), "10.99.101.2".parse::<std::net::IpAddr>().unwrap());
+        // With a trailing path (in case a future caller hands in
+        // `…/livez`).
+        let a = parse_agent_probe_addr("http://127.0.0.1:8080/livez")
+            .expect("path suffix must be stripped");
+        assert_eq!(a.port(), 8080);
+        // Bare host:port (no scheme) — defensive accept.
+        let a = parse_agent_probe_addr("127.0.0.1:9999")
+            .expect("scheme-less host:port must parse");
+        assert_eq!(a.port(), 9999);
+        // Empty → Err.
+        assert!(
+            parse_agent_probe_addr("").is_err(),
+            "empty input must Err"
+        );
+        // Scheme-only → Err (no host:port after `://`).
+        assert!(
+            parse_agent_probe_addr("http://").is_err(),
+            "scheme-without-host must Err"
         );
     }
 
@@ -4322,10 +7361,10 @@ mod tests {
     // `stop_preserving_state` → `stop_inner(.., false)`) MUST NOT
     // remove the per-sandbox `host_dir`, because that directory owns
     // `workspace.img` — the durable per-sandbox storage that the
-    // next wake's wrapper re-mounts. The wrapper's gate
-    // `[ ! -f $ZSBX_WORKSPACE_IMG ] && exit 1` (see
-    // `crates/sandbox/scripts/nomad-vm-wrapper.sh`) is what blew up
-    // empirically in the 2026-05-23 cluster smoke.
+    // next wake's ch driver re-attaches as a virtio-blk disk
+    // (`TaskConfig.Disks`). Its absence caused the 2026-05-23 cluster
+    // smoke failure (bug #15) — the ch driver received a missing-disk
+    // path and CH refused to start.
     //
     // This test exercises the full `stop_inner` path against a tiny
     // TcpListener-backed Nomad mock that 404s every request — which
@@ -4444,8 +7483,8 @@ mod tests {
         assert!(
             host_dir.exists(),
             "B15 regression: stop_preserving_state removed host_dir; \
-             the next wake's wrapper [ ! -f $ZSBX_WORKSPACE_IMG ] gate \
-             will exit 1"
+             the next wake's ch driver will receive a missing \
+             TaskConfig.Disks path and CH will refuse to start"
         );
         assert!(
             sentinel.exists(),
@@ -4465,11 +7504,20 @@ mod tests {
     }
 
     #[compio::test]
-    async fn stop_for_real_removes_host_dir() {
-        // Mirror test: the existing `stop()` MUST still rm the
-        // host_dir under the same favourable conditions. This is the
-        // structural counterpart that proves the bool gate, not
-        // independent infra, is what makes the difference.
+    async fn stop_for_real_leaks_host_dir_for_sweeper() {
+        // T-8b-stress-r2 controller v34: stop() now LEAKS the
+        // host_dir on purpose so a concurrent retry-CREATE for the
+        // same sandbox_id never observes workspace.img missing mid-
+        // alloc. Sweeper-owned GC (`sweep::spawn_host_dir_gc`) is the
+        // catchall — see `crates/sandbox/src/sweep.rs::run_host_dir_gc_once`
+        // for the eligibility gates (terminal state, no pending
+        // wake_jobs row, mtime > grace).
+        //
+        // This test is the mirror of B15's
+        // `stop_preserving_state_does_not_remove_host_dir`: both stop
+        // paths now share the leak-and-defer-to-sweeper contract.
+        // Pre-v34 this test asserted `!host_dir.exists()`; flipped
+        // here to assert the NEW contract.
         let (port, stop_flag) = spawn_404_mock();
         let nomad_addr = format!("http://127.0.0.1:{port}");
 
@@ -4500,18 +7548,32 @@ mod tests {
             backend.state.read().unwrap().get(&id).is_none(),
             "stop must remove the in-memory record"
         );
-        // host_dir IS removed by the regular stop path under these
-        // favourable conditions (404-mock → job_confirmed_gone=true,
-        // fence_secs=0 → fence_passed=true).
+        // v34 invariant: host_dir survives stop() under favourable
+        // conditions (404-mock → job_confirmed_gone=true,
+        // fence_secs=0 → fence_passed=true). Pre-v34 this assertion
+        // was inverted; the v34 fix moves host_dir GC to the
+        // sweeper.
         assert!(
-            !host_dir.exists(),
-            "stop (the for-real variant) must remove host_dir when \
-             job_confirmed_gone && fence_passed; got dir still present"
+            host_dir.exists(),
+            "v34 regression: stop() removed host_dir; the per-alloc \
+             host_dir cleanup MUST leak so a concurrent retry-CREATE \
+             for the same sandbox_id never observes workspace.img \
+             missing mid-alloc. Sweeper-owned GC reaps it later."
+        );
+        assert!(
+            sentinel.exists(),
+            "v34 regression: stop() removed workspace.img"
+        );
+        let contents = std::fs::read(&sentinel).expect("read sentinel");
+        assert_eq!(
+            contents,
+            b"WIPE-ME",
+            "v34 regression: workspace.img sentinel was modified by stop()"
         );
 
         stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        // Safety net in case the assertion above changes: don't
-        // leak the dir.
+        // Cleanup our own test fixture (the sweeper isn't running
+        // here, so we manually rm the leaked dir).
         let _ = std::fs::remove_dir_all(&host_dir);
     }
 
@@ -4789,6 +7851,34 @@ mod tests {
         // Slot 4 must be back in the allocator's free list. Round-
         // trip via alloc(): it should hand out 4 first (freed slots
         // win over `next`).
+        //
+        // T-8b-stress-r8 r24-A2-S3: release is now spawned as a
+        // detached compio task so the controller can delay release
+        // in production without blocking the stop ACK. The test
+        // config sets `vm_index_release_delay_secs=0` so the task
+        // still fires fast — poll for slot 4 to appear in the
+        // freed set before consuming via alloc(). A direct alloc()
+        // race against the release task could return 5 (next slot)
+        // while the freed set is still empty.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut freed_observed = false;
+        while Instant::now() < deadline {
+            let has_4 = {
+                let a = allocator.lock().unwrap();
+                a.freed_for_test().contains(&4)
+            };
+            if has_4 {
+                freed_observed = true;
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            freed_observed,
+            "B19 regression: slot 4 not present in freed set after \
+             stop within 2 s budget — r24-A2-S3 delayed-release task \
+             never fired"
+        );
         let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
         assert_eq!(
             reclaimed, 4,
@@ -4798,5 +7888,818 @@ mod tests {
 
         stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&host_state_parent);
+    }
+
+    // ─── R10-C1 regression (concurrency-r10 2026-05-25):
+    //     `unregister_restored` is the symmetric inverse of
+    //     `register_restored` used by the rollback path. Without it,
+    //     a CasLost on the final `update_sandbox_status(Running)` left
+    //     the state-map entry alive while vm_index went back into the
+    //     allocator pool — a ghost sandbox at a slot the next create
+    //     would land on top of. Source:
+    //     docs/reviews/sandbox-snapshot-restore-concurrency-2026-05-25-r10.md
+    //     R10-C1.
+
+    #[compio::test]
+    async fn unregister_restored_removes_state_map_entry() {
+        let cfg = make_cfg();
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let vm_index: u16 = 7;
+        let agent_url = backend.derive_agent_url(vm_index);
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0xa1; 32],
+                agent_url,
+                "usr_r10c1_unreg".into(),
+            )
+            .expect("register must succeed");
+
+        // Pre-condition: state map carries the entry.
+        assert!(
+            backend.state.read().unwrap().get(&id).is_some(),
+            "test setup: register_restored must place an entry"
+        );
+
+        let removed = backend.unregister_restored(id);
+        assert!(removed, "R10-C1: unregister_restored must report removal");
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "R10-C1 regression: unregister_restored did not remove the \
+             state-map entry"
+        );
+
+        // Idempotency: a second call is a no-op and returns false.
+        let removed_again = backend.unregister_restored(id);
+        assert!(
+            !removed_again,
+            "R10-C1: second unregister must be a no-op (no entry to remove)"
+        );
+    }
+
+    /// R10-C1 follow-on invariant: after `register_restored` +
+    /// `unregister_restored`, a subsequent `register_restored` at the
+    /// SAME `sandbox_id` must succeed (the Vacant slot is the inverse
+    /// of the rollback symmetry).
+    #[compio::test]
+    async fn unregister_restored_re_register_succeeds() {
+        let cfg = make_cfg();
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let vm_index: u16 = 9;
+        let agent_url = backend.derive_agent_url(vm_index);
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0x33; 32],
+                agent_url.clone(),
+                "usr_r10c1_rereg".into(),
+            )
+            .expect("first register");
+        assert!(backend.unregister_restored(id), "unregister returns true");
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0x33; 32],
+                agent_url,
+                "usr_r10c1_rereg".into(),
+            )
+            .expect(
+                "R10-C1: post-unregister, register_restored at the same \
+                 sandbox_id must succeed (Vacant slot)",
+            );
+    }
+
+    // ─── r3-A — local Nomad node_id discovery (parser) ───────
+    //
+    // The HTTP transport is exercised end-to-end at cluster boot;
+    // these tests pin the JSON-decoder invariants so a Nomad-version
+    // shape drift surfaces with a unit failure instead of a silent
+    // `None` fallback (which would degrade to pre-r3-A random
+    // placement under WORKER_COUNT>1).
+
+    /// Happy path: lowercase keys (Nomad 1.x live shape) yield the
+    /// node_id verbatim.
+    #[test]
+    fn parse_nomad_agent_self_node_id_lowercase_keys() {
+        let body = r#"{
+            "config": {},
+            "stats": {
+                "client": {
+                    "node_id": "0123456789abcdef-1111-2222-3333-444455556666"
+                }
+            },
+            "member": {}
+        }"#;
+        let id = parse_nomad_agent_self_node_id(body)
+            .expect("lowercase shape must parse");
+        assert_eq!(id, "0123456789abcdef-1111-2222-3333-444455556666");
+    }
+
+    /// Defensive fallback: PascalCase keys (older docs / agent-version
+    /// drift) also yield the node_id verbatim.
+    #[test]
+    fn parse_nomad_agent_self_node_id_pascal_case_keys() {
+        let body = r#"{
+            "Stats": {
+                "Client": {
+                    "NodeID": "PASCAL-CASE-NODE-ID"
+                }
+            }
+        }"#;
+        let id = parse_nomad_agent_self_node_id(body)
+            .expect("PascalCase shape must parse");
+        assert_eq!(id, "PASCAL-CASE-NODE-ID");
+    }
+
+    /// Server-only agent: no `stats.client` block. The function
+    /// returns Err so the boot path can demote to WARN + leave the
+    /// AppState field as None (random-placement fallback).
+    #[test]
+    fn parse_nomad_agent_self_node_id_missing_client_block_errs() {
+        let body = r#"{
+            "config": {},
+            "stats": {
+                "runtime": { "version": "1.7.0" }
+            }
+        }"#;
+        let err = parse_nomad_agent_self_node_id(body)
+            .expect_err("server-only agent must surface as Err");
+        assert!(
+            err.contains("missing stats.client.node_id"),
+            "error message must point operator at the missing field, got: {err}"
+        );
+    }
+
+    /// Empty node_id is treated as a hard error — an agent that
+    /// reports the field but with empty content is malformed in the
+    /// same way a missing field is.
+    #[test]
+    fn parse_nomad_agent_self_node_id_empty_string_errs() {
+        let body = r#"{
+            "stats": { "client": { "node_id": "" } }
+        }"#;
+        let err = parse_nomad_agent_self_node_id(body)
+            .expect_err("empty node_id must surface as Err");
+        assert!(
+            err.contains("present but empty"),
+            "error message must distinguish empty-vs-missing, got: {err}"
+        );
+    }
+
+    /// Non-JSON body (e.g., HTML interstitial from a misrouted proxy)
+    /// surfaces as a parse error.
+    #[test]
+    fn parse_nomad_agent_self_node_id_malformed_body_errs() {
+        let body = "<html>nope</html>";
+        let err = parse_nomad_agent_self_node_id(body)
+            .expect_err("non-JSON body must surface as Err");
+        assert!(
+            err.contains("parse /v1/agent/self body"),
+            "error message must name the source, got: {err}"
+        );
+    }
+
+    // ─── Option C Phase 2 — staging-locality flag emission ────
+    //
+    // Mirrors R22-T1 / r3-A node-affinity parity test shape: pin
+    // the cross-emitter behaviour of the new `stage_disk_images`
+    // ChPlugin Config field + `zsbx_stage_disks` job-level Meta.
+    // When the controller-side flag is true, every cold-boot
+    // jobspec MUST advertise driver-side staging via BOTH wire
+    // surfaces (typed Config for the driver, Meta for observability);
+    // when false, both surfaces fall back to the legacy false value.
+    // Restore-path emitter is unaffected by the flag (its
+    // `stage_disk_images` is hard-coded false per ADR Phase 2).
+
+    /// Cold-boot under `driver_stages_disk_images=true`: the ch driver
+    /// Config carries `stage_disk_images=true` (Go driver decodes it
+    /// from the HCL schema and runs `stageDiskImages` before CH
+    /// spawn) AND the job-level Meta carries `zsbx_stage_disks=true`
+    /// (operator-facing signal via `nomad job inspect`).
+    #[test]
+    fn cold_boot_jobspec_includes_stage_disks_meta_when_flag_set() {
+        let mut cfg = make_cfg();
+        cfg.driver_stages_disk_images = true;
+        let v = build_nomad_job_json_with(
+            "zsbx-stage-on",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "deadbeef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None, // cold-boot: no restore_from
+            None,
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Config"]["stage_disk_images"], true,
+            "ChPlugin Config must carry stage_disk_images=true when \
+             SandboxConfig.driver_stages_disk_images=true on cold-boot \
+             (Option C Phase 2: driver materializes images in StartTask)",
+        );
+        assert_eq!(
+            v["Job"]["Meta"]["zsbx_stage_disks"], "true",
+            "Job-level Meta must advertise zsbx_stage_disks=true so \
+             operators see staging-locality at-a-glance via \
+             `nomad job inspect`",
+        );
+    }
+
+    /// Cold-boot under `driver_stages_disk_images=false` (Phase 2
+    /// default): both wire surfaces emit `false` so the driver's
+    /// StartTask retains its existing back-compat behaviour
+    /// (consumes pre-staged paths via preflightDiskPaths).
+    #[test]
+    fn cold_boot_jobspec_omits_stage_disks_meta_when_flag_unset() {
+        let cfg = make_cfg(); // flag defaults to false in fixture
+        assert!(
+            !cfg.driver_stages_disk_images,
+            "fixture sanity: flag MUST default to false (Phase 2 \
+             back-compat default; Phase 4 flips after stress validation)",
+        );
+        let v = build_nomad_job_json_with(
+            "zsbx-stage-off",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "deadbeef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            None,
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Config"]["stage_disk_images"], false,
+            "ChPlugin Config must carry stage_disk_images=false when \
+             SandboxConfig.driver_stages_disk_images=false (Phase 2 default)",
+        );
+        assert_eq!(
+            v["Job"]["Meta"]["zsbx_stage_disks"], "false",
+            "Job-level Meta must advertise zsbx_stage_disks=false so \
+             operators can distinguish a missing-flag jobspec from one \
+             that opted out explicitly",
+        );
+    }
+
+    /// Even with the controller-side flag flipped to true, the
+    /// COLD-BOOT emitter MUST still fall back to false when the
+    /// `restore_from` arg is Some — the restore branch stages
+    /// rootfs via its own RootfsSource hardlink/copy and never
+    /// re-mkfs's workspace.img / home.img (ADR Phase 2).
+    #[test]
+    fn cold_boot_jobspec_with_restore_from_overrides_stage_flag_to_false() {
+        let mut cfg = make_cfg();
+        cfg.driver_stages_disk_images = true;
+        let restore_dir = Path::new("/var/zeroship/ch/snap-deadbeef/restore");
+        let v = build_nomad_job_json_with(
+            "zsbx-stage-restore-collision",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "deadbeef",
+            "usr_alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            Some(restore_dir),
+            None,
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Config"]["stage_disk_images"], false,
+            "ChPlugin Config stage_disk_images MUST be false under \
+             restore-with-flag-set (the restore branch stages rootfs \
+             via its own RootfsSource path and does not re-mkfs the \
+             ext4 images — ADR Phase 2 cold-boot-only contract)",
+        );
+        assert_eq!(
+            v["Job"]["Meta"]["zsbx_stage_disks"], "false",
+            "Job-level Meta MUST mirror the Config field (false on \
+             restore-with-flag-set)",
+        );
+    }
+
+    // ─── r30-A1: global Nomad /shutdown semaphore ──────────────────
+    //
+    // Three load-bearing tests for the `NomadStopPermits` semaphore
+    // (the global cap shared across all 7 production teardown call
+    // paths). The architecture review (concurrency r30 CRITICAL #A1)
+    // flagged that per-loop caps don't compose against the single
+    // downstream (Nomad /shutdown RPC queue + host CH process budget);
+    // these tests pin the new global cap's invariants.
+    //
+    // The tests exercise the semaphore type directly rather than
+    // through `stop_inner` to keep the assertions independent of the
+    // /shutdown ladder's many other concerns (Nomad mock setup, fence
+    // timeouts, host_dir bookkeeping). The integration shape — that
+    // stop_inner DOES acquire a permit when the field is installed —
+    // is covered by the call-site test `stop_inner_acquires_permit_
+    // when_installed` below.
+
+    /// r30-A1: a single acquire claims a permit (in-use bumps,
+    /// available drops by one); the guard's Drop releases it (both
+    /// counters return to baseline). The fundamental contract of any
+    /// semaphore — broken silently if the gauge stops tracking the
+    /// underlying flume channel.
+    #[compio::test]
+    async fn nomad_stop_permits_acquire_release_balance() {
+        // Capacity 4 — small enough to assert exact deltas, large
+        // enough that one acquire doesn't exhaust the pool (catches a
+        // regression where exhaust + recover collapse).
+        let permits = NomadStopPermits::new(4);
+        assert_eq!(permits.capacity(), 4);
+        assert_eq!(permits.permits_available(), 4);
+        // Capture pre-test in-use baseline. Process-global gauge: other
+        // tests may have left it at any value; we assert deltas, not
+        // absolutes.
+        let pre_in_use = crate::metrics::nomad_stop_permits_in_use_value();
+
+        // Scope the guard so Drop fires at the closing brace.
+        {
+            let _g = permits.acquire().await;
+            assert_eq!(
+                permits.permits_available(),
+                3,
+                "after one acquire, exactly one permit must be in flight"
+            );
+            assert_eq!(
+                crate::metrics::nomad_stop_permits_in_use_value(),
+                pre_in_use + 1,
+                "in-use gauge MUST bump by 1 on acquire"
+            );
+        }
+        // Drop ran.
+        assert_eq!(
+            permits.permits_available(),
+            4,
+            "after guard drop, all permits must be back in the pool"
+        );
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre_in_use,
+            "in-use gauge MUST decrement by 1 on guard drop"
+        );
+    }
+
+    /// r30-A1 / **load-bearing**: with capacity N, at most N concurrent
+    /// `acquire().await` calls resolve; the N+1th MUST block until a
+    /// permit is released. This is the entire reason the global cap
+    /// exists — if this assertion regresses, the per-loop caps can
+    /// re-compound on the downstream and the architecture review's
+    /// CRITICAL #A1 reopens.
+    ///
+    /// Test shape: spawn N+1 acquire futures; poll them with a tight
+    /// `compio::time::sleep` ceiling; assert exactly N have resolved
+    /// before any guard drops. Then drop one guard and assert the
+    /// (N+1)th unblocks within the same ceiling.
+    #[compio::test]
+    async fn nomad_stop_permits_cap_enforced_n_plus_one_blocks() {
+        const N: usize = 3;
+        let permits = NomadStopPermits::new(N);
+
+        // Acquire N permits inline — must all complete immediately
+        // (no pending await).
+        let g0 = permits.acquire().await;
+        let g1 = permits.acquire().await;
+        let g2 = permits.acquire().await;
+        assert_eq!(
+            permits.permits_available(),
+            0,
+            "after N acquires, pool MUST be empty"
+        );
+
+        // The (N+1)th acquire MUST block. Race it against a sleep
+        // ceiling; if the acquire wins, the cap leaked.
+        //
+        // Use `futures::pin_mut!` + `select!` so we don't allocate a
+        // task (the workspace ban on tokio means we'd otherwise need
+        // `compio::runtime::spawn` and join). `futures` is already in
+        // the workspace dep graph.
+        use futures::future::FutureExt;
+        let acquire_fut = permits.acquire().fuse();
+        let timeout_fut =
+            compio::time::sleep(std::time::Duration::from_millis(100)).fuse();
+        futures::pin_mut!(acquire_fut, timeout_fut);
+        let blocked = futures::select! {
+            _ = acquire_fut => false,  // resolved before timeout = cap leaked
+            _ = timeout_fut => true,    // timeout fired first = correctly blocking
+        };
+        assert!(
+            blocked,
+            "r30-A1 CRITICAL: the (N+1)th acquire on a capacity-{N} semaphore \
+             MUST block; resolving immediately means the cap is not enforced \
+             and concurrent teardowns can overload Nomad /shutdown."
+        );
+
+        // Drop one guard — pool now has 1 permit. The previously-
+        // blocked acquire should resolve within the same ceiling.
+        drop(g1);
+        let acquire_after = permits.acquire();
+        let timeout2 =
+            compio::time::sleep(std::time::Duration::from_millis(500)).fuse();
+        futures::pin_mut!(acquire_after, timeout2);
+        let unblocked = futures::select! {
+            _g3 = acquire_after.fuse() => true,
+            _ = timeout2 => false,
+        };
+        assert!(
+            unblocked,
+            "after one guard drop, a fresh acquire MUST resolve within the \
+             ceiling (the released permit feeds the next waiter)"
+        );
+        drop(g0);
+        drop(g2);
+    }
+
+    /// r30-A1: the `sandbox_nomad_stop_permits_in_use` gauge tracks
+    /// guard lifetime 1:1 even under multiple concurrent acquires.
+    /// Without this, the metric would diverge from the underlying
+    /// semaphore state and the operator-facing saturation view
+    /// (`in_use / total`) would silently lie. Pair with the metrics
+    /// crate's saturating-underflow test.
+    #[compio::test]
+    async fn nomad_stop_permits_in_use_gauge_decrements_on_release() {
+        let permits = NomadStopPermits::new(2);
+        let pre = crate::metrics::nomad_stop_permits_in_use_value();
+
+        let g_a = permits.acquire().await;
+        let g_b = permits.acquire().await;
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre + 2,
+            "two concurrent acquires MUST raise the in-use gauge by 2"
+        );
+
+        drop(g_a);
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre + 1,
+            "dropping one guard MUST decrement the gauge by exactly 1 \
+             (Drop on NomadStopPermitGuard calls dec_nomad_stop_permits_in_use)"
+        );
+
+        drop(g_b);
+        assert_eq!(
+            crate::metrics::nomad_stop_permits_in_use_value(),
+            pre,
+            "dropping the second guard MUST return the gauge to its baseline"
+        );
+    }
+
+    /// r30-A1 integration: when the semaphore is installed on a
+    /// `NomadCHBackend`, `stop_inner` actually acquires it. Asserted
+    /// indirectly: capacity=1; install on the backend; race two
+    /// `stop` calls; verify the in-use gauge held a non-zero value
+    /// during the race (the second `stop` waits behind the first).
+    ///
+    /// We use the same 404-mock Nomad agent the b15 tests use so the
+    /// `/shutdown` + Nomad-purge + wait-for-job-gone chain completes
+    /// fast (404 = "job is gone" for purge, and the agent_url stop
+    /// is best-effort). With `host_fence_timeout_secs=0` the fence
+    /// is bypassed too, so stop_inner runs in single-digit ms.
+    #[compio::test]
+    async fn stop_inner_acquires_permit_when_installed() {
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0; // skip fence loop
+        cfg.nomad_ch.vm_index_release_delay_secs = 0; // skip post-fence delay
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let permits = NomadStopPermits::new(1);
+        backend.install_nomad_stop_permits(permits.clone());
+        assert!(
+            backend.nomad_stop_permits().is_some(),
+            "install_nomad_stop_permits MUST be observable via the \
+             accessor (the OnceLock::set must have succeeded)"
+        );
+
+        // Hand-insert two sandbox records so we have two stop targets.
+        let id_a = Uuid::now_v7();
+        let id_b = Uuid::now_v7();
+        let host_dir_a = fresh_host_dir("permit-a");
+        let host_dir_b = fresh_host_dir("permit-b");
+        for (id, host_dir) in [(id_a, host_dir_a.clone()), (id_b, host_dir_b.clone())]
+        {
+            backend.state.write().unwrap().insert(
+                id,
+                NomadChSandbox {
+                    user_id: "usr_r30_a1".into(),
+                    job_id: format!("zsbx-r30-a1-{}", id.simple()),
+                    vm_index: 42,
+                    host_dir,
+                    // Unreachable; /shutdown errors are best-effort.
+                    agent_url: "http://127.0.0.1:1".into(),
+                    signing_key: make_sk(),
+                },
+            );
+        }
+
+        // Pre-acquire the only permit on a separate task to model
+        // "another teardown is mid-flight". The first stop will then
+        // have to wait for our held permit to drop.
+        let held_guard = permits.acquire().await;
+        assert_eq!(permits.permits_available(), 0);
+
+        // Race a single stop against a sleep ceiling — must block on
+        // the permit (we hold it).
+        use futures::future::FutureExt;
+        let stop_fut = backend.stop(id_a).fuse();
+        let timeout = compio::time::sleep(std::time::Duration::from_millis(100)).fuse();
+        futures::pin_mut!(stop_fut, timeout);
+        let stop_blocked = futures::select! {
+            _ = stop_fut => false,
+            _ = timeout => true,
+        };
+        assert!(
+            stop_blocked,
+            "r30-A1: backend.stop() MUST block when the global semaphore \
+             is exhausted — the permit is held by another teardown caller. \
+             Resolving immediately means stop_inner skipped the acquire \
+             and the global cap is not load-bearing."
+        );
+
+        // Drop the held permit; the in-flight stop should now make
+        // progress. Don't assert success (the unreachable agent_url
+        // makes /shutdown Err) — assert the function RETURNS within
+        // a generous budget, which means the acquire unblocked.
+        drop(held_guard);
+        let final_timeout =
+            compio::time::sleep(std::time::Duration::from_secs(5)).fuse();
+        futures::pin_mut!(final_timeout);
+        let stop_completed = futures::select! {
+            _ = stop_fut => true,
+            _ = final_timeout => false,
+        };
+        assert!(
+            stop_completed,
+            "after releasing the held permit, the pending stop MUST \
+             complete (the released permit feeds the waiter)"
+        );
+
+        // Clean up the second sandbox record so the mock + state are
+        // tidy; also bumps coverage that stop runs with a free pool.
+        let _ = backend.stop(id_b).await;
+
+        // Tidy up the mock thread + tempdirs.
+        stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&host_dir_a);
+        let _ = std::fs::remove_dir_all(&host_dir_b);
+    }
+
+    // ─── R33-I1: per-user `home.img` mkfs fence ────────────────────
+    //
+    // R32-P1 (`2faaf39b`) parallelised the cold-boot
+    // `workspace.img` + `home.img` mkfs via `std::thread::scope`.
+    // concurrency-r33 (R33-I1) flagged that `home.img` is per-USER
+    // (cf `user_home_image_path`), so two concurrent same-user
+    // cold-boot CREATEs can race two `mkfs.ext4 -q -F <same-path>`
+    // subprocesses. Fix: a per-user `Mutex<HashMap<UserId,
+    // Arc<Mutex<()>>>>` fence acquired only inside the `home_h`
+    // spawned thread. The workspace_h thread stays parallel.
+    //
+    // These tests pin the fence shape directly (install / lookup /
+    // serialization) without needing the full `try_create` mock
+    // surface. The "fence engages only on home_h, not workspace_h"
+    // invariant is structurally visible in the source — the lock is
+    // acquired inside `s.spawn(|| { let _guard = ...; })` for home_h
+    // only.
+
+    /// R33-I1: `install_user_home_mkfs_locks` makes the map readable
+    /// via `user_home_mkfs_locks()`. Default (uninstalled) is `None`
+    /// — the legacy R32-P1 unguarded fallback for unit-test /
+    /// single-tenant binary paths. Mirrors the pattern that
+    /// `nomad_stop_permits` follows.
+    #[test]
+    fn user_home_mkfs_locks_install_then_read() {
+        let backend = NomadCHBackend::new(make_cfg(), None).expect("new");
+        assert!(
+            backend.user_home_mkfs_locks().is_none(),
+            "uninstalled default MUST be None — legacy R32-P1 fallback \
+             (mkfs runs unguarded when fence is absent)"
+        );
+        let map: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        backend.install_user_home_mkfs_locks(Arc::clone(&map));
+        assert!(
+            backend.user_home_mkfs_locks().is_some(),
+            "after install, accessor MUST return Some"
+        );
+        // Same Arc identity — install does not clone the inner map.
+        assert!(
+            Arc::ptr_eq(backend.user_home_mkfs_locks().unwrap(), &map),
+            "install MUST store the exact Arc handed in, not a clone \
+             (so AppState and the backend see the SAME map)"
+        );
+    }
+
+    /// R33-I1: per-user entries are lazily inserted on first lookup
+    /// and shared across subsequent lookups by the same user. Two
+    /// lookups for `usr_a` get Arc-equal `Mutex` handles; a lookup
+    /// for `usr_b` gets a distinct handle. This is the "DashMap-
+    /// equivalent" shape the concurrency-r33 review specified — pin
+    /// it so a future refactor that swaps `Mutex<HashMap<_, _>>` for
+    /// `DashMap` (if/when the workspace gains that dep) doesn't drop
+    /// the entry-sharing semantics.
+    #[test]
+    fn user_home_mkfs_locks_per_user_lazy_insert_and_share() {
+        let map: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // Mirror the production acquire path: lock outer, entry-or-
+        // insert-with, clone the inner Arc, drop the outer lock.
+        let lookup = |uid: &str| -> Arc<Mutex<()>> {
+            let mut g = map.lock().unwrap();
+            g.entry(uid.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let a1 = lookup("usr_alice");
+        let a2 = lookup("usr_alice");
+        let b1 = lookup("usr_bob");
+        assert!(
+            Arc::ptr_eq(&a1, &a2),
+            "two lookups for the same user MUST share the same inner \
+             Mutex (otherwise the fence does not actually serialise)"
+        );
+        assert!(
+            !Arc::ptr_eq(&a1, &b1),
+            "lookups for DIFFERENT users MUST get distinct Mutex \
+             handles (otherwise the fence would over-serialise \
+             cross-user CREATEs and erase the R32-P1 parallelism win)"
+        );
+        // Map size = 2 after the three lookups (alice + bob).
+        assert_eq!(
+            map.lock().unwrap().len(),
+            2,
+            "map MUST contain exactly two entries after 3 lookups for \
+             2 distinct users (Alice's second lookup hits the existing \
+             entry, not insert)"
+        );
+    }
+
+    /// R33-I1 LOAD-BEARING: the per-user fence actually serialises
+    /// the home_h critical section. Synthetic c=2 same-user cold-boot
+    /// scenario:
+    ///
+    ///   - Two threads, each playing the role of a same-user cold-
+    ///     boot CREATE's `home_h` spawn. Both acquire the SAME per-
+    ///     user `Arc<Mutex<()>>` cloned from the map.
+    ///   - A third thread plays workspace_h. workspace.img is per-
+    ///     sandbox (no lock), so it MUST run independently — pin
+    ///     this by NOT having it acquire the map at all and asserting
+    ///     it makes progress while the home_h fence is held.
+    ///
+    /// We count entries via atomic counters and use a barrier to
+    /// rendezvous all three threads at the start so the assertions
+    /// catch lock interleaving, not thread-startup ordering.
+    #[test]
+    fn user_home_mkfs_locks_serialises_home_but_not_workspace() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+        use std::sync::Barrier;
+
+        let map: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Per-user (same user) lock. Two clones — one per home_h
+        // playback thread. This is exactly what `try_create`'s
+        // outer-lock + entry-or-insert + Arc::clone path produces
+        // when CREATE #1 and CREATE #2 by the same user resolve their
+        // fence handles.
+        let user_lock_a: Arc<Mutex<()>> = {
+            let mut g = map.lock().unwrap();
+            g.entry("usr_alice".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let user_lock_b: Arc<Mutex<()>> = {
+            let mut g = map.lock().unwrap();
+            g.entry("usr_alice".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        assert!(
+            Arc::ptr_eq(&user_lock_a, &user_lock_b),
+            "fence sanity: same-user lookups MUST share the inner Mutex"
+        );
+
+        // Witnesses:
+        //   - `home_in_section` counts threads currently holding the
+        //     home_h fence. Should NEVER exceed 1 (serialisation
+        //     invariant — what R33-I1 closes).
+        //   - `workspace_progress` is set by workspace_h while a home_h
+        //     critical section is held. Must reach 1 to prove
+        //     workspace_h runs in PARALLEL with held home_h (the
+        //     R32-P1 perf-win invariant we are preserving).
+        let home_in_section = Arc::new(AtomicUsize::new(0));
+        let home_max_concurrent = Arc::new(AtomicUsize::new(0));
+        let workspace_progress = Arc::new(AtomicUsize::new(0));
+
+        // Barrier across all 3 worker threads so they start their
+        // critical sections in lockstep — without this, thread spawn
+        // order would dominate the timing.
+        let barrier = Arc::new(Barrier::new(3));
+
+        std::thread::scope(|s| {
+            // home_h #1 playback. Acquires the per-user Mutex,
+            // increments in_section, sleeps briefly to GIVE the second
+            // home_h a chance to attempt acquire (which it MUST block
+            // on), decrements + releases. The max_concurrent counter
+            // is "the highest in_section ever reached" — under
+            // correct fencing it's 1; under broken fencing it's 2.
+            let lock1 = Arc::clone(&user_lock_a);
+            let in_section1 = Arc::clone(&home_in_section);
+            let max1 = Arc::clone(&home_max_concurrent);
+            let barrier1 = Arc::clone(&barrier);
+            let h1 = s.spawn(move || {
+                barrier1.wait();
+                let _guard = lock1.lock().unwrap();
+                let now = in_section1.fetch_add(1, AOrd::SeqCst) + 1;
+                max1.fetch_max(now, AOrd::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                in_section1.fetch_sub(1, AOrd::SeqCst);
+            });
+            // home_h #2 playback. Same shape; the second to hit the
+            // critical section MUST observe in_section == 1 (it can't
+            // enter until #1 releases).
+            let lock2 = Arc::clone(&user_lock_b);
+            let in_section2 = Arc::clone(&home_in_section);
+            let max2 = Arc::clone(&home_max_concurrent);
+            let barrier2 = Arc::clone(&barrier);
+            let h2 = s.spawn(move || {
+                barrier2.wait();
+                let _guard = lock2.lock().unwrap();
+                let now = in_section2.fetch_add(1, AOrd::SeqCst) + 1;
+                max2.fetch_max(now, AOrd::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                in_section2.fetch_sub(1, AOrd::SeqCst);
+            });
+            // workspace_h playback. Does NOT touch the map — workspace
+            // .img is per-sandbox; the R32-P1 parallelism win for the
+            // workspace half MUST be preserved. We spin a small busy
+            // wait and assert it can complete WHILE the home_h fence
+            // is held by one of the other two threads.
+            let workspace_progress_h = Arc::clone(&workspace_progress);
+            let barrier_w = Arc::clone(&barrier);
+            let in_section_w = Arc::clone(&home_in_section);
+            let h_workspace = s.spawn(move || {
+                barrier_w.wait();
+                // Wait until SOME home_h has entered the critical
+                // section (in_section >= 1), then signal progress.
+                // If workspace_h were (incorrectly) blocked by the
+                // fence, it would never get past this loop — the
+                // test would time out at join() instead.
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(2);
+                while std::time::Instant::now() < deadline
+                    && in_section_w.load(AOrd::SeqCst) == 0
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                workspace_progress_h.store(1, AOrd::SeqCst);
+            });
+            h1.join().unwrap();
+            h2.join().unwrap();
+            h_workspace.join().unwrap();
+        });
+
+        // The fence's load-bearing invariant: home_h MUST be
+        // serialised — at no instant did two threads sit inside the
+        // critical section together. Without R33-I1's fence, this
+        // would race to 2.
+        assert_eq!(
+            home_max_concurrent.load(AOrd::SeqCst),
+            1,
+            "R33-I1 invariant BROKEN: two concurrent home_h threads \
+             entered the critical section together. The per-user \
+             fence is NOT serialising same-user home.img mkfs."
+        );
+        // The workspace_h thread ran while a home_h fence was held —
+        // proves the fence is per-user (home.img-only), not global.
+        // If this fails, we'd have over-serialised and erased the
+        // R32-P1 parallelism win for the workspace half.
+        assert_eq!(
+            workspace_progress.load(AOrd::SeqCst),
+            1,
+            "R33-I1 over-fencing regression: workspace_h playback \
+             did not observe home_h in-section. The fence has \
+             pessimistically blocked workspace.img too — R32-P1's \
+             cold-boot parallelism win is gone."
+        );
     }
 }

@@ -28,9 +28,9 @@
 #   SERVER_MACHINE                                  default: n2-standard-4
 #   WORKER_MACHINE                                  default: n2-standard-32
 #   ARTIFACT_BUCKET  (no gs:// prefix)              default: suger-dev-zsbx-artifacts
-#   CONTROLLER_OBJECT                               default: zeroship-sandbox.snapshot-v6
+#   CONTROLLER_OBJECT                               default: zeroship-sandbox.snapshot-v41
 #   SNAPSHOT_BUCKET  (L2 store)                     default: $ARTIFACT_BUCKET
-#   VM_INDEX_CEIL    (taps per worker)              default: 12
+#   VM_INDEX_CEIL    (taps per worker)              default: 20
 #   PG_PASSWORD                                     default: auto-generated, written to /tmp/.zsbx-pg.pw
 #   SANDBOX_TOKEN                                   default: auto-generated 48-byte base64
 #   SANDBOX_ADMIN_TOKEN                             default: auto-generated 48-byte base64
@@ -52,10 +52,16 @@ WORKER_COUNT=${WORKER_COUNT:-5}
 SERVER_MACHINE=${SERVER_MACHINE:-n2-standard-4}
 WORKER_MACHINE=${WORKER_MACHINE:-n2-standard-32}
 ARTIFACT_BUCKET=${ARTIFACT_BUCKET:-suger-dev-zsbx-artifacts}
-CONTROLLER_OBJECT=${CONTROLLER_OBJECT:-zeroship-sandbox.snapshot-v6}
+CONTROLLER_OBJECT=${CONTROLLER_OBJECT:-zeroship-sandbox.snapshot-v41}
 SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
-VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
+VM_INDEX_CEIL=${VM_INDEX_CEIL:-20}
 DATACENTER=${DATACENTER:-$PREFIX}
+# Optional extra worker metadata, comma-separated key=value pairs.
+# Appended to the worker --metadata line as-is. Default installs the
+# nomad-driver-ch Go plugin (required by every Phase-B+ stress run and
+# the eventual T-8b-cutover state). Override with empty string for
+# raw_exec-only worker testing.
+EXTRA_WORKER_METADATA=${EXTRA_WORKER_METADATA-install-ch-plugin-driver=1}
 
 NETWORK=${NETWORK:-${PREFIX}-net}
 SUBNET=${SUBNET:-${PREFIX}-subnet}
@@ -250,8 +256,13 @@ create_server() {
     --quiet >/dev/null
 }
 
+server_pids=()
 for i in $(seq 1 "$SERVER_COUNT"); do
-  create_server "${SERVER_NAMES[i-1]}" "$i"
+  create_server "${SERVER_NAMES[i-1]}" "$i" &
+  server_pids+=($!)
+done
+for pid in "${server_pids[@]}"; do
+  wait "$pid" || { echo "[provision] FATAL: server create failed (pid $pid)" >&2; exit 1; }
 done
 
 # ────────── Worker creation ──────────
@@ -263,6 +274,11 @@ create_worker() {
     return 0
   fi
   echo "[provision] creating $name ($WORKER_MACHINE, nested-virt enabled)"
+  local meta="role=worker,datacenter=$DATACENTER,pg-host=$PG_HOST_IP,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT,vm-index-ceil=$VM_INDEX_CEIL,snapshot-bucket=$SNAPSHOT_BUCKET"
+  if [ -n "$EXTRA_WORKER_METADATA" ]; then
+    meta="${meta},${EXTRA_WORKER_METADATA}"
+    echo "[provision] extra worker metadata: $EXTRA_WORKER_METADATA"
+  fi
   gcloud compute instances create "$name" \
     --project "$PROJECT" \
     --zone "$ZONE" \
@@ -274,15 +290,19 @@ create_worker() {
     --network "$NETWORK" \
     --subnet "$SUBNET" \
     --enable-nested-virtualization \
-    --scopes=storage-ro,logging-write,monitoring-write \
+    --scopes=storage-rw,logging-write,monitoring-write \
     --metadata-from-file "startup-script=$WORKER_STARTUP,server-ips=$SERVER_IPS_FILE" \
-    --metadata \
-      "role=worker,datacenter=$DATACENTER,pg-host=$PG_HOST_IP,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT,vm-index-ceil=$VM_INDEX_CEIL,snapshot-bucket=$SNAPSHOT_BUCKET" \
+    --metadata "$meta" \
     --quiet >/dev/null
 }
 
+worker_pids=()
 for n in "${WORKER_NAMES[@]}"; do
-  create_worker "$n"
+  create_worker "$n" &
+  worker_pids+=($!)
+done
+for pid in "${worker_pids[@]}"; do
+  wait "$pid" || { echo "[provision] FATAL: worker create failed (pid $pid)" >&2; exit 1; }
 done
 
 # ────────── Wait for sentinels ──────────

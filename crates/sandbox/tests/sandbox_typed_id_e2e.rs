@@ -48,7 +48,7 @@ fn make_cfg(token: &str) -> SandboxConfig {
 /// the handlers' boundary check passes.
 fn make_state_with_typed_id_fixture(token: &str) -> (Arc<zeroship_sandbox::AppState>, Uuid, String, String) {
     let cfg = make_cfg(token);
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     let sandbox_uuid = Uuid::now_v7();
     let sandbox_typed = format!(
         "sbx_{}",

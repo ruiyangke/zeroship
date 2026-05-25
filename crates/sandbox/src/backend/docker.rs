@@ -823,7 +823,6 @@ mod tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
                 runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
@@ -834,6 +833,8 @@ mod tests {
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
                 subnet_second_octet: 99,
+                vm_index_release_delay_secs: 0, // r24-A2-S3: test default 0
+                nomad_stop_concurrency: 16, // r30-A1: prod default
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
@@ -843,6 +844,7 @@ mod tests {
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
             workspace_image_size_gb: 20,
+            driver_stages_disk_images: false,
         };
         let backend = DockerBackend::new(cfg, None);
         let id = Uuid::now_v7();

@@ -78,6 +78,28 @@ pub fn state_from_env(workspace_path: PathBuf) -> Result<AppState, String> {
     state_with_paths(std::path::Path::new(&pubkey_path), &workspace_path)
 }
 
+/// Bind the agent's boot-time `sandbox_id` from `SANDBOX_AGENT_SANDBOX_ID`
+/// env (preferred) or `/run/keys/sandbox-id` file (fallback). The
+/// `/_clock_resync` handler (R7-S1) matches controller-signed bodies
+/// against this id, so calling this exactly once before `ntex::run` is
+/// mandatory for cluster-wake correctness — without it the handler
+/// 500s every request and the controller surfaces that as a backend
+/// failure on the restore path.
+///
+/// **The canonical entry point invoked by the binary's `main.rs`; not
+/// for any other consumer.** This crate's `[lib]`/`[bin]` split forces
+/// the binary to compile against the lib's public API, so the
+/// underlying [`handlers::init_sandbox_id_from_env`] stays
+/// `pub(crate)` and this wrapper is the single named surface bin code
+/// reaches through. Tests use `handlers::test_set_sandbox_id` directly.
+///
+/// Idempotent: a second call after the OnceLock is set returns `Ok`
+/// without re-reading. Subsequent calls with a DIFFERENT id return
+/// `Ok` but do NOT overwrite — `OnceLock::set` is write-once.
+pub fn boot_init_sandbox_id() -> Result<(), String> {
+    handlers::init_sandbox_id_from_env()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

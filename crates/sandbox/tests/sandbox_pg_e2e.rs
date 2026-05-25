@@ -2656,13 +2656,24 @@ async fn seed_snapshotted_row(
         Uuid::now_v7().simple(),
     ));
     std::fs::create_dir_all(&stage).unwrap();
-    // Minimal config.json carrying the v1 rewrite shape.
+    // Minimal config.json carrying the v1 rewrite shape. Post-pivot
+    // (bug #11): keys/workspace/userhome are virtio-blk disks, not
+    // virtiofs sockets — so `fs[]` is absent and `disks[]` carries
+    // the rootfs.img + persistent-workspace + per-user-home triple.
+    // The rewriter (`rewrite_config_json`) still only touches
+    // `net[].tap` + `net[].mac`; the path-bearing entries below stay
+    // untouched, which is the invariant this fixture is designed to
+    // exercise.
     std::fs::write(
         stage.join("config.json"),
         r#"{
             "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
-            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
-            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+            "disks":[
+                {"path":"/opt/nomad/data/alloc/oldalloc/ch/local/rootfs.img"},
+                {"path":"/var/zeroship/ch/sbx-oldalloc/workspace.img"},
+                {"path":"/var/zeroship/ch/users/usr-oldalloc/home.img"}
+            ],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/ch/local/serial.log"}
         }"#,
     )
     .unwrap();
@@ -2821,7 +2832,7 @@ fn build_sweep_state(
     snapshot_enabled: bool,
 ) -> std::sync::Arc<zeroship_sandbox::AppState> {
     let cfg = sweep_test_cfg(snapshot_enabled);
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     // A5: `admin_token` is `pub(crate)`; out-of-crate construction
     // goes through `AppState::new_fixture` (admin_token = None).
     // A6b: `database` is `pub(crate)`; set via `with_database`
@@ -2832,25 +2843,42 @@ fn build_sweep_state(
 }
 
 #[compio::test]
-#[ignore = "needs Postgres; PR 3g transient takeover sweep"]
+#[ignore = "needs Postgres; PR 3g + C1-FOLLOWUP — sweep recovers CRASHED peer's wedge"]
 async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
+    // C1-FOLLOWUP (concurrency-r9): the sweep targets OTHER
+    // controllers' wedges, not our own. Insert the row owned by an
+    // injected "peer" host (different host_id) so the sweep query
+    // surfaces it and the ownership-transferring recovery CAS lands.
+    // Pre-C1-FOLLOWUP this test inserted with `fresh_host(&db)` ==
+    // our own host_id, which the sweep query now (correctly)
+    // excludes from the candidate set.
     let db = migrated_db().await;
-    let host_id = fresh_host(&db);
+    let url = test_url();
+    let (peer_host_id, peer_host_typed) = inject_extra_host(&url, "peer-crashed").await;
     let (info, sid) = fresh_info("alice");
-    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+    // Row owned by the (about-to-crash) peer controller.
+    db.insert_sandbox(&info, peer_host_id, &"a".repeat(32), Some("http://x"), Some(7))
         .await
         .unwrap();
 
-    // Drive into snapshotting and stamp a stale lessee_updated_at by
-    // direct UPDATE (bypassing update_lessee which stamps now()).
+    // Drive into snapshotting under the PEER's identity by going
+    // through the CAS with `host_id = peer_host_id`. Our own
+    // `update_sandbox_status` fences on `self.host_id()` so we use
+    // the `_with_host` variant directly.
     let g1 = db
-        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .update_sandbox_status_with_host(
+            sid,
+            SandboxStatus::Snapshotting,
+            0,
+            peer_host_id,
+            None,
+        )
         .await
         .unwrap();
     let _ = g1;
     // Backdate `lessee_updated_at` 600 seconds — well past the 120s
-    // threshold the sweep uses by default.
-    let url = test_url();
+    // threshold the sweep uses by default. Simulates the peer's
+    // 10s `update_lessee` heartbeat stopping when the peer crashed.
     let app_dsn = role_dsn(&url, "sandbox_app");
     let mut cfg = PoolConfig::default();
     cfg.max_size = 2;
@@ -2868,13 +2896,31 @@ async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
     assert_eq!(n, 1);
 
     let state = build_sweep_state(db, /*snapshot_enabled=*/true);
-    let (seen, recovered) = run_transient_takeover_once(&state, 120).await;
-    assert!(seen >= 1, "sweep should have seen at least our stale row; seen={seen}");
-    assert!(recovered >= 1, "sweep should have recovered at least our row; recovered={recovered}");
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&state.database().unwrap().host_id())
+    );
+    assert_ne!(
+        peer_host_typed, my_host_typed,
+        "test precondition: peer host must differ from sweep's controller \
+         host_id (otherwise the sweep query rightly excludes it)"
+    );
 
-    // Row must be in `snapshotting_aborted` per § 9.2.
-    // A6b: `database` field is `pub(crate)`; use the `database()`
-    // accessor instead of poking the field directly.
+    let (seen, recovered) = run_transient_takeover_once(&state, 120).await;
+    assert!(
+        seen >= 1,
+        "sweep should have seen at least our stale peer-owned row; seen={seen}",
+    );
+    assert!(
+        recovered >= 1,
+        "sweep should have recovered at least our row; recovered={recovered} \
+         (pre-C1-FOLLOWUP this was always 0 because the CAS fenced on \
+         self.host_id() != peer's stored host_id)",
+    );
+
+    // Row must be in `snapshotting_aborted` per § 9.2, ownership
+    // transferred to the recovering controller, and lessee_updated_at
+    // cleared (target state is non-transient).
     let row = state
         .database()
         .unwrap()
@@ -2883,6 +2929,222 @@ async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
         .unwrap()
         .expect("row");
     assert_eq!(row.status, SandboxStatus::SnapshottingAborted);
+    assert_eq!(
+        row.host_id, my_host_typed,
+        "recovery CAS must transfer ownership from crashed peer to \
+         self.host_id(); got {} expected {}",
+        row.host_id, my_host_typed,
+    );
+    let post_lessee: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        post_lessee.is_none(),
+        "post-recovery (non-transient state) must have NULL lessee_updated_at; \
+         got {post_lessee:?}",
+    );
+}
+
+/// C1-FOLLOWUP regression #1: the recovery scope is OTHER controllers'
+/// wedges only. A row whose `host_id = self.host_id()` with a stale
+/// `lessee_updated_at` must NOT be touched by the sweep — either the
+/// handler is legitimately mid-flight (and is supposed to bump the
+/// lease itself) or our own process is hung in a way the sweep can't
+/// safely arbitrate. Pre-C1-FOLLOWUP the sweep query surfaced these
+/// rows, the CAS then bounced on `host_id = self.host_id()` (which
+/// trivially matched), and the row was "recovered" — destroying
+/// in-flight state that may still resolve normally.
+#[compio::test]
+#[ignore = "needs Postgres; C1-FOLLOWUP regression — sweep skips SELF-owned transients"]
+async fn sweep_transient_takeover_skips_self_owned_in_flight_row() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Drive into snapshotting as ourselves.
+    let _g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    // Even at the tightest threshold, a self-owned row must be
+    // invisible to the sweep candidate query (we cap the scope to
+    // OTHER controllers' wedges at the SELECT level).
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let n = client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "should have backdated exactly our row");
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/true);
+    let (seen, recovered) = run_transient_takeover_once(&state, 0).await;
+    // Sweep MUST NOT touch our self-owned row even though
+    // lessee_updated_at is stale. Other unrelated rows the fixture
+    // may have created could push `seen`/`recovered` up, but ours
+    // specifically must still be `snapshotting` afterwards.
+    let row = state
+        .database()
+        .unwrap()
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        row.status,
+        SandboxStatus::Snapshotting,
+        "self-owned in-flight row must remain in snapshotting; got {:?} \
+         (seen={seen} recovered={recovered}); pre-C1-FOLLOWUP the sweep \
+         would have flipped this to snapshotting_aborted",
+        row.status,
+    );
+
+    // And directly: the lease-expired query must not list it.
+    let listed = state
+        .database()
+        .unwrap()
+        .transient_state_lease_expired_sandboxes(0)
+        .await
+        .unwrap();
+    assert!(
+        !listed.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "self-owned row must not appear in transient_state_lease_expired_sandboxes; \
+         got {:?}",
+        listed.iter().map(|r| &r.sandbox_id).collect::<Vec<_>>(),
+    );
+}
+
+/// C1-FOLLOWUP regression #2: the recovery CAS, called directly,
+/// refuses when `expected_host_id == self.host_id()`. Belt-and-
+/// suspenders against a future caller bug that bypasses the sweep
+/// query's self-host filter.
+#[compio::test]
+#[ignore = "needs Postgres; C1-FOLLOWUP — recovery CAS refuses self-host_id"]
+async fn claim_orphan_transient_for_recovery_refuses_self_host() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let _ = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&db.host_id())
+    );
+    let err = db
+        .claim_orphan_transient_for_recovery(
+            sid,
+            SandboxStatus::SnapshottingAborted,
+            /*expected_generation=*/ 1,
+            &my_host_typed,
+            /*threshold_secs=*/ 0,
+        )
+        .await
+        .expect_err("must refuse self.host_id() as expected_host_id");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("expected_host_id") && msg.contains("OTHER"),
+        "expected validation error citing OTHER controllers' wedges; got: {msg}",
+    );
+    // Row untouched.
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotting);
+}
+
+/// C1-FOLLOWUP regression #3: ABA defense — if the original
+/// controller bumps `lessee_updated_at` between the sweep's SELECT
+/// and the recovery CAS, the CAS must lose (the row's "alive" again).
+/// Simulated by stamping a fresh `now()` after collecting the row.
+#[compio::test]
+#[ignore = "needs Postgres; C1-FOLLOWUP — recovery CAS ABA-safe on lessee bump"]
+async fn claim_orphan_transient_for_recovery_aba_safe_on_lessee_bump() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let (peer_host_id, peer_host_typed) = inject_extra_host(&url, "peer-aba").await;
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, peer_host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let g1 = db
+        .update_sandbox_status_with_host(
+            sid,
+            SandboxStatus::Snapshotting,
+            0,
+            peer_host_id,
+            None,
+        )
+        .await
+        .unwrap();
+    // Backdate so the row is sweep-eligible.
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    // Now simulate the original peer's lease-heartbeat landing
+    // between the SELECT and the CAS — bump lessee_updated_at back
+    // to now().
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    // Recovery CAS must miss (CasLost): the lessee window check
+    // rejects.
+    let err = db
+        .claim_orphan_transient_for_recovery(
+            sid,
+            SandboxStatus::SnapshottingAborted,
+            g1,
+            &peer_host_typed,
+            /*threshold_secs=*/ 120,
+        )
+        .await
+        .expect_err("must lose CAS on fresh lessee bump");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::CasLost { .. }),
+        "expected CasLost; got {err:?}",
+    );
+    // Row still in snapshotting under the peer.
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotting);
+    assert_eq!(row.host_id, peer_host_typed);
 }
 
 #[compio::test]
@@ -3056,15 +3318,24 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
     // shape it expects. The mock ch-remote in phase 1 writes a
     // placeholder; we overwrite it with a v1-shaped JSON before the
     // restore so the rewrite assertion succeeds. Real CH artifacts
-    // carry this shape natively.
+    // carry this shape natively. Post-pivot (bug #11): keys/workspace/
+    // userhome are virtio-blk disks, not virtiofs sockets — `fs[]`
+    // is absent and `disks[]` carries the rootfs.img + persistent-
+    // workspace + per-user-home triple. The rewriter (`rewrite_
+    // config_json`) still only touches `net[].tap` + `net[].mac`; the
+    // path-bearing entries below stay untouched.
     let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
     let cfg_path = store_root.join(&typed).join("config.json");
     std::fs::write(
         &cfg_path,
         r#"{
             "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
-            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
-            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+            "disks":[
+                {"path":"/opt/nomad/data/alloc/oldalloc/ch/local/rootfs.img"},
+                {"path":"/var/zeroship/ch/sbx-oldalloc/workspace.img"},
+                {"path":"/var/zeroship/ch/users/usr-oldalloc/home.img"}
+            ],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/ch/local/serial.log"}
         }"#,
     )
     .unwrap();
@@ -3171,7 +3442,7 @@ async fn phase_b_lookup_source_vm_ops_resolves_handle_against_nomad() {
     // returns Err.
     let mut cfg = sweep_test_cfg(true);
     cfg.nomad_ch.nomad_addr = nomad_addr;
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
     let sid = Uuid::now_v7();
     let user_id = typed_id("usr");
     let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -3302,7 +3573,7 @@ async fn teardown_source_for_snapshot_preserves_host_dir_then_stop_reaps() {
     // 3. Construct the Backend (the full enum, not just the inner
     //    nomad-ch backend) so the test exercises the snapshot
     //    teardown's dispatch through `Backend::teardown_source_for_snapshot`.
-    let backend = Backend::from_config(&cfg).expect("backend");
+    let backend = Backend::builder(&cfg).build().expect("backend");
 
     // 4. Inject a sandbox record. `_test_inject_sandbox` derives
     //    host_dir as `<host_state_dir>/<sandbox-id>/`; we materialise
@@ -3386,4 +3657,2303 @@ async fn teardown_source_for_snapshot_preserves_host_dir_then_stop_reaps() {
     // Cleanup.
     stop_flag.store(true, Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&host_state_dir);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// C-7-LT-PR1: wake_jobs CRUD (pg-gated)
+//
+// PR1 lands the table + CRUD; PR2 wires the state machine into the
+// wake handler. These tests pin the round-trip + transition + sweep
+// semantics so PR2 can build on them without re-verifying.
+// ════════════════════════════════════════════════════════════════════
+
+mod wake_jobs_crud {
+    use super::*;
+    use std::time::Duration as StdDuration;
+    use zeroship_sandbox::db::{
+        Database, InsertWakeJobOutcome, WakeErrorCode, WakeJobRow, WakeJobState,
+    };
+
+    fn sample_row(wake_id: &str, sandbox_id: &str, lessee: &str) -> WakeJobRow {
+        WakeJobRow {
+            wake_id: wake_id.to_string(),
+            sandbox_id: sandbox_id.to_string(),
+            state: WakeJobState::Pending,
+            error_code: None,
+            error_message: None,
+            // Insert-side timestamps are server-set; these values are
+            // ignored by `insert_wake_job` so any placeholder works.
+            started_at_secs: 0,
+            updated_at_secs: 0,
+            ready_at_secs: None,
+            agent_url: None,
+            lessee: lessee.to_string(),
+            lessee_updated_at_secs: 0,
+        }
+    }
+
+    /// Round-trip: insert a row, read it back via `get_wake_job`,
+    /// check that all fields are populated and server-side timestamps
+    /// are non-zero.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_insert_and_read_round_trip() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_test_round_trip", "sbx_test_rt_sandbox", "hst_test_owner");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.expect("insert"),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+
+        let loaded = db
+            .get_wake_job("wak_test_round_trip")
+            .await
+            .expect("get")
+            .expect("row must exist");
+        assert_eq!(loaded.wake_id, "wak_test_round_trip");
+        assert_eq!(loaded.sandbox_id, "sbx_test_rt_sandbox");
+        assert_eq!(loaded.state, WakeJobState::Pending);
+        assert!(loaded.error_code.is_none());
+        assert!(loaded.error_message.is_none());
+        assert!(loaded.agent_url.is_none());
+        assert!(loaded.ready_at_secs.is_none());
+        assert_eq!(loaded.lessee, "hst_test_owner");
+        assert!(
+            loaded.started_at_secs > 0,
+            "server-side started_at must populate; got {}",
+            loaded.started_at_secs
+        );
+        assert!(
+            loaded.updated_at_secs > 0,
+            "server-side updated_at must populate"
+        );
+        assert!(loaded.lessee_updated_at_secs > 0);
+
+        // Unknown wake_id → None.
+        let absent = db.get_wake_job("wak_does_not_exist").await.unwrap();
+        assert!(absent.is_none());
+    }
+
+    /// State transition: Pending → Restoring → Ok bumps updated_at,
+    /// sets ready_at on Ok, and surfaces agent_url. Failure path
+    /// surfaces error_code + error_message.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_update_state_transitions() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Happy path: pending → restoring → ok.
+        let happy = sample_row("wak_happy", "sbx_happy", "hst_owner_a");
+        assert!(
+            matches!(
+                db.insert_wake_job(&happy).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        let after_insert = db
+            .get_wake_job("wak_happy")
+            .await
+            .unwrap()
+            .expect("inserted");
+
+        let n = db
+            .update_wake_job_state(
+                "wak_happy",
+                WakeJobState::Restoring,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("update to restoring");
+        assert_eq!(n, 1);
+        let mid = db.get_wake_job("wak_happy").await.unwrap().unwrap();
+        assert_eq!(mid.state, WakeJobState::Restoring);
+        assert!(
+            mid.updated_at_secs >= after_insert.updated_at_secs,
+            "updated_at must move forward (or equal under low resolution)"
+        );
+        assert!(mid.ready_at_secs.is_none(), "ready_at unset until ok");
+        assert!(mid.agent_url.is_none(), "agent_url unset until provided");
+
+        let n = db
+            .update_wake_job_state(
+                "wak_happy",
+                WakeJobState::Ok,
+                None,
+                None,
+                Some("http://10.0.0.1:7000"),
+            )
+            .await
+            .expect("update to ok");
+        assert_eq!(n, 1);
+        let done = db.get_wake_job("wak_happy").await.unwrap().unwrap();
+        assert_eq!(done.state, WakeJobState::Ok);
+        assert!(done.is_state_terminal());
+        assert!(
+            done.ready_at_secs.is_some(),
+            "ready_at must be set on transition to ok"
+        );
+        assert_eq!(done.agent_url.as_deref(), Some("http://10.0.0.1:7000"));
+
+        // Fail path: separate row, pending → failed with code + message.
+        let bad = sample_row("wak_bad", "sbx_bad", "hst_owner_b");
+        assert!(
+            matches!(
+                db.insert_wake_job(&bad).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        let n = db
+            .update_wake_job_state(
+                "wak_bad",
+                WakeJobState::Failed,
+                Some(WakeErrorCode::LivezTimeout),
+                Some("agent /livez never returned 200 within 30s"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let dead = db.get_wake_job("wak_bad").await.unwrap().unwrap();
+        assert_eq!(dead.state, WakeJobState::Failed);
+        assert_eq!(dead.error_code, Some(WakeErrorCode::LivezTimeout));
+        assert_eq!(
+            dead.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s")
+        );
+
+        // Update of a non-existent row affects 0 rows (caller treats
+        // as 404).
+        let n = db
+            .update_wake_job_state(
+                "wak_does_not_exist",
+                WakeJobState::Ok,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// Idempotency lookup: returns the non-terminal row for a
+    /// sandbox; returns None once the row has terminated (ok or
+    /// failed).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_find_pending_for_sandbox() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let sid = "sbx_idempotency_target";
+        // No row at all → None.
+        let none = db.find_pending_wake_for_sandbox(sid).await.unwrap();
+        assert!(none.is_none());
+
+        // Insert a pending row → find returns it.
+        let row = sample_row("wak_idemp_first", sid, "hst_owner_a");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        let found = db
+            .find_pending_wake_for_sandbox(sid)
+            .await
+            .unwrap()
+            .expect("must find pending");
+        assert_eq!(found.wake_id, "wak_idemp_first");
+
+        // Advance to terminal (ok) → find no longer returns it.
+        db.update_wake_job_state(
+            "wak_idemp_first",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://1.2.3.4:7000"),
+        )
+        .await
+        .unwrap();
+        let after_ok = db.find_pending_wake_for_sandbox(sid).await.unwrap();
+        assert!(
+            after_ok.is_none(),
+            "terminal row must NOT match find_pending; got {:?}",
+            after_ok.map(|r| r.wake_id)
+        );
+
+        // Failed is also terminal.
+        let row2 = sample_row("wak_idemp_second", sid, "hst_owner_a");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row2).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert after terminal must return Inserted"
+        );
+        db.update_wake_job_state(
+            "wak_idemp_second",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::Internal),
+            Some("synthesised failure"),
+            None,
+        )
+        .await
+        .unwrap();
+        let after_fail = db.find_pending_wake_for_sandbox(sid).await.unwrap();
+        assert!(after_fail.is_none());
+    }
+
+    /// GC: terminal rows older than the threshold are deleted; rows
+    /// in non-terminal states are NEVER deleted (those are handled by
+    /// PR2's takeover sweep).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_gc_expired_terminal_only() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Insert three rows: one ok, one failed, one pending.
+        for (id, sid) in [
+            ("wak_gc_ok", "sbx_gc_a"),
+            ("wak_gc_failed", "sbx_gc_b"),
+            ("wak_gc_pending", "sbx_gc_c"),
+        ] {
+            let row = sample_row(id, sid, "hst_gc_owner");
+            assert!(
+                matches!(
+                    db.insert_wake_job(&row).await.unwrap(),
+                    InsertWakeJobOutcome::Inserted
+                ),
+                "fresh insert must return Inserted"
+            );
+        }
+        db.update_wake_job_state(
+            "wak_gc_ok",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        db.update_wake_job_state(
+            "wak_gc_failed",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::Internal),
+            Some("synth"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // GC with a future-tense threshold (1 hour). Nothing should
+        // be old enough; the pending row is non-terminal and so
+        // safe regardless.
+        let n = db
+            .gc_expired_wake_jobs(StdDuration::from_secs(3600))
+            .await
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "GC with 1 h threshold must not delete any fresh rows"
+        );
+
+        // GC with a 0-second threshold: every TERMINAL row qualifies.
+        // The pending row must survive.
+        let n = db
+            .gc_expired_wake_jobs(StdDuration::from_secs(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            n, 2,
+            "0-secs GC must delete both terminal rows (ok + failed)"
+        );
+
+        // Verify the surviving row.
+        assert!(db.get_wake_job("wak_gc_pending").await.unwrap().is_some());
+        assert!(db.get_wake_job("wak_gc_ok").await.unwrap().is_none());
+        assert!(db.get_wake_job("wak_gc_failed").await.unwrap().is_none());
+    }
+
+    /// R17-A1: every state transition MUST bump `lessee_updated_at`
+    /// so an in-flight wake is not stolen by the takeover sweep
+    /// while the original lessee is still progressing. Identical
+    /// fingerprint to R14-C1 on `sandboxes`.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_update_state_bumps_lessee_updated_at() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_lessee_bump", "sbx_lb", "hst_lb_owner");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        let after_insert = db
+            .get_wake_job("wak_lessee_bump")
+            .await
+            .unwrap()
+            .unwrap();
+        // Server-side `now()` resolution is 1 µs; ensure pg's clock
+        // moves by sleeping a millisecond before the transition.
+        compio::time::sleep(StdDuration::from_millis(20)).await;
+
+        db.update_wake_job_state(
+            "wak_lessee_bump",
+            WakeJobState::Restoring,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let after_advance = db
+            .get_wake_job("wak_lessee_bump")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The 1-second resolution of `EXTRACT(EPOCH FROM …)::BIGINT`
+        // means the two timestamps may be equal under a tight clock;
+        // the contract is "no regression" rather than "strict
+        // increase". The real test is that the field is NOT frozen at
+        // the insert-time value forever — over the course of a multi
+        // -second wake, `lessee_updated_at` must move forward.
+        assert!(
+            after_advance.lessee_updated_at_secs >= after_insert.lessee_updated_at_secs,
+            "lessee_updated_at must not regress on state transition"
+        );
+
+        // Stronger assertion: drive a second transition after a
+        // sub-second sleep, then read `lessee_updated_at` at the µs
+        // level via a direct pg query. This proves the column was
+        // touched (not just `updated_at`).
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(
+            &test_url(), cfg,
+        )
+        .await
+        .unwrap();
+        let client = pool.get().await.unwrap();
+        let row_before = client
+            .query_one(
+                "SELECT lessee_updated_at FROM sandbox.wake_jobs \
+                  WHERE wake_id = 'wak_lessee_bump'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let before_ts: std::time::SystemTime = row_before.get(0);
+
+        compio::time::sleep(StdDuration::from_millis(20)).await;
+        db.update_wake_job_state(
+            "wak_lessee_bump",
+            WakeJobState::LivezPolling,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row_after = client
+            .query_one(
+                "SELECT lessee_updated_at FROM sandbox.wake_jobs \
+                  WHERE wake_id = 'wak_lessee_bump'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let after_ts: std::time::SystemTime = row_after.get(0);
+        assert!(
+            after_ts > before_ts,
+            "lessee_updated_at must advance on state transition: before={before_ts:?}, after={after_ts:?}"
+        );
+    }
+
+    /// R17-I2: the None-handling contract on `update_wake_job_state`
+    /// is symmetric COALESCE across `error_code`, `error_message`,
+    /// and `agent_url` — passing `None` for any of them preserves
+    /// the existing column value. Retry/replay paths cannot silently
+    /// null out a previously-recorded error record.
+    ///
+    /// Note (R20-C1): terminal rows (`ok`, `failed`) are now immutable
+    /// — `update_wake_job_state` guards against terminal-overwrite via
+    /// `AND state NOT IN ('ok', 'failed')`. This test therefore drives
+    /// the COALESCE contract through non-terminal states (`pending` →
+    /// `restoring` with metadata on successive calls, then seals with
+    /// `ok` or `failed`). The key invariant — None preserves, Some
+    /// overwrites — is identical regardless of which state is used.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_update_preserves_fields_on_none() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_preserve", "sbx_preserve", "hst_p_owner");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+
+        // First transition: drive to `restoring` and record error_code
+        // + error_message (simulates a transient annotation mid-flight).
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::Restoring,
+            Some(WakeErrorCode::LivezTimeout),
+            Some("agent /livez never returned 200 within 30s"),
+            None,
+        )
+        .await
+        .unwrap();
+        let first = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(first.error_code, Some(WakeErrorCode::LivezTimeout));
+        assert_eq!(
+            first.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s")
+        );
+
+        // Re-update with all-None while still in non-terminal state:
+        // error_code, error_message, agent_url MUST be preserved.
+        // Pre-fix this would NULL out the metadata.
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::Restoring,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let second = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(
+            second.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "error_code must be preserved on None re-update"
+        );
+        assert_eq!(
+            second.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s"),
+            "error_message must be preserved on None re-update"
+        );
+
+        // Set an agent_url, then re-update with None — also preserved
+        // (existing agent_url behavior, restated for symmetry).
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::LivezPolling,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::LivezPolling,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let third = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(third.agent_url.as_deref(), Some("http://10.0.0.1:7000"));
+
+        // Explicitly providing Some(_) overwrites — the contract is
+        // None=preserve, Some=overwrite. Verify by overwriting the
+        // error_code with a different variant while still non-terminal.
+        db.update_wake_job_state(
+            "wak_preserve",
+            WakeJobState::LivezPolling,
+            Some(WakeErrorCode::Internal),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fourth = db.get_wake_job("wak_preserve").await.unwrap().unwrap();
+        assert_eq!(
+            fourth.error_code,
+            Some(WakeErrorCode::Internal),
+            "Some(_) overwrites the existing value"
+        );
+        // error_message still preserved from the previous set.
+        assert_eq!(
+            fourth.error_message.as_deref(),
+            Some("agent /livez never returned 200 within 30s")
+        );
+    }
+
+    /// R16-S3: agent_url column-level CHECK rejects out-of-shape
+    /// values (e.g. file:// schemes, freeform text). 0010 added the
+    /// constraint as part of the PR2-followup hardening sprint.
+    ///
+    /// Note (R20-C1): valid-URL checks are driven through non-terminal
+    /// states so the terminal-overwrite guard doesn't swallow the
+    /// write. The invalid-URL checks use direct SQL (no state guard
+    /// in the path) and remain structurally unchanged.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_agent_url_check_constraint_enforced() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_url_check", "sbx_url_check", "hst_url");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+
+        // http://...:port → valid (non-terminal state so the write lands).
+        db.update_wake_job_state(
+            "wak_url_check",
+            WakeJobState::Restoring,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+
+        // https://... → valid.
+        db.update_wake_job_state(
+            "wak_url_check",
+            WakeJobState::LivezPolling,
+            None,
+            None,
+            Some("https://example.com/agent"),
+        )
+        .await
+        .unwrap();
+
+        // file://... must be rejected.
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        let res = client
+            .execute(
+                "UPDATE sandbox.wake_jobs SET agent_url = 'file:///etc/passwd' \
+                 WHERE wake_id = 'wak_url_check'",
+                &[],
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "file:// URL must violate the CHECK constraint"
+        );
+
+        // Freeform text → reject.
+        let res = client
+            .execute(
+                "UPDATE sandbox.wake_jobs SET agent_url = 'arbitrary text' \
+                 WHERE wake_id = 'wak_url_check'",
+                &[],
+            )
+            .await;
+        assert!(res.is_err(), "freeform text must violate CHECK");
+
+        // URL with embedded spaces → reject.
+        let res = client
+            .execute(
+                "UPDATE sandbox.wake_jobs SET agent_url = 'http://example.com/a b' \
+                 WHERE wake_id = 'wak_url_check'",
+                &[],
+            )
+            .await;
+        assert!(res.is_err(), "URL with spaces must violate CHECK");
+    }
+
+    /// R17-A2: the partial index on (lessee_updated_at) WHERE
+    /// non-terminal exists after 0010, supporting the wake-job
+    /// takeover sweep query.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_lessee_partial_index_present() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+
+        let row = client
+            .query_opt(
+                "SELECT indexdef FROM pg_indexes \
+                  WHERE schemaname = 'sandbox' \
+                    AND tablename = 'wake_jobs' \
+                    AND indexname = 'wake_jobs_lessee_idx'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .expect("wake_jobs_lessee_idx must exist after migration 0010");
+        let indexdef: &str = row.get(0);
+        assert!(
+            indexdef.contains("lessee_updated_at"),
+            "index def must mention lessee_updated_at; got {indexdef}"
+        );
+        assert!(
+            indexdef.to_lowercase().contains("where")
+                && indexdef.contains("state"),
+            "index must be partial on state; got {indexdef}"
+        );
+    }
+
+    /// R16-S1: sandbox_audit role MUST NOT have SELECT on wake_jobs
+    /// after 0010 — the 0009 grant violated 0004's role-split
+    /// invariant.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_audit_role_has_no_select() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+
+        // The role may not exist in dev pg (the migration's DO $$
+        // block tolerates that). Skip the assertion if the role
+        // doesn't exist.
+        let role_exists: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_audit')",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if !role_exists {
+            return;
+        }
+
+        // has_table_privilege('sandbox_audit', 'sandbox.wake_jobs', 'SELECT')
+        // must be false after 0010 revoked the 0009 grant.
+        let has_select: bool = client
+            .query_one(
+                "SELECT has_table_privilege('sandbox_audit', \
+                        'sandbox.wake_jobs', 'SELECT')",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            !has_select,
+            "sandbox_audit MUST NOT have SELECT on sandbox.wake_jobs after 0010"
+        );
+    }
+
+    /// Migration target version matches the binary's
+    /// LATEST_MIGRATION_VERSION (smoke check that 0009 actually
+    /// applied — the CHECK constraint on `state` is the proof; an
+    /// INSERT with a junk state must fail).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_state_check_constraint_enforced() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Reach into pg directly — `insert_wake_job` only accepts
+        // typed `WakeJobState`. We want to prove the SCHEMA rejects
+        // an out-of-domain literal, not the Rust enum.
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+
+        let res = client
+            .execute(
+                "INSERT INTO sandbox.wake_jobs (wake_id, sandbox_id, state, lessee) \
+                 VALUES ('wak_bad_state', 'sbx_x', 'totally_invalid', 'hst_y')",
+                &[],
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "INSERT with junk state must violate the CHECK constraint"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // GATE-C2 (R17-C2): partial UNIQUE INDEX on (sandbox_id) WHERE
+    // non-terminal closes the TOCTOU between
+    // `find_pending_wake_for_sandbox` and `insert_wake_job`. Three
+    // tests pin the contract:
+    //
+    //   1. happy path → Inserted; the row carries this caller's data.
+    //   2. concurrent insert from two callers for the SAME sandbox →
+    //      one Inserted + one Replay; the Replay carries the winner's
+    //      row.
+    //   3. UNIQUE INDEX scopes to non-terminal: after the winner
+    //      transitions to `failed`, a second INSERT for the same
+    //      sandbox MUST succeed (the index doesn't see the terminal
+    //      row).
+    // ────────────────────────────────────────────────────────────────
+
+    /// GATE-C2: a fresh INSERT (no prior row for the sandbox) returns
+    /// `InsertWakeJobOutcome::Inserted` and the row is visible via
+    /// `get_wake_job`.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_insert_returns_inserted_on_fresh_sandbox() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_c2_fresh", "sbx_c2_fresh", "hst_c2_owner");
+        let outcome = db.insert_wake_job(&row).await.expect("insert");
+        assert!(
+            matches!(outcome, InsertWakeJobOutcome::Inserted),
+            "fresh INSERT must report Inserted; got {outcome:?}"
+        );
+        // Row is observable.
+        let loaded = db.get_wake_job("wak_c2_fresh").await.unwrap().unwrap();
+        assert_eq!(loaded.wake_id, "wak_c2_fresh");
+        assert_eq!(loaded.sandbox_id, "sbx_c2_fresh");
+        assert_eq!(loaded.state, WakeJobState::Pending);
+    }
+
+    /// GATE-C2 PRIMARY TEST: two concurrent INSERTs for the same
+    /// `sandbox_id` collide on the partial UNIQUE INDEX. One returns
+    /// `Inserted`; the other returns `Replay(winner)` carrying the
+    /// winner's `wake_id`. The two callers agree on which row is the
+    /// winner.
+    ///
+    /// This is the precise race shape R17-C2 was filed against. The
+    /// concurrency is simulated by issuing two `insert_wake_job` calls
+    /// back-to-back on the same Database handle — Postgres's
+    /// row-locking ensures the second INSERT sees the first's row and
+    /// the partial UNIQUE INDEX rejects the duplicate via
+    /// ON CONFLICT DO NOTHING.
+    ///
+    /// Stronger forms of this (two callers on separate compio runtimes
+    /// with a barrier in between) would prove the same property but
+    /// require multi-runtime test scaffolding. The post-INSERT state
+    /// (one row in pg, both outcomes agree on its wake_id) is the
+    /// load-bearing invariant.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_insert_collapses_concurrent_race_via_unique_index() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let sid = "sbx_c2_race";
+        let row_a = sample_row("wak_c2_winner", sid, "hst_c2_a");
+        let row_b = sample_row("wak_c2_loser", sid, "hst_c2_b");
+
+        let out_a = db.insert_wake_job(&row_a).await.expect("first insert");
+        let out_b = db.insert_wake_job(&row_b).await.expect("second insert");
+
+        // Caller A wins outright.
+        assert!(
+            matches!(out_a, InsertWakeJobOutcome::Inserted),
+            "first INSERT must be Inserted; got {out_a:?}"
+        );
+        // Caller B sees the conflict and gets the winner's row back.
+        let winner = match out_b {
+            InsertWakeJobOutcome::Replay(w) => w,
+            other => panic!(
+                "second INSERT must be Replay; got {other:?} \
+                 — UNIQUE INDEX may be absent or ON CONFLICT broken"
+            ),
+        };
+        assert_eq!(
+            winner.wake_id, "wak_c2_winner",
+            "Replay must carry the winner's wake_id, not the loser's"
+        );
+        assert_eq!(winner.sandbox_id, sid);
+        assert_eq!(winner.state, WakeJobState::Pending);
+        // Loser's wake_id MUST NOT appear in pg — the row was never
+        // inserted. This is the "no duplicate WakeMachine" guarantee
+        // the handler depends on.
+        let absent = db.get_wake_job("wak_c2_loser").await.unwrap();
+        assert!(
+            absent.is_none(),
+            "loser's wake_id MUST NOT land in pg; got {absent:?}"
+        );
+    }
+
+    /// GATE-C2: the partial UNIQUE INDEX scopes to non-terminal states.
+    /// After the winner transitions to `failed`, a second INSERT for
+    /// the SAME sandbox must succeed (terminal rows are outside the
+    /// index's predicate). Same after `ok`.
+    ///
+    /// This is what lets a client retry a failed wake against the
+    /// same sandbox without the UNIQUE INDEX permanently blocking the
+    /// sandbox from being woken again.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_unique_index_releases_after_terminal_transition() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let sid = "sbx_c2_terminal";
+
+        // Insert + fail the first wake.
+        let first = sample_row("wak_c2_first", sid, "hst_c2_owner");
+        let out_first = db.insert_wake_job(&first).await.expect("first insert");
+        assert!(matches!(out_first, InsertWakeJobOutcome::Inserted));
+        db.update_wake_job_state(
+            "wak_c2_first",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::Internal),
+            Some("synth"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // A second INSERT for the same sandbox now MUST succeed — the
+        // terminal row dropped out of the partial UNIQUE INDEX.
+        let second = sample_row("wak_c2_second", sid, "hst_c2_owner");
+        let out_second = db
+            .insert_wake_job(&second)
+            .await
+            .expect("second insert after terminal");
+        assert!(
+            matches!(out_second, InsertWakeJobOutcome::Inserted),
+            "INSERT after terminal must be Inserted; got {out_second:?} \
+             — UNIQUE INDEX predicate may be wrong"
+        );
+
+        // The pending row for this sandbox is now the second one.
+        let found = db
+            .find_pending_wake_for_sandbox(sid)
+            .await
+            .unwrap()
+            .expect("second row must be findable");
+        assert_eq!(found.wake_id, "wak_c2_second");
+
+        // Same again after `ok`: fail second, terminal, then a third
+        // succeeds.
+        db.update_wake_job_state(
+            "wak_c2_second",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        let third = sample_row("wak_c2_third", sid, "hst_c2_owner");
+        let out_third = db
+            .insert_wake_job(&third)
+            .await
+            .expect("third insert after ok");
+        assert!(
+            matches!(out_third, InsertWakeJobOutcome::Inserted),
+            "INSERT after ok must be Inserted; got {out_third:?}"
+        );
+    }
+
+    /// GATE-C2 schema pin: the `wake_jobs_sandbox_pending_uniq`
+    /// partial UNIQUE INDEX must exist after migration 0011. Without
+    /// this index, the ON CONFLICT clause in `insert_wake_job` is a
+    /// no-op (Postgres needs a matching arbiter index to use the
+    /// conflict target). This test catches the case where 0011
+    /// silently fails to apply.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_sandbox_pending_uniq_index_present() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT indexdef FROM pg_indexes \
+                 WHERE schemaname = 'sandbox' \
+                   AND tablename = 'wake_jobs' \
+                   AND indexname = 'wake_jobs_sandbox_pending_uniq'",
+                &[],
+            )
+            .await
+            .expect("wake_jobs_sandbox_pending_uniq must exist after migration 0011");
+        let indexdef: String = row.get("indexdef");
+        // Sanity: the index is UNIQUE and filtered to non-terminal.
+        // Postgres's `pg_indexes.indexdef` normalises `NOT IN (...)`
+        // to `<> ALL (ARRAY[...])`, so we match on the canonical form.
+        assert!(
+            indexdef.contains("UNIQUE"),
+            "index must be UNIQUE; got {indexdef}"
+        );
+        let lower = indexdef.to_lowercase();
+        assert!(
+            lower.contains("'ok'") && lower.contains("'failed'"),
+            "index predicate must reference both terminal states; got {indexdef}"
+        );
+        assert!(
+            lower.contains("<> all") || lower.contains("not in"),
+            "index predicate must be a negative match on terminal states; got {indexdef}"
+        );
+    }
+
+    // ─── R19-C1 takeover sweep ─────────────────────────────────────
+    //
+    // `claim_orphan_wake_for_recovery` is the read-side that finally
+    // gives `lessee_updated_at` (bumped by R17-A1 on every transition)
+    // a purpose: rows whose lessee has gone stale are forcibly
+    // transitioned to `failed` with `error_code = 'wake_worker_aborted'`
+    // so the `wake_jobs_sandbox_pending_uniq` UNIQUE INDEX (migration
+    // 0011) releases for a fresh wake POST. These tests pin the four
+    // shapes that close the wedge:
+    //
+    //   1. Stale orphan claimed         → count=1, state=failed.
+    //   2. Fresh non-terminal row       → count=0, untouched.
+    //   3. Terminal row                 → count=0, untouched.
+    //   4. Two concurrent sweeps        → exactly one count=1 (pg
+    //      row-locks serialize via the UPDATE).
+
+    /// Helper: backdate a row's `lessee_updated_at` by `secs` seconds
+    /// via a direct pg UPDATE so the test doesn't have to actually
+    /// sleep through the takeover threshold.
+    async fn backdate_lessee(url: &str, wake_id: &str, secs: i64) {
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        client
+            .execute(
+                "UPDATE sandbox.wake_jobs \
+                    SET lessee_updated_at = \
+                        now() - make_interval(secs => $1::BIGINT) \
+                  WHERE wake_id = $2::TEXT",
+                &[&secs, &wake_id.to_string()],
+            )
+            .await
+            .expect("backdate succeeded");
+    }
+
+    /// R19-C1: a single orphan whose `lessee_updated_at` is older
+    /// than the threshold is claimed: `claim_orphan_wake_for_recovery`
+    /// returns 1, and a follow-up read shows state=failed,
+    /// error_code=WakeWorkerAborted.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_marks_stale_row_failed() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Insert a row + drop it into the `restoring` state, then
+        // backdate `lessee_updated_at` 120 s into the past.
+        let row = sample_row("wak_orphan_a", "sbx_orphan_a", "hst_crashed");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        db.update_wake_job_state(
+            "wak_orphan_a",
+            WakeJobState::Restoring,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        backdate_lessee(&url, "wak_orphan_a", 120).await;
+
+        // Threshold 60s — the backdated row qualifies.
+        let n = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("claim succeeded");
+        assert_eq!(n, 1, "exactly one orphan must be claimed");
+
+        let after = db.get_wake_job("wak_orphan_a").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Failed,
+            "orphan must transition to failed"
+        );
+        assert_eq!(
+            after.error_code,
+            Some(WakeErrorCode::WakeWorkerAborted),
+            "error_code must record the takeover"
+        );
+        assert!(
+            after
+                .error_message
+                .as_deref()
+                .map(|m| m.contains("R19-C1") || m.contains("takeover"))
+                .unwrap_or(false),
+            "error_message must mention takeover; got {:?}",
+            after.error_message
+        );
+    }
+
+    /// R19-C1: a non-terminal row whose `lessee_updated_at` is
+    /// FRESH is NOT claimed — the threshold check fences against
+    /// stealing rows from a still-active controller.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_skips_fresh_row() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_fresh", "sbx_fresh", "hst_active");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        // Don't backdate — `lessee_updated_at` is server-NOW.
+
+        // 60s threshold — fresh row must NOT match.
+        let n = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("claim succeeded");
+        assert_eq!(n, 0, "fresh row must NOT be claimed");
+
+        // Row must still be in its original state.
+        let after = db.get_wake_job("wak_fresh").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Pending,
+            "fresh row must remain pending"
+        );
+        assert!(after.error_code.is_none(), "no error_code on fresh row");
+    }
+
+    /// R19-C1: a TERMINAL row (`ok` or `failed`) is NEVER claimed,
+    /// even when its `lessee_updated_at` is ancient. Terminal rows
+    /// are already out of the GATE-C2 UNIQUE INDEX's domain; the GC
+    /// sweep cleans them up by `updated_at` instead.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_skips_terminal_row() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        // Two terminal rows, both backdated past the threshold.
+        let row_ok = sample_row("wak_term_ok", "sbx_term_a", "hst_t");
+        let row_failed = sample_row("wak_term_failed", "sbx_term_b", "hst_t");
+        for r in [&row_ok, &row_failed] {
+            assert!(
+                matches!(
+                    db.insert_wake_job(r).await.unwrap(),
+                    InsertWakeJobOutcome::Inserted
+                ),
+                "fresh insert must return Inserted"
+            );
+        }
+        db.update_wake_job_state(
+            "wak_term_ok",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        db.update_wake_job_state(
+            "wak_term_failed",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::LivezTimeout),
+            Some("simulated livez timeout"),
+            None,
+        )
+        .await
+        .unwrap();
+        backdate_lessee(&url, "wak_term_ok", 600).await;
+        backdate_lessee(&url, "wak_term_failed", 600).await;
+
+        let n = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("claim succeeded");
+        assert_eq!(n, 0, "terminal rows must NOT be claimed");
+
+        // Existing error_code on the failed row must NOT be
+        // overwritten — the takeover sweep doesn't touch terminals.
+        let term = db
+            .get_wake_job("wak_term_failed")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(term.error_code, Some(WakeErrorCode::LivezTimeout));
+    }
+
+    /// R19-C1: two concurrent claims race cleanly — postgres
+    /// row-locks during UPDATE serialize them, so exactly one sees
+    /// `count == 1` and the other sees `count == 0` (the row is
+    /// already terminal by the time the loser's WHERE evaluates).
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn claim_orphan_wake_concurrent_claims_race_cleanly() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_race", "sbx_race", "hst_crashed");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+        db.update_wake_job_state(
+            "wak_race",
+            WakeJobState::Restoring,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        backdate_lessee(&url, "wak_race", 600).await;
+
+        // Drive two claim attempts back-to-back through the same
+        // Database. Under compio's single-threaded runtime they
+        // execute sequentially at the SQL boundary; the property the
+        // test pins is correctness, not parallelism: exactly one
+        // UPDATE matches the WHERE predicate, the other observes
+        // `state = 'failed'` and matches zero rows. Same outcome
+        // shape as a true concurrent race (postgres row-locks would
+        // serialize a true parallel pair to the same result).
+        let n_first = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("first claim");
+        let n_second = db
+            .claim_orphan_wake_for_recovery(StdDuration::from_secs(60))
+            .await
+            .expect("second claim");
+
+        assert_eq!(
+            n_first + n_second,
+            1,
+            "exactly one of the two claims must succeed (got first={n_first}, second={n_second})"
+        );
+        assert_eq!(n_first, 1, "first claim must observe the orphan");
+        assert_eq!(n_second, 0, "second claim must observe nothing to do");
+
+        // Final state: row is terminal, error code recorded once.
+        let after = db.get_wake_job("wak_race").await.unwrap().unwrap();
+        assert_eq!(after.state, WakeJobState::Failed);
+        assert_eq!(
+            after.error_code,
+            Some(WakeErrorCode::WakeWorkerAborted),
+            "exactly one takeover writer wins"
+        );
+    }
+
+    // ─── R20-C1: terminal-overwrite guard ─────────────────────────
+    //
+    // `update_wake_job_state` now includes `AND state NOT IN
+    // ('ok', 'failed')` in the WHERE predicate. A stale write from a
+    // racing producer that arrives after the row has already reached a
+    // terminal state must silently no-op (rows_affected == 0).
+    //
+    // Two tests:
+    //   1. Transition to `ok`, then attempt `restoring` → row stays ok.
+    //   2. Transition to `failed`, then attempt `restoring` → row stays failed.
+
+    /// R20-C1: once a row is in state `ok`, a subsequent attempt to
+    /// drive it to a non-terminal state (`restoring`) must no-op.
+    /// `rows_affected == 0`; the pg row still reads `state = ok`.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn update_wake_job_state_after_ok_is_noop() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_r20_ok", "sbx_r20_ok", "hst_r20");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+
+        // Drive to terminal ok.
+        let n = db
+            .update_wake_job_state(
+                "wak_r20_ok",
+                WakeJobState::Ok,
+                None,
+                None,
+                Some("http://10.0.0.1:7000"),
+            )
+            .await
+            .expect("transition to ok");
+        assert_eq!(n, 1, "first transition must affect 1 row");
+
+        let before = db.get_wake_job("wak_r20_ok").await.unwrap().unwrap();
+        assert_eq!(before.state, WakeJobState::Ok);
+
+        // Stale write: attempt to overwrite with a non-terminal state.
+        let n_stale = db
+            .update_wake_job_state(
+                "wak_r20_ok",
+                WakeJobState::Restoring,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("stale write must not error");
+        assert_eq!(
+            n_stale, 0,
+            "stale write to terminal-ok row must no-op (rows_affected == 0)"
+        );
+
+        // pg row must still be ok — terminal state not overwritten.
+        let after = db.get_wake_job("wak_r20_ok").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Ok,
+            "state must remain ok after stale write; got {:?}",
+            after.state
+        );
+        // agent_url preserved from the original ok transition.
+        assert_eq!(after.agent_url.as_deref(), Some("http://10.0.0.1:7000"));
+    }
+
+    /// R20-C1: once a row is in state `failed`, a subsequent attempt
+    /// to drive it to a non-terminal state (`restoring`) must no-op.
+    /// `rows_affected == 0`; the pg row still reads `state = failed`
+    /// with the original error_code intact.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn update_wake_job_state_after_failed_is_noop() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_r20_failed", "sbx_r20_failed", "hst_r20");
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "fresh insert must return Inserted"
+        );
+
+        // Drive to terminal failed.
+        let n = db
+            .update_wake_job_state(
+                "wak_r20_failed",
+                WakeJobState::Failed,
+                Some(WakeErrorCode::LivezTimeout),
+                Some("simulated livez timeout"),
+                None,
+            )
+            .await
+            .expect("transition to failed");
+        assert_eq!(n, 1, "first transition must affect 1 row");
+
+        let before = db.get_wake_job("wak_r20_failed").await.unwrap().unwrap();
+        assert_eq!(before.state, WakeJobState::Failed);
+
+        // Stale write: racing producer attempts to overwrite with a
+        // non-terminal state (the TOCTOU shape from R20-C1).
+        let n_stale = db
+            .update_wake_job_state(
+                "wak_r20_failed",
+                WakeJobState::Restoring,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("stale write must not error");
+        assert_eq!(
+            n_stale, 0,
+            "stale write to terminal-failed row must no-op (rows_affected == 0)"
+        );
+
+        // pg row must still be failed — terminal state not overwritten.
+        let after = db.get_wake_job("wak_r20_failed").await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            WakeJobState::Failed,
+            "state must remain failed after stale write; got {:?}",
+            after.state
+        );
+        // Original error metadata must be preserved.
+        assert_eq!(
+            after.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "error_code must not be overwritten by stale write"
+        );
+        assert_eq!(
+            after.error_message.as_deref(),
+            Some("simulated livez timeout"),
+            "error_message must not be overwritten by stale write"
+        );
+    }
+}
+
+// Convenience accessor so tests can spell `row.is_state_terminal()`
+// instead of `row.state.is_terminal()` — pure ergonomics, no
+// state-machine semantics involved.
+trait WakeJobRowExt {
+    fn is_state_terminal(&self) -> bool;
+}
+
+impl WakeJobRowExt for zeroship_sandbox::db::WakeJobRow {
+    fn is_state_terminal(&self) -> bool {
+        self.state.is_terminal()
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// C-7-LT-PR2: WakeMachine end-to-end (pg-gated, StubRestoreBackend)
+//
+// Drives the full state machine through the same `seed_snapshotted_row`
+// fixture the sync `restore_sandbox` tests use, asserting:
+//
+//   - Happy path: pending → reserving_slot → restoring → livez_polling
+//     → clock_resyncing → registering → ok. agent_url + ready_at
+//     populated.
+//   - StubRestoreBackend::fail_livez=true → terminal `failed` with
+//     wire-code-mapped error_code = LivezTimeout. Sandbox row rolls
+//     back to `snapshotted`.
+//   - StubRestoreBackend::fail_submit=true → terminal `failed` with
+//     wire-code-mapped error_code = RestoreFailed (Backend(_) failure
+//     classification). Sandbox row rolls back.
+//   - StubRestoreBackend::fail_reserve=true → terminal `failed` with
+//     wire-code-mapped error_code = SlotUnavailable
+//     (VmIndexUnavailable classification).
+//
+// These tests close test-coverage-r16's EMERGENCY HOLD (R10-T1/T2,
+// R11-T1/T2, R12-T1/T2, R13-T2, R14-T1, R15-T1) for the wake path:
+// the state machine is now end-to-end-driven with StubRestoreBackend
+// failure injection AND the pg row state is asserted at every
+// terminal.
+// ════════════════════════════════════════════════════════════════════
+
+mod wake_machine_e2e {
+    use super::*;
+    use std::sync::Arc as StdArc;
+    use std::time::Duration as StdDuration;
+    use zeroship_sandbox::db::{InsertWakeJobOutcome, WakeErrorCode, WakeJobRow, WakeJobState};
+    use zeroship_sandbox::restore_handler::{RestoreBackend, StubRestoreBackend};
+    use zeroship_sandbox::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
+    use zeroship_sandbox::wake_machine::WakeMachine;
+
+    /// Migrate + arc-wrap the shared test Database so the seeder and
+    /// the WakeMachine share the same `host_id` (the CAS in
+    /// `update_sandbox_status` fences on host_id; a second Database
+    /// instance would have a fresh host_id and the CAS would lose).
+    async fn migrated_db_arc() -> StdArc<zeroship_sandbox::db::Database> {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = zeroship_sandbox::db::Database::from_test_config(url, true, 30)
+            .await
+            .unwrap();
+        db.run_pending_migrations().await.unwrap();
+        db.upsert_host("test-host", "nomad-ch").await.unwrap();
+        StdArc::new(db)
+    }
+
+    /// Build a `WakeMachine` over a SEEDED snapshot row + backend.
+    /// `db` is the same Arc the seeder used so the host_id fence
+    /// holds. Returns the machine + the wake_id it was given so
+    /// the caller can poll `get_wake_job` after `drive()`.
+    async fn make_machine(
+        db: StdArc<zeroship_sandbox::db::Database>,
+        backend: StdArc<dyn RestoreBackend>,
+        store_root: &std::path::Path,
+        sandbox_id: Uuid,
+    ) -> (WakeMachine, String) {
+        let store: StdArc<dyn SnapshotStore> =
+            StdArc::new(LocalDiskSnapshotStore::new(store_root));
+        let typed_sid = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let wake_id = zeroship_core::typed_id::new_wake_id();
+        let lessee = db.host_id().to_string();
+        let row = WakeJobRow {
+            wake_id: wake_id.clone(),
+            sandbox_id: typed_sid,
+            state: WakeJobState::Pending,
+            error_code: None,
+            error_message: None,
+            started_at_secs: 0,
+            updated_at_secs: 0,
+            ready_at_secs: None,
+            agent_url: None,
+            lessee: lessee.clone(),
+            lessee_updated_at_secs: 0,
+        };
+        assert!(
+            matches!(
+                db.insert_wake_job(&row).await.unwrap(),
+                InsertWakeJobOutcome::Inserted
+            ),
+            "make_machine: fresh wake_id insert must return Inserted; \
+             a Replay here means a stale non-terminal row leaked from a prior test \
+             and the machine would drive the wrong wake_id"
+        );
+        let machine = WakeMachine {
+            database: StdArc::clone(&db),
+            backend,
+            snapshot_store: store,
+            persist: None, // test-fixture path; the machine skips
+                           // unseal/resync/register per `persist=None`.
+            sandbox_id,
+            wake_id: wake_id.clone(),
+            lessee,
+        };
+        (machine, wake_id)
+    }
+
+    /// Happy path: the state machine drives a snapshotted row to
+    /// running, marks the wake_job as ok, and populates agent_url +
+    /// ready_at.
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine happy path"]
+    async fn wake_machine_drives_snapshotted_to_ok() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_happy_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_happy_back");
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist after drive");
+        assert_eq!(
+            final_row.state,
+            WakeJobState::Ok,
+            "happy path must reach terminal Ok; got {:?}",
+            final_row.state
+        );
+        assert!(
+            final_row.ready_at_secs.is_some(),
+            "Ok terminal must populate ready_at"
+        );
+        assert!(
+            final_row.agent_url.is_some(),
+            "Ok terminal must populate agent_url"
+        );
+        assert!(final_row.error_code.is_none());
+        assert!(final_row.error_message.is_none());
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(sb.status, SandboxStatus::Running);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// `fail_livez=true` → terminal `failed` with `WakeErrorCode::LivezTimeout`.
+    /// Sandbox row rolls back to `snapshotted` (post-livez phase, so the
+    /// rollback target is NOT `snapshotted_suspect`).
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine livez failure"]
+    async fn wake_machine_classifies_livez_failure() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_livez_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_livez_back");
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_livez = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(final_row.state, WakeJobState::Failed);
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "fail_livez must classify as LivezTimeout (renders as `livez_timeout` on the wire)"
+        );
+        assert!(final_row.error_message.is_some());
+        assert!(
+            final_row.error_code.unwrap().wire_code() == "livez_timeout",
+            "wire code drift check"
+        );
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(
+            sb.status,
+            SandboxStatus::Snapshotted,
+            "post-livez failure rolls back to snapshotted (NOT suspect)"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// `fail_submit=true` → terminal `failed` with
+    /// `WakeErrorCode::RestoreFailed` (Backend(_) classification). The
+    /// submit failure is pre-livez so the rollback target is still
+    /// `snapshotted`.
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine submit failure"]
+    async fn wake_machine_classifies_submit_failure() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_submit_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_submit_back");
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_submit = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(final_row.state, WakeJobState::Failed);
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::RestoreFailed),
+            "Backend(submit) failure → RestoreFailed (wire `restore_backend_failed`)"
+        );
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(sb.status, SandboxStatus::Snapshotted);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// `fail_reserve=true` → terminal `failed` with
+    /// `WakeErrorCode::SlotUnavailable` (VmIndexUnavailable
+    /// classification → wire `vm_index_unavailable`).
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine reserve failure"]
+    async fn wake_machine_classifies_reserve_failure() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_reserve_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_reserve_back");
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_reserve = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(final_row.state, WakeJobState::Failed);
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::SlotUnavailable),
+            "VmIndexUnavailable → SlotUnavailable (wire `vm_index_unavailable`)"
+        );
+
+        let sb = db.get_sandbox_row(sid).await.unwrap().expect("sandbox row");
+        assert_eq!(sb.status, SandboxStatus::Snapshotted);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// Idempotency probe: after the machine reaches terminal,
+    /// `find_pending_wake_for_sandbox` returns None (the row is
+    /// no longer in flight), and a second `insert_wake_job` for the
+    /// SAME wake_id fails (primary-key violation). This pins the
+    /// invariant the handler's idempotency check relies on.
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine idempotency invariant"]
+    async fn wake_machine_terminal_clears_find_pending() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_idemp_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_idemp_back");
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, _wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        let typed_sid = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sid)
+        );
+
+        // Pre-drive: in-flight wake should be visible.
+        let in_flight = db
+            .find_pending_wake_for_sandbox(&typed_sid)
+            .await
+            .unwrap();
+        assert!(
+            in_flight.is_some(),
+            "pending wake must be visible to idempotency lookup"
+        );
+
+        machine.drive().await;
+
+        // Post-drive: no in-flight wake.
+        let after = db
+            .find_pending_wake_for_sandbox(&typed_sid)
+            .await
+            .unwrap();
+        assert!(
+            after.is_none(),
+            "terminal wake must NOT show up in find_pending_wake_for_sandbox"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// GC sweep applied after a terminal wake: the wake_job row is
+    /// deleted, mirroring the production T_KEEP eviction path.
+    /// Subsequent `get_wake_job` returns None (the production poll
+    /// handler maps this to 404 `wake_not_found`).
+    #[compio::test]
+    #[ignore = "needs Postgres; C-7-LT-PR2 wake_machine GC after terminal"]
+    async fn wake_machine_gc_sweep_evicts_terminal_rows() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_gc_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_gc_back");
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) = make_machine(
+            StdArc::clone(&db),
+            backend,
+            &store_root,
+            sid,
+        )
+        .await;
+
+        machine.drive().await;
+
+        // Sanity: terminal row exists.
+        assert!(db.get_wake_job(&wake_id).await.unwrap().is_some());
+
+        // 0-second threshold: every terminal row qualifies. After this
+        // sweep the wake_id must lookup as None (the poll handler maps
+        // this to 404 `wake_not_found` per § 2.cleanup).
+        let deleted = db
+            .gc_expired_wake_jobs(StdDuration::from_secs(0))
+            .await
+            .unwrap();
+        assert!(deleted >= 1, "GC must delete the terminal wake row");
+
+        let evicted = db.get_wake_job(&wake_id).await.unwrap();
+        assert!(
+            evicted.is_none(),
+            "wake_id must lookup as None after T_KEEP eviction"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // R23-I1 (Path B): WakeMachine terminal-overwrite counter wiring.
+    //
+    // R22-I1 placed the `inc_wake_terminal_overwrite_blocked()` bumps
+    // at the wake_machine.rs callers (lines :146, :191, :528) instead
+    // of inside `db::update_wake_job_state`, so each caller can WARN
+    // with its own `attempted_state` context. The bare db noop tests
+    // in `wake_job_terminal_overwrite_guard` only prove the SQL guard
+    // (rows_affected == 0); they do NOT cover the counter wiring at
+    // the WakeMachine callers.
+    //
+    // These two tests drive the full WakeMachine end-to-end with the
+    // wake_jobs row pre-flipped to a terminal state, so every
+    // `update_wake_job_state` call inside the machine (both the
+    // intermediate `set_state` writes and the terminal write in
+    // `drive`'s outer match) hits the R20-C1 guard. They assert:
+    //
+    //   1. The counter strictly INCREASED (>= pre + 1) — proving the
+    //      bump in wake_machine.rs is actually wired up.
+    //   2. The DB row's `state` field is UNCHANGED from the pre-set
+    //      terminal (the sweep's breadcrumb survives — the machine's
+    //      attempted overwrite no-op'd).
+    //
+    // Why `>= pre + 1` and not `== pre + 1`: the WakeMachine issues
+    // 5-6 `set_state` calls during a run plus one terminal write. Each
+    // one no-ops + bumps when the row is already terminal. The exact
+    // delta depends on how far the machine progresses before any
+    // backend failure; asserting strict monotonic increase is the
+    // honest contract, asserting `== 1` would require the production
+    // machine to short-circuit on first guard fire (which it does not
+    // — and should not: intermediate writes are best-effort).
+    // ════════════════════════════════════════════════════════════════
+
+    /// Pre-flip the wake_jobs row to `Failed`, then drive the
+    /// happy-path machine. The machine's terminal write attempts
+    /// `Ok`, hits the R20-C1 guard, and bumps the counter at
+    /// wake_machine.rs:146.
+    #[compio::test]
+    #[ignore = "needs Postgres; R23-I1 terminal-overwrite counter (failed → ok)"]
+    async fn wake_machine_terminal_overwrite_failed_to_ok_bumps_counter() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_r23_fto_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_r23_fto_back");
+        // Happy-path backend: drive() would reach Phase::Ok if the
+        // wake_job row weren't already terminal.
+        let stub = StdArc::new(StubRestoreBackend::new(backend_root.clone()));
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) =
+            make_machine(StdArc::clone(&db), backend, &store_root, sid).await;
+
+        // Pre-flip the wake_job row to terminal Failed BEFORE driving
+        // the machine. Use db.update_wake_job_state directly to bypass
+        // the state machine for this setup step (R20-C1's guard does
+        // not block transitions INTO a terminal — only transitions
+        // out of one).
+        let flipped = db
+            .update_wake_job_state(
+                &wake_id,
+                WakeJobState::Failed,
+                Some(WakeErrorCode::LivezTimeout),
+                Some("pre-seeded terminal failure"),
+                None,
+            )
+            .await
+            .expect("seed: pending → failed must succeed");
+        assert_eq!(flipped, 1, "seed transition must affect exactly 1 row");
+
+        // Capture counter pre. Note: the counter is process-global and
+        // monotonic across all tests in the binary; always delta.
+        let pre = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+
+        machine.drive().await;
+
+        let post = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+        assert!(
+            post >= pre + 1,
+            "wake_machine.rs counter wiring did NOT fire on terminal-overwrite-blocked: \
+             pre={pre} post={post} (expected post >= pre + 1; machine writes \
+             several intermediate set_state calls + one terminal write — each \
+             must no-op + bump when the row is already terminal)"
+        );
+
+        // DB row's state must be unchanged from the pre-set terminal.
+        // The sweep's breadcrumb (Failed + LivezTimeout) survived the
+        // machine's attempted overwrite.
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(
+            final_row.state,
+            WakeJobState::Failed,
+            "row must remain Failed (R20-C1 guard blocked machine's Ok overwrite); \
+             got {:?}",
+            final_row.state
+        );
+        assert_eq!(
+            final_row.error_code,
+            Some(WakeErrorCode::LivezTimeout),
+            "pre-seeded error_code must NOT be overwritten by terminal Ok attempt"
+        );
+        assert_eq!(
+            final_row.error_message.as_deref(),
+            Some("pre-seeded terminal failure"),
+            "pre-seeded error_message must NOT be overwritten by terminal Ok attempt"
+        );
+        assert!(
+            final_row.agent_url.is_none(),
+            "agent_url must NOT be populated — terminal Ok write no-op'd"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+
+    /// Pre-flip the wake_jobs row to `Ok`, then drive the machine
+    /// with `fail_livez=true` so it attempts terminal `Failed`. The
+    /// terminal write hits the R20-C1 guard and bumps the counter at
+    /// wake_machine.rs:191.
+    #[compio::test]
+    #[ignore = "needs Postgres; R23-I1 terminal-overwrite counter (ok → failed)"]
+    async fn wake_machine_terminal_overwrite_ok_to_failed_bumps_counter() {
+        let db = migrated_db_arc().await;
+        let (info, sid) = fresh_info("alice");
+        let store_root = fresh_temp("wm_r23_otf_store");
+        let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+        let backend_root = fresh_temp("wm_r23_otf_back");
+        // fail_livez=true: machine progresses through reserving_slot
+        // and restoring, then trips livez and lands in Phase::Failed
+        // → terminal Failed write attempt.
+        let mut stub_inner = StubRestoreBackend::new(backend_root.clone());
+        stub_inner.fail_livez = true;
+        let stub = StdArc::new(stub_inner);
+        let backend: StdArc<dyn RestoreBackend> = StdArc::clone(&stub) as _;
+
+        let (machine, wake_id) =
+            make_machine(StdArc::clone(&db), backend, &store_root, sid).await;
+
+        // Pre-flip the wake_job row to terminal Ok BEFORE driving.
+        let flipped = db
+            .update_wake_job_state(
+                &wake_id,
+                WakeJobState::Ok,
+                None,
+                None,
+                Some("http://10.0.0.99:7000"),
+            )
+            .await
+            .expect("seed: pending → ok must succeed");
+        assert_eq!(flipped, 1, "seed transition must affect exactly 1 row");
+
+        let pre = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+
+        machine.drive().await;
+
+        let post = zeroship_sandbox::metrics::wake_terminal_overwrite_blocked_value();
+        assert!(
+            post >= pre + 1,
+            "wake_machine.rs counter wiring did NOT fire on terminal-overwrite-blocked: \
+             pre={pre} post={post} (expected post >= pre + 1; the machine attempts \
+             terminal Failed via the wake_machine.rs:191 call site after fail_livez)"
+        );
+
+        // DB row's state must be unchanged from the pre-set terminal Ok.
+        let final_row = db
+            .get_wake_job(&wake_id)
+            .await
+            .unwrap()
+            .expect("wake_job row must exist");
+        assert_eq!(
+            final_row.state,
+            WakeJobState::Ok,
+            "row must remain Ok (R20-C1 guard blocked machine's Failed overwrite); \
+             got {:?}",
+            final_row.state
+        );
+        assert_eq!(
+            final_row.agent_url.as_deref(),
+            Some("http://10.0.0.99:7000"),
+            "pre-seeded agent_url must NOT be overwritten by terminal Failed attempt"
+        );
+        assert!(
+            final_row.error_code.is_none(),
+            "error_code must remain None — terminal Failed write no-op'd"
+        );
+        assert!(
+            final_row.error_message.is_none(),
+            "error_message must remain None — terminal Failed write no-op'd"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&backend_root);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// r1-DISC-3: R26-C1 thread-local `Rc<Pool>` cache predicate tests
+//
+// R28-DISCIPLINE audit (`docs/reviews/sandbox-snapshot-restore-test-
+// discipline-audit-2026-05-25-r1.md`) flagged the R26-C1 cache shape
+// (`crates/sandbox/src/db.rs:62-105` + `:617-672`) as the highest-
+// leverage gap: ZERO predicate tests, and the cost was visible —
+// the stress-r7 wedge → r7-A `max_connections` bump → r7-C-followup
+// `start_housekeeper` patch sequence is exactly the kind of incident
+// that a predicate oracle would have caught earlier. These tests pin
+// the three observable contracts of the cache:
+//
+//   1. **Cache hit within a thread**: same DSN, same compio worker
+//      thread → returns the SAME `Rc<Pool>` (verified via
+//      `Rc::ptr_eq`). The internal pattern is `cached_pool` returns
+//      `Some` on the second call; the post-await re-check in
+//      `install_pool` is bypassed entirely.
+//   2. **Per-thread isolation**: different OS threads each run their
+//      own compio runtime → each has its own `thread_local!` entry,
+//      so each opens an INDEPENDENT pool. The production-state
+//      oracle is `pg_stat_activity` filtered by an
+//      application_name unique to this test (avoids contamination
+//      from prior tests / other connections).
+//   3. **DSN tiebreaker**: same thread, different DSN strings →
+//      `cached_pool` returns `None` on the DSN mismatch arm,
+//      `install_pool` evicts the prior entry and replaces with the
+//      new pool. `Rc::ptr_eq` between the two `Rc<Pool>` values is
+//      false. This is the guard that `set_role_dsns_for_test`
+//      relies on for the role-permission integration tests.
+//
+// Test 4 (housekeeper reaps idle conns) is DEFERRED — the
+// `PoolConfig` `idle_timeout=600s` / `max_lifetime=1800s` defaults
+// are not adjustable from the `Database` boundary, and a CI test
+// that waits 10+ minutes is not viable. The housekeeper's correct
+// wiring is verified by code inspection (`db.rs:640,670` —
+// `start_housekeeper()` is called immediately after
+// `Pool::connect_with_config` for both `pool_app` and `pool_audit`)
+// and the structural argument from `compio-postgres/src/pool.rs:341
+// -353` (housekeeper holds `Weak<Pool>` so it self-terminates when
+// the last `Rc` drops). Source: r1-DISC-3 + r7-C-followup closure.
+// ════════════════════════════════════════════════════════════════════
+
+mod r26_c1_pool_cache {
+    use super::*;
+    use std::rc::Rc;
+    use std::sync::{Arc, Barrier};
+
+    /// Build a DSN with a unique `application_name` query parameter so
+    /// each test's pg_stat_activity reading is isolated from sibling
+    /// tests' lingering connections.
+    fn dsn_with_app_name(tag: &str) -> String {
+        let base = test_url();
+        let sep = if base.contains('?') { '&' } else { '?' };
+        format!("{base}{sep}application_name={tag}")
+    }
+
+    /// Count rows in `pg_stat_activity` whose `application_name`
+    /// matches the test tag. The session executing the query is
+    /// excluded (`pid <> pg_backend_pid()`) so the count reflects
+    /// only the pool's retained connections, not the observer.
+    async fn count_conns_with_app_name(observer: &compio_postgres::Pool, tag: &str) -> i64 {
+        let client = observer.get().await.expect("observer client");
+        let row = client
+            .query_one(
+                "SELECT count(*)::BIGINT FROM pg_stat_activity \
+                 WHERE application_name = $1 AND pid <> pg_backend_pid()",
+                &[&tag],
+            )
+            .await
+            .expect("pg_stat_activity query");
+        row.get(0)
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Test 1: same thread + same DSN → same Rc<Pool>
+    // ────────────────────────────────────────────────────────────────
+
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn pool_cache_returns_same_rc_within_thread() {
+        // Tagged DSN keeps this test's cache entry distinct from
+        // prior tests' default-DSN entries; both calls below share
+        // the SAME DSN string, so `cached_pool` returns `Some` on
+        // the second call and `install_pool` is bypassed.
+        let dsn = dsn_with_app_name("zs_disc3_t1");
+        let db = Database::from_test_config(dsn, false, 30)
+            .await
+            .expect("from_test_config");
+
+        let p1: Rc<compio_postgres::Pool> = db.pool_app().await.expect("first pool_app");
+        let p2: Rc<compio_postgres::Pool> = db.pool_app().await.expect("second pool_app");
+
+        assert!(
+            Rc::ptr_eq(&p1, &p2),
+            "same thread + same DSN must return the cached Rc<Pool> \
+             (R26-C1 cache hit predicate violated — pool_app rebuilt \
+             the pool instead of returning POOL_APP_CELL's cached entry)"
+        );
+        // Strong count is 3: the cache cell, p1, and p2. The
+        // exact value matters less than ptr_eq above; this assert
+        // is a defense-in-depth check that nothing exotic is going
+        // on (e.g., a second cell holding a phantom strong ref).
+        assert_eq!(
+            Rc::strong_count(&p1),
+            3,
+            "Rc strong count must be 3 (cache + p1 + p2); got {}",
+            Rc::strong_count(&p1)
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Test 2: two OS threads → two independent pools
+    //   (production-state oracle: pg_stat_activity row count)
+    // ────────────────────────────────────────────────────────────────
+
+    #[compio::test]
+    #[ignore = "needs Postgres; spawns 2 OS threads with their own compio runtimes"]
+    async fn pool_cache_per_thread_isolated() {
+        let tag = "zs_disc3_t2";
+        let dsn_for_workers = dsn_with_app_name(tag);
+
+        // Build an observer pool on a NEUTRAL application_name (the
+        // default DSN) so the observer's own backend doesn't show up
+        // under the filtered count.
+        let mut obs_cfg = PoolConfig::default();
+        obs_cfg.max_size = 2;
+        let observer = Pool::connect_with_config(&test_url(), obs_cfg)
+            .await
+            .expect("observer pool");
+
+        // Barrier(3) = 2 workers + 1 observer. Workers warm pools
+        // then arrive; observer arrives once it has counted.
+        let barrier_start = Arc::new(Barrier::new(3));
+        let barrier_done = Arc::new(Barrier::new(3));
+
+        let mut handles = Vec::new();
+        for i in 0..2u32 {
+            let dsn = dsn_for_workers.clone();
+            let bs = Arc::clone(&barrier_start);
+            let bd = Arc::clone(&barrier_done);
+            handles.push(std::thread::spawn(move || {
+                let rt = compio::runtime::Runtime::new().expect("worker runtime");
+                rt.block_on(async move {
+                    let db = Database::from_test_config(dsn, false, 30)
+                        .await
+                        .unwrap_or_else(|e| panic!("worker {i} from_test_config: {e}"));
+                    let p1 = db
+                        .pool_app()
+                        .await
+                        .unwrap_or_else(|e| panic!("worker {i} pool_app #1: {e}"));
+                    let p2 = db
+                        .pool_app()
+                        .await
+                        .unwrap_or_else(|e| panic!("worker {i} pool_app #2: {e}"));
+                    // Same-thread cache hit invariant ALSO holds on
+                    // each worker thread (the thread_local is fresh
+                    // per OS thread, so the FIRST call populates it
+                    // and the SECOND call hits).
+                    assert!(
+                        Rc::ptr_eq(&p1, &p2),
+                        "worker {i}: thread-local cache must hit on second call"
+                    );
+                    // Hold the pool alive across the barrier so
+                    // pg_stat_activity sees its conns.
+                    bs.wait();
+                    bd.wait();
+                    drop(p2);
+                    drop(p1);
+                });
+            }));
+        }
+
+        // Wait for both workers to have warmed their pools.
+        barrier_start.wait();
+        let n = count_conns_with_app_name(&observer, tag).await;
+        // Each worker's pool warms `min_idle.max(1) = 2` conns
+        // (PoolConfig default min_idle=2). Two workers × 2 conns
+        // = 4 floor. We assert >= 2 (one per worker would already
+        // disprove "all workers share one pool"); >= 4 is the
+        // tight floor but we use >= 2 to stay robust against
+        // PoolConfig default drift.
+        assert!(
+            n >= 2,
+            "expected at least 2 sandbox_app conns under application_name='{tag}' \
+             (one per worker thread); got {n}. Each compio worker has its OWN \
+             thread_local POOL_APP_CELL — if they shared a cache the count would \
+             reflect only one pool's min_idle"
+        );
+        barrier_done.wait();
+        for (i, h) in handles.into_iter().enumerate() {
+            h.join().unwrap_or_else(|e| panic!("worker {i} join: {e:?}"));
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Test 3: same thread + different DSN → different Rc<Pool>
+    //   (cache key is the DSN string; DSN mismatch evicts + replaces)
+    // ────────────────────────────────────────────────────────────────
+
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn pool_cache_dsn_tiebreaker_evicts_on_mismatch() {
+        // Two DSNs that connect to the same db but differ in their
+        // verbatim string (the cache key). `application_name` is a
+        // pg-supported connection param so both connect cleanly.
+        let dsn_a = dsn_with_app_name("zs_disc3_t3_a");
+        let dsn_b = dsn_with_app_name("zs_disc3_t3_b");
+        assert_ne!(dsn_a, dsn_b, "test fixture: DSNs must differ verbatim");
+
+        let db_a = Database::from_test_config(dsn_a, false, 30)
+            .await
+            .expect("from_test_config dsn_a");
+        let db_b = Database::from_test_config(dsn_b, false, 30)
+            .await
+            .expect("from_test_config dsn_b");
+
+        let pa = db_a.pool_app().await.expect("pool_app dsn_a");
+        let pb = db_b.pool_app().await.expect("pool_app dsn_b");
+
+        assert!(
+            !Rc::ptr_eq(&pa, &pb),
+            "same thread + DIFFERENT DSN must produce different pools — the \
+             cache key includes the DSN so a mismatch evicts the prior entry \
+             and `install_pool` builds afresh. If this assert fires the cache \
+             is collapsing all DSNs to one slot, which would return \
+             auth-mismatched pools when `set_role_dsns_for_test` rotates \
+             roles mid-process (R26-C1 closure note: 'DSN-keyed (not \
+             unkeyed): set_role_dsns_for_test exists for the role-permission \
+             integration tests')"
+        );
+
+        // After the eviction, a second call with dsn_b's Database
+        // returns the SAME pool as `pb` (it's now the cached entry).
+        let pb2 = db_b.pool_app().await.expect("pool_app dsn_b second");
+        assert!(
+            Rc::ptr_eq(&pb, &pb2),
+            "after DSN-mismatch eviction, the new pool itself must be \
+             cached — same-DSN second call should hit"
+        );
+        // Conversely, going back to dsn_a now evicts dsn_b. The
+        // NEW pa2 will NOT equal the original pa (which was
+        // dropped from the cache during the dsn_a → dsn_b swap;
+        // its only remaining strong ref is the `pa` binding
+        // above).
+        let pa2 = db_a.pool_app().await.expect("pool_app dsn_a second");
+        assert!(
+            !Rc::ptr_eq(&pa, &pa2),
+            "the original dsn_a pool was evicted by the dsn_a → dsn_b \
+             rotation; a third call (dsn_b → dsn_a) must build a FRESH \
+             pool, not resurrect the original `pa`"
+        );
+    }
 }

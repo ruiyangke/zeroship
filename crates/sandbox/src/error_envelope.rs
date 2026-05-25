@@ -29,7 +29,7 @@
 
 use ntex::http::StatusCode;
 use ntex::web::HttpResponse;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 /// A typed error envelope. Holds the HTTP status + machine-readable
 /// `code` + human `message` + optional kind-specific extra fields,
@@ -46,7 +46,7 @@ pub(crate) struct ErrorEnvelope {
     status: StatusCode,
     code: &'static str,
     message: String,
-    extra: Option<Value>,
+    extra: Option<Map<String, Value>>,
     no_store: bool,
 }
 
@@ -71,8 +71,24 @@ impl ErrorEnvelope {
     /// key is merged into the envelope at render time. Keys MUST NOT
     /// be `"error"` or `"message"` (the helper does not overwrite the
     /// envelope-reserved fields).
+    ///
+    /// Takes a `serde_json::Value` for ergonomics (callers write
+    /// `with_extra(json!({...}))`). **Panics** if the input is not a
+    /// JSON object — the envelope contract only makes sense for
+    /// objects, since extras flatten into the top-level wire shape.
+    /// An earlier version silently dropped non-object inputs; the
+    /// panic surfaces caller bugs at the first failing test instead
+    /// of producing empty extras on the wire (api-surface r4 R4-S2).
     pub(crate) fn with_extra(mut self, extra: Value) -> Self {
-        self.extra = Some(extra);
+        let Value::Object(map) = extra else {
+            panic!(
+                "ErrorEnvelope::with_extra requires a JSON object; got: {extra:?}"
+            );
+        };
+        match &mut self.extra {
+            Some(existing) => existing.extend(map),
+            None => self.extra = Some(map),
+        }
         self
     }
 
@@ -91,15 +107,13 @@ impl ErrorEnvelope {
             "message": self.message,
         });
         if let (Some(extra), Some(obj)) = (self.extra, body.as_object_mut()) {
-            if let Some(extra_obj) = extra.as_object() {
-                for (k, v) in extra_obj {
-                    // Belt-and-suspenders: never let extra clobber the
-                    // envelope-reserved keys.
-                    if k == "error" || k == "message" {
-                        continue;
-                    }
-                    obj.insert(k.clone(), v.clone());
+            for (k, v) in extra {
+                // Belt-and-suspenders: never let extra clobber the
+                // envelope-reserved keys.
+                if k == "error" || k == "message" {
+                    continue;
                 }
+                obj.insert(k, v);
             }
         }
         let mut resp = HttpResponse::build(self.status);
@@ -212,5 +226,62 @@ mod tests {
     async fn default_has_no_cache_control() {
         let resp = error_response(StatusCode::NOT_FOUND, "not_found", "x");
         assert!(resp.headers().get("cache-control").is_none());
+    }
+
+    // R4-S2: `with_extra` rejected non-object inputs by silent discard
+    // before this change. The contract is "extras flatten into the
+    // top-level envelope" — meaningful only for JSON objects. Each
+    // non-object Value variant MUST panic now so caller bugs surface
+    // at the first failing test instead of producing empty extras on
+    // the wire.
+
+    #[compio::test]
+    #[should_panic(expected = "ErrorEnvelope::with_extra requires a JSON object")]
+    async fn with_extra_array_panics() {
+        let _ = ErrorEnvelope::new(StatusCode::BAD_REQUEST, "x", "y")
+            .with_extra(json!([1, 2, 3]));
+    }
+
+    #[compio::test]
+    #[should_panic(expected = "ErrorEnvelope::with_extra requires a JSON object")]
+    async fn with_extra_string_panics() {
+        let _ = ErrorEnvelope::new(StatusCode::BAD_REQUEST, "x", "y")
+            .with_extra(json!("not-an-object"));
+    }
+
+    #[compio::test]
+    #[should_panic(expected = "ErrorEnvelope::with_extra requires a JSON object")]
+    async fn with_extra_number_panics() {
+        let _ = ErrorEnvelope::new(StatusCode::BAD_REQUEST, "x", "y")
+            .with_extra(json!(42));
+    }
+
+    #[compio::test]
+    #[should_panic(expected = "ErrorEnvelope::with_extra requires a JSON object")]
+    async fn with_extra_bool_panics() {
+        let _ = ErrorEnvelope::new(StatusCode::BAD_REQUEST, "x", "y")
+            .with_extra(json!(true));
+    }
+
+    #[compio::test]
+    #[should_panic(expected = "ErrorEnvelope::with_extra requires a JSON object")]
+    async fn with_extra_null_panics() {
+        let _ = ErrorEnvelope::new(StatusCode::BAD_REQUEST, "x", "y")
+            .with_extra(Value::Null);
+    }
+
+    #[compio::test]
+    async fn with_extra_called_twice_merges() {
+        // The new internal storage is `Map`, not `Option<Value>` —
+        // pin that two chained `with_extra` calls accumulate rather
+        // than the second silently replacing the first. Matches the
+        // wire intent (flatten everything into the envelope).
+        let resp = ErrorEnvelope::new(StatusCode::BAD_REQUEST, "x", "y")
+            .with_extra(json!({"a": 1}))
+            .with_extra(json!({"b": 2}))
+            .into_response();
+        let body = body_json(resp).await;
+        assert_eq!(body["a"], 1);
+        assert_eq!(body["b"], 2);
     }
 }

@@ -91,7 +91,7 @@ async fn run() -> Result<(), String> {
     }
 
     let config = SandboxConfig::from_env().map_err(|e| format!("config: {e}"))?;
-    let backend = Arc::new(Backend::from_config(&config)?);
+    let backend = Arc::new(Backend::builder(&config).build()?);
     backend.probe().await?;
 
     let stats = Arc::new(Stats::new());

@@ -18,18 +18,15 @@
 //!     process. Best for fleet deployments where each sandbox needs
 //!     its own kernel.
 //!
-//!   - **`nomad-ch`** — Nomad `raw_exec` job per sandbox; the job
-//!     invokes a wrapper script that launches a `cloud-hypervisor`
-//!     microVM with three virtio-blk disks (rootfs + per-sandbox
-//!     workspace.img + per-user home.img) and the controller's
-//!     signing pubkey hex on the kernel cmdline. The same in-VM
-//!     `zeroship-sandbox-agent` runs as PID 1 (signed-request
-//!     contract identical to `k8s`). No Kubernetes — no kubelet,
-//!     no CNI, no CSI — just `nomad agent` + a shell wrapper.
-//!     Best for single-node / small-cluster operators who already
-//!     run Nomad and want libkrun-equivalent isolation without the
-//!     k8s control-plane overhead. (Pre virtio-blk pivot the wrapper
-//!     spawned virtiofsd × 3; that's gone, see bug #11 closure.)
+//!   - **`nomad-ch`** — Nomad job per sandbox using the `ch` Go
+//!     plugin driver that launches a `cloud-hypervisor` microVM with
+//!     three virtio-blk disks (rootfs + per-sandbox workspace.img +
+//!     per-user home.img) and the controller's signing pubkey hex on
+//!     the kernel cmdline. The same in-VM `zeroship-sandbox-agent`
+//!     runs as PID 1 (signed-request contract identical to `k8s`).
+//!     No Kubernetes — no kubelet, no CNI, no CSI — just `nomad agent`
+//!     + the Go ch driver. Best for single-node / small-cluster
+//!     operators who already run Nomad.
 //!
 //! ## Why an enum, not a `dyn Trait`
 //!
@@ -179,37 +176,109 @@ pub enum Backend {
     NomadCh(std::sync::Arc<nomad_ch::NomadCHBackend>),
 }
 
-impl Backend {
-    /// Construct without sealed-record persistence. Convenience wrapper
-    /// around [`Backend::from_config_with_persist`] for callers (tests,
-    /// the legacy lifecycle examples) that don't exercise the
-    /// restart-restore path. New code in the controller goes through
-    /// the with-persist variant — see `crate::AppState::from_config`.
-    pub fn from_config(cfg: &SandboxConfig) -> Result<Self, String> {
-        Self::from_config_with_persist(cfg, None)
+/// Builder for [`Backend`]. Returned by [`Backend::builder`].
+///
+/// Setters take `T` (not `Option<T>`); callers only invoke
+/// `.with_persist(p)` / `.with_local_nomad_node_id(id)` when they have
+/// a value. Missing optional fields fall through as `None` to
+/// [`BackendBuilder::build`].
+///
+/// `local_nomad_node_id` is meaningful only for the `nomad-ch`
+/// backend (installed on the inner `NomadCHBackend` for r3-A node-pin
+/// constraints); other backends ignore it.
+///
+/// **Why a builder, not a flat struct of `Option` fields**: tests +
+/// lifecycle examples that don't exercise persistence / node-pin
+/// stay one-liners (`Backend::builder(&cfg).build()?`); orthogonal
+/// extension fields (r27-A1 staging-locality, future VFIO-handoff or
+/// tap-leak edges) absorb as new `.with_*()` setters without
+/// reshaping any existing call site. Replaces R26-I2 / R27-I1's
+/// telescoping `from_config*` cascade.
+#[must_use]
+#[allow(missing_debug_implementations)] // Persistence has no Debug; see sweep.rs convention
+pub struct BackendBuilder<'a> {
+    cfg: &'a SandboxConfig,
+    persist: Option<std::sync::Arc<crate::persist::Persistence>>,
+    local_nomad_node_id: Option<String>,
+}
+
+impl<'a> BackendBuilder<'a> {
+    /// Attach a shared sealed-record persistence handle. The same
+    /// handle is cloned (`Arc::clone`) into all three backend variants
+    /// so the file I/O state (sealed-records dir + AEAD key) lives in
+    /// one place. Omit to disable seal-on-create + delete-on-stop
+    /// entirely (Phase 0 default off behaviour).
+    pub fn with_persist(
+        mut self,
+        persist: std::sync::Arc<crate::persist::Persistence>,
+    ) -> Self {
+        self.persist = Some(persist);
+        self
     }
 
-    /// Construct from config with an optional shared persistence
-    /// handle. The same handle is cloned (`Arc::clone`) into all three
-    /// backend variants so the file I/O state (sealed-records dir +
-    /// AEAD key) lives in one place. `None` disables seal-on-create
-    /// and delete-on-stop entirely, which is still the default.
-    pub fn from_config_with_persist(
-        cfg: &SandboxConfig,
-        persist: Option<std::sync::Arc<crate::persist::Persistence>>,
-    ) -> Result<Self, String> {
+    /// r3-A (T-8b-stress-r3 fix): pin sandbox creates to this Nomad
+    /// node_id. Installed on the inner `NomadCHBackend` when the
+    /// backend variant is `nomad-ch`. Other backends (`docker`, `k8s`)
+    /// silently ignore the value — the constraint is meaningful only
+    /// for the Nomad-driven path.
+    pub fn with_local_nomad_node_id(mut self, node_id: String) -> Self {
+        self.local_nomad_node_id = Some(node_id);
+        self
+    }
+
+    /// Materialize the [`Backend`] enum variant selected by
+    /// `cfg.backend`. Fails fast on an unknown backend string.
+    pub fn build(self) -> Result<Backend, String> {
+        let Self {
+            cfg,
+            persist,
+            local_nomad_node_id,
+        } = self;
         match cfg.backend.as_str() {
-            "docker" => Ok(Self::Docker(docker::DockerBackend::new(
+            "docker" => Ok(Backend::Docker(docker::DockerBackend::new(
                 cfg.clone(),
                 persist,
             ))),
-            "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone(), persist)?)),
-            "nomad-ch" => Ok(Self::NomadCh(std::sync::Arc::new(
-                nomad_ch::NomadCHBackend::new(cfg.clone(), persist)?,
+            "k8s" => Ok(Backend::K8s(k8s::K8sBackend::new(
+                cfg.clone(),
+                persist,
+            )?)),
+            "nomad-ch" => Ok(Backend::NomadCh(std::sync::Arc::new(
+                nomad_ch::NomadCHBackend::new(cfg.clone(), persist)?
+                    .with_local_nomad_node_id(local_nomad_node_id),
             ))),
             other => Err(format!(
                 "unknown SANDBOX_BACKEND={other:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""
             )),
+        }
+    }
+}
+
+impl Backend {
+    /// Entry point to construct a [`Backend`]. Optional fields default
+    /// to `None`; opt in by chaining `.with_*()` setters before
+    /// `.build()`. See [`BackendBuilder`] for the available setters.
+    ///
+    /// Replaces the prior 3-level telescoping constructor cascade
+    /// (R27-I1) — see git history (commit landing R27-I1) for the
+    /// pre-builder shape.
+    ///
+    /// Typical call sites:
+    /// ```ignore
+    /// // tests / lifecycle examples (no persistence, no node-pin)
+    /// let backend = Backend::builder(&cfg).build()?;
+    ///
+    /// // boot path (`crate::AppState::from_config`)
+    /// let backend = Backend::builder(&cfg)
+    ///     .with_persist(persist)
+    ///     .with_local_nomad_node_id(node_id)
+    ///     .build()?;
+    /// ```
+    pub fn builder(cfg: &SandboxConfig) -> BackendBuilder<'_> {
+        BackendBuilder {
+            cfg,
+            persist: None,
+            local_nomad_node_id: None,
         }
     }
 
@@ -414,9 +483,10 @@ impl Backend {
     /// runs the Nomad-job purge + host-fence + vm_index release +
     /// in-memory map removal, but **DOES NOT remove the per-sandbox
     /// `host_dir`**. That dir holds `workspace.img`, which the next
-    /// wake re-mounts as durable per-sandbox storage; deleting it
-    /// here trips the wrapper's `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate
-    /// on the next wake (bug #15 — see
+    /// wake re-attaches as a virtio-blk disk via the ch driver's
+    /// `TaskConfig.Disks` field; deleting it here causes the next
+    /// wake's `TaskConfig.Disks` path to be missing and CH to
+    /// refuse to start (bug #15 — see
     /// `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md`).
     /// The host_dir is finally reaped by the next real [`Self::stop`]
     /// call (operator delete, or terminal-not-restorable transition).

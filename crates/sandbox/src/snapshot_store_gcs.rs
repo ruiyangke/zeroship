@@ -437,9 +437,29 @@ impl GcsSnapshotStore {
             .call();
         match resp {
             Ok(r) if r.status() == 200 => {
-                let mut f = std::fs::File::create(dest)?;
-                let mut reader = r.into_reader();
-                std::io::copy(&mut reader, &mut f)?;
+                let f = std::fs::File::create(dest)?;
+                // R11-P2 (perf-r11, wake-path counterpart to R10-P5):
+                // std lib's io::copy uses an 8 KiB default buffer.
+                // A 1 GB memory-ranges download issues ≈131072
+                // write(2)s unbuffered; the 1 MiB BufWriter collapses
+                // that to ≈1024. We flush + drop before sync_all so
+                // the BufWriter's internal buffer is observed on disk.
+                //
+                // R12-P1 (perf-r12): wrap the READ side too. std's
+                // io::copy specialization uses BufferedCopySpec only
+                // when *both* sides are buffered; otherwise it falls
+                // back to an 8 KiB scratch read buffer, producing
+                // ≈131072 read(2) syscalls on a 1 GB body. Symmetric
+                // 1 MiB BufReader collapses those to ≈1024 too.
+                let mut writer = std::io::BufWriter::with_capacity(1 << 20, f);
+                let mut reader = std::io::BufReader::with_capacity(1 << 20, r.into_reader());
+                std::io::copy(&mut reader, &mut writer)?;
+                let f = writer.into_inner().map_err(|e| {
+                    SnapshotError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("BufWriter flush: {}", e.error()),
+                    ))
+                })?;
                 f.sync_all()?;
                 Ok(())
             }
@@ -504,11 +524,16 @@ impl GcsSnapshotStore {
 /// L1 contract; per-file `x-goog-hash` is for GCS object-integrity
 /// during transfer.
 fn sha256_file(path: &Path) -> Result<[u8; 32], SnapshotError> {
-    let mut f = std::fs::File::open(path)?;
+    // R11-P3 (perf-r11, sibling of R5-P1 77ea717f): 1 MiB BufReader
+    // collapses the 16× syscall amplification of the unbuffered
+    // 64 KiB loop. On a 1 GB memory-ranges file the read(2) count
+    // drops 16384 → 1024. Sha256 still sees byte-identical chunks.
+    let f = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(1 << 20, f);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = f.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -977,10 +1002,15 @@ fn canonical_artifact_sha256(dir: &Path) -> Result<([u8; 32], u64), SnapshotErro
         };
         hasher.update(name.as_bytes());
         hasher.update(len.to_be_bytes());
-        let mut f = std::fs::File::open(&path)?;
+        // R11-P3 (perf-r11, sibling of R5-P1 77ea717f): 1 MiB
+        // BufReader collapses the 16× syscall amplification of the
+        // unbuffered 64 KiB loop. Mirrors snapshot_store::compute_
+        // artifact_sha256 byte-for-byte (same canonical hash domain).
+        let f = std::fs::File::open(&path)?;
+        let mut reader = std::io::BufReader::with_capacity(1 << 20, f);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = f.read(&mut buf)?;
+            let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -1053,6 +1083,39 @@ where
         // l2_upload_pending / l2_upload_failed_total so operators
         // see the L2-lag during a worker drain.
         //
+        // ## C-3 (T-8b-smoke-r4): why a dedicated OS thread (not
+        // `compio::runtime::spawn_blocking`)
+        //
+        // `SnapshotStore::put` is a sync trait method and the
+        // snapshot handler at `snapshot_handler.rs:397` already
+        // hops through `compio::runtime::spawn_blocking` before
+        // calling `store.put(...)`. That means the body of *this*
+        // method runs on a `spawn_blocking` worker thread which
+        // has no compio runtime in thread-local storage; calling
+        // `compio::runtime::spawn_blocking` from inside would hit
+        // `Runtime::with_current` and panic at
+        // `compio-runtime-0.11.0/src/runtime/mod.rs:119` ("not in
+        // a compio runtime").
+        //
+        // `GcsSnapshotStore::put` (and the mock L2 used in tests)
+        // is purely synchronous (ureq HTTPS + std::fs) and does
+        // NOT need a compio runtime, so a plain `std::thread`
+        // dispatch is sufficient. The OS-thread isolation also
+        // keeps `Tiered::put` callable from *any* context — compio
+        // task, spawn_blocking worker, or a unit test on a
+        // non-compio thread — which is the whole point of
+        // declaring the trait method sync.
+        //
+        // R14-A1 (C-7-LT-PR1 commit 1, 3d8acc23): replaced the open-coded
+        // `std::thread::Builder::new().spawn(...)` block with the shared
+        // `crate::detach::detach_isolated` helper (the canonical C-3/C-6
+        // OS-thread pattern). The helper mints a private compio runtime
+        // even though this L2 future never awaits a compio I/O op — the
+        // overhead is negligible (one runtime allocation per upload) and
+        // unifies the isolation surface across all detach sites. The
+        // future body is wrapped in `async move { ... }`; it returns
+        // immediately once the sync `l2.put(...)` returns.
+        //
         // We can't `clone` arbitrary L2; require Arc-shareable above.
         let l2 = self.l2.clone();
         let sandbox_id = sandbox_id.to_string();
@@ -1063,34 +1126,47 @@ where
         let artifact_path = std::path::PathBuf::from(meta.artifact_path.clone());
         let ch_version_owned = ch_version.to_string();
         let sha256 = meta.sha256;
-        compio::runtime::spawn(async move {
-            // Synchronous I/O inside the task — the stub returns
-            // immediately. When real GCS lands, wrap in
-            // spawn_blocking like the rest of the controller.
-            match l2.put(&sandbox_id, &artifact_path, &ch_version_owned) {
-                Ok(m) => {
-                    if m.sha256 != sha256 {
+        // Name the thread for log/grep correlation with the upload's
+        // sandbox id. NOTE: Linux's `pr_set_name` truncates thread
+        // names at 15 bytes (TASK_COMM_LEN-1), so the tail is NOT
+        // visible in `ps`/`top -H` — only the leading
+        // `snap-l2-upload` prefix fits. The tail is preserved for
+        // the Rust-side name (which `tracing`/log lines that include
+        // `std::thread::current().name()` will pick up).
+        //
+        // Byte-slice is ASCII-safe: sandbox_id is hex (32 chars) per
+        // B24-FOLLOWUP, so `s.len() - 8` lands on a char boundary.
+        let tail = sandbox_id
+            .get(sandbox_id.len().saturating_sub(8)..)
+            .unwrap_or(&sandbox_id)
+            .to_string();
+        crate::detach::detach_isolated(
+            format!("snap-l2-upload-{tail}"),
+            move || async move {
+                match l2.put(&sandbox_id, &artifact_path, &ch_version_owned) {
+                    Ok(m) => {
+                        if m.sha256 != sha256 {
+                            tracing::warn!(
+                                sandbox_id = %sandbox_id,
+                                "tiered: L2 returned a different sha256; possible re-encrypt drift"
+                            );
+                        } else {
+                            tracing::debug!(
+                                sandbox_id = %sandbox_id,
+                                "tiered: L2 upload completed"
+                            );
+                        }
+                    }
+                    Err(e) => {
                         tracing::warn!(
                             sandbox_id = %sandbox_id,
-                            "tiered: L2 returned a different sha256; possible re-encrypt drift"
-                        );
-                    } else {
-                        tracing::debug!(
-                            sandbox_id = %sandbox_id,
-                            "tiered: L2 upload completed"
+                            error = %e,
+                            "tiered: L2 upload failed (v1 fire-and-forget; GCS PR adds retry)"
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        sandbox_id = %sandbox_id,
-                        error = %e,
-                        "tiered: L2 upload failed (v1 fire-and-forget; GCS PR adds retry)"
-                    );
-                }
-            }
-        })
-        .detach();
+            },
+        );
 
         Ok(meta)
     }
@@ -1316,6 +1392,56 @@ mod tests {
         write_fake_artifact(&src);
         let meta = tier.put("sbx_l2_fails", &src, "v51.1").unwrap();
         assert!(meta.bytes > 0);
+
+        cleanup(&root);
+    }
+
+    /// C-3 regression (T-8b-smoke-r4): `Tiered::put` MUST be callable
+    /// from a non-compio thread. The snapshot_handler hops through
+    /// `compio::runtime::spawn_blocking` before calling `store.put`,
+    /// which means `put` runs on a worker thread with no compio TLS.
+    /// Before the C-3 fix, the inline `compio::runtime::spawn_blocking`
+    /// inside `put` would hit `Runtime::with_current` and panic at
+    /// `compio-runtime-0.11.0/src/runtime/mod.rs:119` ("not in a
+    /// compio runtime"). Now we use `std::thread::spawn` for the
+    /// fire-and-forget L2 upload, so `put` is context-agnostic.
+    ///
+    /// This test invokes `put` from a plain `std::thread::spawn` —
+    /// i.e. NOT a compio task and NOT a compio spawn_blocking
+    /// worker. Pre-fix, this panics; post-fix, it succeeds.
+    #[test]
+    fn c3_put_callable_from_non_compio_thread() {
+        let root = fresh_root();
+        let l1 = LocalDiskSnapshotStore::new(root.join("store"));
+        let l2 = MockL2::default();
+        let tier = TieredSnapshotStore::new(l1, l2);
+
+        let src = root.join("src");
+        write_fake_artifact(&src);
+
+        // Run `put` on a plain OS thread to mirror what
+        // `compio::runtime::spawn_blocking` does — give the closure
+        // a worker thread with no compio runtime in TLS.
+        let tier_arc = std::sync::Arc::new(tier);
+        let tier_clone = std::sync::Arc::clone(&tier_arc);
+        let src_owned = src.clone();
+        let handle = std::thread::spawn(move || {
+            tier_clone.put("sbx_c3_repro", &src_owned, "v51.1")
+        });
+        let meta = handle
+            .join()
+            .expect("worker thread should not panic — C-3 regression if it does")
+            .expect("Tiered::put should succeed on a non-compio thread");
+        assert!(meta.bytes > 0);
+
+        // Give the detached L2 upload thread a moment to run so we
+        // can assert it didn't panic either.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let put_calls = *tier_arc.l2.put_calls.lock().unwrap();
+        assert!(
+            put_calls <= 1,
+            "L2 put_calls={put_calls}; expected 0 or 1 (fire-and-forget)"
+        );
 
         cleanup(&root);
     }

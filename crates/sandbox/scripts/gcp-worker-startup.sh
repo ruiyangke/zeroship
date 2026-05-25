@@ -17,8 +17,11 @@
 #          adds POST /_clock_resync so the controller can repair the
 #          guest's frozen-at-snapshot CLOCK_REALTIME post-CH-restore.)
 #        - zeroship-sandbox (controller, from metadata `controller-object`)
-#        - nomad-vm-wrapper.sh
-#        - stress harness (stress_one.py, snapshot_stress.py, typed_id.py)
+#        - stress harness:
+#            * snapshot_stress.py — SHA-pinned (R24-T1); canonical
+#              source is `crates/sandbox/scripts/snapshot_stress.py`,
+#              the GCS object is a mirror, SHA mismatch is FATAL.
+#            * stress_one.py, typed_id.py — best-effort, missing OK.
 #   3. set up 12 taps on 10.99.10X.1/30  (X = vm index, see wrapper)
 #   4. write Nomad client config pointing at the server fleet
 #   5. write /etc/zeroship/{sandbox-token,sandbox-admin-token,sandbox-admin-token.env}
@@ -40,7 +43,7 @@
 #   - sandbox-admin-token: bearer for /admin/sandboxes/*
 #   - artifact-bucket:     GCS bucket name (no `gs://`)
 #   - controller-object:   GCS object name for the controller binary
-#                          (e.g. zeroship-sandbox.snapshot-v6)
+#                          (e.g. zeroship-sandbox.snapshot-v30)
 #   - vm-index-ceil:       int, default 12; number of taps to create
 #   - snapshot-bucket:     GCS bucket for L2 snapshot storage
 #                          (default = artifact-bucket; can be same/separate)
@@ -78,7 +81,7 @@ SANDBOX_TOKEN=$(md sandbox-token)
 SANDBOX_ADMIN_TOKEN=$(md sandbox-admin-token)
 ARTIFACT_BUCKET=$(md artifact-bucket)
 CONTROLLER_OBJECT=$(md controller-object)
-VM_INDEX_CEIL=$(md vm-index-ceil); VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
+VM_INDEX_CEIL=$(md vm-index-ceil); VM_INDEX_CEIL=${VM_INDEX_CEIL:-20}
 SNAPSHOT_BUCKET=$(md snapshot-bucket); SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
 
 : "${SERVER_IPS:?missing server-ips}"
@@ -152,12 +155,71 @@ gs_pull ch-remote.v51.1            /usr/local/bin/ch-remote        0755
 gs_pull virtiofsd                  /usr/local/bin/virtiofsd        0755
 gs_pull vmlinuz                    "$ART/vmlinuz"                  0644
 gs_pull rootfs-slim.img.virtio-blk-v5 "$ART/rootfs-slim.img"          0644
-gs_pull nomad-vm-wrapper.sh        "$ART/nomad-vm-wrapper.sh"      0755
 gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
 
-# Stress harness (best-effort: a missing file is non-fatal for cluster
-# bringup; the provisioner uses `gsutil cp` directly to push these too).
-for f in stress_one.py snapshot_stress.py typed_id.py; do
+# Install the Go-based nomad-driver-ch plugin (unconditional — T-8 cutover complete).
+echo "[startup] installing nomad-driver-ch"
+mkdir -p /etc/zeroship/nomad-plugins
+# nomad-driver-ch v25 SHA-pin (R31-P1 allocator tuning + FADV_WILLNEED prewarm).
+# The GCS object is built by `nomad-driver-ch/scripts/build-binary.sh --verify`
+# in the driver worktree and uploaded out-of-band by the operator; the driver
+# binary, the GCS mirror, and the DRIVER_BINARY_SHA256 pin below
+# MUST move together (mirrors the R24-T1 snapshot_stress.py
+# lockstep at dd2079a9). A SHA mismatch is FATAL — the worker
+# refuses to start until operator reconciles.
+DRIVER_BINARY_SHA256="5168dce34798f01966611e09fae5651f2f3e522f6f787ab2e02ba6fb6569ef57"
+gs_pull nomad-driver-ch.v25 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
+chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
+got=$(sha256sum /etc/zeroship/nomad-plugins/nomad-driver-ch | awk '{print $1}')
+if [ "$got" != "$DRIVER_BINARY_SHA256" ]; then
+  echo "[startup] FATAL: nomad-driver-ch SHA mismatch" >&2
+  echo "[startup]   expected: $DRIVER_BINARY_SHA256" >&2
+  echo "[startup]   got:      $got" >&2
+  echo "[startup]   GCS object: gs://$ARTIFACT_BUCKET/nomad-driver-ch.v25" >&2
+  echo "[startup]   Rebuild via nomad-driver-ch/scripts/build-binary.sh --verify and re-upload." >&2
+  exit 1
+fi
+echo "[startup] nomad-driver-ch SHA OK ($DRIVER_BINARY_SHA256)"
+# Surface the embedded gitSHA so we can confirm which build landed.
+/etc/zeroship/nomad-plugins/nomad-driver-ch --version || true
+
+# Tell Nomad where to find plugins. The HCL fragment is loaded
+# alongside /etc/nomad.d/nomad.hcl (Nomad concatenates everything
+# in /etc/nomad.d/*.hcl), so writing it BEFORE `systemctl enable
+# --now nomad` below means we don't need a restart afterwards.
+#
+# The explicit `plugin "nomad-driver-ch" { config {} }` stanza is
+# REQUIRED on Nomad 2.0.2 — `plugin_dir` alone makes the loader emit
+#   [WARN] agent.plugin_loader: plugin not referenced in the agent
+#                                configuration file, loading skipped
+# and skip the driver entirely. The empty `config {}` block is
+# mandatory; Nomad refuses to load plugins it doesn't see configured,
+# even with empty config. Confirmed via T-8b-smoke FAIL r1 — see
+# docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r1.md.
+cat > /etc/nomad.d/plugin-dir.hcl <<'EOF'
+plugin_dir = "/etc/zeroship/nomad-plugins"
+
+plugin "nomad-driver-ch" {
+  config {}
+}
+EOF
+
+# Stress harness.
+#
+# `snapshot_stress.py` is the canonical T-8b-cutover gating workload —
+# its in-repo source lives at `crates/sandbox/scripts/snapshot_stress.py`
+# (R24-T1, 2026-05-25). The GCS object is a MIRROR of the in-repo file;
+# we SHA-pin the download against the literal below so any drift between
+# the in-repo source and the GCS mirror fails worker boot loudly. To
+# update the harness see the "UPDATE PROCEDURE" docstring at the top
+# of `crates/sandbox/scripts/snapshot_stress.py` — the in-repo file,
+# the GCS object, and this SHA literal must all move together.
+SNAPSHOT_STRESS_SHA256="89ba229e2c8544bc648b46f4963e57cf524cd7edfd7af82093a1217afb123d43"
+
+# `stress_one.py` and `typed_id.py` are companion files — best-effort
+# pull, missing-file is non-fatal for cluster bringup; the provisioner
+# pushes these out-of-band too.
+for f in stress_one.py typed_id.py; do
   if gsutil -q stat "gs://$ARTIFACT_BUCKET/stress/$f" 2>/dev/null; then
     gsutil -q cp "gs://$ARTIFACT_BUCKET/stress/$f" "/opt/stress/$f"
     chmod 0755 "/opt/stress/$f"
@@ -165,6 +227,26 @@ for f in stress_one.py snapshot_stress.py typed_id.py; do
     echo "[startup] WARN: /opt/stress/$f not on GCS — skipping"
   fi
 done
+
+# snapshot_stress.py: REQUIRED with SHA verification (R24-T1).
+# A SHA mismatch is FATAL — operator must reconcile the in-repo source,
+# the GCS mirror, and the SNAPSHOT_STRESS_SHA256 pin above.
+if gsutil -q stat "gs://$ARTIFACT_BUCKET/stress/snapshot_stress.py" 2>/dev/null; then
+  gsutil -q cp "gs://$ARTIFACT_BUCKET/stress/snapshot_stress.py" /opt/stress/snapshot_stress.py
+  chmod 0755 /opt/stress/snapshot_stress.py
+  got=$(sha256sum /opt/stress/snapshot_stress.py | awk '{print $1}')
+  if [ "$got" != "$SNAPSHOT_STRESS_SHA256" ]; then
+    echo "[startup] FATAL: snapshot_stress.py SHA mismatch" >&2
+    echo "[startup]   expected: $SNAPSHOT_STRESS_SHA256" >&2
+    echo "[startup]   got:      $got" >&2
+    echo "[startup]   In-repo source: crates/sandbox/scripts/snapshot_stress.py" >&2
+    echo "[startup]   See R24-T1 / UPDATE PROCEDURE in that file's docstring." >&2
+    exit 1
+  fi
+  echo "[startup] snapshot_stress.py SHA OK ($SNAPSHOT_STRESS_SHA256)"
+else
+  echo "[startup] WARN: /opt/stress/snapshot_stress.py not on GCS — skipping"
+fi
 
 # Ensure the rootfs image is the virtio-blk variant the wrapper
 # expects (`$ZSBX_ARTIFACT_DIR/rootfs-slim.img`). gs_pull dropped it
@@ -184,7 +266,7 @@ modprobe tun || true
 # internet-to-VM, so no SNAT is required.
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
-cat > /etc/sysctl.d/99-zsbx.conf <<EOF
+cat > /etc/sysctl.d/99-zsbx.conf <<'EOF'
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
@@ -218,7 +300,7 @@ done
 EOF
 chmod 0755 /usr/local/sbin/zsbx-taps-up.sh
 
-cat > /etc/systemd/system/zsbx-taps.service <<EOF
+cat > /etc/systemd/system/zsbx-taps.service <<'EOF'
 [Unit]
 Description=zsbx tap devices (idempotent)
 After=network-online.target
@@ -274,8 +356,7 @@ client {
     retry_max      = 0
   }
   options = {
-    "driver.raw_exec.enable" = "1"
-    "user.blacklist"         = ""
+    "user.blacklist" = ""
   }
 }
 EOF
@@ -290,6 +371,39 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
+
+# ───── 4b. ch driver-health gate ────────────────────────────────
+# Confirm the ch driver is detected and healthy before proceeding.
+# Without this gate `zsbx-worker-ready` was emitted even when the
+# plugin loader silently skipped the driver (Nomad 2.0.2 WARN: plugin
+# not referenced in agent config), so the failure only surfaced on the
+# first sandbox-create — many minutes later. Surface plugin-load
+# failures at provision time instead.
+#
+# Probe: `nomad node status -self -verbose` lists drivers as
+#   <name>  <detected>  <healthy>  <message>  <time>
+# We match `^ch\s+true\s+true` (whitespace-tolerant), with 10x 3s
+# retries (30s total) before failing the worker startup.
+echo "[startup] probing ch driver health (Detected=true, Healthy=true) ..."
+CH_OK=0
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if nomad node status -self -verbose 2>/dev/null \
+       | grep -E '^ch[[:space:]]+true[[:space:]]+true' >/dev/null; then
+    CH_OK=1
+    echo "[startup] ch driver healthy (attempt $attempt)"
+    break
+  fi
+  echo "[startup] ch driver not yet healthy (attempt $attempt/10); retry in 3s"
+  sleep 3
+done
+if [ "$CH_OK" -ne 1 ]; then
+  echo "[startup] FATAL: ch driver did not reach Detected=true,Healthy=true within 30s" >&2
+  echo "[startup] last node status:" >&2
+  nomad node status -self -verbose 2>&1 | tail -40 >&2 || true
+  echo "[startup] nomad agent logs (tail):" >&2
+  journalctl -u nomad --no-pager -n 80 2>&1 | tail -80 >&2 || true
+  exit 1
+fi
 
 # ───── 5. token files (mode 0o400, owned by root) ───────────────
 umask 077
@@ -336,6 +450,26 @@ else
   chmod 0400 "$AEAD_KEY_PATH"
   echo "[startup] reusing AEAD key at $AEAD_KEY_PATH"
 fi
+
+# Snapshot AEAD root KEK (arch-r9 fail-CLOSED, R10-A1). Controller
+# refuses to boot when `SNAPSHOT_ENABLED=true` + `SNAPSHOT_USE_GCS=true`
+# but `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` is unset — without it, guest RAM
+# pages land in GCS in clear while the pg audit row stamps
+# `snapshot_aead_dek_id="v1"`, an audit-trail-vs-reality gap. The KEK
+# must be exactly 32 raw bytes, mode 0o400, owned by uid 0. Generated
+# once at startup and reused idempotently across reboots so any DEKs
+# previously wrapped under it stay decryptable. DO NOT log or echo
+# the contents.
+ROOT_KEK_PATH="$ART/snapshot-root-kek"
+if [ ! -s "$ROOT_KEK_PATH" ]; then
+  ( umask 077; head -c 32 /dev/urandom > "$ROOT_KEK_PATH" )
+  chmod 0400 "$ROOT_KEK_PATH"
+  echo "[startup] generated snapshot root KEK at $ROOT_KEK_PATH (32 bytes, 0400)"
+else
+  chmod 0400 "$ROOT_KEK_PATH"
+  echo "[startup] reusing snapshot root KEK at $ROOT_KEK_PATH"
+fi
+
 mkdir -p /var/lib/zeroship/sandbox/sealed-records
 umask 022
 
@@ -366,19 +500,34 @@ EnvironmentFile=$ART/sandbox-db.env
 Environment=SANDBOX_BACKEND=nomad-ch
 Environment=SANDBOX_NOMAD_ADDR=http://127.0.0.1:4646
 Environment=SANDBOX_NOMAD_DATACENTER=$DATACENTER
-Environment=SANDBOX_NOMAD_CH_WRAPPER_PATH=$ART/nomad-vm-wrapper.sh
 Environment=SANDBOX_NOMAD_CH_RUNTIME_DIR=/var/lib/zeroship/ch
 Environment=SANDBOX_NOMAD_CH_HOST_STATE_DIR=/var/zeroship/ch
 Environment=SANDBOX_NOMAD_CH_USER_HOME_ROOT=/var/zeroship/ch/users
 Environment=SANDBOX_NOMAD_CH_VM_INDEX_FLOOR=1
 Environment=SANDBOX_NOMAD_CH_VM_INDEX_CEIL=$VM_INDEX_CEIL
 Environment=SANDBOX_NOMAD_CH_SUBNET_BASE_OCTET=99
+# C-8 fix (T-8b-smoke-r9 cluster review): the Rust default fence is
+# 120 s — over-conservative for the cluster-smoke workload, where the
+# observed source-teardown completes well under 30 s. Smoke-r9
+# confirmed C-7's 48 s wake retry budget but exposed that a 150 s
+# source-teardown wall-time (host_fence 120 s + Nomad purge 30 s)
+# exceeds it, surfacing as a clean 503 vm_index_unavailable. Capping
+# the fence at 30 s here reduces source teardown to ~60 s total,
+# fitting inside the 48 s retry budget with ~12 s residual headroom.
+# Production deployments needing the conservative 120 s default can
+# override via metadata; this is the cluster-smoke baseline.
+Environment=SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS=30
 
-# Wrapper inputs: point at the artifact dir holding vmlinuz + rootfs-slim.img.
-# The wrapper reads ZSBX_ARTIFACT_DIR from its Nomad task env; the
-# controller propagates SANDBOX_NOMAD_CH_RUNTIME_DIR there.
-# (We additionally pre-seed the runtime dir with the artifacts so the
-# wrapper's \`cd "\$ZSBX_ARTIFACT_DIR"\` finds vmlinuz + rootfs-slim.img.)
+# C-7-LT (T-8b-smoke-r12, controller v27): activate async wake response
+# mode. The synchronous-response contract was empirically shown across
+# r4-r11 to be under-budgetable inside the 60 s ntex client deadline
+# (smoke-r11 measured a 60.166 s teardown vs a hard-capped 50 s wake
+# budget — C-8c). Async mode returns 202 + {wake_id, poll_url} from
+# POST /wake immediately; the state machine runs server-side without
+# the client deadline binding it. Clients GET /wake/{wake_id} every
+# 500ms-1s until terminal. Legacy sync remains available via ?sync=1
+# (used only by older clients during cutover; new smoke flow polls).
+Environment=SANDBOX_WAKE_RESPONSE_MODE=async
 
 # Snapshot / restore (Phase B feature flag + L2 GCS)
 Environment=SANDBOX_SNAPSHOT_ENABLED=true
@@ -396,12 +545,26 @@ Environment=SANDBOX_SNAPSHOT_GCS_BUCKET=$SNAPSHOT_BUCKET
 Environment=SANDBOX_PERSIST_AUTH=1
 Environment=SANDBOX_AEAD_KEY_PATH=$AEAD_KEY_PATH
 Environment=SANDBOX_PERSIST_DIR=/var/lib/zeroship/sandbox
+# Snapshot root KEK (32 bytes, mode 0o400). Required by the fail-CLOSED
+# boot assertion when SNAPSHOT_ENABLED + SNAPSHOT_USE_GCS are both true.
+Environment=SANDBOX_SNAPSHOT_ROOT_KEK_PATH=$ROOT_KEK_PATH
 
 # Admin token file
 Environment=SANDBOX_ADMIN_TOKEN_PATH=$ART/sandbox-admin-token
 
 # pg migrations: run only on worker-1.
 $( [ "$IS_MIGRATOR" = "1" ] && echo "Environment=SANDBOX_PG_RUN_MIGRATIONS=1" )
+
+# Option C Phase 4 (T-8b-stress-r7) — driver-side disk image staging.
+# With this flag flipped TRUE, the controller emits \`zsbx_stage_disks=true\`
+# job-level Meta + bypasses the controller-side workspace.img staging
+# spawn_blocking path (\`crates/sandbox/src/backend/nomad_ch.rs:797\`);
+# the driver's StartTask owns lifecycle of workspace.img + user_home.img,
+# creating them fresh per StartTask. Per staging-locality ADR \`bbadbe68\`,
+# this eliminates the cross-alloc kernel-state retention surface that
+# the 6 prior consecutive stress regressions (r1-r6 at 1-3/60 e2e OK)
+# all chased. Decisive validation of Option C architectural pivot.
+Environment=SANDBOX_DRIVER_STAGES_DISK_IMAGES=true
 
 # API
 Environment=SANDBOX_PORT=9091
