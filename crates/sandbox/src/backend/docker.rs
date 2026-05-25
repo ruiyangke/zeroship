@@ -823,7 +823,6 @@ mod tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
                 runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),

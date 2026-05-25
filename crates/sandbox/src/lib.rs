@@ -2310,9 +2310,6 @@ mod admin_token_setter_tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: std::path::PathBuf::from(
-                    "/etc/zeroship/nomad-vm-wrapper.sh",
-                ),
                 runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: std::path::PathBuf::from(
@@ -2518,9 +2515,6 @@ mod persist_setter_tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: std::path::PathBuf::from(
-                    "/etc/zeroship/nomad-vm-wrapper.sh",
-                ),
                 runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: std::path::PathBuf::from(
@@ -2662,9 +2656,6 @@ mod field_setter_tests {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: std::path::PathBuf::from(
-                    "/etc/zeroship/nomad-vm-wrapper.sh",
-                ),
                 runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: std::path::PathBuf::from(

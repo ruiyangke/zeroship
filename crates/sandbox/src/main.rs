@@ -70,7 +70,6 @@ async fn main() -> std::io::Result<()> {
             tracing::info!(
                 nomad_addr = %config.nomad_ch.nomad_addr,
                 datacenter = %config.nomad_ch.datacenter,
-                wrapper_path = %config.nomad_ch.wrapper_path.display(),
                 runtime_dir = %config.nomad_ch.runtime_dir.display(),
                 host_state_dir = %config.nomad_ch.host_state_dir.display(),
                 user_home_dir_root = %config.nomad_ch.user_home_dir_root.display(),

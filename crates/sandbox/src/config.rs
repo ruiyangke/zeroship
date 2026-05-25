@@ -284,12 +284,12 @@ pub struct K8sConfig {
 
 /// Configuration for the **Nomad + Cloud Hypervisor** backend.
 ///
-/// In this mode the controller submits a `raw_exec` Nomad job per
-/// sandbox; the job spec invokes a wrapper script (shipped alongside
-/// the controller, configured via `wrapper_path`) which spawns a CH
-/// microVM with three virtio-fs shares (`keys`, `workspace`,
-/// `userhome`) bound to host directories the controller has
-/// pre-created.
+/// In this mode the controller submits a Nomad job using the `ch`
+/// Go plugin driver. The jobspec carries a typed `TaskConfig` block
+/// the driver decodes directly and uses to spawn a
+/// `cloud-hypervisor` microVM with virtio-blk disks (rootfs +
+/// per-sandbox workspace.img + per-user home.img) and the
+/// controller's signing pubkey hex on the kernel cmdline.
 ///
 /// Network plumbing (tap devices, /30 subnets) is assumed to be
 /// pre-provisioned out-of-band — see
@@ -307,13 +307,6 @@ pub struct NomadCHConfig {
     /// `Datacenters: [...]` field. Must match a datacenter the Nomad
     /// agent advertises. `SANDBOX_NOMAD_DATACENTER` (default `dc1`).
     pub datacenter: String,
-
-    /// Absolute path to the wrapper script the `raw_exec` task
-    /// invokes. The script is shipped at
-    /// `crates/sandbox/scripts/nomad-vm-wrapper.sh`; operators copy
-    /// it to a stable system path. `SANDBOX_NOMAD_CH_WRAPPER_PATH`
-    /// (default `/etc/zeroship/nomad-vm-wrapper.sh`).
-    pub wrapper_path: PathBuf,
 
     /// Host directory holding the kernel image (`vmlinuz`) and the
     /// rootfs template (`rootfs-slim.img`). Equivalent to the
@@ -364,18 +357,18 @@ pub struct NomadCHConfig {
 
     /// How long to wait for an alloc to reach `ClientStatus="running"`
     /// after `POST /v1/jobs`. Bounds Nomad scheduling latency only —
-    /// "running" means the wrapper script started, NOT that the VM is
+    /// "running" means the ch driver task started, NOT that the VM is
     /// up. Past this we give up and the `CreateGuard` tears the job
     /// down. `SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS` (default
     /// 120). Should be enough to cover Nomad scheduling, plan-evaluate,
-    /// and `raw_exec` task launch on a healthy cluster (typically
+    /// and ch driver task launch on a healthy cluster (typically
     /// well under 5s; 120s leaves room for a reschedule under load).
     ///
     /// Was 60s pre-Phase-3 stress run; bumped to 120s after the May-5
     /// cluster stress (31/60 creates timed out before reaching
     /// alloc-running under c=60 on a single n2-standard-32 worker —
     /// concurrent VM density past round-2's 16-cap pushed Nomad
-    /// scheduler + raw_exec launch latency well past the 60s budget).
+    /// scheduler + ch driver launch latency well past the 60s budget).
     /// Mirrors the `host_fence_timeout_secs` 30→120 bump from
     /// cad098e6 — same root cause (single-worker saturation under
     /// concurrent ops), same shape of fix.
@@ -671,45 +664,6 @@ impl NomadCHConfig {
         // the only check that makes the assumption "the Nomad agent
         // returns this host's node_id" structurally true.
         validate_nomad_addr_loopback(&self.nomad_addr)?;
-        // m4: validate the wrapper script exists + is executable.
-        // **Caveat:** this only catches misconfig when the
-        // controller and the Nomad client share a filesystem
-        // (single-node deploys). On split deployments where the
-        // Nomad agent runs on different hosts, this check is
-        // best-effort — we can confirm the path is wrong, but a
-        // path that's correct on the controller may still be
-        // wrong on the Nomad client.
-        match std::fs::metadata(&self.wrapper_path) {
-            Ok(md) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mode = md.permissions().mode();
-                    if mode & 0o111 == 0 {
-                        return Err(format!(
-                            "SANDBOX_NOMAD_CH_WRAPPER_PATH ({}) is not \
-                             executable (mode={:o}); chmod +x or fix the \
-                             path.",
-                            self.wrapper_path.display(),
-                            mode
-                        ));
-                    }
-                }
-                let _ = md; // silence unused on non-unix
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Not fatal in split-deploy mode: the controller's
-                // FS may not be the Nomad client's FS. Log only.
-                tracing::info!(
-                    wrapper_path = %self.wrapper_path.display(),
-                    "sandbox/nomad-ch config: wrapper_path not present on controller fs (best-effort check; irrelevant if Nomad client runs on a different host)"
-                );
-            }
-            Err(_) => {
-                // Permission denied / IO error reading metadata —
-                // also likely a split-deploy artefact. Don't block.
-            }
-        }
         // M6: subnet second octet must be a private-range value.
         // 10.0.0.0/8 is RFC1918 private, but the OPERATOR sets the
         // second octet — a typo of `127` would land on loopback
@@ -858,7 +812,6 @@ impl SandboxConfig {
             nomad_ch: NomadCHConfig {
                 nomad_addr: "http://127.0.0.1:4646".into(),
                 datacenter: "dc1".into(),
-                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
                 runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
                 host_state_dir: PathBuf::from("/var/zeroship/ch"),
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
@@ -960,10 +913,6 @@ impl SandboxConfig {
                 .unwrap_or_else(|_| "http://127.0.0.1:4646".to_string()),
             datacenter: std::env::var("SANDBOX_NOMAD_DATACENTER")
                 .unwrap_or_else(|_| "dc1".to_string()),
-            wrapper_path: PathBuf::from(
-                std::env::var("SANDBOX_NOMAD_CH_WRAPPER_PATH")
-                    .unwrap_or_else(|_| "/etc/zeroship/nomad-vm-wrapper.sh".to_string()),
-            ),
             runtime_dir: PathBuf::from(
                 std::env::var("SANDBOX_NOMAD_CH_RUNTIME_DIR")
                     .unwrap_or_else(|_| "/var/lib/zeroship/ch".to_string()),
@@ -1517,7 +1466,6 @@ mod tests {
         NomadCHConfig {
             nomad_addr: "http://127.0.0.1:4646".into(),
             datacenter: "dc1".into(),
-            wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
             runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
             host_state_dir: PathBuf::from("/var/zeroship/ch"),
             user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),

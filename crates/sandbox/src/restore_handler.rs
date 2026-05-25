@@ -2262,15 +2262,6 @@ impl RestoreBackend for RealRestoreBackend {
         user_id: &str,
     ) -> Result<(), SubmitRestoreError> {
         let job_id = format!("zsbx-restore-{}", sandbox_id.simple());
-        // R12-I1 (T-8 blocker): the wake path now respects the same
-        // SANDBOX_TASK_DRIVER feature flag T-7 wired into the cold-boot
-        // builder. Without this, CREATEs under T-8 cutover use the Go
-        // plugin (`Driver: "ch"`) but RESTOREs would still hand Nomad
-        // a `Driver: "raw_exec"` jobspec — once the bash wrapper is
-        // removed in T-8b-cutover, every wake fails. Reading the env
-        // once here mirrors `build_nomad_job_json`'s call site.
-        let mode = crate::backend::nomad_ch::task_driver_mode_from_env();
-
         // T-8b-stress Bug 1 fix: before submitting the restore job,
         // assert that the disk images the driver's preflight will
         // stat are actually on disk. The wake path expects
@@ -2335,7 +2326,6 @@ impl RestoreBackend for RealRestoreBackend {
             user_id,
             self.memory_mb,
             self.cpus,
-            mode,
             self.local_nomad_node_id.as_deref(),
         );
         let body = serde_json::to_vec(&job_json)
@@ -2489,26 +2479,16 @@ impl RestoreBackend for RealRestoreBackend {
     }
 }
 
-/// Build the Nomad job JSON for a restore alloc. Same shape as
+/// Build the Nomad job JSON for a restore alloc. Uses the `ch` Go
+/// plugin driver unconditionally (T-7 + T-8 cutover). Same shape as
 /// `build_nomad_job_json` in nomad_ch but with the restore branch
 /// active. We don't share the helper because the restore path doesn't
 /// have a `user_id`/`project_id` to plumb through Meta — those are
-/// already recorded on the source sandbox row in pg, the wrapper
-/// doesn't need them.
+/// already recorded on the source sandbox row in pg.
 ///
-/// R12-I1 (T-8 blocker): the `mode` arg mirrors the
-/// `build_nomad_job_json_with` T-7 added to the cold-boot path.
-///
-/// - `RawExec` (default): `Driver: "raw_exec"`, `Config: { command:
-///   <wrapper> }`, restore-specific env (`ZSBX_RESTORE_FROM=<alloc_dir>`)
-///   ridges the bash wrapper into the restore branch at
-///   nomad-vm-wrapper.sh:364.
-/// - `ChPlugin`: `Driver: "ch"` (the Go plugin's declared name) +
-///   typed `Config` matching `nomad-driver-ch/ch/task_config.go::TaskConfig`,
-///   with `restore_from = <alloc_dir>` triggering the driver's
-///   `cloud-hypervisor --restore source_url=…` branch. The Env block
-///   stays populated under both modes (largely redundant under ChPlugin
-///   but kept for debugging parity).
+/// The typed `Config.restore_from` field triggers the driver's
+/// `cloud-hypervisor --restore source_url=…` branch. The Env block
+/// is also populated for debugging parity.
 #[allow(clippy::too_many_arguments)]
 fn build_restore_nomad_job_json(
     job_id: &str,
@@ -2519,7 +2499,6 @@ fn build_restore_nomad_job_json(
     user_id: &str,
     memory_mb: u32,
     cpus: f32,
-    mode: crate::backend::nomad_ch::TaskDriverMode,
     local_nomad_node_id: Option<&str>,
 ) -> serde_json::Value {
     // Phase B fix #6 (later: virtio-blk pivot, bug #11): the wrapper
@@ -2555,20 +2534,15 @@ fn build_restore_nomad_job_json(
         if n < 1 { 1 } else { n as u32 }
     };
 
-    // The per-VM Env block. Populated under BOTH driver modes — under
-    // ChPlugin it's largely redundant with the typed Config but the
-    // Go driver ignores Env, so leaving it for debugging + symmetry
-    // with the cold-boot builder's invariant. The wrapper reads these
-    // when raw_exec is the active driver.
+    // The per-VM Env block. Largely redundant with the typed Config
+    // block below since the Go driver ignores Env, but kept for
+    // debugging parity with the cold-boot builder.
     //
     // virtio-blk pivot (bug #11): the three virtio-fs share dirs are
     // gone from the cold-boot env contract; mirror that here by
-    // emitting the two image paths. The controller derives both paths
-    // the same way cold-boot does (host_state_dir +
-    // user_home_dir_root) so the wrapper's existence checks pass.
+    // emitting the two image paths.
     // PUBKEY_HEX is left unset on restore: CH ignores --cmdline on
-    // --restore, and the wrapper's hex validation now skips when
-    // ZSBX_RESTORE_FROM is set.
+    // --restore.
     let env = serde_json::json!({
         "ZSBX_VM_INDEX": vm_index.to_string(),
         "ZSBX_ARTIFACT_DIR": cfg.runtime_dir.display().to_string(),
@@ -2576,19 +2550,16 @@ fn build_restore_nomad_job_json(
         "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
         "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
         // Must match the snapshot's saved config — CH refuses to
-        // restore against a memory size mismatch. Pulled from the
-        // controller's SandboxConfig at backend construction.
+        // restore against a memory size mismatch.
         "ZSBX_VM_MEMORY_MB": memory_mb.to_string(),
         "ZSBX_VM_CPUS_BOOT": cpus_boot.to_string(),
-        // The wrapper's PR 3f restore branch reads this and switches
-        // to `cloud-hypervisor --restore source_url=file://<dir>`.
         "ZSBX_RESTORE_FROM": alloc_dir.display().to_string(),
         "ZSBX_SUBNET_BASE_OCTET": cfg.subnet_second_octet.to_string(),
     });
 
     let resources = serde_json::json!({
-        // Match nomad_ch.rs: CPU MHz advisory under raw_exec + CH;
-        // memory comes from the snapshot's saved config.
+        // CPU MHz advisory — see nomad_ch.rs::NOMAD_CPU_MHZ_ADVISORY.
+        // Memory comes from the snapshot's saved config.
         //
         // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix, 2026-05-22). CH
         // v51.1 mmap-faults full guest RAM during restore which gets
@@ -2600,87 +2571,46 @@ fn build_restore_nomad_job_json(
         "MemoryMaxMB": memory_mb * 2,
     });
 
-    // Driver + Config — only material difference between the two
-    // modes. Under ChPlugin the typed surface matches the Go driver's
-    // TaskConfig struct in nomad-driver-ch/ch/task_config.go, with
-    // `restore_from` carrying the staged snapshot dir (the driver's
-    // StartTask branches on this to spawn `cloud-hypervisor --restore
-    // source_url=file://<RestoreFrom>`).
-    let (driver_name, config): (&str, serde_json::Value) = match mode {
-        crate::backend::nomad_ch::TaskDriverMode::RawExec => (
-            "raw_exec",
-            serde_json::json!({
-                "command": cfg.wrapper_path.display().to_string(),
-            }),
-        ),
-        crate::backend::nomad_ch::TaskDriverMode::ChPlugin => {
-            // Field names + types mirror nomad-driver-ch/ch/task_config.go::TaskConfig.
-            // The cold-boot builder in nomad_ch.rs emits the same
-            // shape; the only differences here are:
-            //   - restore_from carries the staged snapshot dir (the
-            //     driver dispatches on non-empty),
-            //   - pubkey_hex is left empty because CH ignores
-            //     --cmdline on --restore (parallels the wrapper's
-            //     restore-branch skipping the PUBKEY_HEX validator),
-            //   - sandbox_id passes through cfg-agnostic so the
-            //     driver's logs carry it.
-            //
-            // We deliberately do NOT set `command` here — the Go
-            // driver's TaskConfig has no such field; including it
-            // would either be ignored (best case) or fail HCL decode
-            // if the schema gets stricter.
-            let kernel_path = cfg.runtime_dir.join("vmlinuz");
-            // C-7-LT-12a (smoke-r22): the source bytes for rootfs.img
-            // the driver hardlinks (or copies on EXDEV) into runDir
-            // before CH spawn. Matches cold-boot's materializeRootfs
-            // source path (`$ZSBX_ARTIFACT_DIR/rootfs-slim.img` where
-            // `$ZSBX_ARTIFACT_DIR == cfg.runtime_dir`); the restore
-            // path needs an EXPLICIT field because the snapshot's
-            // config.json names the (now-GC'd) source-alloc dir for
-            // disks[0].path, so the driver has no other handle on the
-            // real source bytes once the rewriter retargets the path.
-            let rootfs_source = cfg.runtime_dir.join("rootfs-slim.img");
-            (
-                "ch",
-                serde_json::json!({
-                    "vm_index": vm_index,
-                    "kernel": kernel_path.display().to_string(),
-                    "cpus": cpus_boot,
-                    "memory_mb": memory_mb,
-                    "restore_from": alloc_dir.display().to_string(),
-                    "sandbox_id": sandbox_id.simple().to_string(),
-                    // C-7-LT-7 / r21-A1: user_id feeds the driver's
-                    // per-user-home path allow-list. Restore is the only
-                    // builder invoked during WAKE; without this field the
-                    // driver sees empty user_id and rejects
-                    // /var/zeroship/ch/users/<user_id>/home.img.
-                    // Mirrors cold-boot builder (nomad_ch.rs:2451).
-                    "user_id": user_id,
-                    "workspace_img": workspace_img.display().to_string(),
-                    "user_home_img": user_home_img.display().to_string(),
-                    "rootfs_source": rootfs_source.display().to_string(),
-                    // Empty: CH ignores --cmdline on --restore.
-                    "pubkey_hex": "",
-                    "subnet_base_octet": cfg.subnet_second_octet,
-                    // Option C Phase 2 (2026-05-25 staging-locality
-                    // ADR): the restore branch never re-stages
-                    // workspace.img / home.img (it consumes the
-                    // persistent images from the snapshot artifacts
-                    // per ADR Phase 3). Emit `false` here so the
-                    // ChPlugin Config field-list stays symmetric with
-                    // the cold-boot emitter (R22-T1 parity test).
-                    "stage_disk_images": false,
-                    // Block-lists: empty triggers driver-side
-                    // auto-synthesis from the typed fields above
-                    // (matches T-3 default behaviour + nomad_ch.rs
-                    // cold-boot builder).
-                    "disks": [],
-                    "fs": [],
-                    "net": [],
-                }),
-            )
-        }
-    };
+    // Typed Config block — field names + types mirror
+    // nomad-driver-ch/ch/task_config.go::TaskConfig.
+    // The cold-boot builder in nomad_ch.rs emits the same shape;
+    // differences here: restore_from carries the staged snapshot dir
+    // (the driver dispatches on non-empty to spawn CH --restore);
+    // pubkey_hex is empty (CH ignores --cmdline on --restore).
+    let kernel_path = cfg.runtime_dir.join("vmlinuz");
+    // C-7-LT-12a (smoke-r22): the source bytes for rootfs.img
+    // the driver hardlinks (or copies on EXDEV) into runDir
+    // before CH spawn. The restore path needs an EXPLICIT field
+    // because the snapshot's config.json names the (now-GC'd)
+    // source-alloc dir for disks[0].path.
+    let rootfs_source = cfg.runtime_dir.join("rootfs-slim.img");
+    let config = serde_json::json!({
+        "vm_index": vm_index,
+        "kernel": kernel_path.display().to_string(),
+        "cpus": cpus_boot,
+        "memory_mb": memory_mb,
+        "restore_from": alloc_dir.display().to_string(),
+        "sandbox_id": sandbox_id.simple().to_string(),
+        // C-7-LT-7 / r21-A1: user_id feeds the driver's
+        // per-user-home path allow-list. Without this the driver
+        // rejects /var/zeroship/ch/users/<user_id>/home.img.
+        "user_id": user_id,
+        "workspace_img": workspace_img.display().to_string(),
+        "user_home_img": user_home_img.display().to_string(),
+        "rootfs_source": rootfs_source.display().to_string(),
+        // Empty: CH ignores --cmdline on --restore.
+        "pubkey_hex": "",
+        "subnet_base_octet": cfg.subnet_second_octet,
+        // Option C Phase 2: the restore branch never re-stages
+        // workspace.img / home.img. Emit false so the Config
+        // field-list stays symmetric with the cold-boot emitter.
+        "stage_disk_images": false,
+        // Block-lists: empty triggers driver-side auto-synthesis.
+        "disks": [],
+        "fs": [],
+        "net": [],
+    });
+    let driver_name = "ch";
 
     let mut job = serde_json::json!({
         "ID": job_id,
@@ -3417,7 +3347,6 @@ mod real_backend_tests {
         NomadCHConfig {
             nomad_addr,
             datacenter: "dc1".into(),
-            wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
             runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
             host_state_dir: host_state,
             user_home_dir_root,
@@ -4859,32 +4788,19 @@ mod real_backend_tests {
     }
 }
 
-// ─── R12-I1 (T-8 blocker): wake-path SANDBOX_TASK_DRIVER feature
-//     flag coverage. Mirrors the T-7 tests in
-//     `crates/sandbox/src/backend/nomad_ch.rs` that pin the cold-boot
-//     builder under both modes; here we pin the restore-path builder
-//     under the same flag so a controller running with
-//     `SANDBOX_TASK_DRIVER=ch_plugin` (T-8 cutover) doesn't have a
-//     split-brain where CREATEs hit the Go driver but RESTOREs still
-//     try raw_exec. Without these tests the regression would only
-//     surface on cluster once the bash wrapper is removed.
+// ─── Restore-path jobspec tests (T-7 + T-8 cutover complete) ────────
+//
+// The ch driver is now unconditional. These tests pin the restore-path
+// builder's typed Config surface; the raw_exec / env-gated tests were
+// deleted with the wrapper at T-8 cutover.
 #[cfg(test)]
 mod r12_i1_tests {
     use super::*;
-    use crate::backend::nomad_ch::TaskDriverMode;
-    // R13-Q1: share the SANDBOX_TASK_DRIVER env-mutex with the
-    // cold-boot tests in `backend::nomad_ch::tests`. Both modules
-    // mutate the SAME process-global env var; using two separate
-    // `Mutex<()>` statics (the prior `R12_I1_ENV_LOCK` here +
-    // `T7_ENV_LOCK` there) failed to serialise across modules in the
-    // shared test binary. See `backend::nomad_ch::test_env_lock`.
-    use crate::backend::nomad_ch::test_env_lock::with_task_driver_env;
 
     fn fixture_cfg() -> NomadCHConfig {
         NomadCHConfig {
             nomad_addr: "http://127.0.0.1:4646".into(),
             datacenter: "dc1".into(),
-            wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
             runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
             host_state_dir: PathBuf::from("/var/zeroship/ch"),
             user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
@@ -4900,94 +4816,44 @@ mod r12_i1_tests {
         }
     }
 
-    /// `SANDBOX_TASK_DRIVER` unset (default) → wake-path emits the
-    /// historical `Driver: "raw_exec"` + bash-wrapper Config. This is
-    /// the back-compat contract: the controller MUST NOT opt a fleet
-    /// into the Go driver implicitly on either CREATE or wake.
-    ///
-    /// Drives `submit_restore_job` indirectly by calling the public
-    /// (well, pub(crate)) `build_restore_nomad_job_json` with the same
-    /// `task_driver_mode_from_env()` arg the production caller uses.
+    /// Wake-path always emits `Driver: "ch"` (T-7 + T-8 cutover).
+    /// The ch driver's PluginName const is "ch"; any drift decouples
+    /// the controller from the driver.
     #[test]
-    fn nomad_restore_job_spec_uses_raw_exec_by_default() {
-        with_task_driver_env(None, || {
-            let cfg = fixture_cfg();
-            let sid = Uuid::now_v7();
-            let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
-            let mode = crate::backend::nomad_ch::task_driver_mode_from_env();
-            let v = build_restore_nomad_job_json(
-                "zsbx-restore-default",
-                &cfg,
-                7,
-                alloc_dir,
-                sid,
-                "usr_alice",
-                1024,
-                2.0,
-                mode,
-                None, // r3-A: no node pin
-            );
-            let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
-            assert_eq!(
-                task["Driver"], "raw_exec",
-                "wake-path default MUST stay raw_exec — without this \
-                 invariant the bash-wrapper rollout couldn't depend on \
-                 the controller picking a known transport"
-            );
-            assert_eq!(
-                task["Config"]["command"],
-                "/etc/zeroship/nomad-vm-wrapper.sh",
-                "raw_exec mode must still call the bash wrapper"
-            );
-            // ZSBX_RESTORE_FROM keeps its env-block presence under
-            // raw_exec — that's how the wrapper picks the restore
-            // branch (line 364 of nomad-vm-wrapper.sh).
-            assert_eq!(
-                task["Env"]["ZSBX_RESTORE_FROM"],
-                "/var/zeroship/ch/snap/restore",
-            );
-        });
+    fn nomad_restore_job_spec_always_uses_ch_driver() {
+        let cfg = fixture_cfg();
+        let sid = Uuid::now_v7();
+        let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
+        let v = build_restore_nomad_job_json(
+            "zsbx-restore-ch",
+            &cfg,
+            7,
+            alloc_dir,
+            sid,
+            "usr_alice",
+            1024,
+            2.0,
+            None, // r3-A: no node pin
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(
+            task["Driver"], "ch",
+            "wake-path MUST emit Driver=\"ch\" — T-7 + T-8 cutover complete"
+        );
+        assert!(
+            task["Config"]["command"].is_null(),
+            "raw_exec `command` field must NOT appear in ch driver Config"
+        );
+        assert_eq!(
+            task["Env"]["ZSBX_RESTORE_FROM"],
+            "/var/zeroship/ch/snap/restore",
+        );
     }
 
-    /// `SANDBOX_TASK_DRIVER=ch_plugin` → wake-path emits `Driver: "ch"`,
-    /// matching the Go driver's PluginName const in
-    /// `nomad-driver-ch/ch/driver.go`. This is the actual R12-I1 fix:
-    /// pre-fix this case still emitted `raw_exec` and would split-brain
-    /// against a CREATE under the same flag.
-    #[test]
-    fn nomad_restore_job_spec_uses_ch_when_flag_set() {
-        with_task_driver_env(Some("ch_plugin"), || {
-            let cfg = fixture_cfg();
-            let sid = Uuid::now_v7();
-            let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
-            let mode = crate::backend::nomad_ch::task_driver_mode_from_env();
-            let v = build_restore_nomad_job_json(
-                "zsbx-restore-flagged",
-                &cfg,
-                7,
-                alloc_dir,
-                sid,
-                "usr_alice",
-                1024,
-                2.0,
-                mode,
-                None, // r3-A: no node pin
-            );
-            let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
-            assert_eq!(
-                task["Driver"], "ch",
-                "R12-I1: wake-path under SANDBOX_TASK_DRIVER=ch_plugin \
-                 MUST emit Driver=\"ch\" — matches nomad-driver-ch::ch::PluginName"
-            );
-        });
-    }
-
-    /// Wake-path under ChPlugin populates the typed
-    /// `Config.restore_from` from the staged alloc_dir. The Go driver
-    /// branches on non-empty `RestoreFrom` to spawn
-    /// `cloud-hypervisor --restore source_url=file://<dir>`; an empty
-    /// value would silently mis-route through cold-boot and crash CH
-    /// on the missing kernel/cmdline.
+    /// Wake-path populates the typed `Config.restore_from` from the
+    /// staged alloc_dir. The Go driver branches on non-empty
+    /// `RestoreFrom` to spawn `cloud-hypervisor --restore source_url=…`;
+    /// an empty value would silently mis-route through cold-boot.
     #[test]
     fn ch_plugin_restore_jobspec_populates_restore_from() {
         let cfg = fixture_cfg();
@@ -5002,7 +4868,6 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
             None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
@@ -5075,7 +4940,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
@@ -5119,7 +4984,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             None, // r3-A: no node pin
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
@@ -5128,32 +4993,6 @@ mod r12_i1_tests {
             "ChPlugin wake-path Config must NOT carry the raw_exec \
              `command` field — Go TaskConfig has no such tag, got: {config:?}",
         );
-    }
-
-    /// R12-I1 defence-in-depth: even if the env flag is unset, an
-    /// explicit `TaskDriverMode::ChPlugin` arg forces the ch branch.
-    /// Pins the parameter wiring independently of
-    /// `task_driver_mode_from_env`.
-    #[test]
-    fn ch_plugin_mode_arg_forces_ch_driver_regardless_of_env() {
-        // No env lock needed — we don't read the env on this path.
-        let cfg = fixture_cfg();
-        let sid = Uuid::now_v7();
-        let alloc_dir = Path::new("/var/zeroship/ch/snap/restore");
-        let v = build_restore_nomad_job_json(
-            "zsbx-restore-mode-arg",
-            &cfg,
-            5,
-            alloc_dir,
-            sid,
-            "usr_alice",
-            1024,
-            2.0,
-            TaskDriverMode::ChPlugin,
-            None, // r3-A: no node pin
-        );
-        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
-        assert_eq!(task["Driver"], "ch");
     }
 
     /// R22-T1 / R21-API2 — ChPlugin Config field-list parity contract.
@@ -5201,7 +5040,7 @@ mod r12_i1_tests {
             "proj1",
             "abcdef0123456789abcdef0123456789",
             None, // cold-boot: no restore_from
-            TaskDriverMode::ChPlugin,
+
             None, // r3-A: parity test omits node pin (intentionally —
                   // the Constraints block is verified by the
                   // r3_a_node_affinity_* sibling tests below).
@@ -5227,7 +5066,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             None, // r3-A: parity test omits node pin (parity check is on
                   // Config fields, not Job-level Constraints)
         );
@@ -5298,7 +5137,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             None,
         );
         let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
@@ -5338,7 +5177,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             Some("restore-node-id-aaaa-bbbb"),
         );
         let constraints = &v["Job"]["Constraints"];
@@ -5371,7 +5210,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             None,
         );
         assert!(
@@ -5410,7 +5249,7 @@ mod r12_i1_tests {
             "proj",
             "abcdef0123456789abcdef0123456789",
             None,
-            TaskDriverMode::ChPlugin,
+
             Some(node_id),
         );
         // Restore-path side
@@ -5425,7 +5264,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             Some(node_id),
         );
         assert_eq!(
@@ -5450,7 +5289,7 @@ mod r12_i1_tests {
             "proj",
             "abcdef0123456789abcdef0123456789",
             None,
-            TaskDriverMode::ChPlugin,
+
             None,
         );
         let restore_none = build_restore_nomad_job_json(
@@ -5462,7 +5301,7 @@ mod r12_i1_tests {
             "usr_alice",
             1024,
             2.0,
-            TaskDriverMode::ChPlugin,
+
             None,
         );
         assert_eq!(
