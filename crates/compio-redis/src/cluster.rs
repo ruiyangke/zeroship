@@ -660,7 +660,12 @@ impl ClusterClient {
             ));
         }
         let key_bytes: Vec<&[u8]> = keys.iter().map(|k| k.as_bytes()).collect();
-        let _slot = same_slot_or_err(&key_bytes)?;
+        // Validate all keys share one slot. `same_slot_or_err` derives that
+        // slot from `keys[0]`, and `send_to_slot(keys[0], …)` recomputes the
+        // identical slot via `redis_keyslot(keys[0])` — so routing by
+        // `keys[0]` IS routing by the validated slot. We keep the call for
+        // its CrossSlot guard and discard the (provably redundant) value.
+        let _ = same_slot_or_err(&key_bytes)?;
         let nkeys = keys.len().to_string();
         let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + keys.len() + args.len());
         parts.push(b"EVAL");

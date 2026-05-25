@@ -129,6 +129,11 @@ KV-counter use case. Use `env.db` for exact large-integer accumulation.
 Errors: `kv_non_numeric` (existing value isn't an integer),
 `kv_overflow` (i64 over/underflow — counters do not saturate).
 
+> **Backend note:** on the redb single-process tier each `incr` fsyncs
+> the increment, so a high-frequency counter (e.g. a per-request
+> rate-limit hot path) pays one fsync per call — prefer the
+> Redis/Dragonfly tier at scale.
+
 ### `setIfAbsent<T>(key, value, opts?: { ttlMs? })` → `Result<{ stored: boolean }>`
 
 Atomically store a value only if the key is absent. `stored` is `false`
@@ -196,6 +201,11 @@ do {
 `limit` defaults to **1000** and is clamped to **10 000** by the runtime
 (a larger value is capped, not rejected). If a backend ever returns a
 runaway page over the cap, the call rejects with `kv_list_too_large`.
+
+> **Backend note:** the Redis/Dragonfly tier maps `list` onto `SCAN`,
+> whose at-least-once semantics mean a key may appear in more than one
+> page if the keyspace changes mid-iteration; the redb tier paginates
+> exactly (each key returned once).
 
 ## SDK-only conveniences
 

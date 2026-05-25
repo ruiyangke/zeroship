@@ -36,6 +36,7 @@
 //! documented hook if an fsync stall is ever measured; it is NOT this
 //! commit.
 
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -138,7 +139,7 @@ impl Backend for RedbBackend {
         ttl_ms: Option<u64>,
     ) -> Result<(), KvError> {
         let scoped = scope(app_id, key);
-        let expires_at = ttl_ms.map(|ms| now_ms() + ms);
+        let expires_at = ttl_ms.map(|ms| now_ms().saturating_add(ms));
         let txn = self
             .db
             .begin_write()
@@ -229,7 +230,7 @@ impl Backend for RedbBackend {
                     let next = 0_i64.checked_add(delta).ok_or_else(|| {
                         KvError::overflow(format!("kv: incr overflowed i64 for key '{key}'"))
                     })?;
-                    (next, ttl_ms.map(|ms| now + ms))
+                    (next, ttl_ms.map(|ms| now.saturating_add(ms)))
                 }
             };
 
@@ -275,7 +276,7 @@ impl Backend for RedbBackend {
             if occupied {
                 false
             } else {
-                let expires_at = ttl_ms.map(|ms| now + ms);
+                let expires_at = ttl_ms.map(|ms| now.saturating_add(ms));
                 table
                     .insert(scoped.as_str(), (value, expires_at))
                     .map_err(|e| {
@@ -318,7 +319,7 @@ impl Backend for RedbBackend {
             match payload {
                 Some(value) => {
                     table
-                        .insert(scoped.as_str(), (value.as_str(), Some(now + ttl_ms)))
+                        .insert(scoped.as_str(), (value.as_str(), Some(now.saturating_add(ttl_ms))))
                         .map_err(|e| {
                             KvError::backend(format!("kv: redb expire insert: {e}"))
                         })?;
@@ -424,16 +425,27 @@ impl Backend for RedbBackend {
             Err(e) => return Err(KvError::backend(format!("kv: redb list open_table: {e}"))),
         };
 
-        // Ordered range from the scoped prefix; take-while the key still
-        // shares the prefix. Skip expired entries (lazy TTL — we don't
-        // reap on a read txn). The `cursor` is the last *unscoped* key
-        // returned previously, so we resume strictly after it.
+        // Ordered range; take-while the key still shares the prefix. Skip
+        // expired entries (lazy TTL — we don't reap on a read txn). The
+        // `cursor` is the last *unscoped* key returned previously; we
+        // resume strictly after its scoped form by starting the range at
+        // an EXCLUSIVE lower bound, so prior pages are never re-walked
+        // (the scan is O(page), not O(offset)). With no cursor we start at
+        // the scoped prefix. The upper bound stays open — the
+        // `starts_with` check below terminates the page at the first key
+        // past the prefix, preserving the original behavior exactly.
         let mut page: Vec<String> = Vec::new();
         let mut last_scoped: Option<String> = None;
         let mut any_remaining = false;
 
+        // `scoped_cursor` must outlive the range (the Bound borrows it).
+        let scoped_cursor = cursor.map(|c| scope(app_id, c));
+        let lower = match &scoped_cursor {
+            Some(sc) => Bound::Excluded(sc.as_str()),
+            None => Bound::Included(scoped_prefix.as_str()),
+        };
         let range = table
-            .range(scoped_prefix.as_str()..)
+            .range::<&str>((lower, Bound::Unbounded))
             .map_err(|e| KvError::backend(format!("kv: redb list range: {e}")))?;
 
         for entry in range {
@@ -452,12 +464,6 @@ impl Backend for RedbBackend {
                 Some(u) => u.to_string(),
                 None => continue,
             };
-            // Resume strictly after the cursor (exclusive lower bound).
-            if let Some(c) = cursor {
-                if unscoped.as_str() <= c {
-                    continue;
-                }
-            }
             if page.len() == limit {
                 // We already have a full page; this extra match means more
                 // keys remain beyond the page boundary.
@@ -717,6 +723,42 @@ mod tests {
         let (page, cursor) = b.list(APP, "k", None, 2).await.unwrap();
         assert_eq!(page, vec!["k0", "k1"]);
         assert!(cursor.is_none());
+    }
+
+    #[compio::test]
+    async fn list_pagination_returns_every_key_once_in_order() {
+        // Proves the exclusive-cursor resume bound (no re-walk, no skips,
+        // no dupes) by draining a multi-page prefix and reconstructing the
+        // full ordered keyset. 23 keys / page size 5 = 5 pages (4 full + a
+        // partial), exercising the full-page-with-remainder cursor path.
+        let (b, _dir) = backend();
+        const N: usize = 23;
+        for i in 0..N {
+            // Zero-pad so lexical order == numeric order, making the
+            // expected ordering unambiguous.
+            b.set(APP, &format!("k{i:03}"), "x", None).await.unwrap();
+        }
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 100, "pagination did not terminate");
+            let (page, next) = b
+                .list(APP, "k", cursor.as_deref(), 5)
+                .await
+                .unwrap();
+            seen.extend(page);
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+
+        let expected: Vec<String> = (0..N).map(|i| format!("k{i:03}")).collect();
+        // Exactly once, in order — equality covers count, order, and no dupes.
+        assert_eq!(seen, expected);
     }
 
     #[compio::test]

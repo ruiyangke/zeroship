@@ -31,6 +31,18 @@ pub const LIST_DEFAULT_LIMIT: usize = 1000;
 /// a backend that hands back a runaway page despite the cap.
 pub const LIST_MAX_LIMIT: usize = 10_000;
 
+/// Maximum `ttlMs` (100 years, in milliseconds). A TTL is an *absolute*
+/// deadline computed as `now_ms() + ttl_ms` on the redb tier; an
+/// unbounded `ttlMs` (e.g. `1e19`, which is finite and passes the
+/// integer/negative checks) would overflow that `u64` add — a debug
+/// panic in the isolate pump (DoS) or a silent already-expired write in
+/// release. 100 years is absurdly generous for a cache TTL yet sits far
+/// below `u64::MAX - now_ms()`, so the deadline arithmetic can never
+/// wrap. It also pins the redb/Redis divergence shut alongside the
+/// `ttlMs == 0` rejection below (Dragonfly rejects `PX 0`; redb would
+/// store an instantly-expired key).
+pub const MAX_TTL_MS: u64 = 100 * 365 * 24 * 60 * 60 * 1000;
+
 /// Validate a user-supplied key. Rejects empty keys, keys over
 /// [`MAX_KEY_LEN`] bytes, and keys carrying bytes that would corrupt
 /// the scoping wire format or a SCAN pattern: the hash-tag braces
@@ -100,8 +112,14 @@ pub fn validate_delta(by: f64) -> Result<i64, KvError> {
 }
 
 /// Validate a `ttlMs` option read off a JS number. Rejects non-finite,
-/// fractional, negative, and out-of-`u64`-range values; returns the
-/// integral milliseconds.
+/// fractional, negative, zero, and out-of-range values (> [`MAX_TTL_MS`]);
+/// returns the integral milliseconds.
+///
+/// `ttlMs == 0` is rejected because the backends diverge on it: Dragonfly
+/// rejects `PX 0` with `ERR invalid expire time`, while redb would store
+/// an instantly-expired key. The upper bound keeps the redb deadline
+/// arithmetic (`now_ms() + ttl_ms`) from overflowing `u64` — see
+/// [`MAX_TTL_MS`].
 pub fn validate_ttl_ms(ttl_ms: f64) -> Result<u64, KvError> {
     if !ttl_ms.is_finite() {
         return Err(KvError::invalid_argument("kv: ttlMs must be a finite number"));
@@ -112,9 +130,13 @@ pub fn validate_ttl_ms(ttl_ms: f64) -> Result<u64, KvError> {
     if ttl_ms < 0.0 {
         return Err(KvError::invalid_argument("kv: ttlMs must not be negative"));
     }
-    // 2^64 is the first f64 above u64::MAX.
-    if ttl_ms >= 18_446_744_073_709_551_616.0 {
-        return Err(KvError::invalid_argument("kv: ttlMs is out of range"));
+    if ttl_ms == 0.0 {
+        return Err(KvError::invalid_argument("kv: ttlMs must be greater than 0"));
+    }
+    if ttl_ms > MAX_TTL_MS as f64 {
+        return Err(KvError::invalid_argument(
+            "kv: ttlMs exceeds the maximum (100 years)",
+        ));
     }
     Ok(ttl_ms as u64)
 }
@@ -213,7 +235,32 @@ mod tests {
         assert!(validate_ttl_ms(-1.0).is_err());
         assert!(validate_ttl_ms(1.5).is_err());
         assert_eq!(validate_ttl_ms(1000.0).unwrap(), 1000);
-        assert_eq!(validate_ttl_ms(0.0).unwrap(), 0);
+    }
+
+    #[test]
+    fn validate_ttl_rejects_zero() {
+        // Backends diverge on PX 0 — reject it up front.
+        assert!(matches!(
+            validate_ttl_ms(0.0),
+            Err(KvError::InvalidArgument { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_ttl_rejects_above_max() {
+        // Just over the 100-year cap (the `1e19`-class overflow vector).
+        let over = MAX_TTL_MS as f64 + 1.0;
+        assert!(matches!(
+            validate_ttl_ms(over),
+            Err(KvError::InvalidArgument { .. })
+        ));
+        assert!(validate_ttl_ms(1e19).is_err());
+    }
+
+    #[test]
+    fn validate_ttl_accepts_normal_and_exact_max() {
+        assert_eq!(validate_ttl_ms(60_000.0).unwrap(), 60_000);
+        assert_eq!(validate_ttl_ms(MAX_TTL_MS as f64).unwrap(), MAX_TTL_MS);
     }
 
     #[test]

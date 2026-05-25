@@ -75,10 +75,14 @@ fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
     else { "object" }
 }
 
-/// Extract the `value` argument as a string. `null`/`undefined` throw
-/// (a value is required); everything else (including the empty string)
-/// is accepted and read as its string form — the SDK JSON-encodes
-/// values before they reach here.
+/// Extract the `value` argument as a string. The value MUST be a JS
+/// string: `null`/`undefined` throw (a value is required), and any
+/// non-string (number, object, array, boolean) throws too — coercing
+/// them via `to_rust_string_lossy` would store garbage like
+/// `"[object Object]"`, contradicting the `InvalidValue` "value not a
+/// string" contract and breaking the SDK's `get` (whose `JSON.parse`
+/// would throw on the round-trip). The empty string IS accepted. The SDK
+/// always hands us `JSON.stringify(...)` (a string), so it's unaffected.
 fn extract_value(
     scope: &mut v8::PinScope<'_, '_>,
     value: v8::Local<v8::Value>,
@@ -87,6 +91,12 @@ fn extract_value(
         return Err(OpError::type_error(
             "kv: value must be provided (got null/undefined)",
         ));
+    }
+    if !value.is_string() {
+        return Err(OpError::type_error(format!(
+            "kv: value must be a string, got {}",
+            js_type_name(value)
+        )));
     }
     Ok(value.to_rust_string_lossy(scope))
 }
