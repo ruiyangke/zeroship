@@ -92,6 +92,8 @@ The GCP worker startup script writes `zsbx-ctl.service` with the current Nomad b
 
 The worker bootstrap also wires the controller's DB URL, bearer token, admin-token path, and snapshot-related settings. Use [`gcp-worker-startup.sh`](../../crates/sandbox/scripts/gcp-worker-startup.sh) as the source of truth for the full unit template.
 
+If you override Nomad task resources manually, keep `MemoryMaxMB` at roughly `2 × MemoryMB`. Snapshot and wake flows on the current Cloud Hypervisor stack can fault the full guest RAM into the task memcg; collapsing `MemoryMaxMB` back toward `MemoryMB` can trigger cgroup OOM kills during snapshot or restore.
+
 ## Teardown
 
 To delete the GCP validation cluster:
@@ -114,3 +116,10 @@ It deletes instances and reserved internal server IPs, then reports whether any 
   confirm worker `data_dir` is still `/opt/nomad/data`.
 - Single-replica cleanup after crashes:
   `SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP=true` enables boot-time orphan purge. Leave it off for HA or rolling-restart deployments.
+
+## Driver behavior notes
+
+- The driver implements `RecoverTask`, so a Nomad client or plugin restart re-attaches to a still-running Cloud Hypervisor process from the persisted task handle instead of treating it like a wrapper-style orphan. See [`nomad-driver-ch/ch/recover_task.go`](../../nomad-driver-ch/ch/recover_task.go).
+- The driver implements `TaskStats`, so Nomad can surface per-task CPU and RSS usage for the Cloud Hypervisor process. See [`nomad-driver-ch/ch/task_stats.go`](../../nomad-driver-ch/ch/task_stats.go).
+- `nomad alloc exec` is not supported for `Driver: "ch"`: the plugin advertises `Exec=false`, so workload interaction stays inside the guest VM rather than the Nomad task. See [`nomad-driver-ch/ch/driver.go`](../../nomad-driver-ch/ch/driver.go).
+- The current driver-level `config {}` schema also includes `virtiofsd_bin`; the earlier inline field list is not exhaustive. See [`nomad-driver-ch/ch/driver.go`](../../nomad-driver-ch/ch/driver.go).
