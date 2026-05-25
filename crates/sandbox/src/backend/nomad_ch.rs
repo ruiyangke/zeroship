@@ -65,9 +65,10 @@
 //!   MAC         : 12:34:56:78:9b:<idx hex>
 //! ```
 //!
-//! The controller computes only the **VM IP** (to reach the agent at
-//! `http://10.99.<100+idx>.2:7777`); the wrapper script computes
-//! everything else from `ZSBX_VM_INDEX`.
+//! The controller computes tap name, MAC, and VM IP from `vm_index`
+//! (see `derive_tap` / `derive_mac` in `restore_handler.rs`) and
+//! passes them to the ch driver via `TaskConfig.Net[0]`. The VM IP
+//! (`http://10.99.<100+idx>.2:7777`) is also used for agent reachability.
 //!
 //! ## Agent reachability
 //!
@@ -1144,17 +1145,17 @@ impl NomadCHBackend {
             staged
         };
 
-        // 4. (was: write pubkey file — now baked into the cmdline by
-        //    the wrapper, see step 5's ZSBX_PUBKEY_HEX env var.)
+        // 4. (was: write pubkey file — now passed as ZSBX_PUBKEY_HEX
+        //    in the Nomad job env and baked into the cmdline by the
+        //    ch driver's StartTask, see step 5.)
 
         // 5. Build + submit the Nomad job spec.
         //
         // B24 / R8-DEPLOY1: the sandbox_id flows into
-        // `ZSBX_SANDBOX_ID`, which the wrapper embeds VERBATIM in
-        // the guest's kernel cmdline. The wrapper's validator
-        // (nomad-vm-wrapper.sh:222) rejects any character outside
-        // `[0-9a-zA-Z_]` — that's hyphens too. Uuid's hyphenated
-        // form (`to_string()`) would fail it; `.simple()` (32-hex,
+        // `ZSBX_SANDBOX_ID`, which the ch driver embeds VERBATIM in
+        // the guest's kernel cmdline (`TaskConfig.Cmdline`). The
+        // cmdline field must not contain hyphens; Uuid's hyphenated
+        // form (`to_string()`) would break parsing; `.simple()` (32-hex,
         // no hyphens) passes and matches the format the rest of
         // this file already uses for `job_id` and `host_dir`.
         let job_json = build_nomad_job_json(
@@ -7178,10 +7179,10 @@ mod tests {
     // `stop_preserving_state` → `stop_inner(.., false)`) MUST NOT
     // remove the per-sandbox `host_dir`, because that directory owns
     // `workspace.img` — the durable per-sandbox storage that the
-    // next wake's wrapper re-mounts. The wrapper's gate
-    // `[ ! -f $ZSBX_WORKSPACE_IMG ] && exit 1` (see
-    // `crates/sandbox/scripts/nomad-vm-wrapper.sh`) is what blew up
-    // empirically in the 2026-05-23 cluster smoke.
+    // next wake's ch driver re-attaches as a virtio-blk disk
+    // (`TaskConfig.Disks`). Its absence caused the 2026-05-23 cluster
+    // smoke failure (bug #15) — the ch driver received a missing-disk
+    // path and CH refused to start.
     //
     // This test exercises the full `stop_inner` path against a tiny
     // TcpListener-backed Nomad mock that 404s every request — which

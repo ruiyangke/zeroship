@@ -309,10 +309,10 @@ pub struct NomadCHConfig {
     pub datacenter: String,
 
     /// Host directory holding the kernel image (`vmlinuz`) and the
-    /// rootfs template (`rootfs-slim.img`). Equivalent to the
-    /// `ZSBX_HERE` env var in the demo wrapper. The wrapper `cd`s to
-    /// this dir at startup. `SANDBOX_NOMAD_CH_RUNTIME_DIR` (default
-    /// `/var/lib/zeroship/ch`).
+    /// rootfs template (`rootfs-slim.img`). Passed to the ch driver
+    /// as `ZSBX_ARTIFACT_DIR` in the Nomad job env block (renamed
+    /// from `ZSBX_HERE` in T-7 round 3 / M4).
+    /// `SANDBOX_NOMAD_CH_RUNTIME_DIR` (default `/var/lib/zeroship/ch`).
     pub runtime_dir: PathBuf,
 
     /// Root directory for per-sandbox host state. Each sandbox gets

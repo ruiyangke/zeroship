@@ -413,7 +413,8 @@ pub trait RestoreBackend: Send + Sync {
 
     /// Submit a Nomad (or equivalent) job for the restored alloc.
     /// `ZSBX_RESTORE_FROM=<alloc_dir>` must be set in the spawned
-    /// task's env so the wrapper's restore branch fires (PR 3f).
+    /// task's env; the ch driver reads it via `TaskConfig.RestoreFrom`
+    /// and passes it to CH as `--restore source_url=file://<path>`.
     /// Synchronous return on success means the job was *enqueued*;
     /// readiness is signalled by [`Self::wait_for_livez`].
     ///
@@ -976,9 +977,9 @@ async fn do_restore_inner(
     // 5. Rewrite config.json per § 5 — controller-side rewrites
     //    ONLY the vm_index-dependent fields (net[].tap, net[].mac).
     //    The path-bearing fields (disks[].path, fs[].socket,
-    //    serial.file) are NOT touched here; the wrapper rewrites
-    //    them at exec time because only the wrapper knows the
-    //    actual NOMAD_TASK_DIR (Nomad assigns the alloc UUID after
+    //    serial.file) are NOT touched here; the ch driver receives
+    //    them as absolute paths in TaskConfig.Disks[].Path and
+    //    TaskConfig.Fs[].Socket (Nomad assigns the alloc UUID after
     //    job submission). See bug-#8 diagnostic 2026-05-22.
     let config_path = alloc_dir.join("config.json");
     rewrite_config_json(&config_path, snap.vm_index)
@@ -1224,15 +1225,17 @@ async fn do_restore_inner(
 // config.json rewrite (§ 5.1)
 // ────────────────────────────────────────────────────────────────────
 
-/// MAC derivation rule from `crates/sandbox/scripts/nomad-vm-wrapper.sh`:
-/// `printf '12:34:56:78:9b:%02x' "$VM_INDEX"`. v1 vm_index is i16
-/// (max 256/worker per § 5.0); we mask to one byte for the format.
+/// MAC derivation rule: `12:34:56:78:9b:<vm_index as u8 hex>`.
+/// The controller computes this value and passes it to the ch driver
+/// via `TaskConfig.Net[0].MAC` (`nomad-driver-ch/ch/task_config.go`).
+/// v1 vm_index is i16 (max 256/worker per § 5.0); we mask to one byte.
 pub(crate) fn derive_mac(vm_index: i16) -> String {
     format!("12:34:56:78:9b:{:02x}", (vm_index as u16) & 0xff)
 }
 
-/// Tap derivation rule: `zsbx-nm-<vm_index>`. Source-of-truth is
-/// the wrapper script; this Rust copy must match.
+/// Tap derivation rule: `zsbx-nm-<vm_index>`. The controller computes
+/// this value and passes it to the ch driver via `TaskConfig.Net[0].Tap`
+/// (`nomad-driver-ch/ch/task_config.go`).
 pub(crate) fn derive_tap(vm_index: i16) -> String {
     format!("zsbx-nm-{vm_index}")
 }
@@ -1286,10 +1289,10 @@ pub(crate) fn rewrite_config_json(
 }
 
 // `rewrite_alloc_path` removed 2026-05-22 (bug #8 fix). The controller
-// can't fabricate a meaningful alloc UUID at job-submit time; the
-// wrapper rewrites path-bearing fields at exec time using the real
-// `NOMAD_TASK_DIR` env var. See `crates/sandbox/scripts/nomad-vm-wrapper.sh`
-// restore branch and the diagnostic at the top of this commit.
+// can't fabricate a meaningful alloc UUID at job-submit time; path-bearing
+// fields (disks[].path, fs[].socket, serial) are passed as absolute paths
+// in TaskConfig and the ch driver consumes them directly at launch time.
+// See bug-#8 diagnostic 2026-05-22.
 
 // ────────────────────────────────────────────────────────────────────
 // Test stub `RestoreBackend`.
