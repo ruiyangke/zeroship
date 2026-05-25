@@ -1992,6 +1992,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 - [r30-A2] **OPEN (IMPORTANT, architecture-r30)** `crates/sandbox/src/lib.rs:306` — `NomadStopPermits` lives on `AppState` regardless of backend; Docker/K8s builds carry the semaphore field they never use. Same `Configurable` antipattern as r29-A3. Blocker: needs `AppState::new` to surface a `Backend::needs_stop_permits()` hook OR move the field onto the backend itself. Source: architecture-r30. Last considered: 2026-05-25.
 
-- [r31-S1] **OPEN (MINOR, security-r31)** `crates/sandbox/scripts/gcp-worker-startup.sh:359` still sets `"driver.raw_exec.enable" = "1"` in Nomad client config despite controller no longer emitting raw_exec jobspecs post-T-8 cutover. Defense-in-depth: drop the line so Nomad's default-disabled posture applies. Blocker: none (one-line script edit; next-cycle cluster validation will exercise). Source: security-r31. Last considered: 2026-05-25.
+- [r31-S1] **CLOSED at `c56893b2`** — `crates/sandbox/scripts/gcp-worker-startup.sh` dropped `"driver.raw_exec.enable" = "1"` from Nomad client options; default-disabled raw_exec posture now applies. Defense-in-depth post-T-8 cutover. Source: security-r31 MINOR.
 
 - Cycle 50 paperwork at `594f6d89`. Lens-recency rebalanced: arch r30 (caught up), api-surface r31 (caught up), security r31 (caught up). Next cycle's oldest lenses: concurrency r31, test-coverage r31, code-quality r31, performance r31 — all at parity.
