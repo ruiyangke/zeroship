@@ -24,8 +24,10 @@
  * Reserved native names throw at boot rather than silently shadowing.
  */
 import {
+  captureNativeTransaction,
   Collection,
   type NativeDb,
+  type NativeTransactionFn,
   Query,
   createLive,
   type LiveOptions,
@@ -914,26 +916,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // `Db.prototype` method; in tests a mock's own `transaction`). Bound to
   // `native` so the v8_class receiver check passes.
   const NATIVE_TX_KEY = "__zsNativeTransaction";
-  const nativeHolder = native as unknown as {
-    [NATIVE_TX_KEY]?: (
-      callback: (rawTxView: unknown) => unknown,
-      opts?: { isolationLevel?: string },
-    ) => Promise<unknown>;
-    transaction?: unknown;
-  };
-  if (nativeHolder[NATIVE_TX_KEY] === undefined && typeof nativeHolder.transaction === "function") {
-    const captured = (nativeHolder.transaction as (
-      callback: (rawTxView: unknown) => unknown,
-      opts?: { isolationLevel?: string },
-    ) => Promise<unknown>).bind(native);
-    Object.defineProperty(native, NATIVE_TX_KEY, {
-      value: captured,
-      configurable: true,
-      enumerable: false,
-      writable: true,
-    });
-  }
-  const nativeTransaction = nativeHolder[NATIVE_TX_KEY];
+  const nativeTransaction = captureNativeTransaction(
+    native as unknown as object,
+    NATIVE_TX_KEY,
+  ) as NativeTransactionFn | undefined;
 
   validateRefTargets(schemas);
 

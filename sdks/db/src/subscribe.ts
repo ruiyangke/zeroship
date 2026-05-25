@@ -27,8 +27,13 @@
  * for the case where the user drops every reference without
  * iterating to completion.
  */
-
-import { env } from "zeroship";
+import {
+  nativeDbFromEnv,
+  requireCollectionResolver,
+  requireNativeCapability,
+  type NativeCollection,
+  type NativeSubscriptionLike,
+} from "./native.js";
 
 /** The shape of one event surfaced to a subscriber. */
 export type SubscriptionEvent =
@@ -68,35 +73,17 @@ export interface Subscription extends AsyncIterable<SubscriptionEvent> {
   close(): void;
 }
 
-/** Minimal interface of the native Subscription v8_class wrapper. */
-interface NativeSubscription {
-  next(): Promise<SubscriptionEvent | null>;
-  close(): void;
-}
-
-/** The native zeroship.db surface this module consumes.
- *  **P9 PR 1** — the `Db.openSubscription` duplicate entry was removed;
- *  subscriptions are minted via `collection(name).openSubscription()`. */
-type NativeCollectionWithSub = {
-  openSubscription: () => NativeSubscription;
-};
-type NativeDb = {
-  collection: (name: string) => NativeCollectionWithSub;
-};
+type NativeSubscription = NativeSubscriptionLike<SubscriptionEvent>;
 
 /** Pull the native handle off `env`, throwing on a misconfigured runtime. */
-function getNativeDb(): NativeDb {
-  const db = (env as { db?: NativeDb } | undefined)?.db;
-  if (!db || typeof db.collection !== "function") {
-    throw Object.assign(
-      new Error(
-        "@zeroship/db/subscribe: env.db.collection not available — " +
-          "runtime is missing the Db v8_class surface.",
-      ),
-      { code: "NATIVE_SUBSCRIPTION_UNAVAILABLE" as const },
-    );
-  }
-  return db;
+function getNativeDbCollection(name: string): NativeCollection {
+  const db = nativeDbFromEnv();
+  return requireCollectionResolver(db, {
+    code: "NATIVE_SUBSCRIPTION_UNAVAILABLE",
+    message:
+      "@zeroship/db/subscribe: env.db.collection not available — " +
+      "runtime is missing the Db v8_class surface.",
+  })(name);
 }
 
 /**
@@ -113,18 +100,17 @@ export function subscribe(collection: string): Subscription {
       { code: "SUBSCRIBE_INVALID_COLLECTION" as const },
     );
   }
-  const native = getNativeDb();
-  const col = native.collection(collection);
-  if (typeof col?.openSubscription !== "function") {
-    throw Object.assign(
-      new Error(
+  const col = getNativeDbCollection(collection);
+  const openSubscription = requireNativeCapability(
+    col.openSubscription,
+    {
+      code: "NATIVE_SUBSCRIPTION_UNAVAILABLE",
+      message:
         "@zeroship/db/subscribe: env.db.<collection>.openSubscription not available — " +
-          "runtime is missing the Subscription v8_class surface.",
-      ),
-      { code: "NATIVE_SUBSCRIPTION_UNAVAILABLE" as const },
-    );
-  }
-  const sub = col.openSubscription();
+        "runtime is missing the Subscription v8_class surface.",
+    },
+  );
+  const sub = openSubscription();
   let closed = false;
 
   function doClose(): void {

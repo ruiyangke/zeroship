@@ -1,8 +1,12 @@
+import {
+  requireNativeCapability,
+  type NativeCollection,
+} from "../native.js";
 import type { Result, Row, Actor } from "../types.js";
 
 export interface MaskingCollectionInternals<S> {
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
-  _nativeCollection(): ZeroshipCollection;
+  _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
   _toField(column: string): string;
 }
@@ -25,26 +29,20 @@ export function bulkUnmaskCollection<S>(
   opts: { actor: Actor; reason?: string },
 ): Promise<Result<Map<string, Record<string, unknown>>>> {
   return self._run(async () => {
-    const colAny = self._nativeCollection() as unknown as {
-      bulkUnmask?: (
-        items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>,
-        opts: { actor?: unknown; reason?: string },
-      ) => Promise<{ results: Record<string, Record<string, unknown>> }>;
-    };
-    if (typeof colAny.bulkUnmask !== "function") {
-      throw Object.assign(
-        new Error(
+    const bulkUnmask = requireNativeCapability(
+      self._nativeCollection().bulkUnmask,
+      {
+        code: "BULK_UNMASK_NOT_AVAILABLE",
+        message:
           "@zeroship/db: Collection.bulkUnmask not available — " +
-            "runtime is missing the P9 PR 2 bulk unmask surface.",
-        ),
-        { code: "BULK_UNMASK_NOT_AVAILABLE" as const },
-      );
-    }
+          "runtime is missing the P9 PR 2 bulk unmask surface.",
+      },
+    );
     const wireItems = items.map((it) => ({
       rowPk: String(it.id),
       columns: it.columns.map((c) => self._toColumn(c as string)),
     }));
-    const result = await colAny.bulkUnmask(wireItems, {
+    const result = await bulkUnmask(wireItems, {
       actor: opts.actor,
       reason: opts.reason,
     });
