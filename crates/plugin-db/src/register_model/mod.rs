@@ -46,8 +46,8 @@ use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
 use crate::backend::{
-    AuditWriter, DialectBuilder, FullTextIndex, IndexBuilder, LockManager, LockScope,
-    RegisterBackend, SpatialIndex, SqlExecutor, SqliteBackend, VectorIndex,
+    AuditWriter, DialectBuilder, FullTextIndex, IndexBuilder, LockScope, RegisterBackend,
+    SpatialIndex, SqliteBackend, VectorIndex,
 };
 use crate::context;
 use crate::diff::{ChangeClass, ChangeKind};
@@ -267,12 +267,11 @@ async fn run_sqlite_pipeline(
         .unwrap_or("strict")
         .to_string();
 
-    let lock_client = backend.acquire_dedicated_client().await?;
     let scope = LockScope::GlobalApp {
         app_id: app_id.to_string(),
         name: bootstrap::LOCK_TAG.to_string(),
     };
-    backend.acquire(&lock_client, &scope).await?;
+    let _lock_guard = crate::backend::sqlite::lock::SqliteLockGuard::acquire(backend, &scope).await?;
 
     let ctx = match bootstrap::build_ctx(
         backend,
@@ -286,10 +285,7 @@ async fn run_sqlite_pipeline(
     .await
     {
         Ok(ctx) => ctx,
-        Err(e) => {
-            let _ = backend.release(&lock_client, &scope).await;
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
 
     let approved_res = match plan::compute_plan(backend, &ctx, collection, schema).await {
@@ -303,15 +299,10 @@ async fn run_sqlite_pipeline(
     };
     let approved = match approved_res {
         Ok(approved) => approved,
-        Err(e) => {
-            let _ = backend.release(&lock_client, &scope).await;
-            return Err(e);
-        }
+        Err(e) => return Err(e),
     };
 
-    let apply_result = apply_sqlite(backend, &ctx, &approved).await;
-    let _ = backend.release(&lock_client, &scope).await;
-    apply_result
+    apply_sqlite(backend, &ctx, &approved).await
 }
 
 async fn apply_sqlite(

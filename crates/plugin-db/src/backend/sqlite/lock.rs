@@ -29,6 +29,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use super::SqliteBackend;
+use crate::backend::{LockManager, LockScope, SqlExecutor};
+use crate::error::DbError;
+
 /// Per-process advisory-lock registry. One instance per
 /// [`super::SqliteBackend`].
 #[derive(Default)]
@@ -109,6 +113,41 @@ impl InProcessLockRegistry {
                      (release-without-acquire); no-op"
                 );
             }
+        }
+    }
+}
+
+/// RAII guard for an acquired SQLite in-process advisory lock.
+///
+/// Unlike the PG lock guards, release is synchronous: the lock lives in
+/// an in-memory registry, so `Drop` can free it immediately without any
+/// async unlock SQL. This is the right shape for `register_model` on the
+/// SQLite arm, where the critical failure mode was "acquire succeeded,
+/// then an early return / panic / cancellation leaked the slot forever".
+#[must_use = "SqliteLockGuard releases the registry slot on Drop"]
+pub(crate) struct SqliteLockGuard {
+    registry: Rc<InProcessLockRegistry>,
+    key: Option<(String, String)>,
+}
+
+impl SqliteLockGuard {
+    pub(crate) async fn acquire(
+        backend: &SqliteBackend,
+        scope: &LockScope,
+    ) -> Result<Self, DbError> {
+        let client = backend.acquire_dedicated_client().await?;
+        backend.acquire(&client, scope).await?;
+        Ok(Self {
+            registry: Rc::clone(&backend.lock_registry),
+            key: Some(scope.to_keys()),
+        })
+    }
+}
+
+impl Drop for SqliteLockGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.registry.release(key);
         }
     }
 }
@@ -208,5 +247,51 @@ mod tests {
         );
         // The first slot is still held.
         assert!(!reg.try_acquire(a));
+    }
+
+    #[test]
+    fn sqlite_lock_guard_drop_releases_slot() {
+        let reg = Rc::new(InProcessLockRegistry::new());
+        let k = key("app_demo:register_model", "register_model");
+        assert!(reg.try_acquire(k.clone()), "precondition: slot acquired");
+
+        let guard = SqliteLockGuard {
+            registry: Rc::clone(&reg),
+            key: Some(k.clone()),
+        };
+        drop(guard);
+
+        assert!(
+            reg.try_acquire(k),
+            "dropping SqliteLockGuard must free the registry slot"
+        );
+    }
+
+    #[test]
+    fn sqlite_lock_guard_releases_slot_on_panic_unwind() {
+        let reg = Rc::new(InProcessLockRegistry::new());
+        let k = key("app_demo:register_model", "register_model");
+        assert!(reg.try_acquire(k.clone()), "precondition: slot acquired");
+
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let reg = Rc::clone(&reg);
+            let k = k.clone();
+            move || {
+                let _guard = SqliteLockGuard {
+                    registry: reg,
+                    key: Some(k),
+                };
+                panic!("simulated mid-critical-section panic");
+            }
+        }));
+        std::panic::set_hook(prev_hook);
+        assert!(result.is_err(), "guard fixture must panic");
+
+        assert!(
+            reg.try_acquire(k),
+            "unwinding through SqliteLockGuard must still release the slot"
+        );
     }
 }
