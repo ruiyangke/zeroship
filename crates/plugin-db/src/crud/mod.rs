@@ -522,8 +522,7 @@ pub(crate) fn dispatch_find<'s>(
         // never leaves Postgres on a default read.
         let schema_hint = crate::context::with(|c| c.schema_for(&app, &coll));
         // **P7 PR 5** — soft-delete auto-filter gate.
-        let filter_soft_deleted =
-            system_fields_pass::should_filter_soft_deleted(&app, &coll, include_deleted);
+        let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
         let mut sql_filter = filter;
         maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
         let built = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
@@ -1099,29 +1098,13 @@ pub(crate) fn dispatch_update_many<'s>(
 // ---------------------------------------------------------------------------
 // deleteOne / deleteMany / purge / restore — write paths
 //
-// **P7 PR 5** — `delete()` becomes soft-delete on post-migration tables
-// (Path C from §11 of the proposal). The dispatch helpers route through
-// `system_fields_pass::schema_has_system_fields_marker` to decide:
-//
-//   - Marker present → soft-delete via
-//     `build_soft_delete_*_with_system_fields`. The emitted broker
-//     event is `ChangeOp::Update` (soft-delete IS an UPDATE setting
-//     `deleted_at`) — see §6 of the proposal.
-//   - Marker absent → legacy hard `DELETE` with a one-shot
-//     `tracing::warn!` on the `zeroship_plugin_db::soft_delete_legacy`
-//     target.
-//
-// `purge()` (new in PR 5) always hard-deletes regardless of marker
-// state. `restore()` (also new) clears `deleted_at` on a soft-deleted
-// row.
+// **P7 PR 5** — `delete()` soft-deletes by updating `deleted_at`.
+// `purge()` remains the explicit hard-delete, and `restore()` clears
+// `deleted_at` on a soft-deleted row.
 // ---------------------------------------------------------------------------
 
 /// Shared dispatch for `deleteOne`. See [`dispatch_insert`] for the
 /// capability-gate contract.
-///
-/// **P7 PR 5** — Path C semantics: soft-delete on post-migration
-/// tables, legacy hard-delete with `tracing::warn!` on pre-migration
-/// tables.
 pub(crate) fn dispatch_delete_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1134,84 +1117,42 @@ pub(crate) fn dispatch_delete_one<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
-
-    if has_marker {
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-        let autobump = query::SystemFieldAutoBump {
-            actor_id: actor_id.as_deref(),
-            ..Default::default()
-        };
-        let built = query::build_soft_delete_one_with_system_fields(
-            &app,
-            &coll,
-            &filter,
-            current_sql_dialect(),
-            &autobump,
-        );
-        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-            resolver,
-            request_id,
-            built,
-            move |bq| async move {
-                // Tagged as Update because soft-delete IS an UPDATE
-                // setting `deleted_at`. Subscribers wanting to react
-                // to soft-deletes inspect `new_tuple.deleted_at`.
-                let rows =
-                    exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update)
-                        .await?;
-                read_pipeline::apply(
-                    &app,
-                    &coll,
-                    rows,
-                    read_pipeline::ApplyOptions::default(),
-                )
-                .await
-            },
-            |result: read_pipeline::ApplyResult| {
-                first_row_or_null_masked(result.rows, result.has_masked)
-            },
-        )));
-    } else {
-        system_fields_pass::warn_legacy_hard_delete(&app, &coll);
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-        let built = query::build_delete_one_with_dialect(
-            &app,
-            &coll,
-            &filter,
-            current_sql_dialect(),
-        );
-        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-            resolver,
-            request_id,
-            built,
-            move |bq| async move {
-                let rows =
-                    exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete)
-                        .await?;
-                read_pipeline::apply(
-                    &app,
-                    &coll,
-                    rows,
-                    read_pipeline::ApplyOptions::default(),
-                )
-                .await
-            },
-            |result: read_pipeline::ApplyResult| {
-                first_row_or_null_masked(result.rows, result.has_masked)
-            },
-        )));
-    }
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
+    let autobump = query::SystemFieldAutoBump {
+        actor_id: actor_id.as_deref(),
+        ..Default::default()
+    };
+    let built = query::build_soft_delete_one_with_system_fields(
+        &app,
+        &coll,
+        &filter,
+        current_sql_dialect(),
+        &autobump,
+    );
+    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+        resolver,
+        request_id,
+        built,
+        move |bq| async move {
+            // Tagged as Update because soft-delete IS an UPDATE
+            // setting `deleted_at`. Subscribers wanting to react
+            // to soft-deletes inspect `new_tuple.deleted_at`.
+            let rows =
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update)
+                    .await?;
+            read_pipeline::apply(&app, &coll, rows, read_pipeline::ApplyOptions::default()).await
+        },
+        |result: read_pipeline::ApplyResult| {
+            first_row_or_null_masked(result.rows, result.has_masked)
+        },
+    )));
 
     promise
 }
 
 /// Shared dispatch for `deleteMany`. Resolves with the count of
 /// affected rows as a JS `number`.
-///
-/// **P7 PR 5** — same Path C semantics as [`dispatch_delete_one`].
 pub(crate) fn dispatch_delete_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1224,46 +1165,28 @@ pub(crate) fn dispatch_delete_many<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
-
-    if has_marker {
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-        let autobump = query::SystemFieldAutoBump {
-            actor_id: actor_id.as_deref(),
-            ..Default::default()
-        };
-        let built = query::build_soft_delete_many_with_system_fields(
-            &app,
-            &coll,
-            &filter,
-            current_sql_dialect(),
-            &autobump,
-        );
-        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-            resolver,
-            request_id,
-            built,
-            move |bq| async move {
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
-            },
-            row_count_as_f64,
-        )));
-    } else {
-        system_fields_pass::warn_legacy_hard_delete(&app, &coll);
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-        let built = query::build_delete_many(&app, &coll, &filter);
-        state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-            resolver,
-            request_id,
-            built,
-            move |bq| async move {
-                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Delete).await
-            },
-            row_count_as_f64,
-        )));
-    }
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
+    let autobump = query::SystemFieldAutoBump {
+        actor_id: actor_id.as_deref(),
+        ..Default::default()
+    };
+    let built = query::build_soft_delete_many_with_system_fields(
+        &app,
+        &coll,
+        &filter,
+        current_sql_dialect(),
+        &autobump,
+    );
+    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
+        resolver,
+        request_id,
+        built,
+        move |bq| async move {
+            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
+        },
+        row_count_as_f64,
+    )));
 
     promise
 }
@@ -1343,9 +1266,7 @@ pub(crate) fn dispatch_purge_many<'s>(
     promise
 }
 
-/// **P7 PR 5** — restore a soft-deleted row. Refuses with
-/// `restore_unsupported_legacy_table` when the cached schema lacks
-/// the system-fields marker.
+/// **P7 PR 5** — restore a soft-deleted row.
 pub(crate) fn dispatch_restore_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1358,20 +1279,6 @@ pub(crate) fn dispatch_restore_one<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
-
-    if !has_marker {
-        let err = DbError::restore_unsupported_legacy_table(&coll);
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(err.to_op_error()),
-                request_id,
-            }
-        }));
-        return promise;
-    }
-
     let autobump = query::SystemFieldAutoBump {
         actor_id: actor_id.as_deref(),
         ..Default::default()
@@ -1421,20 +1328,6 @@ pub(crate) fn dispatch_restore_many<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
-
-    if !has_marker {
-        let err = DbError::restore_unsupported_legacy_table(&coll);
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(err.to_op_error()),
-                request_id,
-            }
-        }));
-        return promise;
-    }
-
     let autobump = query::SystemFieldAutoBump {
         actor_id: actor_id.as_deref(),
         ..Default::default()
@@ -1498,8 +1391,7 @@ pub(crate) fn dispatch_aggregate<'s>(
         .get("include_deleted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let filter_soft_deleted =
-        system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let app = app_id.to_string();
@@ -1561,8 +1453,7 @@ pub(crate) fn dispatch_distinct<'s>(
         .get("include_deleted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let filter_soft_deleted =
-        system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
     let mut filter = filter;
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let app = app_id.to_string();
@@ -1640,8 +1531,7 @@ pub(crate) fn dispatch_count<'s>(
         .get("include_deleted")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let filter_soft_deleted =
-        system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
     let mut filter = filter;
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
 

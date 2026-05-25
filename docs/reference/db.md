@@ -1106,15 +1106,6 @@ await db.posts.restoreMany({ … });  // bulk; returns { restoredCount: N }
 `delete` event from `purge()` and an `update` event (with `deleted_at`
 flipping back to null) from `restore()`.
 
-#### Legacy tables (Path C detect-and-warn)
-
-Tables created before the platform's system-field layer landed don't
-carry `deleted_at`. The native dispatch detects this at runtime,
-hard-deletes (the only thing it can do), and emits a `tracing::warn!`
-naming the collection. The detect-and-warn path is a safety net for
-test/dev databases — production has no pre-system-fields tables (the
-platform is pre-launch as of 2026-05-24).
-
 ### Lifecycle worked example
 
 ```ts
@@ -1161,8 +1152,7 @@ The full design lives in `docs/proposals/platform-system-fields.md`.
 sibling concerns and compose: an `t.encrypted(...)` column without
 an explicit `.mask(...)` declaration is treated as `.mask({ kind:
 "full", classification: "pii" })` by default. The full design lives
-in `docs/proposals/sensitive-field-masking.md`; the migration
-walkthrough is `docs/reference/migration/p5-to-masked-decrypt.md`.
+in `docs/proposals/sensitive-field-masking.md`.
 
 ### Mental model
 

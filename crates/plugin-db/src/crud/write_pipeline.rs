@@ -370,7 +370,6 @@ mod tests {
             let app_id = "app_write_pipeline";
             let collection = "users";
             let schema = serde_json::json!({
-                "_systemFields": true,
                 "email": { "type": "string", "required": true, "unique": true },
                 "name": { "type": "string", "required": true },
                 "ssn": {

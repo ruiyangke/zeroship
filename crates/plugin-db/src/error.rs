@@ -429,31 +429,6 @@ impl DbError {
         }
     }
 
-    /// **P7 PR 4** — UPDATE attempted on a table whose schema lacks
-    /// the platform-managed `version` column (and by extension the
-    /// other six system fields). PR 2 prepends these to every NEW
-    /// table; PR 6 will ALTER pre-PR-2 tables in. Until PR 6 lands,
-    /// CRUD against a legacy table refuses with this typed code so
-    /// the SDK can surface a deterministic message.
-    pub fn system_fields_missing(collection: &str) -> Self {
-        DbError::ValidationFailed {
-            code: "system_fields_missing",
-            message: format!(
-                "Collection `{collection}` was created before the platform \
-                 system-fields contract (`id`, `created_at`, `updated_at`, \
-                 `created_by`, `updated_by`, `version`, `deleted_at`) was \
-                 introduced; UPDATE auto-bumps `version` and cannot proceed."
-            ),
-            hint: Some(
-                "Re-register the model via `db.registerModel(...)` after \
-                 the platform's system-fields migration (PR 6) has run, or \
-                 manually ALTER the table to add the seven system field \
-                 columns."
-                    .to_string(),
-            ),
-        }
-    }
-
     /// **P7 PR 4** — UPDATE filter carried `version: N` but no `id`
     /// predicate. The CAS semantics don't generalise cleanly to
     /// multi-row UPDATEs (the affected-rows count conflates "row
@@ -491,31 +466,6 @@ impl DbError {
             hint: Some(
                 "Use a top-level filter like `{ id: ..., version: N }`; \
                  nested `$and`/`$or` version predicates are refused."
-                    .to_string(),
-            ),
-        }
-    }
-
-    /// **P7 PR 5** — `restore()` called on a table that lacks the
-    /// `deleted_at` column (no `_systemFields` marker on the cached
-    /// schema). The legacy-hard-delete fallback for `delete()` makes
-    /// sense (drop a row from a pre-PR-2 table), but there's no
-    /// equivalent "soft-restore" target for a table that never had a
-    /// `deleted_at` column. Refuse with a typed code so SDK consumers
-    /// can surface the remediation message verbatim.
-    pub fn restore_unsupported_legacy_table(collection: &str) -> Self {
-        DbError::ValidationFailed {
-            code: "restore_unsupported_legacy_table",
-            message: format!(
-                "`{collection}` was created before the platform system-fields \
-                 contract (no `deleted_at` column); `restore()` is not \
-                 supported on pre-migration tables."
-            ),
-            hint: Some(
-                "Re-register the model via `db.registerModel(...)` after \
-                 the platform's system-fields migration (PR 6) has run, or \
-                 manually ALTER the table to add the seven system field \
-                 columns."
                     .to_string(),
             ),
         }
@@ -1205,25 +1155,6 @@ mod tests {
         let e = DbError::version_mismatch("posts", None, 5).to_op_error();
         assert!(e.message.contains("posts"));
         assert!(e.message.contains("5"));
-    }
-
-    /// `DbError::system_fields_missing` stamps the canonical
-    /// `system_fields_missing` code; carries a hint that mentions
-    /// PR 6 / registerModel.
-    #[test]
-    fn system_fields_missing_stamps_canonical_code_and_hint() {
-        let e = DbError::system_fields_missing("legacy_posts").to_op_error();
-        match &e.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
-                assert_eq!(code, "system_fields_missing");
-                let h = hint.as_deref().expect("must carry a remediation hint");
-                assert!(
-                    h.contains("registerModel") || h.contains("ALTER"),
-                    "hint should mention registerModel or ALTER: {h}"
-                );
-            }
-            other => panic!("expected CodedError, got {other:?}"),
-        }
     }
 
     /// `DbError::multi_row_version_filter_unsupported` stamps the

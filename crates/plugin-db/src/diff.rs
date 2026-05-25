@@ -790,40 +790,6 @@ SELECT COALESCE(c.reltuples::bigint, 0) AS rows
     Ok(n)
 }
 
-/// Exact row-count (used by the validation pass when row_count > 0 and
-/// we need the precise number for the error envelope). Pricier than
-/// `estimate_row_count` but only invoked when classification has already
-/// established that a violation check is mandatory.
-pub async fn count_violating_not_null(
-    pool: &Pool,
-    app_id: &str,
-    collection: &str,
-    field: &str,
-) -> Result<(i64, Vec<i64>), DbError> {
-    let sql = format!(
-        r#"SELECT id FROM "{app_id}"."{collection}" WHERE "{field}" IS NULL LIMIT 5"#
-    );
-    let empty: Vec<&str> = Vec::new();
-    let sample_rows = pool
-        .query_text_params(&sql, &empty)
-        .await
-        .map_err(|e| coded_sql("count_violating_not_null sample failed", e))?;
-    let samples: Vec<i64> = sample_rows
-        .iter()
-        .filter_map(|r| r.try_get::<_, i32>("id").ok().map(i64::from))
-        .collect();
-
-    let count_sql = format!(
-        r#"SELECT COUNT(*) AS n FROM "{app_id}"."{collection}" WHERE "{field}" IS NULL"#
-    );
-    let cnt_rows = pool
-        .query_text_params(&count_sql, &empty)
-        .await
-        .map_err(|e| coded_sql("count_violating_not_null count failed", e))?;
-    let n: i64 = cnt_rows.first().map(|r| r.get::<_, i64>("n")).unwrap_or(0);
-    Ok((n, samples))
-}
-
 /// Compute the diff between the declared schema and the live snapshot.
 ///
 /// `schema` is the JS-side schema object as already passed to
