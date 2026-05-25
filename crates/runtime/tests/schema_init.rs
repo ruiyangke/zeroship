@@ -29,7 +29,24 @@ impl NativePlugin for DummyDbPlugin {
         "dummy-db"
     }
 
-    fn register(&self, _r: &mut NativeRegistrar) {}
+    fn register(&self, r: &mut NativeRegistrar) {
+        // Register one trivial op so the runtime materializes a non-null
+        // `env.db` object. runtime-entry's schema-install sentinel keys on
+        // `env.db != null` (the real DbPlugin always populates env.db); an
+        // empty register() leaves env.db absent and the sentinel skips
+        // install, which is unfaithful to "DB plugin present".
+        r.add("__dummyNoop", dummy_db_noop);
+    }
+}
+
+/// No-op native op for [`DummyDbPlugin`]. Free function so it coerces to
+/// `v8::FunctionCallback` without a capturing closure.
+fn dummy_db_noop(
+    _scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set_undefined();
 }
 
 /// Build a Runtime around the given user-entry source + procedure
@@ -269,17 +286,26 @@ export function installSchema(schema, _env) {
 }
 "#;
 
-    // The pre-init module imports the stub bootstrap package so the
-    // bundle eagerly compiles it (lazy dynamic import then hits the
-    // registry path).
+    // After installSchema, runtime-entry flushes the pending mask policy
+    // via `await import("@zeroship/db/internal")` and RE-THROWS on failure
+    // (a missing module would reject module init). Stub it so the import
+    // resolves; `_flushPendingMaskPolicy` returns null (no policy to flush).
+    let stub_db_internal = r#"
+export function _flushPendingMaskPolicy() { return null; }
+"#;
+
+    // The pre-init module imports the stub packages so the bundle eagerly
+    // compiles them (the later dynamic imports then hit the registry path).
     let pre_init = r#"
 import "@zeroship/bootstrap/install-schema";
+import "@zeroship/db/internal";
 "#;
 
     let user_with_preinit = format!("{pre_init}\n{user_src}");
     let modules = vec![
         ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
         ModuleEntry { specifier: "@zeroship/bootstrap/install-schema".into(), source: stub_bootstrap.into() },
+        ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
     ];
 
     let runtime = Runtime::builder()
