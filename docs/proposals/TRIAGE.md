@@ -37,7 +37,7 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] p1-sqlite-implementation-plan.md (DB P1)
 - [x] p4-search-implementation-plan.md (DB P4)
 - [x] p5-encryption-backup-implementation-plan.md (DB P5)
-- [ ] runtime-macros-refactor.md (runtime-macros; reference/plugin-system.md)
+- [x] runtime-macros-refactor.md (runtime-macros; reference/plugin-system.md)
 - [ ] zs-standard-and-vite-v2.md (reference/zs-standard.md + vite-plugin.md exist)
 
 ### NEEDS DETERMINATION (check shipped vs active)
@@ -75,3 +75,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - 4 DB proposals archived; db.md promotions: strictness/t.ref/collection-names landed; System Fields + Encrypted/Masked CLOBBERED by concurrent write, re-promoting serially
 
 - p0/p1/p4/p5 implementation plans — archived (no promotion needed; db.md covers)
+
+- runtime-macros-refactor.md — archived (design in plugin-system.md + macro ADRs)
