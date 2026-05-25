@@ -4,6 +4,8 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## Completed
 
+- [x] T-9-perf-prewarm (memory-ranges FADV_WILLNEED before CH spawn) — `24ea6e6b` — `nomad-driver-ch/restore_task: prewarm memory-ranges via FADV_WILLNEED before CH spawn (5-15s wake-path savings)`. Add a best-effort `posix_fadvise(2) POSIX_FADV_WILLNEED` hint on the snapshot's `memory-ranges` artifact after symlinks resolve but before CH `--restore` spawns. Non-blocking: the kernel populates page cache asynchronously in parallel with CH startup. Failure policy: WARN-log and continue — prewarm errors never fail the wake. Counter: `nomad_driver_ch_prewarm_memory_ranges_bytes_total` tracks summed bytes hinted. Seam: `prewarmFileFn` + `SetPrewarmFileFnForTest` / `SetPrewarmFileFnForTestExport` for hermetic tests. Tests: 168 → 171 (+3). `go vet` + `go test` clean.
+
 - [x] T-0 (scaffold) — `ee4a76c3` (`nomad-driver-ch: scaffold from hashicorp/nomad-driver-virt (T-0)`)
 - [x] T-0.5 (flake + main.go) — see commits
   - `de35f49e` — `nomad-driver-ch: flake.nix + flake.lock for dev shell (T-0.5 part 1)`
