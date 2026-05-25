@@ -23,6 +23,7 @@ interface PollHmrChangesOptions {
   restoreKind?: (token: number) => void;
   log?: (message: string) => void;
   pendingChanged?: Set<string>;
+  onBeforeInvalidate?: (changed: string[]) => void;
 }
 
 function collectAffectedModules(
@@ -73,11 +74,8 @@ export async function pollHmrChanges({
   restoreKind,
   log,
   pendingChanged = new Set<string>(),
+  onBeforeInvalidate,
 }: PollHmrChangesOptions): Promise<number> {
-  if (!getCurrentRunner()) {
-    return 0;
-  }
-
   const token = typeof clearKind === "function" ? clearKind() : -1;
   try {
     const resp = await fetchImpl(pollUrl);
@@ -94,13 +92,15 @@ export async function pollHmrChanges({
       return 0;
     }
 
+    const changed = [...pendingChanged];
+    pendingChanged.clear();
+    onBeforeInvalidate?.(changed);
+
     const runner = getCurrentRunner();
     if (!runner) {
       return 0;
     }
 
-    const changed = [...pendingChanged];
-    pendingChanged.clear();
     const invalidated = invalidateChangedFiles(runner, changed);
     if (invalidated > 0) {
       log?.(`[zeroship:hmr] ${changed.length} module(s) updated`);
@@ -120,6 +120,7 @@ export function startHmrPoll(
   pollUrl: string,
   getCurrentRunner: () => ModuleRunner | null,
   log?: (message: string) => void,
+  onBeforeInvalidate?: (changed: string[]) => void,
 ): () => void {
   const pendingChanged = new Set<string>();
   const readGlobal = globalThis as {
@@ -134,6 +135,7 @@ export function startHmrPoll(
       restoreKind: readGlobal.__zsExitKind,
       log,
       pendingChanged,
+      onBeforeInvalidate,
     });
   }, 500);
 

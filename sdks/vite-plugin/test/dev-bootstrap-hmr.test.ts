@@ -99,4 +99,26 @@ describe("dev-bootstrap HMR", () => {
     );
     assert.deepEqual(logs, ["[zeroship:hmr] 1 module(s) updated"]);
   });
+
+  test("poll prunes changed-module registrations before invalidation", async () => {
+    const runner = createRunner({
+      "/app/src/server.ts": [{ id: "/app/src/server.ts", importers: new Set<string>() }],
+    });
+    const pruned: string[][] = [];
+
+    const invalidated = await pollHmrChanges({
+      pollUrl: "http://vite.test/__zeroship_hmr_check",
+      getCurrentRunner: () => runner,
+      fetchImpl: async () => ({
+        async json() {
+          return { changed: ["/app/src/server.ts"] };
+        },
+      } as Response),
+      onBeforeInvalidate: (changed) => pruned.push(changed),
+    });
+
+    assert.equal(invalidated, 1);
+    assert.deepEqual(pruned, [["/app/src/server.ts"]]);
+    assert.deepEqual(runner.invalidated, ["/app/src/server.ts"]);
+  });
 });
