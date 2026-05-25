@@ -90,7 +90,7 @@ Collection methods should read naturally:
 - `count(filter?)`
 - `exists(filter?)`
 
-The public collection surface is defined in [sdks/db/src/collection.ts](sdks/db/src/collection.ts) and [sdks/db/src/db.ts](sdks/db/src/db.ts).
+The public collection surface is defined in [sdks/db/src/collection.ts](sdks/db/src/collection.ts), with the `Db` / `Collections` / `TxCollection` types in [sdks/db/src/db-types.ts](sdks/db/src/db-types.ts).
 
 ### 6. Keep parameter order stable
 
