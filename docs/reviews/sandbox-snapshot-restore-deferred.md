@@ -2022,3 +2022,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [r31-S1] **CLOSED at `c56893b2`** — `crates/sandbox/scripts/gcp-worker-startup.sh` dropped `"driver.raw_exec.enable" = "1"` from Nomad client options; default-disabled raw_exec posture now applies. Defense-in-depth post-T-8 cutover. Source: security-r31 MINOR.
 
 - Cycle 50 paperwork at `594f6d89`. Lens-recency rebalanced: arch r30 (caught up), api-surface r31 (caught up), security r31 (caught up). Next cycle's oldest lenses: concurrency r31, test-coverage r31, code-quality r31, performance r31 — all at parity.
+
+## Round-54 reviewer findings (2026-05-25 — post-R32-P1)
+
+- [R33-I1] **OPEN (IMPORTANT, concurrency-r33)** R32-P1 (`2faaf39b`) widens a pre-existing per-user `home.img` TOCTOU race window. `crates/sandbox/src/backend/nomad_ch.rs:1161` calls `create_ext4_image_if_missing(&user_home_img_owned, ...)` — `home.img` is **per-user** (cf `:954`), not per-sandbox. The exists-then-mkfs inside `create_ext4_image_if_missing` (`:4355`) is not fence-guarded; under c≥2 same-user cold-boot, two `mkfs.ext4 -q -F <same-path>` can fight. Pre-R32-P1 sequential code had the same race window; R32-P1's `std::thread::scope` widens it by running both mkfs in parallel inside each CREATE. Recommended fence: per-user `DashMap<UserId, Mutex<()>>` around the home_h spawn only (`:1161` site). Blocker: none. Source: concurrency-r33 IMPORTANT.
+
+- [R33-T1] **OPEN (MINOR, test-coverage-r33)** R32-P1's `std::thread::scope` block at `nomad_ch.rs:1155-1174` has no test coverage; the inner helper `create_ext4_image_if_missing` is covered (3 tests) but the parallel-threading shape isn't. ~30 LOC test. Blocker: none.
+
+- [R33-T2] **OPEN (MINOR, test-coverage-r33)** wake_machine orchestrator pg-gated coverage gap (renamed from R32-T2). 2nd carry.
+
+- [R33-T3] **OPEN (MINOR, test-coverage-r33)** 2 hardcoded `7777` agent-port sites still in `restore_handler.rs:2396, 2475`. Q4 carry, renumbered.
