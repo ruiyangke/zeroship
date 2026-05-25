@@ -36,7 +36,7 @@ use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
 use super::plan::Plan;
-use crate::backend::PgSqlExecutor;
+use crate::backend::AuditWriter;
 use crate::diff::{ChangeClass, DiffOp};
 
 /// Output of stage 3. Apply still receives the destructive ops (kept
@@ -54,13 +54,9 @@ pub(crate) struct ApprovedPlan {
 /// must NOT mask the validation_refused envelope. `tracing::warn` so it
 /// shows up in worker logs but the user-facing error stays clean.
 ///
-/// **P0 PR 2**: bound narrowed to [`PgSqlExecutor`] (was `Backend`). The
-/// only DB work here is best-effort audit-row INSERTs which now go
-/// through the free fn [`crate::audit::write_audit_row`] taking the
-/// pool surfaced by [`PgSqlExecutor::pool_handle`]. Open Q1 resolution
-/// — see `docs/proposals/p0-implementation-plan.md` §3 Q1 + §"PR 2"
-/// and `docs/proposals/db-system-design.md` §7.
-pub(crate) async fn validate<B: PgSqlExecutor>(
+/// Best-effort audit writes route through [`AuditWriter`] so both the PG
+/// and SQLite register pipelines can reuse this stage.
+pub(crate) async fn validate<B: AuditWriter>(
     backend: &B,
     ctx: &RegisterContext,
     plan: Plan,
@@ -105,10 +101,7 @@ pub(crate) async fn validate<B: PgSqlExecutor>(
             // matches the F1 warn-half family (`app_id` + `audit_err`)
             // pinned at cycle 12:47 `7c6bd2ec` — closes the
             // NEW-R14-2 drift test-coverage r14 caught.
-            if let Err(audit_err) =
-                crate::audit::write_audit_row(backend.pool_handle().as_ref(), &ctx.app_id, &row)
-                    .await
-            {
+            if let Err(audit_err) = backend.write_audit_row(&ctx.app_id, &row).await {
                 tracing::warn!(
                     app_id = %ctx.app_id,
                     collection = %op.collection,

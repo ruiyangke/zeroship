@@ -215,6 +215,10 @@ impl SqliteBackend {
         &self.db_dir
     }
 
+    pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
+        self.session.exec_batch(sql).await
+    }
+
     /// Production constructor used by the runtime URL-scheme
     /// dispatcher.
     ///
@@ -1022,25 +1026,23 @@ impl IndexBuilder for SqliteBackend {
         deploy_id: &str,
         schema_version: i32,
     ) -> Result<(), DbError> {
-        // Build the CREATE INDEX SQL ourselves rather than reuse
-        // `spec.sql` because `IndexSpec::sql` was built against the PG
-        // dialect (`CREATE INDEX CONCURRENTLY` + qualified
-        // `"app"."idx" ON "app"."collection" (cols)`). SQLite uses
-        // `IF NOT EXISTS` (atomic, no CONCURRENTLY) and the index +
-        // table identifiers route through `self.quote_ident` (the
-        // dialect hook). We assemble the column list manually because
-        // SQLite has no `USING <method>` clause — every index is a
-        // B-tree on the listed columns.
-        let q_app = self.quote_ident(app_id);
-        let q_coll = self.quote_ident(collection);
-        let q_idx = self.quote_ident(&spec.name);
-        let cols_quoted: Vec<String> =
-            spec.columns.iter().map(|c| self.quote_ident(c)).collect();
-        let col_list = cols_quoted.join(", ");
-        let unique_kw = if spec.unique { "UNIQUE " } else { "" };
-        let sql = format!(
-            "CREATE {unique_kw}INDEX IF NOT EXISTS {q_app}.{q_idx} ON {q_coll} ({col_list})"
-        );
+        let sql = {
+            let built = self.build_create_index(spec, false);
+            if !built.is_empty() {
+                built
+            } else {
+                let q_app = self.quote_ident(app_id);
+                let q_coll = self.quote_ident(collection);
+                let q_idx = self.quote_ident(&spec.name);
+                let cols_quoted: Vec<String> =
+                    spec.columns.iter().map(|c| self.quote_ident(c)).collect();
+                let col_list = cols_quoted.join(", ");
+                let unique_kw = if spec.unique { "UNIQUE " } else { "" };
+                format!(
+                    "CREATE {unique_kw}INDEX IF NOT EXISTS {q_app}.{q_idx} ON {q_coll} ({col_list})"
+                )
+            }
+        };
 
         match self.session.exec(&sql, &[]).await {
             Ok(_) => Ok(()),
@@ -1138,32 +1140,81 @@ impl IndexBuilder for SqliteBackend {
     }
 }
 
-// P1 PR 5: `AuditWriter` capability. The SQLite impl routes the
-// parameterised INSERT through the session actor. The audit table on
-// SQLite is named `__zs_migrations` (the per-app analogue of PG's
-// `__zeroship_migrations`); PR 5 ships only the INSERT path — the
-// audit-table provisioning ddl + the `update_audit_status` transition
-// path are SQLite-side work for a later PR, since `IndexBuilder` is
-// the only PR-5 consumer and it writes a terminal row in one shot.
+// PR 2: full `AuditWriter` capability for the SQLite register-model
+// pipeline — provisioning, `next_schema_version`, row insert, and
+// terminal-status updates all route through the session actor.
 impl AuditWriter for SqliteBackend {
-    async fn write_audit_row(
+    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
+        let q_app = self.quote_ident(app_id);
+        let ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {q_app}.\"__zeroship_migrations\" (\
+                 id                INTEGER PRIMARY KEY, \
+                 collection        TEXT NOT NULL, \
+                 phase             TEXT NOT NULL, \
+                 change_class      TEXT NOT NULL, \
+                 change_kind       TEXT NOT NULL, \
+                 details           TEXT NOT NULL, \
+                 ddl_sql           TEXT, \
+                 created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+                 updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+                 applied_at        TEXT, \
+                 applied_by_kind   TEXT NOT NULL, \
+                 applied_by_id     TEXT, \
+                 deploy_id         TEXT NOT NULL, \
+                 parent_id         INTEGER REFERENCES \"__zeroship_migrations\"(id), \
+                 schema_version    INTEGER NOT NULL, \
+                 status            TEXT NOT NULL, \
+                 error             TEXT, \
+                 duration_ms       INTEGER, \
+                 validate_cursor   INTEGER, \
+                 owner_session_id  TEXT, \
+                 last_heartbeat_at TEXT, \
+                 dead_letter_pks   TEXT, \
+                 audit_generation  INTEGER NOT NULL DEFAULT 0, \
+                 CONSTRAINT __zeroship_migrations_phase_chk CHECK (phase IN ('ddl','validation','backfill','audit')), \
+                 CONSTRAINT __zeroship_migrations_class_chk CHECK (change_class IN ('additive','compatible','destructive')), \
+                 CONSTRAINT __zeroship_migrations_status_chk CHECK (status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back','validation_refused'))\
+             );\
+             CREATE INDEX IF NOT EXISTS \"__zeroship_migrations_deploy_idx\" \
+                 ON {q_app}.\"__zeroship_migrations\" (deploy_id);\
+             CREATE INDEX IF NOT EXISTS \"__zeroship_migrations_updated_at_idx\" \
+                 ON {q_app}.\"__zeroship_migrations\" (updated_at DESC);"
+        );
+        self.session.exec_batch(&ddl).await
+    }
+
+    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError> {
+        let q_app = self.quote_ident(app_id);
+        let sql = format!(
+            "SELECT COALESCE(MAX(schema_version), 0) + 1 \
+             FROM {q_app}.\"__zeroship_migrations\" \
+             WHERE phase = 'ddl' AND status = 'applied'"
+        );
+        let rows = self.session.query(&sql, &[]).await?;
+        let value = rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|cell| cell.as_deref())
+            .ok_or_else(|| DbError::internal("sqlite audit: missing schema_version row"))?;
+        value.parse::<i32>().map_err(|e| {
+            DbError::internal(format!(
+                "sqlite audit: invalid schema_version {value:?}: {e}"
+            ))
+        })
+    }
+
+    async fn write_audit_row_returning_id(
         &self,
         app_id: &str,
         row: &crate::audit::AuditRow,
-    ) -> Result<(), DbError> {
-        // Parameterised INSERT mirroring the PG-side
-        // `crate::audit::write_audit_row` shape (audit.rs:333). The
-        // SQLite column set is a subset (no `applied_at`, no
-        // `parent_id` — those land when the SQLite audit-table
-        // provisioning DDL ships). The INSERT uses `?N` positional
-        // binds so the session actor's `&[&str]` param surface routes
-        // through `rusqlite::Statement::execute` cleanly.
+    ) -> Result<i64, DbError> {
         let q_app = self.quote_ident(app_id);
         let sql = format!(
-            "INSERT INTO {q_app}.\"__zs_migrations\" \
+            "INSERT INTO {q_app}.\"__zeroship_migrations\" \
                 (collection, phase, change_class, change_kind, details, \
                  ddl_sql, status, deploy_id, applied_by_kind, schema_version) \
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            RETURNING id"
         );
 
         let details_str = row.details.to_string();
@@ -1182,8 +1233,60 @@ impl AuditWriter for SqliteBackend {
             schema_version_str.as_str(),
         ];
 
-        self.session.exec(&sql, &params).await?;
-        Ok(())
+        let rows = self.session.query(&sql, &params).await?;
+        let value = rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|cell| cell.as_deref())
+            .ok_or_else(|| DbError::internal("sqlite audit: missing inserted id"))?;
+        value.parse::<i64>().map_err(|e| {
+            DbError::internal(format!("sqlite audit: invalid inserted id {value:?}: {e}"))
+        })
+    }
+
+    async fn update_audit_status(
+        &self,
+        app_id: &str,
+        id: i64,
+        new_status: crate::audit::TerminalStatus,
+        error: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let q_app = self.quote_ident(app_id);
+        let id_str = id.to_string();
+        let status = new_status.as_sql();
+
+        let rows = if let Some(err) = error {
+            let sql = format!(
+                "UPDATE {q_app}.\"__zeroship_migrations\" \
+                 SET status = ?2, \
+                     error = ?3, \
+                     updated_at = CURRENT_TIMESTAMP, \
+                     applied_at = CASE \
+                         WHEN ?2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL \
+                         THEN CURRENT_TIMESTAMP \
+                         ELSE applied_at \
+                     END \
+                 WHERE id = ?1 AND status IN ('running','pending') \
+                 RETURNING id"
+            );
+            self.session.query(&sql, &[id_str.as_str(), status, err]).await?
+        } else {
+            let sql = format!(
+                "UPDATE {q_app}.\"__zeroship_migrations\" \
+                 SET status = ?2, \
+                     updated_at = CURRENT_TIMESTAMP, \
+                     applied_at = CASE \
+                         WHEN ?2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL \
+                         THEN CURRENT_TIMESTAMP \
+                         ELSE applied_at \
+                     END \
+                 WHERE id = ?1 AND status IN ('running','pending') \
+                 RETURNING id"
+            );
+            self.session.query(&sql, &[id_str.as_str(), status]).await?
+        };
+
+        Ok(!rows.is_empty())
     }
 }
 
@@ -1193,6 +1296,10 @@ impl DialectBuilder for SqliteBackend {
     // dialect without naming the inner type. The ZST is instantiated
     // per call — rustc inlines the value away because every method on
     // `SqliteDialect` is `&self` and side-effect-free.
+
+    fn sql_dialect(&self) -> crate::query::SqlDialect {
+        SqliteDialect.sql_dialect()
+    }
 
     fn quote_ident(&self, name: &str) -> String {
         SqliteDialect.quote_ident(name)

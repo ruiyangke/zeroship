@@ -657,33 +657,42 @@ pub trait IndexBuilder: SqlExecutor {
 ///
 /// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
 pub trait AuditWriter: 'static {
-    /// Insert a single audit row keyed by `app_id`. Returns `Ok(())`
-    /// on success; transient SQL failures surface as the typed
-    /// [`DbError`] variant matching their SQLSTATE / SQLite extended
-    /// code so the caller can decide whether to retry, escalate, or
-    /// surface to the operator.
-    ///
-    /// **Backend divergence**:
-    ///
-    /// - PG impl forwards to [`crate::audit::write_audit_row`] — that
-    ///   helper still owns the `RETURNING id` round-trip the audit
-    ///   state machine needs for transitions. The trait method
-    ///   discards the returned id because the PR-5 SQLite consumer
-    ///   ([`IndexBuilder::create_index_with_recovery`] on the SQLite
-    ///   arm) writes the row in terminal state and doesn't need to
-    ///   transition it. A future trait method `write_and_return_id`
-    ///   can be added if audit-status-update consumers migrate onto
-    ///   this trait.
-    /// - SQLite impl builds the parameterised INSERT inline and routes
-    ///   through the session actor. The row lands in the per-app
-    ///   `__zs_migrations` table (the SQLite analogue of PG's
-    ///   `__zeroship_migrations`).
+    /// Idempotently create the per-app `__zeroship_migrations` table.
+    #[allow(async_fn_in_trait)]
+    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError>;
+
+    /// Return the next monotonic `schema_version` for `app_id`.
+    #[allow(async_fn_in_trait)]
+    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError>;
+
+    /// Insert a single audit row keyed by `app_id`, returning its PK.
+    #[allow(async_fn_in_trait)]
+    async fn write_audit_row_returning_id(
+        &self,
+        app_id: &str,
+        row: &crate::audit::AuditRow,
+    ) -> Result<i64, DbError>;
+
+    /// Insert a single audit row keyed by `app_id`, discarding the PK.
     #[allow(async_fn_in_trait)]
     async fn write_audit_row(
         &self,
         app_id: &str,
         row: &crate::audit::AuditRow,
-    ) -> Result<(), DbError>;
+    ) -> Result<(), DbError> {
+        self.write_audit_row_returning_id(app_id, row).await?;
+        Ok(())
+    }
+
+    /// Transition a running/pending audit row to a terminal status.
+    #[allow(async_fn_in_trait)]
+    async fn update_audit_status(
+        &self,
+        app_id: &str,
+        id: i64,
+        new_status: crate::audit::TerminalStatus,
+        error: Option<&str>,
+    ) -> Result<bool, DbError>;
 }
 
 /// HMAC-signed session-init capability — the cross-backend trust
@@ -811,6 +820,9 @@ pub struct MintedToken {
 /// `DialectBuilder` as its own trait (and composing into the
 /// per-backend struct) is the canonical shape.
 pub trait DialectBuilder: 'static {
+    /// Concrete SQL dialect this builder targets.
+    fn sql_dialect(&self) -> crate::query::SqlDialect;
+
     /// Quote an identifier (column / table / schema name) per the
     /// engine's lexical rules. PG: doubled `"`; SQLite: doubled `"`
     /// with embedded-NUL rejection.

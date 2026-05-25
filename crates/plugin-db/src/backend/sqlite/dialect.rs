@@ -27,6 +27,10 @@ use crate::query::IndexSpec;
 pub(crate) struct SqliteDialect;
 
 impl DialectBuilder for SqliteDialect {
+    fn sql_dialect(&self) -> crate::query::SqlDialect {
+        crate::query::SqlDialect::Sqlite
+    }
+
     /// Double-quote the identifier, escaping any embedded `"` by
     /// doubling. Matches `crate::query::quote_ident` (the PG-side
     /// helper) — SQLite's identifier-quoting rules are a superset of
@@ -68,25 +72,46 @@ impl DialectBuilder for SqliteDialect {
 
     /// Build a `CREATE INDEX` statement for a SQLite collection.
     ///
-    /// **Deferred to PR 5** alongside the `IndexBuilder` impl —
-    /// [`IndexSpec`] today carries a pre-built `sql` string emitted by
-    /// `crate::query::build_create_indexes` against the PG dialect
-    /// (`CREATE INDEX CONCURRENTLY …`). PR 5's SQLite `IndexBuilder`
-    /// will either (a) reshape `IndexSpec` to carry structured fields
-    /// instead of pre-built SQL or (b) take the spec's `name`/`columns`
-    /// fields and rebuild from scratch here.
+    /// SQLite has no `CREATE INDEX CONCURRENTLY`; the `online` flag is a
+    /// no-op. Only `IndexKind::BTree` routes through this builder —
+    /// vector/FTS/spatial index kinds have dedicated backend hooks.
     ///
-    /// SQLite has no `CREATE INDEX CONCURRENTLY` — the `online` flag is
-    /// a no-op on this engine. We honour the trait signature but defer
-    /// the body to PR 5 so the IndexSpec-vs-builder decision lands in
-    /// one place.
-    fn build_create_index(&self, _spec: &IndexSpec, _online: bool) -> String {
-        // Returning a placeholder is safer than `unimplemented!` here:
-        // the hook has no PR-3 consumer, so the panic would only fire
-        // in PR 5+; emitting a comment-only DDL that no engine will
-        // accept means a stray call surfaces as a SQL error (loud and
-        // grep-able) rather than a panic from a future-PR consumer.
-        "-- SqliteDialect::build_create_index deferred to P1 PR 5".to_string()
+    /// `IndexSpec` does not carry the collection name separately, so we
+    /// recover the attached-schema/table target from the deterministic PG
+    /// `spec.sql` shape emitted by `query.rs`.
+    fn build_create_index(&self, spec: &IndexSpec, _online: bool) -> String {
+        if !matches!(spec.kind, crate::query::IndexKind::BTree) {
+            tracing::debug!(
+                kind = ?spec.kind,
+                "SqliteDialect::build_create_index: non-BTree index delegated to backend hook"
+            );
+            return String::new();
+        }
+
+        let (app_id, collection) = match extract_pg_index_target(&spec.sql) {
+            Some(target) => target,
+            None => {
+                tracing::warn!(
+                    sql = %spec.sql,
+                    "SqliteDialect::build_create_index: could not parse PG index target"
+                );
+                return String::new();
+            }
+        };
+
+        let cols = spec
+            .columns
+            .iter()
+            .map(|c| self.quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unique_kw = if spec.unique { "UNIQUE " } else { "" };
+        format!(
+            "CREATE {unique_kw}INDEX IF NOT EXISTS {}.{} ON {} ({cols})",
+            self.quote_ident(&app_id),
+            self.quote_ident(&spec.name),
+            self.quote_ident(&collection),
+        )
     }
 
     /// Map a Zeroship-level type string to SQLite's storage-class
@@ -158,6 +183,18 @@ impl DialectBuilder for SqliteDialect {
     }
 }
 
+fn extract_pg_index_target(sql: &str) -> Option<(String, String)> {
+    let (_, on_tail) = sql.split_once(" ON ")?;
+    let (target, _) = on_tail.split_once(" (")?;
+    let (app, collection) = target.split_once('.')?;
+    Some((unquote_ident(app)?, unquote_ident(collection)?))
+}
+
+fn unquote_ident(ident: &str) -> Option<String> {
+    let inner = ident.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner.replace("\"\"", "\""))
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit tests for the pure-function dialect hooks. The hooks
@@ -224,5 +261,40 @@ mod tests {
         let d = SqliteDialect;
         assert_eq!(d.now_fn(), "CURRENT_TIMESTAMP");
         assert_eq!(d.last_insert_rowid_sql(), Some("SELECT last_insert_rowid()"));
+    }
+
+    #[test]
+    fn build_create_index_emits_plain_sqlite_index() {
+        let d = SqliteDialect;
+        let sql = d.build_create_index(
+            &IndexSpec {
+                name: "users_email_key".to_string(),
+                columns: vec!["email".to_string()],
+                unique: true,
+                sql: "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS \"users_email_key\" ON \"app_demo\".\"users\" (\"email\")".to_string(),
+                kind: crate::query::IndexKind::BTree,
+            },
+            false,
+        );
+        assert_eq!(
+            sql,
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"app_demo\".\"users_email_key\" ON \"users\" (\"email\")"
+        );
+    }
+
+    #[test]
+    fn extract_pg_index_target_round_trips_quoted_identifiers() {
+        assert_eq!(
+            extract_pg_index_target(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"idx\" ON \"app\".\"users\" (\"name\")"
+            ),
+            Some(("app".to_string(), "users".to_string()))
+        );
+        assert_eq!(
+            extract_pg_index_target(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"idx\" ON \"a\"\"pp\".\"us\"\"ers\" (\"name\")"
+            ),
+            Some(("a\"pp".to_string(), "us\"ers".to_string()))
+        );
     }
 }

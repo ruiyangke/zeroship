@@ -579,7 +579,7 @@ fn introspect_after_create_table_round_trip() {
 // `tests/integration.rs::cross_app_fk_rejected_at_parse`.
 // ---------------------------------------------------------------------------
 
-/// Provision the per-app `__zs_migrations` audit table the
+/// Provision the per-app `__zeroship_migrations` audit table the
 /// `AuditWriter` impl writes into. P1 PR 5 ships only the INSERT path;
 /// the audit-table provisioning DDL is a later-PR concern. We create
 /// it inline here so the `unique_violation` path's best-effort audit
@@ -588,7 +588,7 @@ fn introspect_after_create_table_round_trip() {
 /// contract — but covering both halves is cheap).
 async fn ensure_audit_table(backend: &SqliteBackend, app_id: &str) {
     let sql = format!(
-        "CREATE TABLE IF NOT EXISTS \"{app_id}\".\"__zs_migrations\" (\
+        "CREATE TABLE IF NOT EXISTS \"{app_id}\".\"__zeroship_migrations\" (\
              id              INTEGER PRIMARY KEY AUTOINCREMENT, \
              collection      TEXT NOT NULL, \
              phase           TEXT NOT NULL, \
@@ -605,7 +605,7 @@ async fn ensure_audit_table(backend: &SqliteBackend, app_id: &str) {
     backend
         .pool_exec(&sql, &[])
         .await
-        .expect("create __zs_migrations audit table");
+        .expect("create __zeroship_migrations audit table");
 }
 
 #[test]
