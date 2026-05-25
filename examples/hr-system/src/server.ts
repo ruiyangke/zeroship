@@ -443,7 +443,7 @@ export const getEmployeesByDepartment = procedure(async (departmentId: number) =
 export const getEmployeeHistory = procedure(async (employeeId: number) => {
   const [compHistory, posHistory] = await Promise.all([
     db.compensationHistory.find({ employeeId }).sort({ effectiveDate: -1 }),
-    db.reviews.find({ employeeId }).sort({ createdAt: -1 }),
+    db.reviews.find({ employeeId }).sort({ created_at: -1 }),
   ]);
   return {
     data: {
@@ -566,7 +566,7 @@ export const createJobPosting = procedure(async (
 });
 
 export const getJobPostings = procedure(async (filters?: Record<string, unknown>) => {
-  return db.jobPostings.find(filters || {}).sort({ createdAt: -1 });
+  return db.jobPostings.find(filters || {}).sort({ created_at: -1 });
 });
 
 export const getJobPosting = procedure(async (id: number) => {
@@ -792,7 +792,7 @@ export const cancelLeave = procedure(async (id: number, employeeId: number) => {
 });
 
 export const getLeaveRequests = procedure(async (filters?: Record<string, unknown>) => {
-  return db.leaveRequests.find(filters || {}).sort({ createdAt: -1 });
+  return db.leaveRequests.find(filters || {}).sort({ created_at: -1 });
 });
 
 export const getLeaveBalance = procedure(async (employeeId: number) => {
@@ -955,7 +955,7 @@ export const getPayslip = procedure(async (id: number) => {
 });
 
 export const getPayslipsByEmployee = procedure(async (employeeId: number) => {
-  return db.payslips.find({ employeeId }).sort({ createdAt: -1 });
+  return db.payslips.find({ employeeId }).sort({ created_at: -1 });
 });
 
 export const getPayrollSummary = procedure(async (period: string) => {
@@ -1022,14 +1022,14 @@ export const acknowledgeReview = procedure(async (id: number) => {
 });
 
 export const getReviewsForEmployee = procedure(async (employeeId: number) => {
-  return db.reviews.find({ employeeId }).sort({ createdAt: -1 });
+  return db.reviews.find({ employeeId }).sort({ created_at: -1 });
 });
 
 export const getPendingReviews = procedure(async (reviewerId?: number) => {
   return db.reviews.find({
     status: "draft",
     ...(reviewerId !== undefined && { reviewerId }),
-  }).sort({ createdAt: 1 });
+  }).sort({ created_at: 1 });
 });
 
 export const createGoal = procedure(async (
@@ -1071,7 +1071,7 @@ export const giveFeedback = procedure(async (
 });
 
 export const getFeedbackForEmployee = procedure(async (toEmployeeId: number) => {
-  return db.feedback.find({ toEmployeeId }).sort({ createdAt: -1 });
+  return db.feedback.find({ toEmployeeId }).sort({ created_at: -1 });
 });
 
 // ---------------------------------------------------------------------------
@@ -1285,7 +1285,7 @@ export const acknowledgePolicy = procedure(async (employeeId: number, policyId: 
 // ---------------------------------------------------------------------------
 
 export const getNotifications = procedure(async (employeeId: number) => {
-  return db.notifications.find({ employeeId }).sort({ createdAt: -1 });
+  return db.notifications.find({ employeeId }).sort({ created_at: -1 });
 });
 
 export const markAsRead = procedure(async (id: number) => {

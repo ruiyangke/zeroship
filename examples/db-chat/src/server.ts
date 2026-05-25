@@ -67,7 +67,7 @@ export const listMessages = query(
   async ({ channelId, limit = 50 }: { channelId: ChannelId; limit?: number }) => {
     const { data, error } = await db.messages
       .find({ channelId, flagged: false })
-      .sort({ createdAt: -1 })
+      .sort({ created_at: -1 })
       .limit(limit);
     if (error) throw error;
     return data ?? [];
