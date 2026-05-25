@@ -48,7 +48,6 @@ export interface ChangeEvent {
   columns?: string[];
 }
 
-type SeedInput = { email: string; name: string; handle: string };
 type CreateInput = { userId: string; title: string; priority?: Priority };
 type ById = { id: string };
 type ByUser = { userId: string };
@@ -57,8 +56,7 @@ type ByUser = { userId: string };
 export type App = {
   listTodos: ProcedureType<"query", ByUser, Todo[]>;
   todoCount: ProcedureType<"query", ByUser, number>;
-  getUserPair: ProcedureType<"query", { aId: string; bId: string }, { a: User | null; b: User | null }>;
-  seedUser: ProcedureType<"mutation", SeedInput, User>;
+  publicUser: ProcedureType<"mutation", Record<string, never>, User>;
   createTodo: ProcedureType<"mutation", CreateInput, Todo>;
   completeTodo: ProcedureType<"mutation", ById, Todo>;
   archiveTodo: ProcedureType<"mutation", ById, Todo>;
@@ -75,21 +73,65 @@ export { RpcError } from "@zeroship/rpc-client";
 export const listTodos = (userId: string) => rpc.listTodos.query({ userId });
 export const todoCount = (userId: string) => rpc.todoCount.query({ userId });
 
-/** Existence probe: a stored session id is stale if the row is gone (dev DB reset). */
-export const userExists = async (id: string): Promise<boolean> => {
-  try {
-    const { a } = await rpc.getUserPair.query({ aId: id, bId: id });
-    return a != null;
-  } catch {
-    return false;
-  }
-};
-export const seedUser = (input: SeedInput) => rpc.seedUser.mutation(input);
+/** Get-or-create the single shared "public ledger" user (everyone writes here). */
+export const publicUser = () => rpc.publicUser.mutation({});
 export const createTodo = (input: CreateInput) => rpc.createTodo.mutation(input);
 export const completeTodo = (id: string) => rpc.completeTodo.mutation({ id });
 export const archiveTodo = (id: string) => rpc.archiveTodo.mutation({ id });
 export const deleteTodo = (id: string) => rpc.deleteTodo.mutation({ id });
 
-/** Live change feed — async iterator over broker events. `signal` cancels. */
-export const subscribeTodos = (signal?: AbortSignal): AsyncIterableIterator<ChangeEvent> =>
-  rpc.subscribeTodos.stream({}, signal ? { signal } : undefined);
+function b64url(s: string): string {
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Live change feed — async iterator over broker events.
+ *
+ * NOTE: we read the stream with a hand-rolled fetch reader rather than
+ * `rpc.subscribeTodos.stream()`. The subscription GET is identical across
+ * tabs (`?input=<base64 {json:{}}>`), and browsers COALESCE identical
+ * in-flight streaming `fetch`es to one connection — so a second tab would
+ * never get its own stream (only the first shows LIVE). A per-connection
+ * `_n` nonce makes each request unique (mirroring how EventSource opens an
+ * independent connection per instance), and we parse the AI-SDK Data Stream
+ * frames (`2:[…]`) ourselves. `signal` cancels the read.
+ */
+export async function* subscribeTodos(signal?: AbortSignal): AsyncIterableIterator<ChangeEvent> {
+  const input = b64url(JSON.stringify({ json: {} }));
+  const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const res = await fetch(`/_zs/v1/subscribeTodos?input=${input}&_n=${nonce}`, {
+    headers: { accept: "text/event-stream" },
+    signal,
+  });
+  if (!res.ok || !res.body) throw new Error(`subscribeTodos stream failed (${res.status})`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trimStart();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("2:")) continue; // AI-SDK object frame
+        try {
+          const payload = JSON.parse(line.slice(2));
+          const events = Array.isArray(payload) ? payload : [payload];
+          for (const e of events) if (e && typeof e === "object") yield e as ChangeEvent;
+        } catch {
+          /* skip malformed frame */
+        }
+      }
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      /* already torn down */
+    }
+  }
+}

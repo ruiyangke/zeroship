@@ -255,6 +255,33 @@ export const seedUser = mutation(
   },
 );
 
+// Shared "public ledger" user — every client writes into ONE list so the
+// realtime feed streams to all viewers (no per-window identity). Get-or-
+// create on a fixed unique handle; `todos.userId` is a required FK, so we
+// keep a single stable user rather than dropping the relation.
+const PUBLIC_HANDLE = "ledger";
+
+export const publicUser = mutation(
+  async (_input: Record<string, never>) => {
+    const found = await db.users.find({ handle: PUBLIC_HANDLE });
+    if (found.error) throw found.error;
+    if (found.data && found.data.length > 0) return found.data[0];
+
+    const created = await db.users.insert({
+      handle: PUBLIC_HANDLE,
+      email: "ledger@public.local",
+      name: "Public Ledger",
+    });
+    if (created.error) {
+      // Lost a create race against another window — return the existing row.
+      const retry = await db.users.find({ handle: PUBLIC_HANDLE });
+      if (retry.data && retry.data.length > 0) return retry.data[0];
+      throw created.error;
+    }
+    return created.data;
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Re-export the migration so the deploy can register it
 // ---------------------------------------------------------------------------

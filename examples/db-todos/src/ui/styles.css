@@ -107,6 +107,15 @@ code {
   white-space: nowrap;
 }
 .status { display: flex; align-items: center; gap: 0.9rem; }
+.public-tag {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.22em;
+  color: var(--amber);
+  border: 1px solid rgba(232, 176, 75, 0.32);
+  border-radius: 999px;
+  padding: 0.32rem 0.6rem;
+}
 .live {
   display: inline-flex;
   align-items: center;

@@ -5,35 +5,15 @@ import {
   createTodo,
   deleteTodo,
   listTodos,
+  publicUser,
   RpcError,
-  seedUser,
   subscribeTodos,
-  userExists,
   type Priority,
   type Todo,
   type User,
 } from "./api";
 
-const USER_KEY = "ledger.session.user";
 const PRIORITIES: Priority[] = ["low", "medium", "high"];
-
-// ── session ───────────────────────────────────────────────────────────────
-function loadUser(): User | null {
-  try {
-    const raw = localStorage.getItem(USER_KEY);
-    return raw ? (JSON.parse(raw) as User) : null;
-  } catch {
-    return null;
-  }
-}
-function saveUser(u: User) {
-  localStorage.setItem(USER_KEY, JSON.stringify(u));
-}
-function freshIdentity() {
-  const tag = Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-  const handle = `guest_${tag}`;
-  return { handle, email: `${handle}@ledger.local`, name: `Operator ${tag.slice(-4).toUpperCase()}` };
-}
 
 // ── time ────────────────────────────────────────────────────────────────
 function ago(ms: number): string {
@@ -54,7 +34,10 @@ const shortId = (id: string) => {
 type Banner = { kind: "error" | "live"; text: string } | null;
 
 export function App() {
-  const [user, setUser] = useState<User | null>(loadUser);
+  // The single shared "public ledger" user — there's no per-window identity;
+  // every window reads + writes the same list, so the realtime feed streams
+  // to all viewers at once.
+  const [user, setUser] = useState<User | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(true);
   const [booting, setBooting] = useState(true);
@@ -71,13 +54,14 @@ export function App() {
     if (b) window.setTimeout(() => setBanner((cur) => (cur === b ? null : cur)), 3200);
   }, []);
 
+  const errText = (e: unknown) => (e instanceof RpcError ? `${e.code}: ${e.message}` : String(e));
+
   const refresh = useCallback(
     async (uid: string) => {
       try {
-        const rows = await listTodos(uid);
-        setTodos(rows);
+        setTodos(await listTodos(uid));
       } catch (e) {
-        flash({ kind: "error", text: e instanceof RpcError ? `${e.code}: ${e.message}` : String(e) });
+        flash({ kind: "error", text: errText(e) });
       } finally {
         setLoading(false);
       }
@@ -85,38 +69,27 @@ export function App() {
     [flash],
   );
 
-  // Bootstrap / validate the session user once on mount. A stored id can
-  // go stale when the dev DB is reset — using it would FK-violate on
-  // createTodo — so we verify it still exists and re-provision if not.
+  // Resolve the shared ledger user once on mount (get-or-create).
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      let u = loadUser();
-      if (u && !(await userExists(u.id))) u = null; // stale → drop
-      if (!u) {
-        try {
-          u = await seedUser(freshIdentity());
-          saveUser(u);
-        } catch (e) {
-          if (!cancelled)
-            flash({ kind: "error", text: e instanceof RpcError ? `${e.code}: ${e.message}` : String(e) });
-        }
+      try {
+        const u = await publicUser();
+        if (!cancelled) setUser(u);
+      } catch (e) {
+        if (!cancelled) flash({ kind: "error", text: errText(e) });
+      } finally {
+        if (!cancelled) setBooting(false);
       }
-      if (cancelled) return;
-      if (u) setUser(u);
-      setBooting(false);
     })();
     return () => {
       cancelled = true;
     };
-    // mount-only — validation/seed happens once per page load
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [flash]);
 
-  // Load + live-subscribe once we have a user. The platform streams the
-  // AI-SDK Data Stream Protocol; `subscribeTodos()` returns an async
-  // iterator (rpc-client parses the frames) — we consume it in a loop and
-  // abort on teardown.
+  // Load + live-subscribe once the shared user is resolved. The platform
+  // streams the AI-SDK Data Stream Protocol; `subscribeTodos()` yields parsed
+  // change events (own connection per tab via a nonce) — debounce-refetch.
   useEffect(() => {
     if (!user) return;
     setLoading(true);
@@ -132,7 +105,7 @@ export function App() {
           if (ev.collection && ev.collection !== "todos") continue;
           setPulse((p) => p + 1);
           window.clearTimeout(t);
-          t = window.setTimeout(() => void refresh(user.id), 180); // debounce bursts
+          t = window.setTimeout(() => void refresh(user.id), 180);
         }
       } catch {
         /* aborted on teardown, or the stream ended/errored */
@@ -153,7 +126,6 @@ export function App() {
       const text = title.trim();
       if (!text || !user) return;
       setTitle("");
-      // optimistic insert
       const temp: Todo = {
         id: `tmp_${Date.now()}`,
         created_at: Date.now(),
@@ -172,23 +144,8 @@ export function App() {
         await createTodo({ userId: user.id, title: text, priority });
         await refresh(user.id);
       } catch (err) {
-        const code = err instanceof RpcError ? err.code : "";
-        if (code === "FOREIGN_KEY_VIOLATION" || code === "fk_violation") {
-          // Session user vanished mid-session (dev DB reset) — re-provision + retry once.
-          try {
-            const fresh = await seedUser(freshIdentity());
-            saveUser(fresh);
-            setUser(fresh);
-            await createTodo({ userId: fresh.id, title: text, priority });
-            await refresh(fresh.id);
-            inputRef.current?.focus();
-            return;
-          } catch {
-            /* fall through to surface the error below */
-          }
-        }
         setTodos((cur) => cur.filter((x) => x.id !== temp.id));
-        flash({ kind: "error", text: err instanceof RpcError ? `${err.code}: ${err.message}` : String(err) });
+        flash({ kind: "error", text: errText(err) });
       }
       inputRef.current?.focus();
     },
@@ -199,13 +156,13 @@ export function App() {
     async (id: string, fn: (id: string) => Promise<unknown>, optimisticDrop: boolean) => {
       if (optimisticDrop) {
         setRemoving((s) => new Set(s).add(id));
-        await new Promise((r) => setTimeout(r, 220)); // let the exit animation play
+        await new Promise((r) => setTimeout(r, 220));
       }
       try {
         await fn(id);
         if (user) await refresh(user.id);
       } catch (e) {
-        flash({ kind: "error", text: e instanceof RpcError ? `${e.code}: ${e.message}` : String(e) });
+        flash({ kind: "error", text: errText(e) });
         if (user) await refresh(user.id);
       } finally {
         setRemoving((s) => {
@@ -217,14 +174,6 @@ export function App() {
     },
     [user, refresh, flash],
   );
-
-  const newSession = useCallback(async () => {
-    localStorage.removeItem(USER_KEY);
-    setTodos([]);
-    setLoading(true);
-    setBooting(true);
-    setUser(null);
-  }, []);
 
   const { active, done } = useMemo(() => {
     const a: Todo[] = [];
@@ -242,32 +191,27 @@ export function App() {
         <div className="brand">
           <span className="mark">LEDGER</span>
           <span className="rule" aria-hidden />
-          <span className="sub">db-todos · zeroship runtime</span>
+          <span className="sub">shared · db-todos · zeroship</span>
         </div>
         <div className="status">
+          <span className="public-tag">PUBLIC</span>
           <span className={`live ${live ? "on" : "off"}`} key={pulse}>
             <i className="dot" />
             {live ? "LIVE" : "OFFLINE"}
           </span>
-          {user && (
-            <button className="session" onClick={newSession} title="Start a fresh session user">
-              <span className="op">{user.name}</span>
-              <span className="handle">@{user.handle}</span>
-              <span className="uid">{shortId(user.id)}</span>
-            </button>
-          )}
         </div>
       </header>
 
       <main className="stage">
         <div className="lede">
           <h1>
-            What needs <em>doing</em>.
+            One ledger, <em>everyone</em>.
           </h1>
           <p>
-            Every keystroke here rides the real <code>@zeroship/db</code> surface —
-            typed ids, optimistic concurrency, soft-delete, and a live change feed
-            streamed over SSE. Open a second tab; watch it keep pace.
+            A single shared list on the real <code>@zeroship/db</code> surface —
+            no logins, no per-window identity. Every change is committed to the
+            same collection and streamed to every open window over SSE. Open a
+            second tab and watch them move together.
           </p>
         </div>
 
@@ -275,7 +219,7 @@ export function App() {
           <input
             ref={inputRef}
             className="title-input"
-            placeholder="Draft a task…"
+            placeholder="Add to the shared ledger…"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             disabled={!user}
@@ -317,7 +261,7 @@ export function App() {
           ) : todos.length === 0 ? (
             <div className="empty">
               <span className="big">∅</span>
-              <p>The ledger is clean. Commit your first entry above.</p>
+              <p>The ledger is clean. Commit the first entry — everyone will see it.</p>
             </div>
           ) : (
             <ul className="rows">
@@ -338,7 +282,7 @@ export function App() {
       </main>
 
       <footer className="footplate">
-        <span>SQLite dev backend · all writes autocommit · realtime via broker SSE</span>
+        <span>SQLite dev backend · all writes autocommit · realtime broadcast via broker SSE</span>
       </footer>
 
       {banner && <div className={`banner ${banner.kind}`}>{banner.text}</div>}
