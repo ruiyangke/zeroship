@@ -34,7 +34,14 @@ The current system is pull-based:
 - worker polls `/internal/versions` every 5 seconds
 - worker fetches `/internal/env/{app_id}` when `env_version` changes
 
-There is no event bus or push fanout in the current code path.
+There is no event bus or push fanout in the current code path. Polling keeps the
+data flow one-directional (control is never called synchronously on the request
+hot path), at the cost of up-to-5-second propagation lag after a deploy.
+
+CHWBL (Consistent Hashing with Bounded Loads) is how the gateway picks which
+worker handles a request: requests for the same app hash to the same worker so
+its V8 isolate stays warm, while the bounded-load cap spills to another worker
+when a hot app would otherwise overload one node.
 
 ## End-user request sequence
 
@@ -78,3 +85,12 @@ Snapshot, restore, wake, and cold-boot flows are part of the sandbox service, no
 - Local-disk blob store implementation
 - No custom edge POP layer in this repo
 - No multi-region route propagation or data replication in the shipping code path
+
+## Related docs
+
+- [Architecture overview](docs/architecture/overview.md) — the entry point; start here for the system map.
+- [Gateway routing](docs/architecture/gateway-routing.md) — manifest dispatch and the request hot path.
+- [Control plane](docs/architecture/control-plane.md) — where the `/internal/*` route and version feeds come from.
+- [V8 runtime](docs/architecture/runtime.md) — what runs inside the worker once a request arrives.
+- [Blob store](docs/architecture/blob-store.md) — the shared content-addressed bundle/asset root.
+- [Docker Compose runbook](docs/runbooks/docker-compose.md) — bring the multi-process stack up locally.
