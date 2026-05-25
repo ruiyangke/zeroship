@@ -41,8 +41,8 @@ Verify every claim against code before promoting. Reference docs must be accurat
 - [x] zs-standard-and-vite-v2.md (reference/zs-standard.md + vite-plugin.md exist)
 
 ### NEEDS DETERMINATION (check shipped vs active)
-- [ ] rpc.md
-- [ ] plugins-workers-distributed.md
+- [x] rpc.md [ACTIVE — kept]
+- [x] plugins-workers-distributed.md [ACTIVE — kept]
 
 ### KEEP — living docs, not a ship-once proposal
 - [x] feature-roadmap.md  [ACTIVE — keep in place]
@@ -81,3 +81,8 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 - zs-standard-and-vite-v2 + sandbox-pg-state — archived (shipped)
 
 - sandbox-preview-urls + kv-redesign — archived (shipped)
+
+- rpc.md — ACTIVE (Status: Proposal; RPC-v2 seamless-functions vision aspirational — /_zs/v1 dispatch primitive shipped but full codegen/declarative-gateway vision not). KEPT in docs/proposals/.
+- plugins-workers-distributed.md — ACTIVE (Status: In progress; kv/storage distributed correctness + stateless-worker migration not yet shipped). KEPT in docs/proposals/.
+
+## Phase 1 COMPLETE: 24 proposals archived, 2 ACTIVE (rpc, plugins-workers-distributed), 1 living (feature-roadmap).
