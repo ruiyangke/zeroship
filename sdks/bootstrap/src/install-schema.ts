@@ -24,6 +24,9 @@
  * Reserved native names throw at boot rather than silently shadowing.
  */
 import {
+  drainCollectionLoaders,
+  enterTransactionScope,
+  exitTransactionScope,
   captureNativeTransaction,
   Collection,
   type NativeDb,
@@ -561,7 +564,7 @@ function topoSortByRefs(schemas: Record<string, unknown>): string[] {
 export type SchemaInput =
   | Record<string, unknown>
   | SchemaBuilder<Record<string, unknown>>
-  | TypeBuilder<unknown, any, any, any>;
+  | TypeBuilder<unknown, any, any, any, any>;
 
 /**
  * Schema-shape validator. When a user writes `{ name: "string" }`
@@ -570,13 +573,13 @@ export type SchemaInput =
  * validator walks each collection's field map and emits a
  * string-literal error type at the offending field.
  */
-type IsValidSchemaField<F> = F extends TypeBuilder<unknown, boolean, any, any> ? true : false;
+type IsValidSchemaField<F> = F extends TypeBuilder<unknown, boolean, any, any, any> ? true : false;
 
 export type ValidateSchemaShape<T> = {
   [K in keyof T]:
     T[K] extends SchemaBuilder<Record<string, unknown>>
       ? T[K]
-      : T[K] extends TypeBuilder<unknown, boolean, any, any>
+      : T[K] extends TypeBuilder<unknown, boolean, any, any, any>
         ? T[K]
         : T[K] extends Record<string, unknown>
           ? {
@@ -656,7 +659,7 @@ export interface TransactionOptions {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UnwrapSchema<T> =
   T extends SchemaBuilder<infer S> ? S :
-  T extends TypeBuilder<infer U, any, any, any> ? U :
+  T extends TypeBuilder<infer U, any, any, any, any> ? U :
   T;
 
 export type Collections<T extends Record<string, SchemaInput>> = {
@@ -1052,21 +1055,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       );
     }
 
-    const collectionList = Object.values(collections).map(
-      (c) => c as unknown as {
-        _txDepth: number;
-        _idLoader: { _drain(): Promise<void> } | null;
-      },
-    );
+    const collectionList = Object.values(collections);
 
     // 1. Drain the JS DataLoader queues (JS-only state; cannot move to
     //    Rust). A drain failure aborts before any BEGIN runs.
     try {
-      await Promise.all(
-        collectionList
-          .map((c) => c._idLoader?._drain())
-          .filter((p): p is Promise<void> => p !== undefined),
-      );
+      await drainCollectionLoaders(collectionList);
     } catch (drainErr) {
       const wrapped = Object.assign(
         new Error(
@@ -1084,7 +1078,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     //    live-in-tx refusal see depth > 0 for the duration. Bumped
     //    synchronously *before* the native call so an in-flight batched
     //    read observes the tx the instant BEGIN opens.
-    for (const c of collectionList) c._txDepth += 1;
+    const txScopedCollections = enterTransactionScope(collectionList);
     try {
       // 3. Native orchestrator: begin → callback(txCollections) →
       //    commit/rollback. Resolves with the callback's result on
@@ -1108,7 +1102,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       // verbatim. Surface it as `result.error`.
       return err(txErr instanceof Error ? txErr : new Error(String(txErr)));
     } finally {
-      for (const c of collectionList) c._txDepth -= 1;
+      exitTransactionScope(txScopedCollections);
     }
   }
 

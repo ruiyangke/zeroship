@@ -1,5 +1,5 @@
 /**
- * Public type surface for the database SDK — the types user code uses
+ * Type-only public surface for the database SDK — the types user code uses
  * to annotate handlers (`env.db.users` is a `Collection<...>`, the
  * transaction callback receives a `TxCollection`, etc).
  *
@@ -81,7 +81,7 @@ import type {
 export type SchemaInput =
   | Record<string, unknown>
   | SchemaBuilder<Record<string, unknown>>
-  | TypeBuilder<unknown, any, any, any>;
+  | TypeBuilder<unknown, any, any, any, any>;
 
 // ---------------------------------------------------------------------------
 // Transaction surface — TxCollection / TxQuery / TransactionOptions
@@ -174,7 +174,7 @@ export interface TransactionOptions {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UnwrapSchema<T> =
   T extends SchemaBuilder<infer S> ? S :
-  T extends TypeBuilder<infer U, any, any, any> ? U :
+  T extends TypeBuilder<infer U, any, any, any, any> ? U :
   T;
 
 /**

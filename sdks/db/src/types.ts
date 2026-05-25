@@ -35,7 +35,7 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
  * the masked-value wrapper around it.
  */
 export type InferFieldDef<T> =
-  T extends TypeBuilder<infer U, any, infer M, any>
+  T extends TypeBuilder<infer U, any, infer M, any, any>
     ? M extends MaskKind
       ? M extends "none"
         ? U
@@ -49,12 +49,27 @@ export type InferFieldDef<T> =
  *  `TypeBuilder<_, R>`). */
 export type RequiredKeys<S> = {
   [K in keyof S]:
-    S[K] extends TypeBuilder<any, true, any, any> ? K :
+    S[K] extends TypeBuilder<any, true, any, any, any> ? K :
     never
 }[keyof S];
 
 /** Keys that are not explicitly required. */
 export type OptionalKeys<S> = Exclude<keyof S, RequiredKeys<S>>;
+
+type HasDefault<T> =
+  T extends TypeBuilder<any, any, any, any, true> ? true :
+  false;
+
+/** Required insert keys exclude fields with a schema-level `.default()`. */
+export type InsertRequiredKeys<S> = {
+  [K in keyof S]:
+    S[K] extends TypeBuilder<any, true, any, any, any>
+      ? HasDefault<S[K]> extends true ? never : K
+      : never
+}[keyof S];
+
+/** Insert-optional keys include ordinary optional fields and defaulted required fields. */
+export type InsertOptionalKeys<S> = Exclude<keyof S, InsertRequiredKeys<S>>;
 
 /**
  * True iff every value in S is a `TypeBuilder` (i.e. the input is a
@@ -71,7 +86,7 @@ type IsSchemaDict<S> =
       // Otherwise it's already an inferred shape (top-level union
       // variant) and we return S unchanged.
       true extends {
-        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any, any, any> ? true : false;
+        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any, any, any, any> ? true : false;
       }[keyof S]
       ? true
       : false
@@ -97,6 +112,17 @@ export type InferSchema<S> = S extends infer T
         [K in RequiredKeys<T>]: InferFieldDef<T[K]>;
       } & {
         [K in OptionalKeys<T>]?: InferFieldDef<T[K]>;
+      }
+    : T
+  : never;
+
+/** Insert-time shape inference. Required + defaulted fields become optional. */
+export type InferInsertSchema<S> = S extends infer T
+  ? IsSchemaDict<T> extends true
+    ? {
+        [K in InsertRequiredKeys<T>]: InferFieldDef<T[K]>;
+      } & {
+        [K in InsertOptionalKeys<T>]?: InferFieldDef<T[K]>;
       }
     : T
   : never;
@@ -164,7 +190,7 @@ export type Row<S> = InferSchema<S> & SystemFields;
 /** Input type accepted by `insert()` / `upsert()` — required fields
  * stay required, auto-populated system fields are excluded so the
  * platform mints them (PR 3). */
-export type RowInput<S> = InferSchema<S> & {
+export type RowInput<S> = InferInsertSchema<S> & {
   id?: never;
   created_at?: never;
   updated_at?: never;
@@ -232,7 +258,7 @@ type DeterministicEncryptedFilterValue<T> =
  * - plain fields keep the normal operator surface
  */
 type FilterValueForFieldBuilder<F> =
-  F extends TypeBuilder<infer U, any, any, infer E>
+  F extends TypeBuilder<infer U, any, any, infer E, any>
     ? E extends "randomised"
       ? never
       : E extends "deterministic"
@@ -323,17 +349,10 @@ export const naming = {
 };
 
 // ---------------------------------------------------------------------------
-// Infer<> — type-only helpers that pull `Row` / `RowInput` / `Id` out of a
+// InferRow / InferRowInput / InferId — type-only helpers that pull `Row` /
+// `RowInput` / `Id` out of a
 // Collection without `Parameters<typeof col.insertMany>[0][number]` plumbing.
 // ---------------------------------------------------------------------------
-
-/**
- * Generic identity passthrough. Mostly useful so users can write
- * `Infer<typeof db.users.RowInput>` symmetrically with `InferRow<...>` etc.
- * — the input is already the resolved type; this just gives the idiom a
- * single named entry point.
- */
-export type Infer<T> = T extends infer X ? X : never;
 
 /** Persisted-row type for a Collection — `Row<S>` for `Collection<S, _>`. */
 export type InferRow<C> =
@@ -373,7 +392,7 @@ export type WithSpec = Record<string, true>;
  * callers surface a "not a t.ref field" error at the type layer.
  */
 export type ExtractRefTarget<X> =
-  X extends TypeBuilder<infer U, any, any, any>
+  X extends TypeBuilder<infer U, any, any, any, any>
     ? U extends Id<infer T>
       ? T
       : never
@@ -384,7 +403,7 @@ export type ExtractRefTarget<X> =
 /**
  * Unwrap whatever shape an `AllSchemas[name]` slot holds into the raw
  * field-record the `Row<...>` machinery understands. Mirrors the
- * `UnwrapSchema<T>` alias in `db.ts` but lives here so `WithRelations`
+ * `UnwrapSchema<T>` alias in `db-types.ts` but lives here so `WithRelations`
  * can call it without importing across the module boundary.
  *
  * - `schema({...})` wraps `Record<string, TypeBuilder>` — strip it.
@@ -394,7 +413,7 @@ export type ExtractRefTarget<X> =
  */
 export type UnwrapSchemaForRelation<T> =
   T extends SchemaBuilder<infer S> ? S :
-  T extends TypeBuilder<infer U, any, any, any> ? U :
+  T extends TypeBuilder<infer U, any, any, any, any> ? U :
   T;
 
 /**
@@ -683,7 +702,7 @@ export interface EncryptedFieldOpts<Mode extends EncryptionMode = EncryptionMode
    * are supported. Passing any other `TypeBuilder` throws with code
    * `ENCRYPTED_WRAPS_UNSUPPORTED` at schema-definition time.
    */
-  wraps?: TypeBuilder<any, any, any, any>;
+  wraps?: TypeBuilder<any, any, any, any, any>;
 }
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
@@ -973,14 +992,16 @@ export interface FieldDef {
  *   `Filter<S>` so the type layer matches the runtime fence.
  *
  * `t.string().required().min(3).max(50)` → `TypeBuilder<string, true>`
- * `t.encrypted()` → `TypeBuilder<string, false, "full", "randomised">`
- * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined>`
+ * `t.encrypted()` → `TypeBuilder<string, false, "full", "randomised", false>`
+ * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined, false>`
+ * `t.string().required().default("x")` → `TypeBuilder<string, true, undefined, undefined, true>`
  */
 export class TypeBuilder<
   T = unknown,
   R extends boolean = false,
   M extends MaskKind | undefined = undefined,
   E extends EncryptionMode | undefined = undefined,
+  D extends boolean = false,
 > {
   /** @internal Type-level brand — do not access at runtime. */
   declare readonly _type: T;
@@ -990,6 +1011,8 @@ export class TypeBuilder<
   declare readonly _mask: M;
   /** @internal Type-level brand for encrypted-filter legality. */
   declare readonly _encryption: E;
+  /** @internal Type-level brand for `.default()`-backed insert optionality. */
+  declare readonly _hasDefault: D;
 
   private _def: FieldDef;
 
@@ -1003,9 +1026,9 @@ export class TypeBuilder<
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true, M, E> {
+  required(): TypeBuilder<T, true, M, E, D> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true, M, E>;
+    return this as unknown as TypeBuilder<T, true, M, E, D>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -1035,9 +1058,9 @@ export class TypeBuilder<
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): this {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> {
     this._def.default = val;
-    return this;
+    return this as unknown as TypeBuilder<T, R, M, E, true>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
@@ -1142,7 +1165,7 @@ export class TypeBuilder<
    *   schema-normaliser auto-populates `{ kind: "full",
    *   classification: "pii" }` — fail-safe per §3 of the proposal.
    */
-  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E> {
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> {
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
@@ -1213,7 +1236,7 @@ export class TypeBuilder<
       );
     }
     this._def.mask = { kind, classification };
-    return this as unknown as TypeBuilder<T, R, K, E>;
+    return this as unknown as TypeBuilder<T, R, K, E, D>;
   }
 
   /**
@@ -1334,7 +1357,7 @@ export const t = {
    * malformed `FieldDef`s (e.g. dropping `refTarget` so `validateRefTargets`
    * could not visit array items).
    */
-  array<U>(items: TypeBuilder<U, any, any, any>): TypeBuilder<U[]> {
+  array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[]> {
     if (!(items instanceof TypeBuilder)) {
       throw Object.assign(
         new Error("t.array(items) requires a TypeBuilder (use t.string(), t.number(), ...)"),
@@ -1409,7 +1432,7 @@ export const t = {
    * `string | undefined` — the same rules as the top-level schema apply
    * recursively (`required()` keeps a key required, otherwise optional).
    */
-  object<S extends Record<string, TypeBuilder<any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>> {
+  object<S extends Record<string, TypeBuilder<any, any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>> {
     if (shape === null || typeof shape !== "object" || Array.isArray(shape)) {
       throw Object.assign(
         new Error("t.object(shape) requires a record of nested type builders"),
@@ -1564,7 +1587,7 @@ export const t = {
     Mode extends EncryptionMode = "randomised",
   >(
     opts?: EncryptedFieldOpts<Mode>,
-  ): TypeBuilder<T, false, "full", Mode> {
+  ): TypeBuilder<T, false, "full", Mode, false> {
     const wrapsBuilder = opts?.wraps;
     let wrapsKind: "string" | "number" | "bytes" = "string";
     if (wrapsBuilder !== undefined) {
@@ -1765,7 +1788,7 @@ export const t = {
     // explicit form callers may prefer.
     return new TypeBuilder<string | null>({ type: "actor", actorNullable: true });
   },
-  union<V extends readonly TypeBuilder<any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
+  union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
     if (variants.length < 2) {
       throw Object.assign(
         new Error(
@@ -1897,8 +1920,8 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
  * The distributive `infer U` over a union of tuple elements gives us
  * the TS union of every variant's inferred value type.
  */
-export type InferUnion<V extends readonly TypeBuilder<any, any, any, any>[]> =
-  V[number] extends TypeBuilder<infer U, any, any, any> ? U : never;
+export type InferUnion<V extends readonly TypeBuilder<any, any, any, any, any>[]> =
+  V[number] extends TypeBuilder<infer U, any, any, any, any> ? U : never;
 
 // ---------------------------------------------------------------------------
 // Schema builder — per-collection options via fluent API

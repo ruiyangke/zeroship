@@ -12,8 +12,8 @@
  * devDependency edge only exists at test time.
  */
 import { installSchema, type InstallSchemaOptions } from "@zeroship/bootstrap/install-schema";
-import type { Db } from "../src/db.js";
-import type { NativeDb } from "../src/collection.js";
+import type { Db } from "../src/db-types.js";
+import type { NativeDb } from "../src/native.js";
 
 export function installSchemaForTest<
   const T extends Record<string, unknown>,

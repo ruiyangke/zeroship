@@ -10,7 +10,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 // Import directly from the schema / types modules so the test bundle
-// does not transitively pull in `db.ts`, which imports `env` from the
+// does not transitively pull in `db-types.ts`, which imports `env` from the
 // runtime-supplied "zeroship" module (unavailable in node test env).
 import { validateRefTargets } from "@zeroship/bootstrap/install-schema";
 // Import t and schema through the package entry (the compiled dist)

@@ -162,7 +162,7 @@ export class Collection<
   /**
    * Active-transaction depth. `db.transaction()` wraps `tx.x.*` calls
    * with an increment/decrement so the loader is bypassed while a tx is
-   * live on this collection — see `_callWithTx` in db.ts. Mixing a
+   * live on this collection — see `tx-state.ts`. Mixing a
    * batched read with `TX_CONN`-routed reads in the same microtask
    * would otherwise blur the connection-routing boundary.
    */

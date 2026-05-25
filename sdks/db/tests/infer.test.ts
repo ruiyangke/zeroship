@@ -1,5 +1,5 @@
 /**
- * Infer / InferRow / InferRowInput / InferId — type-level helper checks.
+ * InferRow / InferRowInput / InferId — type-level helper checks.
  * These are compile-time assertions in disguise: the test bodies are
  * trivial, what matters is that the types resolve in tsc without errors.
  */
@@ -7,7 +7,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { model } from "@zeroship/bootstrap/install-schema";
 import { t } from "@zeroship/db";
-import type { Infer, InferId, InferRow, InferRowInput } from "@zeroship/db";
+import type { InferId, InferRow, InferRowInput } from "@zeroship/db";
 
 const native = {
   registerModel: () => Promise.resolve(),
@@ -21,6 +21,15 @@ const Users = model(
   {
     email: t.string().required().unique(),
     name: t.string().required(),
+  },
+  native,
+);
+
+const UsersWithDefault = model(
+  "users_with_default",
+  {
+    email: t.string().required().unique(),
+    role: t.string().required().default("user"),
   },
   native,
 );
@@ -53,9 +62,9 @@ describe("Infer helpers", () => {
     assert.equal(x, 42);
   });
 
-  test("Infer<typeof col.RowInput> identity-resolves", () => {
-    type T = Infer<typeof Users.RowInput>;
-    const x: T = { email: "a@b.com", name: "Alice" };
-    assert.equal(x.name, "Alice");
+  test("required().default() fields are optional in RowInput", () => {
+    type T = InferRowInput<typeof UsersWithDefault>;
+    const x: T = { email: "a@b.com" };
+    assert.equal(x.email, "a@b.com");
   });
 });
