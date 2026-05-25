@@ -557,6 +557,7 @@ pub(crate) fn dispatch_find<'s>(
                     read_pipeline::ApplyOptions {
                         unmask_columns: &unmask_columns,
                         schema_field_scope: read_pipeline::SchemaFieldScope::All,
+                        ..read_pipeline::ApplyOptions::default()
                     },
                 )
                 .await
@@ -1534,6 +1535,7 @@ pub(crate) fn dispatch_aggregate<'s>(
                     schema_field_scope: read_pipeline::SchemaFieldScope::Only(
                         group_fields.as_slice(),
                     ),
+                    ..read_pipeline::ApplyOptions::default()
                 },
             )
             .await
@@ -1572,12 +1574,15 @@ pub(crate) fn dispatch_distinct<'s>(
     maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let app = app_id.to_string();
     let coll = collection.to_string();
+    let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
+    let distinct_reads_masked_sibling = query::column_is_masked(field, schema_hint.as_ref());
     let built = query::build_distinct_with_soft_delete_with_dialect(
         app_id,
         collection,
         field,
         &filter,
         filter_soft_deleted,
+        schema_hint.as_ref(),
         current_sql_dialect(),
     );
 
@@ -1591,7 +1596,11 @@ pub(crate) fn dispatch_distinct<'s>(
                 &app,
                 &coll,
                 rows,
-                read_pipeline::ApplyOptions::default(),
+                read_pipeline::ApplyOptions {
+                    apply_decrypt: !distinct_reads_masked_sibling,
+                    wrap_masked: false,
+                    ..read_pipeline::ApplyOptions::default()
+                },
             )
             .await
         },

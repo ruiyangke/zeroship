@@ -2471,7 +2471,7 @@ fn build_masked_aware_select_expr_with_unmask(
 /// `.mask({...})` entry on `schema_hint`? Returns `false` when the
 /// schema is missing, the column is absent from it, or the mask is the
 /// explicit opt-out (`kind: "none"`).
-fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
+pub(crate) fn column_is_masked(name: &str, schema_hint: Option<&Value>) -> bool {
     let Some(schema_obj) = schema_hint.and_then(|v| v.as_object()) else {
         return false;
     };
@@ -3840,6 +3840,7 @@ pub fn build_distinct_with_soft_delete(
         field,
         filter,
         filter_soft_deleted,
+        None,
         SqlDialect::Postgres,
     )
 }
@@ -3851,6 +3852,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     field: &str,
     filter: &Value,
     filter_soft_deleted: bool,
+    schema_hint: Option<&Value>,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
@@ -3859,11 +3861,17 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
     let col = quote_ident(field);
+    let select_expr = if column_is_masked(field, schema_hint) {
+        let sibling = format!("{field}_masked");
+        format!("{} AS {col}", quote_ident(&sibling))
+    } else {
+        col.clone()
+    };
 
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where(filter, &mut params)?;
 
-    let mut sql = format!("SELECT DISTINCT {col} FROM {schema}.{table}");
+    let mut sql = format!("SELECT DISTINCT {select_expr} FROM {schema}.{table}");
     let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
     if !composed_where.is_empty() {
         sql.push_str(" WHERE ");
@@ -5065,6 +5073,37 @@ mod tests {
         );
         assert!(q.sql.contains(r#"ORDER BY "role""#), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["true"]);
+    }
+
+    #[test]
+    fn distinct_on_masked_field_reads_masked_sibling() {
+        let schema = json!({
+            "email": {
+                "type": "string",
+                "mask": { "kind": "email", "classification": "pii" }
+            }
+        });
+        let q = build_distinct_with_soft_delete_with_dialect(
+            "app1",
+            "users",
+            "email",
+            &json!({}),
+            false,
+            Some(&schema),
+            SqlDialect::Postgres,
+        )
+        .expect("build distinct with schema");
+
+        assert!(
+            q.sql.starts_with(r#"SELECT DISTINCT "email_masked" AS "email" FROM "app1"."users""#),
+            "masked distinct must read the sibling column: {}",
+            q.sql
+        );
+        assert!(
+            !q.sql.contains(r#"SELECT DISTINCT "email" FROM"#),
+            "masked distinct must not read the parent column: {}",
+            q.sql
+        );
     }
 
     #[test]

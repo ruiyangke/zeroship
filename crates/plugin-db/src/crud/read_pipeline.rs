@@ -11,6 +11,8 @@ pub(crate) enum SchemaFieldScope<'a> {
 pub(crate) struct ApplyOptions<'a> {
     pub unmask_columns: &'a [String],
     pub schema_field_scope: SchemaFieldScope<'a>,
+    pub apply_decrypt: bool,
+    pub wrap_masked: bool,
 }
 
 impl<'a> Default for ApplyOptions<'a> {
@@ -18,6 +20,8 @@ impl<'a> Default for ApplyOptions<'a> {
         Self {
             unmask_columns: &[],
             schema_field_scope: SchemaFieldScope::All,
+            apply_decrypt: true,
+            wrap_masked: true,
         }
     }
 }
@@ -59,16 +63,22 @@ pub(crate) async fn apply(
         .map(|schema| scope_schema(schema, &opts.schema_field_scope));
     normalize_rows_on_read(schema.as_ref(), &mut rows)?;
 
-    if let Some(schema) = schema.as_ref() {
-        if super::schema_has_encrypted_columns(schema) {
-            decrypt_rows_on_read(app_id, collection, schema, &mut rows).await?;
+    if opts.apply_decrypt {
+        if let Some(schema) = schema.as_ref() {
+            if super::schema_has_encrypted_columns(schema) {
+                decrypt_rows_on_read(app_id, collection, schema, &mut rows).await?;
+            }
         }
     }
 
-    let has_masked = if let Some(schema) = schema.as_ref() {
-        if super::schema_has_masked_columns(schema) {
-            wrap_masked_rows_on_read(collection, schema, &mut rows)?;
-            true
+    let has_masked = if opts.wrap_masked {
+        if let Some(schema) = schema.as_ref() {
+            if super::schema_has_masked_columns(schema) {
+                wrap_masked_rows_on_read(collection, schema, &mut rows)?;
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -500,11 +510,51 @@ mod tests {
                 ApplyOptions {
                     unmask_columns: &[],
                     schema_field_scope: SchemaFieldScope::Only(&[]),
+                    ..ApplyOptions::default()
                 },
             ))
             .expect("aggregate aliases must bypass schema-driven transforms");
 
         assert_eq!(result.rows, vec![serde_json::json!({ "secret": 3 })]);
+        assert!(!result.has_masked);
+    }
+
+    #[test]
+    fn apply_can_skip_mask_wrapping_for_distinct_scalars() {
+        crate::context::with_mut(|c| {
+            c.cache_schema(
+                "app_distinct_masked",
+                "users",
+                serde_json::json!({
+                    "email": {
+                        "type": "string",
+                        "mask": { "kind": "email", "classification": "pii" }
+                    }
+                }),
+            );
+        });
+
+        let rows = vec![serde_json::json!({
+            "email": "a***@example.com"
+        })];
+
+        let result = compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(apply(
+                "app_distinct_masked",
+                "users",
+                rows,
+                ApplyOptions {
+                    wrap_masked: false,
+                    ..ApplyOptions::default()
+                },
+            ))
+            .expect("distinct scalars should bypass masked-value wrapping");
+
+        assert_eq!(
+            result.rows,
+            vec![serde_json::json!({ "email": "a***@example.com" })]
+        );
         assert!(!result.has_masked);
     }
 }
