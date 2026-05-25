@@ -418,6 +418,10 @@ async fn apply_sqlite(
             ChangeKind::DropColumn | ChangeKind::DropIndex => continue,
         };
 
+        if result.is_ok() && refreshes_sqlite_cdc_name_cache(&op.change_kind) {
+            backend.invalidate_cdc_name_cache(&ctx.app_id, &op.collection);
+        }
+
         if let Some(id) = audit_id {
             match &result {
                 Ok(_) => {
@@ -469,6 +473,10 @@ async fn apply_sqlite(
     Ok(())
 }
 
+fn refreshes_sqlite_cdc_name_cache(change_kind: &ChangeKind) -> bool {
+    matches!(change_kind, ChangeKind::CreateTable | ChangeKind::AddColumn)
+}
+
 /// Pool-driven entry retained for integration tests that hand in a
 /// `Rc<Pool>` directly (predates the Backend trait). Builds an ad-hoc
 /// [`PostgresBackend`] around the pool and delegates to
@@ -490,4 +498,143 @@ pub async fn exec_register_model_with_pool(
     let url = context::with(|c| c.db_url()).unwrap_or_default();
     let backend = crate::backend::PostgresBackend::new(pool, url);
     run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::sqlite::SqliteBackend;
+    use crate::backend::SqlExecutor;
+    use crate::broker::SubscriptionMessage;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
+    }
+
+    async fn next_change(
+        sub: &crate::broker::Subscription,
+    ) -> std::rc::Rc<crate::broker::ChangeEvent> {
+        for _ in 0..50 {
+            if let Some(msg) = sub.pop() {
+                match msg {
+                    SubscriptionMessage::Change(ev) => return ev,
+                    SubscriptionMessage::Resync => continue,
+                    SubscriptionMessage::Closed => panic!("subscription closed unexpectedly"),
+                }
+            }
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for broker change event");
+    }
+
+    #[test]
+    fn sqlite_register_model_refreshes_cdc_column_name_cache_after_add_column() {
+        run(async {
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+            let app_id = "app_cdc_name_refresh";
+            let collection = "messages";
+
+            let schema_v1 = json!({
+                "_meta": {"strictness": "lenient"},
+                "title": {"type": "string", "required": true}
+            });
+            run_sqlite_pipeline(
+                &backend,
+                app_id,
+                collection,
+                &schema_v1,
+                &json!([]),
+                "deploy_v1",
+            )
+            .await
+            .expect("register initial schema");
+
+            let sub = crate::broker::subscribe(app_id, collection);
+
+            backend
+                .pool_exec(
+                    r#"INSERT INTO "app_cdc_name_refresh"."messages" (id, title)
+                       VALUES ('msg_1', 'hello')"#,
+                    &[],
+                )
+                .await
+                .expect("seed row for CDC cache prime");
+            let first = next_change(&sub).await;
+            assert!(
+                first.new_tuple.contains_key("title"),
+                "first CDC decode must resolve the original column names"
+            );
+
+            let schema_v2 = json!({
+                "_meta": {"strictness": "lenient"},
+                "title": {"type": "string", "required": true},
+                "body": {"type": "string"}
+            });
+            let ctx = bootstrap::RegisterContext {
+                app_id: app_id.to_string(),
+                deploy_id: "deploy_v2".to_string(),
+                schema_version: 2,
+                strictness: "lenient".to_string(),
+                declared_indexes: Vec::new(),
+                collection: collection.to_string(),
+                schema_json: schema_v2.clone(),
+            };
+            let approved = validate::ApprovedPlan {
+                ops: vec![crate::diff::DiffOp {
+                    collection: collection.to_string(),
+                    change_kind: ChangeKind::AddColumn,
+                    class: ChangeClass::Additive,
+                    sql: Some(
+                        r#"ALTER TABLE "app_cdc_name_refresh"."messages" ADD COLUMN "body" TEXT"#
+                            .to_string(),
+                    ),
+                    details: json!({
+                        "kind": "add_column",
+                        "field": "body",
+                    }),
+                    field: Some("body".to_string()),
+                }],
+            };
+            apply_sqlite(
+                &backend,
+                &ctx,
+                &approved,
+            )
+            .await
+            .expect("apply widened schema");
+
+            backend
+                .pool_exec(
+                    r#"INSERT INTO "app_cdc_name_refresh"."messages" (id, title, body)
+                       VALUES ('msg_2', 'hello-again', 'fresh-body')"#,
+                    &[],
+                )
+                .await
+                .expect("insert row after ADD COLUMN");
+            let second = next_change(&sub).await;
+
+            assert!(
+                second.new_tuple.contains_key("body"),
+                "CDC decode must refresh the cached column names after register_model ADD COLUMN"
+            );
+            assert!(
+                second.changed_columns.iter().any(|c| c == "body"),
+                "changed_columns must include the newly-added column name after cache refresh"
+            );
+            assert!(
+                !second.new_tuple.keys().any(|k| {
+                    k.strip_prefix('c')
+                        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
+                }),
+                "stale cache would synthesize positional fallback keys: {:?}",
+                second.new_tuple.keys().collect::<Vec<_>>()
+            );
+        });
+    }
 }
