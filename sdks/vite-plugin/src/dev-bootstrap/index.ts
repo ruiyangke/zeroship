@@ -28,11 +28,13 @@ import {
   ENV_VITE_ORIGIN,
   HMR_POLL_PATH,
 } from "../constants.js";
+import { startHmrPoll } from "./hmr";
 
 const ENTRY = (globalThis as { process?: { env?: { ZEROSHIP_ENTRY?: string } } }).process?.env?.ZEROSHIP_ENTRY!;
 
 let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
+let stopHmrPoll: (() => void) | null = null;
 
 // Procedure registry — transform-appended `__register(name, fn)` calls
 // land here. Importing the user module triggers those side-effects.
@@ -103,7 +105,7 @@ const entry = devEntry({
 
 // Kick off connection immediately + start HMR poll.
 getRunner()
-  .then((r) => startHmrPoll(r))
+  .then(() => ensureHmrPollStarted())
   .catch((e) => console.error("[zeroship:dev] Runner init failed:", e));
 
 /**
@@ -115,43 +117,27 @@ getRunner()
  * side only), so we can't use Vite's WS-based HMR. HTTP poll is the
  * dev-only fallback.
  */
-function startHmrPoll(runner: ModuleRunner) {
+function ensureHmrPollStarted() {
+  if (stopHmrPoll) return;
+
   const viteOrigin = (globalThis as { process?: { env?: Record<string, string | undefined> } })
     .process?.env?.[ENV_VITE_ORIGIN];
   if (!viteOrigin) return;
 
   const pollUrl = `${viteOrigin}${HMR_POLL_PATH}`;
+  stopHmrPoll = startHmrPoll(pollUrl, () => runner, console.log);
 
-  setInterval(async () => {
-    // The poll is dev-kernel infrastructure — bypass the active
-    // capability frame so the fetch isn't refused if it fires inside a
-    // query/mutation handler's await window.
-    const ck = (globalThis as { __zsClearKind?: () => number }).__zsClearKind;
-    const xk = (globalThis as { __zsExitKind?: (tok: number) => void }).__zsExitKind;
-    const tok = (typeof ck === "function") ? ck() : -1;
-    try {
-      const resp = await fetch(pollUrl);
-      const { changed } = await resp.json() as { changed: string[] };
-
-      if (changed.length === 0) return;
-
-      for (const file of changed) {
-        const mods = runner.evaluatedModules;
-        for (const id of [file, `/${file}`, file.replace(/\\/g, "/")]) {
-          const mod = mods.getModuleById(id);
-          if (mod) {
-            mods.invalidateModule(mod);
-          }
-        }
-      }
-
-      console.log(`[zeroship:hmr] ${changed.length} module(s) updated`);
-    } catch {
-      // Vite not ready or restarting — silently ignore
-    } finally {
-      if (tok >= 0 && typeof xk === "function") xk(tok);
-    }
-  }, 500);
+  const proc = (globalThis as {
+    process?: {
+      once?: (event: string, listener: () => void) => void;
+    };
+  }).process;
+  if (typeof proc?.once === "function") {
+    proc.once("exit", () => {
+      stopHmrPoll?.();
+      stopHmrPoll = null;
+    });
+  }
 }
 
 // Function-shape `default.rpc` per the ZS standard
