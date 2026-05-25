@@ -12,15 +12,15 @@ Verify every claim against code before promoting. Reference docs must be accurat
 ## Queue
 
 ### SHIPPED — has ADR in decisions/ (archive; content already in ADR + reference)
-- [ ] compression-streams-native.md → 2026-05-01-compression-streams-native ADR
-- [ ] headers-native.md → 2026-05-01-headers-native ADR
-- [ ] fetch-native.md → 2026-05-02-fetch-native ADR
-- [ ] streams-native.md → 2026-05-02-streams-native ADR
-- [ ] webcrypto-native.md → 2026-05-02-webcrypto-native ADR
-- [ ] websocket-native.md → 2026-05-02-websocket-native ADR (+ reference/websocket-design.md)
-- [ ] macro-constructor-post-init.md → 2026-05-04 ADR
-- [ ] macro-v8-state.md → 2026-05-04 ADR
-- [ ] node-crypto-native.md → 2026-05-05-node-crypto-native ADR
+- [x] compression-streams-native.md → 2026-05-01-compression-streams-native ADR
+- [x] headers-native.md → 2026-05-01-headers-native ADR
+- [x] fetch-native.md → 2026-05-02-fetch-native ADR
+- [x] streams-native.md → 2026-05-02-streams-native ADR
+- [x] webcrypto-native.md → 2026-05-02-webcrypto-native ADR
+- [x] websocket-native.md → 2026-05-02-websocket-native ADR (+ reference/websocket-design.md)
+- [x] macro-constructor-post-init.md → 2026-05-04 ADR
+- [x] macro-v8-state.md → 2026-05-04 ADR
+- [x] node-crypto-native.md → 2026-05-05-node-crypto-native ADR
 
 ### SHIPPED — merged to main, no ADR (promote any reference-grade content, then archive)
 - [ ] nomad-driver-ch.md (merged dde08ca2; ops covered by runbooks/sandbox-nomad-ch.md)
@@ -65,3 +65,5 @@ The 7 architecture docs were refreshed for *accuracy* in the prior pass. This ph
 ## Phase 3 — cross-cutting (optional, after Phase 2)
 - [ ] Ensure AGENTS.md task-router links all resolve (no links to archived proposals or deleted files)
 - [ ] Verify docs/reference/ index in AGENTS.md matches docs/reference/ contents
+
+- 9 ADR-backed native-API proposals — archived to docs/archive/ + headers — 82adcefd (renames) + e8564b49 (headers)
