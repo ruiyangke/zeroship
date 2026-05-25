@@ -6,6 +6,9 @@
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 
+#[path = "parity/mod.rs"]
+mod parity;
+
 fn test_url() -> String {
     std::env::var("PG_TEST_URL")
         .unwrap_or_else(|_| "postgres://postgres:test@localhost:5434/postgres".to_string())
@@ -138,6 +141,21 @@ fn row_to_json(row: &compio_postgres::Row) -> Value {
 }
 
 use zeroship_plugin_db::query::*;
+
+#[compio::test]
+#[ignore = "requires live postgres; default gate runs the sqlite leg only"]
+async fn parity_matrix_pg_matches_sqlite_projection() {
+    let Some(pg_url) = parity::maybe_pg_url().await else {
+        return;
+    };
+    let sqlite_dir = tempfile::tempdir().expect("create sqlite parity dir");
+
+    let sqlite = parity::run_matrix(&parity::sqlite_url(&sqlite_dir));
+    let pg = parity::run_matrix(&pg_url);
+
+    assert_eq!(pg.seed, sqlite.seed);
+    assert_eq!(pg.tx, sqlite.tx);
+}
 
 // ---------------------------------------------------------------------------
 // 1. Insert + find round-trip

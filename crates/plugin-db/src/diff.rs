@@ -844,9 +844,10 @@ pub fn compute_diff(
 
     let live_cols = live.tables.get(collection);
     let live_indexes = live.indexes.get(collection);
+    let table_missing = live_cols.is_none();
 
     // ----- table create -----
-    if live_cols.is_none() {
+    if table_missing {
         ops.push(DiffOp {
             collection: collection.to_string(),
             change_kind: ChangeKind::CreateTable,
@@ -869,6 +870,9 @@ pub fn compute_diff(
             // `field_name` validator (which now reserves the `_`
             // prefix for synthetic-result columns).
             if crate::query::is_schema_metadata_key(field) {
+                continue;
+            }
+            if table_missing {
                 continue;
             }
             let exists = live_cols.map(|c| c.contains_key(field)).unwrap_or(false);
@@ -1483,6 +1487,21 @@ mod tests {
             .collect();
         assert_eq!(creates.len(), 1);
         assert_eq!(creates[0].class, ChangeClass::Additive);
+    }
+
+    #[test]
+    fn create_table_does_not_emit_redundant_add_column_ops_when_live_empty() {
+        let live = LiveSchema::default();
+        let declared = json!({
+            "name": { "type": "string" },
+            "rank": { "type": "int", "required": true },
+        });
+        let ops = compute_diff(&live, "app1", "fresh", &declared, "CREATE TABLE ...", &[]);
+        assert!(
+            ops.iter()
+                .all(|op| !matches!(op.change_kind, ChangeKind::AddColumn)),
+            "fresh-table diff must rely on CreateTable alone; ops={ops:?}"
+        );
     }
 
     // -----------------------------------------------------------------

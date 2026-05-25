@@ -532,7 +532,7 @@ pub fn build_create_table_with_fks_for_dialect(
             if is_schema_metadata_key(field) {
                 continue;
             }
-            let col_def = field_to_column(field, def)?;
+            let col_def = field_to_column_for_dialect(field, def, dialect)?;
             columns.push(col_def);
 
             // **P5.5 PR 2** — Path B sibling-column emission. When the
@@ -1641,10 +1641,12 @@ pub fn build_mask_sentinel_comment_for_field(
 /// platform system field names ([`SYSTEM_FIELD_NAMES`]); filter-time
 /// call sites stay on the underlying [`validate_field_name`] so creators
 /// can keep filtering by `id` / `created_at` / etc.
-fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, QueryError> {
+fn field_to_column_for_dialect(
+    field: &str,
+    def: &serde_json::Value,
+    dialect: SqlDialect,
+) -> Result<String, QueryError> {
     validate_field_name_for_declaration(field)?;
-    let pg_type_owned;
-    let zs_type = def.get("type").and_then(|t| t.as_str());
     // **P5 PR 2** — `t.encrypted(...)`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
     // regardless of `wraps`. The encryption pass swaps the plaintext
@@ -1677,41 +1679,8 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, Query
     } else {
         ""
     };
-    let pg_type: &str = if def.get("encrypted").is_some() {
-        "BYTEA"
-    } else if zs_type == Some("vector") {
-        // **P4 PR 2** — pgvector column type is parameterised by dims:
-        // `vector(768)`. The SDK validates `vectorDims` is `1..=16000`
-        // before sending; we treat a missing field as a schema bug and
-        // fall back to bare `vector` (PG will then reject the DDL with
-        // a typed error the SDK can surface).
-        let dims = def
-            .get("vectorDims")
-            .and_then(serde_json::Value::as_i64)
-            .filter(|d| *d > 0 && *d <= 16000)
-            .unwrap_or(0);
-        if dims > 0 {
-            pg_type_owned = format!("vector({dims})");
-            &pg_type_owned
-        } else {
-            "vector"
-        }
-    } else if zs_type == Some("geoPoint") {
-        // **P4 PR 3** — `t.geoPoint()` materialises as PostGIS
-        // `geography(POINT, 4326)`. We hand-code the PG type here rather
-        // than wiring it through `def_to_pg_type` because the type is
-        // PostGIS-extension-dependent, not a core PG type, and we want
-        // the DDL emitter to remain functional regardless of whether
-        // PostGIS is installed (the PostGIS probe lives on the runtime
-        // `SpatialIndex` path; a registerModel against a non-PostGIS
-        // database will fail at CREATE TABLE time with a clear
-        // "type geography does not exist" error rather than at
-        // index-build time).
-        "geography(POINT, 4326)"
-    } else {
-        def_to_pg_type(def)
-    };
-    let constraints = def_to_constraints(field, def);
+    let sql_type = def_to_column_type_for_dialect(def, dialect);
+    let constraints = def_to_constraints_for_dialect(field, def, dialect);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zsenc:... */
     // <constraints>`. PG ignores the comment; SQLite preserves it in
@@ -1719,12 +1688,72 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, Query
     Ok(format!(
         "{} {}{} {}",
         quote_ident(field),
-        pg_type,
+        sql_type,
         enc_comment,
         constraints
     )
     .trim()
     .to_string())
+}
+
+fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
+    if def.get("encrypted").is_some() {
+        return match dialect {
+            SqlDialect::Postgres => "BYTEA".to_string(),
+            SqlDialect::Sqlite => "BLOB".to_string(),
+        };
+    }
+
+    let zs_type = def.get("type").and_then(|t| t.as_str());
+
+    if zs_type == Some("vector") {
+        return match dialect {
+            SqlDialect::Postgres => {
+                let dims = def
+                    .get("vectorDims")
+                    .and_then(serde_json::Value::as_i64)
+                    .filter(|d| *d > 0 && *d <= 16000)
+                    .unwrap_or(0);
+                if dims > 0 {
+                    format!("vector({dims})")
+                } else {
+                    "vector".to_string()
+                }
+            }
+            SqlDialect::Sqlite => "BLOB".to_string(),
+        };
+    }
+
+    if zs_type == Some("geoPoint") {
+        return match dialect {
+            SqlDialect::Postgres => "geography(POINT, 4326)".to_string(),
+            SqlDialect::Sqlite => "BLOB".to_string(),
+        };
+    }
+
+    match dialect {
+        SqlDialect::Postgres => def_to_pg_type(def).to_string(),
+        SqlDialect::Sqlite => match zs_type {
+            Some("string") => "TEXT".to_string(),
+            Some("number") => "REAL".to_string(),
+            Some("boolean") => "INTEGER".to_string(),
+            Some("date") => "TEXT".to_string(),
+            Some("calendarDate") => "TEXT".to_string(),
+            Some("json") | Some("object") | Some("array") | Some("union") => {
+                "TEXT".to_string()
+            }
+            Some("ref") => "TEXT".to_string(),
+            Some("literal") => match def.get("literalValue") {
+                Some(serde_json::Value::Number(_)) => "NUMERIC".to_string(),
+                Some(serde_json::Value::Bool(_)) => "INTEGER".to_string(),
+                _ => "TEXT".to_string(),
+            },
+            Some("bigint") | Some("int8") | Some("integer") | Some("int") | Some("int4") => {
+                "INTEGER".to_string()
+            }
+            _ => "TEXT".to_string(),
+        },
+    }
 }
 
 /// C2 — emit per-variant CHECK constraints for a flat-expanded
@@ -1942,6 +1971,14 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
 
 /// Generate column constraints from field definition.
 fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
+    def_to_constraints_for_dialect(field, def, SqlDialect::Postgres)
+}
+
+fn def_to_constraints_for_dialect(
+    field: &str,
+    def: &serde_json::Value,
+    dialect: SqlDialect,
+) -> String {
     let mut parts = Vec::new();
 
     if def.get("required").and_then(|v| v.as_bool()) == Some(true) {
@@ -1974,15 +2011,27 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
                     parts.push(format!("DEFAULT {b}"));
                 }
             }
-            Some("json") | Some("object") => parts.push("DEFAULT '{}'::jsonb".to_string()),
-            Some("array") => parts.push("DEFAULT '[]'::jsonb".to_string()),
+            Some("json") | Some("object") => parts.push(match dialect {
+                SqlDialect::Postgres => "DEFAULT '{}'::jsonb".to_string(),
+                SqlDialect::Sqlite => "DEFAULT '{}'".to_string(),
+            }),
+            Some("array") => parts.push(match dialect {
+                SqlDialect::Postgres => "DEFAULT '[]'::jsonb".to_string(),
+                SqlDialect::Sqlite => "DEFAULT '[]'".to_string(),
+            }),
             _ => {}
         }
     } else {
         // Default defaults for json/object/array
         match def.get("type").and_then(|t| t.as_str()) {
-            Some("json") | Some("object") => parts.push("DEFAULT '{}'::jsonb".to_string()),
-            Some("array") => parts.push("DEFAULT '[]'::jsonb".to_string()),
+            Some("json") | Some("object") => parts.push(match dialect {
+                SqlDialect::Postgres => "DEFAULT '{}'::jsonb".to_string(),
+                SqlDialect::Sqlite => "DEFAULT '{}'".to_string(),
+            }),
+            Some("array") => parts.push(match dialect {
+                SqlDialect::Postgres => "DEFAULT '[]'::jsonb".to_string(),
+                SqlDialect::Sqlite => "DEFAULT '[]'".to_string(),
+            }),
             _ => {}
         }
     }
@@ -2183,6 +2232,63 @@ pub fn build_find_with_schema_and_unmask(
     )
 }
 
+/// Dialect-aware variant of
+/// [`build_find_with_schema_and_unmask_and_soft_delete`]. The legacy
+/// wrapper above keeps the Postgres SQL shape for direct callers; the
+/// runtime dispatch path threads the active backend's dialect here so
+/// SQLite can emulate Postgres' NULL ordering semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+    unmask_columns: &[String],
+    filter_soft_deleted: bool,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut params: Vec<String> = Vec::new();
+    let where_clause = build_where(filter, &mut params)?;
+
+    // Build SELECT column list from projection, or default to *
+    let select_expr =
+        build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns);
+
+    let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
+    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
+    if !composed_where.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&composed_where);
+    }
+
+    if let Some(order) = order_by {
+        let order_clause = build_order_by_with_dialect(order, dialect)?;
+        if !order_clause.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&order_clause);
+        }
+    }
+
+    if let Some(lim) = limit {
+        sql.push_str(&format!(" LIMIT {lim}"));
+    }
+    if let Some(off) = offset {
+        sql.push_str(&format!(" OFFSET {off}"));
+    }
+
+    Ok(BuiltQuery { sql, params })
+}
+
 /// **P7 PR 5** — schema-aware SELECT builder with the soft-delete
 /// auto-filter. Same shape as [`build_find_with_schema_and_unmask`],
 /// plus `filter_soft_deleted`: when `true`, appends
@@ -2217,42 +2323,19 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete(
     unmask_columns: &[String],
     filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
-    validate_collection(collection)?;
-    validate_schema(app_id)?;
-
-    let schema = quote_ident(app_id);
-    let table = quote_ident(collection);
-
-    let mut params: Vec<String> = Vec::new();
-    let where_clause = build_where(filter, &mut params)?;
-
-    // Build SELECT column list from projection, or default to *
-    let select_expr =
-        build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns);
-
-    let mut sql = format!("SELECT {select_expr} FROM {schema}.{table}");
-    let composed_where = compose_where_with_soft_delete(&where_clause, filter_soft_deleted);
-    if !composed_where.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&composed_where);
-    }
-
-    if let Some(order) = order_by {
-        let order_clause = build_order_by(order)?;
-        if !order_clause.is_empty() {
-            sql.push_str(" ORDER BY ");
-            sql.push_str(&order_clause);
-        }
-    }
-
-    if let Some(lim) = limit {
-        sql.push_str(&format!(" LIMIT {lim}"));
-    }
-    if let Some(off) = offset {
-        sql.push_str(&format!(" OFFSET {off}"));
-    }
-
-    Ok(BuiltQuery { sql, params })
+    build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+        app_id,
+        collection,
+        filter,
+        limit,
+        offset,
+        order_by,
+        select,
+        schema_hint,
+        unmask_columns,
+        filter_soft_deleted,
+        SqlDialect::Postgres,
+    )
 }
 
 /// **P7 PR 5** — compose a WHERE clause body with the soft-delete
@@ -3507,6 +3590,23 @@ pub fn build_aggregate_with_soft_delete(
     pipeline: &Value,
     filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
+    build_aggregate_with_soft_delete_with_dialect(
+        app_id,
+        collection,
+        pipeline,
+        filter_soft_deleted,
+        SqlDialect::Postgres,
+    )
+}
+
+/// Dialect-aware variant of [`build_aggregate_with_soft_delete`].
+pub fn build_aggregate_with_soft_delete_with_dialect(
+    app_id: &str,
+    collection: &str,
+    pipeline: &Value,
+    filter_soft_deleted: bool,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -3526,8 +3626,8 @@ pub fn build_aggregate_with_soft_delete(
     let mut having_clause = String::new();
     let mut order_clause = String::new();
     let mut limit_clause = String::new();
-    // Track the most recent $sort for $first sort-order threading
-    let mut last_sort: Vec<(String, &str)> = Vec::new();
+    // Track the most recent $sort for $first sort-order threading.
+    let mut last_sort: Vec<(String, bool)> = Vec::new();
 
     for stage in stages {
         let obj = stage.as_object().ok_or_else(|| {
@@ -3633,7 +3733,9 @@ pub fn build_aggregate_with_soft_delete(
                         } else {
                             let order_parts: Vec<String> = last_sort
                                 .iter()
-                                .map(|(col, dir)| format!("{} {dir}", quote_ident(col)))
+                                .map(|(col, descending)| {
+                                    build_order_term(col, *descending, dialect)
+                                })
                                 .collect();
                             format!(
                                 "(array_agg({} ORDER BY {}))[1]",
@@ -3659,14 +3761,11 @@ pub fn build_aggregate_with_soft_delete(
             last_sort.clear();
             if let Some(sort_obj) = sort_val.as_object() {
                 for (key, val) in sort_obj {
-                    let dir = match val.as_i64() {
-                        Some(n) if n < 0 => "DESC",
-                        _ => "ASC",
-                    };
-                    last_sort.push((key.clone(), dir));
+                    let descending = matches!(val.as_i64(), Some(n) if n < 0);
+                    last_sort.push((key.clone(), descending));
                 }
             }
-            order_clause = build_order_by(sort_val)?;
+            order_clause = build_order_by_with_dialect(sort_val, dialect)?;
         } else if let Some(limit_val) = obj.get("$limit") {
             let n = limit_val.as_i64().ok_or_else(|| {
                 QueryError::InvalidFilter("aggregate: $limit must be an integer".to_string())
@@ -3735,6 +3834,25 @@ pub fn build_distinct_with_soft_delete(
     filter: &Value,
     filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
+    build_distinct_with_soft_delete_with_dialect(
+        app_id,
+        collection,
+        field,
+        filter,
+        filter_soft_deleted,
+        SqlDialect::Postgres,
+    )
+}
+
+/// Dialect-aware variant of [`build_distinct_with_soft_delete`].
+pub fn build_distinct_with_soft_delete_with_dialect(
+    app_id: &str,
+    collection: &str,
+    field: &str,
+    filter: &Value,
+    filter_soft_deleted: bool,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -3751,7 +3869,8 @@ pub fn build_distinct_with_soft_delete(
         sql.push_str(" WHERE ");
         sql.push_str(&composed_where);
     }
-    sql.push_str(&format!(" ORDER BY {col}"));
+    sql.push_str(" ORDER BY ");
+    sql.push_str(&build_order_term(field, false, dialect));
 
     Ok(BuiltQuery { sql, params })
 }
@@ -4327,16 +4446,17 @@ fn build_field_condition(
 /// Accepts: `{ "field": 1 }` or `{ "field": -1 }` (1 = ASC, -1 = DESC)
 /// or `[["field", 1], ["field2", -1]]` for ordered multi-column sort.
 fn build_order_by(order: &Value) -> Result<String, QueryError> {
+    build_order_by_with_dialect(order, SqlDialect::Postgres)
+}
+
+fn build_order_by_with_dialect(order: &Value, dialect: SqlDialect) -> Result<String, QueryError> {
     match order {
         Value::Object(map) => {
             let parts: Vec<String> = map
                 .iter()
                 .map(|(key, val)| {
-                    let dir = match val.as_i64() {
-                        Some(n) if n < 0 => "DESC",
-                        _ => "ASC",
-                    };
-                    format!("{} {dir}", quote_ident(key))
+                    let descending = matches!(val.as_i64(), Some(n) if n < 0);
+                    build_order_term(key, descending, dialect)
                 })
                 .collect();
             Ok(parts.join(", "))
@@ -4355,17 +4475,34 @@ fn build_order_by(order: &Value) -> Result<String, QueryError> {
                 let field = pair[0].as_str().ok_or_else(|| {
                     QueryError::InvalidFilter("orderBy field must be a string".to_string())
                 })?;
-                let dir = match pair[1].as_i64() {
-                    Some(n) if n < 0 => "DESC",
-                    _ => "ASC",
-                };
-                parts.push(format!("{} {dir}", quote_ident(field)));
+                let descending = matches!(pair[1].as_i64(), Some(n) if n < 0);
+                parts.push(build_order_term(field, descending, dialect));
             }
             Ok(parts.join(", "))
         }
         _ => Err(QueryError::InvalidFilter(
             "orderBy must be an object or array".to_string(),
         )),
+    }
+}
+
+fn build_order_term(field: &str, descending: bool, dialect: SqlDialect) -> String {
+    let col = quote_ident(field);
+    match dialect {
+        SqlDialect::Postgres => {
+            let dir = if descending { "DESC" } else { "ASC" };
+            let nulls = if descending {
+                "NULLS FIRST"
+            } else {
+                "NULLS LAST"
+            };
+            format!("{col} {dir} {nulls}")
+        }
+        SqlDialect::Sqlite => {
+            let dir = if descending { "DESC" } else { "ASC" };
+            let null_bucket = if descending { "DESC" } else { "ASC" };
+            format!("{col} IS NULL {null_bucket}, {col} {dir}")
+        }
     }
 }
 
@@ -4998,8 +5135,8 @@ mod tests {
     fn test_order_by_object() {
         let order = json!({"name": 1, "age": -1});
         let clause = build_order_by(&order).unwrap();
-        assert!(clause.contains(r#""name" ASC"#), "clause: {clause}");
-        assert!(clause.contains(r#""age" DESC"#), "clause: {clause}");
+        assert!(clause.contains(r#""name" ASC NULLS LAST"#), "clause: {clause}");
+        assert!(clause.contains(r#""age" DESC NULLS FIRST"#), "clause: {clause}");
     }
 
     #[test]
@@ -5007,8 +5144,8 @@ mod tests {
         let order = json!([["name", 1], ["age", -1]]);
         let clause = build_order_by(&order).unwrap();
         // Array form preserves declaration order
-        assert!(clause.contains(r#""name" ASC"#), "clause: {clause}");
-        assert!(clause.contains(r#""age" DESC"#), "clause: {clause}");
+        assert!(clause.contains(r#""name" ASC NULLS LAST"#), "clause: {clause}");
+        assert!(clause.contains(r#""age" DESC NULLS FIRST"#), "clause: {clause}");
         // "name" should appear before "age"
         let name_pos = clause.find(r#""name""#).unwrap();
         let age_pos = clause.find(r#""age""#).unwrap();
@@ -5016,12 +5153,55 @@ mod tests {
     }
 
     #[test]
+    fn test_order_by_sqlite_emulates_postgres_null_ordering() {
+        let order = json!({"name": 1, "age": -1});
+        let clause = build_order_by_with_dialect(&order, SqlDialect::Sqlite).unwrap();
+        assert!(
+            clause.contains(r#""name" IS NULL ASC, "name" ASC"#),
+            "clause: {clause}"
+        );
+        assert!(
+            clause.contains(r#""age" IS NULL DESC, "age" DESC"#),
+            "clause: {clause}"
+        );
+    }
+
+    #[test]
     fn test_find_with_order() {
         let filter = json!({});
         let order = json!({"created_at": -1});
         let q = build_find("app1", "posts", &filter, Some(10), None, Some(&order), None).unwrap();
-        assert!(q.sql.contains(r#"ORDER BY "created_at" DESC"#), "sql: {}", q.sql);
+        assert!(
+            q.sql.contains(r#"ORDER BY "created_at" DESC NULLS FIRST"#),
+            "sql: {}",
+            q.sql
+        );
         assert!(q.sql.contains("LIMIT 10"), "sql: {}", q.sql);
+    }
+
+    #[test]
+    fn build_find_sqlite_orders_nullable_columns_like_postgres() {
+        let filter = json!({});
+        let order = json!({"optional": 1});
+        let q = build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+            "app1",
+            "posts",
+            &filter,
+            None,
+            None,
+            Some(&order),
+            None,
+            None,
+            &[],
+            false,
+            SqlDialect::Sqlite,
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(r#"ORDER BY "optional" IS NULL ASC, "optional" ASC"#),
+            "sql: {}",
+            q.sql
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -5351,7 +5531,7 @@ mod tests {
         let q = build_aggregate("app1", "employees", &pipeline).unwrap();
         // With a preceding $sort, $first threads the ORDER BY into array_agg
         assert!(
-            q.sql.contains(r#"(array_agg("name" ORDER BY "salary" DESC))[1]"#),
+            q.sql.contains(r#"(array_agg("name" ORDER BY "salary" DESC NULLS FIRST))[1]"#),
             "sql: {}",
             q.sql
         );
@@ -5396,7 +5576,7 @@ mod tests {
         let q = build_aggregate("app1", "employees", &pipeline).unwrap();
         // $first should have ORDER BY
         assert!(
-            q.sql.contains(r#"array_agg("name" ORDER BY "salary" DESC)"#),
+            q.sql.contains(r#"array_agg("name" ORDER BY "salary" DESC NULLS FIRST)"#),
             "sql: {}",
             q.sql
         );
@@ -6750,6 +6930,28 @@ mod tests {
         assert!(sql.contains("\"profile\" JSONB"), "{sql}");
         // Defaults to an empty JSON object (like t.json()).
         assert!(sql.contains("DEFAULT '{}'::jsonb"), "{sql}");
+    }
+
+    #[test]
+    fn sqlite_create_table_uses_sqlite_types_for_object_bool_and_int() {
+        let schema = json!({
+            "flag": { "type": "boolean", "required": true },
+            "meta": { "type": "object", "required": true },
+            "rank": { "type": "int", "required": true },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "users",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build sqlite DDL");
+        assert!(sql.contains("\"flag\" INTEGER NOT NULL"), "{sql}");
+        assert!(sql.contains("\"meta\" TEXT NOT NULL DEFAULT '{}'"), "{sql}");
+        assert!(sql.contains("\"rank\" INTEGER NOT NULL"), "{sql}");
+        assert!(!sql.contains("JSONB"), "{sql}");
+        assert!(!sql.contains("::jsonb"), "{sql}");
     }
 
     // -----------------------------------------------------------------

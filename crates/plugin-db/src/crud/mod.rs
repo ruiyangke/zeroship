@@ -490,7 +490,7 @@ pub(crate) fn dispatch_find<'s>(
         // **P7 PR 5** — soft-delete auto-filter gate.
         let filter_soft_deleted =
             system_fields_pass::should_filter_soft_deleted(&app, &coll, include_deleted);
-        let built = query::build_find_with_schema_and_unmask_and_soft_delete(
+        let built = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
             &app,
             &coll,
             &filter,
@@ -501,6 +501,7 @@ pub(crate) fn dispatch_find<'s>(
             schema_hint.as_ref(),
             &unmask_columns,
             filter_soft_deleted,
+            current_sql_dialect(),
         );
         let bq = match built {
             Ok(bq) => bq,
@@ -514,6 +515,16 @@ pub(crate) fn dispatch_find<'s>(
         };
         match exec_query(bq).await {
             Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
                 // **P5 PR 2** — decrypt encrypted columns on every
                 // returned row. No-op when the schema declares none.
                 let rows = match apply_encryption_on_read(&app, &coll, rows).await {
@@ -1411,11 +1422,12 @@ pub(crate) fn dispatch_aggregate<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let app = app_id.to_string();
     let coll = collection.to_string();
-    let built = query::build_aggregate_with_soft_delete(
+    let built = query::build_aggregate_with_soft_delete_with_dialect(
         app_id,
         collection,
         &pipeline,
         filter_soft_deleted,
+        current_sql_dialect(),
     );
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -1456,12 +1468,13 @@ pub(crate) fn dispatch_distinct<'s>(
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
     let app = app_id.to_string();
     let coll = collection.to_string();
-    let built = query::build_distinct_with_soft_delete(
+    let built = query::build_distinct_with_soft_delete_with_dialect(
         app_id,
         collection,
         field,
         &filter,
         filter_soft_deleted,
+        current_sql_dialect(),
     );
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(

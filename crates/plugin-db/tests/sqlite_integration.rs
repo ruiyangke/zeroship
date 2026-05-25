@@ -19,6 +19,9 @@ use std::path::PathBuf;
 
 use std::rc::Rc;
 
+#[path = "parity/mod.rs"]
+mod parity;
+
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope, NamespaceManager,
@@ -48,6 +51,24 @@ fn run<F: std::future::Future>(f: F) -> F::Output {
     compio::runtime::Runtime::new()
         .expect("compio runtime build")
         .block_on(f)
+}
+
+#[test]
+fn parity_matrix_sqlite_seed_projection_matches_contract() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create parity dir");
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        assert_eq!(snapshot.seed, parity::expected_seed_projection());
+    });
+}
+
+#[test]
+fn parity_matrix_sqlite_transaction_projection_matches_contract() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create parity dir");
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        assert_eq!(snapshot.tx, parity::expected_tx_projection());
+    });
 }
 
 /// Read the value of a single-column scalar PRAGMA back from the
@@ -271,6 +292,23 @@ fn ensure_app_schema_isolates_per_app() {
             rows_b.is_empty(),
             "app_b must not see app_a's tables; got {rows_b:?}"
         );
+    });
+}
+
+#[test]
+fn estimate_row_count_missing_table_returns_zero() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        let rows = backend
+            .estimate_row_count("app_demo", "missing_table")
+            .await
+            .expect("estimate_row_count for missing table");
+        assert_eq!(rows, 0, "missing table must classify as empty");
     });
 }
 

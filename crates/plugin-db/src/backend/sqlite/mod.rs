@@ -988,7 +988,13 @@ impl SchemaIntrospect for SqliteBackend {
         let q_app = self.quote_ident(app_id);
         let q_coll = self.quote_ident(collection);
         let sql = format!("SELECT COUNT(*) FROM {q_app}.{q_coll}");
-        let rows = self.session.query(&sql, &[]).await?;
+        let rows = match self.session.query(&sql, &[]).await {
+            Ok(rows) => rows,
+            Err(DbError::Transient { message }) if message.contains("no such table") => {
+                return Ok(0);
+            }
+            Err(e) => return Err(e),
+        };
         let n = rows
             .first()
             .and_then(|r| r.first())
@@ -1184,10 +1190,10 @@ impl AuditWriter for SqliteBackend {
                  CONSTRAINT __zeroship_migrations_class_chk CHECK (change_class IN ('additive','compatible','destructive')), \
                  CONSTRAINT __zeroship_migrations_status_chk CHECK (status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back','validation_refused'))\
              );\
-             CREATE INDEX IF NOT EXISTS \"__zeroship_migrations_deploy_idx\" \
-                 ON {q_app}.\"__zeroship_migrations\" (deploy_id);\
-             CREATE INDEX IF NOT EXISTS \"__zeroship_migrations_updated_at_idx\" \
-                 ON {q_app}.\"__zeroship_migrations\" (updated_at DESC);"
+             CREATE INDEX IF NOT EXISTS {q_app}.\"__zeroship_migrations_deploy_idx\" \
+                 ON \"__zeroship_migrations\" (deploy_id);\
+             CREATE INDEX IF NOT EXISTS {q_app}.\"__zeroship_migrations_updated_at_idx\" \
+                 ON \"__zeroship_migrations\" (updated_at DESC);"
         );
         self.session.exec_batch(&ddl).await
     }
