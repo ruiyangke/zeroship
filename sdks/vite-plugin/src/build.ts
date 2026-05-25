@@ -14,6 +14,7 @@ import {
   computeManifestExtras,
   type DiscoveredProcedure,
 } from "./manifest.js";
+import { zeroshipBootstrapResolverPlugin } from "./zeroship-module.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 
@@ -457,6 +458,13 @@ export function buildPlugin(
           // more — the synthetic SSR entry discovers procedures at
           // module-init time from the user namespace's exports.
           transformPlugin(DEFAULT_RPC_ENDPOINT, state),
+          // The synthetic server entry side-effect-imports
+          // @zeroship/bootstrap so the runtime can resolve its dynamic
+          // imports from the bundled worker. That package is
+          // framework-internal, so the nested SSR build must resolve it
+          // through the Vite plugin's dependency tree rather than the
+          // user's app root.
+          zeroshipBootstrapResolverPlugin(),
           // Synthetic SSR entry virtual module owner. The entry's body
           // is build-time-static and order-independent.
           rpcRegistryPlugin({

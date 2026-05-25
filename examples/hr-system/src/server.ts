@@ -14,7 +14,7 @@
 
 import { schema, t } from "@zeroship/db";
 import { env } from "zeroship";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 
 // Schema declared via the `export default { schema }` convention; the
 // platform installs typed Collection wrappers on `env.db` at app boot.
@@ -361,19 +361,19 @@ export const createEmployee = procedure(async (
   });
 
   return { data, error: null };
-});
+}, { id: "hr.createEmployee" });
 
 export const getEmployees = procedure(async (filters?: Record<string, unknown>) => {
   return db.employees.find(filters || {}).sort({ lastName: 1, firstName: 1 });
-});
+}, { id: "hr.getEmployees" });
 
 export const getEmployee = procedure(async (id: number) => {
   return db.employees.get({ id });
-});
+}, { id: "hr.getEmployee" });
 
 export const updateEmployee = procedure(async (id: number, changes: Record<string, unknown>) => {
   return db.employees.update({ id }, changes);
-});
+}, { id: "hr.updateEmployee" });
 
 export const terminateEmployee = procedure(async (id: number) => {
   const { data: emp } = await db.employees.get({ id });
@@ -389,7 +389,7 @@ export const terminateEmployee = procedure(async (id: number) => {
   }
 
   return { data: { terminated: true }, error: null };
-});
+}, { id: "hr.terminateEmployee" });
 
 export const getOrgChart = procedure(async () => {
   const { data: allEmployees } = await db.employees.find({ status: "active" });
@@ -412,11 +412,11 @@ export const getOrgChart = procedure(async () => {
   }
 
   return { data: roots, error: null };
-});
+}, { id: "hr.getOrgChart" });
 
 export const getDirectReports = procedure(async (managerId: number) => {
   return db.employees.find({ managerId, status: "active" }).sort({ lastName: 1 });
-});
+}, { id: "hr.getDirectReports" });
 
 export const searchEmployees = procedure(async (query: string) => {
   return db.employees.find({
@@ -426,19 +426,19 @@ export const searchEmployees = procedure(async (query: string) => {
       { email:     { $ilike: `%${query}%` } },
     ],
   }).limit(20);
-});
+}, { id: "hr.searchEmployees" });
 
 export const addSkill = procedure(async (id: number, skill: string) => {
   return db.employees.update({ id }, { skills: { $addToSet: skill } });
-});
+}, { id: "hr.addSkill" });
 
 export const removeSkill = procedure(async (id: number, skill: string) => {
   return db.employees.update({ id }, { skills: { $pull: skill } });
-});
+}, { id: "hr.removeSkill" });
 
 export const getEmployeesByDepartment = procedure(async (departmentId: number) => {
   return db.employees.find({ departmentId, status: "active" }).sort({ lastName: 1 });
-});
+}, { id: "hr.getEmployeesByDepartment" });
 
 export const getEmployeeHistory = procedure(async (employeeId: number) => {
   const [compHistory, posHistory] = await Promise.all([
@@ -452,7 +452,7 @@ export const getEmployeeHistory = procedure(async (employeeId: number) => {
     },
     error: null,
   };
-});
+}, { id: "hr.getEmployeeHistory" });
 
 // ---------------------------------------------------------------------------
 // Department (6 endpoints)
@@ -470,23 +470,23 @@ export const createDepartment = procedure(async (
     ...(budget !== undefined && { budget }),
     ...(parentDepartmentId !== undefined && { parentDepartmentId }),
   });
-});
+}, { id: "hr.createDepartment" });
 
 export const getDepartments = procedure(async () => {
   return db.departments.find({}).sort({ name: 1 });
-});
+}, { id: "hr.getDepartments" });
 
 export const getDepartment = procedure(async (id: number) => {
   return db.departments.get({ id });
-});
+}, { id: "hr.getDepartment" });
 
 export const updateDepartment = procedure(async (id: number, changes: Record<string, unknown>) => {
   return db.departments.update({ id }, changes);
-});
+}, { id: "hr.updateDepartment" });
 
 export const deleteDepartment = procedure(async (id: number) => {
   return db.departments.delete({ id });
-});
+}, { id: "hr.deleteDepartment" });
 
 export const getDepartmentTree = procedure(async () => {
   const { data: allDepts } = await db.departments.find({});
@@ -509,7 +509,7 @@ export const getDepartmentTree = procedure(async () => {
   }
 
   return { data: roots, error: null };
-});
+}, { id: "hr.getDepartmentTree" });
 
 // ---------------------------------------------------------------------------
 // Position (6 endpoints)
@@ -524,27 +524,27 @@ export const createPosition = procedure(async (
   description?: string
 ) => {
   return db.positions.insert({ title, departmentId, level, salaryMin, salaryMax, ...(description && { description }) });
-});
+}, { id: "hr.createPosition" });
 
 export const getPositions = procedure(async (filters?: Record<string, unknown>) => {
   return db.positions.find(filters || {}).sort({ title: 1 });
-});
+}, { id: "hr.getPositions" });
 
 export const getOpenPositions = procedure(async () => {
   return db.positions.find({ isOpen: true }).sort({ title: 1 });
-});
+}, { id: "hr.getOpenPositions" });
 
 export const updatePosition = procedure(async (id: number, changes: Record<string, unknown>) => {
   return db.positions.update({ id }, changes);
-});
+}, { id: "hr.updatePosition" });
 
 export const closePosition = procedure(async (id: number) => {
   return db.positions.update({ id }, { isOpen: false });
-});
+}, { id: "hr.closePosition" });
 
 export const getPositionsByDepartment = procedure(async (departmentId: number) => {
   return db.positions.find({ departmentId }).sort({ level: 1 });
-});
+}, { id: "hr.getPositionsByDepartment" });
 
 // ---------------------------------------------------------------------------
 // Recruitment (10 endpoints)
@@ -563,23 +563,23 @@ export const createJobPosting = procedure(async (
     ...(requirements && { requirements }),
     ...(closingDate && { closingDate }),
   });
-});
+}, { id: "hr.createJobPosting" });
 
 export const getJobPostings = procedure(async (filters?: Record<string, unknown>) => {
   return db.jobPostings.find(filters || {}).sort({ created_at: -1 });
-});
+}, { id: "hr.getJobPostings" });
 
 export const getJobPosting = procedure(async (id: number) => {
   return db.jobPostings.get({ id });
-});
+}, { id: "hr.getJobPosting" });
 
 export const publishJobPosting = procedure(async (id: number) => {
   return db.jobPostings.update({ id }, { status: "open", postedDate: Date.now() });
-});
+}, { id: "hr.publishJobPosting" });
 
 export const closeJobPosting = procedure(async (id: number) => {
   return db.jobPostings.update({ id }, { status: "closed" });
-});
+}, { id: "hr.closeJobPosting" });
 
 export const applyToJob = procedure(async (
   jobPostingId: number,
@@ -594,14 +594,14 @@ export const applyToJob = procedure(async (
     ...(resumeUrl && { resumeUrl }),
     appliedDate: Date.now(),
   });
-});
+}, { id: "hr.applyToJob" });
 
 export const getApplicants = procedure(async (jobPostingId: number, stage?: string) => {
   return db.applicants.find({
     jobPostingId,
     ...(stage && { stage }),
   }).sort({ appliedDate: -1 });
-});
+}, { id: "hr.getApplicants" });
 
 export const updateApplicantStage = procedure(async (
   id: number,
@@ -614,7 +614,7 @@ export const updateApplicantStage = procedure(async (
     ...(notes !== undefined && { notes }),
     ...(rating !== undefined && { rating }),
   });
-});
+}, { id: "hr.updateApplicantStage" });
 
 export const scheduleInterview = procedure(async (
   applicantId: number,
@@ -627,7 +627,7 @@ export const scheduleInterview = procedure(async (
     applicantId, interviewerId, scheduledAt, type,
     ...(durationMinutes && { durationMinutes }),
   });
-});
+}, { id: "hr.scheduleInterview" });
 
 export const submitInterviewFeedback = procedure(async (
   id: number,
@@ -635,7 +635,7 @@ export const submitInterviewFeedback = procedure(async (
   rating: number
 ) => {
   return db.interviews.update({ id }, { status: "completed", feedback, rating });
-});
+}, { id: "hr.submitInterviewFeedback" });
 
 // ---------------------------------------------------------------------------
 // Time & Attendance (8 endpoints)
@@ -653,7 +653,7 @@ export const clockIn = procedure(async (employeeId: number, date: number, notes?
     clockIn: Date.now(),
     ...(notes && { notes }),
   });
-});
+}, { id: "hr.clockIn" });
 
 export const clockOut = procedure(async (employeeId: number, date: number) => {
   const { data: ts } = await db.timesheets.get({ employeeId, date });
@@ -670,15 +670,15 @@ export const clockOut = procedure(async (employeeId: number, date: number) => {
     { id: tsData._id as number },
     { clockOut: clockOutTime, hoursWorked, overtimeHours }
   );
-});
+}, { id: "hr.clockOut" });
 
 export const submitTimesheet = procedure(async (id: number) => {
   return db.timesheets.update({ id }, { status: "submitted" });
-});
+}, { id: "hr.submitTimesheet" });
 
 export const approveTimesheet = procedure(async (id: number) => {
   return db.timesheets.update({ id }, { status: "approved" });
-});
+}, { id: "hr.approveTimesheet" });
 
 export const getTimesheets = procedure(async (
   employeeId: number,
@@ -691,11 +691,11 @@ export const getTimesheets = procedure(async (
       date: { $gte: fromDate, $lte: toDate },
     }),
   }).sort({ date: -1 });
-});
+}, { id: "hr.getTimesheets" });
 
 export const getWorkSchedule = procedure(async (employeeId: number) => {
   return db.workSchedules.find({ employeeId }).sort({ dayOfWeek: 1 });
-});
+}, { id: "hr.getWorkSchedule" });
 
 export const updateWorkSchedule = procedure(async (
   employeeId: number,
@@ -715,7 +715,7 @@ export const updateWorkSchedule = procedure(async (
     employeeId, dayOfWeek, startTime, endTime,
     ...(isRemote !== undefined && { isRemote }),
   });
-});
+}, { id: "hr.updateWorkSchedule" });
 
 export const getOvertimeReport = procedure(async (fromDate?: number, toDate?: number) => {
   return db.timesheets.aggregate([
@@ -737,7 +737,7 @@ export const getOvertimeReport = procedure(async (fromDate?: number, toDate?: nu
     },
     { $sort: { totalOvertime: -1 } },
   ]);
-});
+}, { id: "hr.getOvertimeReport" });
 
 // ---------------------------------------------------------------------------
 // Leave (10 endpoints)
@@ -755,7 +755,7 @@ export const requestLeave = procedure(async (
     employeeId, type, startDate, endDate, days,
     ...(reason && { reason }),
   });
-});
+}, { id: "hr.requestLeave" });
 
 export const approveLeave = procedure(async (id: number, approvedBy: number) => {
   // `update(filter, patch)` returns the updated row (or null when nothing
@@ -775,25 +775,25 @@ export const approveLeave = procedure(async (id: number, approvedBy: number) => 
   }
 
   return { data: leave, error: null };
-});
+}, { id: "hr.approveLeave" });
 
 export const denyLeave = procedure(async (id: number, approvedBy: number) => {
   return db.leaveRequests.update(
     { id, status: "pending" },
     { status: "denied", approvedBy, approvedAt: Date.now() }
   );
-});
+}, { id: "hr.denyLeave" });
 
 export const cancelLeave = procedure(async (id: number, employeeId: number) => {
   return db.leaveRequests.update(
     { id, employeeId, status: "pending" },
     { status: "cancelled" }
   );
-});
+}, { id: "hr.cancelLeave" });
 
 export const getLeaveRequests = procedure(async (filters?: Record<string, unknown>) => {
   return db.leaveRequests.find(filters || {}).sort({ created_at: -1 });
-});
+}, { id: "hr.getLeaveRequests" });
 
 export const getLeaveBalance = procedure(async (employeeId: number) => {
   const currentYear = new Date().getFullYear();
@@ -832,7 +832,7 @@ export const getLeaveBalance = procedure(async (employeeId: number) => {
     },
     error: null,
   };
-});
+}, { id: "hr.getLeaveBalance" });
 
 export const getLeaveCalendar = procedure(async (departmentId?: number) => {
   const empFilter: Record<string, unknown> = { status: { $ne: "terminated" } };
@@ -847,18 +847,18 @@ export const getLeaveCalendar = procedure(async (departmentId?: number) => {
     employeeId: { $in: ids },
     status: "approved",
   }).sort({ startDate: 1 });
-});
+}, { id: "hr.getLeaveCalendar" });
 
 export const getHolidays = procedure(async (year?: number) => {
   if (!year) return db.holidays.find({}).sort({ date: 1 });
   const start = new Date(year, 0, 1).getTime();
   const end   = new Date(year, 11, 31, 23, 59, 59).getTime();
   return db.holidays.find({ date: { $gte: start, $lte: end } }).sort({ date: 1 });
-});
+}, { id: "hr.getHolidays" });
 
 export const createHoliday = procedure(async (name: string, date: number, isRecurring?: boolean) => {
   return db.holidays.insert({ name, date, ...(isRecurring !== undefined && { isRecurring }) });
-});
+}, { id: "hr.createHoliday" });
 
 export const getLeaveReport = procedure(async () => {
   return db.leaveRequests.aggregate([
@@ -873,7 +873,7 @@ export const getLeaveReport = procedure(async () => {
     },
     { $sort: { totalDays: -1 } },
   ]);
-});
+}, { id: "hr.getLeaveReport" });
 
 // ---------------------------------------------------------------------------
 // Payroll (8 endpoints)
@@ -885,7 +885,7 @@ export const createPayrollRun = procedure(async (period: string, processedBy: nu
     runDate: Date.now(),
     processedBy,
   });
-});
+}, { id: "hr.createPayrollRun" });
 
 export const processPayroll = procedure(async (payrollRunId: number) => {
   await db.payrollRuns.update({ id: payrollRunId }, { status: "processing" });
@@ -939,24 +939,24 @@ export const processPayroll = procedure(async (payrollRunId: number) => {
     },
     error: null,
   };
-});
+}, { id: "hr.processPayroll" });
 
 export const finalizePayroll = procedure(async (payrollRunId: number) => {
   await db.payslips.updateMany({ payrollRunId, status: "pending" }, { status: "paid" });
   return { data: { finalized: true }, error: null };
-});
+}, { id: "hr.finalizePayroll" });
 
 export const getPayrollRuns = procedure(async (filters?: Record<string, unknown>) => {
   return db.payrollRuns.find(filters || {}).sort({ runDate: -1 });
-});
+}, { id: "hr.getPayrollRuns" });
 
 export const getPayslip = procedure(async (id: number) => {
   return db.payslips.get({ id });
-});
+}, { id: "hr.getPayslip" });
 
 export const getPayslipsByEmployee = procedure(async (employeeId: number) => {
   return db.payslips.find({ employeeId }).sort({ created_at: -1 });
-});
+}, { id: "hr.getPayslipsByEmployee" });
 
 export const getPayrollSummary = procedure(async (period: string) => {
   const { data: run } = await db.payrollRuns.get({ period });
@@ -974,7 +974,7 @@ export const getPayrollSummary = procedure(async (period: string) => {
     },
     error: null,
   };
-});
+}, { id: "hr.getPayrollSummary" });
 
 export const exportPayroll = procedure(async (payrollRunId: number) => {
   const { data: slips } = await db.payslips.find({ payrollRunId });
@@ -990,7 +990,7 @@ export const exportPayroll = procedure(async (payrollRunId: number) => {
     ].join(",")
   );
   return { data: [header, ...lines].join("\n"), error: null };
-});
+}, { id: "hr.exportPayroll" });
 
 // ---------------------------------------------------------------------------
 // Performance (10 endpoints)
@@ -1011,26 +1011,26 @@ export const createReview = procedure(async (
     ...(improvements && { improvements }),
     ...(goalsText    && { goals: goalsText }),
   });
-});
+}, { id: "hr.createReview" });
 
 export const submitReview = procedure(async (id: number, rating: number) => {
   return db.reviews.update({ id }, { status: "submitted", rating });
-});
+}, { id: "hr.submitReview" });
 
 export const acknowledgeReview = procedure(async (id: number) => {
   return db.reviews.update({ id }, { status: "acknowledged" });
-});
+}, { id: "hr.acknowledgeReview" });
 
 export const getReviewsForEmployee = procedure(async (employeeId: number) => {
   return db.reviews.find({ employeeId }).sort({ created_at: -1 });
-});
+}, { id: "hr.getReviewsForEmployee" });
 
 export const getPendingReviews = procedure(async (reviewerId?: number) => {
   return db.reviews.find({
     status: "draft",
     ...(reviewerId !== undefined && { reviewerId }),
   }).sort({ created_at: 1 });
-});
+}, { id: "hr.getPendingReviews" });
 
 export const createGoal = procedure(async (
   employeeId: number,
@@ -1044,18 +1044,18 @@ export const createGoal = procedure(async (
     ...(targetDate  !== undefined && { targetDate }),
     ...(description && { description }),
   });
-});
+}, { id: "hr.createGoal" });
 
 export const updateGoalProgress = procedure(async (id: number, progress: number, status?: string) => {
   return db.goals.update({ id }, {
     progress,
     ...(status && { status }),
   });
-});
+}, { id: "hr.updateGoalProgress" });
 
 export const getGoals = procedure(async (employeeId: number, filters?: Record<string, unknown>) => {
   return db.goals.find({ employeeId, ...(filters || {}) }).sort({ targetDate: 1 });
-});
+}, { id: "hr.getGoals" });
 
 export const giveFeedback = procedure(async (
   fromEmployeeId: number,
@@ -1068,11 +1068,11 @@ export const giveFeedback = procedure(async (
     fromEmployeeId, toEmployeeId, type, message,
     ...(isAnonymous !== undefined && { isAnonymous }),
   });
-});
+}, { id: "hr.giveFeedback" });
 
 export const getFeedbackForEmployee = procedure(async (toEmployeeId: number) => {
   return db.feedback.find({ toEmployeeId }).sort({ created_at: -1 });
-});
+}, { id: "hr.getFeedbackForEmployee" });
 
 // ---------------------------------------------------------------------------
 // Training (8 endpoints)
@@ -1092,18 +1092,18 @@ export const createCourse = procedure(async (
     ...(isMandatory    !== undefined && { isMandatory }),
     ...(maxParticipants !== undefined && { maxParticipants }),
   });
-});
+}, { id: "hr.createCourse" });
 
 export const getCourses = procedure(async (filters?: Record<string, unknown>) => {
   return db.courses.find(filters || {}).sort({ title: 1 });
-});
+}, { id: "hr.getCourses" });
 
 export const enrollInCourse = procedure(async (courseId: number, employeeId: number) => {
   return db.enrollments.insert({
     courseId, employeeId,
     enrolledAt: Date.now(),
   });
-});
+}, { id: "hr.enrollInCourse" });
 
 export const completeCourse = procedure(async (
   courseId: number,
@@ -1118,11 +1118,11 @@ export const completeCourse = procedure(async (
       ...(score !== undefined && { score }),
     }
   );
-});
+}, { id: "hr.completeCourse" });
 
 export const getEnrollments = procedure(async (filters?: Record<string, unknown>) => {
   return db.enrollments.find(filters || {}).sort({ enrolledAt: -1 });
-});
+}, { id: "hr.getEnrollments" });
 
 export const addCertification = procedure(async (
   employeeId: number,
@@ -1137,11 +1137,11 @@ export const addCertification = procedure(async (
     ...(expiryDate    !== undefined && { expiryDate }),
     ...(credentialUrl && { credentialUrl }),
   });
-});
+}, { id: "hr.addCertification" });
 
 export const getCertifications = procedure(async (employeeId: number) => {
   return db.certifications.find({ employeeId }).sort({ issueDate: -1 });
-});
+}, { id: "hr.getCertifications" });
 
 export const getExpiringCertifications = procedure(async (daysAhead: number = 30) => {
   const now    = Date.now();
@@ -1149,7 +1149,7 @@ export const getExpiringCertifications = procedure(async (daysAhead: number = 30
   return db.certifications.find({
     expiryDate: { $gte: now, $lte: cutoff },
   }).sort({ expiryDate: 1 });
-});
+}, { id: "hr.getExpiringCertifications" });
 
 // ---------------------------------------------------------------------------
 // Compensation & Benefits (8 endpoints)
@@ -1173,15 +1173,15 @@ export const adjustSalary = procedure(async (
     ...(changeReason && { changeReason }),
     ...(approvedBy !== undefined && { approvedBy }),
   });
-});
+}, { id: "hr.adjustSalary" });
 
 export const getCompensationHistory = procedure(async (employeeId: number) => {
   return db.compensationHistory.find({ employeeId }).sort({ effectiveDate: -1 });
-});
+}, { id: "hr.getCompensationHistory" });
 
 export const getBenefitsPlans = procedure(async (type?: string) => {
   return db.benefitsPlans.find(type ? { type } : {}).sort({ name: 1 });
-});
+}, { id: "hr.getBenefitsPlans" });
 
 export const enrollInBenefit = procedure(async (
   employeeId: number,
@@ -1189,11 +1189,11 @@ export const enrollInBenefit = procedure(async (
   startDate: number
 ) => {
   return db.benefitsEnrollments.insert({ employeeId, planId, startDate });
-});
+}, { id: "hr.enrollInBenefit" });
 
 export const getBenefitsEnrollments = procedure(async (employeeId: number) => {
   return db.benefitsEnrollments.find({ employeeId, status: "active" }).sort({ startDate: -1 });
-});
+}, { id: "hr.getBenefitsEnrollments" });
 
 export const submitExpense = procedure(async (
   employeeId: number,
@@ -1207,18 +1207,18 @@ export const submitExpense = procedure(async (
     submittedAt: Date.now(),
     ...(receiptUrl && { receiptUrl }),
   });
-});
+}, { id: "hr.submitExpense" });
 
 export const approveExpense = procedure(async (id: number, approvedBy: number, approve: boolean) => {
   return db.expenseClaims.update(
     { id },
     { status: approve ? "approved" : "rejected", approvedBy }
   );
-});
+}, { id: "hr.approveExpense" });
 
 export const getExpenses = procedure(async (filters?: Record<string, unknown>) => {
   return db.expenseClaims.find(filters || {}).sort({ submittedAt: -1 });
-});
+}, { id: "hr.getExpenses" });
 
 // ---------------------------------------------------------------------------
 // Documents & Compliance (6 endpoints)
@@ -1236,14 +1236,14 @@ export const uploadDocument = procedure(async (
     uploadedAt: Date.now(),
     ...(expiresAt !== undefined && { expiresAt }),
   });
-});
+}, { id: "hr.uploadDocument" });
 
 export const getDocuments = procedure(async (employeeId: number, type?: string) => {
   return db.documents.find({
     employeeId,
     ...(type && { type }),
   }).sort({ uploadedAt: -1 });
-});
+}, { id: "hr.getDocuments" });
 
 export const getExpiringDocuments = procedure(async (daysAhead: number = 30) => {
   const now    = Date.now();
@@ -1251,11 +1251,11 @@ export const getExpiringDocuments = procedure(async (daysAhead: number = 30) => 
   return db.documents.find({
     expiresAt: { $gte: now, $lte: cutoff },
   }).sort({ expiresAt: 1 });
-});
+}, { id: "hr.getExpiringDocuments" });
 
 export const getPolicies = procedure(async (category?: string) => {
   return db.policies.find(category ? { category } : {}).sort({ effectiveDate: -1 });
-});
+}, { id: "hr.getPolicies" });
 
 export const getAuditLog = procedure(async (
   entityType?: string,
@@ -1267,7 +1267,7 @@ export const getAuditLog = procedure(async (
     ...(entityId   !== undefined && { entityId }),
     ...(actorId    !== undefined && { actorId }),
   }).sort({ timestamp: -1 }).limit(500);
-});
+}, { id: "hr.getAuditLog" });
 
 export const acknowledgePolicy = procedure(async (employeeId: number, policyId: number) => {
   // Record acknowledgement as a document
@@ -1278,7 +1278,7 @@ export const acknowledgePolicy = procedure(async (employeeId: number, policyId: 
     fileUrl: "",
     uploadedAt: Date.now(),
   });
-});
+}, { id: "hr.acknowledgePolicy" });
 
 // ---------------------------------------------------------------------------
 // Notifications (4 endpoints)
@@ -1286,19 +1286,19 @@ export const acknowledgePolicy = procedure(async (employeeId: number, policyId: 
 
 export const getNotifications = procedure(async (employeeId: number) => {
   return db.notifications.find({ employeeId }).sort({ created_at: -1 });
-});
+}, { id: "hr.getNotifications" });
 
 export const markAsRead = procedure(async (id: number) => {
   return db.notifications.update({ id }, { isRead: true });
-});
+}, { id: "hr.markAsRead" });
 
 export const markAllAsRead = procedure(async (employeeId: number) => {
   return db.notifications.updateMany({ employeeId, isRead: false }, { isRead: true });
-});
+}, { id: "hr.markAllAsRead" });
 
 export const getUnreadCount = procedure(async (employeeId: number) => {
   return db.notifications.count({ employeeId, isRead: false });
-});
+}, { id: "hr.getUnreadCount" });
 
 // ---------------------------------------------------------------------------
 // Analytics (10 endpoints)
@@ -1329,7 +1329,7 @@ export const getDashboard = procedure(async () => {
     },
     error: null,
   };
-});
+}, { id: "hr.getDashboard" });
 
 export const getHeadcountByDepartment = procedure(async () => {
   return db.employees.aggregate([
@@ -1337,7 +1337,7 @@ export const getHeadcountByDepartment = procedure(async () => {
     { $group: { _id: "$departmentId", headcount: { $sum: 1 }, avgSalary: { $avg: "$salary" } } },
     { $sort: { headcount: -1 } },
   ]);
-});
+}, { id: "hr.getHeadcountByDepartment" });
 
 export const getSalaryDistribution = procedure(async () => {
   return db.employees.aggregate([
@@ -1354,14 +1354,14 @@ export const getSalaryDistribution = procedure(async () => {
     },
     { $sort: { totalPayroll: -1 } },
   ]);
-});
+}, { id: "hr.getSalaryDistribution" });
 
 export const getAttritionReport = procedure(async () => {
   const { data: terminated } = await db.employees.count({ status: "terminated" });
   const { data: total }      = await db.employees.count({});
   const rate = total ? (((terminated as number) || 0) / (total as number) * 100).toFixed(1) : "0.0";
   return { data: { terminated, total, attritionRate: `${rate}%` }, error: null };
-});
+}, { id: "hr.getAttritionReport" });
 
 export const getLeaveUtilization = procedure(async () => {
   return db.leaveRequests.aggregate([
@@ -1375,14 +1375,14 @@ export const getLeaveUtilization = procedure(async () => {
     },
     { $sort: { totalDaysUsed: -1 } },
   ]);
-});
+}, { id: "hr.getLeaveUtilization" });
 
 export const getReviewStats = procedure(async () => {
   return db.reviews.aggregate([
     { $group: { _id: "$period", count: { $sum: 1 }, avgRating: { $avg: "$rating" } } },
     { $sort: { _id: -1 } },
   ]);
-});
+}, { id: "hr.getReviewStats" });
 
 export const getTimeToHire = procedure(async () => {
   // Hired applicants carry the appliedDate; the job posting has the postedDate.
@@ -1398,7 +1398,7 @@ export const getTimeToHire = procedure(async () => {
     },
     { $sort: { count: -1 } },
   ]);
-});
+}, { id: "hr.getTimeToHire" });
 
 export const getDiversityMetrics = procedure(async () => {
   // Department composition with skill breakdown
@@ -1407,7 +1407,7 @@ export const getDiversityMetrics = procedure(async () => {
     { $group: { _id: "$departmentId", headcount: { $sum: 1 } } },
     { $sort: { headcount: -1 } },
   ]);
-});
+}, { id: "hr.getDiversityMetrics" });
 
 export const getCostPerEmployee = procedure(async () => {
   return db.employees.aggregate([
@@ -1422,7 +1422,7 @@ export const getCostPerEmployee = procedure(async () => {
     },
     { $sort: { totalSalary: -1 } },
   ]);
-});
+}, { id: "hr.getCostPerEmployee" });
 
 export const getMonthlyTrends = procedure(async () => {
   const { data: hires } = await db.employees.aggregate([
@@ -1437,4 +1437,4 @@ export const getMonthlyTrends = procedure(async () => {
   ]);
 
   return { data: { hires, terminations }, error: null };
-});
+}, { id: "hr.getMonthlyTrends" });

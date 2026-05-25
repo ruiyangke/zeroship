@@ -31,7 +31,7 @@ export function App() {
 
     try {
       // `chat` is the client stub (async iterable of event objects).
-      for await (const ev of chat(text, messages)) {
+      for await (const ev of chat({ message: text, history: messages })) {
         if (typeof ev.token === "string") {
           content += ev.token;
         } else if (ev.tool && ev.args) {

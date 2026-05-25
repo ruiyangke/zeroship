@@ -134,4 +134,18 @@ describe("client — idempotency header", () => {
     const k = spy.calls[0].headers["idempotency-key"];
     assert.ok(k && k.length > 0);
   });
+
+  test("per-call idempotencyKey overrides generated key", async () => {
+    const spy = makeFetch();
+    const rpc = client({
+      baseUrl: "https://api.test",
+      fetch: spy.fetchFn,
+    });
+    await rpc.call("addTodo", { text: "hi" }, {
+      kind: "mutation",
+      idempotent: true,
+      idempotencyKey: "idem-fixed",
+    });
+    assert.equal(spy.calls[0].headers["idempotency-key"], "idem-fixed");
+  });
 });

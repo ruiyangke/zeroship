@@ -4,15 +4,25 @@
 // calls it like a normal async function, and framework code can inspect
 // its stable metadata and server-reference brand.
 
-/** Procedure kind — matches the wire protocol's discriminator. */
-export type ProcedureKind = "query" | "mutation" | "stream" | "subscription";
+import type { RetryConfig } from "./transport.js";
+
+/** Procedure kind - matches the wire protocol's discriminator. */
+export type ProcedureKind = "query" | "mutation" | "action" | "stream" | "subscription";
+
+export interface ProcedureCallOptions {
+  signal?: AbortSignal;
+  headers?: Record<string, string>;
+  timeout?: number;
+  retry?: RetryConfig;
+  idempotencyKey?: string;
+}
 
 /**
  * Per-procedure metadata. The build-time transform injects this; users
  * supplying procedures by hand pass it explicitly.
  */
 export interface ProcedureBuildMeta {
-  /** Wire id — stable across refactors. */
+  /** Wire id - stable across refactors. */
   id: string;
   /** Discriminator. */
   kind: ProcedureKind;
@@ -36,24 +46,41 @@ export const __SERVER_REFERENCE: symbol = Symbol.for(
 );
 
 /**
- * Caller signature. Always async for query/mutation procedures; stream
- * procedures return the AsyncIterable directly.
+ * Caller signature. Always async for query/mutation/action procedures;
+ * stream procedures return the AsyncIterable directly.
  */
 export type ProcedureCaller<TIn, TOut> = (
   input: TIn,
+  options?: ProcedureCallOptions,
 ) => Promise<TOut> | AsyncIterable<TOut>;
 
-export interface ProcedureFn<TIn, TOut> {
-  (input: TIn): Promise<TOut> | AsyncIterable<TOut>;
+interface ProcedureMetaFields {
   id: string;
   kind: ProcedureKind;
   wire: string;
 }
 
-export type QueryProcedure<TIn, TOut> = ProcedureFn<TIn, TOut>;
-export type MutationProcedure<TIn, TOut> = ProcedureFn<TIn, TOut>;
-export type StreamProcedure<TIn, TOut> = ProcedureFn<TIn, TOut>;
-export type SubscriptionProcedure<TIn, TOut> = ProcedureFn<TIn, TOut>;
+export interface ProcedureFn<TIn, TOut> extends ProcedureMetaFields {
+  (input: TIn, options?: ProcedureCallOptions):
+    | Promise<TOut>
+    | AsyncIterable<TOut>;
+}
+
+export interface UnaryProcedure<TIn, TOut> extends ProcedureMetaFields {
+  (input: TIn, options?: ProcedureCallOptions): Promise<TOut>;
+}
+
+export interface AsyncIterableProcedure<TIn, TOut> extends ProcedureMetaFields {
+  (input: TIn, options?: ProcedureCallOptions): AsyncIterableIterator<TOut>;
+}
+
+export type QueryProcedure<TIn, TOut> = UnaryProcedure<TIn, TOut>;
+export type MutationProcedure<TIn, TOut> = UnaryProcedure<TIn, TOut>;
+export type ActionProcedure<TIn, TOut> = UnaryProcedure<TIn, TOut>;
+export type StreamProcedure<TIn, TOut> = AsyncIterableProcedure<TIn, TOut> & {
+  streamUrl(input?: TIn): string | Promise<string>;
+};
+export type SubscriptionProcedure<TIn, TOut> = AsyncIterableProcedure<TIn, TOut>;
 
 /**
  * Wrap a raw RPC call into a callable procedure reference.
@@ -67,8 +94,11 @@ export function __makeProcedure<TIn = unknown, TOut = unknown>(
   call: ProcedureCaller<TIn, TOut>,
   meta: ProcedureBuildMeta,
 ): ProcedureFn<TIn, TOut> {
-  const fn = function (input: TIn): Promise<TOut> | AsyncIterable<TOut> {
-    return call(input);
+  const fn = function (
+    input: TIn,
+    options?: ProcedureCallOptions,
+  ): Promise<TOut> | AsyncIterable<TOut> {
+    return call(input, options);
   } as ProcedureFn<TIn, TOut>;
 
   Object.defineProperty(fn, "id", { value: meta.id, enumerable: true });
@@ -78,7 +108,7 @@ export function __makeProcedure<TIn = unknown, TOut = unknown>(
     enumerable: true,
   });
 
-  // Server-reference brand — non-enumerable so JSON.stringify and
+  // Server-reference brand - non-enumerable so JSON.stringify and
   // dev-tools enumeration stay clean; Symbol.for lets cross-realm
   // consumers re-derive the same key.
   Object.defineProperty(fn, __SERVER_REFERENCE, {

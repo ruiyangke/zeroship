@@ -10,7 +10,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { __makeProcedure, __SERVER_REFERENCE } from "../src/index.js";
+import { __makeProcedure, __SERVER_REFERENCE } from "../src/make-procedure.js";
 
 describe("__makeProcedure", () => {
   test("the returned thing is callable; invokes call(input)", async () => {

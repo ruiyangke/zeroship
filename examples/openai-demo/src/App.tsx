@@ -38,7 +38,7 @@ export function App() {
     try {
       // `chat` is the client stub produced by @zeroship/vite-plugin:
       // an async iterable that streams `{ token: string }` events.
-      for await (const ev of chat(text, messages)) {
+      for await (const ev of chat({ message: text, history: messages })) {
         if (firstToken) {
           setFirstTokenMs(Math.round(performance.now() - started));
           firstToken = false;

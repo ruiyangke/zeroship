@@ -1,6 +1,6 @@
 //
-// `__makeServerProcedure(impl, meta)` — server-side counterpart to
-// `__makeProcedure` from `@zeroship/rpc-client`. The vite-plugin uses
+// `__makeServerProcedure(impl, meta)` — server-side counterpart to the
+// client procedure brander in `@zeroship/rpc`. The vite-plugin uses
 // it while transforming server modules so procedure exports carry the
 // same metadata as client stubs.
 

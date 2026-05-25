@@ -5,7 +5,7 @@
  * the string-literal expression `"use server"`. Inside a server
  * module, only exports whose initializer is a call to one of the
  * wrapper markers (`procedure`/`query`/`mutation`/`stream`/
- * `subscription`, imported from `@zeroship/server` or `@zeroship/rpc`)
+ * `subscription`, imported from `@zeroship/rpc/server`)
  * is registered as an RPC. Every other declaration — `export
  * function`, `export const x = 5`, plain async arrow exports —
  * stays private to the server bundle.
@@ -51,7 +51,7 @@ describe('"use server" + wrappers — discovery', () => {
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { procedure, query, mutation } from "@zeroship/server";
+import { procedure, query, mutation } from "@zeroship/rpc/server";
 
 // Helpers — must remain private to the server bundle.
 function _internalSink(x) { return x.toUpperCase(); }
@@ -77,7 +77,7 @@ export const create = mutation(async (input) => input, { id: "create.v2" });
     const byName = new Map(state.discoveredProcedures.map((p) => [p.exportName, p]));
     assert.equal(byName.get("list")?.kind, "query");
     assert.equal(byName.get("create")?.kind, "mutation");
-    // procedure() defers to inferKind → "greet" matches no query prefix → mutation.
+    // Generic procedure() defaults to mutation unless config.kind says otherwise.
     assert.equal(byName.get("greet")?.kind, "mutation");
 
     // Verify wrapper config still flows through (the second wrapper arg).
@@ -90,7 +90,7 @@ export const create = mutation(async (input) => input, { id: "create.v2" });
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { query } from "@zeroship/server";
+import { query } from "@zeroship/rpc/server";
 export const list = query(async () => []);
 `;
     const out = getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
@@ -111,7 +111,7 @@ export const list = query(async () => []);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { query as q, mutation as m } from "@zeroship/server";
+import { query as q, mutation as m } from "@zeroship/rpc/server";
 
 export const listFoo = q(async () => []);
 export const addFoo = m(async (x) => x);
@@ -124,13 +124,13 @@ export const addFoo = m(async (x) => x);
     assert.equal(byName.get("addFoo"), "mutation");
   });
 
-  test("import from `@zeroship/rpc` (alternate source) is recognized too", () => {
+  test("import from `@zeroship/rpc/server` is recognized", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { procedure } from "@zeroship/rpc";
+import { procedure } from "@zeroship/rpc/server";
 export const ping = procedure(async () => "pong");
 `;
     getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
@@ -165,7 +165,7 @@ export const ping = procedure(async () => "pong");
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import * as zs from "@zeroship/server";
+import * as zs from "@zeroship/rpc/server";
 export const ping = zs.procedure(async () => "pong");
 `;
     getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
@@ -185,7 +185,7 @@ export const ping = zs.procedure(async () => "pong");
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { stream } from "@zeroship/server";
+import { stream } from "@zeroship/rpc/server";
 // Plain async fn that returns an iterator — wrapper still tags as stream.
 export const drip = stream(async () => makeIterator());
 `;

@@ -3,7 +3,7 @@
 // can call. The file-level `"use server"` directive at the top opts
 // the file into the vite-plugin's RPC discovery; only exports wrapped
 // in `procedure()` / `query()` / `mutation()` / `stream()` /
-// `subscription()` from `@zeroship/server` become public endpoints.
+// `subscription()` from `@zeroship/rpc/server` become public endpoints.
 // Plain helpers stay private to the server bundle.
 //
 // The `@zeroship/vite-plugin` transform replaces wrapped exports
@@ -17,7 +17,8 @@
 // synthetic SSR entry calls `.parse()` before invoking the handler;
 // failures throw an INVALID_ARGUMENT envelope (status 400) to the wire.
 
-import { query, stream, z } from "@zeroship/server";
+import { query, stream } from "@zeroship/rpc/server";
+import { z } from "@zeroship/server";
 
 export interface Todo {
   id: number;

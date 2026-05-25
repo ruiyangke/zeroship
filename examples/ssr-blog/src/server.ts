@@ -8,7 +8,7 @@
 // See README. Real per-request SSR: every GET hits this fetch handler
 // and gets back a freshly-rendered HTML page.
 
-import { query } from "@zeroship/server";
+import { query } from "@zeroship/rpc/server";
 import { renderToString } from "react-dom/server";
 import { createElement, type ComponentType, type ReactNode } from "react";
 import { App, LIST_POSTS_QUERY_KEY } from "./components/App";

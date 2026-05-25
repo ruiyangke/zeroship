@@ -26,12 +26,12 @@
   },
   "peerDependencies": {
     "vite": "^8.0.0",
-    "@zeroship/rpc-client": "workspace:*"
+    "@zeroship/rpc": "workspace:*"
   },
   "devDependencies": {
     "@types/mime": "^3.0.4",
     "@types/node": "catalog:",
-    "@zeroship/rpc-client": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
     "acorn": "^8.16.0",
     "esbuild": "^0.28.0",
     "tsx": "catalog:",

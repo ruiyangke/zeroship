@@ -1,6 +1,6 @@
 "use server";
 
-import { stream as streamRpc, query } from "@zeroship/server";
+import { stream as streamRpc, query } from "@zeroship/rpc/server";
 import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
@@ -72,7 +72,13 @@ const toolMap = Object.fromEntries(tools.map(t => [t.name, t]));
 interface ChatMsg { role: string; content: string }
 
 export const chat = streamRpc(
-  async function* (message: string, history: ChatMsg[] = []) {
+  async function* ({
+    message,
+    history = [],
+  }: {
+    message: string;
+    history?: ChatMsg[];
+  }) {
     const msgs: any[] = (Array.isArray(history) ? history : []).map((m: ChatMsg) =>
       m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
     );

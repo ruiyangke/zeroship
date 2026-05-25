@@ -78,7 +78,7 @@ describe("lazy detection — transform.ts", () => {
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const wizard = procedure(async (input) => input);
 wizard.config = { id: "wizard", kind: "mutation", lazy: true };
 `;
@@ -99,7 +99,7 @@ wizard.config = { id: "wizard", kind: "mutation", lazy: true };
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 export const heavyOp = mutation(async (x) => x, { id: "heavyOp", lazy: true });
 `;
     getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/actions/heavy.ts");
@@ -114,7 +114,7 @@ export const heavyOp = mutation(async (x) => x, { id: "heavyOp", lazy: true });
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 export const fast = mutation(async (x) => x);
 fast.config = { id: "fast" };
 `;
@@ -134,7 +134,7 @@ fast.config = { id: "fast" };
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 export const op = mutation(async (x) => x, { lazy: false });
 `;
     getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/actions/op.ts");
@@ -149,7 +149,7 @@ export const op = mutation(async (x) => x, { lazy: false });
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 const useLazy = process.env.LAZY === "1";
 export const op = mutation(async (x) => x);
 op.config = { id: "op", lazy: useLazy };
@@ -176,7 +176,7 @@ op.config = { id: "op", lazy: useLazy };
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 export const op = mutation(async (x) => x, { lazy: true });
 op.config = { id: "op", lazy: false };
 `;

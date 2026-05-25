@@ -11,10 +11,12 @@
   "dependencies": {
     "@zeroship/db": "workspace:*",
     "@zeroship/migrations": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*"
   },
   "devDependencies": {
+    "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
     "vite": "catalog:"
   }

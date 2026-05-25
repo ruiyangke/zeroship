@@ -2,8 +2,8 @@
  * WinterCG `fetch` wrapper that owns the `/_zs/v1/<id>` fall-through:
  *   - GET / POST against `/_zs/v1/<id>` → dispatch through
  *     `__zsDispatch(rpc, id, input, ctx)`. Streaming results are
- *     encoded via the AI-SDK line-prefixed protocol; unary results are
- *     wrapped in the `{ "json": ... }` envelope.
+ *     encoded via the AI-SDK line-prefixed protocol; unary results use
+ *     the SuperJSON-compatible `{ "json": ..., "meta"?: ... }` envelope.
  *   - Any other path → forward to the user's own `default.fetch`. If
  *     the user didn't export one, return 404.
  *
@@ -32,6 +32,62 @@ declare const globalThis: {
   [key: string]: unknown;
 };
 
+let _superjsonPromise: Promise<{
+  serialize: (value: unknown) => { json: unknown; meta?: unknown };
+  deserialize: <T = unknown>(payload: { json: unknown; meta?: unknown }) => T;
+}> | null = null;
+
+function loadSuperjson() {
+  if (!_superjsonPromise) {
+    // @ts-ignore - bundled by apps that use the RPC package; optional for non-RPC apps.
+    _superjsonPromise = import("superjson").then(
+      (m: { default?: unknown; serialize?: unknown; deserialize?: unknown }) => {
+        const named = m as {
+          serialize?: (value: unknown) => { json: unknown; meta?: unknown };
+          deserialize?: <T = unknown>(payload: { json: unknown; meta?: unknown }) => T;
+        };
+        if (named.serialize && named.deserialize) {
+          return { serialize: named.serialize, deserialize: named.deserialize };
+        }
+        const d = m.default as {
+          serialize: (value: unknown) => { json: unknown; meta?: unknown };
+          deserialize: <T = unknown>(payload: { json: unknown; meta?: unknown }) => T;
+        };
+        return { serialize: d.serialize, deserialize: d.deserialize };
+      },
+    );
+  }
+  return _superjsonPromise;
+}
+
+async function decodeWireText(text: string): Promise<unknown> {
+  if (!text) return undefined;
+  const parsed = JSON.parse(text);
+  if (parsed && typeof parsed === "object" && "json" in parsed) {
+    const envelope = parsed as { json: unknown; meta?: unknown };
+    if ("meta" in envelope) {
+      const sj = await loadSuperjson();
+      return sj.deserialize(envelope);
+    }
+    return envelope.json;
+  }
+  return parsed;
+}
+
+function base64UrlDecodeUtf8(value: string): string {
+  const b64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+async function encodeWireOutput(value: unknown): Promise<string> {
+  const sj = await loadSuperjson();
+  return JSON.stringify(sj.serialize(value));
+}
+
 /**
  * Caller-supplied loader. The dev path re-imports the user module per
  * request (HMR may have invalidated cached evaluations); the
@@ -57,10 +113,7 @@ export function createFetchHandler(loadNormalized: LoadNormalized): (request: Re
         const param = url.searchParams.get("input");
         if (param) {
           try {
-            const b64 = param.replace(/-/g, "+").replace(/_/g, "/");
-            const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-            const e = JSON.parse(atob(padded));
-            input = (e && typeof e === "object" && "json" in e) ? e.json : e;
+            input = await decodeWireText(base64UrlDecodeUtf8(param));
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             return errResponse(400, "INVALID_ARGUMENT", `invalid base64url input: ${msg}`);
@@ -70,8 +123,7 @@ export function createFetchHandler(loadNormalized: LoadNormalized): (request: Re
         const text = await request.text();
         if (text) {
           try {
-            const e = JSON.parse(text);
-            input = (e && typeof e === "object" && "json" in e) ? e.json : e;
+            input = await decodeWireText(text);
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             return errResponse(400, "INVALID_ARGUMENT", `invalid JSON body: ${msg}`);
@@ -165,7 +217,7 @@ async function rpcAndRespond(
     if (result instanceof Response) return result;
 
     return new Response(
-      JSON.stringify({ json: result === undefined ? null : result }),
+      await encodeWireOutput(result),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   } catch (e) {

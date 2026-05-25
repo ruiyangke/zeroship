@@ -24,6 +24,7 @@
 import { decodeBody, encodeBody, type Transformer } from "./encoding.js";
 import { parseErrorResponse, RpcError, type ErrorCode } from "./error.js";
 import { newUuidV7 } from "./idempotency.js";
+import type { HeaderValue } from "./transport.js";
 
 interface BatchEntry {
   procId: string;
@@ -39,6 +40,7 @@ export interface BatchConfig {
   fetch: typeof globalThis.fetch;
   transformer: Transformer;
   authResolver: () => string | null | undefined | Promise<string | null | undefined>;
+  headersResolver?: () => HeaderValue | Promise<HeaderValue>;
   onError?: (err: RpcError) => void;
   onAuthExpired?: () => void;
 }
@@ -105,6 +107,13 @@ export function createBatchLink(cfg: BatchConfig): BatchLink {
     headers.set("Content-Type", "application/zs-batch+json");
     if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
     headers.set("X-Request-Id", newUuidV7());
+    if (cfg.headersResolver) {
+      const resolved = await cfg.headersResolver();
+      if (resolved) {
+        const src = new Headers(resolved);
+        src.forEach((v, k) => headers.set(k, v));
+      }
+    }
 
     let res: Response;
     try {

@@ -1,14 +1,14 @@
 // Typed RPC client for the builder's chat surface. Mirrors
 // `examples/ai-chat/src/api.ts` exactly: declare an `App` type listing
-// every procedure with its kind + input/output, then `client<App>`
-// returns a typed proxy.
+// every procedure with its kind + input/output, then `createRpcClient<App>`
+// returns typed procedure factories.
 //
-// `rpc.chat.streamUrl()` is the AI-SDK entry point — `@zeroship/rpc-client`
+// `rpc.chat.streamUrl()` is the AI-SDK entry point — `@zeroship/rpc`
 // exposes it explicitly so we can hand the URL to `useChat` without
 // hardcoding `/_zs/v1/chat`. The transport-level body envelope
 // (`{ json: <input> }`) is wrapped in `chatTransport` below.
 
-import { client, type ProcedureType } from "@zeroship/rpc-client";
+import { createRpcClient, type Stream } from "@zeroship/rpc/client";
 import { DefaultChatTransport } from "ai";
 import type { UIMessage } from "ai";
 
@@ -123,19 +123,23 @@ export { appPreviewUrl } from "./lib/preview-url";
 // One procedure to start with — we can add more later (file CRUD, deploy,
 // etc.) and they go here as additional fields on `App`.
 type App = {
-  chat: ProcedureType<"stream", { messages: UIMessage[]; appId?: string }, never>;
+  chat: Stream<{ messages: UIMessage[]; appId?: string }, never>;
   // Wizard: project-creation flow runtime, plain LangGraph (see
   // §4.8.2b). Same wire envelope as chat, but the input is `{idea, id}`
   // on a fresh turn (no message history — the wizard's checkpointer
   // owns state) and `{resume, id}` on a SurveyCard submit.
-  wizard: ProcedureType<
-    "stream",
+  wizard: Stream<
     { idea?: string; id?: string; resume?: { token: string; value: unknown }; messages?: UIMessage[] },
     never
   >;
 };
 
-export const rpc = client<App>({ baseUrl: "" });
+const rpcClient = createRpcClient<App>({ baseUrl: "" });
+
+export const rpc = {
+  chat: rpcClient.stream("chat"),
+  wizard: rpcClient.stream("wizard"),
+};
 
 /**
  * AI SDK transport bound to a streaming RPC procedure. Wraps the

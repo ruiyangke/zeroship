@@ -18,7 +18,8 @@
 
 import { t, schema } from "@zeroship/db";
 import { env } from "zeroship";
-import { query, mutation, action, runQuery, runMutation } from "@zeroship/server";
+import { query, mutation, action } from "@zeroship/rpc/server";
+import { runQuery, runMutation } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
 // Schema — the `export default { schema }` convention

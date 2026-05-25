@@ -15,10 +15,8 @@
 //        client<App>({ ... })
 //        rpc.listTodos.query({ limit: 50 })
 //      Same proxy at runtime; the App type provides input/output types.
-//      Procedure kind is auto-inferred at runtime per the spec rule
-//      "names that look like queries are queries; everything else is a
-//      mutation". Callers that need precise kind override should use
-//      mode #2 OR call rpc.<id>.query / rpc.<id>.mutation explicitly.
+//      The escape-hatch `rpc.call()` still needs an explicit `kind`
+//      because generic types do not exist at runtime.
 //
 // The proxy unwraps dotted ids — `rpc.todos.list.query()` and
 // `rpc["todos.list"].query()` route to the same wire id "todos.list".
@@ -29,6 +27,8 @@ import {
   subscribeCall,
   buildStreamUrl,
   type CallKind,
+  type HeaderResolver,
+  type RetryConfig,
   type SubscribeOptions,
   type SubscriptionHandle,
   type TransportConfig,
@@ -71,11 +71,17 @@ export interface ClientOptions<App = unknown> {
    * `Authorization: Bearer <token>` when the resolved value is truthy.
    */
   auth?: AuthValue;
+  /** Default headers added to every request. Per-call headers win. */
+  headers?: HeaderResolver;
   /**
    * Wire transformer. Must match `manifest.transformer` on the server
    * side or the wire will fail to decode. Defaults to "superjson".
    */
   transformer?: Transformer;
+  /** Default per-attempt timeout in milliseconds. */
+  timeout?: number;
+  /** Default retry policy for unary calls. */
+  retry?: RetryConfig;
   /**
    * Opt into auto-batching for queries. Mutations and streams never
    * batch. Default false (additive opt-in).
@@ -105,6 +111,8 @@ export interface CallOptions {
   signal?: AbortSignal;
   headers?: Record<string, string>;
   timeout?: number;
+  retry?: RetryConfig;
+  idempotencyKey?: string;
 }
 
 /** Internal call options used by the escape-hatch `call(id, ...)`. */
@@ -148,6 +156,7 @@ export interface ProcedureType<
 export interface ProcedureHandle<TIn = unknown, TOut = unknown> {
   query(input?: TIn, opts?: CallOptions): Promise<TOut>;
   mutation(input?: TIn, opts?: CallOptions): Promise<TOut>;
+  action(input?: TIn, opts?: CallOptions): Promise<TOut>;
   stream(input?: TIn, opts?: CallOptions): AsyncIterableIterator<TOut>;
   /**
    * Returns the streaming URL for this procedure. Use when handing the
@@ -227,15 +236,11 @@ interface UntypedClientMethods {
   ): Promise<TOut> | AsyncIterableIterator<TOut>;
 }
 
-// ── Runtime kind inference (for type-only mode) ────────────────────────
-
-const QUERY_PREFIXES = /^(get|list|find|search|count|read|fetch)([A-Z_]|$)/;
-
-function inferKindFromName(id: string): CallKind {
-  // Use the leaf segment for inference (e.g. "todos.list" → "list").
-  const leaf = id.includes(".") ? id.slice(id.lastIndexOf(".") + 1) : id;
-  if (QUERY_PREFIXES.test(leaf)) return "query";
-  return "mutation";
+function normalizeHeadersResolver(
+  headers: HeaderResolver | undefined,
+): TransportConfig["headersResolver"] {
+  if (!headers) return undefined;
+  return typeof headers === "function" ? headers : () => headers;
 }
 
 // ── Builder ────────────────────────────────────────────────────────────
@@ -255,11 +260,12 @@ export function client<App = Record<string, never>>(
   const fetchFn = options.fetch ?? globalThis.fetch?.bind(globalThis);
   if (!fetchFn) {
     throw new Error(
-      "[zeroship/rpc-client] no fetch implementation — pass `fetch:` in client({}) or run on a runtime that exposes globalThis.fetch.",
+      "[zeroship/rpc] no fetch implementation — pass `fetch:` in client({}) or run on a runtime that exposes globalThis.fetch.",
     );
   }
   const transformer: Transformer = options.transformer ?? "superjson";
   const proceduresMeta = options.procedures ?? {};
+  const headersResolver = normalizeHeadersResolver(options.headers);
 
   // Resolve auth lazily — same input shape supported as `AuthValue`.
   const authResolver: () => string | null | undefined | Promise<string | null | undefined> =
@@ -274,6 +280,9 @@ export function client<App = Record<string, never>>(
     fetch: fetchFn,
     transformer,
     authResolver,
+    headersResolver,
+    timeout: options.timeout,
+    retry: options.retry,
     onError: options.onError,
     onAuthExpired: options.onAuthExpired,
   };
@@ -284,6 +293,7 @@ export function client<App = Record<string, never>>(
         fetch: fetchFn,
         transformer,
         authResolver,
+        headersResolver,
         onError: options.onError,
         onAuthExpired: options.onAuthExpired,
       })
@@ -326,6 +336,13 @@ export function client<App = Record<string, never>>(
         return dispatch(procId, input, {
           ...opts,
           kind: "mutation",
+          idempotent: meta?.idempotent ?? false,
+        });
+      },
+      action(input?: unknown, opts?: CallOptions) {
+        return dispatch(procId, input, {
+          ...opts,
+          kind: "action",
           idempotent: meta?.idempotent ?? false,
         });
       },
@@ -373,7 +390,15 @@ export function client<App = Record<string, never>>(
               input?: unknown,
               opts?: FullCallOptions,
             ): Promise<TOut> | AsyncIterableIterator<TOut> {
-              const kind = opts?.kind ?? inferKindFromName(id);
+              if (!opts?.kind) {
+                throw new RpcError({
+                  code: "INVALID_ARGUMENT",
+                  message:
+                    "[zeroship/rpc] rpc.call(id, input, opts) requires opts.kind. Use .query(), .mutation(), .action(), .stream(), or pass a procedures registry.",
+                  retryable: false,
+                });
+              }
+              const kind = opts.kind;
               if (kind === "stream") {
                 return streamCall<TOut>(id, input, transportCfg, {
                   signal: opts?.signal,
@@ -398,6 +423,7 @@ export function client<App = Record<string, never>>(
         if (handle) {
           if (prop === "query") return handle.query.bind(handle);
           if (prop === "mutation") return handle.mutation.bind(handle);
+          if (prop === "action") return handle.action.bind(handle);
           if (prop === "stream") return handle.stream.bind(handle);
           if (prop === "streamUrl") return handle.streamUrl.bind(handle);
           if (prop === "subscribe") return handle.subscribe.bind(handle);

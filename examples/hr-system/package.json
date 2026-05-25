@@ -12,7 +12,9 @@
     "@fontsource-variable/geist": "^5.2.8",
     "@tailwindcss/vite": "catalog:",
     "@zeroship/db": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
+    "zeroship": "workspace:*",
     "class-variance-authority": "^0.7.1",
     "clsx": "catalog:",
     "cmdk": "^1.1.1",
@@ -34,6 +36,7 @@
     "@types/react": "catalog:react18",
     "@types/react-dom": "catalog:react18",
     "@vitejs/plugin-react": "catalog:",
+    "@zeroship/types": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "typescript": "catalog:",
     "vite": "catalog:"

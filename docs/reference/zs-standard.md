@@ -22,7 +22,7 @@ export default {
 
 ## RPC authoring
 
-`@zeroship/server` provides the current wrapper helpers in [sdks/server/src/index.ts](sdks/server/src/index.ts):
+`@zeroship/rpc/server` provides the current wrapper helpers in [sdks/rpc/src/server.ts](sdks/rpc/src/server.ts):
 
 - `procedure`
 - `query`
@@ -32,6 +32,7 @@ export default {
 - `subscription`
 
 Named exports are normalized into the runtime RPC tree by [sdks/bootstrap/src/normalize.ts](sdks/bootstrap/src/normalize.ts). The runtime-owned dispatch path is `/_zs/v1/<wireId>`; user code does not route that path manually.
+`subscription` is currently server-side metadata plus lower-level transport work; the generic `@zeroship/rpc/client` API intentionally excludes it until the public subscription client shape is finalized.
 
 ## Current source of truth
 

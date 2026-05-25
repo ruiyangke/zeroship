@@ -7,8 +7,8 @@
  * keyed by wireId.
  *
  * After Stage 5b the dispatch dict is PURE DATA — no dispatcher helpers
- * live in the synthetic entry. The runtime's `__zsDispatch` consumes
- * it directly.
+ * are generated into the synthetic entry. Bootstrap's shared fetch handler
+ * and `__zsDispatch` consume it.
  */
 
 import { test, describe } from "node:test";
@@ -86,16 +86,17 @@ describe("buildServerEntrySource — binding-fed emission", () => {
 
   test("user fetch fall-through is shaped through default.fetch", () => {
     // The normaliser picks `user.default.fetch` first, falling back to
-    // a top-level `fetch` export. The runtime's kernel routes non-
-    // /_zs/v1/ traffic through that handler — no in-entry dispatcher.
+    // a top-level `fetch` export. The bootstrap fetch handler routes
+    // non-/_zs/v1/ traffic through that user handler.
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
         { sourceFile: "/proj/src/server.ts", exportName: "ping" },
       ]),
     });
+    assert.match(code, /const _zsTopLevelFetch = Reflect\.get\(_zsUser, "fetch"\)/);
     assert.match(code, /typeof _zsUserDefault\.fetch === "function"/);
-    assert.match(code, /typeof _zsUser\.fetch === "function"/);
+    assert.match(code, /typeof _zsTopLevelFetch === "function"/);
   });
 
   test("lazy bindings emit dynamic-import wrappers (Wave #188)", () => {

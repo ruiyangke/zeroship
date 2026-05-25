@@ -51,5 +51,8 @@
     "tsx": "catalog:",
     "typescript": "catalog:",
     "zeroship": "workspace:*"
+  },
+  "optionalDependencies": {
+    "superjson": "^2.2.6"
   }
 }

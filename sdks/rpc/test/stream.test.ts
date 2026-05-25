@@ -351,6 +351,70 @@ describe("client.stream() — errors", () => {
     assert.ok(thrown instanceof RpcError, `expected RpcError, got ${String(thrown)}`);
     assert.equal((thrown as RpcError).code, "CANCELLED");
   });
+
+  test("timeout starts when iteration starts, not when the stream handle is created", async () => {
+    const encoder = new TextEncoder();
+    const spy = recordingFetch(async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          ctrl.enqueue(encoder.encode("d:{}\n"));
+          ctrl.close();
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const rpc = client({
+      baseUrl: "https://api.test",
+      fetch: spy.fetch,
+      timeout: 5,
+    });
+
+    const iter = rpc.call<unknown>(
+      "lazy.stream",
+      undefined,
+      { kind: "stream" } as never,
+    ) as never as AsyncIterable<unknown>;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(spy.calls.length, 0, "stream fetch should be lazy");
+    assert.deepEqual(await collect(iter), []);
+    assert.equal(spy.calls.length, 1);
+  });
+
+  test("timeout during initial fetch reports TIMEOUT", async () => {
+    const spy = recordingFetch((req) => {
+      return new Promise<Response>((_resolve, reject) => {
+        req.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+    });
+    const rpc = client({
+      baseUrl: "https://api.test",
+      fetch: spy.fetch,
+      timeout: 5,
+    });
+
+    const iter = rpc.call<unknown>(
+      "slow.start",
+      undefined,
+      { kind: "stream" } as never,
+    ) as never as AsyncIterable<unknown>;
+
+    await assert.rejects(
+      async () => {
+        for await (const _chunk of iter) {
+          // no chunks expected
+        }
+      },
+      (err) => err instanceof RpcError && err.code === "TIMEOUT",
+    );
+  });
 });
 
 // ── streamUrl() — for ai-sdk hand-off ─────────────────────────────────

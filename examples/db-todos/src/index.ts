@@ -20,7 +20,8 @@
 import { t, schema, type InferRowInput } from "@zeroship/db";
 import { subscribe } from "@zeroship/db/internal";
 import { env } from "zeroship";
-import { query, mutation, action, runQuery, stream } from "@zeroship/server";
+import { query, mutation, action, stream } from "@zeroship/rpc/server";
+import { runQuery } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
 // Schema — the `export default { schema }` convention

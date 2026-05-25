@@ -10,11 +10,9 @@
  *     and prop-passed server actions can be detected at runtime),
  *   - expose `id`, `kind`, `wire` metadata on the function value.
  *
- * The brand + metadata is delegated to `__makeProcedure` from
- * `@zeroship/rpc-client` — the transform emits one `__makeProcedure`
- * call per server export and pulls the brand symbol from the same
- * package, so RSC-style detectors and dev-tools can re-derive the
- * brand without duplicating the `Symbol.for` call.
+ * The brand + metadata is delegated to `createRpcClient` from
+ * `@zeroship/rpc/client`, so generated stubs share the same transport
+ * and procedure branding as manually-created RPC clients.
  */
 
 import { test, describe } from "node:test";
@@ -54,21 +52,21 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
 }
 
 async function installRpcClientStub(baseDir: string): Promise<void> {
-  const pkgDir = join(baseDir, "node_modules", "@zeroship", "rpc-client");
+  const pkgDir = join(baseDir, "node_modules", "@zeroship", "rpc");
   await mkdir(pkgDir, { recursive: true });
   await writeFile(
     join(pkgDir, "package.json"),
     JSON.stringify({
-      name: "@zeroship/rpc-client",
+      name: "@zeroship/rpc",
       type: "module",
       exports: {
-        ".": "./index.js",
+        "./client": "./client.js",
       },
     }, null, 2),
     "utf8",
   );
   await writeFile(
-    join(pkgDir, "index.js"),
+    join(pkgDir, "client.js"),
     [
       "export const __SERVER_REFERENCE = Symbol.for(\"zeroship/server-reference\");",
       "export function __makeProcedure(call, meta) {",
@@ -79,6 +77,15 @@ async function installRpcClientStub(baseDir: string): Promise<void> {
       "  Object.defineProperty(fn, __SERVER_REFERENCE, { value: true, enumerable: false });",
       "  return fn;",
       "}",
+      "export function createRpcClient() {",
+      "  return {",
+      "    procedure: (meta) => __makeProcedure((input, callOptions) => ({ id: meta.id, kind: meta.kind, input, callOptions }), { wire: \"json\", ...meta }),",
+      "    query: (id, options) => __makeProcedure((input, callOptions) => ({ id, kind: \"query\", input, callOptions, options }), { id, kind: \"query\", wire: \"json\", ...(options ?? {}) }),",
+      "    mutation: (id, options) => __makeProcedure((input, callOptions) => ({ id, kind: \"mutation\", input, callOptions, options }), { id, kind: \"mutation\", wire: \"json\", ...(options ?? {}) }),",
+      "    action: (id, options) => __makeProcedure((input, callOptions) => ({ id, kind: \"action\", input, callOptions, options }), { id, kind: \"action\", wire: \"json\", ...(options ?? {}) }),",
+      "    stream: (id, options) => __makeProcedure((input, callOptions) => ({ id, kind: \"stream\", input, callOptions, options }), { id, kind: \"stream\", wire: \"json\", ...(options ?? {}) }),",
+      "  };",
+      "}",
       "",
     ].join("\n"),
     "utf8",
@@ -86,35 +93,33 @@ async function installRpcClientStub(baseDir: string): Promise<void> {
 }
 
 describe("client-environment transform — branded stubs", () => {
-  test("imports __makeProcedure + __SERVER_REFERENCE from @zeroship/rpc-client", () => {
+  test("imports the public procedure factory from @zeroship/rpc/client", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 export const add = mutation(async (input) => input);
 `;
     const ctx = makeCtx("client");
     const out = getHandler(plugin).call(ctx, code, "/r/src/actions/todos.ts");
     assert.ok(out, "transform returned output");
     const emitted: string = out.code;
-    // Single import line pulls both names from the canonical home;
-    // the transform no longer inlines the Symbol.for call.
-    assert.match(
-      emitted,
-      /import\s*\{\s*__makeProcedure\s*,\s*__SERVER_REFERENCE\s*\}\s*from\s*"@zeroship\/rpc-client"/,
-    );
+    assert.match(emitted, /import\s*\{\s*createRpcClient\s*\}\s*from\s*"@zeroship\/rpc\/client"/);
+    assert.match(emitted, /const __zsRpc = createRpcClient\(\)/);
+    assert.doesNotMatch(emitted, /__callProcedure/);
+    assert.doesNotMatch(emitted, /__streamProcedure/);
     assert.doesNotMatch(emitted, /Symbol\.for\("zeroship\/server-reference"\)/);
   });
 
-  test("stub carries id, kind, wire metadata via __makeProcedure", () => {
+  test("stub carries id, kind, wire metadata through the public factory", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation, query } from "@zeroship/server";
+import { mutation, query } from "@zeroship/rpc/server";
 export const list = query(async () => []);
 export const remove = mutation(async (id) => id, { id: "todos.remove" });
 `;
@@ -122,52 +127,83 @@ export const remove = mutation(async (id) => id, { id: "todos.remove" });
     const out = getHandler(plugin).call(ctx, code, "/r/src/actions/todos.ts");
     const emitted: string = out.code;
     // list — bare exportName as wireId, kind "query".
-    assert.match(emitted, /export const list = __makeProcedure\(/);
-    assert.match(emitted, /"id":"list"/);
-    assert.match(emitted, /"kind":"query"/);
+    assert.match(emitted, /export const list = __zsRpc\.query\("list"\)/);
     // remove — explicit wireId pinned, kind "mutation".
-    assert.match(emitted, /export const remove = __makeProcedure\(/);
-    assert.match(emitted, /"id":"todos\.remove"/);
-    assert.match(emitted, /"kind":"mutation"/);
-    // wire is "json" by default.
-    assert.match(emitted, /"wire":"json"/);
+    assert.match(emitted, /export const remove = __zsRpc\.mutation\("todos\.remove"\)/);
   });
 
-  test("stub forwards to __rpcUnary for non-stream procedures", () => {
+  test("stub uses a public mutation factory for non-stream procedures", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 export const send = mutation(async (input) => input);
 `;
     const ctx = makeCtx("client");
     const out = getHandler(plugin).call(ctx, code, "/r/src/x.ts");
     const emitted: string = out.code;
-    assert.match(emitted, /__rpcUnary\("send", input\)/);
+    assert.match(emitted, /export const send = __zsRpc\.mutation\("send"\)/);
   });
 
-  test("stream stub forwards to __rpcStream", () => {
+  test("stream stub uses the public stream factory", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { stream } from "@zeroship/server";
+import { stream } from "@zeroship/rpc/server";
 export const drip = stream(async function* () { yield 1; });
 `;
     const ctx = makeCtx("client");
     const out = getHandler(plugin).call(ctx, code, "/r/src/x.ts");
     const emitted: string = out.code;
-    assert.match(emitted, /__rpcStream\("drip", input\)/);
-    assert.match(emitted, /"kind":"stream"/);
+    assert.match(emitted, /export const drip = __zsRpc\.stream\("drip"\)/);
   });
 
-  test("evaluable: emitted code resolves @zeroship/rpc-client and produces a branded stub", async () => {
+  test("subscription stub preserves subscription metadata instead of using stream transport", () => {
+    const state = makeState();
+    const plugin = transformPlugin("/_rpc", state);
+    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
+
+    const code = `"use server";
+import { subscription } from "@zeroship/rpc/server";
+export const feed = subscription(async function* () { yield 1; }, { id: "feed.events" });
+`;
+    const ctx = makeCtx("client");
+    const out = getHandler(plugin).call(ctx, code, "/r/src/x.ts");
+    const emitted: string = out.code;
+    assert.match(
+      emitted,
+      /export const feed = __zsRpc\.procedure\(\{"id":"feed\.events","kind":"subscription","wire":"json"\}\)/,
+    );
+    assert.doesNotMatch(emitted, /__zsRpc\.stream\("feed\.events"\)/);
+  });
+
+  test("idempotent metadata reaches generated direct-call stubs", () => {
+    const state = makeState();
+    const plugin = transformPlugin("/_rpc", state);
+    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
+
+    const code = `"use server";
+import { mutation } from "@zeroship/rpc/server";
+export const save = mutation(async (input) => input, { id: "todos.save", idempotent: true });
+`;
+    const ctx = makeCtx("client");
+    const out = getHandler(plugin).call(ctx, code, "/r/src/x.ts");
+    const emitted: string = out.code;
+    assert.match(emitted, /"idempotent":true/);
+    assert.match(
+      emitted,
+      /export const save = __zsRpc\.mutation\("todos\.save", \{"idempotent":true\}\)/,
+    );
+  });
+
+  test("evaluable: emitted code resolves @zeroship/rpc/client and produces a branded stub", async () => {
     // Materialize the emitted client source UNDER the vite-plugin
     // package root so Node's bare-specifier resolver walks up into the
-    // workspace's `node_modules` and finds `@zeroship/rpc-client`. A
+    // workspace's `node_modules` and finds `@zeroship/rpc/client`. A
     // tmpdir outside the workspace tree won't resolve the import — and
     // a `data:` URL has no base path at all.
     const state = makeState();
@@ -175,7 +211,7 @@ export const drip = stream(async function* () { yield 1; });
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const code = `"use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 export const ping = mutation(async () => "pong", { id: "ping" });
 `;
     const ctx = makeCtx("client");

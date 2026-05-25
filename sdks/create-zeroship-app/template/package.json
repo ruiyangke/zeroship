@@ -11,6 +11,7 @@
     "@vitejs/plugin-react": "^6.0.1",
     "@zeroship/db": "^0.1.0",
     "@zeroship/kv": "^0.1.0",
+    "@zeroship/rpc": "^0.1.0",
     "@zeroship/storage": "^0.1.0",
     "@zeroship/vite-plugin": "^0.3.0",
     "react": "^19.2.5",

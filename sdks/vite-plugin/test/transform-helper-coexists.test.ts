@@ -52,7 +52,7 @@ describe('helper + procedure coexistence in a single "use server" file', () => {
     // Realistic server-module shape: a few RPC procedures alongside
     // helpers used by other server modules.
     const code = `"use server";
-import { procedure, query, mutation } from "@zeroship/server";
+import { procedure, query, mutation } from "@zeroship/rpc/server";
 
 // ── Helpers (NOT RPCs) ───────────────────────────────────────────
 function _hashSecret(secret) {
@@ -90,7 +90,7 @@ export const provision = procedure(async (req) => ({ provisioned: req }));
     assert.equal(byName.get("revokeSession")?.kind, "mutation");
     assert.equal(byName.get("revokeSession")?.config?.id, "session.revoke");
     assert.equal(byName.get("listSessions")?.kind, "query");
-    // procedure() defers to inferKind: "provision" → mutation (not list/get/...).
+    // Generic procedure() defaults to mutation unless config.kind says otherwise.
     assert.equal(byName.get("provision")?.kind, "mutation");
   });
 
@@ -106,7 +106,7 @@ export const provision = procedure(async (req) => ({ provisioned: req }));
     // Now: the re-exported helpers are not wrapper calls in THIS
     // file's AST, so they're not registered.
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 
 export * from "./_helpers";
 export { default as anonymous } from "./_helpers";
@@ -133,7 +133,7 @@ export const real = procedure(async () => 42);
     // Apps may export a `default.fetch` for HTTP fall-through. The
     // discovery pass ignores `export default` regardless of shape.
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 
 export const ping = procedure(async () => "pong");
 

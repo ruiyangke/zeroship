@@ -125,6 +125,9 @@ importers:
       '@langchain/langgraph':
         specifier: ^1.2.9
         version: 1.2.9(@langchain/core@1.1.44(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(ws@8.20.0))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(zod-to-json-schema@3.25.2(zod@3.25.76))(zod@3.25.76)
+      '@langchain/langgraph-checkpoint':
+        specifier: ^1.0.1
+        version: 1.0.1(@langchain/core@1.1.44(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(ws@8.20.0))
       '@langchain/openai':
         specifier: ^1.4.5
         version: 1.4.5(@langchain/core@1.1.44(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(ws@8.20.0))(ws@8.20.0)
@@ -140,9 +143,9 @@ importers:
       '@zeroship/kv':
         specifier: workspace:*
         version: link:../../sdks/kv
-      '@zeroship/rpc-client':
+      '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc-client
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -158,6 +161,9 @@ importers:
       deepagents:
         specifier: ^1.9.0
         version: 1.9.0(@opentelemetry/api@1.9.0)(langsmith@0.6.0(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(ws@8.20.0))(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(ws@8.20.0)(zod-to-json-schema@3.25.2(zod@3.25.76))
+      langchain:
+        specifier: ^1.3.5
+        version: 1.3.5(@langchain/core@1.1.44(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(ws@8.20.0))(@opentelemetry/api@1.9.0)(openai@6.35.0(ws@8.20.0)(zod@3.25.76))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(ws@8.20.0)(zod-to-json-schema@3.25.2(zod@3.25.76))
       react:
         specifier: 'catalog:'
         version: 19.2.5
@@ -222,9 +228,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 'catalog:'
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
-      '@zeroship/rpc-client':
+      '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc-client
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -256,6 +262,9 @@ importers:
 
   examples/bench:
     dependencies:
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -281,9 +290,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 'catalog:'
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
-      '@zeroship/rpc-client':
+      '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc-client
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -321,6 +330,9 @@ importers:
       '@zeroship/react':
         specifier: workspace:*
         version: link:../../sdks/react
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -340,6 +352,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.0.0
         version: 19.2.3(@types/react@19.2.14)
+      '@zeroship/types':
+        specifier: workspace:*
+        version: link:../../sdks/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -355,6 +370,9 @@ importers:
       '@zeroship/db':
         specifier: workspace:*
         version: link:../../sdks/db
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -383,6 +401,9 @@ importers:
       '@zeroship/migrations':
         specifier: workspace:*
         version: link:../../sdks/migrations
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -390,6 +411,9 @@ importers:
         specifier: workspace:*
         version: link:../../sdks/vite-plugin
     devDependencies:
+      '@zeroship/types':
+        specifier: workspace:*
+        version: link:../../sdks/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -411,9 +435,9 @@ importers:
       '@zeroship/migrations':
         specifier: workspace:*
         version: link:../../sdks/migrations
-      '@zeroship/rpc-client':
+      '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../../sdks/rpc-client
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -476,6 +500,9 @@ importers:
       '@zeroship/db':
         specifier: workspace:*
         version: link:../../sdks/db
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -527,6 +554,9 @@ importers:
       tw-animate-css:
         specifier: ^1.4.0
         version: 1.4.0
+      zeroship:
+        specifier: workspace:*
+        version: link:../..
     devDependencies:
       '@types/react':
         specifier: catalog:react18
@@ -537,6 +567,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 'catalog:'
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
+      '@zeroship/types':
+        specifier: workspace:*
+        version: link:../../sdks/types
       '@zeroship/vite-plugin':
         specifier: workspace:*
         version: link:../../sdks/vite-plugin
@@ -564,6 +597,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 'catalog:'
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -598,6 +634,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 'catalog:'
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -642,6 +681,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 'catalog:'
         version: 6.0.1(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
+      '@zeroship/rpc':
+        specifier: workspace:*
+        version: link:../../sdks/rpc
       '@zeroship/server':
         specifier: workspace:*
         version: link:../../sdks/server
@@ -691,6 +733,10 @@ importers:
       '@zeroship/types':
         specifier: workspace:*
         version: link:../types
+    optionalDependencies:
+      superjson:
+        specifier: ^2.2.6
+        version: 2.2.6
     devDependencies:
       tsx:
         specifier: 'catalog:'
@@ -802,7 +848,7 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
-  sdks/rpc-client:
+  sdks/rpc:
     optionalDependencies:
       superjson:
         specifier: ^2.2.6
@@ -884,9 +930,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
-      '@zeroship/rpc-client':
+      '@zeroship/rpc':
         specifier: workspace:*
-        version: link:../rpc-client
+        version: link:../rpc
       acorn:
         specifier: ^8.16.0
         version: 8.16.0

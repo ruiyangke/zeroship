@@ -129,29 +129,32 @@ Inference is **only** about call shape (query vs. mutation vs. stream vs. subscr
 | `kind: "stream"` | `async function*` (generator) or `Promise<ReadableStream>` return type. |
 | `kind: "subscription"` | Explicit `kind: "subscription"` on `fn.config`. |
 
-The round-01 critic flagged name-regex inference (`/^(get\|list\|find\|search\|count\|read)/`) as a footgun (cache poisoning on `searchAndDestroy`). It is **deleted**. Queries opt in via `fn.config.kind = "query"` or via the `query()` wrapper from `@zeroship/server`.
+The round-01 critic flagged name-regex inference (`/^(get\|list\|find\|search\|count\|read)/`) as a footgun (cache poisoning on `searchAndDestroy`). It is **deleted**. Queries opt in via `fn.config.kind = "query"` or via the `query()` wrapper from `@zeroship/rpc/server`.
 
 ### Wrappers (Level 2)
 
 Functions are objects. Attach `.config` directly, or use a wrapper that carries types and runtime checks:
 
 ```ts
-import { mutation, query, z } from "@zeroship/server";
+import { z } from "@zeroship/server";
+import { mutation, query } from "@zeroship/rpc/server";
 
-export const list = query({
+export const list = query(async ({ limit, cursor }) => {
+  return db.todos.find({ ownerId: ctx.user.id, limit, cursor });
+}, {
+  id: "todos.list",
   input:  z.object({ limit: z.number().int().min(1).max(200).default(20), cursor: z.string().optional() }),
   output: z.array(TodoSchema),
-})(async ({ limit, cursor }) => {
-  return db.todos.find({ ownerId: ctx.user.id, limit, cursor });
 });
 
-export const add = mutation({
+export const add = mutation(async ({ text }) => {
+  return db.todos.insertOne({ ownerId: ctx.user.id, text });
+}, {
+  id:         "todos.add",
   input:      z.object({ text: z.string().min(1).max(500) }),
   idempotent: true,
   rateLimit:  { rpm: 100, per: "user" },
   middleware: ["transaction"],
-})(async ({ text }) => {
-  return db.todos.insertOne({ ownerId: ctx.user.id, text });
 });
 ```
 
@@ -172,7 +175,7 @@ A procedure marked `lazy: true` defers its module evaluation to the first call. 
 
 ```ts
 "use server";
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 import { runWizard } from "./_wizard.js";   // heavy
 
 export const wizard = mutation(async (input) => runWizard(input), {
@@ -321,7 +324,7 @@ Round-01 Critical-1 named the failure mode: `setTimeout(() => user(), 1000)` re-
 
 The wire is JSON. Plain `JSON.stringify` loses `Date`, `BigInt`, `Map`, `Set`, `URL`, `Uint8Array`, `RegExp`. **Superjson is the canonical envelope. There is one wire format.**
 
-The round-01 critic flagged the v1 sketch as "auto-stub strips meta; manual client preserves meta; types lie about Date round-tripping." That's resolved by removing the choice: every emitter (auto-stub, manual `client<App>()`, server response, batched envelope, cached idempotency body) emits superjson. Every parser (gateway, kernel, client SDK) reads superjson.
+The round-01 critic flagged the v1 sketch as "auto-stub strips meta; manual client preserves meta; types lie about Date round-tripping." That's resolved by removing the choice: every emitter (auto-stub, manual `createRpcClient<App>()`, server response, batched envelope, cached idempotency body) emits superjson. Every parser (gateway, kernel, client SDK) reads superjson.
 
 ### Envelope shape
 
@@ -393,7 +396,7 @@ Native `FormData`, `Blob`, `File`, `ReadableStream` ship as `#[v8_class]` primit
 TypeScript types are erased at build time, so the transform cannot rely on them to decide between JSON and multipart wires. The wire mode is chosen by **explicit, build-visible signals** — in priority order:
 
 1. **`fn.config.wire`** — explicit override. Values: `"json"` (default), `"multipart"`, `"ai-ui-v1"` (streams), `"raw"` (escape-hatch).
-2. **Wrapper input schema** — when the wrapper is `mutation({ input: ... })` and the schema includes `z.instanceof(FormData)`, `z.instanceof(File)`, `z.instanceof(Blob)`, OR a `z.object({...})` whose top-level fields include any of those types, the build emits `wire: "multipart"`.
+2. **Wrapper input schema** — when the wrapper config is `mutation(handler, { input: ... })` and the schema includes `z.instanceof(FormData)`, `z.instanceof(File)`, `z.instanceof(Blob)`, OR a `z.object({...})` whose top-level fields include any of those types, the build emits `wire: "multipart"`.
 3. **Default** — `wire: "json"`.
 
 The build records the resolved `wire` in `manifest.artifact.procedures.<id>.wire`. The client stub uses the recorded value to pick the call shape.
@@ -402,38 +405,46 @@ The build records the resolved `wire` in `manifest.artifact.procedures.<id>.wire
 
 ```ts
 // (a) Pure-FormData parameter — wire: "multipart", _zs.json absent.
-import { mutation, z } from "@zeroship/server";
-export const uploadAvatar = mutation({
-  input:      z.instanceof(FormData),
-  idempotent: true,
-})(async (form: FormData) => {
+import { z } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
+export const uploadAvatar = mutation(async (form: FormData) => {
   const file = form.get("avatar") as File;
   const url  = await storage.put(file);
   return { url };
+}, {
+  id:         "avatar.upload",
+  input:      z.instanceof(FormData),
+  idempotent: true,
 });
 
 // (b) Mixed structured + binary — wire: "multipart", _zs.json carries JSON fields.
-export const updateAvatar = mutation({
+export const updateAvatar = mutation(async ({ avatar, caption }) => {
+  const url = await storage.put(avatar);
+  return { url, caption };
+}, {
+  id: "avatar.update",
   input: z.object({
     avatar:  z.instanceof(File),
     caption: z.string().min(1).max(280),
   }),
   idempotent: true,
-})(async ({ avatar, caption }) => {
-  const url = await storage.put(avatar);
-  return { url, caption };
 });
 
 // (c) Pure-JSON parameter — wire: "json".
-export const renameTodo = mutation({
-  input: z.object({ id: z.string(), title: z.string() }),
-})(async ({ id, title }) => db.todos.update(id, { title }));
+export const renameTodo = mutation(
+  async ({ id, title }) => db.todos.update(id, { title }),
+  {
+    id: "todos.rename",
+    input: z.object({ id: z.string(), title: z.string() }),
+  },
+);
 
 // (d) Manual override — author wants raw bytes.
-export const ingestLog = mutation({
+export const ingestLog = mutation(async (bytes: Uint8Array) => log.append(bytes), {
+  id:    "logs.ingest",
   input: z.instanceof(Uint8Array),
   wire:  "multipart",      // explicit; otherwise the schema would default to json+base64
-})(async (bytes: Uint8Array) => log.append(bytes));
+});
 ```
 
 ### Multipart envelope spec
@@ -514,16 +525,17 @@ For `ReadableStream` returns: see §6 streaming for the wire spec. Disambiguatio
 Power users who need full HTTP control declare:
 
 ```ts
-import { action } from "@zeroship/server";
+import { action } from "@zeroship/rpc/server";
 
-export const webhookHandler = action({
-  kind: "raw",
-})(async (req: Request) => {
+export const webhookHandler = action(async (req: Request) => {
   if (req.headers.get("x-signature") !== expectedSig) {
     return new Response("forbidden", { status: 403 });
   }
   // ...
   return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
+}, {
+  id:   "webhooks.handler",
+  kind: "raw",
 });
 ```
 
@@ -645,20 +657,22 @@ export default {
 
 ```ts
 // transform-client output of ./actions/todos
-import { __makeProcedure, __SERVER_REFERENCE } from "@zeroship/rpc-client";
+import { createRpcClient } from "@zeroship/rpc/client";
 
-export const list = __makeProcedure(
-  (input) => __rpcUnary("todos.list", input),
+const __zsRpc = createRpcClient({ baseUrl: "" });
+
+export const list = __zsRpc.query(
+  "todos.list",
   { id: "todos.list", kind: "query", wire: "json" },
 );
-export const add = __makeProcedure(
-  (input) => __rpcUnary("todos.add", input),
+export const add = __zsRpc.mutation(
+  "todos.add",
   { id: "todos.add", kind: "mutation", wire: "json" },
 );
 ```
 
-`__makeProcedure` attaches `id`, `kind`, `wire`, and the
-`__SERVER_REFERENCE` symbol. Same pattern as RSC's server-action
+The public factory attaches `id`, `kind`, `wire`, and the server-reference
+brand to each generated callable. Same pattern as RSC's server-action
 references: when a server function is passed as a prop to a client
 component, the client can identify it as an RPC reference rather than a
 local function.
@@ -857,15 +871,16 @@ The client SDK picks the best `Accept` for the procedure's declared output type 
 A procedure that wants to drive `useChat` from `ai/react` declares `kind: "stream"` and `wire: "ai-ui-v1"`:
 
 ```ts
-import { stream } from "@zeroship/server";
+import { stream } from "@zeroship/rpc/server";
 import { streamText } from "ai";
 
-export const completion = stream({
-  wire: "ai-ui-v1",   // tells the runtime to ship the AI SDK 5 stream protocol
-  input: z.object({ messages: z.array(MessageSchema) }),
-})(async ({ messages }) => {
+export const completion = stream(async ({ messages }) => {
   const result = streamText({ model: claude("opus"), messages });
   return result.toUIMessageStreamResponse();   // returns a Response we forward verbatim
+}, {
+  id: "chat.completion",
+  wire: "ai-ui-v1",   // tells the runtime to ship the AI SDK 5 stream protocol
+  input: z.object({ messages: z.array(MessageSchema) }),
 });
 ```
 
@@ -1590,7 +1605,7 @@ A common pattern: a server function `add()` imports and calls another server fun
 import { recompute } from "../actions/cache";
 import { ctx } from "@zeroship/server";
 
-export const add = mutation({...})(async ({ text }) => {
+export const add = mutation(async ({ text }) => {
   const t = await db.todos.insertOne({ text });
 
   // Default: direct call.
@@ -1619,23 +1634,24 @@ The Level-1 import-and-call surface is the default. Underneath:
 
 ```ts
 // Generated for SSR / non-Vite consumers
-import { client } from "@zeroship/rpc";
+import { createRpcClient } from "@zeroship/rpc/client";
 import type { App } from "../api";          // type-only
 
-const rpc = client<App>({
+const rpc = createRpcClient<App>({
   baseUrl: "https://myapp.zeroship.ai",
   auth:    () => getJwt(),
   fetch:   globalThis.fetch,
   batch:   true,
 });
 
-const todos = await rpc.todos.list.query({ limit: 50 });
+const listTodos = rpc.query("todos.list");
+const todos = await listTodos({ limit: 50 });
 const sub   = rpc.todoChanges.subscribe(undefined, {
   onData: ch => …, onError: e => …, signal: controller.signal,
 });
 ```
 
-`client<App>` and the seamless import-and-call surface emit identical wire bytes (the same superjson envelope). There is one wire encoder, used by both. Round-01 Critical-2's "auto-stub strips meta; manual client preserves meta" mismatch is gone.
+`createRpcClient<App>()` and the seamless import-and-call surface emit identical wire bytes (the same superjson envelope). There is one wire encoder, used by both. Round-01 Critical-2's "auto-stub strips meta; manual client preserves meta" mismatch is gone.
 
 ### React
 
@@ -1769,7 +1785,7 @@ for await (const chunk of search({ query: "build" })) {
 ```
 
 For chat UIs, use `ProcedureHandle.streamUrl(input)` from the typed
-`client<App>()` surface with AI SDK's `useChat`.
+`createRpcClient<App>()` surface with AI SDK's `useChat`.
 
 ### Server-side rendering
 
@@ -1813,7 +1829,7 @@ procedure exports before the synthetic entry binds them.
 
 ### C — AI-built chat app
 
-1. Creator's app: `export const completion = stream({ wire: "ai-ui-v1", input: ... })(async ({ messages }) => streamText({...}).toUIMessageStreamResponse())`.
+1. Creator's app: `export const completion = stream(async ({ messages }) => streamText({...}).toUIMessageStreamResponse(), { id: "chat.completion", wire: "ai-ui-v1", input: ... })`.
 2. Frontend: `useChat({ api: rpc.chat.completion.streamUrl({}) })`. AI SDK 5 consumes the SSE.
 3. **Zero custom protocol code.**
 
@@ -1856,7 +1872,7 @@ procedure exports before the synthetic entry binds them.
 
 ### I — webhook handler (raw escape-hatch)
 
-1. Creator: `export const handler = action({ kind: "raw" })(async (req: Request) => { ... })`.
+1. Creator: `export const handler = action(async (req: Request) => { ... }, { id: "webhook.handler", kind: "raw" })`.
 2. Wire: Stripe POSTs JSON; the handler reads `req.headers.get("stripe-signature")`, verifies, processes.
 3. Auth/rate-limit still apply (gateway-side).
 
@@ -1962,17 +1978,18 @@ Round-01 Major-9: the v1 draft declared `todos.add.v2` as a sibling procedure, w
 
 ```ts
 // Both versions exported from the same module
-export const add = mutation({
+export const add = mutation(async ({ text }) => { /* ... */ }, {
+  id:      "todos.add",
   version: "1",   // current default
   input: z.object({ text: z.string().min(1).max(500) }),
-})(async ({ text }) => { /* ... */ });
+});
 
-export const addV2 = mutation({
+export const addV2 = mutation(async ({ text, dueDate }) => { /* ... */ }, {
   id:      "todos.add",     // same wireId
   version: "2",
   input: z.object({ text: z.string().min(1).max(500), dueDate: z.date().optional() }),
   deprecates: { version: "1", sunsetAt: "2026-12-31" },   // marks v1 deprecated
-})(async ({ text, dueDate }) => { /* ... */ });
+});
 ```
 
 Manifest:
@@ -2080,10 +2097,11 @@ Output:
 A creator may explicitly attest a change is non-breaking by adding `breakingOk: true` to the wrapper (e.g., when adding a runtime check that the old client wouldn't violate). The build emits a warning, not an error, and records the attestation in the audit log.
 
 ```ts
-export const add = mutation({
+export const add = mutation(async ({ text }) => { /* ... */ }, {
+  id: "todos.add",
   input: z.object({ text: z.string().min(5).max(500) }),    // bumped from min(1)
   breakingOk: true,                                          // attested non-breaking
-})(async ({ text }) => { /* ... */ });
+});
 ```
 
 #### Audit log surface
@@ -2214,7 +2232,7 @@ The intent of the layered check: in the common case (browser; same origin), chec
 
 ## 15. Open questions
 
-1. **Default batching off vs. on.** Proposal: off by default for vanilla `client<App>()`, on by default in the React adapter. Revisit after early creators ship.
+1. **Default batching off vs. on.** Proposal: off by default for vanilla `createRpcClient<App>()`, on by default in the React adapter. Revisit after early creators ship.
 
 2. ~~**In-flight cancellation during deploy.**~~ **Resolved (§3 abort plumbing).** On isolate eviction triggered by a deploy swap, the worker calls `entered_for_eviction()` on the isolate; this fires the per-request `AbortController` for every in-flight procedure and starts a 30-second drain window. Procedures that finish within the window respond normally; those that don't are aborted hard at window end. After the drain, the isolate enters `Disposed`. The drain window is configurable via `defineApp.deploy.drainSeconds` (default 30, max 300).
 
@@ -2239,7 +2257,7 @@ The intent of the layered check: in the common case (browser; same origin), chec
 | **5** | Idempotency: gateway-side SETNX flow with Lua-script release (`crates/gateway/src/idempotency.rs`). KV-backed dedupe table. UUIDv4/v7 entropy check for anonymous mutations. | ~400 (Rust) | Phase 4 |
 | **6** | Streaming: `function*` detection + content-negotiated wires (NDJSON, SSE, octet-stream). AI SDK 5 UI Message Stream emitter. Mid-stream error frames per §6 (NDJSON / SSE / AI SDK 5 / octet-stream-trailers). Heartbeats. **Acceptance**: the `wire: "ai-ui-v1"` byte stream is byte-identical to `streamText({...}).toUIMessageStreamResponse()` for a representative input set (verified against the upstream `ai/react` lib in CI). | ~500 (Rust+TS) | Phase 4 |
 | **7** | Multipart / FormData / Blob / File first-class on the dispatch path. `_zs.json` envelope spec. Native multipart parser already exists; we wire it in. | ~350 (Rust+TS) | Phase 4 |
-| **8** | Client: typed `client<App>()` with seamless surface, branded `__SERVER_REFERENCE` references, batching link. Auto-emitted `virtual:zeroship/server-api.d.ts`. | ~500 (TS) | Phase 2 |
+| **8** | Client: typed `createRpcClient<App>()` with seamless surface, branded server-reference callables, batching link. Auto-emitted `virtual:zeroship/server-api.d.ts`. | ~500 (TS) | Phase 2 |
 | **9** | React examples: native TanStack Query over callable RPC imports; SSR examples use `prefetchQuery` + `dehydrate` directly. | ~200 (TS) | Phase 8 |
 | **10** | Wire-compat check: `zod-to-json-schema` integration; canonical schema diff; safe-vs-breaking classifier; deploy-time gate; control-plane prior-manifest history (last 10). | ~450 (Rust+TS) | Phase 3 |
 | **11** | Procedure versioning: `Zs-Procedure-Version` header routing; sunset/deprecation surfaces; live-version cap enforcement. | ~250 (Rust+TS) | Phase 4, 10 |

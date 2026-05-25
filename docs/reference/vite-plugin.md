@@ -43,16 +43,17 @@ Today, a procedure is recorded for the manifest only when all of the following a
 
 1. The file has a top-level `"use server"` directive.
 2. The exported binding is initialized by a recognized wrapper call.
-3. The wrapper is a named import from `@zeroship/server` or `@zeroship/rpc`.
+3. The wrapper is a named import from `@zeroship/rpc/server`.
 
 Recognized wrappers: `procedure`, `query`, `mutation`, `action`, `stream`, `subscription`.
 
 Namespace imports and default imports are ignored by the static matcher. Plain exports stay private to the server bundle.
+Client stubs for `subscription` preserve `{ kind: "subscription" }` metadata, but the generic `@zeroship/rpc/client` surface does not expose a public subscription API yet; invoking one fails with `UNIMPLEMENTED` instead of falling back to the stream transport.
 
 ```ts
 "use server";
 
-import { query, mutation } from "@zeroship/server";
+import { query, mutation } from "@zeroship/rpc/server";
 
 export const listTodos = query(async () => []);
 export const addTodo = mutation(async (input) => input, {
@@ -78,22 +79,22 @@ The old `src/server.{ts,tsx,js,jsx}` and `src/server/**` path convention is no l
 Kind resolution is:
 
 - explicit wrapper kind for `query`, `mutation`, `action`, `stream`, `subscription`
-- name-based inference for `procedure()`:
-  `get*`, `list*`, `find*`, `search*`, `count*`, `read*`, `fetch*` => `query`
 - async generators => `stream`
-- everything else => `mutation`
+- generic unary `procedure()` => `mutation`
+
+Names are never used to infer `query`. Reads opt in via `query(...)` or an explicit `config.kind = "query"` so cache and retry policy do not depend on identifier spelling.
 
 `lazy: true` is supported in either the wrapper config or `fn.config`. When present, the synthetic server entry emits a dynamic `import()` wrapper instead of an eager namespace import. Non-literal `lazy` values warn and stay eager.
 
 ## Synthetic server entry
 
-[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts) emits `virtual:zeroship/_server-entry`. Its job is normalization, not dispatch:
+[`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts) emits `virtual:zeroship/_server-entry`. Its job is to normalize the app module and delegate RPC fall-through to `@zeroship/bootstrap`:
 
 - `default.schema` is passed through
-- `default.fetch` is passed through
+- `default.fetch` is a shared bootstrap fetch handler that routes `/_zs/v1/<wireId>` and falls through to the user's own fetch for non-RPC paths
 - `default.rpc` is a plain object keyed by `wireId`
 
-The runtime-side dispatcher lives in [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md) and [`zs-standard.md`](zs-standard.md), not in the generated entry.
+The runtime-side dispatcher and stream encoder live in [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md) and [`zs-standard.md`](zs-standard.md), not as generated helper code in the entry.
 
 ## See also
 

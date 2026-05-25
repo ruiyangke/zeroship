@@ -14,7 +14,7 @@
 import { t, schema } from "@zeroship/db";
 import { env } from "zeroship";
 import { defineMigration, migrations } from "@zeroship/migrations";
-import { action, mutation, query } from "@zeroship/server";
+import { action, mutation, query } from "@zeroship/rpc/server";
 
 // ---------------------------------------------------------------------------
 // Schema — represents the "post-expand" shape. Both old and new fields

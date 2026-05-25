@@ -2995,9 +2995,9 @@ fn classify_fetch_fast_return(
 //   - The incoming URL contains `/_zs/v1/<id>` (POST or GET)
 //
 // The kernel slices the id in Rust (no URL-object construction), parses
-// the body's superjson `{ json }` envelope in V8, and calls
+// the body's superjson `{ json, meta? }` envelope in V8, and calls
 // `rpc(id, input, ctx)`. Resolved values are encoded inline:
-//   - Plain JSON-serializable → `{"json":<result>}` envelope, 200 OK
+//   - Plain / superjson-serializable → `{ "json": ..., "meta"? }`, 200 OK
 //   - Response object → inspect_response (status, headers, body)
 //   - AsyncIterator → fall through to default.fetch (whose synthetic
 //     entry wraps it in an SSE Response)
@@ -3005,17 +3005,6 @@ fn classify_fetch_fast_return(
 // Synchronous handlers complete entirely in this block; async handlers
 // (Promise) hand off to the existing pump path on pending; the resolved
 // fast path applies to fulfilled-on-checkpoint promises too.
-
-// External one-byte string constants so per-request envelope unwrap
-// reuses the same V8 string identity (lets V8's hidden-class IC fire
-// on `obj.get(json_key)` after warmup instead of re-interning the key
-// every call). Same pattern as http.rs's K_STATUS / K_HEADERS etc.
-static K_JSON: v8::OneByteConst = v8::String::create_external_onebyte_const(b"json");
-
-#[inline(always)]
-fn key<'s>(scope: &mut v8::PinScope<'s, '_>, k: &'static v8::OneByteConst) -> v8::Local<'s, v8::String> {
-    v8::String::new_from_onebyte_const(scope, k).unwrap()
-}
 
 /// Outcome of the RPC fast-path attempt.
 enum RpcCallResult {
@@ -3066,7 +3055,8 @@ enum InputParse<'s> {
 /// Materialize the `input` arg for `rpc(name, input, ctx)`.
 ///
 /// Wire shapes:
-///   - POST:  body is JSON, expected canonical shape `{"json":<v>}`.
+///   - POST:  body is superjson, expected canonical shape
+///            `{"json":<v>,"meta"?:...}`.
 ///   - GET:   query string carries `?input=<base64url-of-JSON-body>`.
 ///
 /// Empty body / missing query param → `undefined` (Ok). Malformed JSON
@@ -3079,7 +3069,7 @@ fn parse_rpc_input<'s>(
     body: &str,
 ) -> InputParse<'s> {
     if method.eq_ignore_ascii_case("POST") {
-        return parse_envelope_body(scope, body);
+        return parse_rpc_body(scope, body);
     }
     if !method.eq_ignore_ascii_case("GET") {
         return InputParse::Ok(v8::undefined(scope).into());
@@ -3100,63 +3090,22 @@ fn parse_rpc_input<'s>(
     let Ok(s) = std::str::from_utf8(&decoded) else {
         return InputParse::Reject400("invalid base64url input");
     };
-    parse_envelope_body(scope, s)
+    parse_rpc_body(scope, s)
 }
 
-/// Parse a JSON body wrapped in the `{"json":<v>}` envelope.
-///
-/// Fast path: when the body matches the canonical shape exactly
-/// (no whitespace, no extra keys), slice the inner value in Rust and
-/// JSON-parse only that — saves one V8 object allocation + one property
-/// get per request vs. the general path. zerobench/SuperJSON/our own
-/// vite plugin all emit this exact shape, so it's the common case.
-///
-/// Slow path: full `JSON.parse(body).json`. Handles whitespace,
-/// reordered keys, or missing envelope (raw JSON value pass-through).
-/// On total parse failure, returns `Reject400`.
+/// Parse a superjson body and revive rich values into V8.
 #[inline]
-fn parse_envelope_body<'s>(
+fn parse_rpc_body<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     body: &str,
 ) -> InputParse<'s> {
-    if body.is_empty() { return InputParse::Ok(v8::undefined(scope).into()); }
-
-    const PREFIX: &[u8] = b"{\"json\":";
-    let bytes = body.as_bytes();
-    if bytes.len() >= PREFIX.len() + 1
-        && bytes.starts_with(PREFIX)
-        && bytes.last() == Some(&b'}')
-    {
-        let inner = &body[PREFIX.len()..body.len() - 1];
-        if !inner.is_empty() {
-            // `null` is the common no-arg payload — skip V8 entirely.
-            if inner == "null" { return InputParse::Ok(v8::null(scope).into()); }
-            if let Some(s) = v8::String::new(scope, inner) {
-                if let Some(v) = v8::json::parse(scope, s) { return InputParse::Ok(v); }
-            }
-            // Parse failure on the sliced inner → fall through. Either
-            // the inner isn't valid JSON (e.g. trailing extra keys
-            // before the outer `}`) or v8::String::new rejected the
-            // input. The slow path's full envelope parse is the safety
-            // net — it's slower but catches anything the fast slice
-            // can't.
-        }
+    if body.is_empty() {
+        return InputParse::Ok(v8::undefined(scope).into());
     }
-
-    // Slow path: parse the full envelope + property get.
-    let Some(body_str) = v8::String::new(scope, body) else {
-        return InputParse::Reject400("invalid JSON body");
-    };
-    let Some(parsed) = v8::json::parse(scope, body_str) else {
-        return InputParse::Reject400("invalid JSON body");
-    };
-    if !parsed.is_object() { return InputParse::Ok(parsed); }
-    let obj: v8::Local<v8::Object> = parsed.try_into().unwrap();
-    // Cached external one-byte "json" key — same V8 string identity per
-    // request, so V8's hidden-class IC fires on the property get.
-    let json_key = key(scope, &K_JSON);
-    let v = obj.get(scope, json_key.into()).unwrap_or(parsed);
-    InputParse::Ok(if v.is_undefined() { parsed } else { v })
+    match crate::rpc::decode_from_bytes(scope, body.as_bytes()) {
+        Ok(v) => InputParse::Ok(v),
+        Err(_) => InputParse::Reject400("invalid JSON body"),
+    }
 }
 
 /// Build a 400 INVALID_ARGUMENT response body. Format matches the
@@ -3320,7 +3269,7 @@ fn call_rpc_inner<'s>(
 ///     encoder; the synthetic SSR entry's JS encoder takes over via
 ///     re-invocation (see RpcCallResult::FallThrough).
 ///
-/// Everything else: JSON.stringify and wrap in `{"json":<value>}`.
+/// Everything else: superjson encode and wrap in `{ json, meta? }`.
 fn classify_rpc_return<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     val: v8::Local<'s, v8::Value>,
@@ -3343,21 +3292,19 @@ fn classify_rpc_return<'s>(
         }
     }
 
-    // Plain value → JSON.stringify and wrap in `{"json":<value>}`
-    // envelope. Pre-size the buffer so the prefix + body + suffix push
-    // is one allocation. `s.length()` is UTF-16 code units; for ASCII
-    // JSON it matches UTF-8 bytes exactly, for non-ASCII it under-
-    // counts and the String reallocates once — still cheaper than
-    // format!'s build-then-realloc-into-final pass.
-    let body = match v8::json::stringify(scope, val) {
-        Some(s) => {
-            let mut buf = String::with_capacity(s.length() + 9);
-            buf.push_str("{\"json\":");
-            buf.push_str(&s.to_rust_string_lossy(scope));
-            buf.push('}');
-            buf
+    // Plain value → superjson encode and wrap in `{ json, meta? }`.
+    let body = match crate::rpc::encode_to_bytes(scope, val) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(body) => body,
+            Err(e) => {
+                return RpcCallResult::Handled(Ok(DispatchResult::Error(format!(
+                    "superjson encode produced invalid UTF-8: {e}",
+                ))));
+            }
+        },
+        Err(e) => {
+            return RpcCallResult::Handled(Ok(DispatchResult::Error(e.message)));
         }
-        None => String::from("{\"json\":null}"),
     };
     RpcCallResult::Handled(Ok(DispatchResult::HttpResponse(
         http::ResponseInfo::Complete {

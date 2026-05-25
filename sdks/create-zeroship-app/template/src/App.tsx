@@ -24,7 +24,7 @@ export function App() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    await addNote(title.trim(), body.trim());
+    await addNote({ title: title.trim(), body: body.trim() });
     setTitle("");
     setBody("");
     refresh();
@@ -62,7 +62,7 @@ export function App() {
           >
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <strong>{n.title}</strong>
-              <button onClick={() => deleteNote(n.id).then(refresh)}>×</button>
+              <button onClick={() => deleteNote({ id: n.id }).then(refresh)}>×</button>
             </div>
             {n.body && <div style={{ color: "#555" }}>{n.body}</div>}
           </li>

@@ -4,7 +4,7 @@
  *   const rpc = client<App>({ baseUrl, ... });
  *   await rpc.todos.list.query({ limit: 50 });
  *   await rpc.todos.add.mutation({ text: "hi" });
- *   await rpc.call("listTodos", input);             // escape hatch
+ *   await rpc.call("listTodos", input, { kind: "query" }); // escape hatch
  *
  * The proxy keys procedures off the dotted id ("todos.list" → rpc.todos.list).
  * Each leaf carries `query`, `mutation`, `subscribe`, and `stream` callers;
@@ -15,7 +15,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { client } from "../src/client.js";
-import { typeMarker } from "../src/index.js";
 
 interface RecordedCall {
   url: string;
@@ -271,14 +270,5 @@ describe("client — error path", () => {
     });
     await rpc.call("me", undefined, { kind: "query" }).catch(() => {});
     assert.equal(triggered, 1);
-  });
-});
-
-describe("client — typeMarker fallback", () => {
-  test("typeMarker is a no-op runtime helper", () => {
-    // typeMarker exists purely to attach a phantom type — it shouldn't
-    // do anything at runtime. The product is the same shape regardless.
-    const t = typeMarker<(a: number) => Promise<string>>();
-    assert.equal(t, undefined);
   });
 });

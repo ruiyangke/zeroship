@@ -9,20 +9,27 @@ use common::*;
 // production.
 
 use std::time::Duration;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch};
 
-fn dispatch_zs(modules: Vec<zeroship_runtime::ModuleEntry>, name: &str, body: &str) -> Result<String, String> {
+fn dispatch_zs(
+    modules: Vec<zeroship_runtime::ModuleEntry>,
+    name: &str,
+    body: &str,
+) -> Result<String, String> {
     init_v8();
     let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let url = format!("http://localhost/_zs/v1/{}", name);
     let outcome = runtime.call_fetch_handler(
-        "POST", &url,
+        "POST",
+        &url,
         &[("content-type".into(), "application/json".into())],
-        body, &env, ctx,
+        body,
+        &env,
+        ctx,
     );
 
     // Sync Response — return immediately.
@@ -38,8 +45,11 @@ fn dispatch_zs(modules: Vec<zeroship_runtime::ModuleEntry>, name: &str, body: &s
         runtime.start_pump();
         match outcome {
             FetchOutcome::Response { status, body, .. } => {
-                if !(200..300).contains(&status) { Err(parse_message(&body)) }
-                else { Ok(unwrap_json_envelope(&body)) }
+                if !(200..300).contains(&status) {
+                    Err(parse_message(&body))
+                } else {
+                    Ok(unwrap_json_envelope(&body))
+                }
             }
             FetchOutcome::Stream { status, body_reader, .. } => {
                 let mut out = Vec::new();
@@ -47,19 +57,30 @@ fn dispatch_zs(modules: Vec<zeroship_runtime::ModuleEntry>, name: &str, body: &s
                     while let Some(chunk) = body_reader.pop() {
                         out.extend_from_slice(&chunk);
                     }
-                    if body_reader.is_done() { break; }
+                    if body_reader.is_done() {
+                        break;
+                    }
                     body_reader.wait_for_data().await;
                 }
                 let s = String::from_utf8_lossy(&out).into_owned();
-                if !(200..300).contains(&status) { Err(s) } else { Ok(s) }
+                if !(200..300).contains(&status) {
+                    Err(s)
+                } else {
+                    Ok(s)
+                }
             }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
-                    .await.expect("dispatch pending timed out").expect("dispatch error");
+                    .await
+                    .expect("dispatch pending timed out")
+                    .expect("dispatch error");
                 match settled {
                     SettledFetch::Response { status, body, .. } => {
-                        if !(200..300).contains(&status) { Err(parse_message(&body)) }
-                        else { Ok(unwrap_json_envelope(&body)) }
+                        if !(200..300).contains(&status) {
+                            Err(parse_message(&body))
+                        } else {
+                            Ok(unwrap_json_envelope(&body))
+                        }
                     }
                     SettledFetch::Stream { status, body_reader, .. } => {
                         let mut out = Vec::new();
@@ -67,11 +88,17 @@ fn dispatch_zs(modules: Vec<zeroship_runtime::ModuleEntry>, name: &str, body: &s
                             while let Some(chunk) = body_reader.pop() {
                                 out.extend_from_slice(&chunk);
                             }
-                            if body_reader.is_done() { break; }
+                            if body_reader.is_done() {
+                                break;
+                            }
                             body_reader.wait_for_data().await;
                         }
                         let s = String::from_utf8_lossy(&out).into_owned();
-                        if !(200..300).contains(&status) { Err(s) } else { Ok(s) }
+                        if !(200..300).contains(&status) {
+                            Err(s)
+                        } else {
+                            Ok(s)
+                        }
                     }
                     SettledFetch::WebSocketUpgrade { .. } => panic!("unexpected WS upgrade"),
                 }
@@ -106,6 +133,65 @@ fn basic_rpc() {
     );
     let r = dispatch_zs(modules, "ping", r#"{"json":null}"#).unwrap();
     assert_eq!(r, "\"pong\"");
+}
+
+#[test]
+fn superjson_input_date_revives_on_rpc_fast_path() {
+    let modules = wrap_with_synthetic_entry(
+        r#"
+        function inspect(input) {
+            return {
+                isDate: input instanceof Date,
+                iso: input instanceof Date ? input.toISOString() : null,
+            };
+        }
+        "#,
+        "{ inspect }",
+    );
+    let r = dispatch_zs(
+        modules,
+        "inspect",
+        r#"{"json":"2026-01-01T00:00:00.000Z","meta":{"values":["Date"],"v":1}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        r,
+        r#"{"isDate":true,"iso":"2026-01-01T00:00:00.000Z"}"#,
+    );
+}
+
+#[test]
+fn superjson_output_date_preserves_meta_on_rpc_fast_path() {
+    let modules = wrap_with_synthetic_entry(
+        r#"function today() { return new Date("2026-01-01T00:00:00.000Z"); }"#,
+        "{ today }",
+    );
+    init_v8();
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_zs/v1/today",
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        ctx,
+    );
+    let FetchOutcome::Response { status, body, .. } = outcome else {
+        panic!("expected Response");
+    };
+    assert_eq!(status, 200, "body: {}", body);
+    assert!(
+        body.contains(r#""json":"2026-01-01T00:00:00.000Z""#),
+        "body: {}",
+        body,
+    );
+    assert!(
+        body.contains(r#""meta":{"values":["Date"],"v":1}"#),
+        "body: {}",
+        body,
+    );
 }
 
 #[test]

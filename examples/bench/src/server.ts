@@ -10,7 +10,7 @@
 // goes through the real vite-plugin transform → synthetic SSR entry,
 // so the dispatch path matches what real apps actually run.
 
-import { query, stream } from "@zeroship/server";
+import { query, stream } from "@zeroship/rpc/server";
 
 // ── Sync ──────────────────────────────────────────────────────────────
 

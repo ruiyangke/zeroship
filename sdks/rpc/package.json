@@ -1,16 +1,24 @@
 {
-  "name": "@zeroship/rpc-client",
+  "name": "@zeroship/rpc",
   "version": "0.1.0",
   "private": true,
-  "description": "Typed unary RPC client for zeroship apps — query/mutation, error handling, optional batching",
+  "description": "Zeroship RPC client, server wrappers, and shared inferred-contract types",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": {
+    "./client": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
     }
   },
   "files": [
@@ -19,7 +27,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p tsconfig.typecheck.json",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "license": "MIT",

@@ -13,7 +13,7 @@
   "dependencies": {
     "@tanstack/react-query": "catalog:",
     "@vitejs/plugin-react": "catalog:",
-    "@zeroship/rpc-client": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "react": "catalog:react18",

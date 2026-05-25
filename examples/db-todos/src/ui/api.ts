@@ -1,7 +1,7 @@
 // Direct backend calls — the supported path. We import the wrapped server
 // procedures straight from the "use server" module (src/index.ts); the
 // @zeroship/vite-plugin transform rewrites these client-side imports into
-// typed RPC callers (POST /_zs/v1/<id>). No hand-rolled client.
+// typed RPC callers over /_zs/v1/<id>. No hand-rolled client.
 //
 // `query()`/`mutation()` return `typeof handler`, and branded ids
 // (UserId/TodoId) are just strings over the wire — so we re-type the

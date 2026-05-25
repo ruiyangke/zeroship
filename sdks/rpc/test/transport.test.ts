@@ -293,3 +293,143 @@ describe("transport — request id and per-call options", () => {
     });
   });
 });
+
+describe("transport — response body failures", () => {
+  test("malformed success body throws RpcError(INTERNAL)", async () => {
+    const rpc = client({
+      baseUrl: "https://api.test",
+      fetch: async () =>
+        new Response("{not json", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      transformer: "json",
+    });
+
+    await assert.rejects(
+      rpc.call("badBody", undefined, { kind: "query" }),
+      (err: Error & { code?: string }) =>
+        err.name === "RpcError" &&
+        err.code === "INTERNAL" &&
+        err.message.includes("invalid rpc response body"),
+    );
+  });
+
+  test("timeout covers response body reads after headers arrive", async () => {
+    const rpc = client({
+      baseUrl: "https://api.test",
+      timeout: 1,
+      fetch: async (_url, init) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              init?.signal?.addEventListener("abort", () => {
+                controller.error(Object.assign(new Error("aborted"), { name: "AbortError" }));
+              });
+            },
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      transformer: "json",
+    });
+
+    await assert.rejects(
+      rpc.call("slowBody", undefined, { kind: "query" }),
+      (err: Error & { code?: string }) => err.name === "RpcError" && err.code === "TIMEOUT",
+    );
+  });
+});
+
+describe("transport — retry policy", () => {
+  test("retryable query failures retry before surfacing the result", async () => {
+    let n = 0;
+    const spy = makeFetchSpy(() => {
+      n++;
+      if (n === 1) {
+        return new Response(
+          JSON.stringify({
+            code: "UNAVAILABLE",
+            message: "temporary",
+            retryable: true,
+          }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return jsonResponse({ ok: true });
+    });
+    const rpc = client({
+      baseUrl: "https://api.test",
+      fetch: spy.fetchFn,
+      retry: { attempts: 2, baseDelayMs: 0, jitter: false },
+    });
+
+    const result = await rpc.call("listTodos", undefined, { kind: "query" });
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(spy.calls.length, 2);
+    assert.equal(spy.calls[0].method, "GET");
+    assert.equal(spy.calls[1].method, "GET");
+  });
+
+  test("idempotent mutation retries reuse one Idempotency-Key", async () => {
+    let n = 0;
+    const spy = makeFetchSpy(() => {
+      n++;
+      if (n === 1) {
+        return new Response(
+          JSON.stringify({
+            code: "UNAVAILABLE",
+            message: "temporary",
+            retryable: true,
+          }),
+          { status: 503, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return jsonResponse({ ok: true });
+    });
+    const rpc = client({
+      baseUrl: "https://api.test",
+      fetch: spy.fetchFn,
+      retry: { attempts: 2, baseDelayMs: 0, jitter: false },
+    });
+
+    await rpc.call("saveTodo", { text: "hi" }, {
+      kind: "mutation",
+      idempotent: true,
+    });
+
+    assert.equal(spy.calls.length, 2);
+    assert.ok(spy.calls[0].headers["idempotency-key"]);
+    assert.equal(
+      spy.calls[1].headers["idempotency-key"],
+      spy.calls[0].headers["idempotency-key"],
+    );
+  });
+
+  test("non-idempotent mutations do not retry by default", async () => {
+    const spy = makeFetchSpy(() =>
+      new Response(
+        JSON.stringify({
+          code: "UNAVAILABLE",
+          message: "temporary",
+          retryable: true,
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const rpc = client({
+      baseUrl: "https://api.test",
+      fetch: spy.fetchFn,
+      retry: { attempts: 3, baseDelayMs: 0, jitter: false },
+    });
+
+    await assert.rejects(
+      rpc.call("saveTodo", { text: "hi" }, { kind: "mutation" }),
+      (err: Error & { code?: string }) => err.name === "RpcError" && err.code === "UNAVAILABLE",
+    );
+    assert.equal(spy.calls.length, 1);
+  });
+});

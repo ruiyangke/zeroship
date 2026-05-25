@@ -9,7 +9,7 @@ import {
   type Result,
 } from "@zeroship/db";
 import { env } from "zeroship";
-import { action, stream } from "@zeroship/server";
+import { action, stream } from "@zeroship/rpc/server";
 
 defineMaskPolicy({
   admin: ["public", "pii", "spi", "phi", "pci", "internal"],

@@ -128,7 +128,7 @@ trybuild = "1.0"
 criterion = { workspace = true }
 
 # RPC v2 phase 1 — Wave F. Measures the production single-call dispatch
-# path (`extract_zs_v1_id` → `parse_envelope_body` → `RpcContext::build_js_object`
+# path (`extract_zs_v1_id` → `parse_rpc_body` → `RpcContext::build_js_object`
 # → `with_rpc_context_in_als` → `rpc_fn.call` → `classify_rpc_return`).
 # Per `docs/proposals/rpc-v2.md` §5, the result decides whether phase 1
 # stays on single-call or amends to a two-step `#[v8_method(fastcall)]`

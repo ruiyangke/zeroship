@@ -16,7 +16,7 @@
 // deltas. `result.toUIMessageStreamResponse()` produces the canonical
 // SSE wire `useChat` expects — no manual frame plumbing.
 
-import { mutation } from "@zeroship/server";
+import { mutation } from "@zeroship/rpc/server";
 import { openai } from "@ai-sdk/openai";
 import { streamText, convertToModelMessages, type UIMessage } from "ai";
 

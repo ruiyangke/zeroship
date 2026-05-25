@@ -50,7 +50,7 @@ function loadSuperjson() {
       })
       .catch((e) => {
         throw new Error(
-          `[zeroship/rpc-client] superjson is required for transformer: "superjson" but couldn't be loaded: ${(
+          `[zeroship/rpc] superjson is required for transformer: "superjson" but couldn't be loaded: ${(
             e as Error
           ).message}. Install \`superjson\` or set \`transformer: "json"\`.`,
         );

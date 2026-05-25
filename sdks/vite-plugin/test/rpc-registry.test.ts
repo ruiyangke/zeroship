@@ -139,8 +139,9 @@ describe("buildServerEntrySource — dict-shape normaliser (namespace-walk)", ()
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
     });
+    assert.match(code, /const _zsTopLevelFetch = Reflect\.get\(_zsUser, "fetch"\)/);
     assert.match(code, /typeof _zsUserDefault\.fetch === "function"/);
-    assert.match(code, /typeof _zsUser\.fetch === "function"/);
+    assert.match(code, /typeof _zsTopLevelFetch === "function"/);
   });
 
   test("default export shape: { schema, fetch, rpc }", () => {
@@ -149,7 +150,7 @@ describe("buildServerEntrySource — dict-shape normaliser (namespace-walk)", ()
     });
     // Dict-shape — `rpc` is the _zsRpc OBJECT, not a function call.
     assert.match(code, /schema:\s*_zsUserDefault\.schema/);
-    assert.match(code, /fetch:\s*_zsFetch/);
+    assert.match(code, /fetch:\s*_zsFetchHandler/);
     assert.match(code, /rpc:\s*_zsRpc/);
   });
 
@@ -175,8 +176,8 @@ describe("buildServerEntrySource — forbidden helpers (Stage 5b cleanup)", () =
   ]);
 
   // The synthetic entry no longer generates dispatch helpers — those
-  // moved to the runtime's __zsDispatch (Stage 5a). Every shape below
-  // must be ABSENT from the generated source.
+  // moved to bootstrap's shared __zsDispatch/createFetchHandler. Every
+  // old inline-dispatch shape below must be ABSENT from the generated source.
   //
   // Note: `_zsFetch` survives as the NAME of the resolved-fetch local
   // (e.g. `const _zsFetch = ...`). The old _zsFetch was a HELPER
@@ -352,11 +353,51 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
         type: "module",
         exports: {
           ".": "./index.js",
+          "./fetch-handler": "./fetch-handler.js",
         },
       }, null, 2),
       "utf8",
     );
     await writeFile(join(pkgDir, "index.js"), "export {};\n", "utf8");
+    await writeFile(
+      join(pkgDir, "fetch-handler.js"),
+      `
+export function createFetchHandler(loadNormalized) {
+  return async function fetchHandler(request, env, ctx) {
+    const normalized = await loadNormalized();
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/_zs/v1/")) {
+      const id = url.pathname.slice("/_zs/v1/".length);
+      const text = request.method === "POST" ? await request.text() : "";
+      const input = text ? JSON.parse(text).json : undefined;
+      const fn = normalized.rpc[id];
+      if (typeof fn !== "function") return new Response("missing", { status: 404 });
+      const result = await fn(input, ctx);
+      if (result && typeof result === "object" && Symbol.asyncIterator in result) {
+        const enc = new TextEncoder();
+        return new Response(new ReadableStream({
+          async start(ctrl) {
+            for await (const value of result) {
+              ctrl.enqueue(enc.encode("2:[" + JSON.stringify(value) + "]\\n"));
+            }
+            ctrl.enqueue(enc.encode("d:{}\\n"));
+            ctrl.close();
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      }
+      return new Response(JSON.stringify({ json: result }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (typeof normalized.fetch === "function") {
+      return normalized.fetch.call(normalized.userDefault, request, env, ctx);
+    }
+    return new Response("Not Found", { status: 404 });
+  };
+}
+`,
+      "utf8",
+    );
   }
 
   test("namespace-walk entry: ESM-evaluable normaliser yields a dict", async () => {
@@ -403,6 +444,49 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
       assert.deepEqual(def.schema, { todos: {} });
       // fetch surfaces.
       assert.equal(typeof def.fetch, "function");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("namespace-walk fetch handler routes stream RPC fall-through", async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+
+    await mkdir(workspaceTmpRoot, { recursive: true });
+    const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-stream-"));
+    try {
+      await installBootstrapStub(dir);
+      const userPath = join(dir, "user.mjs");
+      await writeFile(
+        userPath,
+        `export async function* chat(input) {
+           yield { token: input.prompt };
+         }`,
+        "utf8",
+      );
+
+      const entry = buildServerEntrySource({
+        userEntryRel: pathToFileURL(userPath).href,
+      });
+      const entryPath = join(dir, "entry.mjs");
+      await writeFile(entryPath, entry, "utf8");
+
+      const mod = (await import(pathToFileURL(entryPath).href)) as {
+        default: { fetch: (req: Request, env?: unknown, ctx?: unknown) => Promise<Response> };
+      };
+      const res = await mod.default.fetch(
+        new Request("https://app.test/_zs/v1/chat", {
+          method: "POST",
+          body: JSON.stringify({ json: { prompt: "hi" } }),
+        }),
+      );
+      const body = await res.text();
+
+      assert.equal(res.status, 200);
+      assert.match(body, /2:\[\{"token":"hi"\}\]\n/);
+      assert.match(body, /d:\{\}\n/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

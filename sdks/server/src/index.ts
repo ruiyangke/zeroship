@@ -1,12 +1,9 @@
 // Public surface of `@zeroship/server`.
 //
-// Two layers:
-//   1. Build-time authoring — `defineApp`, the procedure wrappers
-//      (`query` / `mutation` / `action` / `stream` / `subscription` /
-//      `procedure`), the type vocabulary, and the optional Zod re-export.
-//   2. Runtime substrate re-exports — the synthetic `"zeroship"` module
-//      (`env`, `runQuery`, `runMutation`, `currentUser`, …) so user code
-//      has one import surface for everything wrapper + composition + state.
+// This package owns app/resource configuration, the optional Zod
+// convenience export, and runtime substrate re-exports from the
+// synthetic `"zeroship"` module. RPC wrapper markers live in
+// `@zeroship/rpc/server`.
 
 export { defineApp } from "./define-app.js";
 export {
@@ -30,41 +27,8 @@ export {
   DEFINE_APP_MARKER,
 } from "./types.js";
 
-// ── Procedure wrapper markers ─────────────────────────────────────────
-//
-// RPC discovery is explicit now: the vite-plugin's transform statically
-// recognizes these wrapper names (any of `procedure`, `query`,
-// `mutation`, `stream`, `subscription`) when imported from
-// `@zeroship/server`; only exports whose initializer is one such call
-// become RPCs.
-//
-// Plain `export function helper(...)` and `export const x = ...` stay
-// private to the server bundle.
-//
-// Authoring shape:
-//
-//   import { procedure, query, mutation, z } from "@zeroship/server";
-//
-//   "use server";
-//
-//   export const list = query(async () => db.todos.find({}));
-//   export const greet = procedure(
-//     async (name: string) => `hi ${name}`,
-//     { id: "greet" },
-//   );
-//   export const charge = mutation(
-//     async (input: ChargeArgs) => stripe.charge(input),
-//     { id: "charge", input: z.object({ amount: z.number() }) },
-//   );
-export { procedure, query, mutation, action, stream, subscription } from "./wrappers.js";
-
 // Re-exports of the runtime substrate (the synthetic `"zeroship"`
-// module). One import surface for user code — @zeroship/server covers
-// wrappers + bindings + composition + per-request state. The
-// `"zeroship"` virtual module stays as the internal substrate that
-// other SDKs (@zeroship/db, @zeroship/auth, @zeroship/migrations)
-// import from, but user-facing app code shouldn't need to know it
-// exists.
+// module).
 export {
   env,
   waitUntil,
@@ -86,7 +50,7 @@ export {
 // `wire` metadata onto the original export before synthetic-entry
 // binding.
 //
-// Symmetric with `__makeProcedure` from `@zeroship/rpc-client`.
+// Symmetric with the client-side procedure brander in `@zeroship/rpc`.
 export { __makeServerProcedure } from "./make-server-procedure.js";
 export type {
   ServerProcedureMeta,

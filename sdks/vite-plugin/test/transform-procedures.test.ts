@@ -5,15 +5,16 @@
  * directive. The old path convention is gone. Inside a server
  * module, only exports whose initializer is a call to one of the
  * wrapper markers (`procedure`/`query`/`mutation`/`stream`/
- * `subscription`, imported from `@zeroship/server` or `@zeroship/rpc`)
+ * `subscription`, imported from `@zeroship/rpc/server`)
  * is registered as an RPC. Plain exports stay private to the server
  * bundle.
  *
  * For every discovered procedure the transform records:
  *
  *   - filePath, exportName, moduleSlug
- *   - kind (legacy `.config.kind` > wrapper-marker > name-based
- *     inference; async generators default to "stream")
+ *   - kind (legacy `.config.kind` > wrapper-marker > safe default:
+ *     async generators default to "stream"; other generic wrappers default
+ *     to "mutation")
  *   - isStream (async-generator?)
  *   - config (parsed object literal of `<fnName>.config = {...}`)
  *   - moduleConfig (parsed object literal of module-level `$config`)
@@ -74,7 +75,7 @@ describe("transform — procedure metadata", () => {
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const add = procedure(async (input) => input);
 add.config = { kind: "mutation", idempotent: true };
 `;
@@ -87,17 +88,17 @@ add.config = { kind: "mutation", idempotent: true };
     assert.equal(p.config?.idempotent, true);
   });
 
-  test("infers kind: 'query' when name matches list/get/find/...", () => {
+  test("generic procedure() defaults unary handlers to mutation regardless of name", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    // The generic `procedure()` marker leaves kind unset on .config;
-    // the transform falls back to name-based inference (get/list/find/
-    // search/count/read/fetch → query).
+    // The generic `procedure()` marker leaves kind unset on .config.
+    // Reads must opt in via query() or explicit config.kind; names are
+    // deliberately ignored so `searchAndDestroy` cannot become a query.
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const listTodos = procedure(async () => []);
 export const getUser = procedure(async (id) => ({ id }));
 export const searchPosts = procedure(async () => []);
@@ -106,7 +107,7 @@ export const searchPosts = procedure(async () => []);
 
     assert.equal(state.discoveredProcedures.length, 3);
     const kinds = state.discoveredProcedures.map((p) => p.kind);
-    assert.deepEqual(kinds, ["query", "query", "query"]);
+    assert.deepEqual(kinds, ["mutation", "mutation", "mutation"]);
   });
 
   test("kind: 'stream' for async generators (function*)", () => {
@@ -116,7 +117,7 @@ export const searchPosts = procedure(async () => []);
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const logStream = procedure(async function* () { yield 1; yield 2; });
 `;
     getHandler(plugin).call(ctx, code, "/r/src/x.ts");
@@ -133,7 +134,7 @@ export const logStream = procedure(async function* () { yield 1; yield 2; });
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const $config = { auth: "user", rateLimit: { rpm: 600, per: "user" } };
 export const listTodos = procedure(async () => []);
 `;
@@ -158,7 +159,7 @@ export const listTodos = procedure(async () => []);
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const listTodos = procedure(async (input) => []);
 listTodos.config = {
   id: "listTodos",
@@ -194,7 +195,7 @@ listTodos.config = {
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const list = procedure(async () => []);
 `;
     getHandler(plugin).call(ctx, code, "/r/src/server/todos.ts");
@@ -212,7 +213,7 @@ export const list = procedure(async () => []);
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const ping = procedure(async () => "pong");
 `;
     // Path is irrelevant — even files outside src/server/ are eligible.
@@ -229,7 +230,7 @@ export const ping = procedure(async () => "pong");
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const deeplyNested = procedure(async () => 42);
 `;
     // Outside src/server/ — discovered solely because of the directive.
@@ -246,7 +247,7 @@ export const deeplyNested = procedure(async () => 42);
 
     const ctx = makeCtx("ssr");
     const code = `
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const shouldNotBeDiscovered = procedure(async () => 1);
 `;
     const result = getHandler(plugin).call(ctx, code, "/r/src/server/api.ts");
@@ -324,7 +325,7 @@ export async function nope() { return 1; }
 /* multi-line block
    comment */
 "use server";
-import { procedure } from "@zeroship/server";
+import { procedure } from "@zeroship/rpc/server";
 export const ping = procedure(async () => "pong");
 `;
     getHandler(plugin).call(ctx, code, "/r/src/api/x.ts");

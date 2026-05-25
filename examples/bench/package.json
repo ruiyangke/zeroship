@@ -9,6 +9,7 @@
     "build:prod": "vite build --mode production"
   },
   "dependencies": {
+    "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "zod": "catalog:"

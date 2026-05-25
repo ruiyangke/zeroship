@@ -11,13 +11,6 @@
 // SSR entry's dispatch reads these values at request time and calls
 // `.parse()` on them; failures throw a structured INVALID_ARGUMENT
 // envelope (status 400) carrying ZodError.issues to the wire.
-//
-// B3 capability typing: `QueryCtx` / `MutationCtx` / `ActionCtx`
-// surfaces below model the per-wrapper capability set defined by the
-// `docs/proposals/zeroship-db.md` §B3 table. Wrappers in
-// `./wrappers.ts` constrain their `handler` argument to one of these
-// `ctx` surfaces, so misuse (a `query` that writes, a `mutation` that
-// calls `fetch`) is caught by `tsc` before any code runs.
 
 /**
  * Structural shape of any object accepted as a procedure schema. We
@@ -242,31 +235,3 @@ export interface DefinedApp {
   readonly [DEFINE_APP_MARKER]: true;
   readonly definition: AppDefinition;
 }
-
-// ── B3 capability typing ─────────────────────────────────────────────
-//
-// The three `*Ctx` types below model the wrapper-specific capability
-// surface. They are STRUCTURAL — any object satisfying the shape is
-// accepted, which lets the runtime hand in a richer concrete `ctx`
-// (with `requestId`, `traceId`, `signal`, etc.) without forcing
-// imports here. The wrappers in `./wrappers.ts` use them as the type
-// constraint on the `handler`'s first parameter.
-//
-// Capability matrix (mirrors `docs/proposals/zeroship-db.md` §B3):
-//
-//   wrapper      DB read   DB write   fetch()   runQuery   runMutation
-//   ──────────────────────────────────────────────────────────────────
-//   query()      yes       no         no        yes        no
-//   mutation()   yes       yes        no        yes        no
-//   action()     via       via        yes       yes        yes
-//                runQuery  runMutation
-//
-// `stream` / `subscription` map to `action` capability internally (no
-// DB tx, `fetch()` allowed). `procedure()` (the generic wrapper for
-// handlers with multi-arg signatures) also maps to `action`.
-//
-// Enforcement: runtime-only. Handlers take `(input)` only — composition
-// primitives (`runQuery` / `runMutation` / `currentUser` / etc.) are
-// module imports from `@zeroship/server`, and capability violations
-// are caught request-time by the native gate
-// (`crates/runtime/src/rpc/capability.rs`).

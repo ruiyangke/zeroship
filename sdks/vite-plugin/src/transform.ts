@@ -7,15 +7,10 @@ import MagicString from "magic-string";
  * procedure wrappers (`procedure`/`query`/`mutation`/`action`/`stream`/
  * `subscription`).
  *
- * `@zeroship/server` is the canonical home today (the wrappers ship
- * alongside `defineApp`, `z`, and the SSR adapter). `@zeroship/rpc`
- * is kept as an alias so the wrapper import path can be split later
- * without changing the transform model.
+ * Wrappers live at `@zeroship/rpc/server`. `@zeroship/server` owns
+ * `defineApp`, `z`, and runtime substrate helpers.
  */
-const WRAPPER_SOURCES = new Set([
-  "@zeroship/server",
-  "@zeroship/rpc",
-]);
+const WRAPPER_SOURCES = new Set(["@zeroship/rpc/server"]);
 
 /** Names exported by {@link WRAPPER_SOURCES} that mark an export as RPC. */
 const WRAPPER_NAMES = new Set([
@@ -66,13 +61,13 @@ export interface DiscoveredProcedureRecord {
   /**
    * Procedure kind, as resolved by the transform. `action` lands here
    * when the user wrote `action(...)` explicitly. `procedure(...)`
-   * still resolves through `inferKind()` so name-based heuristics
-   * (`get*` → `query`, default → `mutation`) keep working.
+   * resolves through `defaultKind()` so async generators still become
+   * streams while generic unary procedures default to mutations.
    *
    * The Rust-side wire `ProcedureKind` enum currently lacks `action`
    * (it predates B3). The manifest emitter folds `action` → `mutation`
-   * for wire-format back-compat; the SDK-level capability typing in
-   * `@zeroship/server` is what enforces the actual behaviour.
+   * for the current Rust manifest enum; runtime capability gates
+   * enforce the actual behaviour.
    */
   kind: "query" | "mutation" | "action" | "stream" | "subscription";
   isStream: boolean;
@@ -80,7 +75,7 @@ export interface DiscoveredProcedureRecord {
   moduleConfig?: Record<string, unknown>;
   /** Wave #188 — opt-in lazy procedure flag, set when the procedure's
    *  config carries `lazy: true` as a literal boolean (either via
-   *  `<fn>.config.lazy = true` or the `query({ lazy: true, ... })`
+   *  `<fn>.config.lazy = true` or the `query(handler, { lazy: true })`
    *  wrapper option). Drives the synthetic-entry generator's
    *  dynamic-import wrapper emission. Non-literal `lazy` expressions
    *  warn at build time and fall back to `false`. */
@@ -329,7 +324,7 @@ function quickHasUseServerDirective(code: string): boolean {
  * Per-file symbol table mapping locally-bound identifiers to the
  * wrapper marker name they resolve to.
  *
- *   import { procedure, query as q } from "@zeroship/server";
+ *   import { procedure, query as q } from "@zeroship/rpc/server";
  *   // bindings: { procedure → "procedure", q → "query" }
  *
  * Only named imports from {@link WRAPPER_SOURCES} are recorded;
@@ -392,75 +387,14 @@ function matchWrapperCall(
 }
 
 /** Import prelude emitted once per transformed client module. Pulls
- *  `__makeProcedure` (the callable procedure-reference builder) and
- *  `__SERVER_REFERENCE` (the brand symbol) from the canonical home
- *  `@zeroship/rpc-client`. `__makeProcedure` brands every stub
- *  internally — the symbol import is exposed for downstream consumers
- *  (RSC `<form action={fn}>` detectors, dev-tools) that re-derive the
- *  brand without re-importing `Symbol.for`. */
-const CLIENT_IMPORT_PRELUDE = `import { __makeProcedure, __SERVER_REFERENCE } from "@zeroship/rpc-client";\n`;
+ *  the public generated-stub factory from `@zeroship/rpc/client`.
+ *  The factory owns transport configuration and procedure branding. */
+const CLIENT_IMPORT_PRELUDE = `import { createRpcClient } from "@zeroship/rpc/client";\nconst __zsRpc = createRpcClient();\n`;
 
-/** Shared wire helpers: emitted once per client bundle. Speaks the spec
- *  wire (`/_zs/v1/<id>` with superjson `{ json, meta? }` envelope,
- *  AI-SDK Data Stream Protocol for streams). No npm deps beyond
- *  `@zeroship/rpc-client`; superjson revival is left to the consumer
- *  (rare on the bare-stub path — most apps use `@zeroship/rpc-client`
- *  directly). */
-const CLIENT_HELPERS = `
-async function __rpcUnary(id, input) {
-  const r = await fetch("/_zs/v1/" + id, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ json: input }),
-  });
-  if (!r.ok) {
-    let body = null;
-    try { body = await r.json(); } catch {}
-    const e = new Error((body && body.message) || r.statusText);
-    if (body && body.code) e.code = body.code;
-    if (body && body.details !== undefined) e.details = body.details;
-    e.status = r.status;
-    throw e;
-  }
-  const env = await r.json();
-  return env && typeof env === "object" && "json" in env ? env.json : env;
-}
-async function* __rpcStream(id, input) {
-  const r = await fetch("/_zs/v1/" + id, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
-    body: JSON.stringify({ json: input }),
-  });
-  if (!r.ok) {
-    let body = null;
-    try { body = await r.json(); } catch {}
-    const e = new Error((body && body.message) || r.statusText);
-    if (body && body.code) e.code = body.code;
-    e.status = r.status;
-    throw e;
-  }
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\\n")) !== -1) {
-      const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
-      if (!line) continue;
-      const colon = line.indexOf(":"); if (colon < 0) continue;
-      const tag = line.slice(0, colon);
-      const data = line.slice(colon + 1);
-      if (tag === "0") yield JSON.parse(data);
-      else if (tag === "2") { const arr = JSON.parse(data); for (const v of arr) yield v; }
-      else if (tag === "e") { const env = JSON.parse(data); const e = new Error(env.message || "stream error"); if (env.code) e.code = env.code; if (env.details !== undefined) e.details = env.details; throw e; }
-      else if (tag === "d") return;
-    }
-  }
-}
-`.trim();
+/** Shared wire helpers: intentionally empty. Client stubs delegate to
+ *  `@zeroship/rpc/client`, so generated and manual clients share the
+ *  same transport, transformer, retry, and error behavior. */
+const CLIENT_HELPERS = "";
 
 /**
  * Slug a module file path into a stable id segment.
@@ -480,28 +414,17 @@ function moduleSlug(root: string, id: string): string {
 }
 
 /**
- * Infer the procedure kind from the function's name.
+ * Pick the procedure kind when the wrapper did not pin one.
  *
- *   /^(get|list|find|search|count|read|fetch)/ → "query"
- *   else                                       → "mutation"
- *
- * Async generators get `kind: "stream"` regardless of name. An explicit
- * `.config = { kind: "..." }` overrides everything.
- *
- * Note: `action` is NOT in the heuristic. The only way to land on
- * `kind: "action"` today is to use the `action(...)` wrapper explicitly
- * (or write `.config.kind = "action"`). This is intentional —
- * `procedure(...)` keeps its current name-based behaviour to preserve
- * backwards compatibility with existing user code.
+ * Name-based query inference is intentionally not used: reads opt in via
+ * the `query(...)` wrapper or an explicit `config.kind = "query"`. Generic
+ * unary `procedure(...)` defaults to `mutation`, which is safer for caching,
+ * retry, and capability policy.
  */
-function inferKind(
-  name: string,
+function defaultKind(
   isStream: boolean,
-): "query" | "mutation" | "stream" | "subscription" {
+): "mutation" | "stream" {
   if (isStream) return "stream";
-  if (/^(get|list|find|search|count|read|fetch)[A-Z_]?/.test(name)) {
-    return "query";
-  }
   return "mutation";
 }
 
@@ -703,29 +626,34 @@ function collectConfig(astBody: any[]): {
  * with no args). Procedures that conceptually take multiple values
  * pass them as a single object.
  *
- * Emits a `__makeProcedure` call from `@zeroship/rpc-client` — the
- * builder attaches the `__SERVER_REFERENCE` brand plus `{ id, kind, wire }`
- * metadata uniformly. Runtime callers can detect stubs passed as props by
- * checking the brand. */
-function clientUnaryStub(name: string, methodName: string, kind: string): string {
-  const meta = JSON.stringify({ id: methodName, kind, wire: "json" });
-  return (
-    `export const ${name} = __makeProcedure(` +
-    `(input) => __rpcUnary(${JSON.stringify(methodName)}, input), ` +
-    `${meta});`
-  );
+ * Emits a call through the generated-stub factory from
+ * `@zeroship/rpc/client`; the factory attaches the `__SERVER_REFERENCE`
+ * brand plus `{ id, kind, wire }` metadata uniformly. Runtime callers can
+ * detect stubs passed as props by checking the brand. */
+function clientUnaryStub(
+  name: string,
+  methodName: string,
+  kind: string,
+  idempotent: boolean,
+): string {
+  const options = idempotent ? `, ${JSON.stringify({ idempotent: true })}` : "";
+  const factory = kind === "action" ? "action" : kind === "query" ? "query" : "mutation";
+  return `export const ${name} = __zsRpc.${factory}(${JSON.stringify(methodName)}${options});`;
 }
 
-/** Client stub for a streaming (async generator) export. Same single-
- *  input wire as unary; differs only in the underlying transport
- *  helper (`__rpcStream` instead of `__rpcUnary`). */
+/** Client stub for a streaming export. Subscriptions deliberately keep
+ *  their metadata but route through the generic procedure factory so a
+ *  client call fails with UNIMPLEMENTED instead of silently using the
+ *  SSE stream transport. */
 function clientStreamStub(name: string, methodName: string, kind: string): string {
-  const meta = JSON.stringify({ id: methodName, kind, wire: "json" });
-  return (
-    `export const ${name} = __makeProcedure(` +
-    `(input) => __rpcStream(${JSON.stringify(methodName)}, input), ` +
-    `${meta});`
-  );
+  if (kind === "subscription") {
+    return `export const ${name} = __zsRpc.procedure(${JSON.stringify({
+      id: methodName,
+      kind: "subscription",
+      wire: "json",
+    })});`;
+  }
+  return `export const ${name} = __zsRpc.stream(${JSON.stringify(methodName)});`;
 }
 
 export function transformPlugin(_rpcEndpoint: string, state: TransformState): Plugin {
@@ -780,7 +708,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
               `Path-based discovery was dropped: add ` +
               `\`"use server";\` as the first line, then wrap each RPC ` +
               `export with procedure()/query()/mutation()/stream() ` +
-              `from \`@zeroship/server\`. Untouched files will not be ` +
+              `from \`@zeroship/rpc/server\`. Untouched files will not be ` +
               `published as RPC endpoints.`;
             // pluginContext.warn is the structured Vite hook (carries
             // the file id, surfaces in the dev overlay). Fall back to
@@ -808,7 +736,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //    automatically an RPC. Only exports whose initializer is a
         //    call to one of the wrapper markers (`procedure`, `query`,
         //    `mutation`, `stream`, `subscription` imported from
-        //    `@zeroship/server` or `@zeroship/rpc`) are registered.
+        //    `@zeroship/rpc/server`) are registered.
         //
         //    Plain `export function helper(...)` and `export const x =
         //    ...` stay private; they survive in the server bundle and
@@ -821,7 +749,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           name: string;
           /** Wrapper kind from the marker call: query/mutation/stream/
            *  subscription (an explicit kind), or "procedure" (generic
-           *  marker — kind comes from `inferKind()`). */
+           *  marker — kind comes from `defaultKind()`). */
           markerKind: WrapperKind;
           /** Config object pulled from the wrapper's second argument,
            *  e.g. `procedure(handler, { id: "x" })`. Already literalized
@@ -985,12 +913,12 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             //   2. Wrapper marker name — `query`/`mutation`/`action`/
             //      `stream`/`subscription` imply a kind; the generic
             //      `procedure()` marker doesn't (defers to step 3).
-            //   3. Name-based inference (`get*`/`list*`/etc → query,
-            //      default → mutation, async generator → stream).
+            //   3. Safe default for generic wrappers: async generator →
+            //      stream; otherwise mutation.
             const wrapperKind:
               | "query" | "mutation" | "action" | "stream" | "subscription" | undefined =
               fn.markerKind === "procedure" ? undefined : fn.markerKind;
-            const kind = explicitKind ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
+            const kind = explicitKind ?? wrapperKind ?? defaultKind(fn.isStream);
             // Avoid duplicates if the transform fires twice (e.g., dev
             // server hot-reload). Replace existing record by key.
             const existingIdx = state.discoveredProcedures.findIndex(
@@ -1035,7 +963,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
 
         // Resolve kind via the same priority chain used in the
         // discovery pass (explicit .kind → wrapper marker name → name-
-        // based inference). Hoisted so both server and client branches
+        // safe default). Hoisted so both server and client branches
         // can read it.
         const kindFor = (fn: ServerFn) => {
           const legacyKind = perFnForWireIds.get(fn.name)?.kind as
@@ -1046,8 +974,13 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           const wrapperKind:
             | "query" | "mutation" | "action" | "stream" | "subscription" | undefined =
             fn.markerKind === "procedure" ? undefined : fn.markerKind;
-          return explicit ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
+          return explicit ?? wrapperKind ?? defaultKind(fn.isStream);
         };
+
+        const mergedConfigFor = (fn: ServerFn): Record<string, unknown> => ({
+          ...(fn.wrapperConfig ?? {}),
+          ...(perFnForWireIds.get(fn.name) ?? {}),
+        });
 
         // --- SERVER ENVIRONMENT ---------------------------------------------
         //
@@ -1122,9 +1055,11 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         const stubs = serverFns.map((fn) => {
           const wid = wireIdFor(fn);
           const k = kindFor(fn);
+          const cfg = mergedConfigFor(fn);
+          const idempotent = cfg.idempotent === true;
           return fn.isStream
             ? clientStreamStub(fn.name, wid, k)
-            : clientUnaryStub(fn.name, wid, k);
+            : clientUnaryStub(fn.name, wid, k, idempotent);
         });
 
         s.overwrite(

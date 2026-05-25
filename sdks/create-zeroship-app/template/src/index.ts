@@ -2,7 +2,7 @@
 // Server functions — wrapped exports here run on the zeroship runtime,
 // not in the browser. The file-level `"use server"` directive opts the
 // file into RPC discovery; only exports wrapped in `procedure()`,
-// `query()`, `mutation()`, or `stream()` from `@zeroship/server`
+// `query()`, `mutation()`, or `stream()` from `@zeroship/rpc/server`
 // become public endpoints. Plain helpers stay server-private.
 //
 // The vite-plugin converts client imports of these wrapped exports
@@ -15,7 +15,7 @@
 //
 // Delete what you don't need; this file is a starting point, not a lecture.
 
-import { query, mutation } from "@zeroship/server";
+import { query, mutation } from "@zeroship/rpc/server";
 import { t } from "@zeroship/db";
 import { env } from "zeroship";
 import { bucket } from "@zeroship/storage";
@@ -45,13 +45,13 @@ export const listNotes = query(async () => {
   return r.data;
 });
 
-export const addNote = mutation(async (title: string, body: string) => {
+export const addNote = mutation(async ({ title, body }: { title: string; body: string }) => {
   const r = await db.notes.create({ title, body });
   if (r.error) throw r.error;
   return r.data;
 });
 
-export const deleteNote = mutation(async (id: number) => {
+export const deleteNote = mutation(async ({ id }: { id: number }) => {
   const r = await db.notes.findOneAndDelete({ id });
   if (r.error) throw r.error;
   return r.data !== null;
@@ -60,7 +60,7 @@ export const deleteNote = mutation(async (id: number) => {
 // ── File upload demo (stores base64-encoded bytes from the client) ────────
 
 export const uploadFile = mutation(
-  async (name: string, dataBase64: string) => {
+  async ({ name, dataBase64 }: { name: string; dataBase64: string }) => {
     const bytes = Uint8Array.from(atob(dataBase64), (c) => c.charCodeAt(0));
     const r = await uploads.put(name, bytes);
     if (r.error) throw r.error;

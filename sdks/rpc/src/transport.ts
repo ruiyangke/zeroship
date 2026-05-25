@@ -1,7 +1,7 @@
 //
 // Request transports for unary procedures (query / mutation) and
-// streams. WebSocket subscriptions are not implemented in this package
-// yet.
+// streams. WebSocket subscriptions have a lower-level transport helper,
+// but the generic `createRpcClient()` surface does not expose them yet.
 //
 // Wire shape:
 //
@@ -16,7 +16,7 @@
 //   - Accept: application/json | text/event-stream (stream)
 //   - Content-Type: application/json (only when a body is present)
 //   - Authorization: Bearer <token>  (when auth resolves to a string)
-//   - Idempotency-Key: <uuidv7>      (mutations w/ idempotent: true)
+//   - Idempotency-Key: <uuidv7>      (writes w/ idempotent: true)
 //   - X-Request-Id: <uuidv7>         (every request — for tracing)
 
 import { decodeBody, encodeBody, encodeQueryInput, type Transformer } from "./encoding.js";
@@ -27,13 +27,46 @@ import { newUuidV7 } from "./idempotency.js";
 const URL_FALLBACK_BYTES = 6 * 1024;
 
 /** Discriminator for the *kind* a transport call is operating in. */
-export type CallKind = "query" | "mutation" | "stream" | "subscription";
+export type CallKind = "query" | "mutation" | "action" | "stream" | "subscription";
+
+export interface RetryOptions {
+  /**
+   * Total attempts, including the first try. `1` means no retry.
+   * `true` normalizes to `3`.
+   */
+  attempts?: number;
+  /** Initial retry delay. Defaults to 100ms. */
+  baseDelayMs?: number;
+  /** Maximum retry delay. Defaults to 2s. */
+  maxDelayMs?: number;
+  /** Add +/- 50% jitter. Defaults to true. */
+  jitter?: boolean;
+  /**
+   * Retry non-idempotent writes. Defaults to false.
+   * Idempotent mutations/actions may retry because a stable
+   * Idempotency-Key is reused for every attempt.
+   */
+  retryWrites?: boolean;
+  /** Observation hook fired before a retry sleeps. */
+  onRetry?: (ctx: { attempt: number; nextAttempt: number; delayMs: number; error: RpcError }) => void;
+}
+
+export type RetryConfig = boolean | number | RetryOptions;
+
+export type HeaderValue = HeadersInit | null | undefined;
+export type HeaderResolver = HeaderValue | (() => HeaderValue | Promise<HeaderValue>);
 
 export interface TransportOptions {
   /** Procedure kind. Drives HTTP method choice + body encoding. */
   kind: CallKind;
-  /** Idempotent? When true and kind is "mutation", we add Idempotency-Key. */
+  /** Idempotent? When true for writes, we add Idempotency-Key. */
   idempotent?: boolean;
+  /**
+   * Explicit Idempotency-Key. Used by generated direct-call stubs and
+   * React adapters so retries of the same logical mutation share one
+   * gateway dedupe key.
+   */
+  idempotencyKey?: string;
   /** Per-call signal for cancellation. */
   signal?: AbortSignal;
   /** Per-call extra headers (merged after built-ins; user wins). */
@@ -44,6 +77,8 @@ export interface TransportOptions {
    * with `signal` — whichever fires first wins.
    */
   timeout?: number;
+  /** Per-call retry override. */
+  retry?: RetryConfig;
 }
 
 export interface TransportConfig {
@@ -52,6 +87,12 @@ export interface TransportConfig {
   transformer: Transformer;
   /** Resolves to the bearer token string, or null/undefined to skip the header. */
   authResolver: () => string | null | undefined | Promise<string | null | undefined>;
+  /** Optional default headers, resolved once per request attempt. */
+  headersResolver?: () => HeaderValue | Promise<HeaderValue>;
+  /** Optional default per-attempt timeout in ms. */
+  timeout?: number;
+  /** Optional default retry policy for unary calls. */
+  retry?: RetryConfig;
   /** Optional global hooks. */
   onError?: (err: RpcError) => void;
   onAuthExpired?: () => void;
@@ -71,7 +112,7 @@ export async function sendUnary<TOut = unknown>(
     throw new RpcError({
       code: "INTERNAL",
       message:
-        "[zeroship/rpc-client] streamCall must handle 'stream' kind, not sendUnary",
+        "[zeroship/rpc] streamCall must handle 'stream' kind, not sendUnary",
       retryable: false,
     });
   }
@@ -79,11 +120,55 @@ export async function sendUnary<TOut = unknown>(
     throw new RpcError({
       code: "UNIMPLEMENTED",
       message:
-        "subscription procedures are not supported by @zeroship/rpc-client yet",
+        "subscription procedures are not supported by @zeroship/rpc yet",
       retryable: false,
     });
   }
 
+  const retryPolicy = normalizeRetry(opts.retry ?? cfg.retry);
+  const effectiveKind = opts.kind;
+  const stableIdempotencyKey =
+    opts.idempotencyKey ??
+    (opts.idempotent && isWriteKind(effectiveKind) ? newUuidV7() : undefined);
+  const effectiveOpts: TransportOptions = {
+    ...opts,
+    timeout: opts.timeout ?? cfg.timeout,
+    idempotencyKey: stableIdempotencyKey,
+  };
+
+  let attempt = 1;
+  while (true) {
+    try {
+      return await sendUnaryOnce<TOut>(procId, input, cfg, effectiveOpts);
+    } catch (err) {
+      if (!(err instanceof RpcError)) throw err;
+      if (!shouldRetry(err, attempt, retryPolicy, effectiveOpts)) {
+        if (err.code === "UNAUTHENTICATED" && cfg.onAuthExpired) {
+          cfg.onAuthExpired();
+        }
+        cfg.onError?.(err);
+        throw err;
+      }
+      const retryAfter = (err as RpcError & { retryAfterMs?: number }).retryAfterMs;
+      const delayMs = retryAfter ?? retryDelayMs(attempt, retryPolicy);
+      retryPolicy.onRetry?.({
+        attempt,
+        nextAttempt: attempt + 1,
+        delayMs,
+        error: err,
+      });
+      await sleep(delayMs, effectiveOpts.signal);
+      attempt += 1;
+    }
+  }
+}
+
+async function sendUnaryOnce<TOut = unknown>(
+  procId: string,
+  input: unknown,
+  cfg: TransportConfig,
+  opts: TransportOptions,
+): Promise<TOut> {
   // Resolve auth before assembling headers (the resolver may throw, in
   // which case we surface the failure verbatim — better than masking it
   // as INTERNAL).
@@ -100,6 +185,7 @@ export async function sendUnary<TOut = unknown>(
   headers.set("Accept", "application/json");
   if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
   headers.set("X-Request-Id", newUuidV7());
+  await applyResolvedHeaders(headers, cfg.headersResolver);
 
   let url: string;
   let method: string;
@@ -125,13 +211,13 @@ export async function sendUnary<TOut = unknown>(
       }
     }
   } else {
-    // Mutation.
+    // Mutation / action.
     url = `${cfg.baseUrl}/_zs/v1/${procId}`;
     method = "POST";
     body = await encodeBody(input, cfg.transformer);
     headers.set("Content-Type", "application/json");
-    if (opts.idempotent) {
-      headers.set("Idempotency-Key", newUuidV7());
+    if (opts.idempotencyKey) {
+      headers.set("Idempotency-Key", opts.idempotencyKey);
     }
   }
 
@@ -144,9 +230,11 @@ export async function sendUnary<TOut = unknown>(
 
   // Compose abort signals (caller signal + timeout signal).
   const callerSignal = opts.signal;
-  const timeoutCtrl = opts.timeout && opts.timeout > 0 ? new AbortController() : null;
+  const effectiveTimeout = opts.timeout ?? cfg.timeout;
+  const timeoutCtrl =
+    effectiveTimeout && effectiveTimeout > 0 ? new AbortController() : null;
   const timeoutHandle = timeoutCtrl
-    ? setTimeout(() => timeoutCtrl.abort(), opts.timeout!)
+    ? setTimeout(() => timeoutCtrl.abort(), effectiveTimeout)
     : null;
   const signal = composeSignals(callerSignal, timeoutCtrl?.signal);
 
@@ -168,7 +256,6 @@ export async function sendUnary<TOut = unknown>(
         message: timedOut ? "request timed out" : "request cancelled",
         retryable: timedOut,
       });
-      cfg.onError?.(rpcErr);
       throw rpcErr;
     }
     // Generic transport failure → UNAVAILABLE.
@@ -178,28 +265,70 @@ export async function sendUnary<TOut = unknown>(
       message: `transport error: ${message}`,
       retryable: true,
     });
-    cfg.onError?.(rpcErr);
     throw rpcErr;
   }
-  if (timeoutHandle) clearTimeout(timeoutHandle);
-
-  if (!res.ok) {
-    const err = await parseErrorResponse(res);
-    if (err.code === "UNAUTHENTICATED" && cfg.onAuthExpired) {
-      cfg.onAuthExpired();
+  try {
+    if (!res.ok) {
+      let err: RpcError;
+      try {
+        err = await parseErrorResponse(res);
+      } catch (readErr) {
+        throw responseReadError(readErr, timeoutCtrl);
+      }
+      const retryAfterMs = parseRetryAfterMs(res.headers.get("Retry-After"));
+      if (retryAfterMs !== undefined) {
+        (err as RpcError & { retryAfterMs?: number }).retryAfterMs = retryAfterMs;
+      }
+      throw err;
     }
-    cfg.onError?.(err);
-    throw err;
-  }
 
-  const text = await res.text();
-  return decodeBody<TOut>(text, cfg.transformer);
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (readErr) {
+      throw responseReadError(readErr, timeoutCtrl);
+    }
+
+    try {
+      return await decodeBody<TOut>(text, cfg.transformer);
+    } catch (decodeErr) {
+      const message = decodeErr instanceof Error ? decodeErr.message : String(decodeErr);
+      throw new RpcError({
+        code: "INTERNAL",
+        message: `invalid rpc response body: ${message}`,
+        retryable: false,
+      });
+    }
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
 }
 
 function isAbortError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as { name?: string; code?: string };
   return e.name === "AbortError" || e.code === "ABORT_ERR";
+}
+
+function responseReadError(
+  err: unknown,
+  timeoutCtrl: AbortController | null,
+): RpcError {
+  if (err instanceof RpcError) return err;
+  if (isAbortError(err)) {
+    const timedOut = timeoutCtrl?.signal.aborted ?? false;
+    return new RpcError({
+      code: timedOut ? "TIMEOUT" : "CANCELLED",
+      message: timedOut ? "request timed out" : "request cancelled",
+      retryable: timedOut,
+    });
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return new RpcError({
+    code: "UNAVAILABLE",
+    message: `transport error while reading response: ${message}`,
+    retryable: true,
+  });
 }
 
 // ── Streams ─────────────────────────────────────────────────────────────
@@ -243,16 +372,26 @@ export function streamCall<TOut = unknown>(
   let thrown: unknown = null;
   const decoder = new TextDecoder();
 
-  // Compose abort signals.
   const callerSignal = opts.signal;
-  const timeoutCtrl = opts.timeout && opts.timeout > 0 ? new AbortController() : null;
-  const timeoutHandle = timeoutCtrl
-    ? setTimeout(() => timeoutCtrl.abort(), opts.timeout!)
-    : null;
-  const signal = composeSignals(callerSignal, timeoutCtrl?.signal);
+  let timeoutCtrl: AbortController | null = null;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
   function clearTimeoutOnce(): void {
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = null;
+    }
+    timeoutCtrl = null;
+  }
+
+  function startTimeout(): AbortSignal | undefined {
+    const effectiveTimeout = opts.timeout ?? cfg.timeout;
+    timeoutCtrl =
+      effectiveTimeout && effectiveTimeout > 0 ? new AbortController() : null;
+    timeoutHandle = timeoutCtrl
+      ? setTimeout(() => timeoutCtrl?.abort(), effectiveTimeout)
+      : null;
+    return composeSignals(callerSignal, timeoutCtrl?.signal);
   }
 
   async function startRequest(): Promise<{ reader: ReadableStreamDefaultReader<Uint8Array> }> {
@@ -268,6 +407,7 @@ export function streamCall<TOut = unknown>(
     headers.set("Content-Type", "application/json");
     if (authToken) headers.set("Authorization", `Bearer ${authToken}`);
     headers.set("X-Request-Id", newUuidV7());
+    await applyResolvedHeaders(headers, cfg.headersResolver);
     if (opts.headers) {
       for (const [k, v] of Object.entries(opts.headers)) headers.set(k, v);
     }
@@ -277,11 +417,16 @@ export function streamCall<TOut = unknown>(
 
     let res: Response;
     try {
-      res = await cfg.fetch(url, { method: "POST", headers, body, signal });
+      res = await cfg.fetch(url, {
+        method: "POST",
+        headers,
+        body,
+        signal: startTimeout(),
+      });
     } catch (err) {
+      const timedOut = timeoutCtrl?.signal.aborted ?? false;
       clearTimeoutOnce();
       if (isAbortError(err)) {
-        const timedOut = timeoutCtrl?.signal.aborted ?? false;
         const rpcErr = new RpcError({
           code: timedOut ? "TIMEOUT" : "CANCELLED",
           message: timedOut ? "request timed out" : "request cancelled",
@@ -633,7 +778,7 @@ export function subscribeCall<TOut = unknown>(
     throw new RpcError({
       code: "UNAVAILABLE",
       message:
-        "[zeroship/rpc-client] no WebSocket implementation — pass a `wsFactory` or run on a runtime that exposes globalThis.WebSocket",
+        "[zeroship/rpc] no WebSocket implementation — pass a `wsFactory` or run on a runtime that exposes globalThis.WebSocket",
       retryable: false,
     });
   }
@@ -968,6 +1113,137 @@ export function buildStreamUrl(
   return encodeQueryInput(input, cfg.transformer).then(
     (enc) => `${cfg.baseUrl}/_zs/v1/${procId}?input=${enc}`,
   );
+}
+
+async function applyResolvedHeaders(
+  headers: Headers,
+  resolver: TransportConfig["headersResolver"],
+): Promise<void> {
+  if (!resolver) return;
+  const resolved = typeof resolver === "function" ? await resolver() : resolver;
+  if (!resolved) return;
+  const src = new Headers(resolved);
+  src.forEach((v, k) => headers.set(k, v));
+}
+
+interface NormalizedRetryOptions {
+  attempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  jitter: boolean;
+  retryWrites: boolean;
+  onRetry?: RetryOptions["onRetry"];
+}
+
+function normalizeRetry(input: RetryConfig | undefined): NormalizedRetryOptions {
+  if (!input) {
+    return {
+      attempts: 1,
+      baseDelayMs: 100,
+      maxDelayMs: 2_000,
+      jitter: true,
+      retryWrites: false,
+    };
+  }
+  if (input === true) {
+    return {
+      attempts: 3,
+      baseDelayMs: 100,
+      maxDelayMs: 2_000,
+      jitter: true,
+      retryWrites: false,
+    };
+  }
+  if (typeof input === "number") {
+    return {
+      attempts: Math.max(1, Math.floor(input)),
+      baseDelayMs: 100,
+      maxDelayMs: 2_000,
+      jitter: true,
+      retryWrites: false,
+    };
+  }
+  return {
+    attempts: Math.max(1, Math.floor(input.attempts ?? 3)),
+    baseDelayMs: Math.max(0, input.baseDelayMs ?? 100),
+    maxDelayMs: Math.max(0, input.maxDelayMs ?? 2_000),
+    jitter: input.jitter ?? true,
+    retryWrites: input.retryWrites ?? false,
+    onRetry: input.onRetry,
+  };
+}
+
+function shouldRetry(
+  err: RpcError,
+  attempt: number,
+  policy: NormalizedRetryOptions,
+  opts: TransportOptions,
+): boolean {
+  if (attempt >= policy.attempts) return false;
+  if (!err.retryable) return false;
+  if (opts.signal?.aborted) return false;
+  if (isWriteKind(opts.kind)) {
+    return Boolean(opts.idempotencyKey || policy.retryWrites);
+  }
+  return opts.kind === "query";
+}
+
+function retryDelayMs(attempt: number, policy: NormalizedRetryOptions): number {
+  const raw = Math.min(
+    policy.maxDelayMs,
+    policy.baseDelayMs * Math.pow(2, Math.max(0, attempt - 1)),
+  );
+  if (!policy.jitter || raw <= 0) return raw;
+  const min = raw / 2;
+  const max = raw * 1.5;
+  return Math.floor(min + Math.random() * (max - min));
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.floor(seconds * 1_000);
+  }
+  const dateMs = Date.parse(value);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+  return undefined;
+}
+
+function isWriteKind(kind: CallKind): boolean {
+  return kind === "mutation" || kind === "action";
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) {
+    if (signal?.aborted) {
+      return Promise.reject(
+        new RpcError({ code: "CANCELLED", message: "request cancelled", retryable: false }),
+      );
+    }
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(
+        new RpcError({ code: "CANCELLED", message: "request cancelled", retryable: false }),
+      );
+      return;
+    }
+    const handle = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(handle);
+      reject(
+        new RpcError({ code: "CANCELLED", message: "request cancelled", retryable: false }),
+      );
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function byteLength(str: string): number {

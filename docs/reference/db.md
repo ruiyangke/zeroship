@@ -12,7 +12,7 @@ runtime); no raw SQL is exposed to user code.
 // src/index.ts — your app's entry module
 import { t } from "@zeroship/db";
 import { env } from "zeroship";
-import { mutation, query } from "@zeroship/server";
+import { mutation, query } from "@zeroship/rpc/server";
 
 // Declare your schema once on `default.schema`. The runtime reads it
 // at boot and installs typed Collection wrappers as own properties on
@@ -834,7 +834,7 @@ const { data, error } = await db.transaction(async (tx) => {
   `transaction()` call doesn't throw.
 
 The procedure wrappers `query()`, `mutation()`, and `action()` from
-`@zeroship/server` do not open a transaction implicitly. Top-level
+`@zeroship/rpc/server` do not open a transaction implicitly. Top-level
 `db.<table>.*` calls autocommit per operation. Use explicit
 `db.transaction()` when a handler needs multiple database operations to
 commit or roll back as a unit.
