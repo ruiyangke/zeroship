@@ -6150,6 +6150,72 @@ async fn encrypted_column_missing_key_typed_error() {
     }
 }
 
+/// **I1** — the SECURITY DEFINER `__zeroship_admin.get_column_key`
+/// path must read `bytea` in binary form rather than falling through
+/// to the env-var source. Pin it by seeding the admin table with one
+/// root and the env var with a different root: the resolved key must
+/// match the admin-table root.
+#[compio::test]
+async fn pg_admin_table_key_source_reads_bytea_directly() {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .expect("ensure_admin_schema");
+
+    let key_id = "admin_table_test";
+    let env_name = "ZEROSHIP_COLUMN_KEY_ADMIN_TABLE_TEST";
+    let admin_root_hex = "11".repeat(32);
+    let env_root_hex = "22".repeat(32);
+    let _env = WithEnv::set(env_name, &env_root_hex);
+
+    pool.execute(
+        r#"DELETE FROM "__zeroship_admin"."column_keys" WHERE key_id = $1"#,
+        &[&key_id],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        r#"INSERT INTO "__zeroship_admin"."column_keys" (key_id, root_key)
+           VALUES ($1, decode($2, 'hex')::bytea)"#,
+        &[&key_id, &admin_root_hex.as_str()],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let resolved = backend
+        .resolve_key("app_admin_key_lookup", key_id)
+        .await
+        .expect("resolve key from admin table");
+
+    let root_bytes = admin_root_hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let s = std::str::from_utf8(pair).expect("hex utf8");
+            u8::from_str_radix(s, 16).expect("hex byte")
+        })
+        .collect::<Vec<_>>();
+    let root: [u8; 32] = root_bytes.try_into().expect("32-byte root");
+    let hkdf = Hkdf::<Sha256>::new(Some(b"app_admin_key_lookup"), &root);
+    let mut expected_k_enc = [0u8; 32];
+    let mut expected_k_siv = [0u8; 32];
+    hkdf.expand(b"zsenc/aead/v1/k_enc", &mut expected_k_enc)
+        .expect("expand k_enc");
+    hkdf.expand(b"zsenc/aead/v1/k_siv", &mut expected_k_siv)
+        .expect("expand k_siv");
+
+    assert_eq!(
+        resolved.k_enc, expected_k_enc,
+        "resolve_key must use the admin-table root, not the env-var fallback",
+    );
+    assert_eq!(resolved.k_siv, expected_k_siv);
+}
+
 // ===========================================================================
 // P5 PR 4 — PG `Backup` impl (pg_dump / pg_restore shell-out + PITR
 // placeholder)
