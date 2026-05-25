@@ -18,55 +18,48 @@ const qk = (uid: string) => ["todos", uid] as const;
 
 function ago(ms: number): string {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 5) return "just now";
-  if (s < 60) return `${s}s ago`;
+  if (s < 5) return "now";
+  if (s < 60) return `${s}s`;
   const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return `${m}m`;
   const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
 }
-const shortId = (id: string) => {
-  const [p, rest] = id.split("_");
-  return rest ? `${p}_${rest.slice(0, 6)}…` : id;
-};
 const errText = (e: unknown) => {
   const c = errCode(e);
   const msg = (e as { message?: string } | null)?.message ?? String(e);
-  return c ? `${c}: ${msg}` : msg;
+  return c ? `${c} · ${msg}` : msg;
 };
 
-type Banner = { kind: "error" | "live"; text: string } | null;
+type Banner = { kind: "error"; text: string; code?: string } | null;
 
 export function App() {
   const qc = useQueryClient();
 
-  // The single shared "public ledger" user — no per-window identity.
   const [userId, setUserId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner>(null);
   const [live, setLive] = useState(false);
   const [pulse, setPulse] = useState(0);
   const [title, setTitle] = useState("");
-  const [priority, setPriority] = useState<Priority>("medium");
+  const [priority, setPriority] = useState<Priority>("low");
   const [removing, setRemoving] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
-  // realId → optimistic key, so the optimistic→real swap keeps one React
-  // element (no re-mount → no entrance-animation "double flash").
   const keyMap = useRef(new Map<string, string>());
   const keySeq = useRef(0);
   const keyOf = (t: Todo) => t._key ?? keyMap.current.get(t.id) ?? t.id;
 
-  const flash = useCallback((b: Banner) => {
+  const flash = useCallback((text: string, code?: string) => {
+    const b: Banner = { kind: "error", text, code };
     setBanner(b);
-    if (b) window.setTimeout(() => setBanner((cur) => (cur === b ? null : cur)), 3200);
+    window.setTimeout(() => setBanner((cur) => (cur === b ? null : cur)), 3400);
   }, []);
 
-  // Resolve the shared ledger user once (get-or-create).
   useEffect(() => {
     let cancelled = false;
     publicUser({})
       .then((u) => !cancelled && setUserId(u.id))
-      .catch((e) => !cancelled && flash({ kind: "error", text: errText(e) }));
+      .catch((e) => !cancelled && flash(errText(e), errCode(e)));
     return () => {
       cancelled = true;
     };
@@ -74,7 +67,6 @@ export function App() {
 
   const uid = userId ?? "";
 
-  // The list — TanStack Query over the direct-imported `listTodos` caller.
   const todosQ = useQuery({
     queryKey: qk(uid),
     queryFn: () => listTodos({ userId: uid }),
@@ -82,8 +74,7 @@ export function App() {
   });
   const todos = (todosQ.data ?? []) as Todo[];
 
-  // Live feed → invalidate (React Query refetches + dedupes). Own connection
-  // per tab via the nonce in subscribeTodos.
+  // Live feed → invalidate (own connection per tab via the nonce reader).
   useEffect(() => {
     if (!userId) return;
     const controller = new AbortController();
@@ -100,7 +91,7 @@ export function App() {
           const now = Date.now();
           if (pk) {
             const prev = seen.get(pk);
-            if (prev && now - prev < 600) continue; // collapse the broker's double frame
+            if (prev && now - prev < 600) continue;
             seen.set(pk, now);
             if (seen.size > 200) seen.clear();
           }
@@ -109,7 +100,7 @@ export function App() {
           t = window.setTimeout(() => void qc.invalidateQueries({ queryKey: qk(userId) }), 180);
         }
       } catch {
-        /* aborted on teardown / stream ended */
+        /* aborted / ended */
       } finally {
         setLive(false);
       }
@@ -121,7 +112,7 @@ export function App() {
     };
   }, [userId, qc]);
 
-  // ── Optimistic create (raw React Query over the direct-imported caller) ──
+  // Optimistic create (raw React Query over the direct-imported caller).
   const createM = useMutation({
     mutationFn: createTodo,
     onMutate: async (input) => {
@@ -137,7 +128,7 @@ export function App() {
         version: 1,
         userId: input.userId,
         title: input.title,
-        priority: input.priority ?? "medium",
+        priority: input.priority ?? "low",
         tags: [],
         done: false,
         archived: false,
@@ -148,10 +139,10 @@ export function App() {
     },
     onError: (e, _input, ctx) => {
       if (ctx) qc.setQueryData<Todo[]>(qk(ctx.userId), ctx.prev ?? []);
-      flash({ kind: "error", text: errText(e) });
+      flash(errText(e), errCode(e));
     },
     onSuccess: (real, _input, ctx) => {
-      keyMap.current.set(real.id, ctx.ck); // bridge real id → optimistic key
+      keyMap.current.set(real.id, ctx.ck);
       qc.setQueryData<Todo[]>(qk(ctx.userId), (old = []) =>
         old.map((t) => (t._key === ctx.ck ? { ...real, _key: ctx.ck } : t)),
       );
@@ -173,7 +164,6 @@ export function App() {
     [title, priority, userId, createM],
   );
 
-  // complete: optimistic flip, then sync.
   const onComplete = useCallback(
     async (id: string) => {
       qc.setQueryData<Todo[]>(qk(uid), (old = []) =>
@@ -182,7 +172,7 @@ export function App() {
       try {
         await completeTodo({ id });
       } catch (e) {
-        flash({ kind: "error", text: errText(e) });
+        flash(errText(e), errCode(e));
       } finally {
         void qc.invalidateQueries({ queryKey: qk(uid) });
       }
@@ -190,7 +180,6 @@ export function App() {
     [uid, qc, flash],
   );
 
-  // archive / delete: play the leave animation, optimistically drop, then sync.
   const onRemove = useCallback(
     async (id: string, fn: (i: { id: string }) => Promise<unknown>) => {
       setRemoving((s) => new Set(s).add(id));
@@ -199,7 +188,7 @@ export function App() {
       try {
         await fn({ id });
       } catch (e) {
-        flash({ kind: "error", text: errText(e) });
+        flash(errText(e), errCode(e));
       } finally {
         setRemoving((s) => {
           const n = new Set(s);
@@ -222,114 +211,111 @@ export function App() {
   const booting = !userId || todosQ.isLoading;
 
   return (
-    <div className="shell">
-      <div className="grain" aria-hidden />
-      <div className="glow" aria-hidden />
-
-      <header className="masthead">
-        <div className="brand">
-          <span className="mark">LEDGER</span>
-          <span className="rule" aria-hidden />
-          <span className="sub">shared · db-todos · zeroship</span>
-        </div>
-        <div className="status">
-          <span className="public-tag">PUBLIC</span>
-          <span className={`live ${live ? "on" : "off"}`} key={pulse}>
+    <div className="app">
+      <header className="top">
+        <h1>Todos</h1>
+        <div className="meta">
+          <span className="count">{active.length} open</span>
+          <span className={`live ${live ? "on" : ""}`} key={pulse}>
             <i className="dot" />
-            {live ? "LIVE" : "OFFLINE"}
+            {live ? "live" : "offline"}
           </span>
         </div>
       </header>
 
-      <main className="stage">
-        <div className="lede">
-          <h1>
-            One ledger, <em>everyone</em>.
-          </h1>
-          <p>
-            A single shared list on the real <code>@zeroship/db</code> surface.
-            The client just imports the server procedures and calls them — the
-            vite plugin turns those into RPC. Creates are optimistic via React
-            Query; every commit streams to every open window over SSE.
-          </p>
+      <p className="tagline">
+        A shared list on the real <code>@zeroship/db</code> surface. Open another
+        window — it stays in sync over realtime SSE.
+      </p>
+
+      <form className="new" onSubmit={add}>
+        <input
+          ref={inputRef}
+          placeholder="Add a task…"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          disabled={!userId}
+          maxLength={200}
+          autoFocus
+        />
+        <div className="prio" role="radiogroup" aria-label="priority">
+          {PRIORITIES.map((p) => (
+            <button
+              type="button"
+              key={p}
+              className={p}
+              aria-pressed={priority === p}
+              aria-label={`${p} priority`}
+              title={`${p} priority`}
+              onClick={() => setPriority(p)}
+            />
+          ))}
         </div>
+        <button className="add" type="submit" disabled={!userId || !title.trim()}>
+          Add
+        </button>
+      </form>
 
-        <form className="composer" onSubmit={add}>
-          <input
-            ref={inputRef}
-            className="title-input"
-            placeholder="Add to the shared ledger…"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            disabled={!userId}
-            maxLength={200}
-            autoFocus
-          />
-          <div className="prio-pick" role="radiogroup" aria-label="priority">
-            {PRIORITIES.map((p) => (
-              <button
-                type="button"
-                key={p}
-                className={`prio ${p} ${priority === p ? "sel" : ""}`}
-                aria-pressed={priority === p}
-                onClick={() => setPriority(p)}
-              >
-                {p}
-              </button>
-            ))}
-          </div>
-          <button className="commit" type="submit" disabled={!userId || !title.trim()}>
-            Commit ↵
-          </button>
-        </form>
+      {booting ? (
+        <div className="skeleton">
+          <div className="sk" />
+          <div className="sk" />
+          <div className="sk" />
+        </div>
+      ) : todos.length === 0 ? (
+        <div className="empty">
+          <div className="ring" />
+          <p>Nothing yet. Add the first task — everyone sees it.</p>
+        </div>
+      ) : (
+        <ul className="list">
+          {[...active, ...done].map((t, i) => (
+            <Item
+              key={keyOf(t)}
+              todo={t}
+              index={i}
+              removing={removing.has(t.id)}
+              onComplete={() => void onComplete(t.id)}
+              onArchive={() => void onRemove(t.id, archiveTodo)}
+              onDelete={() => void onRemove(t.id, deleteTodo)}
+            />
+          ))}
+        </ul>
+      )}
 
-        <section className="ledger">
-          <div className="col-head">
-            <span>entry</span>
-            <span className="count">
-              {active.length} open · {done.length} done
-            </span>
-          </div>
-
-          {booting ? (
-            <div className="skeleton">
-              {[0, 1, 2].map((i) => (
-                <div className="row sk" style={{ animationDelay: `${i * 90}ms` }} key={i} />
-              ))}
-            </div>
-          ) : todos.length === 0 ? (
-            <div className="empty">
-              <span className="big">∅</span>
-              <p>The ledger is clean. Commit the first entry — everyone will see it.</p>
-            </div>
-          ) : (
-            <ul className="rows">
-              {[...active, ...done].map((t, i) => (
-                <TodoRow
-                  key={keyOf(t)}
-                  todo={t}
-                  index={i}
-                  removing={removing.has(t.id)}
-                  onComplete={() => void onComplete(t.id)}
-                  onArchive={() => void onRemove(t.id, archiveTodo)}
-                  onDelete={() => void onRemove(t.id, deleteTodo)}
-                />
-              ))}
-            </ul>
-          )}
-        </section>
-      </main>
-
-      <footer className="footplate">
-        <span>SQLite dev backend · all writes autocommit · realtime broadcast via broker SSE</span>
+      <footer className="foot">
+        Realtime via broker SSE · SQLite dev backend · writes autocommit
       </footer>
 
-      {banner && <div className={`banner ${banner.kind}`}>{banner.text}</div>}
+      {banner && (
+        <div className="toast">
+          {banner.code && <span className="tcode">{banner.code}</span>}
+          {banner.text.replace(new RegExp(`^${banner.code} · `), "")}
+        </div>
+      )}
     </div>
   );
 }
 
-function TodoRow({
+const Check = () => (
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden>
+    <path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+const ArchiveIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden>
+    <rect x="3.5" y="4.5" width="17" height="4" rx="1.2" stroke="currentColor" strokeWidth="1.7" />
+    <path d="M5 8.5V18a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 18V8.5" stroke="currentColor" strokeWidth="1.7" />
+    <path d="M10 12h4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+  </svg>
+);
+const TrashIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden>
+    <path d="M4.5 6.5h15M9 6.5V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v1.5M7 6.5 7.7 19a1.5 1.5 0 0 0 1.5 1.4h5.6a1.5 1.5 0 0 0 1.5-1.4L17 6.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+function Item({
   todo,
   index,
   removing,
@@ -347,42 +333,31 @@ function TodoRow({
   const pending = todo.id.startsWith("tmp_");
   return (
     <li
-      className={`row ${todo.done ? "done" : ""} ${removing ? "leaving" : ""} ${pending ? "pending" : ""} p-${todo.priority}`}
-      style={{ animationDelay: `${Math.min(index, 12) * 45}ms` }}
+      className={`item ${todo.done ? "done" : ""} ${removing ? "leaving" : ""} ${pending ? "pending" : ""}`}
+      style={{ animationDelay: `${Math.min(index, 14) * 28}ms` }}
     >
       <button
-        className="check"
-        aria-label={todo.done ? "completed" : "complete"}
+        className="box"
+        aria-label={todo.done ? "completed" : "mark complete"}
         onClick={onComplete}
         disabled={todo.done || pending}
       >
-        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden>
-          <path d="M4 12.5l5 5L20 6" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <Check />
       </button>
 
-      <div className="body">
-        <span className="text">{todo.title}</span>
-        <div className="meta">
-          <span className={`tag prio ${todo.priority}`}>{todo.priority}</span>
-          {todo.tags?.map((tg) => (
-            <span className="tag" key={tg}>
-              #{tg}
-            </span>
-          ))}
-          <span className="mono">{pending ? "committing…" : shortId(todo.id)}</span>
-          <span className="mono dim">v{todo.version}</span>
-          <span className="mono dim">{ago(todo.created_at)}</span>
-        </div>
-      </div>
+      <span className={`pri-tick ${todo.priority}`} title={`${todo.priority} priority`} aria-hidden />
+      <span className="label">{todo.title}</span>
 
-      <div className="actions">
-        <button className="act" onClick={onArchive} disabled={pending} title="Archive">
-          archive
-        </button>
-        <button className="act danger" onClick={onDelete} disabled={pending} title="Soft-delete">
-          delete
-        </button>
+      <div className="right">
+        <span className="when">{pending ? "…" : ago(todo.created_at)}</span>
+        <div className="actions">
+          <button className="icon-btn" onClick={onArchive} disabled={pending} aria-label="archive" title="Archive">
+            <ArchiveIcon />
+          </button>
+          <button className="icon-btn danger" onClick={onDelete} disabled={pending} aria-label="delete" title="Delete">
+            <TrashIcon />
+          </button>
+        </div>
       </div>
     </li>
   );
