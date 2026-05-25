@@ -170,6 +170,170 @@ fn current_sql_dialect() -> query::SqlDialect {
     }
 }
 
+fn maybe_lower_sqlite_boolean_doc(
+    app_id: &str,
+    collection: &str,
+    doc: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    lower_boolean_doc_with_schema(&schema, doc);
+}
+
+fn maybe_lower_sqlite_boolean_docs(
+    app_id: &str,
+    collection: &str,
+    docs: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    let Some(arr) = docs.as_array_mut() else {
+        return;
+    };
+    for doc in arr {
+        lower_boolean_doc_with_schema(&schema, doc);
+    }
+}
+
+fn maybe_lower_sqlite_boolean_update(
+    app_id: &str,
+    collection: &str,
+    patch: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    lower_boolean_update_with_schema(&schema, patch);
+}
+
+fn maybe_lower_sqlite_boolean_filter(
+    app_id: &str,
+    collection: &str,
+    filter: &mut Value,
+) {
+    if current_sql_dialect() != query::SqlDialect::Sqlite {
+        return;
+    }
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return;
+    };
+    lower_boolean_filter_with_schema(&schema, filter);
+}
+
+fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    for (field, value) in obj {
+        if field.starts_with("__zsenc__") {
+            continue;
+        }
+        if schema_field_type(schema, field) == Some("boolean") {
+            lower_boolean_scalar(value);
+        }
+    }
+}
+
+fn lower_boolean_update_with_schema(schema: &Value, patch: &mut Value) {
+    let Some(obj) = patch.as_object_mut() else {
+        return;
+    };
+    if let Some(set_doc) = obj.get_mut("$set") {
+        lower_boolean_doc_with_schema(schema, set_doc);
+    }
+    for (field, value) in obj {
+        if field.starts_with('$') || field.starts_with("__zsenc__") {
+            continue;
+        }
+        if schema_field_type(schema, field) != Some("boolean") {
+            continue;
+        }
+        match value {
+            Value::Bool(_) => lower_boolean_scalar(value),
+            Value::Object(ops) => {
+                if let Some(set_val) = ops.get_mut("$set") {
+                    lower_boolean_scalar(set_val);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn lower_boolean_filter_with_schema(schema: &Value, filter: &mut Value) {
+    let Some(obj) = filter.as_object_mut() else {
+        return;
+    };
+    for (key, value) in obj {
+        if key.starts_with('$') {
+            match key.as_str() {
+                "$and" | "$or" => {
+                    if let Some(arr) = value.as_array_mut() {
+                        for clause in arr {
+                            lower_boolean_filter_with_schema(schema, clause);
+                        }
+                    }
+                }
+                "$not" => lower_boolean_filter_with_schema(schema, value),
+                _ => {}
+            }
+            continue;
+        }
+        if schema_field_type(schema, key) == Some("boolean") {
+            lower_boolean_filter_value(value);
+        }
+    }
+}
+
+fn lower_boolean_filter_value(value: &mut Value) {
+    match value {
+        Value::Bool(_) => lower_boolean_scalar(value),
+        Value::Object(ops) => {
+            for (op, operand) in ops {
+                match op.as_str() {
+                    "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" => {
+                        lower_boolean_scalar(operand);
+                    }
+                    "$in" | "$nin" => {
+                        if let Some(arr) = operand.as_array_mut() {
+                            for item in arr {
+                                lower_boolean_scalar(item);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lower_boolean_scalar(value: &mut Value) {
+    if let Value::Bool(b) = value {
+        *value = Value::Number(serde_json::Number::from(i64::from(u8::from(*b))));
+    }
+}
+
+fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
+    schema
+        .as_object()?
+        .get(field)?
+        .get("type")?
+        .as_str()
+}
+
 /// Lower a `Vec<Value>` result to a single JSON value: the first row,
 /// or `null` when the result was empty. Used by `insert` / `update` /
 /// `delete` / `upsert`, all of which the SDK expects to resolve to a
@@ -358,16 +522,10 @@ fn parse_timestamp_millis(s: &str) -> Option<i64> {
     }
 
     let b = s.as_bytes();
-    if !(b.len() == 19 || b.len() == 23) {
+    if b.len() < 19 {
         return None;
     }
-    if b[4] != b'-'
-        || b[7] != b'-'
-        || b[10] != b' '
-        || b[13] != b':'
-        || b[16] != b':'
-        || (b.len() == 23 && b[19] != b'.')
-    {
+    if b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b' ' | b'T') || b[13] != b':' || b[16] != b':' {
         return None;
     }
 
@@ -377,15 +535,72 @@ fn parse_timestamp_millis(s: &str) -> Option<i64> {
     let hour: i64 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
     let minute: i64 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
     let second: i64 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
-    let millis: i64 = if b.len() == 23 {
-        std::str::from_utf8(&b[20..23]).ok()?.parse().ok()?
-    } else {
-        0
-    };
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
+        return None;
+    }
+
+    let mut millis = 0i64;
+    let mut tz_offset_minutes = 0i64;
+    let mut idx = 19usize;
+
+    if idx < b.len() && b[idx] == b'.' {
+        idx += 1;
+        let frac_start = idx;
+        while idx < b.len() && b[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        if idx == frac_start {
+            return None;
+        }
+        let frac = &b[frac_start..idx];
+        let frac_digits = std::str::from_utf8(frac).ok()?;
+        let mut milli_digits = frac_digits.chars().take(3).collect::<String>();
+        while milli_digits.len() < 3 {
+            milli_digits.push('0');
+        }
+        millis = milli_digits.parse().ok()?;
+    }
+
+    if idx < b.len() {
+        tz_offset_minutes = parse_timestamp_offset_minutes(&b[idx..])?;
+    }
 
     let days = days_from_civil(year, month, day)?;
     let total_secs = days * 86_400 + hour * 3600 + minute * 60 + second;
-    Some(total_secs * 1000 + millis)
+    Some(total_secs * 1000 + millis - tz_offset_minutes * 60 * 1000)
+}
+
+fn parse_timestamp_offset_minutes(rest: &[u8]) -> Option<i64> {
+    match rest {
+        b"Z" | b"z" => Some(0),
+        [sign @ (b'+' | b'-'), h1, h2] => {
+            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
+            if hours > 23 {
+                return None;
+            }
+            let sign = if *sign == b'-' { -1 } else { 1 };
+            Some(sign * hours * 60)
+        }
+        [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] => {
+            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
+            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            let sign = if *sign == b'-' { -1 } else { 1 };
+            Some(sign * (hours * 60 + minutes))
+        }
+        [sign @ (b'+' | b'-'), h1, h2, m1, m2] => {
+            let hours: i64 = std::str::from_utf8(&[*h1, *h2]).ok()?.parse().ok()?;
+            let minutes: i64 = std::str::from_utf8(&[*m1, *m2]).ok()?.parse().ok()?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            let sign = if *sign == b'-' { -1 } else { 1 };
+            Some(sign * (hours * 60 + minutes))
+        }
+        _ => None,
+    }
 }
 
 fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
@@ -490,10 +705,12 @@ pub(crate) fn dispatch_find<'s>(
         // **P7 PR 5** — soft-delete auto-filter gate.
         let filter_soft_deleted =
             system_fields_pass::should_filter_soft_deleted(&app, &coll, include_deleted);
+        let mut sql_filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
         let built = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
             &app,
             &coll,
-            &filter,
+            &sql_filter,
             limit,
             offset,
             order_by.as_ref(),
@@ -651,6 +868,7 @@ pub(crate) fn dispatch_insert<'s>(
                 request_id,
             };
         }
+        maybe_lower_sqlite_boolean_doc(&app, &coll, &mut doc);
         let built = query::build_insert_with_dialect(&app, &coll, &doc, current_sql_dialect());
         let result = match built {
             Ok(bq) => {
@@ -735,6 +953,7 @@ pub(crate) fn dispatch_insert_many<'s>(
         collection,
         actor_id.as_deref(),
     );
+    maybe_lower_sqlite_boolean_docs(app_id, collection, &mut docs);
 
     let built =
         query::build_insert_many_with_dialect(app_id, collection, &docs, current_sql_dialect());
@@ -828,6 +1047,9 @@ pub(crate) fn dispatch_update_one<'s>(
                 request_id,
             };
         }
+        maybe_lower_sqlite_boolean_update(&app, &coll, &mut update);
+        let mut sql_filter = filter.clone();
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
         // **P7 PR 4** — auto-bump via the system-fields-aware builder.
         // Actor flows into the `updated_by` bind; the `hints` from the
         // pre-pass tell the builder which auto-bumps to suppress.
@@ -840,7 +1062,7 @@ pub(crate) fn dispatch_update_one<'s>(
         let built = query::build_update_one_with_system_fields(
             &app,
             &coll,
-            &filter,
+            &sql_filter,
             &update,
             current_sql_dialect(),
             &autobump,
@@ -999,16 +1221,27 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
 
+        let mut update = update;
+        if let Err(e) = apply_encryption_on_update(&app, &coll, &filter, &mut update).await {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
         let autobump = query::SystemFieldAutoBump {
             actor_id: actor_id.as_deref(),
             skip_version: hints.creator_supplied_version,
             skip_updated_at: hints.creator_supplied_updated_at,
             skip_updated_by: hints.creator_supplied_updated_by,
         };
+        maybe_lower_sqlite_boolean_update(&app, &coll, &mut update);
+        let mut sql_filter = filter.clone();
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut sql_filter);
         let built = query::build_update_many_with_system_fields(
             &app,
             &coll,
-            &filter,
+            &sql_filter,
             &update,
             current_sql_dialect(),
             &autobump,
@@ -1103,6 +1336,8 @@ pub(crate) fn dispatch_delete_one<'s>(
     let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
 
     if has_marker {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
         let autobump = query::SystemFieldAutoBump {
             actor_id: actor_id.as_deref(),
             ..Default::default()
@@ -1131,6 +1366,8 @@ pub(crate) fn dispatch_delete_one<'s>(
         )));
     } else {
         system_fields_pass::warn_legacy_hard_delete(&app, &coll);
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
         let built = query::build_delete_one_with_dialect(
             &app,
             &coll,
@@ -1173,6 +1410,8 @@ pub(crate) fn dispatch_delete_many<'s>(
     let has_marker = system_fields_pass::schema_has_system_fields_marker(&app, &coll);
 
     if has_marker {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
         let autobump = query::SystemFieldAutoBump {
             actor_id: actor_id.as_deref(),
             ..Default::default()
@@ -1195,6 +1434,8 @@ pub(crate) fn dispatch_delete_many<'s>(
         )));
     } else {
         system_fields_pass::warn_legacy_hard_delete(&app, &coll);
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
         let built = query::build_delete_many(&app, &coll, &filter);
         state.borrow_mut().spawned_ops.push(Box::pin(run_op(
             resolver,
@@ -1225,6 +1466,8 @@ pub(crate) fn dispatch_purge_one<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let built =
         query::build_delete_one_with_dialect(app_id, collection, &filter, current_sql_dialect());
     let coll = collection.to_string();
@@ -1256,6 +1499,8 @@ pub(crate) fn dispatch_purge_many<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let built = query::build_delete_many(app_id, collection, &filter);
     let coll = collection.to_string();
     let app = app_id.to_string();
@@ -1306,6 +1551,8 @@ pub(crate) fn dispatch_restore_one<'s>(
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let built = query::build_restore_one_with_system_fields(
         &app,
         &coll,
@@ -1359,6 +1606,8 @@ pub(crate) fn dispatch_restore_many<'s>(
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let built = query::build_restore_many_with_system_fields(
         &app,
         &coll,
@@ -1466,6 +1715,8 @@ pub(crate) fn dispatch_distinct<'s>(
         .unwrap_or(false);
     let filter_soft_deleted =
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
     let app = app_id.to_string();
     let coll = collection.to_string();
     let built = query::build_distinct_with_soft_delete_with_dialect(
@@ -1529,6 +1780,8 @@ pub(crate) fn dispatch_count<'s>(
         .unwrap_or(false);
     let filter_soft_deleted =
         system_fields_pass::should_filter_soft_deleted(app_id, collection, include_deleted);
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(app_id, collection, &mut filter);
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let built =
@@ -1565,6 +1818,8 @@ pub(crate) fn dispatch_upsert<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
+    let mut doc = doc;
+    maybe_lower_sqlite_boolean_doc(app_id, collection, &mut doc);
     let built = query::build_upsert_with_dialect(
         app_id,
         collection,
@@ -1685,13 +1940,13 @@ pub(crate) fn dispatch_search<'s>(
                 // `limit: Option<usize>` either way.
                 args.get("k").and_then(Value::as_u64).map(|n| n as usize)
             });
-        let filter = args
+        let mut filter = args
             .get("filter")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-
         let app = app_id.to_string();
         let coll = collection.to_string();
+        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             let backend = crate::context::with(|c| c.backend());
@@ -1719,13 +1974,27 @@ pub(crate) fn dispatch_search<'s>(
             .await;
 
             match result {
-                Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: zeroship_runtime::state::ResolveValue::Json(
-                        Value::Array(rows).to_string(),
-                    ),
-                    request_id,
-                },
+                Ok(rows) => {
+                    let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            return zeroship_runtime::state::OpResult::JsValue {
+                                resolver,
+                                value: zeroship_runtime::state::ResolveValue::RejectError(
+                                    e.to_op_error(),
+                                ),
+                                request_id,
+                            };
+                        }
+                    };
+                    zeroship_runtime::state::OpResult::JsValue {
+                        resolver,
+                        value: zeroship_runtime::state::ResolveValue::Json(
+                            Value::Array(rows).to_string(),
+                        ),
+                        request_id,
+                    }
+                }
                 Err(e) => zeroship_runtime::state::OpResult::JsValue {
                     resolver,
                     value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
@@ -1804,13 +2073,13 @@ pub(crate) fn dispatch_search<'s>(
         .and_then(Value::as_str)
         .unwrap_or("embedding")
         .to_string();
-    let filter = args
+    let mut filter = args
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-
     let app = app_id.to_string();
     let coll = collection.to_string();
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Reach the backend through the per-isolate context. The
@@ -1847,13 +2116,27 @@ pub(crate) fn dispatch_search<'s>(
         .await;
 
         match result {
-            Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::Json(
-                    Value::Array(rows).to_string(),
-                ),
-                request_id,
-            },
+            Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return zeroship_runtime::state::OpResult::JsValue {
+                            resolver,
+                            value: zeroship_runtime::state::ResolveValue::RejectError(
+                                e.to_op_error(),
+                            ),
+                            request_id,
+                        };
+                    }
+                };
+                zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::Json(
+                        Value::Array(rows).to_string(),
+                    ),
+                    request_id,
+                }
+            }
             Err(e) => zeroship_runtime::state::OpResult::JsValue {
                 resolver,
                 value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
@@ -1953,13 +2236,14 @@ pub(crate) fn dispatch_near<'s>(
         .get("limit")
         .and_then(Value::as_u64)
         .map(|n| n as usize);
-    let filter = args
+    let mut filter = args
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
     let app = app_id.to_string();
     let coll = collection.to_string();
+    maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
     let point = crate::backend::GeoPoint { lat, lng };
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -1989,13 +2273,27 @@ pub(crate) fn dispatch_near<'s>(
         .await;
 
         match result {
-            Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::Json(
-                    Value::Array(rows).to_string(),
-                ),
-                request_id,
-            },
+            Ok(rows) => {
+                let rows = match normalize_rows_on_read(&app, &coll, rows) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return zeroship_runtime::state::OpResult::JsValue {
+                            resolver,
+                            value: zeroship_runtime::state::ResolveValue::RejectError(
+                                e.to_op_error(),
+                            ),
+                            request_id,
+                        };
+                    }
+                };
+                zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::Json(
+                        Value::Array(rows).to_string(),
+                    ),
+                    request_id,
+                }
+            }
             Err(e) => zeroship_runtime::state::OpResult::JsValue {
                 resolver,
                 value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
@@ -2322,7 +2620,7 @@ mod tests {
             "active": 1,
             "prefs": "{\"theme\":\"dark\"}",
             "avatar": [222, 173, 190, 239],
-            "published_at": "2026-05-24 12:34:56",
+            "published_at": "2026-05-24T12:34:56.789Z",
             "created_at": "2026-05-24 12:34:56"
         });
 
@@ -2338,6 +2636,42 @@ mod tests {
         );
         assert!(row.get("published_at").and_then(Value::as_i64).is_some());
         assert!(row.get("created_at").and_then(Value::as_i64).is_some());
+    }
+
+    #[test]
+    fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {
+        let expected = 1_779_626_096_789i64;
+        assert_eq!(
+            parse_timestamp_millis("2026-05-24T12:34:56.789Z"),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_timestamp_millis("2026-05-24T12:34:56.789123Z"),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_timestamp_millis("2026-05-24T14:34:56.789+02:00"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
+        let schema = serde_json::json!({
+            "active": { "type": "boolean" },
+            "payload": { "type": "json" }
+        });
+        let mut filter = serde_json::json!({
+            "$and": [
+                { "active": { "$in": [true, false] } },
+                { "payload": true }
+            ]
+        });
+
+        lower_boolean_filter_with_schema(&schema, &mut filter);
+
+        assert_eq!(filter["$and"][0]["active"]["$in"], serde_json::json!([1, 0]));
+        assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
     }
 
     #[test]

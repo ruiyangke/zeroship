@@ -155,6 +155,7 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
 
     assert_eq!(pg.seed, sqlite.seed);
     assert_eq!(pg.tx, sqlite.tx);
+    assert_eq!(pg.typed, sqlite.typed);
 }
 
 // ---------------------------------------------------------------------------

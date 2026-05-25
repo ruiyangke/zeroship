@@ -12,6 +12,7 @@ use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestC
 pub struct MatrixSnapshot {
     pub seed: Value,
     pub tx: Value,
+    pub typed: Value,
 }
 
 static MATRIX_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -74,6 +75,10 @@ async function _zsFetch(request) {
 export default { fetch: _zsFetch, rpc: _shimRpc };
 "#;
 
+const TYPED_DATE_ISO: &str = "2026-05-24T12:34:56.789Z";
+const TYPED_DATE_MS: i64 = 1_779_626_096_789;
+const TYPED_BYTES_B64: &str = "3q2+7w==";
+
 pub fn matrix_source(collection: &str) -> String {
     r#"
 import { env } from "zeroship";
@@ -82,6 +87,8 @@ const __plat = (typeof globalThis.__zsDbPlatform === "function")
     ? globalThis.__zsDbPlatform(env.db)
     : undefined;
 const COLLECTION = "__COLLECTION__";
+const TYPED_DATE_ISO = "__TYPED_DATE_ISO__";
+const TYPED_BYTES_B64 = "__TYPED_BYTES_B64__";
 
 function projectRows(rows) {
     return rows.map((row) => ({
@@ -98,6 +105,17 @@ function projectRows(rows) {
     }));
 }
 
+function projectTypedRow(row) {
+    return {
+        title: row.title,
+        flag: row.flag,
+        occurred_at: row.occurred_at,
+        occurred_at_kind: typeof row.occurred_at,
+        payload_bytes: row.payload_bytes,
+        payload_json: row.payload_json,
+    };
+}
+
 async function setup(_input, _ctx) {
     await __plat.registerModel(COLLECTION, {
         title: { type: "string", required: true },
@@ -105,6 +123,9 @@ async function setup(_input, _ctx) {
         meta: { type: "object", required: true },
         optional: { type: "string" },
         rank: { type: "int", required: true },
+        occurred_at: { type: "date" },
+        payload_bytes: { type: "bytes" },
+        payload_json: { type: "json" },
     });
     return { ok: true };
 }
@@ -190,9 +211,35 @@ async function transactionMatrix(_input, _ctx) {
 }
 transactionMatrix.config = { kind: "action" };
 
-const _procedures = { setup, seed, transactionMatrix };
+async function typedRoundTrip(_input, _ctx) {
+    const coll = env.db.collection(COLLECTION);
+    await coll.insert({
+        title: "typed-roundtrip",
+        flag: true,
+        meta: { kind: "typed" },
+        optional: "typed",
+        rank: 41,
+        occurred_at: new Date(TYPED_DATE_ISO),
+        payload_bytes: TYPED_BYTES_B64,
+        payload_json: {
+            nested: { ok: true },
+            items: [1, "two", false],
+            nullish: null,
+        },
+    });
+    const rows = await coll.find(
+        { title: "typed-roundtrip", flag: 1 },
+        { limit: 1 },
+    );
+    return rows[0] ? projectTypedRow(rows[0]) : null;
+}
+typedRoundTrip.config = { kind: "action" };
+
+const _procedures = { setup, seed, transactionMatrix, typedRoundTrip };
 "#
     .replace("__COLLECTION__", collection)
+    .replace("__TYPED_DATE_ISO__", TYPED_DATE_ISO)
+    .replace("__TYPED_BYTES_B64__", TYPED_BYTES_B64)
         + SHIM
 }
 
@@ -257,7 +304,11 @@ pub fn run_matrix(url: &str) -> MatrixSnapshot {
     assert_eq!(status, 200, "transactionMatrix failed: {body}");
     let tx = extract_json(&body);
 
-    MatrixSnapshot { seed, tx }
+    let (status, body) = dispatch_zs(url, &source, "typedRoundTrip");
+    assert_eq!(status, 200, "typedRoundTrip failed: {body}");
+    let typed = extract_json(&body);
+
+    MatrixSnapshot { seed, tx, typed }
 }
 
 pub fn extract_json(body: &Value) -> Value {
@@ -332,4 +383,19 @@ pub fn expected_tx_projection() -> Value {
             "updated_at_kind": "number"
         }
     ])
+}
+
+pub fn expected_typed_projection() -> Value {
+    json!({
+        "title": "typed-roundtrip",
+        "flag": true,
+        "occurred_at": TYPED_DATE_MS,
+        "occurred_at_kind": "number",
+        "payload_bytes": TYPED_BYTES_B64,
+        "payload_json": {
+            "nested": { "ok": true },
+            "items": [1, "two", false],
+            "nullish": null
+        }
+    })
 }

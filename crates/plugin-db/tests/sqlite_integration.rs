@@ -71,6 +71,15 @@ fn parity_matrix_sqlite_transaction_projection_matches_contract() {
     });
 }
 
+#[test]
+fn parity_matrix_sqlite_typed_projection_matches_contract() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create parity dir");
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        assert_eq!(snapshot.typed, parity::expected_typed_projection());
+    });
+}
+
 /// Read the value of a single-column scalar PRAGMA back from the
 /// session.
 ///
