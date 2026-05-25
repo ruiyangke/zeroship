@@ -1183,6 +1183,15 @@ impl NomadCHBackend {
                 e
             })?;
         guard.job_submitted = true;
+        // r32-T1 trace: emit submit-done milestone so the CREATE
+        // breakdown can attribute "Nomad scheduling" to (submit_done →
+        // alloc_visible) vs. (alloc_visible → alloc_running).
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            job = %job_id,
+            elapsed_ms = %create_started.elapsed().as_millis(),
+            "sandbox/nomad-ch create submit_done"
+        );
 
         // 6. Poll until at least one alloc reaches running. Bounded
         //    by the Nomad-scheduling budget (alloc_running_timeout_secs);
@@ -3033,13 +3042,20 @@ async fn wait_for_alloc_running(
     job_id: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
+    let fn_started = Instant::now();
+    let deadline = fn_started + timeout;
     let url = format!("{nomad_addr}/v1/job/{job_id}/allocations");
     let mut last_status: Option<String> = None;
     let mut last_parse_err: Option<String> = None;
     let mut last_parse_log_at: Option<Instant> = None;
     let mut last_http_err: Option<String> = None;
     let mut last_http_log_at: Option<Instant> = None;
+    // r32-T1 trace: emit first time ANY alloc becomes visible from
+    // the /allocations endpoint — separates "Nomad accepted job" from
+    // "client picked it up and reported running". The gap between
+    // submit_done (controller emit) and this log is the eval+placement
+    // window inside Nomad.
+    let mut alloc_first_seen_logged = false;
     while Instant::now() < deadline {
         let resp = http_get_unsigned(&url, Duration::from_secs(5)).await;
         match resp {
@@ -3067,7 +3083,18 @@ async fn wait_for_alloc_running(
                     }
                 };
                 let mut latest: Option<String> = None;
-                for a in allocs.as_array().into_iter().flatten() {
+                let alloc_arr = allocs.as_array();
+                if !alloc_first_seen_logged
+                    && alloc_arr.map(|a| !a.is_empty()).unwrap_or(false)
+                {
+                    tracing::info!(
+                        job = %job_id,
+                        elapsed_ms = %fn_started.elapsed().as_millis(),
+                        "sandbox/nomad-ch alloc_first_seen"
+                    );
+                    alloc_first_seen_logged = true;
+                }
+                for a in alloc_arr.into_iter().flatten() {
                     let cs = a["ClientStatus"].as_str().unwrap_or("").to_string();
                     if cs == "running" {
                         return Ok(());
