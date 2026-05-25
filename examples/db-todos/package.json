@@ -9,12 +9,17 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "catalog:",
     "@zeroship/db": "workspace:*",
     "@zeroship/migrations": "workspace:*",
     "@zeroship/server": "workspace:*",
-    "@zeroship/vite-plugin": "workspace:*"
+    "@zeroship/vite-plugin": "workspace:*",
+    "react": "catalog:react18",
+    "react-dom": "catalog:react18"
   },
   "devDependencies": {
+    "@types/react": "catalog:react18",
+    "@types/react-dom": "catalog:react18",
     "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
     "vite": "catalog:",

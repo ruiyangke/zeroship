@@ -3,13 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>db-todos smoke</title>
+    <title>LEDGER · db-todos</title>
+    <meta
+      name="description"
+      content="A live database ledger — db-todos on the zeroship runtime."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..900;1,9..144,400..700&family=Hanken+Grotesk:wght@300..800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
-    <h1>db-todos</h1>
-    <p>This page exists so the Vite client build has an HTML entry. The
-       interesting bits are the RPC procedures in <code>src/index.ts</code>
-       — see <code>scripts/smoke.sh</code> for how the smoke exercises
-       them through <code>/_zs/v1/&lt;wireId&gt;</code>.</p>
+    <div id="root"></div>
+    <script type="module" src="/src/ui/main.tsx"></script>
   </body>
 </html>
