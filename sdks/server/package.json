@@ -24,17 +24,9 @@
   },
   "license": "MIT",
   "peerDependencies": {
-    "@tanstack/react-query": "^5.0.0",
-    "react": "^18.0.0 || ^19.0.0",
     "zod": "^3.22.0"
   },
   "peerDependenciesMeta": {
-    "@tanstack/react-query": {
-      "optional": true
-    },
-    "react": {
-      "optional": true
-    },
     "zod": {
       "optional": true
     }
@@ -43,13 +35,7 @@
     "@zeroship/types": "workspace:*"
   },
   "devDependencies": {
-    "@tanstack/react-query": "catalog:",
     "@types/node": "catalog:",
-    "@types/react": "catalog:react18",
-    "@types/react-dom": "catalog:react18",
-    "react": "catalog:react18",
-    "react-dom": "catalog:react18",
-    "react-test-renderer": "catalog:react18",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "zeroship": "workspace:*",

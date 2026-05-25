@@ -84,6 +84,27 @@ export const create = mutation(async (input) => input, { id: "create.v2" });
     assert.equal(byName.get("create")?.config?.id, "create.v2");
   });
 
+  test("server transform copies only id/kind/wire metadata", () => {
+    const state = makeState();
+    const plugin = transformPlugin("/_rpc", state);
+    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
+
+    const code = `"use server";
+import { query } from "@zeroship/server";
+export const list = query(async () => []);
+`;
+    const out = getHandler(plugin).call(makeCtx("ssr"), code, "/r/src/api.ts");
+    assert.ok(out, "transform returned output");
+    const emitted: string = out.code;
+
+    assert.match(emitted, /for \(const k of \["id","kind","wire"\]\)/);
+    assert.match(
+      emitted,
+      /__zsAttachProcedureMeta\(list, \{"id":"list","kind":"query","wire":"json"\}\);/,
+    );
+    assert.doesNotMatch(emitted, /useQuery|useMutation|queryKey|prefetch/);
+  });
+
   test("aliased import: `query as q` works", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);

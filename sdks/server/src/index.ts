@@ -79,14 +79,12 @@ export {
   currentIdempotencyKey,
 } from "zeroship";
 
-// `__makeServerProcedure` SSR adapter.
+// `__makeServerProcedure` metadata adapter.
 //
-// The vite-plugin's SSR-enabled-app variant wraps each user procedure
-// with `__makeServerProcedure(impl, meta)` so the same React component
-// code (`list.useQuery(...)`) works on both server and client. On the
-// server, hooks call the impl directly (no HTTP) and stash results in
-// a per-request QueryClient; the worker dehydrates that to JSON for
-// the client to hydrate.
+// The vite-plugin's SSR build wraps each user procedure with
+// `__makeServerProcedure(impl, meta)` so it can copy `id`, `kind`, and
+// `wire` metadata onto the original export before synthetic-entry
+// binding.
 //
 // Symmetric with `__makeProcedure` from `@zeroship/rpc-client`.
 export { __makeServerProcedure } from "./make-server-procedure.js";

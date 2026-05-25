@@ -3,7 +3,7 @@
 A minimal SPA that exercises the **client-side rendering** path through the zeroship build pipeline.
 
 - **Frontend**: React 18, vite-bundled, mounted at `<div id="root">` in `/index.html`.
-- **Backend**: one server function (`listTodos`) registered automatically via the `"use server"` transform.
+- **Backend**: two server functions (`listTodos`, `searchTodos`) registered automatically via the `"use server"` transform.
 - **Routing**: a hand-rolled tiny router in `src/main.tsx` — every URL the client doesn't recognise falls through to `/about` or back to `/`. The gateway's `Match::Any → Static{ try: ["$path", "/index.html"] }` rule serves the SPA shell so the browser can take over.
 
 ## Build

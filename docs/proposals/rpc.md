@@ -645,19 +645,23 @@ export default {
 
 ```ts
 // transform-client output of ./actions/todos
-import { __makeProcedure, __SERVER_REFERENCE } from "@zeroship/rpc/client";
+import { __makeProcedure, __SERVER_REFERENCE } from "@zeroship/rpc-client";
 
-export const list = __makeProcedure({
-  [__SERVER_REFERENCE]: true,
-  id: "todos.list", kind: "query", wire: "json",
-});
-export const add = __makeProcedure({
-  [__SERVER_REFERENCE]: true,
-  id: "todos.add", kind: "mutation", idempotent: true, wire: "json",
-});
+export const list = __makeProcedure(
+  (input) => __rpcUnary("todos.list", input),
+  { id: "todos.list", kind: "query", wire: "json" },
+);
+export const add = __makeProcedure(
+  (input) => __rpcUnary("todos.add", input),
+  { id: "todos.add", kind: "mutation", wire: "json" },
+);
 ```
 
-The `__SERVER_REFERENCE` symbol is the branding mechanism. Same pattern as RSC's server-action references: the marker survives serialization (the symbol is sent as a sentinel field), so when a server function is passed as a prop to a client component (RSC pattern) the client knows to invoke it via RPC, not call it locally.
+`__makeProcedure` attaches `id`, `kind`, `wire`, and the
+`__SERVER_REFERENCE` symbol. Same pattern as RSC's server-action
+references: when a server function is passed as a prop to a client
+component, the client can identify it as an RPC reference rather than a
+local function.
 
 ### Gateway dispatch — fastcall hot path
 
@@ -972,7 +976,8 @@ The full subscription contract (backpressure, replay, credit-based flow control,
 - CHWBL routing by app + session (so reconnects land on the same worker; gateway already supports this via `subscription_affinity_key`).
 - JSON-frame envelope with at minimum: `{t:"hello", input}`, `{t:"data", value}`, `{t:"error", error}`, `{t:"end"}`, `{t:"ping"}` / `{t:"pong"}`.
 - Auth via the standard cookie/header chain on the upgrade request.
-- The hooks API in §10 (`fn.useSubscription`).
+- Client-side subscription helpers can wrap the callable/transport
+  surface described in §10.
 
 Backpressure / replay / flow-control specifications are deferred to the dedicated proposal — round-01 High-6 was correct that three paragraphs aren't enough.
 
@@ -1635,13 +1640,19 @@ const sub   = rpc.todoChanges.subscribe(undefined, {
 ### React
 
 ```tsx
-import { rpcReact } from "@zeroship/rpc/react";
-const trpc = rpcReact<App>();
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { add, list } from "../actions/todos";
 
 function Todos() {
-  const { data, error, isLoading } = trpc.todos.list.useQuery({ limit: 50 });
-  const add = trpc.todos.add.useMutation({
-    onSuccess: () => trpc.todos.list.invalidate(),
+  const qc = useQueryClient();
+  const input = { limit: 50 };
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["todos", "list", input],
+    queryFn: () => list(input),
+  });
+  const addTodo = useMutation({
+    mutationFn: add,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["todos"] }),
   });
   // ...
 }
@@ -1671,184 +1682,110 @@ Out of scope for the initial release. The wire is plain HTTP+JSON; non-TS caller
 
 ---
 
-## 10. React Query integration
+## 10. TanStack Query integration
 
-The seamless model and TanStack Query (React Query) compose cleanly: every procedure imported from a server module is **simultaneously a callable function and a hooks object**. Same import, three usage modes.
+Procedures imported from a server module are plain callable functions.
+React apps compose them with TanStack Query directly:
 
 ```tsx
-import { list, add } from "../actions/todos";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { add, list } from "../actions/todos";
+
+const todosKey = (input: { limit: number }) => ["todos", "list", input] as const;
 
 function Todos() {
-  const { data } = list.useQuery({ limit: 50 });
-  const { data } = list.useSuspenseQuery({ limit: 50 });
+  const input = { limit: 50 };
+  const qc = useQueryClient();
+  const { data } = useQuery({
+    queryKey: todosKey(input),
+    queryFn: () => list(input),
+  });
 
-  const addTodo = add.useMutation({
-    onSuccess: () => list.invalidate(),
+  const addTodo = useMutation({
+    mutationFn: add,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["todos"] }),
   });
 
   return <button onClick={() => addTodo.mutate({ text: "hi" })}>+</button>;
 }
 
-// Same import works outside React, e.g. in an event handler:
 async function exportToCSV() {
-  const todos = await list({ limit: 1000 });               // direct call, no hook
+  const todos = await list({ limit: 1000 });
   download(toCsv(todos));
 }
 ```
 
-No `trpc.todos.list.useQuery(...)` namespace traversal. No separate `App` type to thread through. The procedure IS the hooks object.
+There is no framework adapter package and no hook-on-procedure API.
+Applications choose their own keys, cache lifetimes, retries, optimistic
+updates, suspense boundaries, and invalidation policy using TanStack
+Query's native surface.
 
 ### What `__makeProcedure` does
 
-The client stub from §5 wraps the raw RPC call so the resulting export is callable AND carries the kind-appropriate React Query hooks:
+The client stub from §5 wraps the raw RPC call so the resulting export is
+callable and carries the metadata the runtime needs:
 
 ```ts
-// @zeroship/rpc/client (excerpt — see §5 for the full module)
-export function __makeProcedure(meta) {
-  const fn = (input, opts) => __rpcCallByWire(meta, input, opts);
-  fn[__SERVER_REFERENCE] = true;
-  fn.id = meta.id; fn.kind = meta.kind;
-  fn.queryKey = (input) => [meta.id, input];
-
-  if (meta.kind === "query") {
-    Object.defineProperty(fn, "useQuery", { get: () => /* uses _hookRegistry */ });
-    Object.defineProperty(fn, "useSuspenseQuery", { get: () => /* ... */ });
-    Object.defineProperty(fn, "useInfiniteQuery", { get: () => /* ... */ });
-    fn.invalidate = (input) => /* ... */;
-    fn.prefetch  = (input, options) => /* ... */;
-    fn.setData   = (input, updater) => /* ... */;
-  }
-  if (meta.kind === "mutation") {
-    Object.defineProperty(fn, "useMutation", { get: () => /* ... */ });
-  }
-  if (meta.kind === "stream") {
-    Object.defineProperty(fn, "useStream", { get: () => /* ... */ });
-    fn.streamUrl = (input) => /* returns a string URL with input pre-encoded */;
-  }
-  if (meta.kind === "subscription") {
-    Object.defineProperty(fn, "useSubscription", { get: () => /* ... */ });
-  }
-
+export function __makeProcedure(call, meta) {
+  const fn = (input) => call(input);
+  Object.defineProperty(fn, "id", { value: meta.id, enumerable: true });
+  Object.defineProperty(fn, "kind", { value: meta.kind, enumerable: true });
+  Object.defineProperty(fn, "wire", { value: meta.wire ?? "json", enumerable: true });
+  Object.defineProperty(fn, __SERVER_REFERENCE, { value: true, enumerable: false });
   return fn;
 }
 ```
 
-Hooks are attached only for the matching `kind`; a query never carries `useMutation`. Stable query key shape: `[wireId, input]` for queries / streams / subscriptions; `[wireId]` for mutations.
-
 ### Setup
 
-One line at the app root:
+Use TanStack Query's provider directly:
 
 ```tsx
-import { ZeroshipProvider } from "@zeroship/rpc/react";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const qc = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 30_000,                    // matches typical resource policy.cache.max_age
-      retry: (n, err) => err.retryable && n < 3,
+      staleTime: 30_000,
+      retry: (n, err) => Boolean(err.retryable) && n < 3,
     },
   },
 });
 
-<ZeroshipProvider client={qc}>
+<QueryClientProvider client={qc}>
   <App />
-</ZeroshipProvider>
+</QueryClientProvider>
 ```
 
-`ZeroshipProvider` wraps `QueryClientProvider` and additionally provides the `__rpcCall` transport (auth tokens, base URL, batching opt).
+### Streaming
 
-### What you get for free
-
-| TanStack Query feature | How it works |
-| --- | --- |
-| Stale-while-revalidate | Manifest's `cache.swr` becomes default `staleTime` per procedure |
-| Optimistic updates | `add.useMutation({ onMutate, onError })` |
-| Suspense + Error Boundaries | `list.useSuspenseQuery` |
-| Infinite scroll | `list.useInfiniteQuery` for procedures returning `{ items, nextCursor }` |
-| Prefetching on hover | `list.prefetch({ limit: 50 })` in `onMouseEnter` |
-| SSR hydration | `dehydrate(qc)` server-side, `<HydrationBoundary>` client-side; `wireId` stable across boundaries |
-| Persistent cache | `persistQueryClient` plugin works unchanged |
-| DevTools panel | Keys show as `["todos.list", { limit: 50 }]` |
-| Automatic retries | `retryable: true` errors retry; idempotent mutations retry safely |
-
-### Idempotency × retry interaction
-
-This is the load-bearing detail. React Query retries on transient errors. Without idempotency keys, a mutation that fires `add({ text: "hi" })` then 503s could double-write on retry. With this design:
+Stream procedures are callable too; the client stub returns an async
+iterator:
 
 ```tsx
-const add = add.useMutation({ retry: 3 });
-add.mutate({ text: "hi" });
-// Internally: idempotencyKey = uuidv7(); used for ALL retries of THIS mutate() call.
-// Server dedupes — second attempt returns the first attempt's stored result.
-```
-
-The auto-generated key is bound to the React Query mutation observer's lifetime, **not per HTTP attempt**. Procedures without `idempotent: true` get `retry: 0` automatically — non-idempotent retries surface to the app to handle explicitly.
-
-### Streaming + React Query
-
-```tsx
-const { chunks, isStreaming, error, cancel } = search.useStream({ query: "..." });
-```
-
-For chat UIs: skip our hook and pass `search.streamUrl(input)` to AI SDK's `useChat`. Same SSE wire, two consumers.
-
-#### `streamUrl` security note
-
-`streamUrl(input)` returns a URL with the input pre-encoded in the query string. This is fine for idempotent queries with non-sensitive inputs. For inputs that include credentials, secrets, or user-identifying data the URL may end up in browser history, intermediary access logs, or `Referer` headers — prefer `useStream`/`call` which posts the input as a body. The runtime emits a build warning when a procedure declared `auth: "user"`/`"admin"` exposes `streamUrl` and the input schema includes any field annotated `z.string().secret()` (a Zod refinement marker).
-
-### Subscriptions
-
-```tsx
-const { value, isConnected, error } = todoChanges.useSubscription();
-```
-
-Auto-reconnect with exponential backoff. Unmount triggers unsubscribe. The full backpressure / replay / credit-based-flow-control protocol is deferred to `rpc-subscriptions.md` (round-01 High-6).
-
-### Server-side rendering
-
-When the worker runs React SSR, the same component code calls `list.useQuery(...)` on both server and client. On the client, `list` is a `__makeProcedure`-wrapped stub (HTTP). On the server, `list` is the actual function — and **must also expose `.useQuery` / `.prefetch`** (the same hook surface), or render breaks.
-
-For SSR-enabled apps, the server transform wraps each procedure with `__makeServerProcedure` from `@zeroship/rpc/server`. Server-side hooks call the local function directly (no HTTP); results land in the per-request QueryClient and dehydrate to the client.
-
-```ts
-// @zeroship/rpc/server (excerpted)
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-
-export function __makeServerProcedure(impl, meta) {
-  const fn = (input) => impl(input);
-  fn.id = meta.id; fn.kind = meta.kind;
-  fn.queryKey = (input) => [meta.id, input];
-
-  if (meta.kind === "query") {
-    fn.useQuery = (input, options) =>
-      useQuery({ queryKey: [meta.id, input], queryFn: () => impl(input), ...options });
-    fn.useSuspenseQuery = (input, options) =>
-      useSuspenseQuery({ queryKey: [meta.id, input], queryFn: () => impl(input), ...options });
-    fn.prefetch = (input, qc) =>
-      qc.prefetchQuery({ queryKey: [meta.id, input], queryFn: () => impl(input) });
-  }
-  return fn;
+for await (const chunk of search({ query: "build" })) {
+  setChunks((prev) => [...prev, chunk]);
 }
 ```
 
-Mutations and subscriptions don't render server-side — `useMutation` / `useSubscription` resolve to no-ops that throw if invoked during SSR.
+For chat UIs, use `ProcedureHandle.streamUrl(input)` from the typed
+`client<App>()` surface with AI SDK's `useChat`.
 
-### Per-procedure `staleTime`
+### Server-side rendering
 
-The resource's `policy.cache.max_age` (when set on a query) becomes the default `staleTime`. Per-call override still works:
+SSR uses the same native TanStack Query APIs. Server rendering prefetches
+the callable procedure into a per-request `QueryClient`, then renders
+inside `QueryClientProvider` / `HydrationBoundary`:
 
-```tsx
-list.useQuery({ limit: 50 }, { staleTime: 5_000 });
+```ts
+await qc.prefetchQuery({
+  queryKey: ["todos", "list", input],
+  queryFn: () => list(input),
+});
 ```
 
-Aggregate invalidation by prefix:
-
-```tsx
-import { rpcInvalidate } from "@zeroship/rpc/react";
-await rpcInvalidate("todos.");
-```
+The server transform only copies `id`, `kind`, and `wire` metadata onto
+procedure exports before the synthetic entry binds them.
 
 ---
 
@@ -2303,7 +2240,7 @@ The intent of the layered check: in the common case (browser; same origin), chec
 | **6** | Streaming: `function*` detection + content-negotiated wires (NDJSON, SSE, octet-stream). AI SDK 5 UI Message Stream emitter. Mid-stream error frames per §6 (NDJSON / SSE / AI SDK 5 / octet-stream-trailers). Heartbeats. **Acceptance**: the `wire: "ai-ui-v1"` byte stream is byte-identical to `streamText({...}).toUIMessageStreamResponse()` for a representative input set (verified against the upstream `ai/react` lib in CI). | ~500 (Rust+TS) | Phase 4 |
 | **7** | Multipart / FormData / Blob / File first-class on the dispatch path. `_zs.json` envelope spec. Native multipart parser already exists; we wire it in. | ~350 (Rust+TS) | Phase 4 |
 | **8** | Client: typed `client<App>()` with seamless surface, branded `__SERVER_REFERENCE` references, batching link. Auto-emitted `virtual:zeroship/server-api.d.ts`. | ~500 (TS) | Phase 2 |
-| **9** | React: `@zeroship/rpc/client/_hooks` registry; `@zeroship/rpc/react` populates it; `@zeroship/rpc/server` (`__makeServerProcedure` + dehydrate/hydrate). | ~600 (TS) | Phase 8 |
+| **9** | React examples: native TanStack Query over callable RPC imports; SSR examples use `prefetchQuery` + `dehydrate` directly. | ~200 (TS) | Phase 8 |
 | **10** | Wire-compat check: `zod-to-json-schema` integration; canonical schema diff; safe-vs-breaking classifier; deploy-time gate; control-plane prior-manifest history (last 10). | ~450 (Rust+TS) | Phase 3 |
 | **11** | Procedure versioning: `Zs-Procedure-Version` header routing; sunset/deprecation surfaces; live-version cap enforcement. | ~250 (Rust+TS) | Phase 4, 10 |
 | **12** | Subscriptions sketch: WS upgrade routing through manifest; `kind: "subscription"` runtime support. (Full backpressure / replay / flow-control: separate proposal.) | ~400 (Rust+TS) | Phase 4 |

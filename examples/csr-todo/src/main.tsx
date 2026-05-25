@@ -1,17 +1,9 @@
 // Client entry — bootstrap React at /, render a primitive client-side
 // "router" so links inside the SPA don't trigger full reloads.
 //
-// Mount `<ZeroshipProvider>` at the root. The provider:
-//   - wraps `<QueryClientProvider>` for React Query,
-//   - stashes the QueryClient on `_hookRegistry.queryClient` so
-//     `listTodos.invalidate()` and `rpcInvalidate("todos.")` work
-//     without threading the client through every call site,
-//   - importing `@zeroship/rpc-react` side-effect-populates the
-//     hooks registry so `listTodos.useQuery(...)` resolves.
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { QueryClient } from "@tanstack/react-query";
-import { ZeroshipProvider } from "@zeroship/rpc-react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./components/App";
 import { About } from "./components/About";
 
@@ -47,7 +39,7 @@ function Router() {
 
 const root = document.getElementById("root")!;
 createRoot(root).render(
-  <ZeroshipProvider client={queryClient}>
+  <QueryClientProvider client={queryClient}>
     <Router />
-  </ZeroshipProvider>,
+  </QueryClientProvider>,
 );

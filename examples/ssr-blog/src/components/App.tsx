@@ -1,22 +1,20 @@
 import { PostList } from "./PostList";
 import { Post } from "./Post";
+import { useQuery } from "@tanstack/react-query";
 import { listPosts } from "../server";
 
 export interface AppProps {
   url: string;          // path the server is rendering
 }
 
-/** Top-level component. Calls `listPosts.useQuery()` — works on both
- *  the SSR side (synchronous, prefetched into QueryClient) and the
- *  browser side (HTTP /_zs/v1/listPosts via the client SDK). */
+export const LIST_POSTS_QUERY_KEY = ["posts", "list"] as const;
+
+/** Top-level component. React Query wraps the typed RPC caller directly. */
 export function App({ url }: AppProps) {
-  // The cast is needed because the vite-plugin monkey-patches
-  // hooks on at build time; TS doesn't see them statically.
-  const lp = listPosts as typeof listPosts & {
-    useQuery: (input?: undefined) => { data?: unknown[] };
-  };
-  const { data } = lp.useQuery();
-  const posts = (data as { id: string; title: string; body: string }[] | undefined) ?? [];
+  const { data: posts = [] } = useQuery({
+    queryKey: LIST_POSTS_QUERY_KEY,
+    queryFn: () => listPosts(undefined),
+  });
 
   if (url === "/" || url === "") {
     return <PostList posts={posts} />;
