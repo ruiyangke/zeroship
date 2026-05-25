@@ -206,3 +206,23 @@ Auto-maintained by the 10-minute cron + sprint fixers.
   (which restore phases dominate the 42s?). Tracking: out-of-scope
   for nomad-driver-ch crate; reopens only if cluster behavior
   regresses.
+
+- [x] T-10-prepared (driver-side CREATE-path trace points) —
+  `ch/start_task.go::StartTask` emits three hclog.Info lines along
+  the cold-boot happy path: `start_task: entry` (with task_id +
+  alloc_id, at function top), `start_task: ch_spawned` (with pid +
+  elapsed_ms, immediately after `runner.Start()` returns), and
+  `start_task: handle_returned` (with elapsed_ms, immediately before
+  the happy-path return). Motivation: r32-T1 cluster trace
+  (sandbox-snapshot-restore-cluster-2026-05-25-r32-T1-trace.md)
+  identified a ~700ms "client+driver dispatch" segment between
+  Nomad's `alloc_first_seen` and `alloc running` poll events that
+  was a black box from the controller's vantage point. These three
+  trace points split that segment into pre-spawn driver work
+  (decode + validate + tap setup + rootfs stage + preflight +
+  config.json write), CH spawn surface, and post-spawn handle
+  persist + Nomad-framework time. Test: `TestStartTask_EmitsTracePoints`
+  drives StartTask happy-path against a buffer-backed hclog and
+  asserts all three lines appear in order. `go vet ./...` clean,
+  `go test ./...` green (171 → 172 top-level tests). Commit-only,
+  no push.

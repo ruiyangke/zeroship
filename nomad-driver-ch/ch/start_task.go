@@ -96,9 +96,19 @@ const (
 // in-memory handle); the tap is left for T-3 / the host setup script to
 // own.
 func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	startTaskStarted := time.Now()
 	if cfg == nil {
 		return nil, nil, errors.New("ch: StartTask: nil TaskConfig")
 	}
+	// T-10: CREATE-path trace points. The controller's CREATE wall-clock
+	// shows a ~700ms "client+driver dispatch" segment between Nomad
+	// `alloc_first_seen` and `alloc running` (r32-T1 trace,
+	// 2026-05-25 review at sandbox-snapshot-restore-cluster-2026-05-25-
+	// r32-T1-trace.md). These three log lines (entry / ch_spawned /
+	// handle_returned) attribute that 700ms between Nomad-framework
+	// overhead (RPC + ClientStatus update) and actual driver work
+	// (tap setup + CH spawn + handle persist).
+	p.logger.Info("start_task: entry", "task_id", cfg.ID, "alloc_id", cfg.AllocID)
 	if _, ok := p.tasks.Get(cfg.ID); ok {
 		return nil, nil, ErrExistingTask
 	}
@@ -368,6 +378,15 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	startedAt := time.Now().UTC()
 	pid := runner.Pid()
 
+	// T-10: trace point #2 — runner.Start() returned successfully, i.e.
+	// cloud-hypervisor has been exec'd. Elapsed from entry attributes
+	// pre-spawn work (decode + validate + tap setup + rootfs stage +
+	// preflight + config.json write) to the spawn-call surface.
+	p.logger.Info("start_task: ch_spawned",
+		"task_id", cfg.ID,
+		"pid", pid,
+		"elapsed_ms", time.Since(startTaskStarted).Milliseconds())
+
 	// Persistence record. RecoverTask (T-4) reads this back; the field
 	// set MUST be sufficient for RecoverTask to re-attach to the running
 	// VM after a Nomad-client restart.
@@ -434,6 +453,14 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		"api_socket", apiSocket,
 		"tap", tapName,
 		"config", configPath)
+
+	// T-10: trace point #3 — about to return the TaskHandle to Nomad.
+	// Elapsed from entry attributes all driver-owned work; anything past
+	// this point is Nomad-framework time (gRPC response marshal +
+	// ClientStatus update on the server side).
+	p.logger.Info("start_task: handle_returned",
+		"task_id", cfg.ID,
+		"elapsed_ms", time.Since(startTaskStarted).Milliseconds())
 
 	return handle, nil, nil
 }

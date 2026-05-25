@@ -9,6 +9,7 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1236,6 +1237,82 @@ func TestStartTask_DoesNotRollBackOnSuccess(t *testing.T) {
 	// doesn't hang the test process.
 	if runner != nil {
 		close(runner.waitCh)
+	}
+}
+
+// TestStartTask_EmitsTracePoints (T-10) pins the three CREATE-path
+// trace points the controller-side r32-T1 review identified as the
+// missing attribution surface for the ~700ms "client+driver dispatch"
+// segment between Nomad's alloc_first_seen and alloc-running.
+//
+// The trace points are:
+//   - "start_task: entry"          — emitted at the top of StartTask
+//   - "start_task: ch_spawned"     — emitted right after runner.Start()
+//     returns successfully
+//   - "start_task: handle_returned" — emitted right before the happy-path
+//     return of TaskHandle to Nomad
+//
+// All three MUST appear in the captured logger output, in order. If a
+// future refactor drops or reorders any of them the cluster review's
+// attribution math breaks silently, so we pin the contract here.
+func TestStartTask_EmitsTracePoints(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	prev := ch.SetEnsureTapUpForTest(func(string) error { return nil })
+	t.Cleanup(func() { ch.SetEnsureTapUpForTest(prev) })
+
+	cfg := validColdBootConfig()
+	cfg.Net = []ch.NetSpec{{Tap: "test-tap-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}}
+
+	var captured *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		captured = newFakeRunner(cmd)
+		return captured
+	}
+
+	// hclog with a *bytes.Buffer sink so we can assert on raw log lines.
+	// Info level matches the production emit level on the trace points.
+	var buf bytes.Buffer
+	logger := hclog.New(&hclog.LoggerOptions{
+		Name:   "ch-test",
+		Level:  hclog.Info,
+		Output: &buf,
+	})
+	plugin := ch.NewPluginForTest(logger, factory)
+
+	taskCfg := newDriversTaskConfig(t, &cfg, t.TempDir())
+
+	if _, _, err := plugin.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("runner factory not invoked")
+	}
+	t.Cleanup(func() { close(captured.waitCh) })
+
+	out := buf.Bytes()
+
+	// All three trace points must appear in the captured output.
+	for _, want := range [][]byte{
+		[]byte("start_task: entry"),
+		[]byte("start_task: ch_spawned"),
+		[]byte("start_task: handle_returned"),
+	} {
+		if !bytes.Contains(out, want) {
+			t.Errorf("missing trace point %q in log output:\n%s", want, out)
+		}
+	}
+
+	// And they must appear in the order above — the attribution math
+	// (pre-spawn driver work vs. post-spawn handle persist) only works
+	// if the emit order matches the code-path order.
+	entryIdx := bytes.Index(out, []byte("start_task: entry"))
+	spawnedIdx := bytes.Index(out, []byte("start_task: ch_spawned"))
+	returnedIdx := bytes.Index(out, []byte("start_task: handle_returned"))
+	if !(entryIdx < spawnedIdx && spawnedIdx < returnedIdx) {
+		t.Errorf("trace points out of order: entry=%d ch_spawned=%d handle_returned=%d\noutput:\n%s",
+			entryIdx, spawnedIdx, returnedIdx, out)
 	}
 }
 
