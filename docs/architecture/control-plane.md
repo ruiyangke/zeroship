@@ -1,140 +1,116 @@
 # Control plane
 
-`crates/control` is the single creator-facing API and the registry that the gateway/worker poll. Everything the creator does — create app, deploy, manage env, configure auth, view billing — flows through here.
+`crates/control` owns the creator/admin API, auth endpoints, deploy ingest, env/secrets, and the registry feeds that gateway and worker poll.
 
-## Surface
+## HTTP surface
 
-Two HTTP roots:
-
-```
-/api/*        Creator-facing. Bearer master-key gates create/delete/deploy.
-/internal/*   Gateway/worker-facing. Bearer control-key gates everything.
-```
-
-Plus a few unauthenticated routes for end-user OAuth callbacks.
-
-## Module map (`crates/control/src/`)
-
-```
-main.rs            Wires routes, payload caps (16 MB on /deploy + /assets/...), TLS, logger
-lib.rs             AppState, shared dependencies (vfs, env_store, registry, oauth)
-api.rs             /api/apps/* CRUD + deploy + asset upload
-internal.rs        /internal/* — health, env fetch, asset GET, usage report
-auth_handlers.rs   /auth/* creator and end-user routes (login, signup, OAuth start/callback)
-auth_service.rs    Cookie session, password hashing, JWT mint
-oauth.rs           Pluggable OAuth provider (Google today; trait-driven)
-env_handlers.rs    /api/apps/{id}/env — vars + secrets CRUD
-env_store.rs       Encrypted-at-rest secret storage (libsodium)
-stripe_handlers.rs /api/stripe/* — Stripe Connect onboarding, webhooks
-stripe_store.rs    Persistence for connect accounts, payouts ledger
-metering.rs        Aggregate workers' UsageReports → per-app counters
-audit.rs           Audit log for sensitive ops
-rate_limit.rs      Control-plane self-throttling (separate from gateway's per-app limits)
-http_util.rs       Shared HTTP helpers
-registry.rs        Postgres-backed app/route registry. Builds the RouteMap for the gateway.
+```text
+/api/*      creator/admin API
+/auth/*     creator + end-user auth/session routes
+/internal/* gateway/worker feeds and usage reporting
 ```
 
-## State and persistence
+Current internal endpoints are:
 
-`AppState` (`lib.rs`) carries:
+- `GET /internal/routes`
+- `GET /internal/versions`
+- `GET /internal/env/{app_id}`
+- `POST /internal/usage`
 
-- `vfs: Arc<dyn BundleStore>` — `LocalFs` in dev, S3/R2 in prod (the trait is in `crates/core/src/vfs.rs`). Stores bundles + assets.
-- `env_store: EnvStore` — Postgres + libsodium-encrypted secret storage.
-- `registry` — direct Postgres handle for the apps table.
-- `oauth` — optional Google OAuth config; `None` disables `/auth/google/*`.
-- `control_key` (Zeroizing String) — bearer token gating internal routes.
+Mutating `/api/*` endpoints accept either an authenticated admin session or the master-key bearer. `/internal/*` is gated by the control-key bearer unless `--dev-insecure` is enabled.
 
-The `apps` table schema (managed by `registry.rs`):
+## Module map
+
+```text
+main.rs            boot, config, route registration
+lib.rs             `AppState`, shared services, secret wrappers
+api.rs             app CRUD, deploy, plan, usage reads
+internal.rs        route/version/env feeds, usage ingest
+auth_handlers.rs   login/signup/authorize/session flows
+auth_service.rs    cookie JWTs, password auth
+oauth.rs           Google OAuth config + flow helpers
+env_handlers.rs    vars/secrets CRUD + process.env exposure list
+env_store.rs       encrypted-at-rest env/secrets storage
+registry.rs        PostgreSQL-backed app registry
+stripe_handlers.rs Stripe-facing HTTP routes
+stripe_store.rs    Stripe/account persistence
+metering.rs        usage aggregation helpers
+audit.rs           audit logging helpers
+rate_limit.rs      control-plane rate limiting
+http_util.rs       shared HTTP helpers
+deploy.rs          re-exports `.zship` ingest limits/types from `zeroship_bundle`
+```
+
+## `AppState`
+
+`crates/control/src/lib.rs` wires these long-lived dependencies:
+
+- `registry: Registry`
+- `env_store: EnvStore`
+- `stripe_store: StripeStore`
+- `auth: AuthService`
+- `google_oauth: Option<GoogleConfig>`
+- `vfs: Arc<dyn BundleStore + Send + Sync>` currently backed by `zeroship_bundle::LocalFs`
+- `blob_store: Arc<dyn BlobStore>` currently backed by `zeroship_bundle::LocalDiskBlobStore`
+- secret-bearing config wrapped in `SecretString`
+- admin + webhook rate limiters
+- `deploy_tmp_dir` for streamed `.zship` uploads
+
+The `apps` table currently carries the routing/deploy state the rest of the platform consumes:
 
 ```sql
 apps(
-  id            uuid primary key,
-  name          text unique,
-  plan_id       text,
-  api_key       text,
-  api_key_hash  text,
-  deploy_hash   text,
-  manifest_json text,           -- the per-app routing manifest
-  env_version   bigint default 0,
-  created_at    timestamptz default now(),
-  updated_at    timestamptz
+  id uuid primary key,
+  name text unique,
+  plan_id text,
+  deploy_hash text,
+  api_key text,
+  api_key_hash text,
+  env_version bigint default 0,
+  manifest_json text,
+  created_at timestamptz,
+  updated_at timestamptz
 )
 ```
 
-`manifest_json` is the wire-format JSON of `Manifest`. NULL → `Manifest::passthrough()` is synthesized at registry-load time.
+## Route and version feeds
 
-## RouteMap synthesis
+`Registry::get_routes()` builds `RouteMap<Uuid, RouteEntry>` for the gateway. If `manifest_json` is missing, unparsable, or fails `Manifest::validate()`, the registry falls back to `Manifest::passthrough()` and logs a warning.
 
-`registry::list_routes()`:
-1. Reads all apps from Postgres.
-2. For each row, parses `manifest_json` and runs `Manifest::validate()`. Validation failure → drop the manifest (use passthrough), log a warning.
-3. Builds a `RouteMap = HashMap<Uuid, RouteEntry>` and returns.
+`Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
 
-The gateway polls `/internal/routes` every 5s. `crates/gateway/src/sync.rs::sync_once` ingests this, compiles each `Manifest` into its `CompiledManifest` form, and atomically swaps the gateway's route cache.
+Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/env/{app_id}` when `env_version` changes.
 
-## Deploy path
+## Deploy ingest
 
-```
-1. Creator → POST /api/apps/{id}/deploy
-   Content-Type: application/x-zship
-   Body: streaming tar.zst of { manifest.json + blobs/<hash> }
-
-2. crates/control/src/deploy.rs::ingest:
-   - Stream-decompress (cap: 256 MB decompressed)
-   - First tar entry MUST be manifest.json — parse + validate
-   - For each subsequent blobs/<hash> entry:
-       verify sha256(bytes) == hash (possession proof)
-       blob_store.has_blob(hash) ? discard : put_blob(hash, bytes)
-   - Compute deploy_hash from canonical manifest (deploy_hash field omitted)
-   - blob_store.put_manifest(app_id, deploy_hash, manifest_json)
-   - UPDATE apps SET deploy_hash = $1, manifest_json = $2 WHERE id = $3
-
-3. Worker + Gateway pick up the new deploy on their next 5s poll
-   - Worker fetches manifest.worker.modules[entry] blob via BlobStore
-   - Gateway re-compiles the manifest into its routing form
+```text
+1. `api::deploy` accepts only `application/x-zship`.
+2. The request body is streamed to a temp file under `deploy_tmp_dir`.
+3. `zeroship_bundle::ingest(...)`:
+   - opens the tar.zst
+   - requires `manifest.json` first
+   - validates `Manifest.version == 1`
+   - streams `blobs/<hash>` through `BlobStore::put_blob_stream`
+   - writes `manifests/<app_id>/<deploy_hash>.json`
+4. Control updates `apps.deploy_hash` and `apps.manifest_json`.
 ```
 
-## End-user auth flow
+The blob-store ingest path is current. The older raw bundle upload path is gone.
 
-```
-End user → app.zeroship.ai/protected
-  → Gateway: no JWT cookie → 302 to control's /auth/authorize?app_id=...&return=/protected
-  → Control: shows login UI (or kicks off OAuth)
-  → Control: on success, sets __zs_session cookie scoped to *.zeroship.ai with HS256 JWT
-  → User's browser: redirects back to app.zeroship.ai/protected
-  → Gateway: validates JWT, injects ZeroShip-User header, forwards to worker
-  → Worker: env.auth.getUser() reads the header, returns the user object
-```
+## Auth flow
 
-Detailed: `docs/reference/auth.md`.
+End-user auth still terminates in control:
 
-## Billing flow
-
-```
-Worker → POST /internal/usage every N seconds
-   Body: UsageReport { worker_id, counters: { app_id → AppUsage { requests, cpu_us, ... } } }
-
-Control:
-   metering.rs aggregates per app
-   stripe_store records billable events
-   stripe_handlers webhooks reconcile against actual charges
+```text
+Gateway -> /auth/authorize?app_id=...&return=...
+Control -> login / OAuth / consent
+Control -> sets `__zs_session`
+Gateway -> validates cookie and forwards `ZeroShip-User`
+Worker/runtime -> reads the forwarded user context
 ```
 
-Detailed: `docs/reference/billing-metering.md`.
+## Notes
 
-## Operational notes
-
-- **Master key vs control key.** Creator-facing ops (`/api/*`) check the master key. Gateway/worker-facing ops (`/internal/*`) check the control key. Different surfaces, different secrets — leaking one doesn't leak the other.
-- **`get_app` admin gate.** `GET /api/apps/{id}` surfaces the `api_key` only when admin-authed. Anonymous reads get the public `AppRecord` without the secret. Lets the dashboard show the key to the owner without leaking it on every public lookup.
-- **`insecure_dev` flag.** Disables `/internal/*` auth checks. Use for local dev only — never set in prod.
-
-## Where to start by sub-task
-
-| Working on… | Read first |
-| --- | --- |
-| Adding a creator-facing endpoint | `crates/control/src/api.rs` (existing handlers as templates) |
-| Adding a gateway-facing endpoint | `crates/control/src/internal.rs` (note `check_auth` pattern) |
-| Auth provider | `crates/control/src/oauth.rs` (trait); add a new impl |
-| Schema migration | `crates/control/src/registry.rs` (look for `ALTER TABLE` blocks at startup) |
-| Stripe integration | `crates/control/src/stripe_*.rs`; webhook handler in `stripe_handlers.rs` |
-| Encryption / secrets | `crates/control/src/env_store.rs` (libsodium-sealed boxes) |
+- `EnvStore` uses `zeroship_core::crypto` for encrypted-at-rest secrets, with primary + previous master-key support for rotation.
+- `BundleStore` is still present on `AppState`, but deploy ingestion and runtime asset serving use `BlobStore`.
+- Stripe support lives in `stripe_handlers.rs` and `stripe_store.rs`; worker metering still arrives through `/internal/usage`.
