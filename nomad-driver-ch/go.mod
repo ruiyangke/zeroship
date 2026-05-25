@@ -15,6 +15,8 @@ require (
 	github.com/hashicorp/nomad v1.11.3
 )
 
+require golang.org/x/sys v0.41.0
+
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/LK4D4/joincontext v0.0.0-20171026170139-1724345da6d5 // indirect
@@ -117,7 +119,6 @@ require (
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.41.0 // indirect

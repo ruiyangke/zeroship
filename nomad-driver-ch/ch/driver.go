@@ -16,7 +16,9 @@ package ch
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -125,11 +127,37 @@ type Plugin struct {
 
 // Config is the driver-level configuration block (set once at plugin load).
 // Field names match the proposal's example Nomad agent stanza in § 8.
+//
+// C-7-LT-5 (2026-05-23): added ChRemoteBin so the operator's agent stanza
+// can configure the ch-remote path independently of cloud-hypervisor and
+// virtiofsd. The prior shape called SetBinaries(chBin, VirtiofsdBin) — a
+// signature/argument mismatch that caused the StopTask shutdown ladder
+// to shell out to virtiofsd in place of ch-remote (smoke-r15 observed
+// "SIGTERM fallback works; degraded but non-fatal" because Shutdown
+// failed silently and the SIGTERM step did the real work).
 type Config struct {
 	CloudHypervisorBin string `codec:"cloud_hypervisor_bin"`
+	ChRemoteBin        string `codec:"ch_remote_bin"`
 	VirtiofsdBin       string `codec:"virtiofsd_bin"`
 	VMIndexLockDir     string `codec:"vm_index_lockdir"`
 	RunDir             string `codec:"run_dir"`
+
+	// ContentAddressedRootfsRoots is the list of absolute path
+	// prefixes under which read-only base rootfs images live. The
+	// restore-path config rewriter (C-7-LT-6) accepts `disks[*].path`
+	// values under any of these roots in addition to the per-sandbox
+	// persistent root (`/var/zeroship/ch/<sandbox_id>/`) and the
+	// current alloc's task_dir. Empty/unset disables the
+	// content-addressed allow-list slot (disks must then be under
+	// task_dir or the per-sandbox prefix only).
+	//
+	// Operator stanza example:
+	//   config {
+	//     content_addressed_rootfs_roots = [
+	//       "/var/zeroship/ch/rootfs",
+	//     ]
+	//   }
+	ContentAddressedRootfsRoots []string `codec:"content_addressed_rootfs_roots"`
 }
 
 // configSpec is the HCL schema for the driver-level config block. Returned
@@ -138,6 +166,10 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	"cloud_hypervisor_bin": hclspec.NewDefault(
 		hclspec.NewAttr("cloud_hypervisor_bin", "string", false),
 		hclspec.NewLiteral(`"/usr/local/bin/cloud-hypervisor"`),
+	),
+	"ch_remote_bin": hclspec.NewDefault(
+		hclspec.NewAttr("ch_remote_bin", "string", false),
+		hclspec.NewLiteral(`"/usr/local/bin/ch-remote"`),
 	),
 	"virtiofsd_bin": hclspec.NewDefault(
 		hclspec.NewAttr("virtiofsd_bin", "string", false),
@@ -151,15 +183,31 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		hclspec.NewAttr("run_dir", "string", false),
 		hclspec.NewLiteral(`"/var/lib/zsbx/run"`),
 	),
+	// C-7-LT-6: list of absolute path prefixes for content-addressed
+	// read-only base rootfs images. Optional; empty default disables
+	// the content-addressed allow-list slot in the restore-path
+	// config.json rewriter.
+	"content_addressed_rootfs_roots": hclspec.NewAttr("content_addressed_rootfs_roots", "list(string)", false),
 })
 
 // NewPlugin returns a drivers.DriverPlugin ready to be served via
 // plugins.Serve. Called once per plugin process by the factory in
 // cmd/nomad-driver-ch/main.go.
+//
+// Side effects:
+//   - Starts the driver-metrics file exporter goroutine
+//     (T-8b-stress-r8 r7-B). It writes a Prometheus text-format
+//     snapshot of the `nomad_driver_ch_*` counters every
+//     `driverMetricsExportInterval` (default 5 s) to
+//     `driverMetricsExportPath` (default /var/lib/zsbx/driver-metrics.prom),
+//     and stops when the per-plugin ctx is cancelled via
+//     signalShutdown. Operators wire node_exporter's textfile
+//     collector at the file's parent dir to surface the counters in
+//     `/metrics` — closes the r24-API1 gap stress-r8 review flagged.
 func NewPlugin(logger hclog.Logger) drivers.DriverPlugin {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger = logger.Named(PluginName)
-	return &Plugin{
+	p := &Plugin{
 		eventer:        eventer.NewEventer(ctx, logger),
 		config:         &Config{},
 		tasks:          newTaskStore(),
@@ -167,6 +215,16 @@ func NewPlugin(logger hclog.Logger) drivers.DriverPlugin {
 		signalShutdown: cancel,
 		logger:         logger,
 	}
+	// T-8b-stress-r8 r7-B: launch the driver-metrics file exporter.
+	// Lifetime is bound to the plugin's signalShutdown ctx so a
+	// clean shutdown writes one final snapshot before exiting.
+	// Gated by driverMetricsExportEnabled so the test suite (which
+	// calls NewPlugin many times) doesn't spawn one leaked
+	// goroutine per call — TestMain flips this to false.
+	if driverMetricsExportEnabled {
+		go runDriverMetricsExporter(ctx, logger)
+	}
+	return p
 }
 
 // PluginInfo returns the version/identity tuple Nomad logs at load time.
@@ -181,7 +239,9 @@ func (p *Plugin) ConfigSchema() (*hclspec.Spec, error) {
 }
 
 // SetConfig is invoked once at plugin load with the operator's driver-level
-// config (msgpack-encoded against ConfigSchema). Stash it on the receiver.
+// config (msgpack-encoded against ConfigSchema). Stash it on the receiver
+// and propagate the configured binary paths into the shared CH client so
+// StartTask doesn't re-resolve them on every spawn.
 func (p *Plugin) SetConfig(cfg *base.Config) error {
 	var config Config
 	if len(cfg.PluginConfig) != 0 {
@@ -192,6 +252,16 @@ func (p *Plugin) SetConfig(cfg *base.Config) error {
 	p.config = &config
 	if cfg.AgentConfig != nil {
 		p.nomadConfig = cfg.AgentConfig.Driver
+	}
+	// Best-effort binary discovery using the new config. NewClient also
+	// did this; we redo it here in case Config arrives after construction.
+	//
+	// C-7-LT-5: pass ChRemoteBin (NOT VirtiofsdBin) as the second arg —
+	// SetBinaries takes (chBin, chRemoteBin), and the pre-fix shape
+	// silently shoved the virtiofsd path into c.chRemoteBin, breaking
+	// the StopTask ch-remote shutdown step.
+	if p.chClient != nil {
+		p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.ChRemoteBin)
 	}
 	return nil
 }
@@ -237,11 +307,29 @@ func (p *Plugin) handleFingerprint(ctx context.Context, ch chan<- *drivers.Finge
 }
 
 func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
-	// T-0: stub. Probe CH/virtiofsd binaries + /dev/kvm in a follow-up.
+	// T-1: report the discovered CH binary so `nomad node status` shows
+	// whether the host is ready. /dev/kvm + virtiofsd are still TODO
+	// (T-3 covers the deeper probe — tap availability, kvm capability).
+	attrs := map[string]*structs.Attribute{}
+	chBin := ""
+	if p.chClient != nil {
+		chBin = p.chClient.CHBin()
+	}
+	if chBin == "" {
+		return &drivers.Fingerprint{
+			Attributes:        attrs,
+			Health:            drivers.HealthStateUndetected,
+			HealthDescription: "ch driver: cloud-hypervisor binary not found on PATH",
+		}
+	}
+	attrs["driver.ch.cloud_hypervisor_bin"] = structs.NewStringAttribute(chBin)
+	if chRemote := p.chClient.CHRemoteBin(); chRemote != "" {
+		attrs["driver.ch.ch_remote_bin"] = structs.NewStringAttribute(chRemote)
+	}
 	return &drivers.Fingerprint{
-		Attributes:        map[string]*structs.Attribute{},
-		Health:            drivers.HealthStateUndetected,
-		HealthDescription: "ch driver scaffold — not implemented",
+		Attributes:        attrs,
+		Health:            drivers.HealthStateHealthy,
+		HealthDescription: "ready",
 	}
 }
 
@@ -257,12 +345,91 @@ func (p *Plugin) ExecTask(taskID string, cmd []string, timeout time.Duration) (*
 	return nil, errors.New("ch: ExecTask is not supported (capability Exec=false)")
 }
 
-// SignalTask is wired to forward POSIX signals to the CH process.
-// Implemented inline because it's trivial; T-2 (StopTask) will share the
-// underlying os.Process lookup.
+// SignalTask forwards a POSIX signal (named per Nomad's `nomad alloc signal`
+// contract — "SIGUSR1", "SIGHUP", …) to the CH process backing the task.
+//
+// Resolution:
+//
+//  1. Parse the signal name via signalLookup (case-insensitive; tolerates
+//     both "SIGUSR1" and "USR1"). Unknown names default to syscall.SIGINT
+//     with a warning, matching raw_exec's behaviour.
+//  2. Prefer handle.runner.Signal (live in T-1's processRunner seam, used
+//     by fake runners in tests). Fall back to os.FindProcess+Signal when
+//     no runner is attached (RecoverTask handles in T-4).
+//
+// Capability claim SendSignals=true (see Capabilities) is the wire promise
+// behind this method.
 func (p *Plugin) SignalTask(taskID string, signal string) error {
-	// T-2: stub. Forward to handle.Signal once taskHandle owns the *os.Process.
-	return errors.New("ch: SignalTask not implemented (T-2)")
+	h, ok := p.tasks.Get(taskID)
+	if !ok {
+		return drivers.ErrTaskNotFound
+	}
+	sig, ok := signalLookup(signal)
+	if !ok {
+		p.logger.Warn("ch: SignalTask: unknown signal name; defaulting to SIGINT",
+			"task_id", taskID, "signal", signal)
+		sig = syscall.SIGINT
+	}
+	return p.signalHandle(h, sig)
+}
+
+// signalLookup resolves a Nomad-style signal name ("SIGUSR1" or "USR1") to
+// the matching syscall.Signal. Returns (sig, true) on hit; (0, false) on
+// miss so the caller can decide the fallback policy.
+//
+// The table covers the subset Nomad clients actually emit (`nomad alloc
+// signal`'s -s flag accepts these by name); host-only signals (SIGCHLD,
+// SIGURG) are intentionally omitted.
+func signalLookup(name string) (syscall.Signal, bool) {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	n = strings.TrimPrefix(n, "SIG")
+	switch n {
+	case "HUP":
+		return syscall.SIGHUP, true
+	case "INT":
+		return syscall.SIGINT, true
+	case "QUIT":
+		return syscall.SIGQUIT, true
+	case "ILL":
+		return syscall.SIGILL, true
+	case "TRAP":
+		return syscall.SIGTRAP, true
+	case "ABRT", "IOT":
+		return syscall.SIGABRT, true
+	case "BUS":
+		return syscall.SIGBUS, true
+	case "FPE":
+		return syscall.SIGFPE, true
+	case "KILL":
+		return syscall.SIGKILL, true
+	case "USR1":
+		return syscall.SIGUSR1, true
+	case "SEGV":
+		return syscall.SIGSEGV, true
+	case "USR2":
+		return syscall.SIGUSR2, true
+	case "PIPE":
+		return syscall.SIGPIPE, true
+	case "ALRM":
+		return syscall.SIGALRM, true
+	case "TERM":
+		return syscall.SIGTERM, true
+	case "STOP":
+		return syscall.SIGSTOP, true
+	case "TSTP":
+		return syscall.SIGTSTP, true
+	case "CONT":
+		return syscall.SIGCONT, true
+	case "WINCH":
+		return syscall.SIGWINCH, true
+	case "IO":
+		return syscall.SIGIO, true
+	case "PWR":
+		return syscall.SIGPWR, true
+	case "SYS":
+		return syscall.SIGSYS, true
+	}
+	return 0, false
 }
 
 // taskStore is the in-process registry of running tasks. Methods are

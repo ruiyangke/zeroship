@@ -87,3 +87,40 @@ func TestConfigSchemaPresent(t *testing.T) {
 func TestInterfaceConformance(t *testing.T) {
 	var _ drivers.DriverPlugin = ch.NewPlugin(hclog.NewNullLogger())
 }
+
+// TestSetBinariesResolvesChRemoteToCorrectBinary is the C-7-LT-5
+// regression pin: SetBinaries(chBin, chRemoteBin) must resolve the
+// SECOND argument as ch-remote, NOT as some other binary the caller
+// happens to have on hand. Pre-fix, the driver was passing
+// p.config.VirtiofsdBin as the second arg, which silently aliased
+// c.chRemoteBin to virtiofsd — and the StopTask ch-remote shutdown
+// step shelled out to virtiofsd instead of ch-remote. The bug was
+// masked because the SIGTERM fallback in the stop ladder still
+// terminated CH; the smoke review flagged it as "degraded but
+// non-fatal."
+//
+// We use the t.TempDir scratch as a stand-in for the two binaries
+// (the helper only stats the file; it does not execute it).
+func TestSetBinariesResolvesChRemoteToCorrectBinary(t *testing.T) {
+	tmpCH := writeStubBinary(t, "cloud-hypervisor")
+	tmpRemote := writeStubBinary(t, "ch-remote")
+	// Override PATH so exec.LookPath fallback can't accidentally find a
+	// system binary. The stubs already have absolute paths so SetBinaries
+	// uses them via the cfgPath branch, but pinning PATH keeps the test
+	// hermetic.
+	t.Setenv("PATH", "")
+	// Clear the env overrides so the cfgPath branch (the production
+	// path operators actually configure) is exercised.
+	t.Setenv("ZSBX_CH_BIN", "")
+	t.Setenv("ZSBX_CH_REMOTE_BIN", "")
+
+	c := ch.NewClient(hclog.NewNullLogger())
+	c.SetBinaries(tmpCH, tmpRemote)
+
+	if got := c.CHBin(); got != tmpCH {
+		t.Errorf("CHBin() = %q, want %q", got, tmpCH)
+	}
+	if got := c.CHRemoteBin(); got != tmpRemote {
+		t.Errorf("CHRemoteBin() = %q, want %q (pre-C-7-LT-5 a virtiofsd path would land here)", got, tmpRemote)
+	}
+}

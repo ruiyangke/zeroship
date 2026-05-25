@@ -1,18 +1,25 @@
 // Copyright (c) HashiCorp, Inc.
 // SPDX-License-Identifier: MPL-2.0
 //
-// New file (no upstream equivalent). The libvirt provider that lived under
-// providers/libvirt/ in nomad-driver-virt is replaced wholesale by this
-// CH-specific client; the wire idiom (Unix-domain HTTP) is documented in the
-// volantvm spike § 3 ("vm_operations.go::httpRequest") and the proposal § 7.
+// Forked from hashicorp/nomad-driver-virt (the libvirt provider that lived
+// under providers/libvirt/) on 2026-05-25 for Cloud Hypervisor support. The
+// CH-specific client speaks the cloud-hypervisor Unix-domain HTTP API
+// (`vmm/src/api/openapi/cloud-hypervisor.yaml`); the wire idiom is documented
+// in the volantvm spike § 3 ("vm_operations.go::httpRequest").
 
 package ch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -21,7 +28,8 @@ import (
 // Client is a thin wrapper around `cloud-hypervisor` (as a subprocess) and
 // the `ch-remote` REST API exposed over the per-VM Unix socket. It does NOT
 // hold per-task state — that lives on taskHandle. The single shared Client
-// holds the HTTP transport and the logger.
+// holds the HTTP transport, the resolved binary paths, the logger, and the
+// processRunner factory (which tests swap out).
 //
 // The CH REST shape we target (per the volantvm spike and the CH OpenAPI
 // spec at vmm/src/api/openapi/cloud-hypervisor.yaml):
@@ -39,13 +47,117 @@ import (
 // keeps the listener open for the life of the VM.
 type Client struct {
 	logger hclog.Logger
+
+	// chBin is the absolute path to the `cloud-hypervisor` binary. Resolved
+	// in NewClient from (in order) the ZSBX_CH_BIN env var, the configured
+	// Config.CloudHypervisorBin, then PATH. Cached so StartTask's hot path
+	// doesn't shell-out for the lookup on every spawn.
+	chBin string
+
+	// chRemoteBin is the absolute path to the `ch-remote` binary. Same
+	// discovery order as chBin (env override → Config → PATH).
+	chRemoteBin string
+
+	// runnerFactory builds a processRunner for the given exec.Cmd. The
+	// default builds a defaultRunner backed by os/exec; tests inject a
+	// fakeRunner factory to assert argv without actually spawning CH.
+	runnerFactory func(cmd *exec.Cmd) processRunner
+
+	// muBin guards chBin / chRemoteBin updates from a late call to Probe.
+	// Tests may swap binaries between scenarios.
+	muBin sync.RWMutex
 }
 
-// NewClient constructs the shared Client. Today it only stashes the logger;
-// once T-1 lands, it will also resolve the absolute paths to `cloud-hypervisor`
-// and `ch-remote` (from the driver Config) and verify they exist.
+// NewClient constructs the shared Client. Looks up the cloud-hypervisor and
+// ch-remote binaries on PATH (with env overrides) so a missing-binary error
+// surfaces at plugin load instead of at first StartTask.
+//
+// A missing binary does NOT fail NewClient — the binary may not be present
+// during early Nomad-client probing on a host that hasn't been provisioned
+// yet. Callers that need a binary (StartTask) re-resolve via lookupBin and
+// emit a structured error then.
 func NewClient(logger hclog.Logger) *Client {
-	return &Client{logger: logger}
+	c := &Client{
+		logger:        logger,
+		runnerFactory: defaultRunnerFactory,
+	}
+	// Best-effort discovery — failures are tolerated (StartTask retries).
+	c.chBin, _ = lookupBin("ZSBX_CH_BIN", "", "cloud-hypervisor")
+	c.chRemoteBin, _ = lookupBin("ZSBX_CH_REMOTE_BIN", "", "ch-remote")
+	return c
+}
+
+// SetBinaries lets the driver-level config (via Plugin.SetConfig) override
+// the discovered binary paths. Called after NewClient when SetConfig populates
+// Config.CloudHypervisorBin and friends.
+func (c *Client) SetBinaries(chBin, chRemoteBin string) {
+	c.muBin.Lock()
+	defer c.muBin.Unlock()
+	if chBin != "" {
+		// Reconfirm against PATH if absolute path missing.
+		if resolved, err := lookupBin("ZSBX_CH_BIN", chBin, "cloud-hypervisor"); err == nil {
+			c.chBin = resolved
+		}
+	}
+	if chRemoteBin != "" {
+		if resolved, err := lookupBin("ZSBX_CH_REMOTE_BIN", chRemoteBin, "ch-remote"); err == nil {
+			c.chRemoteBin = resolved
+		}
+	}
+}
+
+// CHBin returns the resolved absolute path to cloud-hypervisor, or "" if it
+// couldn't be located. Callers that need it should treat "" as an error.
+func (c *Client) CHBin() string {
+	c.muBin.RLock()
+	defer c.muBin.RUnlock()
+	return c.chBin
+}
+
+// CHRemoteBin returns the resolved absolute path to ch-remote.
+func (c *Client) CHRemoteBin() string {
+	c.muBin.RLock()
+	defer c.muBin.RUnlock()
+	return c.chRemoteBin
+}
+
+// RunnerFactory returns the current process-runner factory. StartTask uses
+// this to spawn the CH subprocess; tests override it.
+func (c *Client) RunnerFactory() func(cmd *exec.Cmd) processRunner {
+	return c.runnerFactory
+}
+
+// SetRunnerFactory replaces the process-runner factory. ONLY for tests.
+func (c *Client) SetRunnerFactory(f func(cmd *exec.Cmd) processRunner) {
+	c.runnerFactory = f
+}
+
+// lookupBin resolves a binary path with the precedence:
+//
+//  1. env var (envName), if non-empty
+//  2. cfgPath (from the driver Config block), if non-empty
+//  3. exec.LookPath(name)
+//
+// Returns ("", err) on miss. The returned path is always absolute on
+// success (LookPath does that; cfgPath / env are trusted verbatim).
+func lookupBin(envName, cfgPath, name string) (string, error) {
+	if envName != "" {
+		if v := os.Getenv(envName); v != "" {
+			if _, err := os.Stat(v); err == nil {
+				return v, nil
+			}
+		}
+	}
+	if cfgPath != "" {
+		if _, err := os.Stat(cfgPath); err == nil {
+			return cfgPath, nil
+		}
+	}
+	resolved, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("ch: %s not found on PATH: %w", name, err)
+	}
+	return resolved, nil
 }
 
 // httpClientForSocket returns an http.Client whose Transport dials the given
@@ -53,9 +165,8 @@ func NewClient(logger hclog.Logger) *Client {
 // by the dialer; convention is "unix" (matches the upstream virt + volantvm
 // idiom).
 //
-// Kept here as a helper that's exercised by tests once T-1 starts emitting
-// requests. The 5-second timeout is the volantvm value and works fine for
-// our cold-boot envelope.
+// The 5-second timeout is the volantvm value and works fine for our
+// cold-boot envelope.
 func httpClientForSocket(socketPath string) *http.Client {
 	return &http.Client{
 		Timeout: 5 * time.Second,
@@ -67,22 +178,209 @@ func httpClientForSocket(socketPath string) *http.Client {
 	}
 }
 
-// Info will return the parsed `vm.info` JSON for the VM at socketPath.
-// Stubbed until T-1 needs it.
+// Info returns the parsed `vm.info` payload for the VM at socketPath.
+//
+// Two paths are kept: the structured JSON path (preferred, matches T-5's
+// TaskStats consumer) and a fallback that shells out to `ch-remote info`
+// (used when the caller wants the same diagnostic shape as the bash
+// wrapper). Today we use the HTTP path; ch-remote is reserved for
+// administrative commands (shutdown, resume) where ch-remote's CLI
+// validates argument shape better than a hand-rolled PUT.
 func (c *Client) Info(socketPath string) (*VMInfo, error) {
-	return nil, errors.New("ch: T-1: Client.Info not implemented")
+	if socketPath == "" {
+		return nil, errors.New("ch: Info: empty socket path")
+	}
+	hc := httpClientForSocket(socketPath)
+	req, err := http.NewRequest("GET", "http://unix/api/v1/vm.info", nil)
+	if err != nil {
+		return nil, fmt.Errorf("ch: Info: build request: %w", err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ch: Info: dial %s: %w", socketPath, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ch: Info: status=%d body=%q", resp.StatusCode, string(body))
+	}
+	var info VMInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("ch: Info: decode: %w", err)
+	}
+	return &info, nil
 }
 
-// Shutdown sends `PUT /api/v1/vm.shutdown` to the VM at socketPath.
-// Stubbed until T-2 wires up the graceful-stop ladder.
+// Shutdown asks the running CH instance at socketPath to perform a graceful
+// VMM shutdown by invoking `ch-remote --api-socket <socketPath> shutdown-vmm`.
+//
+// We shell out to ch-remote (rather than issue the HTTP PUT directly the way
+// Info does) because:
+//
+//  1. ch-remote's CLI validates argument shape and emits the exact error text
+//     the bash wrapper consumes today; staying on the same wire keeps cluster
+//     behaviour identical (the wrapper's cleanup trap uses kill, but the
+//     controller path that calls /shutdown ultimately reaches the same CH
+//     control channel).
+//  2. The shutdown-vmm semantic (terminate the VMM process gracefully) is
+//     subtly different from vm.shutdown (power-off the guest, leave the VMM
+//     running) and shutdown-vmm is the operation the proposal § 7 calls for
+//     in the StopTask ladder.
+//
+// Behaviour:
+//   - Returns nil if ch-remote exits 0.
+//   - Returns an error (containing the combined output) on non-zero exit, on
+//     missing ch-remote binary, or on empty socketPath.
+//
+// Note: ch-remote returns success the moment CH acknowledges the request;
+// the actual process exit is observed by StopTask waiting on runner.Wait().
 func (c *Client) Shutdown(socketPath string) error {
-	return errors.New("ch: T-2: Client.Shutdown not implemented")
+	if socketPath == "" {
+		return errors.New("ch: Shutdown: empty socket path")
+	}
+	chRemote := c.CHRemoteBin()
+	if chRemote == "" {
+		return errors.New("ch: Shutdown: ch-remote binary not resolved")
+	}
+	cmd := exec.Command(chRemote, "--api-socket", socketPath, "shutdown-vmm")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ch: Shutdown: ch-remote shutdown-vmm: %w (output=%q)", err, string(out))
+	}
+	return nil
 }
 
-// Resume sends `PUT /api/v1/vm.resume` to the VM at socketPath.
-// Stubbed until T-2 implements the restore path.
+// Resume invokes `ch-remote --api-socket <socketPath> resume`. This
+// is the wake-from-snapshot post-step: CH `--restore` brings the VM
+// back in a PAUSED state (vCPUs not running, virtio-net not
+// responding); the resume RPC is what starts the vCPUs and makes the
+// guest reachable again. Idempotent — CH returns success even if the
+// VM is already running.
+//
+// Shells to ch-remote (rather than issuing the HTTP PUT directly the
+// way Info does) for the same reason Shutdown does: ch-remote's CLI
+// validates argument shape and emits the exact error text the bash
+// wrapper consumes today, keeping cluster behaviour identical.
+//
+// Behaviour:
+//   - Returns nil on ch-remote exit 0.
+//   - Returns an error (containing the combined output) on non-zero
+//     exit, on missing ch-remote binary, or on empty socketPath.
 func (c *Client) Resume(socketPath string) error {
-	return errors.New("ch: T-2: Client.Resume not implemented")
+	if socketPath == "" {
+		return errors.New("ch: Resume: empty socket path")
+	}
+	chRemote := c.CHRemoteBin()
+	if chRemote == "" {
+		return errors.New("ch: Resume: ch-remote binary not resolved")
+	}
+	cmd := exec.Command(chRemote, "--api-socket", socketPath, "resume")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ch: Resume: ch-remote resume: %w (output=%q)", err, string(out))
+	}
+	return nil
+}
+
+// Probe is a composite liveness check used by RecoverTask (T-4) to decide
+// whether a persisted task can be re-attached: it confirms the API socket
+// file exists on disk AND that `ch-remote --api-socket <p> info` returns
+// success (which only happens when CH is actively serving on that socket
+// and the VM is in a non-degenerate state).
+//
+// The two-step design (file-stat THEN ch-remote) is deliberate:
+//
+//  1. The stat gives a clean, fast "socket file missing on disk" error
+//     — the most common post-crash residual where CH died before unlinking
+//     its socket OR where the alloc dir was rotated. We surface this as
+//     a distinct error message so the operator log shows the precise
+//     cause rather than an opaque ch-remote dial failure.
+//  2. The ch-remote info call exercises the actual control channel. CH
+//     binds the socket eagerly at startup, so a stale socket left by a
+//     crashed CH will fail at ch-remote (connection refused on dial) —
+//     which is the discriminator we want against the "socket file exists
+//     but CH is dead" case.
+//
+// Surfaces ch-remote's stderr verbatim on failure (matches the Shutdown
+// idiom) so an operator can tell EACCES from ECONNREFUSED.
+func (c *Client) Probe(socketPath string) error {
+	if socketPath == "" {
+		return errors.New("ch: Probe: empty socket path")
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("ch: Probe: api socket %s does not exist", socketPath)
+		}
+		return fmt.Errorf("ch: Probe: stat api socket %s: %w", socketPath, err)
+	}
+	chRemote := c.CHRemoteBin()
+	if chRemote == "" {
+		return errors.New("ch: Probe: ch-remote binary not resolved")
+	}
+	cmd := exec.Command(chRemote, "--api-socket", socketPath, "info")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ch: Probe: ch-remote info: %w (output=%q)", err, string(out))
+	}
+	return nil
+}
+
+// probeFn is the package-level seam tests swap to fake ch-remote info
+// without spawning a real binary. Default delegates to Client.Probe.
+// Mirrors the shutdownFn pattern.
+var probeFn = func(c *Client, socketPath string) error {
+	return c.Probe(socketPath)
+}
+
+// SetProbeForTest replaces the ch-remote probe seam. Returns the previous
+// fn so the caller can restore it on cleanup.
+func SetProbeForTest(fn func(c *Client, socketPath string) error) func(*Client, string) error {
+	prev := probeFn
+	if fn != nil {
+		probeFn = fn
+	}
+	return prev
+}
+
+// shutdownFn is the package-level seam that tests swap to fake ch-remote
+// without spawning a real binary. Default delegates to Client.Shutdown.
+// Mirrors the ensureTapUpFn pattern from start_task.go.
+var shutdownFn = func(c *Client, socketPath string) error {
+	return c.Shutdown(socketPath)
+}
+
+// SetShutdownForTest replaces the ch-remote shutdown seam. Returns the
+// previous fn so the caller can restore it on cleanup.
+func SetShutdownForTest(fn func(c *Client, socketPath string) error) func(*Client, string) error {
+	prev := shutdownFn
+	if fn != nil {
+		shutdownFn = fn
+	}
+	return prev
+}
+
+// removeTapFn is the package-level seam for tap teardown. Retained as a
+// thin alias over teardownTapFn (T-3) so the existing stop_task.go call
+// site and the SetRemoveTapForTest test API don't churn. T-3 owns the
+// underlying impl in net.go.
+//
+// Reads and writes here MUST funnel through teardownTapFn under the hood
+// so a test that sets one seam doesn't silently bypass the other.
+var removeTapFn = func(tapName string) error {
+	return teardownTap(tapName)
+}
+
+// SetRemoveTapForTest replaces the tap-down seam. Returns the previous fn.
+// Today this is the SAME seam as SetTeardownTapForTest, just under the
+// historical name the T-2 tests use. New tests should prefer
+// SetTeardownTapForTest; this one is preserved verbatim so the T-2 suite
+// still drives the same code path.
+func SetRemoveTapForTest(fn func(tapName string) error) func(string) error {
+	prev := removeTapFn
+	if fn != nil {
+		removeTapFn = fn
+	}
+	return prev
 }
 
 // VMInfo is the decoded shape of CH's `GET /api/v1/vm.info` payload. Only
@@ -96,4 +394,178 @@ type VMInfo struct {
 	CPU struct {
 		Utilisation uint64 `json:"utilisation"`
 	} `json:"cpu"`
+}
+
+// ------------------------------------------------------------------
+// processRunner: a small seam over os/exec so tests can assert argv
+// without spawning a real cloud-hypervisor.
+//
+// The default runner wraps *exec.Cmd. The fake runner used in tests
+// records the argv vector and lets the test drive Wait()/Pid()
+// deterministically.
+// ------------------------------------------------------------------
+
+// processRunner is the abstract handle StartTask uses to manage the spawned
+// CH process. The minimal surface is intentional: Start (spawn), Wait
+// (block on exit and return ExitError-like info), Pid (for state
+// persistence), Signal (for StopTask), and Stderr (last bytes for error
+// surface).
+//
+// All methods are goroutine-safe with respect to themselves; Wait must be
+// callable exactly once (matches os/exec.Cmd.Wait's contract).
+type processRunner interface {
+	// Start spawns the underlying process. Must return promptly.
+	Start() error
+	// Wait blocks until the process exits. Returns nil on clean exit
+	// (exit code 0), an error otherwise. Callers consult ExitCode and
+	// StderrTail on a non-nil error.
+	Wait() error
+	// Pid returns the PID of the spawned process. Valid only after Start.
+	Pid() int
+	// Signal forwards a signal to the process. Used by StopTask (T-2)
+	// and by SignalTask.
+	Signal(sig os.Signal) error
+	// ExitCode returns the exit code from the last Wait. Valid only
+	// after Wait returns. -1 on signal-terminated.
+	ExitCode() int
+	// StderrTail returns the last min(N, len(stderr)) bytes of the
+	// process's stderr. Used by WaitTask to populate ExitResult.Err
+	// with the failure message.
+	StderrTail(n int) []byte
+}
+
+// defaultRunner wraps *exec.Cmd. The stderr buffer is a ring-buffer-ish
+// io.Writer that keeps the last `stderrCap` bytes; CH's stderr is mostly
+// quiet (it logs to --log-file) so a 4 KiB cap is plenty.
+const stderrCap = 4096
+
+type defaultRunner struct {
+	cmd     *exec.Cmd
+	stderr  *tailBuffer
+	mu      sync.Mutex
+	exited  bool
+	exitErr error
+	code    int
+}
+
+// defaultRunnerFactory is the production runner factory. Wraps cmd's stderr
+// in a tailBuffer so WaitTask can surface the last bytes on failure.
+//
+// C-7-LT-3-PR2 (2026-05-25): if the caller already set cmd.Stderr (the
+// restore branch sets it to a per-alloc file under runDir/ch-stderr.log
+// so CH stderr persists past the alloc's task-failure GC), we tee
+// through io.MultiWriter instead of clobbering — both the on-disk file
+// AND the in-memory tail buffer receive every byte. Preserves the
+// WaitTask exit-tail behaviour while gaining post-mortem visibility.
+func defaultRunnerFactory(cmd *exec.Cmd) processRunner {
+	tb := newTailBuffer(stderrCap)
+	if cmd.Stderr != nil {
+		cmd.Stderr = io.MultiWriter(cmd.Stderr, tb)
+	} else {
+		cmd.Stderr = tb
+	}
+	return &defaultRunner{cmd: cmd, stderr: tb}
+}
+
+func (r *defaultRunner) Start() error {
+	return r.cmd.Start()
+}
+
+func (r *defaultRunner) Wait() error {
+	err := r.cmd.Wait()
+	r.mu.Lock()
+	r.exited = true
+	r.exitErr = err
+	if ee, ok := err.(*exec.ExitError); ok {
+		r.code = ee.ExitCode()
+	} else if err == nil {
+		r.code = 0
+	} else {
+		r.code = -1
+	}
+	r.mu.Unlock()
+	return err
+}
+
+func (r *defaultRunner) Pid() int {
+	if r.cmd.Process == nil {
+		return 0
+	}
+	return r.cmd.Process.Pid
+}
+
+func (r *defaultRunner) Signal(sig os.Signal) error {
+	if r.cmd.Process == nil {
+		return errors.New("ch: Signal: process not started")
+	}
+	return r.cmd.Process.Signal(sig)
+}
+
+func (r *defaultRunner) ExitCode() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.code
+}
+
+func (r *defaultRunner) StderrTail(n int) []byte {
+	if r.stderr == nil {
+		return nil
+	}
+	return r.stderr.Tail(n)
+}
+
+// tailBuffer is a fixed-cap io.Writer that keeps the last `cap` bytes
+// written. Used to capture the tail of CH stderr without unbounded growth.
+type tailBuffer struct {
+	mu   sync.Mutex
+	buf  []byte
+	cap  int
+	full bool
+	pos  int
+}
+
+func newTailBuffer(cap int) *tailBuffer {
+	return &tailBuffer{buf: make([]byte, 0, cap), cap: cap}
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, b := range p {
+		if !t.full {
+			t.buf = append(t.buf, b)
+			if len(t.buf) == t.cap {
+				t.full = true
+				t.pos = 0
+			}
+			continue
+		}
+		t.buf[t.pos] = b
+		t.pos = (t.pos + 1) % t.cap
+	}
+	return len(p), nil
+}
+
+// Tail returns the most-recent min(n, cap, written) bytes in write order.
+func (t *tailBuffer) Tail(n int) []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.full {
+		if n >= len(t.buf) {
+			out := make([]byte, len(t.buf))
+			copy(out, t.buf)
+			return out
+		}
+		out := make([]byte, n)
+		copy(out, t.buf[len(t.buf)-n:])
+		return out
+	}
+	// Ring buffer is full; layout is buf[pos:] + buf[:pos].
+	ordered := make([]byte, t.cap)
+	copy(ordered, t.buf[t.pos:])
+	copy(ordered[t.cap-t.pos:], t.buf[:t.pos])
+	if n >= t.cap {
+		return ordered
+	}
+	return ordered[t.cap-n:]
 }

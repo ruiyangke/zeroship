@@ -10,6 +10,8 @@ package ch
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -57,6 +59,52 @@ type TaskState struct {
 	// Mode is "cold_boot" or "restore". Drives the controller-side
 	// post-Running hooks (e.g. clock-resync runs only on restore).
 	Mode string
+
+	// SandboxId is the typed-id of the sandbox this VM belongs to. Captured
+	// for RecoverTask + observability (so a recovered handle can re-emit
+	// the sandbox-id-tagged events even when the operator's TaskConfig was
+	// truncated mid-restart).
+	SandboxId string
+
+	// NomadTaskName is cfg.Name from the original TaskConfig — kept for
+	// RecoverTask context (StartTask records it; RecoverTask uses it to
+	// re-tag log lines so a recovered task is grepable in the same way it
+	// was at first boot).
+	NomadTaskName string
+}
+
+// Validate sanity-checks an unmarshalled TaskState before RecoverTask
+// attempts to re-attach. Returns an error naming the first invalid field
+// so a Nomad-client restart confronted with a corrupt handle surfaces
+// a clear cause in the task log.
+//
+// The invariants enforced match the StartTask persistence contract
+// (start_task.go records all of these unconditionally on the cold-boot
+// path; restore-mode bookkeeping is T-6's sprint).
+func (s *TaskState) Validate() error {
+	if s == nil {
+		return errors.New("ch: TaskState: nil state")
+	}
+	if s.CHPid <= 0 {
+		return fmt.Errorf("ch: TaskState: CHPid must be > 0, got %d", s.CHPid)
+	}
+	if s.APISocket == "" {
+		return errors.New("ch: TaskState: APISocket is empty")
+	}
+	// Tap is required: even RecoverTask handles need to know the tap so
+	// DestroyTask can `ip link delete` it on cleanup. Format matches the
+	// `zsbx-nm-<idx>` convention (or an operator-supplied name); we only
+	// enforce non-empty here — the deeper typed-id-shape check is the
+	// VMIndex range guard below.
+	if s.Tap == "" {
+		return errors.New("ch: TaskState: Tap is empty")
+	}
+	// VMIndex range matches StartTask's validateColdBoot (1..155).
+	// 0 is reserved; >155 wouldn't fit the third octet (100+idx).
+	if s.VMIndex < 1 || s.VMIndex > 155 {
+		return fmt.Errorf("ch: TaskState: VMIndex %d out of range [1,155]", s.VMIndex)
+	}
+	return nil
 }
 
 // taskHandle is the in-memory runtime view of a running task. It is created
@@ -92,6 +140,19 @@ type taskHandle struct {
 	vmIndex uint16
 	tap     string
 	mode    string
+
+	// runner is the live processRunner StartTask attached. WaitTask blocks
+	// on runner.Wait(); StopTask signals through runner.Signal(); the
+	// SignalTask RPC calls runner.Signal(); StderrTail pulls from runner.
+	// nil for handles produced by RecoverTask before T-4 wires up a
+	// re-attached process supervisor.
+	runner processRunner
+
+	// exitDone is closed by the supervisor goroutine (superviseCH) once
+	// runner.Wait returns. WaitTask subscribers select on it instead of
+	// calling cmd.Wait directly (which can only fire once per Cmd).
+	// nil for handles produced by RecoverTask before T-4.
+	exitDone chan struct{}
 
 	// ctx/cancelFn bound the per-task supervision goroutines (WaitTask
 	// monitor, TaskStats poller). Cancelled in StopTask/DestroyTask.

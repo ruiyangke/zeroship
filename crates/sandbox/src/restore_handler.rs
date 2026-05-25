@@ -471,7 +471,7 @@ async fn do_restore_inner(
     //
     // R8-A3-5 (perf-r8): `submit_restore_job` on `RealRestoreBackend`
     // is internally sync — it POSTs to Nomad over a blocking ureq
-    // client, then `std::thread::sleep(250ms)`-polls allocations
+    // client, then `std::thread::sleep(100ms)`-polls allocations
     // until the alloc reaches `running` (typically 2-4 s, deadline
     // up to `restore_job_timeout`). Running it on the async caller
     // parked the ntex worker for the entire duration. Per perf-r8
@@ -502,7 +502,7 @@ async fn do_restore_inner(
     // 7. Wait for /livez.
     //
     // R8-A3-5 (perf-r8): `wait_for_livez` is also sync — it polls
-    // the in-VM agent's `/livez` with `std::thread::sleep(250ms)`
+    // the in-VM agent's `/livez` with `std::thread::sleep(50ms)`
     // between attempts until the agent answers 200 or the deadline
     // hits (typically 1-3 s post-`running`). Same blocking-poll
     // shape as `submit_restore_job`; same spawn_blocking treatment.
@@ -1392,7 +1392,7 @@ fn send_ureq_blocking(
 }
 
 /// Sync version of `wait_for_alloc_running` (nomad_ch.rs) — polls
-/// the job's allocations every 250 ms until at least one reaches
+/// the job's allocations every 100 ms until at least one reaches
 /// `ClientStatus="running"`, or terminal (failed/lost) → Err, or the
 /// deadline expires.
 fn wait_for_alloc_running_blocking(
@@ -1443,7 +1443,7 @@ fn wait_for_alloc_running_blocking(
                 last_err = Some(e);
             }
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(100));
     }
     let mut msg = format!(
         "restore: nomad alloc never reached running for {job_id} (last status={:?})",
@@ -1476,7 +1476,7 @@ fn wait_for_livez_blocking(
             Ok(r) => last = Some(format!("status {}", r.status)),
             Err(e) => last = Some(e),
         }
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(50));
     }
     Err(format!(
         "restore: agent at {base_url} never returned 200 on /livez (last={})",
