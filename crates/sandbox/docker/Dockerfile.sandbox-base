@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+
+# Build inside Debian 12 so the agent binary links against the same
+# glibc family as the runtime image. Do not copy a host-built binary
+# into this image from a Nix shell.
+FROM rust:1.94-bookworm AS builder
+WORKDIR /work
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/work/target \
+    cargo build --release -p zeroship-sandbox-agent --bin sandbox-agent && \
+    mkdir -p /out && \
+    cp /work/target/release/sandbox-agent /out/zeroship-sandbox-agent
+
+FROM debian:12-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates coreutils dash && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /workspace /home/u /run/keys && \
+    chown nobody:nogroup /workspace /home/u
+
+COPY --from=builder /out/zeroship-sandbox-agent /usr/local/bin/zeroship-sandbox-agent
+
+ENV SANDBOX_AGENT_WORKSPACE=/workspace \
+    SANDBOX_AGENT_PORT=7777 \
+    SANDBOX_AGENT_PUBKEY_FILE=/run/keys/controller-pubkey \
+    SANDBOX_AGENT_LOG=info
+
+EXPOSE 7777 7778
+WORKDIR /workspace
+
+# docker.rs appends `sleep infinity` after the image name. Keep the
+# real agent as ENTRYPOINT so those words are harmless argv to the
+# Rust binary, not the container's long-running process.
+ENTRYPOINT ["/usr/local/bin/zeroship-sandbox-agent"]

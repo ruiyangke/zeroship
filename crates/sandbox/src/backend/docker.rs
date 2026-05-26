@@ -520,6 +520,8 @@ async fn run_container(
     );
     let label_sandbox = format!("zeroship.sandbox={sandbox_id}");
     let label_project = format!("zeroship.project={project_id}");
+    let env_sandbox_id = format!("SANDBOX_AGENT_SANDBOX_ID={sandbox_id}");
+    let env_agent_port = format!("SANDBOX_AGENT_PORT={AGENT_PORT}");
 
     let args: Vec<&str> = vec![
         "run", "-d", "--rm",
@@ -528,6 +530,7 @@ async fn run_container(
         "--memory", &memory,
         "--cpus", &cpus_s,
         "--pids-limit", "256",
+        "--security-opt", "seccomp=unconfined",
         "--read-only",
         "--tmpfs", "/tmp:size=128m",
         "--tmpfs", "/root/.npm:size=256m",
@@ -535,6 +538,10 @@ async fn run_container(
         "--volume", &keys_arg,
         "--label", &label_sandbox,
         "--label", &label_project,
+        "--env", &env_sandbox_id,
+        "--env", "SANDBOX_AGENT_WORKSPACE=/workspace",
+        "--env", &env_agent_port,
+        "--env", "SANDBOX_AGENT_PUBKEY_FILE=/run/keys/controller-pubkey",
         "--workdir", "/workspace",
         image,
         "sleep", "infinity",
@@ -783,7 +790,7 @@ mod tests {
         assert_eq!(super::short_id("short"), "short");
     }
 
-    /// Docker has no agent-launch path yet, so
+    /// If docker inspect cannot resolve an agent URL at create-time,
     /// `session_auth` cleanly errors instead of silently misbehaving.
     /// Distinguishes "no such sandbox" from "no agent path on docker"
     /// so the controller's audit log says the right thing.
