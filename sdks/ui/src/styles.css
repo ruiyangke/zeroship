@@ -21,6 +21,16 @@
 @import "./components/Toast/Toast.css";
 @import "./components/Tooltip/Tooltip.css";
 
+/* Border-box everywhere. Components use width:100% + token padding/border;
+   under the default content-box that padding+border is ADDED to the width, so
+   inputs/controls overflow their container — visible as overlapping fields in
+   multi-column layouts. (Must follow the @import rules, which CSS requires first.) */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 /* Atelier is the default theme: its tokens live on :root unconditionally so
    components always have a complete token set, even where no (or an invalid)
    data-theme is present — e.g. Storybook's Docs inline render, which writes
