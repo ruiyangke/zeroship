@@ -143,7 +143,17 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
           {...props}
         >
           <BaseSelect.Value placeholder={placeholder} />
-          <BaseSelect.Icon className="zs-select__icon" aria-hidden="true" />
+          <BaseSelect.Icon className="zs-select__icon">
+            <svg viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
+              <path
+                d="M3 4.5 6 7.5l3-3"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </BaseSelect.Icon>
         </BaseSelect.Trigger>
         <BaseSelect.Portal>
           <BaseSelect.Positioner className="zs-select__positioner" sideOffset={4}>
@@ -156,7 +166,17 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
                     disabled={item.disabled}
                     className="zs-select__item"
                   >
-                    <BaseSelect.ItemIndicator className="zs-select__item-indicator" />
+                    <BaseSelect.ItemIndicator className="zs-select__item-indicator">
+                      <svg viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
+                        <path
+                          d="M2.5 6.5 5 9l4.5-5.5"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </BaseSelect.ItemIndicator>
                     <BaseSelect.ItemText>{item.label}</BaseSelect.ItemText>
                   </BaseSelect.Item>
                 ))}
