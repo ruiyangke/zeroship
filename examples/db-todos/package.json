@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "smoke": "bash scripts/smoke.sh",
+    "e2e:ui": "node e2e/ui.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
