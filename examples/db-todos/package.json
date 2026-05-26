@@ -6,7 +6,9 @@
     "dev": "vite",
     "build": "vite build",
     "smoke": "bash scripts/smoke.sh",
-    "e2e:ui": "node e2e/ui.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -20,11 +22,17 @@
     "react-dom": "catalog:react18"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/react": "catalog:react18",
     "@types/react-dom": "catalog:react18",
     "@zeroship/types": "workspace:*",
+    "jsdom": "^29.1.1",
     "typescript": "catalog:",
     "vite": "catalog:",
+    "vitest": "^4.1.7",
     "zeroship": "workspace:*"
   }
 }
