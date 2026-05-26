@@ -1,5 +1,9 @@
+/* Atelier is the default theme: its tokens live on :root unconditionally so
+   components always have a complete token set, even where no (or an invalid)
+   data-theme is present — e.g. Storybook's Docs inline render, which writes
+   data-theme="undefined". [data-theme="studio"|"dusk"] below only *override*. */
+:root,
 [data-theme="atelier"],
-:root:not([data-theme]),
 .zs-theme-root[data-theme="atelier"] {
   --zs-surface: oklch(0.97 0.012 89);
   --zs-surface-raised: oklch(0.995 0.004 89);
