@@ -88,7 +88,6 @@ export async function persistGet<T>(key: string, fallback: T): Promise<T> {
   // Map fallback
   return (FALLBACK.get(key) as T | undefined) ?? fallback;
 }
-persistGet.config = { id: "_internal.persistGet" };
 
 /**
  * Write a JSON-serializable value at `key`. Errors propagate as
@@ -114,7 +113,6 @@ export async function persistSet<T>(key: string, value: T): Promise<void> {
   }
   FALLBACK.set(key, value);
 }
-persistSet.config = { id: "_internal.persistSet" };
 
 /**
  * Delete a key. Best-effort; errors swallowed. No return value — callers
@@ -134,4 +132,3 @@ export async function persistDelete(key: string): Promise<void> {
   }
   FALLBACK.delete(key);
 }
-persistDelete.config = { id: "_internal.persistDelete" };

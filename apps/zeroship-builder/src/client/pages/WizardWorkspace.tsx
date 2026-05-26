@@ -9,7 +9,7 @@
 // sandbox provisioning happen synchronously and we navigate to
 // /p/<id>/preview where the WORKSPACE Builder takes over. We:
 //   1. derive a project name from the brief idea (first 3 words),
-//   2. POST createApp(name) to the control plane,
+//   2. POST createApp({ name }) to the control plane,
 //   3. stash the brief in sessionStorage under `zeroship_pending_brief`,
 //   4. navigate to /p/<app.id>/preview where WorkspaceShell consumes
 //      the stash and seeds ChatRail with a synthesised first message.

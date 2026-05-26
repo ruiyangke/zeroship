@@ -4,6 +4,7 @@
 // Cookie session covers admin auth (control plane's `check_admin_auth`
 // accepts session cookie OR Bearer master-key); we forward both.
 
+import { action, mutation } from "@zeroship/rpc/server";
 import { CONTROL_URL, CONTROL_KEY } from "./env";
 import { getRequest } from "./request-context";
 import { persistGet, persistSet } from "./_persist.js";
@@ -72,23 +73,21 @@ async function proxy<T>(
   return (await res.json()) as T;
 }
 
-export async function listApps(): Promise<AppRecord[]> {
+export const listApps = action(async (): Promise<AppRecord[]> => {
   const [apps, archive] = await Promise.all([
     proxy<AppRecord[]>("/api/apps"),
     loadArchive(),
   ]);
   return apps.map((a) => ({ ...a, archived: archive.has(a.id) }));
-}
-listApps.config = { id: "apps.listApps" };
+}, { id: "apps.listApps" });
 
-export async function getApp(id: string): Promise<AppRecord> {
+export const getApp = action(async (id: string): Promise<AppRecord> => {
   const [app, archive] = await Promise.all([
     proxy<AppRecord>(`/api/apps/${encodeURIComponent(id)}`),
     loadArchive(),
   ]);
   return { ...app, archived: archive.has(app.id) };
-}
-getApp.config = { id: "apps.getApp" };
+}, { id: "apps.getApp" });
 
 /**
  * Soft-delete an app. Tracked in KV per-user (see ARCHIVE_KEY above)
@@ -96,21 +95,23 @@ getApp.config = { id: "apps.getApp" };
  * Returns the new state so the client can update its cache without a
  * refetch round-trip.
  */
-export async function archiveApp(input: { appId: string }): Promise<{ archived: boolean }> {
+export const archiveApp = mutation(async (
+  input: { appId: string },
+): Promise<{ archived: boolean }> => {
   const archive = await loadArchive();
   archive.add(input.appId);
   await saveArchive(archive);
   return { archived: true };
-}
-archiveApp.config = { id: "apps.archiveApp" };
+}, { id: "apps.archiveApp" });
 
-export async function unarchiveApp(input: { appId: string }): Promise<{ archived: boolean }> {
+export const unarchiveApp = mutation(async (
+  input: { appId: string },
+): Promise<{ archived: boolean }> => {
   const archive = await loadArchive();
   archive.delete(input.appId);
   await saveArchive(archive);
   return { archived: false };
-}
-unarchiveApp.config = { id: "apps.unarchiveApp" };
+}, { id: "apps.unarchiveApp" });
 
 /**
  * Single-input wire — the vite-plugin RPC stub forwards `args[0]` only,
@@ -120,85 +121,90 @@ unarchiveApp.config = { id: "apps.unarchiveApp" };
  * upstream when `JSON.stringify({..., plan_id: ctx})` ran). Wrap into
  * one object per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §RPC.
  */
-export async function createApp(input: {
+export const createApp = action(async (input: {
   name: string;
   plan_id?: string;
-}): Promise<AppRecord> {
+}): Promise<AppRecord> => {
   const name = input?.name;
   const plan_id = input?.plan_id ?? "free";
   return proxy("/api/apps", {
     method: "POST",
     body: JSON.stringify({ name, plan_id }),
   });
-}
-createApp.config = { id: "apps.createApp" };
+}, { id: "apps.createApp" });
 
-export async function deleteApp(id: string): Promise<{ deleted: boolean }> {
+export const deleteApp = action(async (id: string): Promise<{ deleted: boolean }> => {
   return proxy(`/api/apps/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-deleteApp.config = { id: "apps.deleteApp" };
+}, { id: "apps.deleteApp" });
 
-export async function deployApp(id: string, code: string): Promise<{ deploy_hash: string }> {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/deploy`, {
+export const deployApp = action(async (
+  input: { appId: string; code: string },
+): Promise<{ deploy_hash: string }> => {
+  return proxy(`/api/apps/${encodeURIComponent(input.appId)}/deploy`, {
     method: "POST",
-    body: code,
+    body: input.code,
     contentType: "application/javascript",
   });
-}
-deployApp.config = { id: "apps.deployApp" };
+}, { id: "apps.deployApp" });
 
-export async function updatePlan(id: string, plan_id: string): Promise<{ updated: boolean }> {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/plan`, {
+export const updatePlan = action(async (
+  input: { appId: string; plan_id: string },
+): Promise<{ updated: boolean }> => {
+  return proxy(`/api/apps/${encodeURIComponent(input.appId)}/plan`, {
     method: "PUT",
-    body: JSON.stringify({ plan_id }),
+    body: JSON.stringify({ plan_id: input.plan_id }),
   });
-}
-updatePlan.config = { id: "apps.updatePlan" };
+}, { id: "apps.updatePlan" });
 
-export async function getAppLogs(id: string): Promise<string[]> {
+export const getAppLogs = action(async (id: string): Promise<string[]> => {
   return proxy(`/api/apps/${encodeURIComponent(id)}/logs`);
-}
-getAppLogs.config = { id: "apps.getAppLogs" };
+}, { id: "apps.getAppLogs" });
 
 // ─── env vars + secrets ─────────────────────────────────────────
 
 export interface EnvVar { key: string; value: string }
 
-export async function listVars(id: string): Promise<{ vars: EnvVar[] }> {
+export const listVars = action(async (id: string): Promise<{ vars: EnvVar[] }> => {
   return proxy(`/api/apps/${encodeURIComponent(id)}/vars`);
-}
-listVars.config = { id: "apps.listVars" };
-export async function setVar(id: string, key: string, value: string): Promise<void> {
-  await proxy(`/api/apps/${encodeURIComponent(id)}/vars`, {
-    method: "POST",
-    body: JSON.stringify({ key, value }),
-  });
-}
-setVar.config = { id: "apps.setVar" };
-export async function deleteVar(id: string, key: string): Promise<void> {
-  await proxy(`/api/apps/${encodeURIComponent(id)}/vars/${encodeURIComponent(key)}`, {
-    method: "DELETE",
-  });
-}
-deleteVar.config = { id: "apps.deleteVar" };
+}, { id: "apps.listVars" });
 
-export async function listSecrets(id: string): Promise<{ secrets: string[] }> {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/secrets`);
-}
-listSecrets.config = { id: "apps.listSecrets" };
-export async function setSecret(id: string, key: string, value: string): Promise<void> {
-  await proxy(`/api/apps/${encodeURIComponent(id)}/secrets`, {
+export const setVar = action(async (
+  input: { appId: string; key: string; value: string },
+): Promise<void> => {
+  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/vars`, {
     method: "POST",
-    body: JSON.stringify({ key, value }),
+    body: JSON.stringify({ key: input.key, value: input.value }),
   });
-}
-setSecret.config = { id: "apps.setSecret" };
-export async function deleteSecret(id: string, key: string): Promise<void> {
-  await proxy(`/api/apps/${encodeURIComponent(id)}/secrets/${encodeURIComponent(key)}`, {
+}, { id: "apps.setVar" });
+
+export const deleteVar = action(async (
+  input: { appId: string; key: string },
+): Promise<void> => {
+  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/vars/${encodeURIComponent(input.key)}`, {
     method: "DELETE",
   });
-}
-deleteSecret.config = { id: "apps.deleteSecret" };
+}, { id: "apps.deleteVar" });
+
+export const listSecrets = action(async (id: string): Promise<{ secrets: string[] }> => {
+  return proxy(`/api/apps/${encodeURIComponent(id)}/secrets`);
+}, { id: "apps.listSecrets" });
+
+export const setSecret = action(async (
+  input: { appId: string; key: string; value: string },
+): Promise<void> => {
+  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/secrets`, {
+    method: "POST",
+    body: JSON.stringify({ key: input.key, value: input.value }),
+  });
+}, { id: "apps.setSecret" });
+
+export const deleteSecret = action(async (
+  input: { appId: string; key: string },
+): Promise<void> => {
+  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/secrets/${encodeURIComponent(input.key)}`, {
+    method: "DELETE",
+  });
+}, { id: "apps.deleteSecret" });
 
 // `appPreviewUrl` moved to `src/client/lib/preview-url.ts` — it's a
 // pure URL-builder that the iframe consumes synchronously, so it must

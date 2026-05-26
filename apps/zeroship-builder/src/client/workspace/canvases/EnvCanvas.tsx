@@ -5,13 +5,9 @@
 // the form is set-only — there is no "edit" path, only "rotate by
 // re-setting"). Both use the existing apps.* RPCs.
 //
-// Note on the wire: setVar/setSecret are declared in server/apps.ts
-// with positional args. The single-input wire only forwards args[0]
-// — but the existing dashboard already calls these with the same
-// signatures, so behaviour is consistent with the rest of the
-// codebase. A later cleanup will migrate these to object input. For now
-// we mirror the legacy EnvTab's call shape to avoid a wire flip in
-// this commit.
+// Note on the wire: set/delete procedures use one object input so the
+// generated RPC stubs can forward every field over the single-input
+// `/_zs/v1/<id>` contract.
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -55,7 +51,7 @@ function Variables({ appId }: { appId: string }) {
   const [newVal, setNewVal] = useState("");
 
   const add = useMutation({
-    mutationFn: () => setVar(appId, newKey, newVal),
+    mutationFn: async () => setVar({ appId, key: newKey, value: newVal }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["env-vars", appId] });
       setAdding(false);
@@ -64,7 +60,7 @@ function Variables({ appId }: { appId: string }) {
     },
   });
   const del = useMutation({
-    mutationFn: (key: string) => deleteVar(appId, key),
+    mutationFn: async (key: string) => deleteVar({ appId, key }),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ["env-vars", appId] }),
   });
@@ -150,7 +146,7 @@ function Secrets({ appId }: { appId: string }) {
   const [newVal, setNewVal] = useState("");
 
   const add = useMutation({
-    mutationFn: () => setSecret(appId, newKey, newVal),
+    mutationFn: async () => setSecret({ appId, key: newKey, value: newVal }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["env-secrets", appId] });
       setAdding(false);
@@ -159,7 +155,7 @@ function Secrets({ appId }: { appId: string }) {
     },
   });
   const del = useMutation({
-    mutationFn: (key: string) => deleteSecret(appId, key),
+    mutationFn: async (key: string) => deleteSecret({ appId, key }),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ["env-secrets", appId] }),
   });

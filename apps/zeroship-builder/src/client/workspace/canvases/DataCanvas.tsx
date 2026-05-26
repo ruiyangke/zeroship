@@ -482,7 +482,7 @@ function BackupsPane({ appId }: { appId: string }) {
   });
 
   const trigger = useMutation({
-    mutationFn: () => triggerBackup({ appId }),
+    mutationFn: async () => triggerBackup({ appId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["data-backups", appId] });
     },

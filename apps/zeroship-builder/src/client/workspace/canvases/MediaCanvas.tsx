@@ -61,7 +61,7 @@ export function MediaCanvas({ appId }: MediaCanvasProps) {
   });
 
   const remove = useMutation({
-    mutationFn: (key: string) => deleteMedia({ appId, key }),
+    mutationFn: async (key: string) => deleteMedia({ appId, key }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["media", appId] });
     },

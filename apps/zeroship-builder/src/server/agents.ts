@@ -22,6 +22,7 @@
 // `vite-plugin` `args[0]`-only forwarding honest even when we add
 // `addIssue({appId, title, description})`.
 
+import { query, mutation } from "@zeroship/rpc/server";
 import { persistGet, persistSet } from "./_persist.js";
 
 // ─── issue store ────────────────────────────────────────────────
@@ -130,13 +131,14 @@ async function loadIssuesOrSeed(appId: string): Promise<Issue[]> {
 export interface ListIssuesInput { appId: string }
 export interface ListIssuesResult { issues: Issue[] }
 
-export async function listIssues(input: ListIssuesInput): Promise<ListIssuesResult> {
+export const listIssues = mutation(async (
+  input: ListIssuesInput,
+): Promise<ListIssuesResult> => {
   const issues = await loadIssuesOrSeed(input.appId);
   // Return a shallow copy so the caller can't mutate our store by
   // accident through a shared reference.
   return { issues: issues.map((i) => ({ ...i, comments: [...i.comments] })) };
-}
-listIssues.config = { id: "agents.listIssues" };
+}, { id: "agents.listIssues" });
 
 export interface AddIssueInput {
   appId: string;
@@ -146,7 +148,9 @@ export interface AddIssueInput {
   assignee?: string | null;
 }
 
-export async function addIssue(input: AddIssueInput): Promise<{ issue: Issue }> {
+export const addIssue = mutation(async (
+  input: AddIssueInput,
+): Promise<{ issue: Issue }> => {
   const list = await loadIssuesOrSeed(input.appId);
   const now = nowIso();
   const issue: Issue = {
@@ -165,8 +169,7 @@ export async function addIssue(input: AddIssueInput): Promise<{ issue: Issue }> 
   const next = [issue, ...list];
   await persistSet(issuesKey(input.appId), next);
   return { issue };
-}
-addIssue.config = { id: "agents.addIssue" };
+}, { id: "agents.addIssue" });
 
 // ─── quality scorecard ──────────────────────────────────────────
 //
@@ -253,9 +256,9 @@ function defaultScores(): QualityScores {
 
 export interface GetQualityScoresInput { appId: string }
 
-export async function getQualityScores(
+export const getQualityScores = query(async (
   input: GetQualityScoresInput,
-): Promise<QualityScores> {
+): Promise<QualityScores> => {
   const scores = await persistGet<QualityScores | null>(
     qualityKey(input.appId),
     null,
@@ -267,8 +270,7 @@ export async function getQualityScores(
     last_run_at: safe.last_run_at,
     dimensions: safe.dimensions.map((d) => ({ ...d })),
   };
-}
-getQualityScores.config = { id: "agents.getQualityScores" };
+}, { id: "agents.getQualityScores" });
 
 // Note: the writer side of the quality scorecard (the function the
 // chat middleware calls after every Critic round) lives in
@@ -325,14 +327,13 @@ const SAMPLE_TABLES: ReadonlyArray<TableSummary> = [
   },
 ];
 
-export async function listTables(
+export const listTables = query(async (
   input: ListTablesInput,
-): Promise<ListTablesResult> {
+): Promise<ListTablesResult> => {
   void input.appId;
   // Defensive copy so callers can't mutate the constant.
   return { tables: SAMPLE_TABLES.map((t) => ({ ...t })) };
-}
-listTables.config = { id: "agents.listTables" };
+}, { id: "agents.listTables" });
 
 export interface TableRow {
   /** Stable row id used as a React key. */
@@ -402,9 +403,9 @@ const SAMPLE_ROWS: Record<string, SampleColumns> = {
   },
 };
 
-export async function getTableRows(
+export const getTableRows = query(async (
   input: GetTableRowsInput,
-): Promise<GetTableRowsResult> {
+): Promise<GetTableRowsResult> => {
   void input.appId;
   const limit = Math.max(1, Math.min(200, input.limit ?? 25));
   const offset = Math.max(0, input.offset ?? 0);
@@ -422,8 +423,7 @@ export async function getTableRows(
     limit,
     offset,
   };
-}
-getTableRows.config = { id: "agents.getTableRows" };
+}, { id: "agents.getTableRows" });
 
 export interface IndexInfo {
   table: string;
@@ -482,13 +482,12 @@ const SAMPLE_INDEXES: ReadonlyArray<IndexInfo> = [
   },
 ];
 
-export async function listIndexes(
+export const listIndexes = query(async (
   input: ListIndexesInput,
-): Promise<ListIndexesResult> {
+): Promise<ListIndexesResult> => {
   void input.appId;
   return { indexes: SAMPLE_INDEXES.map((i) => ({ ...i, columns: [...i.columns] })) };
-}
-listIndexes.config = { id: "agents.listIndexes" };
+}, { id: "agents.listIndexes" });
 
 export type MigrationStatus = "applied" | "pending" | "failed";
 
@@ -536,13 +535,12 @@ const SAMPLE_MIGRATIONS: ReadonlyArray<MigrationEntry> = [
   },
 ];
 
-export async function listMigrations(
+export const listMigrations = query(async (
   input: ListMigrationsInput,
-): Promise<ListMigrationsResult> {
+): Promise<ListMigrationsResult> => {
   void input.appId;
   return { migrations: SAMPLE_MIGRATIONS.map((m) => ({ ...m })) };
-}
-listMigrations.config = { id: "agents.listMigrations" };
+}, { id: "agents.listMigrations" });
 
 export type BackupKind = "auto" | "manual";
 
@@ -599,20 +597,19 @@ async function loadBackupsOrSeed(appId: string): Promise<BackupEntry[]> {
 export interface ListBackupsInput { appId: string }
 export interface ListBackupsResult { backups: BackupEntry[] }
 
-export async function listBackups(
+export const listBackups = mutation(async (
   input: ListBackupsInput,
-): Promise<ListBackupsResult> {
+): Promise<ListBackupsResult> => {
   const list = await loadBackupsOrSeed(input.appId);
   return { backups: list.map((b) => ({ ...b })) };
-}
-listBackups.config = { id: "agents.listBackups" };
+}, { id: "agents.listBackups" });
 
 export interface TriggerBackupInput { appId: string }
 export interface TriggerBackupResult { backup: BackupEntry }
 
-export async function triggerBackup(
+export const triggerBackup = mutation(async (
   input: TriggerBackupInput,
-): Promise<TriggerBackupResult> {
+): Promise<TriggerBackupResult> => {
   const list = await loadBackupsOrSeed(input.appId);
   const entry: BackupEntry = {
     id: `bk_${Math.random().toString(36).slice(2, 10)}`,
@@ -627,8 +624,7 @@ export async function triggerBackup(
   const next = [entry, ...list];
   await persistSet(backupsKey(input.appId), next);
   return { backup: { ...entry } };
-}
-triggerBackup.config = { id: "agents.triggerBackup" };
+}, { id: "agents.triggerBackup" });
 
 // ─── media canvas stubs ──────────────────────────────────────────
 //
@@ -709,13 +705,12 @@ async function loadMediaOrSeed(appId: string): Promise<MediaEntry[]> {
 export interface ListMediaInput { appId: string }
 export interface ListMediaResult { items: MediaEntry[] }
 
-export async function listMedia(
+export const listMedia = mutation(async (
   input: ListMediaInput,
-): Promise<ListMediaResult> {
+): Promise<ListMediaResult> => {
   const list = await loadMediaOrSeed(input.appId);
   return { items: list.map((m) => ({ ...m })) };
-}
-listMedia.config = { id: "agents.listMedia" };
+}, { id: "agents.listMedia" });
 
 export interface UploadMediaInput {
   appId: string;
@@ -726,9 +721,9 @@ export interface UploadMediaInput {
 }
 export interface UploadMediaResult { item: MediaEntry }
 
-export async function uploadMedia(
+export const uploadMedia = mutation(async (
   input: UploadMediaInput,
-): Promise<UploadMediaResult> {
+): Promise<UploadMediaResult> => {
   const list = await loadMediaOrSeed(input.appId);
   // Best-effort byte length — `Buffer` is available in the V8 runtime
   // via the node-compat shim, but we fall back to the base64 string
@@ -760,8 +755,7 @@ export async function uploadMedia(
   const next = [entry, ...list];
   await persistSet(mediaKey(input.appId), next);
   return { item: { ...entry } };
-}
-uploadMedia.config = { id: "agents.uploadMedia" };
+}, { id: "agents.uploadMedia" });
 
 export interface DeleteMediaInput {
   appId: string;
@@ -769,12 +763,11 @@ export interface DeleteMediaInput {
 }
 export interface DeleteMediaResult { ok: true }
 
-export async function deleteMedia(
+export const deleteMedia = mutation(async (
   input: DeleteMediaInput,
-): Promise<DeleteMediaResult> {
+): Promise<DeleteMediaResult> => {
   const list = await loadMediaOrSeed(input.appId);
   const next = list.filter((m) => m.key !== input.key);
   await persistSet(mediaKey(input.appId), next);
   return { ok: true };
-}
-deleteMedia.config = { id: "agents.deleteMedia" };
+}, { id: "agents.deleteMedia" });

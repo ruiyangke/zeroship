@@ -61,7 +61,7 @@ export function PlanCanvas({ appId, app }: PlanCanvasProps) {
 function DigestSection({ appId }: { appId: string }) {
   const [digest, setDigest] = useState<PMDigest | null>(null);
   const run = useMutation({
-    mutationFn: () => pmDigest({ appId }),
+    mutationFn: async () => pmDigest({ appId }),
     onSuccess: (d) => setDigest(d),
   });
   return (
@@ -147,7 +147,7 @@ function IssuesSection({ appId }: { appId: string }) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const create = useMutation({
-    mutationFn: (input: { title: string; description: string }) =>
+    mutationFn: async (input: { title: string; description: string }) =>
       addIssue({ appId, ...input }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["plan-issues", appId] });

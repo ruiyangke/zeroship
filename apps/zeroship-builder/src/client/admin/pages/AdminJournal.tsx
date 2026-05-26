@@ -18,7 +18,7 @@ interface JoinedLog {
 
 export function AdminJournal() {
   const [filter, setFilter] = useState<Filter>("all");
-  const { data: apps } = useQuery({ queryKey: ["admin", "apps"], queryFn: listApps });
+  const { data: apps } = useQuery({ queryKey: ["admin", "apps"], queryFn: () => listApps() });
 
   const queries = useQuery({
     queryKey: ["admin", "journal", apps?.map((a) => a.id) ?? []],

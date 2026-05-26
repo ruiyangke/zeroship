@@ -232,7 +232,7 @@ function Incidents({ appId }: { appId: string }) {
   // page refresh wipes the result, the user can hit Scan again.
   const [findings, setFindings] = useState<SREFindingItem[] | null>(null);
   const scan = useMutation({
-    mutationFn: () => sreMonitor({ appId }),
+    mutationFn: async () => sreMonitor({ appId }),
     onSuccess: (r) => setFindings(r.findings),
   });
   return (
@@ -390,7 +390,13 @@ function Performance({ appId }: { appId: string }) {
     queryKey: ["health-perf-logs", appId],
     // Tolerate 404 (no logs yet) and other transient failures — perf
     // tiles should degrade to placeholder, not blow up.
-    queryFn: () => getAppLogs(appId).catch(() => [] as string[]),
+    queryFn: async () => {
+      try {
+        return await getAppLogs(appId);
+      } catch {
+        return [] as string[];
+      }
+    },
     refetchInterval: PERF_POLL_MS,
     retry: false,
   });

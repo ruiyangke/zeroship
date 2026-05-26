@@ -243,7 +243,6 @@ export async function getOrCreateSandboxFor(
   _inFlight.set(cacheKey, promise);
   return { id: await promise, userId, projectId };
 }
-getOrCreateSandboxFor.config = { id: "_internal.getOrCreateSandboxFor" };
 
 // ─── path encoding ────────────────────────────────────────────────────
 //

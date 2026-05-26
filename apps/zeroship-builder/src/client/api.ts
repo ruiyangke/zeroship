@@ -1,14 +1,14 @@
-// Typed RPC client for the builder's chat surface. Mirrors
-// `examples/ai-chat/src/api.ts` exactly: declare an `App` type listing
-// every procedure with its kind + input/output, then `createRpcClient<App>`
-// returns typed procedure factories.
+// Typed RPC client for the builder's streaming chat surfaces. Unary
+// procedures are direct imports from server modules; the vite-plugin
+// turns those imports into RPC stubs. Streams use explicit per-procedure
+// handles so `streamUrl()` stays available for AI SDK transports.
 //
 // `rpc.chat.streamUrl()` is the AI-SDK entry point — `@zeroship/rpc`
 // exposes it explicitly so we can hand the URL to `useChat` without
 // hardcoding `/_zs/v1/chat`. The transport-level body envelope
 // (`{ json: <input> }`) is wrapped in `chatTransport` below.
 
-import { createRpcClient, type Stream } from "@zeroship/rpc/client";
+import { createRpcClient } from "@zeroship/rpc/client";
 import { DefaultChatTransport } from "ai";
 import type { UIMessage } from "ai";
 
@@ -54,9 +54,7 @@ export {
 } from "../server/apps";
 
 // Sandbox file procs used by the FilesCanvas. Both take object input
-// so the single-input RPC wire delivers every field — see
-// server/sandbox.ts for the comment on why the legacy positional-arg
-// `readFile` is kept around but not used.
+// so the single-input RPC wire delivers every field.
 export {
   listSandboxFiles,
   readSandboxFile,
@@ -120,25 +118,16 @@ export {
 
 export { appPreviewUrl } from "./lib/preview-url";
 
-// One procedure to start with — we can add more later (file CRUD, deploy,
-// etc.) and they go here as additional fields on `App`.
-type App = {
-  chat: Stream<{ messages: UIMessage[]; appId?: string }, never>;
+export const rpc = {
+  chat: createRpcClient().stream<{ messages: UIMessage[]; appId?: string }, never>("chat"),
   // Wizard: project-creation flow runtime, plain LangGraph (see
   // §4.8.2b). Same wire envelope as chat, but the input is `{idea, id}`
   // on a fresh turn (no message history — the wizard's checkpointer
   // owns state) and `{resume, id}` on a SurveyCard submit.
-  wizard: Stream<
+  wizard: createRpcClient().stream<
     { idea?: string; id?: string; resume?: { token: string; value: unknown }; messages?: UIMessage[] },
     never
-  >;
-};
-
-const rpcClient = createRpcClient<App>({ baseUrl: "" });
-
-export const rpc = {
-  chat: rpcClient.stream("chat"),
-  wizard: rpcClient.stream("wizard"),
+  >("wizard"),
 };
 
 /**

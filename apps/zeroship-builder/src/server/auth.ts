@@ -8,6 +8,7 @@
 // the browser sends `__zs_session` to us; we forward it to the
 // control plane and propagate any Set-Cookie headers back.
 
+import { action } from "@zeroship/rpc/server";
 import { CONTROL_URL } from "./env";
 import { getRequest, getResponseHeaders } from "./request-context";
 
@@ -65,35 +66,30 @@ async function proxy<T>(
   return body as T;
 }
 
-export async function register(input: {
+export const register = action(async (input: {
   email: string;
   password: string;
   name: string;
-}): Promise<{ user: AuthUser }> {
+}): Promise<{ user: AuthUser }> => {
   return proxy("/auth/register", { method: "POST", body: input });
-}
-register.config = { id: "auth.register" };
+}, { id: "auth.register" });
 
-export async function login(input: {
+export const login = action(async (input: {
   email: string;
   password: string;
-}): Promise<{ user: AuthUser }> {
+}): Promise<{ user: AuthUser }> => {
   return proxy("/auth/login", { method: "POST", body: input });
-}
-login.config = { id: "auth.login" };
+}, { id: "auth.login" });
 
-export async function logout(): Promise<{ logged_out: boolean }> {
+export const logout = action(async (): Promise<{ logged_out: boolean }> => {
   return proxy("/auth/logout", { method: "POST" });
-}
-logout.config = { id: "auth.logout" };
+}, { id: "auth.logout" });
 
-export async function userinfo(): Promise<UserInfo | null> {
+export const userinfo = action(async (): Promise<UserInfo | null> => {
   try {
     return await proxy<UserInfo>("/auth/userinfo");
   } catch (e) {
     if ((e as { status?: number }).status === 401) return null;
     throw e;
   }
-}
-userinfo.config = { id: "auth.userinfo" };
-
+}, { id: "auth.userinfo" });

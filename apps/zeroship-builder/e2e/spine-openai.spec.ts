@@ -147,7 +147,7 @@ test.describe("spine — home → wizard → workspace", () => {
 
     await expect(brief).toBeVisible({ timeout: STEP_TIMEOUT });
 
-    // 4. Begin. Mutation fires createApp(name) against the control
+    // 4. Begin. Mutation fires createApp({ name }) against the control
     // plane and navigates to /p/<appId>/preview. If the control plane
     // is down this throws and the test fails (the wizard error band
     // surfaces it).

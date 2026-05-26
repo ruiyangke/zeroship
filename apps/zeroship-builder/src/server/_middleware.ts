@@ -307,7 +307,6 @@ export async function dataPartMiddleware(
     },
   });
 }
-dataPartMiddleware.config = { id: "_internal.dataPartMiddleware" };
 
 // Extract the JSON-decoded subagent response from the Command the
 // `task` tool returns. Each SubAgent in the fleet has a `responseFormat`

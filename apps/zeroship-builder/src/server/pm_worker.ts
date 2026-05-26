@@ -36,6 +36,7 @@
 //     body: { json: { appId: string } }
 //     response: { summary: string, recommendations: PMRecommendationItem[] }
 
+import { action } from "@zeroship/rpc/server";
 import { z } from "zod";
 
 import { PM_PROMPT } from "./_prompts.js";
@@ -98,7 +99,7 @@ export interface PMDigestInput {
  * next tick. Throws on missing OPENAI_API_KEY so the calling cron
  * sees a real error rather than a silent empty digest.
  */
-export async function pmDigest(input: PMDigestInput): Promise<PMDigest> {
+export const pmDigest = action(async (input: PMDigestInput): Promise<PMDigest> => {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error(
@@ -118,9 +119,9 @@ export async function pmDigest(input: PMDigestInput): Promise<PMDigest> {
   // placeholder line and keep going. The model is told what's missing
   // so its recommendation set reflects the gaps.
   const [issuesResult, scores, appRecord] = await Promise.all([
-    listIssues({ appId: input.appId }).catch(() => null),
-    getQualityScores({ appId: input.appId }).catch(() => null),
-    getAppRecord(input.appId).catch(() => null),
+    Promise.resolve().then(() => listIssues({ appId: input.appId })).catch(() => null),
+    Promise.resolve().then(() => getQualityScores({ appId: input.appId })).catch(() => null),
+    Promise.resolve().then(() => getAppRecord(input.appId)).catch(() => null),
   ]);
 
   const contextText = renderProjectContext({
@@ -149,8 +150,7 @@ export async function pmDigest(input: PMDigestInput): Promise<PMDigest> {
   ]);
 
   return result;
-}
-pmDigest.config = { id: "pm.digest" };
+}, { id: "pm.digest" });
 
 // --- helpers --------------------------------------------------------
 

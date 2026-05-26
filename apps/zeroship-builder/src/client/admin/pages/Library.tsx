@@ -9,7 +9,7 @@ import { LedgerRow } from "../../components/LedgerRow";
 export function AdminLibrary() {
   const { data: apps } = useQuery({
     queryKey: ["admin", "apps"],
-    queryFn: listApps,
+    queryFn: () => listApps(),
   });
   const live = (apps ?? []).filter((a) => !!a.deploy_hash).length;
 

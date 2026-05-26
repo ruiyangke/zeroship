@@ -61,6 +61,7 @@
 // wrapping needed.
 
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage } from "ai";
+import { stream as rpcStream } from "@zeroship/rpc/server";
 import { critic } from "./_critic.js";
 import { reviewer } from "./_reviewer.js";
 import { pm } from "./_pm.js";
@@ -648,48 +649,46 @@ function extractTextDelta(event: {
 
 // --- RPC handler --------------------------------------------------------
 
-// Marked as `mutation` — the procedure has side-effects (a model call)
-// and returns a single Response, even though that response happens to
-// stream. The manifest emitter literalizes `.config` via the AST, so
-// no `as const`.
-export async function chat(
-  input: BuilderTurnInput,
-): Promise<Response> {
-  const ac = new AbortController();
-  const stream = await buildTranslatedStream(input, ac.signal);
+// Marked as `stream` for the RPC capability frame: the handler returns an
+// AI-SDK SSE Response, but it is still a long-lived streaming endpoint and
+// must be allowed to call external APIs and sandbox-controller fetch paths.
+export const chat = rpcStream(
+  (async (input: BuilderTurnInput): Promise<Response> => {
+    const ac = new AbortController();
+    const stream = await buildTranslatedStream(input, ac.signal);
 
-  // Wrap the SSE Response's body to abort the in-flight LLM call when
-  // the client disconnects. The default `createUIMessageStreamResponse`
-  // body is a ReadableStream; we passthrough chunks but intercept
-  // `cancel()` to fire the AbortController.
-  const baseResponse = createUIMessageStreamResponse({ stream });
-  if (!baseResponse.body) return baseResponse;
+    // Wrap the SSE Response's body to abort the in-flight LLM call when
+    // the client disconnects. The default `createUIMessageStreamResponse`
+    // body is a ReadableStream; we passthrough chunks but intercept
+    // `cancel()` to fire the AbortController.
+    const baseResponse = createUIMessageStreamResponse({ stream });
+    if (!baseResponse.body) return baseResponse;
 
-  const wrapped = new ReadableStream({
-    async start(controller) {
-      const reader = baseResponse.body!.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          controller.enqueue(value);
+    const wrapped = new ReadableStream({
+      async start(controller) {
+        const reader = baseResponse.body!.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+          controller.close();
+        } catch (err) {
+          controller.error(err);
         }
-        controller.close();
-      } catch (err) {
-        controller.error(err);
-      }
-    },
-    cancel(reason) {
-      // Client disconnected mid-stream — abort the OpenAI request.
-      ac.abort(reason);
-    },
-  });
+      },
+      cancel(reason) {
+        // Client disconnected mid-stream — abort the OpenAI request.
+        ac.abort(reason);
+      },
+    });
 
-  return new Response(wrapped, {
-    status: baseResponse.status,
-    statusText: baseResponse.statusText,
-    headers: baseResponse.headers,
-  });
-}
-
-chat.config = { id: "chat", kind: "mutation", lazy: true };
+    return new Response(wrapped, {
+      status: baseResponse.status,
+      statusText: baseResponse.statusText,
+      headers: baseResponse.headers,
+    });
+  }) as unknown as (input: BuilderTurnInput) => AsyncIterable<never>,
+  { id: "chat", lazy: true },
+) as unknown as (input: BuilderTurnInput) => Promise<Response>;

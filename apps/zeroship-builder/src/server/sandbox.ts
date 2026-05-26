@@ -5,12 +5,10 @@
 //
 //  1. Legacy `/sessions/...` procedures (openSession, listFiles,
 //     readFile, writeFile, deleteFile, execCommand). These targeted
-//     an earlier controller revision. They take positional args and
-//     therefore don't survive the single-input RPC wire (the vite-
-//     plugin transform forwards `args[0]` only). The orphan
-//     workspace/tabs/FilesTab still imports them via api/files.ts;
-//     once the canvas migration deletes that tree, these can be
-//     dropped too.
+//     an earlier controller revision. They now use the same single-
+//     input wire convention as the rest of the builder RPC surface,
+//     but the orphan workspace/tabs/FilesTab tree no longer imports
+//     them. Once that tree is deleted, these can be dropped too.
 //
 //  2. New `/sandboxes/:id/...` procedures (listSandboxFiles,
 //     readSandboxFile). These are the ones the FilesCanvas calls and
@@ -19,6 +17,7 @@
 //     so the FilesCanvas attaches to the same sandbox Builder writes
 //     into — readers see writers' bytes immediately.
 
+import { action } from "@zeroship/rpc/server";
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./env";
 import { getOrCreateSandboxFor } from "./_sandbox_backend";
 
@@ -75,9 +74,9 @@ function encodePath(p: string): string {
 
 export interface ListSandboxFilesInput { appId: string }
 
-export async function listSandboxFiles(
+export const listSandboxFiles = action(async (
   input: ListSandboxFilesInput,
-): Promise<FileEntry[]> {
+): Promise<FileEntry[]> => {
   const sandbox = await getOrCreateSandboxFor(input.appId, {
     projectSourceId: input.appId,
   });
@@ -87,14 +86,13 @@ export async function listSandboxFiles(
   );
   const data = await jsonOrThrow<{ entries: FileEntry[] }>(res, "list files");
   return data.entries ?? [];
-}
-listSandboxFiles.config = { id: "sandbox.listSandboxFiles" };
+}, { id: "sandbox.listSandboxFiles" });
 
 export interface ReadSandboxFileInput { appId: string; path: string }
 
-export async function readSandboxFile(
+export const readSandboxFile = action(async (
   input: ReadSandboxFileInput,
-): Promise<string> {
+): Promise<string> => {
   const sandbox = await getOrCreateSandboxFor(input.appId, {
     projectSourceId: input.appId,
   });
@@ -106,84 +104,83 @@ export async function readSandboxFile(
     throw new Error(`read ${input.path} → ${res.status}: ${await res.text()}`);
   }
   return res.text();
-}
-readSandboxFile.config = { id: "sandbox.readSandboxFile" };
+}, { id: "sandbox.readSandboxFile" });
 
 // ─── legacy `/sessions/...` procs (kept for orphan tree, scheduled
 // for deletion alongside workspace/tabs) ────────────────────────
 
-export async function openSession(projectId: string): Promise<SessionInfo> {
+export const openSession = action(async (projectId: string): Promise<SessionInfo> => {
   const res = await fetch(`${SANDBOX_URL()}/sessions`, {
     method: "POST",
     headers: authHeaders({ "content-type": "application/json" }),
     body: JSON.stringify({ project_id: projectId }),
   });
   return jsonOrThrow(res, "create session");
-}
-openSession.config = { id: "sandbox.openSession" };
+}, { id: "sandbox.openSession" });
 
 async function sessionFor(projectId: string): Promise<string> {
   const s = await openSession(projectId);
   return s.session_id;
 }
 
-export async function listFiles(projectId: string): Promise<FileEntry[]> {
+export const listFiles = action(async (projectId: string): Promise<FileEntry[]> => {
   const sid = await sessionFor(projectId);
   const res = await fetch(`${SANDBOX_URL()}/sessions/${sid}/file-tree`, { headers: authHeaders() });
   const data = await jsonOrThrow<{ entries: FileEntry[] }>(res, "list files");
   return data.entries ?? [];
-}
-listFiles.config = { id: "sandbox.listFiles" };
+}, { id: "sandbox.listFiles" });
 
-export async function readFile(projectId: string, path: string): Promise<string> {
-  const sid = await sessionFor(projectId);
+export const readFile = action(async (
+  input: { projectId: string; path: string },
+): Promise<string> => {
+  const sid = await sessionFor(input.projectId);
   const res = await fetch(
-    `${SANDBOX_URL()}/sessions/${sid}/files/${encodePath(path)}`,
+    `${SANDBOX_URL()}/sessions/${sid}/files/${encodePath(input.path)}`,
     { headers: authHeaders() },
   );
-  if (!res.ok) throw new Error(`read ${path} → ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`read ${input.path} → ${res.status}: ${await res.text()}`);
   return res.text();
-}
-readFile.config = { id: "sandbox.readFile" };
+}, { id: "sandbox.readFile" });
 
-export async function writeFile(
-  projectId: string, path: string, content: string,
-): Promise<{ written: string; size: number }> {
-  const sid = await sessionFor(projectId);
+export const writeFile = action(async (
+  input: { projectId: string; path: string; content: string },
+): Promise<{ written: string; size: number }> => {
+  const sid = await sessionFor(input.projectId);
   const res = await fetch(
-    `${SANDBOX_URL()}/sessions/${sid}/files/${encodePath(path)}`,
+    `${SANDBOX_URL()}/sessions/${sid}/files/${encodePath(input.path)}`,
     {
       method: "PUT",
       headers: authHeaders({ "content-type": "text/plain" }),
-      body: content,
+      body: input.content,
     },
   );
-  return jsonOrThrow(res, `write ${path}`);
-}
-writeFile.config = { id: "sandbox.writeFile" };
+  return jsonOrThrow(res, `write ${input.path}`);
+}, { id: "sandbox.writeFile" });
 
-export async function deleteFile(projectId: string, path: string): Promise<void> {
-  const sid = await sessionFor(projectId);
+export const deleteFile = action(async (
+  input: { projectId: string; path: string },
+): Promise<void> => {
+  const sid = await sessionFor(input.projectId);
   const res = await fetch(
-    `${SANDBOX_URL()}/sessions/${sid}/files/${encodePath(path)}`,
+    `${SANDBOX_URL()}/sessions/${sid}/files/${encodePath(input.path)}`,
     { method: "DELETE", headers: authHeaders() },
   );
   if (res.status === 404) return;
-  await jsonOrThrow<unknown>(res, `delete ${path}`);
-}
-deleteFile.config = { id: "sandbox.deleteFile" };
+  await jsonOrThrow<unknown>(res, `delete ${input.path}`);
+}, { id: "sandbox.deleteFile" });
 
-export async function execCommand(
-  projectId: string,
-  cmd: string,
-  opts: { cwd?: string; timeoutMs?: number } = {},
-): Promise<{ status: number; stdout: string; stderr: string }> {
-  const sid = await sessionFor(projectId);
+export const execCommand = action(async (
+  input: { projectId: string; cmd: string; opts?: { cwd?: string; timeoutMs?: number } },
+): Promise<{ status: number; stdout: string; stderr: string }> => {
+  const sid = await sessionFor(input.projectId);
   const res = await fetch(`${SANDBOX_URL()}/sessions/${sid}/exec`, {
     method: "POST",
     headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ cmd, cwd: opts.cwd, timeout_ms: opts.timeoutMs }),
+    body: JSON.stringify({
+      cmd: input.cmd,
+      cwd: input.opts?.cwd,
+      timeout_ms: input.opts?.timeoutMs,
+    }),
   });
   return jsonOrThrow(res, "exec");
-}
-execCommand.config = { id: "sandbox.execCommand" };
+}, { id: "sandbox.execCommand" });

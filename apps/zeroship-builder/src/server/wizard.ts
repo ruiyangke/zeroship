@@ -75,6 +75,7 @@
 // section).
 
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage, type UIMessageStreamWriter } from "ai";
+import { stream as rpcStream } from "@zeroship/rpc/server";
 import { z } from "zod";
 
 import { emitDataSurvey, surveyInputSchema, type SurveyInput } from "./_survey_wire.js";
@@ -453,42 +454,41 @@ function stringifyAnswer(value: unknown): string {
 
 // --- RPC handler --------------------------------------------------------
 
-export async function wizard(
-  input: WizardTurnInput,
-): Promise<Response> {
+export const wizard = rpcStream(
+  (async (input: WizardTurnInput): Promise<Response> => {
   // Same AbortController-on-stream-cancel pattern as chat.ts. The
   // kernel RPC fast path doesn't expose request.signal, so we mint
   // our own and abort when the response body is cancelled.
-  const ac = new AbortController();
-  const stream = await buildWizardStream(input, ac.signal);
+    const ac = new AbortController();
+    const stream = await buildWizardStream(input, ac.signal);
 
-  const baseResponse = createUIMessageStreamResponse({ stream });
-  if (!baseResponse.body) return baseResponse;
+    const baseResponse = createUIMessageStreamResponse({ stream });
+    if (!baseResponse.body) return baseResponse;
 
-  const wrapped = new ReadableStream({
-    async start(controller) {
-      const reader = baseResponse.body!.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          controller.enqueue(value);
+    const wrapped = new ReadableStream({
+      async start(controller) {
+        const reader = baseResponse.body!.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+          controller.close();
+        } catch (err) {
+          controller.error(err);
         }
-        controller.close();
-      } catch (err) {
-        controller.error(err);
-      }
-    },
-    cancel(reason) {
-      ac.abort(reason);
-    },
-  });
+      },
+      cancel(reason) {
+        ac.abort(reason);
+      },
+    });
 
-  return new Response(wrapped, {
-    status: baseResponse.status,
-    statusText: baseResponse.statusText,
-    headers: baseResponse.headers,
-  });
-}
-
-wizard.config = { id: "wizard", kind: "mutation", lazy: true };
+    return new Response(wrapped, {
+      status: baseResponse.status,
+      statusText: baseResponse.statusText,
+      headers: baseResponse.headers,
+    });
+  }) as unknown as (input: WizardTurnInput) => AsyncIterable<never>,
+  { id: "wizard", lazy: true },
+) as unknown as (input: WizardTurnInput) => Promise<Response>;

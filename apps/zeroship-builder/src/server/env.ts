@@ -1,3 +1,4 @@
+"use server";
 // Server-side env access. The zeroship runtime exposes user-set vars
 // via the `env` import; these helpers normalize defaults so the
 // rest of the server code reads from one place.
@@ -28,16 +29,11 @@ function readEnv(key: string, fallback: string): string {
 }
 
 export const CONTROL_URL  = () => readEnv("CONTROL_URL",  "http://localhost:9090");
-CONTROL_URL.config = { id: "env.CONTROL_URL" };
 
 export const CONTROL_KEY  = () => readEnv("CONTROL_KEY",  "dev-master-key");
-CONTROL_KEY.config = { id: "env.CONTROL_KEY" };
 
 export const SANDBOX_URL  = () => readEnv("SANDBOX_URL",  "http://localhost:9091");
-SANDBOX_URL.config = { id: "env.SANDBOX_URL" };
 
 export const SANDBOX_TOKEN = () => readEnv("SANDBOX_TOKEN", "test");
-SANDBOX_TOKEN.config = { id: "env.SANDBOX_TOKEN" };
 
 export const OPENAI_API_KEY = () => readEnv("OPENAI_API_KEY", "");
-OPENAI_API_KEY.config = { id: "env.OPENAI_API_KEY" };

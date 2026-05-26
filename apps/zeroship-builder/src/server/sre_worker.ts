@@ -31,6 +31,7 @@
 //     body: { json: { appId: string } }
 //     response: { findings: SREFindingItem[] }
 
+import { action } from "@zeroship/rpc/server";
 import { z } from "zod";
 
 import { SRE_PROMPT } from "./_prompts.js";
@@ -99,7 +100,9 @@ export interface SREMonitorInput {
  * OPENAI_API_KEY so the caller sees a real error rather than a silent
  * empty findings array.
  */
-export async function sreMonitor(input: SREMonitorInput): Promise<SREMonitorResult> {
+export const sreMonitor = action(async (
+  input: SREMonitorInput,
+): Promise<SREMonitorResult> => {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error(
@@ -116,7 +119,9 @@ export async function sreMonitor(input: SREMonitorInput): Promise<SREMonitorResu
   // "no logs available" rather than throwing. The model is told
   // what's missing so it returns an empty findings array (or an info-
   // severity "insufficient data" finding) instead of guessing.
-  const logs = await getAppLogs(input.appId).catch(() => null);
+  const logs = await Promise.resolve()
+    .then(() => getAppLogs(input.appId))
+    .catch(() => null);
 
   const contextText = renderHealthContext({
     appId: input.appId,
@@ -145,8 +150,7 @@ export async function sreMonitor(input: SREMonitorInput): Promise<SREMonitorResu
   ]);
 
   return result;
-}
-sreMonitor.config = { id: "sre.monitor" };
+}, { id: "sre.monitor" });
 
 // --- helpers --------------------------------------------------------
 

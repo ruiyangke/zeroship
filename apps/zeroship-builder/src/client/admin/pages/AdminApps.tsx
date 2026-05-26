@@ -11,7 +11,7 @@ import { StatusPill } from "../../components/Kpi";
 type Filter = "all" | "live" | "draft";
 
 export function AdminApps() {
-  const { data: apps } = useQuery({ queryKey: ["admin", "apps"], queryFn: listApps });
+  const { data: apps } = useQuery({ queryKey: ["admin", "apps"], queryFn: () => listApps() });
   const [filter, setFilter] = useState<Filter>("all");
   const [q, setQ] = useState("");
 

@@ -19,7 +19,7 @@ export default function Login() {
   const oauthError = params.get("error");
 
   const loginMut = useMutation({
-    mutationFn: () => apiLogin({ email, password }),
+    mutationFn: async () => apiLogin({ email, password }),
     onSuccess: async () => {
       await refresh();
       navigate(returnTo, { replace: true });

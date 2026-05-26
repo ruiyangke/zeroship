@@ -43,15 +43,15 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const upgrade = useMutation({
-    mutationFn: (plan: string) => updatePlan(appId, plan),
+    mutationFn: async (plan: string) => updatePlan({ appId, plan_id: plan }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["app", appId] }),
   });
   const del = useMutation({
-    mutationFn: () => deleteApp(appId),
+    mutationFn: async () => deleteApp(appId),
     onSuccess: () => navigate("/", { replace: true }),
   });
   const archive = useMutation({
-    mutationFn: () => archiveApp({ appId }),
+    mutationFn: async () => archiveApp({ appId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["apps"] });
       qc.invalidateQueries({ queryKey: ["app", appId] });
@@ -59,7 +59,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
     },
   });
   const unarchive = useMutation({
-    mutationFn: () => unarchiveApp({ appId }),
+    mutationFn: async () => unarchiveApp({ appId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["apps"] });
       qc.invalidateQueries({ queryKey: ["app", appId] });

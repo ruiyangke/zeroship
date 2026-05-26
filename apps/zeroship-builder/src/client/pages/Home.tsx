@@ -27,11 +27,11 @@ export function Home() {
 
   const { data: apps, isLoading } = useQuery({
     queryKey: ["apps"],
-    queryFn: listApps,
+    queryFn: () => listApps(),
   });
 
   const restore = useMutation({
-    mutationFn: (id: string) => unarchiveApp({ appId: id }),
+    mutationFn: async (id: string) => unarchiveApp({ appId: id }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["apps"] }),
   });
 
@@ -201,4 +201,3 @@ export function Home() {
     </PageFrame>
   );
 }
-

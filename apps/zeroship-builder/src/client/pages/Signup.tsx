@@ -19,7 +19,7 @@ export default function Signup() {
   const returnTo = sanitizeReturn(params.get("return"));
 
   const mut = useMutation({
-    mutationFn: () => apiRegister({ email, password, name }),
+    mutationFn: async () => apiRegister({ email, password, name }),
     onSuccess: async () => {
       await refresh();
       // First signup → run the onboarding intent flow per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.1.
