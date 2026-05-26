@@ -221,7 +221,7 @@ impl Manifest {
             resources,
             schemas: HashMap::new(),
             aliases: HashMap::new(),
-            transformer: Some("superjson".into()),
+            transformer: Some("json".into()),
             assets: HashMap::new(),
             runtime_assets: HashMap::new(),
             asset_version: 0,
