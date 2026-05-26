@@ -23,8 +23,8 @@
  * settled the audit row).
  */
 
-import type { NativeMigration, NativeMigrations } from "./native.js";
-import { getNativeMigrations, toNativeError } from "./native.js";
+import type { NativeMigration, NativeMigrations } from "./native";
+import { getNativeMigrations, toNativeError } from "./native";
 import type {
   DeadLetterEntry,
   Migration,
@@ -33,7 +33,7 @@ import type {
   Result,
   RunOptions,
   RunResult,
-} from "./types.js";
+} from "./types";
 
 /**
  * Run a migration to completion (or to a terminal failure). Always

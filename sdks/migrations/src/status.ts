@@ -9,15 +9,15 @@
  * `MIG_LOCK`.
  */
 
-import type { NativeMigrations } from "./native.js";
-import { getNativeMigrations, toNativeError } from "./native.js";
+import type { NativeMigrations } from "./native";
+import { getNativeMigrations, toNativeError } from "./native";
 import type {
   Migration,
   MigrationStatus,
   MigrationStatusSnapshot,
   PlainObject,
   Result,
-} from "./types.js";
+} from "./types";
 
 export async function statusOf<Row extends PlainObject, Update extends PlainObject>(
   migration: Migration<Row, Update>,

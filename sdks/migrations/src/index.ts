@@ -28,7 +28,7 @@
 
 "use server";
 
-export { defineMigration } from "./define.js";
+export { defineMigration } from "./define";
 
 export type {
   Migration,
@@ -39,15 +39,15 @@ export type {
   Result,
   RunOptions,
   RunResult,
-} from "./types.js";
-export type { DefineMigrationInput } from "./define.js";
-export type { NativeMigrations } from "./native.js";
+} from "./types";
+export type { DefineMigrationInput } from "./define";
+export type { NativeMigrations } from "./native";
 
-import type { Migration, PlainObject, Result, RunOptions, RunResult, MigrationStatusSnapshot } from "./types.js";
-import type { NativeMigrations } from "./native.js";
-import { runMigration } from "./run.js";
-import { statusOf } from "./status.js";
-import { cancelMigration, resetMigration } from "./cancel.js";
+import type { Migration, PlainObject, Result, RunOptions, RunResult, MigrationStatusSnapshot } from "./types";
+import type { NativeMigrations } from "./native";
+import { runMigration } from "./run";
+import { statusOf } from "./status";
+import { cancelMigration, resetMigration } from "./cancel";
 
 /**
  * Convenience namespace mirroring the proposal's surface

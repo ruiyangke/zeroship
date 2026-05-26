@@ -10,9 +10,9 @@
  * after a `cancelled` or `failed` run.
  */
 
-import type { NativeMigrations } from "./native.js";
-import { getNativeMigrations, toNativeError } from "./native.js";
-import type { Migration, PlainObject, Result } from "./types.js";
+import type { NativeMigrations } from "./native";
+import { getNativeMigrations, toNativeError } from "./native";
+import type { Migration, PlainObject, Result } from "./types";
 
 export async function cancelMigration<Row extends PlainObject, Update extends PlainObject>(
   migration: Migration<Row, Update>,

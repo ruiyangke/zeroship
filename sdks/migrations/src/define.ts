@@ -7,7 +7,7 @@
  * persisted cursor by `(collection, name)`.
  */
 
-import type { Migration, MigrateContext, PlainObject } from "./types.js";
+import type { Migration, MigrateContext, PlainObject } from "./types";
 
 /** Input shape — mirrors `Migration` but lets callers omit defaults. */
 export interface DefineMigrationInput<

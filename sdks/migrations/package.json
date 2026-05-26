@@ -2,26 +2,25 @@
   "name": "@zeroship/migrations",
   "version": "0.1.0",
   "description": "Online data-backfill orchestrator for zeroship apps",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zeroship-dev/zeroship",
+    "url": "git+https://github.com/zeroship-dev/zeroship.git",
     "directory": "sdks/migrations"
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
+      "import": "./dist/index.js"
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsup",
+    "lint:pkg": "publint && attw --pack .",
     "prepublishOnly": "npm run build && npm test",
     "test": "node --import tsx --test tests/*.test.ts"
   },
@@ -29,6 +28,9 @@
     "@zeroship/types": "workspace:*"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "zeroship": "workspace:*"
