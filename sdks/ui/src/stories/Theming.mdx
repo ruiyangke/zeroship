@@ -1,5 +1,5 @@
-import { Meta, Canvas, Controls, Source } from "@storybook/blocks";
-import { Button, ThemeProvider } from "../index";
+import { Meta } from "@storybook/blocks";
+import { Button } from "../index";
 
 <Meta title="Foundations/Theming" />
 
@@ -57,10 +57,10 @@ Add a new `[data-theme="name"]` block in `styles.css`, provide every contract
 key, add the name to `themes` and `themeLabels`, then add it to the Storybook
 toolbar. Components do not change.
 
-<Canvas>
-  <div className="zs-story-row">
-    <Button>Primary action</Button>
-    <Button variant="secondary">Secondary</Button>
-    <Button variant="ghost">Ghost</Button>
-  </div>
-</Canvas>
+The same markup below restyles as you flip the toolbar theme:
+
+<div className="zs-story-row" style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", padding: "1.5rem", background: "var(--zs-surface)", borderRadius: "var(--zs-radius-md)", border: "1px solid var(--zs-rule)" }}>
+  <Button>Primary action</Button>
+  <Button variant="secondary">Secondary</Button>
+  <Button variant="ghost">Ghost</Button>
+</div>
