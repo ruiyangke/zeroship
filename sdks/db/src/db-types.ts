@@ -48,8 +48,8 @@
  * - `env.db.transaction(fn)` itself → `Promise<Result<R>>` — never throws.
  */
 
-import type { Collection } from "./collection.js";
-import type { LiveOptions, LiveQuery } from "./live.js";
+import type { Collection } from "./collection";
+import type { LiveOptions, LiveQuery } from "./live";
 import type {
   PlainObject,
   Result,
@@ -62,7 +62,7 @@ import type {
   WithRelations,
   SchemaBuilder,
   TypeBuilder,
-} from "./types.js";
+} from "./types";
 
 // ---------------------------------------------------------------------------
 // Schema-shape input (used by bootstrap's installSchema, also exposed
@@ -139,14 +139,14 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
       id: string;
       columns: readonly (string & keyof Row<S>)[];
     }>,
-    opts: { actor: import("./types.js").Actor; reason?: string },
+    opts: { actor: import("./types").Actor; reason?: string },
   ): Promise<Map<string, Record<string, unknown>>>;
   search(
     args:
       | {
           vector: number[];
           k?: number;
-          metric?: import("./types.js").VectorMetric;
+          metric?: import("./types").VectorMetric;
           column?: string;
           filter?: Filter<S>;
         }

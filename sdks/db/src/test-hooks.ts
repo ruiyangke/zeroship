@@ -14,9 +14,9 @@
 export {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
-} from "./collection.js";
+} from "./collection";
 
 export {
   __zeroshipDbResetAccShapeWarnings,
   __zeroshipDbWarnedAccShapesSize,
-} from "./utils.js";
+} from "./utils";

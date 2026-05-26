@@ -15,28 +15,28 @@
  * main `@zeroship/db` entry user-facing while making the coupling
  * explicit at the import site.
  */
-export { Collection } from "./collection.js";
-export { captureNativeTransaction } from "./native.js";
+export { Collection } from "./collection";
+export { captureNativeTransaction } from "./native";
 export type {
   NativeDb,
   NativeCollection,
   NativeSubscriptionLike,
   NativeTransactionFn,
-} from "./native.js";
-export { Query } from "./query.js";
-export { createLive } from "./live.js";
-export type { LiveOptions, LiveQuery } from "./live.js";
-export { subscribe } from "./subscribe.js";
-export type { Subscription, SubscriptionEvent } from "./subscribe.js";
+} from "./native";
+export { Query } from "./query";
+export { createLive } from "./live";
+export type { LiveOptions, LiveQuery } from "./live";
+export { subscribe } from "./subscribe";
+export type { Subscription, SubscriptionEvent } from "./subscribe";
 export {
   anyCollectionInTransaction,
   drainCollectionLoaders,
   enterTransactionScope,
   exitTransactionScope,
   readTransactionDepth,
-} from "./tx-state.js";
-export type { TransactionStateCarrier } from "./tx-state.js";
-export { naming, SchemaBuilder, TypeBuilder, ok, err } from "./types.js";
+} from "./tx-state";
+export type { TransactionStateCarrier } from "./tx-state";
+export { naming, SchemaBuilder, TypeBuilder, ok, err } from "./types";
 export type {
   NamingStrategy,
   NamedIndexSpec,
@@ -50,8 +50,8 @@ export type {
   WithSpec,
   WithRelations,
   FieldDef,
-} from "./types.js";
-export type { NormalizedSchema } from "./schema.js";
+} from "./types";
+export type { NormalizedSchema } from "./schema";
 
 // Test-only hooks — exposed here (subpath, not public ./) so tests
 // reaching into Collection's warning state hit the SAME module
@@ -61,24 +61,24 @@ export type { NormalizedSchema } from "./schema.js";
 export {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
-} from "./collection.js";
+} from "./collection";
 export {
   __zeroshipDbResetAccShapeWarnings,
   __zeroshipDbWarnedAccShapesSize,
-} from "./utils.js";
+} from "./utils";
 
 // Internal validation entry points — used by the c2-union tests which
 // exercise the validator against synthetic schemas without going
 // through Collection.{insert,update}. Same module-identity logic as
 // the warning hooks above.
-export { validateDoc, checkPartial } from "./validate.js";
+export { validateDoc, checkPartial } from "./validate";
 
 // Aggregate-pipeline translator — used by warned-acc-shapes-cap to
 // drive the dedup state the matching internal getter inspects.
-export { translateAggregatePipeline } from "./utils.js";
+export { translateAggregatePipeline } from "./utils";
 
 // P5.5 PR 5 — defineMaskPolicy() pending-slot drain. The bootstrap
 // runtime-entry calls `_flushPendingMaskPolicy()` once at app init and
 // flushes the returned policy through `zeroship.db.setMaskPolicy`.
-export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy.js";
-export type { MaskPolicy } from "./policy.js";
+export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy";
+export type { MaskPolicy } from "./policy";

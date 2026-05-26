@@ -365,18 +365,18 @@ export const naming = {
 /** Persisted-row type for a Collection — `Row<S>` for `Collection<S, _>`. */
 export type InferRow<C> =
   C extends { readonly _schema_brand?: infer S } ? Row<S> :
-  C extends import("./collection.js").Collection<infer S, any> ? Row<S> :
+  C extends import("./collection").Collection<infer S, any> ? Row<S> :
   never;
 
 /** Insert-shape type for a Collection — `RowInput<S>` for `Collection<S, _>`. */
 export type InferRowInput<C> =
   C extends { readonly _schema_brand?: infer S } ? RowInput<S> :
-  C extends import("./collection.js").Collection<infer S, any> ? RowInput<S> :
+  C extends import("./collection").Collection<infer S, any> ? RowInput<S> :
   never;
 
 /** Branded `Id<N>` for a Collection — `Id<"users">` for `Collection<_, "users">`. */
 export type InferId<C> =
-  C extends import("./collection.js").Collection<any, infer N extends string> ? Id<N> :
+  C extends import("./collection").Collection<any, infer N extends string> ? Id<N> :
   never;
 
 /**
@@ -983,6 +983,9 @@ export interface FieldDef {
   timestampAuto?: "now" | "now_on_update";
 }
 
+const TYPE_BUILDER_BRAND = Symbol.for("@zeroship/db/TypeBuilder");
+const SCHEMA_BUILDER_BRAND = Symbol.for("@zeroship/db/SchemaBuilder");
+
 /**
  * Fluent builder for a single field definition.
  *
@@ -1022,7 +1025,18 @@ export class TypeBuilder<
   /** @internal Type-level brand for `.default()`-backed insert optionality. */
   declare readonly _hasDefault: D;
 
+  readonly [TYPE_BUILDER_BRAND] = true;
+
   private _def: FieldDef;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return Boolean(
+      value &&
+        typeof value === "object" &&
+        (value as Record<PropertyKey, unknown>)[TYPE_BUILDER_BRAND] === true &&
+        typeof (value as { toFieldDef?: unknown }).toFieldDef === "function",
+    );
+  }
 
   constructor(def: FieldDef) {
     this._def = { ...def };
@@ -1986,9 +2000,20 @@ export interface NamedIndexSpec {
  * Use `schema({ ... }).softDelete()` to enable soft delete for a specific collection.
  */
 export class SchemaBuilder<S> {
+  readonly [SCHEMA_BUILDER_BRAND] = true;
+
   readonly fields: S;
   private _options: SchemaOptions;
   private _indexes: NamedIndexSpec[];
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return Boolean(
+      value &&
+        typeof value === "object" &&
+        (value as Record<PropertyKey, unknown>)[SCHEMA_BUILDER_BRAND] === true &&
+        "fields" in value,
+    );
+  }
 
   constructor(fields: S) {
     this.fields = fields;

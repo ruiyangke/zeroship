@@ -1,4 +1,4 @@
-import type { IdLoader } from "./loader.js";
+import type { IdLoader } from "./loader";
 
 type LoaderRow = { id: string };
 

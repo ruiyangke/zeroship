@@ -6,15 +6,15 @@
  *   // base runtime only:
  *   //   tsconfig.json: { "types": ["@zeroship/types"] }
  *   // typed env.db collections:
- *   //   tsconfig.json: { "types": ["@zeroship/types", "@zeroship/db/env"] }
+ *   //   const db = env.db as Db<typeof schema>
  *
  * The entry is the `"zeroship"` module declaration in `zeroship.d.ts`:
  * SDK code does `import { env } from "zeroship"` and reads plugin
  * namespaces off `env.db`, `env.auth`, etc. The native interface shapes
  * in `db.d.ts` / `auth.d.ts` are the authoritative spec for the plugin
  * namespaces surfaced on `env.*`. The higher-level `env.db.<collection>`
- * schema narrowing lives in `@zeroship/db/env`; include both packages in
- * tsconfig `"types"` for typed application collections.
+ * schema narrowing lives in the public `Db<TSchema>` type from
+ * `@zeroship/db`.
  */
 
 /// <reference path="shared.d.ts" />

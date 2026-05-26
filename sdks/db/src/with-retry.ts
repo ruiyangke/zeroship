@@ -1,4 +1,4 @@
-import { readCanonicalErrorCode } from "./errors.js";
+import { readCanonicalErrorCode } from "./errors";
 
 /**
  * `withRetry` — a small helper for the optimistic-concurrency retry

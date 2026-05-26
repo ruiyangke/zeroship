@@ -47,7 +47,7 @@
  * Rust-time, belt-and-braces — see
  * `crates/plugin-db/src/crud/unmask.rs::dispatch_set_mask_policy`).
  */
-import type { Classification } from "./types.js";
+import type { Classification } from "./types";
 
 /**
  * **P5.5 PR 5** — actor-role → allowed classifications map.
@@ -82,18 +82,31 @@ const VALID_CLASSIFICATIONS: readonly Classification[] = [
   "internal",
 ];
 
+const MASK_POLICY_STATE = Symbol.for("@zeroship/db/MaskPolicyState");
+
+type MaskPolicyState = {
+  pendingPolicy: MaskPolicy | null;
+};
+
+function policyState(): MaskPolicyState {
+  const global = globalThis as unknown as Record<PropertyKey, MaskPolicyState | undefined>;
+  return (global[MASK_POLICY_STATE] ??= { pendingPolicy: null });
+}
+
 /**
  * Holding slot for the policy declared by `defineMaskPolicy()` — the
  * SDK bootstrap (`@zeroship/bootstrap`) reads this once at app init
  * via `_flushPendingMaskPolicy()` and flushes through the native op.
  *
- * Module-local — never exposed. Re-declaring policy in the same
- * process overwrites: the platform's mask policy is single-shot at
- * boot. A second call after `_flushPendingMaskPolicy()` returned the
- * previous one is honored on the next flush; calls after the first
- * request reaches the dispatcher have no effect (no second flush).
+ * The slot is keyed on `globalThis` so the public `@zeroship/db` entry
+ * and framework-internal `@zeroship/db/internal` entry share policy
+ * state even when they are published as separate bundled ESM files.
+ * Re-declaring policy in the same process overwrites: the platform's
+ * mask policy is single-shot at boot. A second call after
+ * `_flushPendingMaskPolicy()` returned the previous one is honored on
+ * the next flush; calls after the first request reaches the dispatcher
+ * have no effect (no second flush).
  */
-let _pendingPolicy: MaskPolicy | null = null;
 
 /**
  * **P5.5 PR 5** — declare the per-app mask policy. See module-level
@@ -141,7 +154,7 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
   for (const [role, classifications] of Object.entries(policy)) {
     cloned[role] = [...classifications];
   }
-  _pendingPolicy = cloned;
+  policyState().pendingPolicy = cloned;
 }
 
 /**
@@ -159,8 +172,9 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
  *   own flush and leave the policy unflushed.
  */
 export function _flushPendingMaskPolicy(): MaskPolicy | null {
-  const p = _pendingPolicy;
-  _pendingPolicy = null;
+  const state = policyState();
+  const p = state.pendingPolicy;
+  state.pendingPolicy = null;
   return p;
 }
 
@@ -172,5 +186,5 @@ export function _flushPendingMaskPolicy(): MaskPolicy | null {
  * @internal
  */
 export function _peekPendingMaskPolicy(): MaskPolicy | null {
-  return _pendingPolicy;
+  return policyState().pendingPolicy;
 }

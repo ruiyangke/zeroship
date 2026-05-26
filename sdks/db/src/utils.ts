@@ -4,7 +4,7 @@
  * All field↔column mapping is driven by the NamingStrategy passed from Collection.
  * Contains aggregate pipeline translation (MongoDB → native format).
  */
-import { PlainObject } from "./types.js";
+import { PlainObject } from "./types";
 
 // ---------------------------------------------------------------------------
 // Document mapping (native → user)

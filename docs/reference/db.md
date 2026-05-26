@@ -48,32 +48,21 @@ export const listAdmins = query(async () => {
 
 ### TypeScript: typed `env.db`
 
-To make `env.db.<name>` strongly typed against your schema, add this to
-your project's `tsconfig.json`:
+To make `env.db.<name>` strongly typed against your schema, cast the
+runtime handle to `Db<typeof schema>` at the app boundary:
 
-```json
-{
-  "compilerOptions": {
-    "types": ["@zeroship/types", "@zeroship/db/env"],
-    "paths": {
-      "zeroship-schema": ["./src/index.ts"]
-    }
-  }
-}
+```ts
+import { env } from "zeroship";
+import { type Db } from "@zeroship/db";
+import schema from "./schema";
+
+const db = env.db as Db<typeof schema>;
 ```
 
-`@zeroship/types` declares the base `zeroship` runtime module.
-`@zeroship/db/env` reads the user's schema via the `zeroship-schema`
-paths alias and narrows `env.db` from the bare native handle to a typed
-`Db<typeof schema>` — so `env.db.users.find(...)` typechecks against
-the declared fields. The alias can point at either the app entry module
-(`default = { schema }`) or a schema-only module whose default export is
-the bare collection map.
-
-Keep this augmentation opt-in. The root `@zeroship/db` package is the
-plain TypeScript SDK surface (`t`, `schema`, `RowOf`, `Db`, etc.) and
-does not require a Zeroship app entry module, so it can be imported by
-ordinary TypeScript projects, shared packages, and tests.
+`@zeroship/types` declares the base `zeroship` runtime module. The
+public `@zeroship/db` entry exports `Db<TSchema>`, `RowOf`, `RowInputOf`,
+and the schema builders, so ordinary TypeScript projects, shared
+packages, and tests can import the SDK without a virtual schema module.
 
 ### Split-file schemas
 
@@ -95,19 +84,8 @@ import schema from "./schema.ts";
 export default { schema };
 ```
 
-When using a split schema file, point the `zeroship-schema` alias at
-that schema-only module:
-
-```json
-{
-  "compilerOptions": {
-    "types": ["@zeroship/types", "@zeroship/db/env"],
-    "paths": {
-      "zeroship-schema": ["./src/schema.ts"]
-    }
-  }
-}
-```
+When using a split schema file, import that schema and cast the runtime
+handle once near the app entry.
 
 The runtime's bootstrap (`sdks/bootstrap/src/runtime-entry.ts`, embedded
 into the runtime crate at compile time via `crates/runtime/src/core/init.rs::DB_INIT_JS`)
@@ -477,7 +455,7 @@ const { data } = await db.todos.find({}, {
 #### v1 limitations (future work)
 
 - **Standalone models degrade.** When `env.db` is schema-typed through
-  `@zeroship/db/env`, joined fields narrow to the referenced row type.
+  `Db<typeof schema>`, joined fields narrow to the referenced row type.
   Standalone `model()` callers that do not carry a parent schema map
   still degrade joined fields to `PlainObject | null`.
 - **No projection narrowing.** Drizzle / Prisma support

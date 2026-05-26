@@ -1,5 +1,5 @@
-import type { NormalizedSchema } from "../schema.js";
-import type { PlainObject } from "../types.js";
+import type { NormalizedSchema } from "../schema";
+import type { PlainObject } from "../types";
 
 /**
  * **P5 PR 2** — operators allowed on a `deterministic`-encrypted column.
