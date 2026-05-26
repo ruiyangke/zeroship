@@ -41,4 +41,14 @@ zstd -dc examples/<demo>/dist/app.zship | tar -xf - -O manifest.json | jq .
 
 ## Other examples in this directory
 
-The `*.js` and other folders alongside these three are older single-file or framework-less examples that don't go through the vite-plugin pipeline. They predate the `.zship` format and exist for legacy CLI testing (`zeroship serve <file>.js`).
+The `*.js` files are older framework-less examples that predate the
+`.zship` format and exist for legacy CLI testing (`zeroship serve <file>.js`).
+
+Platform SDK examples:
+
+| Demo | What it shows |
+| ---- | ------------- |
+| [`kv-dashboard/`](./kv-dashboard/) | `@zeroship/kv` JSON values, TTL, counters, leases, namespaced list, and cleanup |
+| [`db-todos/`](./db-todos/) | `@zeroship/db` schema discovery, relations, RPC procedures, and live snapshots |
+| [`db-chat/`](./db-chat/) | reactive DB queries and broker-driven updates |
+| [`db-migrations-playground/`](./db-migrations-playground/) | online data backfills with `@zeroship/migrations` |

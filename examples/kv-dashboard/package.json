@@ -1,0 +1,28 @@
+{
+  "name": "kv-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "smoke": "bash scripts/smoke.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "catalog:",
+    "@zeroship/kv": "workspace:*",
+    "@zeroship/rpc": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*",
+    "react": "catalog:react18",
+    "react-dom": "catalog:react18"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:react18",
+    "@types/react-dom": "catalog:react18",
+    "@zeroship/types": "workspace:*",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "zeroship": "workspace:*"
+  }
+}
