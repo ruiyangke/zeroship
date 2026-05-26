@@ -2,11 +2,13 @@
   "name": "@zeroship/bootstrap",
   "version": "0.1.0",
   "description": "Framework-internal coordination package for zeroship — schema install, RPC dispatch, dev/prod entry shims. User code MUST NOT import this; Vite plugin and runtime crate are the consumers.",
-  "private": true,
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

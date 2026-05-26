@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "React bindings for @zeroship/db reactive queries — useQuery hook + Suspense variant on top of the broker subscription surface (P8b stage 4).",
   "type": "module",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

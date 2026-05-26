@@ -1,18 +1,33 @@
 {
   "name": "@zeroship/payments",
   "version": "0.1.0",
-  "private": true,
+  "description": "Payments SDK for zeroship — Stripe Checkout and webhook helpers",
   "type": "module",
-  "main": "src/index.ts",
-  "exports": {
-    ".": "./src/index.ts",
-    "./testing": "./src/testing.ts"
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
   },
-  "files": ["src"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "tsup",
     "test": "vitest run"
   },
   "devDependencies": {
+    "tsup": "^8.5.1",
     "typescript": "catalog:",
     "vitest": "^2.1.0"
   }

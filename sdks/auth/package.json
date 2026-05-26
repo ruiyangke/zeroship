@@ -4,6 +4,9 @@
   "description": "Auth SDK for zeroship — platform-managed authentication",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

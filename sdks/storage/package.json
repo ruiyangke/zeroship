@@ -4,6 +4,9 @@
   "description": "Object-storage SDK for zeroship — files, uploads, binary data",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zeroship-dev/zeroship.git",

@@ -6,6 +6,9 @@
   "bin": {
     "create-zeroship-app": "bin/create.js"
   },
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "files": [
     "bin",
     "template"

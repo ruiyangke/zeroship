@@ -7,6 +7,29 @@
 #   docker compose down -v                        # tear down
 
 services:
+  verdaccio:
+    image: verdaccio/verdaccio:6
+    command:
+      - verdaccio
+      - --config
+      - /verdaccio/conf/config.yaml
+      - --listen
+      - 0.0.0.0:4873
+    ports:
+      - "4873:4873"
+    volumes:
+      - ./config/verdaccio/config.yaml:/verdaccio/conf/config.yaml:ro
+      - verdaccio_storage:/verdaccio/conf/storage
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4873/-/ping').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
   postgres:
     image: postgres:16
     environment:
@@ -130,3 +153,4 @@ networks:
 
 volumes:
   bundles:
+  verdaccio_storage:

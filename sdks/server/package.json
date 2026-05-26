@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Server-side helpers for zeroship apps — defineApp, zod convenience, ambient runtime substrate",
   "type": "module",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

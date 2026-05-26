@@ -3,6 +3,29 @@
   "version": "0.1.0",
   "description": "TypeScript declarations for the zeroship runtime globals",
   "types": "globals.d.ts",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
+  "exports": {
+    ".": {
+      "types": "./globals.d.ts"
+    },
+    "./auth": {
+      "types": "./auth.d.ts"
+    },
+    "./db": {
+      "types": "./db.d.ts"
+    },
+    "./globals": {
+      "types": "./globals.d.ts"
+    },
+    "./shared": {
+      "types": "./shared.d.ts"
+    },
+    "./zeroship": {
+      "types": "./zeroship.d.ts"
+    }
+  },
   "files": ["globals.d.ts", "zeroship.d.ts", "shared.d.ts", "db.d.ts", "auth.d.ts"],
   "license": "MIT"
 }

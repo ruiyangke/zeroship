@@ -13,6 +13,7 @@ perf.data
 perf-compio.data
 .worktrees/
 .superpowers/
+config/verdaccio/storage/
 
 # Local dev state: `zeroship serve` writes the default redb KV file
 # (`./.zeroship/kv.redb` + lock) and the storage root (`.zeroship/storage`)

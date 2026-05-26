@@ -4,6 +4,9 @@
   "description": "Online data-backfill orchestrator for zeroship apps",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zeroship-dev/zeroship.git",

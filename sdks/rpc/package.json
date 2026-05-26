@@ -1,9 +1,11 @@
 {
   "name": "@zeroship/rpc",
   "version": "0.1.0",
-  "private": true,
   "description": "Zeroship RPC client, server wrappers, and shared inferred-contract types",
   "type": "module",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "exports": {
     "./client": {
       "types": "./dist/index.d.ts",
