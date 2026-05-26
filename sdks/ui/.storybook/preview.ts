@@ -51,7 +51,11 @@ const preview: Preview = {
     docs: {
       toc: true,
     },
-    layout: "centered",
+    // The story decorator (.zs-story-main) is full-bleed by design — it paints the
+    // theme surface and centers content itself (min-height:100vh, place-items:center).
+    // "fullscreen" lets it fill the canvas; "centered" shrink-wrapped it to content
+    // width, leaving the themed area a narrow strip with large blank gutters.
+    layout: "fullscreen",
   },
 };
 
