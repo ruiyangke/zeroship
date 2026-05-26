@@ -209,6 +209,7 @@ echo "[m0] starting worker"
   --workers 2 \
   --control "$CONTROL_URL" \
   --control-key "$CONTROL_KEY" \
+  --blob-store "$STATE_DIR/bundles" \
   --poll-interval 2 \
   > "$LOG_DIR/worker.log" 2>&1 &
 PIDS+=("$!")
@@ -219,6 +220,7 @@ echo "[m0] starting gateway"
   --control "$CONTROL_URL" \
   --control-key "$CONTROL_KEY" \
   --workers "http://localhost:$WORKER_PORT" \
+  --blob-store "$STATE_DIR/bundles" \
   --poll-interval 2 \
   > "$LOG_DIR/gateway.log" 2>&1 &
 PIDS+=("$!")
