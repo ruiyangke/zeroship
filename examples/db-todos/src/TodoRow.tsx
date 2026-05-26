@@ -39,7 +39,6 @@ const TrashIcon = () => (
 
 export type TodoRowProps = {
   todo: Todo;
-  index: number;
   removing: boolean;
   onSetDone: (done: boolean) => void;
   onArchive: () => void;
@@ -48,7 +47,6 @@ export type TodoRowProps = {
 
 export function TodoRow({
   todo,
-  index,
   removing,
   onSetDone,
   onArchive,
@@ -58,8 +56,9 @@ export function TodoRow({
 
   return (
     <li
-      className={`item ${todo.done ? "done" : ""} ${removing ? "leaving" : ""} ${pending ? "pending" : ""}`}
-      style={{ animationDelay: `${Math.min(index, 14) * 28}ms` }}
+      className={`item ${todo.done ? "done" : ""} ${removing ? "leaving" : ""} ${
+        pending ? "pending entering" : ""
+      }`}
     >
       <button
         className="box"

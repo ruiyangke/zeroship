@@ -26,6 +26,106 @@ async function addTodo(page: Page, { priority = "high" }: { priority?: "low" | "
   return title;
 }
 
+test("initial load does not duplicate bootstrap RPCs", async ({ page }) => {
+  const counts = { publicUser: 0, listTodos: 0 };
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/_zs/v1/users.public") counts.publicUser += 1;
+    if (url.pathname === "/_zs/v1/todos.list") counts.listTodos += 1;
+  });
+
+  await bootedPage(page);
+  await expect(page.locator(".live.on")).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => counts.publicUser, { timeout: 5_000 }).toBe(1);
+  await expect.poll(() => counts.listTodos, { timeout: 5_000 }).toBe(1);
+  await page.waitForTimeout(900);
+
+  expect(counts.publicUser).toBe(1);
+  expect(counts.listTodos).toBe(1);
+});
+
+test("todo stream emits one snapshot for one committed create", async ({ page }) => {
+  await bootedPage(page);
+  const title = uniq("stream");
+
+  const frames = await page.evaluate(async (todoTitle) => {
+    const unwrap = (value: unknown): unknown => {
+      if (value && typeof value === "object" && "json" in value) {
+        return (value as { json: unknown }).json;
+      }
+      return value;
+    };
+    const postJson = async (id: string, input: unknown, accept = "application/json") => {
+      const res = await fetch(`/_zs/v1/${id}`, {
+        method: "POST",
+        headers: { accept, "content-type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      if (!res.ok) throw new Error(`${id} failed: ${res.status}`);
+      return res;
+    };
+
+    const userRes = await postJson("users.public", {});
+    const user = unwrap(await userRes.json()) as { id: string };
+
+    const controller = new AbortController();
+    const streamRes = await fetch("/_zs/v1/todos.subscribe", {
+      method: "POST",
+      headers: { accept: "text/event-stream", "content-type": "application/json" },
+      body: JSON.stringify({ userId: user.id }),
+      signal: controller.signal,
+    });
+    if (!streamRes.ok || !streamRes.body) {
+      throw new Error(`todos.subscribe failed: ${streamRes.status}`);
+    }
+
+    const reader = streamRes.body.getReader();
+    const decoder = new TextDecoder();
+    const lines: string[] = [];
+    let buffered = "";
+    const pump = (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffered += decoder.decode(value, { stream: true });
+          for (;;) {
+            const idx = buffered.indexOf("\n");
+            if (idx < 0) break;
+            const line = buffered.slice(0, idx).trim();
+            buffered = buffered.slice(idx + 1);
+            if (line) lines.push(line);
+          }
+        }
+      } catch {
+        /* abort closes the reader */
+      }
+    })();
+
+    const waitFor = async (predicate: () => boolean, timeoutMs: number) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error(`timed out waiting for stream frames: ${lines.join("\n")}`);
+    };
+
+    await waitFor(() => lines.some((line) => line.startsWith("2:")), 5_000);
+    await postJson("todos.create", { userId: user.id, title: todoTitle, priority: "low" });
+    await waitFor(() => lines.some((line) => line.includes(todoTitle)), 5_000);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    controller.abort();
+    await reader.cancel().catch(() => undefined);
+    await pump;
+
+    return lines.filter((line) => line.includes(todoTitle));
+  }, title);
+
+  expect(frames).toHaveLength(1);
+});
+
 test.describe.serial("db-todos UI", () => {
   let context: BrowserContext;
   let page: Page;

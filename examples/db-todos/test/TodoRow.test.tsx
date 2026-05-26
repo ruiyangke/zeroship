@@ -28,7 +28,7 @@ function renderRow(overrides: Partial<Todo> = {}) {
 
   const view = render(
     <ul>
-      <TodoRow todo={todo(overrides)} index={2} removing={false} {...handlers} />
+      <TodoRow todo={todo(overrides)} removing={false} {...handlers} />
     </ul>,
   );
 
@@ -66,7 +66,6 @@ describe("TodoRow", () => {
       <ul>
         <TodoRow
           todo={todo({ id: "tmp_k1", title: "Optimistic row", priority: "low" })}
-          index={0}
           removing={false}
           onSetDone={vi.fn()}
           onArchive={vi.fn()}
@@ -76,7 +75,7 @@ describe("TodoRow", () => {
     );
 
     const row = screen.getByText("Optimistic row").closest(".item");
-    expect(row).toHaveClass("pending");
+    expect(row).toHaveClass("pending", "entering");
     expect(within(row as HTMLElement).getByRole("button", { name: "mark complete" })).toBeDisabled();
     expect(within(row as HTMLElement).getByRole("button", { name: "archive" })).toBeDisabled();
     expect(within(row as HTMLElement).getByRole("button", { name: "delete" })).toBeDisabled();
