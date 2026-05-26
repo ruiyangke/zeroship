@@ -1,7 +1,7 @@
 "use server";
 // SRE monitor worker — the SCHEDULED-mode half of the SRE agent (spec
 // §4.8.3.2). Mirrors the dual-shape pattern: SRE has a chat SubAgent
-// (`_sre.ts`, dispatched via `task("sre", …)` from Builder) plus a
+// (`internal/sre.ts`, dispatched via `task("sre", …)` from Builder) plus a
 // background worker that scans logs + perf for concerning signals on
 // a cron.
 //
@@ -24,7 +24,7 @@
 // Naming (no underscore prefix): files re-exported by `server.ts` get
 // their exports registered as public RPC procedures. This file IS meant
 // to be public; the underscore opt-out is reserved for internal helpers
-// (`_sre.ts`, `_translator.ts`, etc.).
+// (`internal/sre.ts`, translator helpers, etc.).
 //
 // Wire convention (single-input object):
 //   POST /_zs/v1/sre.monitor
@@ -34,12 +34,12 @@
 import { action } from "@zeroship/rpc/server";
 import { z } from "zod";
 
-import { SRE_PROMPT } from "./_prompts.js";
+import { SRE_PROMPT } from "./internal/prompts.js";
 import { getAppLogs } from "./apps.js";
 
 // ─── finding shape ───────────────────────────────────────────────
 //
-// The chat-mode SRE SubAgent (`_sre.ts`) returns a SINGLE diagnosis
+// The chat-mode SRE SubAgent (`internal/sre.ts`) returns a SINGLE diagnosis
 // per turn (one card per `task("sre", …)` call). The monitor pass is
 // different: it scans a window and may surface 0..N independent
 // findings. Each finding mirrors the SubAgent's response shape (so
@@ -133,7 +133,7 @@ export const sreMonitor = action(async (
   });
 
   // functionCalling vs jsonSchema strict — same rationale as
-  // pm_worker.ts: `related_logs` is `.optional()` and strict mode
+  // pm-worker.ts: `related_logs` is `.optional()` and strict mode
   // would reject without `.nullable()`.
   const model = new ChatOpenAI({
     model: "gpt-5.4-mini",

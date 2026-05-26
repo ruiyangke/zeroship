@@ -5,7 +5,7 @@ import {
   ZeroshipSandboxBackend,
   deriveSandboxProjectId,
   getOrCreateSandboxFor,
-} from "../src/server/_sandbox_backend";
+} from "../src/server/internal/sandbox-backend";
 
 const STEP_TIMEOUT = 120_000;
 const PROJECT_SOURCE = "00000000-0000-7000-8000-0000000000b1";

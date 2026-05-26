@@ -13,13 +13,13 @@
 //  2. New `/sandboxes/:id/...` procedures (listSandboxFiles,
 //     readSandboxFile). These are the ones the FilesCanvas calls and
 //     they take object input so the RPC wire forwards everything.
-//     They reuse `getOrCreateSandboxFor` from `_sandbox_backend.ts`
+//     They reuse `getOrCreateSandboxFor` from `internal/sandbox-backend.ts`
 //     so the FilesCanvas attaches to the same sandbox Builder writes
 //     into — readers see writers' bytes immediately.
 
 import { action } from "@zeroship/rpc/server";
-import { SANDBOX_URL, SANDBOX_TOKEN } from "./env";
-import { getOrCreateSandboxFor } from "./_sandbox_backend";
+import { SANDBOX_URL, SANDBOX_TOKEN } from "./internal/env";
+import { getOrCreateSandboxFor } from "./internal/sandbox-backend";
 
 // The controller's `/sandboxes/:id/*` routes verify ownership via a
 // `?user_id=<id>` query string and 404 on mismatch. Builder's backend

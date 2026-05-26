@@ -37,7 +37,7 @@ import {
 } from "@zeroship/server/typed-id";
 
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./env.js";
-import { userinfo } from "./auth.js";
+import { userinfo } from "../auth.js";
 
 // ─── controller wire shapes (mirrors crates/sandbox/src/handlers.rs) ──
 

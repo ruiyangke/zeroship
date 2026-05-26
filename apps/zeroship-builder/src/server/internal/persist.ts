@@ -49,7 +49,7 @@ async function probeKv(): Promise<boolean> {
     if (!kvWarned) {
       kvWarned = true;
       console.warn(
-        "[zeroship:_persist] @zeroship/kv unavailable — falling back to in-process Map. " +
+        "[zeroship:server/internal/persist] @zeroship/kv unavailable - falling back to in-process Map. " +
           "State will not survive HMR. Reason:",
         e instanceof Error ? e.message : String(e),
       );
@@ -73,14 +73,14 @@ export async function persistGet<T>(key: string, fallback: T): Promise<T> {
         // KV reachable but threw on get (rare — likely a JSON parse
         // failure). Warn and use the fallback.
         console.warn(
-          `[zeroship:_persist] kv.get(${key}) errored: ${r.error.message}`,
+          `[zeroship:server/internal/persist] kv.get(${key}) errored: ${r.error.message}`,
         );
         return fallback;
       }
       return r.data ?? fallback;
     } catch (e) {
       console.warn(
-        `[zeroship:_persist] kv.get(${key}) threw: ${e instanceof Error ? e.message : String(e)}`,
+        `[zeroship:server/internal/persist] kv.get(${key}) threw: ${e instanceof Error ? e.message : String(e)}`,
       );
       return fallback;
     }
@@ -100,13 +100,13 @@ export async function persistSet<T>(key: string, value: T): Promise<void> {
       const r = await kv.set<T>(key, value);
       if (r.error) {
         console.warn(
-          `[zeroship:_persist] kv.set(${key}) errored: ${r.error.message}`,
+          `[zeroship:server/internal/persist] kv.set(${key}) errored: ${r.error.message}`,
         );
       }
       return;
     } catch (e) {
       console.warn(
-        `[zeroship:_persist] kv.set(${key}) threw: ${e instanceof Error ? e.message : String(e)}`,
+        `[zeroship:server/internal/persist] kv.set(${key}) threw: ${e instanceof Error ? e.message : String(e)}`,
       );
       return;
     }
@@ -125,7 +125,7 @@ export async function persistDelete(key: string): Promise<void> {
       return;
     } catch (e) {
       console.warn(
-        `[zeroship:_persist] kv.delete(${key}) threw: ${e instanceof Error ? e.message : String(e)}`,
+        `[zeroship:server/internal/persist] kv.delete(${key}) threw: ${e instanceof Error ? e.message : String(e)}`,
       );
       return;
     }

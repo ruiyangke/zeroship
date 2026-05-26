@@ -78,8 +78,8 @@ import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage, t
 import { stream as rpcStream } from "@zeroship/rpc/server";
 import { z } from "zod";
 
-import { emitDataSurvey, surveyInputSchema, type SurveyInput } from "./_survey_wire.js";
-import { WIZARD_SYSTEM } from "./_prompts.js";
+import { emitDataSurvey, surveyInputSchema, type SurveyInput } from "./internal/survey-wire.js";
+import { WIZARD_SYSTEM } from "./internal/prompts.js";
 
 // --- Wire input ---------------------------------------------------------
 

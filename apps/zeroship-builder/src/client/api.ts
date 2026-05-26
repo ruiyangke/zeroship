@@ -101,20 +101,20 @@ export {
 
 // PM / SRE scheduled-worker procs (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.3.2). Each takes
 // `{appId}` and returns a structured digest / findings payload — see
-// `server/pm_worker.ts` and `server/sre_worker.ts` for the wire shape
+// `server/pm-worker.ts` and `server/sre-worker.ts` for the wire shape
 // and the missing cron infrastructure caveat.
 export {
   pmDigest,
   type PMDigest,
   type PMDigestRecommendationItem,
   type PMDigestInput,
-} from "../server/pm_worker";
+} from "../server/pm-worker";
 export {
   sreMonitor,
   type SREMonitorResult,
   type SREFindingItem,
   type SREMonitorInput,
-} from "../server/sre_worker";
+} from "../server/sre-worker";
 
 export { appPreviewUrl } from "./lib/preview-url";
 

@@ -93,7 +93,7 @@ export type CriticRound = z.infer<typeof criticRoundSchema>;
 // --- Reviewer round indicator (pre-deploy hard-gate) ---
 //
 // Mirrors the server-side `reviewerResponseSchema` in
-// apps/zeroship-builder/src/server/_reviewer.ts. Builder dispatches
+// apps/zeroship-builder/src/server/internal/reviewer.ts. Builder dispatches
 // Reviewer via `task("reviewer", …)` before any deploy or destructive
 // op; the middleware extracts the structured response and emits this
 // chunk. The card renders approval state + blockers list.
@@ -113,7 +113,7 @@ export type ReviewerRound = z.infer<typeof reviewerRoundSchema>;
 // --- PM recommendation card (chat-mode) ---
 //
 // Mirrors the server-side `pmResponseSchema` in
-// apps/zeroship-builder/src/server/_pm.ts. PM is a strategic
+// apps/zeroship-builder/src/server/internal/pm.ts. PM is a strategic
 // product-manager subagent: returns ONE primary recommendation plus
 // up to 2 alternatives.
 export const pmRecommendationItemSchema = z.object({
@@ -133,7 +133,7 @@ export type PMRecommendation = z.infer<typeof pmRecommendationSchema>;
 // --- SRE finding card (chat-mode) ---
 //
 // Mirrors the server-side `sreResponseSchema` in
-// apps/zeroship-builder/src/server/_sre.ts. SRE is a diagnostic
+// apps/zeroship-builder/src/server/internal/sre.ts. SRE is a diagnostic
 // subagent for app health and reliability questions. Severity drives
 // the card's colour ramp.
 export const sreFindingSchema = z.object({

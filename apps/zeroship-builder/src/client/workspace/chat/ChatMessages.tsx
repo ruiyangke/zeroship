@@ -12,7 +12,7 @@
 //   - data-brief                 → <BriefCard> (wizard-only)
 //
 // The translator emits chunks of these types on the wire (see
-// apps/zeroship-builder/src/server/chat.ts and _middleware.ts).
+// apps/zeroship-builder/src/server/chat.ts and internal/middleware.ts).
 // `useChat` from @ai-sdk/react reassembles them into UIMessage.parts[]
 // with stable discriminants — we just type-narrow and render.
 //

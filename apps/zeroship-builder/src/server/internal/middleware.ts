@@ -72,11 +72,11 @@ import { waitUntil } from "zeroship";
 // emit helper is shared with the wizard runtime (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b /
 // §8.2.7). The wizard calls it directly from its node body; Builder
 // goes through this middleware. Same chunk shape on the wire.
-import { emitDataSurvey, type SurveyInput } from "./_survey_wire.js";
-// Quality-scoreboard updater. Lives in `_agent_writes.ts`
+import { emitDataSurvey, type SurveyInput } from "./survey-wire.js";
+// Quality-scoreboard updater. Lives in `agent-writes.ts`
 // (underscore-prefixed) so it stays out of the public RPC surface —
 // only the server middleware writes here.
-import { setQualityFromCritic } from "./_agent_writes.js";
+import { setQualityFromCritic } from "./agent-writes.js";
 
 /**
  * Build a middleware bound to a specific v6 stream writer. The middleware
@@ -224,7 +224,7 @@ export async function dataPartMiddleware(
                 waitUntil(
                   setQualityFromCritic(appId, round.issues).catch((e) => {
                     console.warn(
-                      `[zeroship:_middleware] setQualityFromCritic threw: ${
+                      `[zeroship:server/internal/middleware] setQualityFromCritic threw: ${
                         e instanceof Error ? e.message : String(e)
                       }`,
                     );

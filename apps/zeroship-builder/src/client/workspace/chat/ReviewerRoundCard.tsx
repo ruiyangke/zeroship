@@ -1,6 +1,6 @@
 // Pre-deploy hard-gate card. Builder dispatches Reviewer via
 // task("reviewer", …) before any deploy; the middleware extracts the
-// structured response (see _middleware.ts → normaliseReviewerRound)
+// structured response (see internal/middleware.ts -> normaliseReviewerRound)
 // and emits a `data-reviewer-round` chunk that ChatMessages dispatches
 // here.
 //

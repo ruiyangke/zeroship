@@ -158,7 +158,7 @@ export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
     });
     // The resume value the server feeds into the interrupted tool's
     // `interrupt(...)` return. Match the shape Builder expects from
-    // `ask_survey` (see _tools.ts): `{ skipped, answers }`. Dropping
+    // `ask_survey` (see internal/tools.ts): `{ skipped, answers }`. Dropping
     // the `survey_id` because the tool already knows it (it's the one
     // that interrupted).
     const value = response.skipped

@@ -4,7 +4,7 @@
 // when the Builder needs structured clarification (single-/multi-choice
 // or short-text answers, max 3 questions per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7), it calls
 // `ask_survey` and the run halts via `interrupt()`. The client renders
-// a SurveyCard from the `data-survey` chunk emitted by `_middleware.ts`,
+// a SurveyCard from the `data-survey` chunk emitted by `middleware.ts`,
 // the user submits, and the resume protocol (`Command({resume})` server-
 // side, `body.resume` client-side) feeds the answer back into the
 // interrupted node — `interrupt(...)` returns the resume value, which
@@ -27,9 +27,9 @@
 import { tool } from "@langchain/core/tools";
 import { interrupt } from "@langchain/langgraph";
 
-// Schema is shared with the wizard runtime — see _survey_wire.ts for
+// Schema is shared with the wizard runtime — see `survey-wire.ts` for
 // why and the cross-runtime contract.
-import { surveyInputSchema } from "./_survey_wire.js";
+import { surveyInputSchema } from "./survey-wire.js";
 
 export const askSurveyTool = tool(
   // The LLM's args ARE the survey definition. interrupt() halts the

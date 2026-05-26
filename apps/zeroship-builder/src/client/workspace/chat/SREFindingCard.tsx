@@ -1,6 +1,6 @@
 // SRE finding card. Builder dispatches SRE via task("sre", …) when the
 // user asks reliability questions ("why is the app slow?"). Middleware
-// extracts the structured response (see _middleware.ts →
+// extracts the structured response (see internal/middleware.ts ->
 // normaliseSREFinding) and emits `data-sre-finding` which ChatMessages
 // dispatches here.
 //

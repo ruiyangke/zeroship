@@ -59,21 +59,22 @@ apps/zeroship-builder/
     │   ├── sandbox.ts
     │   ├── chat.ts          (Builder — deepagents + LangGraph, lazy)
     │   ├── wizard.ts        (clarification — plain LangGraph, lazy)
-    │   ├── pm_worker.ts     (PM digest RPC)
-    │   ├── sre_worker.ts    (SRE monitor RPC)
-    │   ├── env.ts
-    │   ├── request-context.ts
-    │   ├── _critic.ts       (sibling helper — Critic SubAgent)
-    │   ├── _reviewer.ts     (sibling helper — Reviewer SubAgent)
-    │   ├── _pm.ts           (sibling helper — PM SubAgent)
-    │   ├── _sre.ts          (sibling helper — SRE SubAgent)
-    │   ├── _tools.ts        (sibling helper — tool defs)
-    │   ├── _middleware.ts   (sibling helper — deepagents middleware)
-    │   ├── _persist.ts      (sibling helper — checkpointer)
-    │   ├── _prompts.ts      (sibling helper — system prompts)
-    │   ├── _survey_wire.ts  (sibling helper — data-survey wire)
-    │   ├── _agent_writes.ts (sibling helper — agent-write fan-out)
-    │   └── _sandbox_backend.ts (sibling helper — sandbox HTTP client)
+    │   ├── pm-worker.ts     (PM digest RPC)
+    │   ├── sre-worker.ts    (SRE monitor RPC)
+    │   └── internal/
+    │       ├── env.ts
+    │       ├── request-context.ts
+    │       ├── critic.ts       (Critic SubAgent)
+    │       ├── reviewer.ts     (Reviewer SubAgent)
+    │       ├── pm.ts           (PM SubAgent)
+    │       ├── sre.ts          (SRE SubAgent)
+    │       ├── tools.ts        (tool defs)
+    │       ├── middleware.ts   (deepagents middleware)
+    │       ├── persist.ts      (checkpointer)
+    │       ├── prompts.ts      (system prompts)
+    │       ├── survey-wire.ts  (data-survey wire)
+    │       ├── agent-writes.ts (agent-write fan-out)
+    │       └── sandbox-backend.ts (sandbox HTTP client)
     └── client/
         ├── main.tsx
         ├── App.tsx
@@ -87,9 +88,9 @@ apps/zeroship-builder/
         └── builder/        (Chat + tool-call rendering)
 ```
 
-The `_*.ts` files in `src/server/` are sibling helpers (SubAgents,
-prompts, middleware, wire shapes) — NOT RPC procedures. They're
-imported by `chat.ts` / `wizard.ts` and never reach the browser.
+The files in `src/server/internal/` are server-only helpers (SubAgents,
+prompts, middleware, wire shapes) - NOT client-facing RPC procedure
+modules. They're imported by server modules and never reach the browser.
 `chat.ts` and `wizard.ts` carry `lazy: true` in their config so the
 heavy LangGraph / deepagents code only loads on the first call to
 `/_zs/v1/chat` or `/_zs/v1/wizard` — boot stays cheap.

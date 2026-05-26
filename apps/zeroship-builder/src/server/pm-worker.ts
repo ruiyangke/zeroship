@@ -1,7 +1,7 @@
 "use server";
 // PM digest worker — the SCHEDULED-mode half of the PM agent (spec
 // §4.8.3.2). Mirrors the dual shape called out in the spec: PM has a
-// chat SubAgent (`_pm.ts`, dispatched via `task("pm", …)` from
+// chat SubAgent (`internal/pm.ts`, dispatched via `task("pm", …)` from
 // Builder) plus a background worker that produces periodic digests
 // for the project chat thread.
 //
@@ -25,9 +25,9 @@
 //     custom data parts (data-pm-recommendation) — needs the chat
 //     thread runtime to accept "out-of-band assistant turn" writes.
 //
-// Why this isn't `_pm_worker.ts`: files re-exported by `server.ts` are
+// Why this is not in `internal/`: files re-exported by `server.ts` are
 // treated as public RPC modules. The underscore prefix is the project-
-// side opt-out convention (see `_pm.ts` etc.). This file IS meant to be
+// side opt-out convention (see `internal/pm.ts` etc.). This file IS meant to be
 // a public RPC endpoint, so it lives without the prefix and gets
 // re-exported from `server.ts` deliberately.
 //
@@ -39,7 +39,7 @@
 import { action } from "@zeroship/rpc/server";
 import { z } from "zod";
 
-import { PM_PROMPT } from "./_prompts.js";
+import { PM_PROMPT } from "./internal/prompts.js";
 import { listIssues, getQualityScores } from "./agents.js";
 // `getApp` lives in apps.ts (proxied to the control plane). Keep the
 // wire optional — the digest still works without deploy info, so a
@@ -49,12 +49,12 @@ import { getApp as getAppRecord } from "./apps.js";
 // ─── recommendation shape ────────────────────────────────────────
 //
 // Reuse the same recommendation-item schema the chat-mode PM SubAgent
-// emits (`_pm.ts` → `recommendationSchema`). The digest just produces
+// emits (`internal/pm.ts` -> `recommendationSchema`). The digest just produces
 // a list of them rather than a single primary + alternatives — the
 // caller (cron, dashboard) is in a better position to pick how many
 // to surface.
 //
-// Inlined (rather than imported from _pm.ts) so this file doesn't
+// Inlined (rather than imported from `internal/pm.ts`) so this file doesn't
 // depend on the SubAgent's internal exports — the SubAgent's
 // `pmResponseSchema` is shaped for the chat card, not the digest.
 const recommendationItemSchema = z.object({

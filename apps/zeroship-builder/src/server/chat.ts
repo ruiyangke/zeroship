@@ -62,12 +62,12 @@
 
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage } from "ai";
 import { stream as rpcStream } from "@zeroship/rpc/server";
-import { critic } from "./_critic.js";
-import { reviewer } from "./_reviewer.js";
-import { pm } from "./_pm.js";
-import { sre } from "./_sre.js";
-import { BUILDER_SYSTEM } from "./_prompts.js";
-import { askSurveyTool } from "./_tools.js";
+import { critic } from "./internal/critic.js";
+import { reviewer } from "./internal/reviewer.js";
+import { pm } from "./internal/pm.js";
+import { sre } from "./internal/sre.js";
+import { BUILDER_SYSTEM } from "./internal/prompts.js";
+import { askSurveyTool } from "./internal/tools.js";
 
 export interface BuilderTurnInput {
   messages?: UIMessage[];
@@ -189,7 +189,7 @@ async function buildTranslatedStream(
   // the same sandbox (the in-flight tool that interrupted may need
   // sandbox access on the resumed half).
   const { ZeroshipSandboxBackend, getOrCreateSandboxFor } = await import(
-    "./_sandbox_backend.js"
+    "./internal/sandbox-backend.js"
   );
   const sandbox = await getOrCreateSandboxFor(threadId, {
     projectSourceId: input.appId ?? threadId,
@@ -228,7 +228,7 @@ async function buildTranslatedStream(
   // Import the data-part emitter middleware factory. The middleware
   // itself needs the per-request v6 writer, so we
   // instantiate it inside `execute({writer})` below.
-  const { dataPartMiddleware } = await import("./_middleware.js");
+  const { dataPartMiddleware } = await import("./internal/middleware.js");
 
   return createUIMessageStream({
     async execute({ writer }) {
@@ -279,7 +279,7 @@ async function buildTranslatedStream(
 
       // Tools whose visualisation goes via custom data parts instead
       // of the native v6 tool-call chunks. Keep in sync with the
-      // wrapToolCall hooks in `_middleware.ts`.
+      // wrapToolCall hooks in `internal/middleware.ts`.
       //   write_file / edit_file → data-diff
       //   ask_survey             → data-survey (also: tool halts via
       //                            interrupt(), so on_tool_end may not

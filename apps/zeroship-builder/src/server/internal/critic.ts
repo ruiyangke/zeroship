@@ -25,7 +25,7 @@
 import type { SubAgent } from "deepagents";
 import { z } from "zod";
 
-import { CRITIC_PROMPT } from "./_prompts.js";
+import { CRITIC_PROMPT } from "./prompts.js";
 
 export const criticResponseSchema = z.object({
   approved: z.boolean(),

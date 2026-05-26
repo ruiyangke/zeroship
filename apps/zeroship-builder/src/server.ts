@@ -13,8 +13,8 @@ export * from "./server/agents";
 // PM/SRE scheduled-worker procs (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.3.2 dual-shape stubs).
 // Both expose a single proc each (`pmDigest`, `sreMonitor`) — kept in
 // dedicated modules rather than folded into agents.ts so the chat-mode
-// SubAgent files (`_pm.ts` / `_sre.ts`) and the worker files cluster
+// SubAgent files (`internal/pm.ts` / `internal/sre.ts`) and the worker files cluster
 // by name and the import surface stays scannable. Cron infrastructure
 // to drive them is not wired yet.
-export * from "./server/pm_worker";
-export * from "./server/sre_worker";
+export * from "./server/pm-worker";
+export * from "./server/sre-worker";

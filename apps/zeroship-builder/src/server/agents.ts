@@ -8,7 +8,7 @@
 // input RPC surface (`{appId, …}`) so the canvas shells render real-
 // looking data while the real backing tables are still being built.
 //
-// Storage shape: KV-backed via `_persist.ts`. The native `@zeroship/kv`
+// Storage shape: KV-backed via `internal/persist.ts`. The native `@zeroship/kv`
 // primitive lives in the V8 worker process, which the vite-plugin keeps
 // running across HMR module re-evaluations — so writes survive "save
 // the file → dev refreshes the bundle". They DO vanish on a hard worker
@@ -23,7 +23,7 @@
 // `addIssue({appId, title, description})`.
 
 import { query, mutation } from "@zeroship/rpc/server";
-import { persistGet, persistSet } from "./_persist.js";
+import { persistGet, persistSet } from "./internal/persist.js";
 
 // ─── issue store ────────────────────────────────────────────────
 
@@ -174,8 +174,8 @@ export const addIssue = mutation(async (
 // ─── quality scorecard ──────────────────────────────────────────
 //
 // Spec §11.1 names seven quality dimensions. KV-backed per appId via
-// `_persist.ts`. The Critic loop now writes here on every round (see
-// `_middleware.ts` data-critic-round handler — the middleware fires
+// `internal/persist.ts`. The Critic loop now writes here on every round (see
+// `internal/middleware.ts` data-critic-round handler — the middleware fires
 // `setQualityScores` via `waitUntil()` after extracting the round
 // payload). HealthCanvas reads via `getQualityScores`. Fresh apps
 // without a Critic round yet fall back to the default snapshot so
@@ -274,7 +274,7 @@ export const getQualityScores = query(async (
 
 // Note: the writer side of the quality scorecard (the function the
 // chat middleware calls after every Critic round) lives in
-// `_agent_writes.ts` so it stays out of the public RPC surface. Every
+// `internal/agent-writes.ts` so it stays out of the public RPC surface. Every
 // export from this file becomes a network endpoint via `server.ts`'s
 // `export *`; we want `setQualityFromCritic` to stay server-internal.
 

@@ -1,6 +1,6 @@
 // PM recommendation card. Builder dispatches PM via task("pm", …) when
 // the user asks "what should I build next?". Middleware extracts the
-// structured response (see _middleware.ts → normalisePMRecommendation)
+// structured response (see internal/middleware.ts -> normalisePMRecommendation)
 // and emits `data-pm-recommendation` which ChatMessages dispatches here.
 //
 // Visual contract:

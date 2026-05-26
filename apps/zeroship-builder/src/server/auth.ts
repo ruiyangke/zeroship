@@ -9,8 +9,8 @@
 // control plane and propagate any Set-Cookie headers back.
 
 import { action } from "@zeroship/rpc/server";
-import { CONTROL_URL } from "./env";
-import { getRequest, getResponseHeaders } from "./request-context";
+import { CONTROL_URL } from "./internal/env";
+import { getRequest, getResponseHeaders } from "./internal/request-context";
 
 export interface AuthUser {
   id: string;

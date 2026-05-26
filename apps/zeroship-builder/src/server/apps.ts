@@ -5,9 +5,9 @@
 // accepts session cookie OR Bearer master-key); we forward both.
 
 import { action, mutation } from "@zeroship/rpc/server";
-import { CONTROL_URL, CONTROL_KEY } from "./env";
-import { getRequest } from "./request-context";
-import { persistGet, persistSet } from "./_persist.js";
+import { CONTROL_URL, CONTROL_KEY } from "./internal/env";
+import { getRequest } from "./internal/request-context";
+import { persistGet, persistSet } from "./internal/persist.js";
 
 // ─── archive: KV-backed stub ─────────────────────────────────────
 //

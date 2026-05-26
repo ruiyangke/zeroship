@@ -30,7 +30,7 @@
 import type { SubAgent } from "deepagents";
 import { z } from "zod";
 
-import { REVIEWER_PROMPT } from "./_prompts.js";
+import { REVIEWER_PROMPT } from "./prompts.js";
 
 export const reviewerResponseSchema = z.object({
   approved: z.boolean(),

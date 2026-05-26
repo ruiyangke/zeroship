@@ -2,7 +2,7 @@
 // Server-internal writes for agent surfaces — kept out of the public
 // RPC namespace by the underscore-prefix file convention.
 //
-// The chat middleware (`_middleware.ts`) calls these after every
+// The chat middleware (`middleware.ts`) calls these after every
 // agent SubAgent dispatch to persist round-by-round state into the
 // project's KV slot. The READ side of the same data ships from
 // `agents.ts` (`getQualityScores`, `listIssues`, etc.) which the
@@ -11,8 +11,8 @@
 // from-the-client, which is the right shape for stub state — only
 // the server agents should be writing here.
 
-import { persistSet } from "./_persist.js";
-import type { QualityDimension, QualityGrade, QualityScores } from "./agents.js";
+import { persistSet } from "./persist.js";
+import type { QualityDimension, QualityGrade, QualityScores } from "../agents.js";
 
 const qualityKey = (appId: string) => `quality:${appId}`;
 
