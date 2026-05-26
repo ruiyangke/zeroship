@@ -52,7 +52,7 @@ Builder sandbox
 5. `Runtime::call_fetch_handler(...)` runs user code and returns `FetchOutcome`.
 ```
 
-Auth today is cookie/JWT-based at the gateway. When a session is valid, the gateway forwards an HMAC-signed `ZeroShip-User` header to the worker, as defined in the auth flow contract ([auth.md](docs/reference/auth.md)).
+Auth today is cookie/JWT-based at the gateway. When a session is valid, the gateway forwards an HMAC-signed `ZeroShip-User` header to the worker, as defined in the auth flow contract ([auth.md](../reference/auth.md)).
 
 ## Deploy path
 
@@ -67,20 +67,20 @@ Auth today is cookie/JWT-based at the gateway. When a session is valid, the gate
    the worker-entry blob from `BlobStore`.
 ```
 
-The `.zship` deploy archive and artifact layout are specified in [zship.md](docs/reference/zship.md).
+The `.zship` deploy archive and artifact layout are specified in [zship.md](../reference/zship.md).
 
 For SDK-facing contracts:
-- Database plugin behavior and `env.db` assumptions are in [db.md](docs/reference/db.md).
-- KV plugin contract (TTL, counters, list semantics) is in [kv.md](docs/reference/kv.md).
+- Database plugin behavior and `env.db` assumptions are in [db.md](../reference/db.md).
+- KV plugin contract (TTL, counters, list semantics) is in [kv.md](../reference/kv.md).
 
 ## Read next
 
-- [Distributed architecture flow](docs/architecture/distributed.md): end-to-end request sequence for creator-facing and end-user paths.
-- [Gateway routing](docs/architecture/gateway-routing.md): manifest matching, dispatch, and request path control.
-- [Control plane architecture](docs/architecture/control-plane.md): app deploy lifecycle, route registry, and metadata updates.
-- [Runtime architecture](docs/architecture/runtime.md): V8 execution, async model, native host bridges, and request execution.
-- [Blob store and bundle storage](docs/architecture/blob-store.md): `BlobStore`, `.zship` blobs, and object layout.
-- [Builder sandbox](docs/architecture/builder.md): the `crates/sandbox` service — live dev sandboxes, preview proxying, and snapshot/restore.
+- [Distributed architecture flow](../architecture/distributed.md): end-to-end request sequence for creator-facing and end-user paths.
+- [Gateway routing](../architecture/gateway-routing.md): manifest matching, dispatch, and request path control.
+- [Control plane architecture](../architecture/control-plane.md): app deploy lifecycle, route registry, and metadata updates.
+- [Runtime architecture](../architecture/runtime.md): V8 execution, async model, native host bridges, and request execution.
+- [Blob store and bundle storage](../architecture/blob-store.md): `BlobStore`, `.zship` blobs, and object layout.
+- [Builder sandbox](../architecture/builder.md): the `crates/sandbox` service — live dev sandboxes, preview proxying, and snapshot/restore.
 
 ## Current architecture notes
 

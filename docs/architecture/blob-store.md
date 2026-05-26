@@ -50,10 +50,10 @@ The upload must contain every referenced blob. The server re-checks every hash; 
 
 Gateway adds two caches on top of `BlobStore`:
 
-- `BlobCache` in [blob_cache.rs](crates/gateway/src/blob_cache.rs): in-memory LRU
+- `BlobCache` in [blob_cache.rs](../../crates/gateway/src/blob_cache.rs): in-memory LRU
 - `DiskBlobCache` in the same file: on-disk LRU used for mmap and streaming
 
-Static serving lives in [static_serve.rs](crates/gateway/src/router/static_serve.rs):
+Static serving lives in [static_serve.rs](../../crates/gateway/src/router/static_serve.rs):
 
 - small responses: memory LRU -> disk LRU/mmap -> blob store
 - large responses: ensure disk copy exists, then stream in chunks from disk
@@ -63,10 +63,10 @@ The control plane is not on the hot path for asset bytes.
 
 ## Current callers
 
-- [crates/control/src/main.rs](crates/control/src/main.rs): constructs `LocalDiskBlobStore`
-- [crates/gateway/src/main.rs](crates/gateway/src/main.rs): constructs `LocalDiskBlobStore` plus memory/disk caches
-- [crates/worker/src/main.rs](crates/worker/src/main.rs): constructs `LocalDiskBlobStore`
-- [crates/worker/src/sync.rs](crates/worker/src/sync.rs): fetches `manifest.worker.modules[entry]`
+- [crates/control/src/main.rs](../../crates/control/src/main.rs): constructs `LocalDiskBlobStore`
+- [crates/gateway/src/main.rs](../../crates/gateway/src/main.rs): constructs `LocalDiskBlobStore` plus memory/disk caches
+- [crates/worker/src/main.rs](../../crates/worker/src/main.rs): constructs `LocalDiskBlobStore`
+- [crates/worker/src/sync.rs](../../crates/worker/src/sync.rs): fetches `manifest.worker.modules[entry]`
 
 ## Current non-goals
 
@@ -76,8 +76,8 @@ The control plane is not on the hot path for asset bytes.
 
 ## Related docs
 
-- [Architecture overview](docs/architecture/overview.md) — the entry point and system map.
-- [Gateway routing](docs/architecture/gateway-routing.md) — the static-serving consumer of `BlobStore`.
-- [Control plane](docs/architecture/control-plane.md) — runs the `.zship` ingest that writes blobs.
-- [Distributed architecture](docs/architecture/distributed.md) — how the blob root is shared across processes.
-- [`.zship` artifact format](docs/reference/zship.md) — the deploy archive whose blobs land here.
+- [Architecture overview](../architecture/overview.md) — the entry point and system map.
+- [Gateway routing](../architecture/gateway-routing.md) — the static-serving consumer of `BlobStore`.
+- [Control plane](../architecture/control-plane.md) — runs the `.zship` ingest that writes blobs.
+- [Distributed architecture](../architecture/distributed.md) — how the blob root is shared across processes.
+- [`.zship` artifact format](../reference/zship.md) — the deploy archive whose blobs land here.

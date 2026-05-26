@@ -9,9 +9,8 @@
 #   bash scripts/smoke.sh                # uses http://localhost:3001
 #   ZS_URL=http://... bash scripts/smoke.sh
 #
-# Prereqs: `npm run dev` already running in another shell; Postgres
-# reachable (the dev server wires this up automatically when configured
-# via `zeroship serve` or vite-plugin's dev bootstrap).
+# Prereqs: `pnpm dev` already running in another shell. By default the
+# vite-plugin dev runtime uses project-local SQLite at .zeroship/dev.sqlite.
 set -euo pipefail
 
 URL="${ZS_URL:-http://localhost:3001}"

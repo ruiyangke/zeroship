@@ -1,6 +1,12 @@
 # RPC v2 — Seamless server functions
 
-**Status:** Proposal · **Wire version:** `/_zs/v1/`
+**Status:** Active proposal · **Wire version:** `/_zs/v1/`
+
+Live shipped reference: [`docs/reference/rpc.md`](../reference/rpc.md). This
+proposal is broader than the current implementation; it still tracks planned
+native/gateway work such as mandatory rich transformers, content-negotiated
+binary bodies, gateway-side validation, and public subscriptions. When this
+file and the reference disagree, the reference describes shipped behavior.
 
 > Amendment 2026-05-07: `ctx.headers` and `ctx.url` are now request-scoped *mutable* native instances (no `Object.freeze`). The kernel never reads them after handing dispatch to the user procedure, so any mutation vanishes when the request ends — and dropping the freeze + per-setter shadow installs recovers ~4 µs of fixed cost per request (see `docs/perf/rpc-ctx-regression-2026-05-07.md`). The freeze approach was a defense-in-depth shim, not load-bearing on any kernel invariant; this amendment realigns the proposal with WHATWG defaults (`new Headers(...)` and `new URL(...)` are mutable).
 

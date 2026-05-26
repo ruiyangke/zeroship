@@ -2,7 +2,7 @@
 
 Design zeroship APIs so generated code matches the current app model:
 
-- app entry points use the [ZS standard](docs/reference/zs-standard.md) default export (`schema`, `fetch`, `rpc`, optional `fetchFast`)
+- app entry points use the [ZS standard](../reference/zs-standard.md) default export (`schema`, `fetch`, `rpc`, optional `fetchFast`)
 - database access hangs off `env.db` after bootstrap installs schema wrappers
 - auth is an explicit SDK call (`auth.getUser()` / `auth.requireUser()`)
 
@@ -58,7 +58,7 @@ import { auth } from "@zeroship/auth";
 const user = auth.requireUser();
 ```
 
-The current auth helper lives in [sdks/auth/src/index.ts](sdks/auth/src/index.ts).
+The current auth helper lives in [sdks/auth/src/index.ts](../../sdks/auth/src/index.ts).
 
 ### 4. Zero setup for creator code
 
@@ -73,7 +73,7 @@ const { data, error } = await env.db.users.insert({
 });
 ```
 
-The typed `env.db` surface is installed by [sdks/bootstrap/src/install-schema.ts](sdks/bootstrap/src/install-schema.ts).
+The typed `env.db` surface is installed by [sdks/bootstrap/src/install-schema.ts](../../sdks/bootstrap/src/install-schema.ts).
 
 ### 5. Use names that read like English
 
@@ -90,7 +90,7 @@ Collection methods should read naturally:
 - `count(filter?)`
 - `exists(filter?)`
 
-The public collection surface is defined in [sdks/db/src/collection.ts](sdks/db/src/collection.ts), with the `Db` / `Collections` / `TxCollection` types in [sdks/db/src/db-types.ts](sdks/db/src/db-types.ts).
+The public collection surface is defined in [sdks/db/src/collection.ts](../../sdks/db/src/collection.ts), with the `Db` / `Collections` / `TxCollection` types in [sdks/db/src/db-types.ts](../../sdks/db/src/db-types.ts).
 
 ### 6. Keep parameter order stable
 
@@ -143,7 +143,7 @@ if (error?.code === "UNIQUE_VIOLATION") { /* ... */ }
 if (error?.code === "LOCK_NOT_AVAILABLE") { /* ... */ }
 ```
 
-See the current database-side codes in [sdks/db/src/errors.ts](sdks/db/src/errors.ts) and [crates/plugin-db/src/backend/sqlite/error.rs](crates/plugin-db/src/backend/sqlite/error.rs).
+See the current database-side codes in [sdks/db/src/errors.ts](../../sdks/db/src/errors.ts) and [crates/plugin-db/src/backend/sqlite/error.rs](../../crates/plugin-db/src/backend/sqlite/error.rs).
 
 ### 10. Let query chains read left-to-right
 
@@ -213,7 +213,7 @@ Filters, patches, and row objects should be treated as inputs, not scratch space
 
 ## Checklist
 
-- Is the main path consistent with [docs/reference/zs-standard.md](docs/reference/zs-standard.md)?
+- Is the main path consistent with [docs/reference/zs-standard.md](../reference/zs-standard.md)?
 - Is the method name enough for generated code to use it correctly?
 - Is there one obvious way to do the operation?
 - Are parameters ordered consistently?

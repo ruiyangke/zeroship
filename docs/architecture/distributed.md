@@ -73,7 +73,7 @@ This is request-boundary eventual propagation. There is no cross-service transac
 The builder stack is outside the app-serving hot path:
 
 - `crates/sandbox` exposes sandbox lifecycle, preview, and admin endpoints
-- the current bare-metal VM backend is `nomad-ch` in [nomad_ch.rs](crates/sandbox/src/backend/nomad_ch.rs)
+- the current bare-metal VM backend is `nomad-ch` in [nomad_ch.rs](../../crates/sandbox/src/backend/nomad_ch.rs)
 - operator details live in `docs/runbooks/sandbox-nomad-ch.md`
 
 Snapshot, restore, wake, and cold-boot flows are part of the sandbox service, not the gateway/worker request path.
@@ -88,9 +88,9 @@ Snapshot, restore, wake, and cold-boot flows are part of the sandbox service, no
 
 ## Related docs
 
-- [Architecture overview](docs/architecture/overview.md) — the entry point; start here for the system map.
-- [Gateway routing](docs/architecture/gateway-routing.md) — manifest dispatch and the request hot path.
-- [Control plane](docs/architecture/control-plane.md) — where the `/internal/*` route and version feeds come from.
-- [V8 runtime](docs/architecture/runtime.md) — what runs inside the worker once a request arrives.
-- [Blob store](docs/architecture/blob-store.md) — the shared content-addressed bundle/asset root.
-- [Docker Compose runbook](docs/runbooks/docker-compose.md) — bring the multi-process stack up locally.
+- [Architecture overview](../architecture/overview.md) — the entry point; start here for the system map.
+- [Gateway routing](../architecture/gateway-routing.md) — manifest dispatch and the request hot path.
+- [Control plane](../architecture/control-plane.md) — where the `/internal/*` route and version feeds come from.
+- [V8 runtime](../architecture/runtime.md) — what runs inside the worker once a request arrives.
+- [Blob store](../architecture/blob-store.md) — the shared content-addressed bundle/asset root.
+- [Docker Compose runbook](../runbooks/docker-compose.md) — bring the multi-process stack up locally.

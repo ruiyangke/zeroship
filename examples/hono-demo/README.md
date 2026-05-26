@@ -6,8 +6,8 @@ its default export matches the `{fetch(req, env, ctx)}` contract.
 ## Run locally
 
 ```bash
-npm install
-npm run dev            # vite-plugin injects bootstrap + starts the worker
+pnpm install
+pnpm dev              # vite-plugin injects bootstrap + starts the worker
 ```
 
 Then:

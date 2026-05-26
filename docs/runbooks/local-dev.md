@@ -7,7 +7,8 @@ Get a working zeroship stack on your machine. Build the JS SDKs first, then the 
 - Rust toolchain
 - Node.js 20+
 - `pnpm` 9+
-- PostgreSQL running locally
+- PostgreSQL running locally if you run the control plane, full platform, or
+  Postgres-backed tests
 - Docker only if you want the compose stack
 
 ## First-time bootstrap
@@ -16,11 +17,18 @@ Get a working zeroship stack on your machine. Build the JS SDKs first, then the 
 pnpm install
 pnpm build
 cargo build --release
-createdb zeroship
 mkdir -p bundles
 ```
 
-The control plane defaults to `postgres://localhost/zeroship`; `createdb zeroship` matches that.
+For full-platform mode, create the control-plane database:
+
+```bash
+createdb zeroship
+```
+
+The control plane defaults to `postgres://localhost/zeroship`; `createdb
+zeroship` matches that. Vite examples do not require this by default because
+the dev runtime uses project-local SQLite at `.zeroship/dev.sqlite`.
 
 ## Mode 1: single-file runtime
 
@@ -38,8 +46,12 @@ For Vite-based apps, run the app's dev server instead of pointing `zeroship serv
 ```bash
 cd examples/db-todos
 pnpm install
-DATABASE_URL=postgres://localhost:5432/zeroship pnpm dev
+pnpm dev
 ```
+
+By default the Vite plugin spawns the zeroship dev runtime with
+`DATABASE_URL=sqlite:.zeroship/dev.sqlite`. Override `DATABASE_URL` only when
+you intentionally want a different backend.
 
 ## Mode 2: full local platform
 
@@ -139,8 +151,8 @@ The runner script is `./crates/runtime/benches/run_zerobench.sh`. Read that scri
 
 ## Related docs
 
-- [Multi-node / Docker Compose](docs/runbooks/docker-compose.md) — the same stack via `docker compose` instead of three terminals.
-- [Architecture overview](docs/architecture/overview.md) — what each binary (`control`/`worker`/`gate`) does.
-- [Distributed architecture](docs/architecture/distributed.md) — how control, gateway, and worker talk over the `/internal/*` feeds you wired above.
-- [`.zship` artifact format](docs/reference/zship.md) — the deploy archive `pnpm build` emits and `zeroship deploy` uploads.
-- [ZS deploy contract](docs/reference/zs-standard.md) — what `default = { schema?, fetch?, rpc? }` an example app must export.
+- [Multi-node / Docker Compose](../runbooks/docker-compose.md) — the same stack via `docker compose` instead of three terminals.
+- [Architecture overview](../architecture/overview.md) — what each binary (`control`/`worker`/`gate`) does.
+- [Distributed architecture](../architecture/distributed.md) — how control, gateway, and worker talk over the `/internal/*` feeds you wired above.
+- [`.zship` artifact format](../reference/zship.md) — the deploy archive `pnpm build` emits and `zeroship deploy` uploads.
+- [ZS deploy contract](../reference/zs-standard.md) — what `default = { schema?, fetch?, rpc? }` an example app must export.

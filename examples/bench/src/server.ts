@@ -1,8 +1,9 @@
 "use server";
 // Benchmark fixture — exercises the full zeroship runtime surface.
 //
-// Wire (post-redesign): each wrapped export is a procedure on
-// `POST /_zs/v1/<id>` with body = superjson `{ json: <input> }`.
+// Wire: each wrapped export is a procedure on `/_zs/v1/<id>`.
+// Unary POST bodies use the current RPC envelope `{ json: <input> }`;
+// the default transformer is plain JSON.
 // Single-arg dispatch: the unwrapped `json` value is the handler's
 // argument (or `undefined` for no-arg procedures).
 //

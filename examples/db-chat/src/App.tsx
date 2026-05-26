@@ -1,17 +1,13 @@
 // db-chat client — exercises @zeroship/react useQuery on top of the
-// server's reactive query primitives.
+// server's RPC procedures.
 //
 // What this file demonstrates:
-//   • useQuery wraps a Subscription that auto-rerenders on broker
-//     events matching the read-set captured by the query handler.
-//   • Two clients viewing different channels do NOT see each other's
-//     messages (P8b read-set narrowing).
-//   • A mutation on worker A delivers events to a subscriber on worker
-//     B via the pgoutput WAL consumer (P8a.2). Cross-worker propagation
-//     is invisible to the React layer — it just re-renders.
+//   • useQuery re-runs the supplied fetcher when the DB layer publishes
+//     a relevant change.
+//   • Two clients viewing different channels keep independent state.
 //
 // To run:
-//   npm run dev       — vite-plugin bootstraps the worker + WAL consumer
+//   pnpm dev          — vite-plugin bootstraps the dev runtime
 //   open localhost:3000 in two tabs, each with a different ?channel=
 //   query param; send messages from one; only that tab's UI updates.
 
@@ -47,9 +43,8 @@ type Message = {
 };
 
 function ChannelView({ channelId }: { channelId: number }) {
-  // The hook re-runs the factory on every broker event whose tuple
-  // matches the read-set captured by listMessages (which records
-  // {channelId} via the B3 CURRENT_KIND gate + read_set::Active guard).
+  // The hook re-runs the fetcher when the reactive DB layer publishes
+  // a matching change.
   const messages = useQuery<Message[]>(
     () => rpc<Message[]>("listMessages", { channelId }),
     { collection: "messages" },

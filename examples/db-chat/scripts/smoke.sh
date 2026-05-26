@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for db-chat.
 #
-# Exercises C1 reactive queries + P8b read-set narrowing + cross-worker
-# WAL propagation. Requires:
-#   • A running dev server (`npm run dev` in another shell)
-#   • Postgres with wal_level=logical (for cross-worker delivery)
-#
-# Without wal_level=logical, the single-worker local-emit path still
-# fires events — the cross-worker check (5) is the only one that
-# requires the WAL consumer.
+# Exercises the db-chat RPC handlers through the dev server. Requires:
+#   • A running dev server (`pnpm dev` in another shell)
 set -euo pipefail
 
 URL="${ZS_URL:-http://localhost:3001}"
@@ -57,7 +51,7 @@ echo "  seeded general=$GENERAL_ID random=$RANDOM_ID author=$AUTHOR_ID"
 # Check 1: sendMessage to general (mutation capability)
 # ---------------------------------------------------------------------------
 
-echo "[check 1] sendMessage — mutation in SERIALIZABLE tx"
+echo "[check 1] sendMessage — mutation"
 
 M1=$(rpc sendMessage "{\"channelId\":${GENERAL_ID},\"authorId\":${AUTHOR_ID},\"body\":\"hello general\"}")
 check "sendMessage returned an id" contains "$M1" '"id":'
@@ -72,10 +66,10 @@ LIST_GENERAL=$(rpc listMessages "{\"channelId\":${GENERAL_ID}}")
 check "listMessages returned an array shape" contains "$LIST_GENERAL" '\['
 
 # ---------------------------------------------------------------------------
-# Check 3: read-set narrowing — messages in #random don't leak to #general
+# Check 3: channel isolation — messages in #random don't leak to #general
 # ---------------------------------------------------------------------------
 
-echo "[check 3] read-set narrowing — channel isolation"
+echo "[check 3] channel isolation"
 
 rpc sendMessage "{\"channelId\":${RANDOM_ID},\"authorId\":${AUTHOR_ID},\"body\":\"hello random\"}" >/dev/null
 
@@ -88,7 +82,7 @@ check "general channel still doesn't see random's messages" \
 # Check 4: FK enforcement — sendMessage with non-existent channel fails
 # ---------------------------------------------------------------------------
 
-echo "[check 4] FK enforcement — orphan channel rejected (B2)"
+echo "[check 4] FK enforcement — orphan channel rejected"
 
 BAD=$(rpc sendMessage "{\"channelId\":99999,\"authorId\":${AUTHOR_ID},\"body\":\"orphan\"}")
 check "orphan channel insert produced an error" \

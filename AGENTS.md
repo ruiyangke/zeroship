@@ -37,6 +37,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
+| **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
 | **ZS deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zs-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
@@ -135,7 +136,7 @@ These don't change. If you're about to violate one, stop and ask.
 - **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`).
 - **V8 per thread, one isolate per app.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/core/src/typed_id.rs`.
-- **Wire formats are immutable contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout — back-compat is required at the wire level even when internal types change.
+- **Wire formats are explicit contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout, and RPC envelopes must be changed deliberately. Pre-launch can break them, but every producer, consumer, fixture, and reference doc changes in the same patch; no hidden compatibility shim.
 - **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
 - **The gateway is dumb.** It does manifest dispatch, JWT, rate-limit, CHWBL routing — and forwards. All app logic runs in the worker.
 
@@ -147,16 +148,24 @@ Two layers: native primitives (Rust kernel) and npm packages (JS ecosystem).
 
 ### Native primitives (`env.*` namespaces)
 
-Registered by Rust on every V8 isolate as namespaces on the `env` object
+Registered native primitives appear as namespaces on the `env` object
 (the 2nd arg to `fetch(req, env, ctx)` and the `env` named export of the
-`zeroship` module). The "syscalls" of the platform — small, stable,
-low-level:
+`zeroship` module). These are the platform "syscalls": small, stable,
+low-level operations that SDK packages wrap.
+
+Creator-facing namespaces registered today:
 
 ```
 env.db.*       structured database operations (no raw SQL)
-env.auth.*     getUser/requireUser (reads gateway-injected user context)
 env.storage.*  object storage put/get/delete
 env.kv.*       key-value get/set/delete
+```
+
+Planned or platform-internal namespaces must be documented as such until the
+runtime actually registers them:
+
+```
+env.auth.*     planned getUser/requireUser namespace; not registered today
 env.meter.*    billing counter increment
 env.assets.*   runtime-emitted static asset CRUD (manifest runtime_assets)
 ```
@@ -171,6 +180,7 @@ import { env } from "zeroship";
 import { auth } from "@zeroship/auth";
 import { storage } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
+import { query, mutation } from "@zeroship/rpc/server";
 
 // Declare your schema once via the `export default { schema }` convention;
 // the platform installs typed Collection wrappers on `env.db` at app boot.
@@ -213,6 +223,7 @@ Stable contracts, live in `docs/reference/`:
 - `zs-standard.md` — the deploy contract: `default = { schema?, fetch?, rpc? }`, dispatch, raw-JS deploys
 - `db.md` — `@zeroship/db`: `default.schema` discovery, CRUD, aggregation, naming strategy
 - `kv.md` — `@zeroship/kv`: ephemeral key-value surface, TTL, atomic counters, `setIfAbsent`, paginated `list`
+- `rpc.md` — `@zeroship/rpc`: server wrappers, generated and manual clients, transport, transformers, retries
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `zship.md` — `.zship` deploy artifact format (tar.zst with content-addressed blobs)

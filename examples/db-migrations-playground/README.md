@@ -50,10 +50,10 @@ App stays live throughout — new writes are valid in both shapes.
 ## Run locally
 
 ```bash
-npm install
-npm run typecheck
-npm run dev           # vite-plugin bootstraps the dev runtime
-npm run smoke         # in another shell — exercises the 5 checks
+pnpm install
+pnpm typecheck
+pnpm dev              # vite-plugin bootstraps the dev runtime
+pnpm smoke            # in another shell
 ```
 
 ## Smoke test checks
