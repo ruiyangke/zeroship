@@ -29,7 +29,35 @@ export const Checkbox = forwardRef<HTMLElement, CheckboxProps>(function Checkbox
         className={clsx("zs-checkbox", className)}
         {...props}
       >
-        <BaseCheckbox.Indicator className="zs-checkbox__indicator" keepMounted />
+        <BaseCheckbox.Indicator className="zs-checkbox__indicator" keepMounted>
+          <svg
+            className="zs-checkbox__check"
+            viewBox="0 0 12 12"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M2.5 6.5 5 9l4.5-5.5"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <svg
+            className="zs-checkbox__dash"
+            viewBox="0 0 12 12"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M3 6h6"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
+        </BaseCheckbox.Indicator>
       </BaseCheckbox.Root>
     </FieldFrame>
   );

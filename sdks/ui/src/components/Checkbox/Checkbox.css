@@ -34,12 +34,13 @@
 }
 
 .zs-checkbox__indicator {
-  width: calc(var(--zs-space-2) + var(--zs-space-1));
+  display: inline-grid;
+  place-items: center;
+  width: var(--zs-space-3);
   height: var(--zs-space-3);
-  border-right: var(--zs-border-md) solid currentColor;
-  border-bottom: var(--zs-border-md) solid currentColor;
+  color: var(--zs-accent-ink);
   opacity: 0;
-  transform: rotate(45deg) scale(0.72);
+  transform: scale(0.6);
   transition:
     opacity var(--zs-motion-fast) var(--zs-motion-ease),
     transform var(--zs-motion-fast) var(--zs-motion-ease);
@@ -48,14 +49,25 @@
 .zs-checkbox[data-checked] .zs-checkbox__indicator,
 .zs-checkbox[data-indeterminate] .zs-checkbox__indicator {
   opacity: 1;
-  transform: rotate(45deg) scale(1);
+  transform: scale(1);
 }
 
-.zs-checkbox[data-indeterminate] .zs-checkbox__indicator {
-  width: var(--zs-space-3);
-  height: var(--zs-border-md);
-  border: 0;
-  border-radius: var(--zs-radius-pill);
-  background: currentColor;
-  transform: scale(1);
+/* Both glyphs share the same grid cell; state toggles which one shows. */
+.zs-checkbox__check,
+.zs-checkbox__dash {
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+}
+
+.zs-checkbox__dash {
+  display: none;
+}
+
+.zs-checkbox[data-indeterminate] .zs-checkbox__check {
+  display: none;
+}
+
+.zs-checkbox[data-indeterminate] .zs-checkbox__dash {
+  display: block;
 }
