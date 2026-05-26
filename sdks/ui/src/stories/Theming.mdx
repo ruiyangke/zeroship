@@ -11,8 +11,9 @@ read those properties, so the same Button, Dialog, Table, and form controls
 change personality when `data-theme` changes.
 
 Storybook uses `@storybook/addon-themes` with `withThemeByDataAttribute`.
-The toolbar writes `data-theme="studio" | "atelier" | "dusk"` on the
-document element, and every story re-renders against that contract.
+The toolbar writes `studio`, `atelier`, `dusk`, `glass-dark`, or
+`glass-light` to `data-theme` on the document element, and every story
+re-renders against that contract.
 
 ## Contract
 
@@ -24,6 +25,11 @@ Color: `--zs-surface`, `--zs-surface-raised`, `--zs-surface-sunken`,
 `--zs-state-info`, `--zs-state-info-bg`, `--zs-rule`,
 `--zs-rule-strong`, `--zs-focus`, `--zs-backdrop`, `--zs-code-bg`,
 `--zs-code-ink`.
+
+Glass surface effects use `--zs-blur` for panel backdrop filtering and
+`--zs-surface-bg` for the root backdrop mesh. Components read both with
+fallbacks (`var(--zs-blur, none)` and `var(--zs-surface-bg,
+var(--zs-surface))`), so non-glass themes leave them unset and remain flat.
 
 Type, space, radius, shadow, motion, and layer keys are fixed too:
 `--zs-font-display`, `--zs-font-body`, `--zs-font-mono`, `--zs-text-*`,
@@ -53,13 +59,14 @@ picker. The provider persists to `localStorage` by default and writes
 
 ## Adding A Theme
 
-Add a new `[data-theme="name"]` block in `styles.css`, provide every contract
-key, add the name to `themes` and `themeLabels`, then add it to the Storybook
-toolbar. Components do not change.
+Add a new `[data-theme="name"]` block in `styles.css`, provide every required
+contract key, add the name to `themes` and `themeLabels`, then add it to the
+Storybook toolbar. Components do not change unless the new theme needs a new
+semantic token.
 
 The same markup below restyles as you flip the toolbar theme:
 
-<div className="zs-story-row" style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", padding: "1.5rem", background: "var(--zs-surface)", borderRadius: "var(--zs-radius-md)", border: "1px solid var(--zs-rule)" }}>
+<div className="zs-story-row" style={{ display: "flex", gap: "var(--zs-space-3)", flexWrap: "wrap", padding: "var(--zs-space-6)", background: "var(--zs-surface-bg, var(--zs-surface))", borderRadius: "var(--zs-radius-md)", border: "var(--zs-border-sm) solid var(--zs-rule)" }}>
   <Button>Primary action</Button>
   <Button variant="secondary">Secondary</Button>
   <Button variant="ghost">Ghost</Button>

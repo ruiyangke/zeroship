@@ -25,6 +25,8 @@
   background: var(--zs-ink);
   color: var(--zs-surface);
   box-shadow: var(--zs-shadow-md);
+  backdrop-filter: var(--zs-blur, none);
+  -webkit-backdrop-filter: var(--zs-blur, none);
   font-size: var(--zs-text-sm);
   line-height: var(--zs-line-normal);
   padding: var(--zs-space-2) var(--zs-space-3);

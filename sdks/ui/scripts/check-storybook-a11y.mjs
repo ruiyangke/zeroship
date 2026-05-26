@@ -10,6 +10,8 @@ const themes = [
   { label: "Studio", value: "studio" },
   { label: "Atelier", value: "atelier" },
   { label: "Dusk", value: "dusk" },
+  { label: "Glass Dark", value: "glass-dark" },
+  { label: "Glass Light", value: "glass-light" },
 ];
 const stories = [
   "components-base-ui--button-states",
@@ -33,7 +35,8 @@ const failures = [];
 
 for (const theme of themes) {
   for (const storyId of stories) {
-    const url = `${baseUrl}/iframe.html?id=${storyId}&globals=theme:${theme.label}`;
+    const themeGlobal = encodeURIComponent(theme.label);
+    const url = `${baseUrl}/iframe.html?id=${storyId}&globals=theme:${themeGlobal}`;
     await page.goto(url, { waitUntil: "networkidle" });
     const results = await new AxeBuilder({ page }).analyze();
     const blockingViolations = results.violations.filter((violation) =>

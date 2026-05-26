@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 
-export const themes = ["studio", "atelier", "dusk"] as const;
+export const themes = ["studio", "atelier", "dusk", "glass-dark", "glass-light"] as const;
 export type ThemeName = (typeof themes)[number];
 
 export const DEFAULT_THEME: ThemeName = "studio";
@@ -18,6 +18,8 @@ export const themeLabels: Record<ThemeName, string> = {
   studio: "Studio",
   atelier: "Atelier",
   dusk: "Dusk",
+  "glass-dark": "Glass Dark",
+  "glass-light": "Glass Light",
 };
 
 export function isThemeName(value: string | null | undefined): value is ThemeName {

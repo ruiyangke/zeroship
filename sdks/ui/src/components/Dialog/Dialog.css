@@ -31,6 +31,8 @@
   background: var(--zs-surface-overlay);
   color: var(--zs-ink);
   box-shadow: var(--zs-shadow-lg);
+  backdrop-filter: var(--zs-blur, none);
+  -webkit-backdrop-filter: var(--zs-blur, none);
   pointer-events: auto;
   transform-origin: var(--transform-origin, center);
   transition:

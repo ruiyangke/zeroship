@@ -4,6 +4,8 @@
   background: var(--zs-surface-raised);
   color: var(--zs-ink);
   box-shadow: var(--zs-shadow-sm);
+  backdrop-filter: var(--zs-blur, none);
+  -webkit-backdrop-filter: var(--zs-blur, none);
 }
 
 .zs-card--accent {

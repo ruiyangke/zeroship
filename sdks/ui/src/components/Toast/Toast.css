@@ -18,6 +18,8 @@
   background: var(--zs-surface-overlay);
   color: var(--zs-ink);
   box-shadow: var(--zs-shadow-lg);
+  backdrop-filter: var(--zs-blur, none);
+  -webkit-backdrop-filter: var(--zs-blur, none);
   padding: var(--zs-space-4);
   transition:
     opacity var(--zs-motion-base) var(--zs-motion-ease),

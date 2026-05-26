@@ -11,6 +11,8 @@ const preview: Preview = {
         Studio: "studio",
         Atelier: "atelier",
         Dusk: "dusk",
+        "Glass Dark": "glass-dark",
+        "Glass Light": "glass-light",
       },
       defaultTheme: "Studio",
       attributeName: "data-theme",

@@ -2,7 +2,7 @@
   min-height: 100vh;
   display: grid;
   place-items: center;
-  background: var(--zs-surface);
+  background: var(--zs-surface-bg, var(--zs-surface));
   color: var(--zs-ink);
   padding: var(--zs-space-6);
 }
