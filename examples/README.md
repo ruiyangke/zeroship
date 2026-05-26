@@ -13,7 +13,7 @@ Each subdirectory here is a small app that exercises the zeroship build pipeline
 Each demo's README explains:
 
 - **What it shows** — the rendering mode and the file shape it produces.
-- **How to build** — `npm install && npx vite build`.
+- **How to build** — `pnpm install && pnpm build`.
 - **The expected manifest shape** — the rules + worker fields the build emits.
 - **How to deploy** — `zeroship deploy ./dist/app.zship ...`.
 - **Known limitations** — gaps in the platform that this demo surfaces.
@@ -28,7 +28,7 @@ Each demo's README explains:
 
 ```bash
 for d in csr-todo ssr-blog ssg-docs; do
-  (cd examples/$d && npm install && npx vite build)
+  (cd examples/$d && pnpm install && pnpm build)
 done
 ```
 
@@ -41,8 +41,9 @@ zstd -dc examples/<demo>/dist/app.zship | tar -xf - -O manifest.json | jq .
 
 ## Other examples in this directory
 
-The `*.js` files are older framework-less examples that predate the
-`.zship` format and exist for legacy CLI testing (`zeroship serve <file>.js`).
+The `*.js` files are framework-less runtime examples. They are useful for
+`zeroship serve <file>.js` smoke tests, while Vite examples are the primary
+`.zship` build path.
 
 Platform SDK examples:
 

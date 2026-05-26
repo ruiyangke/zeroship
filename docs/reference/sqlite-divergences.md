@@ -16,16 +16,16 @@
 
 ## Source of truth
 
-- [crates/plugin-db/src/backend/mod.rs](crates/plugin-db/src/backend/mod.rs) — cross-backend trait contracts for vector, FTS, and spatial search
-- [crates/plugin-db/src/backend/sqlite/mod.rs](crates/plugin-db/src/backend/sqlite/mod.rs) — SQLite implementations
-- [crates/plugin-db/src/backend/sqlite/vector.rs](crates/plugin-db/src/backend/sqlite/vector.rs) — `vector_unsupported_metric`
-- [crates/plugin-db/src/backend/sqlite/fts.rs](crates/plugin-db/src/backend/sqlite/fts.rs) — SQLite `_rank` / FTS5 SQL shape
-- [crates/plugin-db/src/backend/sqlite/spatial.rs](crates/plugin-db/src/backend/sqlite/spatial.rs) — haversine helper
-- [crates/plugin-db/src/backend/sqlite/session.rs](crates/plugin-db/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
-- [crates/plugin-db/src/backend/sqlite/error.rs](crates/plugin-db/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
-- [crates/plugin-db/src/v8_classes/transaction.rs](crates/plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
-- [crates/plugin-db/src/query.rs](crates/plugin-db/src/query.rs) — cross-backend `ORDER BY` shaping
+- [crates/plugin-db/src/backend/mod.rs](../../crates/plugin-db/src/backend/mod.rs) — cross-backend trait contracts for vector, FTS, and spatial search
+- [crates/plugin-db/src/backend/sqlite/mod.rs](../../crates/plugin-db/src/backend/sqlite/mod.rs) — SQLite implementations
+- [crates/plugin-db/src/backend/sqlite/vector.rs](../../crates/plugin-db/src/backend/sqlite/vector.rs) — `vector_unsupported_metric`
+- [crates/plugin-db/src/backend/sqlite/fts.rs](../../crates/plugin-db/src/backend/sqlite/fts.rs) — SQLite `_rank` / FTS5 SQL shape
+- [crates/plugin-db/src/backend/sqlite/spatial.rs](../../crates/plugin-db/src/backend/sqlite/spatial.rs) — haversine helper
+- [crates/plugin-db/src/backend/sqlite/session.rs](../../crates/plugin-db/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
+- [crates/plugin-db/src/backend/sqlite/error.rs](../../crates/plugin-db/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
+- [crates/plugin-db/src/v8_classes/transaction.rs](../../crates/plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
+- [crates/plugin-db/src/query.rs](../../crates/plugin-db/src/query.rs) — cross-backend `ORDER BY` shaping
 
 ## Test coverage
 
-SQLite-specific backend coverage lives in [crates/plugin-db/tests/sqlite_integration.rs](crates/plugin-db/tests/sqlite_integration.rs). The parity matrix helpers live in [crates/plugin-db/tests/parity/mod.rs](crates/plugin-db/tests/parity/mod.rs).
+SQLite-specific backend coverage lives in [crates/plugin-db/tests/sqlite_integration.rs](../../crates/plugin-db/tests/sqlite_integration.rs). The parity matrix helpers live in [crates/plugin-db/tests/parity/mod.rs](../../crates/plugin-db/tests/parity/mod.rs).

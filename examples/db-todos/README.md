@@ -1,62 +1,85 @@
 # db-todos
 
-End-to-end smoke test for the `@zeroship/db` v2 surfaces. A small todo
-list that exercises the Tier A/B features the v2 work shipped.
+End-to-end Vite + React demo for the current `@zeroship/db` and
+`@zeroship/rpc` surfaces. It is intentionally small, but it exercises the
+state paths that matter for a real app: typed schema discovery, typed
+`env.db`, relations, explicit RPC IDs, generated direct client calls, live
+snapshots, and optimistic UI.
 
 ## What this demonstrates
 
-| Feature | Shipped in commit | Example surface |
-|---|---|---|
-| Materialised indexes (`.unique()` / `.index()`) | A1 — `f9d057b` | `users.email.unique()`, `users.handle.unique()`, `todos.userId.index()` (implicit via `t.ref`) |
-| Deploy-time data validation + audit log | A2+A3 — `6daef16` | `__zeroship_migrations` table populated by every DDL |
-| Typed `t.ref("users")` + Postgres FK | B2 — `eab163a` | `todos.userId: t.ref("users").required()` |
-| Capability-scoped wrappers (TS+runtime) | B3 — `7b8074e` + `6df9097` | `query` / `mutation` / `action` in `src/index.ts` |
+| Area | Example surface |
+| --- | --- |
+| Schema discovery | `export default { schema: dbSchema }` in `src/index.ts` |
+| Typed `env.db` | `@zeroship/db/env` + `zeroship-schema` path alias in `tsconfig.json` |
+| System fields | Rows include `id`, timestamps, actor fields, `version`, and `deleted_at` automatically |
+| Relations | `todos.userId: t.ref("users").required()` in `src/schema.ts` |
+| RPC wrappers | `query`, `mutation`, `action`, and `stream` from `@zeroship/rpc/server` |
+| Explicit wire IDs | Dotted IDs such as `todos.list`, `todos.create`, `todos.subscribe`, `users.public` |
+| Generated client calls | React imports server procedures directly; no `clientProcedure(...)` wrappers |
+| Live data | `subscribeTodos` wraps `db.live(...)` and yields snapshot frames |
+| Stable feed ordering | List and live snapshots sort by `id: -1`, not `created_at`, to avoid timestamp ties |
+| State management | React Query owns the initial public user request; the live feed owns todo snapshots |
 
-The example deliberately uses each wrapper kind:
+## Procedure map
 
-- `listTodos`, `getTodo`, `todoCount` — `query()`; cannot write to the DB
-  (caught at TS compile + runtime capability gates)
-- `createTodo`, `completeTodo`, `archiveTodo`, `deleteTodo` — `mutation()`;
-  cannot call `fetch()`
-- `shareToWebhook` — `action()`; can call `fetch()`; uses `ctx.runQuery`
-  to read data because direct DB access isn't available in actions
+Queries:
 
-Handlers currently run without an implicit transaction: individual DB
-operations autocommit. Use explicit `db.transaction()` when multiple
-operations must commit or roll back as a unit.
+- `todos.list`
+- `todos.listPage`
+- `todos.get`
+- `todos.count`
+- `users.getPair`
+- `todos.listWithUser`
+
+Stream:
+
+- `todos.subscribe`
+
+Mutations:
+
+- `todos.create`
+- `todos.setDone`
+- `todos.archive`
+- `todos.delete`
+- `users.seed`
+- `users.public`
+
+Action:
+
+- `todos.shareToWebhook`
+
+`publicUser` is a mutation because it may create the shared demo user. The
+client calls it through React Query with a stable key so React Strict Mode does
+not create duplicate network traffic.
 
 ## Run locally
 
-Prereqs: a Postgres reachable by the dev runtime (the standard
-zeroship-vite-plugin dev bootstrap handles this when configured).
+The Vite plugin defaults the dev database to project-local SQLite at
+`.zeroship/dev.sqlite`. No local Postgres is required for the default path.
+`.zeroship/` is persistent dev runtime state and should survive restarts.
 
 ```bash
-npm install
-npm run typecheck       # static verification
-npm run dev             # vite-plugin bootstraps the dev runtime
+pnpm install
+pnpm typecheck
+pnpm dev
 ```
 
 In another shell:
 
 ```bash
-npm run smoke           # runs scripts/smoke.sh
+pnpm smoke
 ```
 
-The smoke test exercises:
-1. `createTodo` happy path (mutation wrapper)
-2. FK enforcement — insert with non-existent userId fails (B2)
-3. Manifest registration — wrapper kinds visible to the runtime (B3)
-4. `listTodos` query
-5. Schema audit endpoint accessible (A3)
+The smoke test covers create/list/update/delete flows, FK enforcement, wrapper
+registration, `db.live` snapshot delivery, and the generated RPC path.
 
-## What's NOT in this example
+## What is not the focus
 
-These surfaces ship in v2 but aren't exercised here (see other examples):
-
-- C1 reactive queries / `useQuery` — see `examples/db-chat/`
-- `@zeroship/migrations` data backfills — see `examples/db-migrations-playground/`
-- `t.union()` discriminated documents
-- `t.calendarDate()`, `t.object()`, `withVersioning()` — Tier D polish
-- P8c admin role / HMAC session init — deployment-tier concern
-
-Each is a single-line addition once the runtime is provisioned for it.
+- Multi-step business transactions. Use `db.transaction()` when multiple DB
+  operations must commit or roll back together.
+- Durable data migrations. See `examples/db-migrations-playground/`.
+- Authenticated per-user data. This demo uses a shared public ledger user so
+  every browser window sees the same live list.
+- Raw file or binary RPC responses. Use stream procedures or normal fetch
+  routes for those.

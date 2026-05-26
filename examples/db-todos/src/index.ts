@@ -5,16 +5,16 @@
 // What this file demonstrates:
 //   • export default { schema } convention — multi-collection schema
 //     declared once; the platform installs typed wrappers on env.db
-//   • t.ref("users")  — typed cross-table relations + Postgres FK (B2)
-//   • .unique() / .index() — materialised as real Postgres indexes (A1)
+//   • t.ref("users")  — typed cross-table relations + native FK
+//   • .unique() / .index() — materialised as real backend indexes
 //   • Validation: required / min / max / enum / pattern (existing SDK)
 //   • query() / mutation() / action() wrappers (B3) — capability-scoped:
-//       - query   reads only; runs inside READ ONLY tx
-//       - mutation read+write; runs inside SERIALIZABLE tx; refuses fetch
+//       - query   reads only
+//       - mutation read+write
 //       - action  can call fetch(); compose via runQuery/runMutation
 //
-// Wire conventions match the existing examples (hono-demo etc.):
-//   exports become RPC procedures at /_zs/v1/<name>.
+// Wire IDs are explicit and dotted:
+//   exports become RPC procedures at /_zs/v1/<id>.
 
 import { env } from "zeroship";
 import { query, mutation, action, stream } from "@zeroship/rpc/server";
@@ -54,7 +54,7 @@ function typedIdFromWire<T extends string>(id: string, prefix: string): T {
 const userIdFromWire = (id: string): UserId => typedIdFromWire<UserId>(id, "user");
 
 // ---------------------------------------------------------------------------
-// Queries — read-only; auto-wrapped in BEGIN TRANSACTION READ ONLY (T1)
+// Queries — read-only RPC procedures.
 // ---------------------------------------------------------------------------
 
 // Outside `db.transaction(...)` every Collection method returns
@@ -171,7 +171,7 @@ export const subscribeTodos = stream(
 );
 
 // ---------------------------------------------------------------------------
-// Mutations — read+write; auto-wrapped in BEGIN ISOLATION LEVEL SERIALIZABLE
+// Mutations — read+write RPC procedures.
 // ---------------------------------------------------------------------------
 
 type CreateTodoInput = {
@@ -226,7 +226,7 @@ export const deleteTodo = mutation(
 // ---------------------------------------------------------------------------
 // Actions — can call fetch(); cannot directly write the DB (must use
 // runMutation). Auto-tx is NOT applied here — actions are long-lived and
-// shouldn't hold a Postgres transaction open across HTTP calls.
+// shouldn't hold a database transaction open across HTTP calls.
 // ---------------------------------------------------------------------------
 
 type ShareInput = { id: string; webhookUrl: string };

@@ -8,8 +8,8 @@
 //
 // The `@zeroship/vite-plugin` transform replaces wrapped exports
 // with HTTP-RPC stubs in the client bundle (calling `listTodos(input)`
-// on the client just works), and dispatches them server-side via the
-// synthetic SSR entry's `default.rpc(name, input, ctx)`.
+// on the client just works), and builds the server-side `default.rpc`
+// dictionary consumed by the shared bootstrap dispatcher.
 //
 // Validation: procedures opt into runtime input/output validation
 // by passing `input` / `output` Zod schemas in the wrapper's second

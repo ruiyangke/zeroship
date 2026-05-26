@@ -139,23 +139,30 @@ export const seedEvents = mutation(
     if (error) throw error;
     return data ?? [];
   },
+  { id: "seedEvents" },
 );
 
-export const eventCount = query(async (_input: Record<string, never>) => {
-  const { data, error } = await db.events.count({});
-  if (error) throw error;
-  return data ?? 0;
-});
+export const eventCount = query(
+  async (_input: Record<string, never>) => {
+    const { data, error } = await db.events.count({});
+    if (error) throw error;
+    return data ?? 0;
+  },
+  { id: "eventCount" },
+);
 
-export const eventStats = query(async (_input: Record<string, never>) => {
-  const col = db.events;
-  // Unwrap each Result so the smoke can grep `"total":N` directly.
-  const total = (await col.count({})).data ?? 0;
-  const nullSeverity = (await col.count({ severity: null })).data ?? 0;
-  const emptyKind = (await col.count({ kind: "" })).data ?? 0;
-  const emptyHash = (await col.count({ user_hash: "" })).data ?? 0;
-  return { total, nullSeverity, emptyKind, emptyHash };
-});
+export const eventStats = query(
+  async (_input: Record<string, never>) => {
+    const col = db.events;
+    // Unwrap each Result so the smoke can grep `"total":N` directly.
+    const total = (await col.count({})).data ?? 0;
+    const nullSeverity = (await col.count({ severity: null })).data ?? 0;
+    const emptyKind = (await col.count({ kind: "" })).data ?? 0;
+    const emptyHash = (await col.count({ user_hash: "" })).data ?? 0;
+    return { total, nullSeverity, emptyKind, emptyHash };
+  },
+  { id: "eventStats" },
+);
 
 // ---------------------------------------------------------------------------
 // Migration drivers — thin RPC wrappers around `@zeroship/migrations`
@@ -184,6 +191,7 @@ export const runMigration = action(
     const result = await migrations.run(m, dryRun ? { dryRun: true } : undefined);
     return result.data ?? { error: result.error?.message ?? "unknown" };
   },
+  { id: "runMigration" },
 );
 
 // `action` (not `query`): `migrations.status` calls
@@ -195,4 +203,5 @@ export const migrationStatus = action(
     const result = await migrations.status(m);
     return result.data ?? { error: result.error?.message ?? "unknown" };
   },
+  { id: "migrationStatus" },
 );

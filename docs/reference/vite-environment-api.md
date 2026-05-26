@@ -105,6 +105,11 @@ Notes:
   backend creates the parent directory when it opens the database.
 - The default SQLite path is relative to the spawned runtime's cwd, which the
   plugin sets to the project root.
+- `.zeroship/` is persistent local app state, not disposable boot scratch.
+  Restarting Vite should reuse the same SQLite and redb files. Schema
+  revalidation must treat platform-owned system columns as desired physical
+  columns before diffing, otherwise a restart would incorrectly look like a
+  destructive migration.
 
 ## Runtime Environment Variables
 

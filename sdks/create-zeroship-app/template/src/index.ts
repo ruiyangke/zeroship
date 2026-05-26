@@ -11,7 +11,7 @@
 // Three SDKs demonstrate the platform's shape:
 //   - @zeroship/db        typed CRUD over the app database (SQLite by default in dev)
 //   - @zeroship/storage   file uploads / object storage
-//   - @zeroship/kv        in-memory cache / counters
+//   - @zeroship/kv        ephemeral key-value state / counters
 //
 // Delete what you don't need; this file is a starting point, not a lecture.
 
@@ -39,23 +39,32 @@ const uploads = bucket("uploads");
 
 // ── Notes CRUD ────────────────────────────────────────────────────────────
 
-export const listNotes = query(async () => {
-  const r = await db.notes.find().sort({ id: -1 });
-  if (r.error) throw r.error;
-  return r.data;
-});
+export const listNotes = query(
+  async () => {
+    const r = await db.notes.find().sort({ id: -1 });
+    if (r.error) throw r.error;
+    return r.data;
+  },
+  { id: "notes.list" },
+);
 
-export const addNote = mutation(async ({ title, body }: { title: string; body: string }) => {
-  const r = await db.notes.create({ title, body });
-  if (r.error) throw r.error;
-  return r.data;
-});
+export const addNote = mutation(
+  async ({ title, body }: { title: string; body: string }) => {
+    const r = await db.notes.create({ title, body });
+    if (r.error) throw r.error;
+    return r.data;
+  },
+  { id: "notes.add", idempotent: true },
+);
 
-export const deleteNote = mutation(async ({ id }: { id: number }) => {
-  const r = await db.notes.findOneAndDelete({ id });
-  if (r.error) throw r.error;
-  return r.data !== null;
-});
+export const deleteNote = mutation(
+  async ({ id }: { id: number }) => {
+    const r = await db.notes.findOneAndDelete({ id });
+    if (r.error) throw r.error;
+    return r.data !== null;
+  },
+  { id: "notes.delete" },
+);
 
 // ── File upload demo (stores base64-encoded bytes from the client) ────────
 
@@ -66,18 +75,25 @@ export const uploadFile = mutation(
     if (r.error) throw r.error;
     return r.data;
   },
+  { id: "files.upload", idempotent: true },
 );
 
-export const listFiles = query(async () => {
-  const r = await uploads.list();
-  if (r.error) throw r.error;
-  return r.data;
-});
+export const listFiles = query(
+  async () => {
+    const r = await uploads.list();
+    if (r.error) throw r.error;
+    return r.data;
+  },
+  { id: "files.list" },
+);
 
 // ── Visit counter (kv) ────────────────────────────────────────────────────
 
-export const bumpVisits = mutation(async () => {
-  const r = await kv.incr("visits");
-  if (r.error) throw r.error;
-  return r.data;
-});
+export const bumpVisits = mutation(
+  async () => {
+    const r = await kv.incr("visits");
+    if (r.error) throw r.error;
+    return r.data;
+  },
+  { id: "visits.bump" },
+);

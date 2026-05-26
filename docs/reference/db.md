@@ -209,8 +209,8 @@ platform "system fields" — full documentation lives in the
 - `deleted_at: number | null` — `null` (live) by default; `delete()` stamps the current Unix-ms time.
 
 These seven columns are added by the platform on every table created
-through the schema DSL — `softDelete()` / `withVersioning()` are no
-longer opt-in (the equivalent behaviour is on by default). See
+through the schema DSL. Soft delete and the physical `version` column
+are runtime-owned system-field behavior, not opt-in schema features. See
 [System fields](#system-fields) for the full semantics.
 
 ### Typed-id prefixes
@@ -257,6 +257,14 @@ prefix must match `^[a-z][a-z0-9_]*$`.
 `t.id("usr")` is rejected (and the auto-derivation will never produce it
 either — e.g. a collection named `usrs` derives `usrs`, not `usr`).
 
+**Ordering.** The UUIDv7 body is encoded as a fixed-width base62 string
+using the runtime's ordered alphabet, so lexicographic `id` order
+preserves creation order. Use `.sort({ id: -1 })` for stable
+newest-first feeds and `.sort({ id: 1 })` for oldest-first pagination.
+`created_at` is still the display/filter timestamp, but SQLite's
+`CURRENT_TIMESTAMP` has second-level granularity and can tie under quick
+dev inserts.
+
 ### Per-collection options via `schema()`
 
 ```ts
@@ -267,22 +275,22 @@ export default {
     todos: schema({
       title: t.string().required(),
       done:  t.boolean().default(false),
-    }).softDelete().withVersioning(),
+    })
+      .strictness("strict")
+      .index("by_done", ["done"]),
   },
 };
 ```
 
-- `schema({...}).softDelete()` — soft-delete is now **on by default** for
-  every table via the [System fields](#system-fields) layer. This builder
-  is retained for backward compatibility but does not need to be called;
-  `delete()` always soft-deletes against `deleted_at`, and hard-delete
-  moves under `purge()`. `find()` and friends auto-filter
-  `WHERE deleted_at IS NULL` regardless of this opt-in.
-- `schema({...}).withVersioning()` — optimistic concurrency on `version`
-  is now **on by default** for every table via the [System fields](#system-fields)
-  layer. This builder is retained for backward compatibility but does not
-  need to be called; `update({ id, version: N }, …)` is a CAS guard on
-  every collection.
+- `schema({...}).softDelete()` — not required for normal CRUD. The
+  runtime creates `deleted_at` on every table, `delete()` soft-deletes,
+  and read paths hide deleted rows through the system-fields layer.
+- `schema({...}).withVersioning()` — not required to create or bump the
+  physical `version` field. The runtime creates `version` on every table
+  and treats `update({ id, version: N }, ...)` as a CAS guard. The SDK
+  flag currently controls the higher-level `OptimisticLockError`
+  mapping for wrapper-side CAS helpers while this pre-launch surface is
+  being simplified.
 - `schema({...}).strictness("strict" | "lenient" | "off")` — deploy-time
   data-validation policy. Both shorthand collections (`users: { ... }`)
   and `schema({...})` default to `strict`; switch to the builder form if
@@ -328,7 +336,7 @@ fields, matching Postgres B-tree semantics:
 `code = "SCHEMA_INVALID"` if `name` is empty or already declared on the
 schema, or if `fields` is empty or references a field absent from the
 schema. The auto-generated columns (`id`, `created_at`, `updated_at`,
-`deleted_at` under soft-delete, `version` under versioning) are accepted.
+`created_by`, `updated_by`, `version`, `deleted_at`) are accepted.
 
 **Runtime warning.** Outside `NODE_ENV=production`, calling
 `find()` / `get()` / `deleteMany()` with a filter whose keys don't form
@@ -428,23 +436,24 @@ const { data: admins } = await db.users
   .limit(20)
   .skip(40);
 
-// Cursor pagination — id-only seek (legacy helper)
+// Cursor pagination — id-only seek helper
 const { data: next } = await db.users.find({}).sort({ id: 1 }).after(lastId);
 
 // Cursor pagination — full envelope (recommended)
 // Pass cursor: null for the first page; pass back continueCursor to advance.
 // isDone flips true when the underlying store returns fewer than numItems+1
 // rows. The cursor is opaque base64-JSON and bound to the orderBy used.
+// Prefer id order for stable feeds; typed ids are lexicographically sortable.
 const { data: p1 } = await db.users
   .find({})
-  .sort({ created_at: -1 })
+  .sort({ id: -1 })
   .paginate({ cursor: null, numItems: 20 });
 // p1 = { page, continueCursor, isDone }
 
 if (!p1!.isDone) {
   const { data: p2 } = await db.users
     .find({})
-    .sort({ created_at: -1 })
+    .sort({ id: -1 })
     .paginate({ cursor: p1!.continueCursor, numItems: 20 });
 }
 
@@ -561,7 +570,7 @@ const { data: counts } = await db.users.updateMany(
 );
 // counts = { matchedCount: N, modifiedCount: N }
 
-// CAS via versioning (when withVersioning() is on)
+// CAS via the platform version field
 const { data, error } = await db.products.update(
   { id: "prd_01hxyz...", version: 5 },
   { stock: { $dec: 1 } },
@@ -621,9 +630,8 @@ const { data } = await db.users.delete({ email: "spam@..." });
 const { data } = await db.sessions.deleteMany({ expiresAt: { $lt: Date.now() } });
 // { deletedCount: N }
 
-// Soft delete: with `softDelete()` on the schema, delete sets deleted_at
-// instead of removing the row. For an explicit hard-delete (regardless
-// of soft-delete state), use `purge` / `purgeMany`:
+// Soft delete: delete sets deleted_at instead of removing the row.
+// For an explicit hard-delete, use `purge` / `purgeMany`:
 await db.users.purge("usr_01hxyz...");
 await db.users.purgeMany({ email: { $like: "spam-%" } });
 ```
@@ -1151,6 +1159,10 @@ which the SDK rethrows as `OptimisticLockError` (`code:
 "OPTIMISTIC_CONCURRENCY"`, `retryable: true`) so the standard
 `instanceof OptimisticLockError` check keeps working.
 
+The physical column and native CAS behavior exist on every collection.
+The current `withVersioning()` builder flag is only an SDK-side hint for
+typed wrapper error mapping; it is not what creates the `version` column.
+
 Omitting `version` from the filter is last-writer-wins — the UPDATE
 still bumps `version` by 1 but doesn't refuse on a concurrent edit.
 Use the [`withRetry`](#retrying-cas-updates-with-withretry) helper to
@@ -1167,8 +1179,10 @@ await db.posts.delete(postId);
 ```
 
 `find()` / `count()` / `exists()` / `distinct()` / `aggregate()` all
-auto-filter `WHERE deleted_at IS NULL`. To include soft-deleted rows,
-thread `{ include_deleted: true }` through the native query opts.
+auto-filter `WHERE deleted_at IS NULL`. The native option for internal
+callers is `include_deleted: true`; the public SDK's include-deleted
+read helper is still being simplified. Use `restore()` and `purge()`
+for explicit lifecycle operations today.
 
 To remove a row from storage permanently (GDPR-erase, compliance), use
 `purge()`:
@@ -1228,6 +1242,12 @@ await db.posts.purge(post.id);
 ```
 
 The full design lives in `docs/archive/platform-system-fields.md` (shipped; archived).
+
+Implementation anchors:
+
+- System columns and implicit indexes are emitted in `crates/plugin-db/src/query.rs`.
+- Read filtering, soft delete, restore, and purge dispatch live in `crates/plugin-db/src/crud/mod.rs`.
+- Schema revalidation treats platform system fields as desired physical columns before diffing, so persistent dev databases under `.zeroship/` do not look destructive after a restart.
 
 ## Masking
 
@@ -1426,26 +1446,6 @@ re-run the rewrite cron for the affected slice.
 
 Both tables live in the per-app schema; standard isolation rules
 apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).
-
-## System Fields (Shipped Reference)
-
-This section resolves `docs/archive/platform-system-fields.md` against the shipped implementation in `crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/system_fields_pass.rs`, `crates/plugin-db/src/crud/mod.rs`, and `sdks/db/src/types.ts`. In this worktree, the seven platform-managed fields are `id`, `created_at`, `updated_at`, `created_by`, `updated_by`, `version`, and `deleted_at`; there is no shipped `_deleted` or `_deleted_at` column in the verified implementation.
-
-| Field | Shipped behavior |
-| --- | --- |
-| `id` | `TEXT PRIMARY KEY`; auto-minted as a typed id on insert when absent, but a creator-supplied value is preserved when present. Immutable after insert. |
-| `created_at` | Server-populated at insert via dialect default (`NOW()` on Postgres, `CURRENT_TIMESTAMP` on SQLite). Immutable after insert. |
-| `updated_at` | Server-populated at insert, then auto-bumped on update, soft-delete, and restore unless the patch explicitly overrides it. |
-| `created_by` | Stamped from the current request actor on insert when an actor is in scope; otherwise left `NULL`. Immutable after insert. |
-| `updated_by` | Stamped from the current request actor on insert and update paths when an actor is in scope; otherwise left `NULL`. Auto-managed, but an explicit update-path override suppresses the automatic bump. |
-| `version` | `INTEGER NOT NULL DEFAULT 1`; starts at `1` and auto-bumps on update, soft-delete, and restore unless the patch explicitly overrides it. |
-| `deleted_at` | Nullable timestamp; `NULL` means live, `delete()` stamps it to the current time, and `restore()` clears it back to `NULL`. |
-
-`Row<S>` includes these fields automatically on every read, with `id: string`, `created_at` / `updated_at` / `deleted_at` as Unix-ms numbers, `created_by` / `updated_by` as `string | null`, and `version: number` (`sdks/db/src/types.ts`). The declaration-time reserved-name fence also follows this shipped set: creator schemas cannot declare any of those seven names (`crates/plugin-db/src/query.rs`).
-
-`delete()` is a soft-delete on tables that carry the system-fields marker. The generated SQL updates `deleted_at`, bumps `version`, updates `updated_at`, and stamps `updated_by` when an actor exists; it also adds `AND deleted_at IS NULL`, so re-deleting an already soft-deleted row is a no-op (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mod.rs`). `restore()` is the symmetric update: it clears `deleted_at`, applies the same version/timestamp/actor bump, and only affects rows where `deleted_at IS NOT NULL` (`crates/plugin-db/src/query.rs`, `crates/plugin-db/src/crud/mod.rs`). `purge()` is the explicit hard-delete path and does not rely on the soft-delete marker, so it removes matching rows from storage outright (`crates/plugin-db/src/crud/mod.rs`).
-
-Read paths auto-filter soft-deleted rows by appending `deleted_at IS NULL` unless the caller passes `include_deleted: true`; the CRUD layer threads that gate through `find`, `count`, `aggregate`, and `distinct` (`crates/plugin-db/src/crud/mod.rs`, `crates/plugin-db/src/query.rs`). New tables also get three implicit B-tree indexes on `deleted_at`, `updated_at`, and `created_by`; `id` is already covered by the primary key, and `version` is intentionally left unindexed because every update bumps it (`crates/plugin-db/src/query.rs`). On legacy tables that do not carry the system-fields marker, the runtime keeps the pre-marker fallback: `delete()` warns and hard-deletes, while `restore()` refuses because there is no guaranteed `deleted_at` column (`crates/plugin-db/src/crud/system_fields_pass.rs`, `crates/plugin-db/src/crud/mod.rs`).
 
 ## Encrypted and Masked Fields (Shipped Reference)
 

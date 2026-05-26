@@ -119,9 +119,9 @@ Worker/runtime -> reads the forwarded user context
 
 ## Related docs
 
-- [docs/architecture/overview.md](docs/architecture/overview.md) — Platform entry point and system map
-- [docs/architecture/distributed.md](docs/architecture/distributed.md) — How feeds propagate across nodes
-- [docs/architecture/gateway-routing.md](docs/architecture/gateway-routing.md) — Gateway-side route resolution and dispatch
-- [docs/architecture/blob-store.md](docs/architecture/blob-store.md) — Bundle and asset blob storage architecture
-- [docs/reference/auth.md](docs/reference/auth.md) — Creator and end-user authentication model
-- [docs/reference/billing-metering.md](docs/reference/billing-metering.md) — Usage reporting, metering, and billing flows
+- [docs/architecture/overview.md](../architecture/overview.md) — Platform entry point and system map
+- [docs/architecture/distributed.md](../architecture/distributed.md) — How feeds propagate across nodes
+- [docs/architecture/gateway-routing.md](../architecture/gateway-routing.md) — Gateway-side route resolution and dispatch
+- [docs/architecture/blob-store.md](../architecture/blob-store.md) — Bundle and asset blob storage architecture
+- [docs/reference/auth.md](../reference/auth.md) — Creator and end-user authentication model
+- [docs/reference/billing-metering.md](../reference/billing-metering.md) — Usage reporting, metering, and billing flows

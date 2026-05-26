@@ -34,7 +34,7 @@ These fields exist on `ZeroshipOptions`, but the current `zeroship()` pipeline d
 
 | Option | Current reality |
 | --- | --- |
-| `rpcEndpoint` | The transform receives it, but generated client stubs still call `/_zs/v1/<wireId>`. Dev middleware also accepts legacy `/_rpc` and `/rpc` routes for migration parity. |
+| `rpcEndpoint` | The transform receives it, but generated client stubs and the shared RPC client use the shipped `/_zs/v1/<wireId>` path. |
 | `rpc.strict` | `resolveRpcStrict()` and `server-graph.ts` exist, but the build path in [`sdks/vite-plugin/src/build.ts`](../../sdks/vite-plugin/src/build.ts) still emits manifest metadata from wrapper discovery only. |
 
 ## Procedure discovery in the active build path
@@ -69,6 +69,25 @@ In that file, `listTodos` and `addTodo` become RPC procedures. `helper()` does n
 
 The old `src/server.{ts,tsx,js,jsx}` and `src/server/**` path convention is no longer sufficient by itself. Legacy paths without the directive only trigger a migration warning.
 
+## Generated client stubs
+
+Client modules can import server procedure exports directly. The transform
+replaces those imports with callable procedure references backed by
+`@zeroship/rpc/client`:
+
+```ts
+import { listTodos, addTodo } from "./index";
+
+const todos = await listTodos({ userId });
+await addTodo({ userId, title: "Ship docs" });
+```
+
+The generated stubs do not own transport behavior. They delegate to the shared
+RPC runtime, so `configureRpcClient({ baseUrl, auth, headers, timeout, retry,
+transformer })` affects generated stubs and manual `createRpcClient()` calls in
+the same way. This is why app code does not need per-procedure
+`clientProcedure(...)` wrappers.
+
 ## Config, kind, and `wireId`
 
 - The wrapper's second argument and the legacy `fn.config = { ... }` assignment are both read.
@@ -99,5 +118,6 @@ The runtime-side dispatcher and stream encoder live in [`sdks/bootstrap/README.m
 ## See also
 
 - [`vite-environment-api.md`](vite-environment-api.md)
+- [`rpc.md`](rpc.md)
 - [`zs-standard.md`](zs-standard.md)
 - [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md)

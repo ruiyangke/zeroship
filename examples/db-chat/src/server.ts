@@ -1,20 +1,15 @@
 "use server";
 
-// db-chat (server module) — exercises C1 reactive queries + P8b
-// read-set narrowing end-to-end.
+// db-chat server module.
 //
 // What this file demonstrates:
-//   • export default { schema } with three related collections + t.ref FKs (B2)
-//   • query() handler captures read-set via the B3 CURRENT_KIND gate
-//     and the per-query Active capture guard — the broker's predicate
-//     evaluator (P8b) uses it to skip events that don't match
-//   • mutation() writes go through the local-emit path (P8a) AND the
-//     WAL pgoutput consumer (P8a.2) when wal_level=logical is on
-//   • Subscription cleanup via the Weak finalizer (P8a + native
-//     Subscription v8_class in a7261cf) — handle reclaimed at GC
+//   • export default { schema } with three related collections + t.ref FKs
+//   • query/mutation/action wrappers from @zeroship/rpc/server
+//   • Result<T> unwrapping before returning through the RPC wire
+//   • channel-scoped queries that the React example can refresh
 //
-// The client (src/App.tsx) uses @zeroship/react's useQuery against
-// the `listMessages` proc and auto-rerenders on broker events.
+// The client (src/App.tsx) uses the older @zeroship/react hook path
+// against `listMessages`.
 
 import { t, schema } from "@zeroship/db";
 import { env } from "zeroship";
@@ -55,8 +50,7 @@ type ChannelId = typeof db.channels.Id;
 type MessageId = typeof db.messages.Id;
 
 // ---------------------------------------------------------------------------
-// Queries — read-only. listMessages records its read-set ({channelId}) so
-// the broker only fires events for messages in this specific channel.
+// Queries.
 // ---------------------------------------------------------------------------
 
 // Outside `db.transaction(...)` every Collection method returns
@@ -68,11 +62,12 @@ export const listMessages = query(
   async ({ channelId, limit = 50 }: { channelId: ChannelId; limit?: number }) => {
     const { data, error } = await db.messages
       .find({ channelId, flagged: false })
-      .sort({ created_at: -1 })
+      .sort({ id: -1 })
       .limit(limit);
     if (error) throw error;
     return data ?? [];
   },
+  { id: "listMessages" },
 );
 
 export const getMessage = query(
@@ -81,17 +76,20 @@ export const getMessage = query(
     if (error) throw error;
     return data;
   },
+  { id: "getMessage" },
 );
 
-export const listChannels = query(async (_input: Record<string, never>) => {
-  const { data, error } = await db.channels.find({}).sort({ slug: 1 });
-  if (error) throw error;
-  return data ?? [];
-});
+export const listChannels = query(
+  async (_input: Record<string, never>) => {
+    const { data, error } = await db.channels.find({}).sort({ slug: 1 });
+    if (error) throw error;
+    return data ?? [];
+  },
+  { id: "listChannels" },
+);
 
 // ---------------------------------------------------------------------------
-// Mutations — write paths. Each write fires a broker event; if a
-// Subscription read-set matches, the subscriber's useQuery re-renders.
+// Mutations.
 // ---------------------------------------------------------------------------
 
 export const sendMessage = mutation(
@@ -102,6 +100,7 @@ export const sendMessage = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "sendMessage" },
 );
 
 export const flagMessage = mutation(
@@ -110,6 +109,7 @@ export const flagMessage = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "flagMessage" },
 );
 
 export const createChannel = mutation(
@@ -120,6 +120,7 @@ export const createChannel = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "createChannel" },
 );
 
 // Seed helper — used by smoke.sh to provision a user.
@@ -129,6 +130,7 @@ export const createUser = mutation(
     if (error) throw error;
     return data;
   },
+  { id: "createUser" },
 );
 
 // ---------------------------------------------------------------------------
@@ -156,4 +158,5 @@ export const moderateMessage = action(
     }
     return { handled: true, flagged: false };
   },
+  { id: "moderateMessage" },
 );

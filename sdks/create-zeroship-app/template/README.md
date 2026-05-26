@@ -1,13 +1,13 @@
 # zeroship app
 
-A zeroship app with database (SQLite by default in dev), file storage, and key-value cache
+A zeroship app with database (SQLite by default in dev), file storage, and key-value state
 wired up out of the box.
 
 ## Get started
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 - **http://localhost:5173** — your app
@@ -22,11 +22,12 @@ npm run dev
 |---|---|---|
 | `@zeroship/db` | `env.db` | Typed CRUD over the app database |
 | `@zeroship/storage` | `env.storage` | File uploads / object storage |
-| `@zeroship/kv` | `env.kv` | In-memory cache, sessions, counters |
+| `@zeroship/kv` | `env.kv` | Ephemeral key-value state, sessions, counters |
 
-The `"use server"` directive at the top of `src/index.ts` marks every export
-as a server function. You can call these directly from client code — the
-vite-plugin converts client calls into RPC.
+The `"use server"` directive at the top of `src/index.ts` opts the file into
+RPC discovery. Wrapped exports (`query`, `mutation`, `action`, `stream`) become
+server functions. You can call those directly from client code; the Vite plugin
+converts the imports into RPC calls.
 
 ## Deploy (coming soon)
 

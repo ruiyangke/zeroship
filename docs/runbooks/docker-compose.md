@@ -37,6 +37,6 @@ The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host
 
 ## Related docs
 
-- [Local dev setup](docs/runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
-- [Nomad + Cloud Hypervisor sandbox](docs/runbooks/sandbox-nomad-ch.md) — operating the bare-metal VM sandbox backend.
-- [Distributed architecture](docs/architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.
+- [Local dev setup](../runbooks/local-dev.md) — the same platform stack run as three bare `cargo`-built binaries instead of containers.
+- [Nomad + Cloud Hypervisor sandbox](../runbooks/sandbox-nomad-ch.md) — operating the bare-metal VM sandbox backend.
+- [Distributed architecture](../architecture/distributed.md) — what the `control`/`gateway`/`worker` services are and how they coordinate.

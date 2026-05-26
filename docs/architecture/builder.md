@@ -16,13 +16,13 @@ This file does not describe any separate `zeroship/editor` repository or a Docke
 
 ## Relevant files
 
-- [crates/sandbox/src/main.rs](crates/sandbox/src/main.rs): HTTP surface and service boot
-- [crates/sandbox/src/handlers.rs](crates/sandbox/src/handlers.rs): creator-facing sandbox API
-- [crates/sandbox/src/backend/mod.rs](crates/sandbox/src/backend/mod.rs): backend enum
-- [crates/sandbox/src/backend/nomad_ch.rs](crates/sandbox/src/backend/nomad_ch.rs): Nomad + Cloud Hypervisor backend
-- [crates/sandbox/src/preview.rs](crates/sandbox/src/preview.rs): HTTP preview proxy
-- [crates/sandbox/src/preview_ws.rs](crates/sandbox/src/preview_ws.rs): WebSocket preview forwarder
-- [crates/sandbox/src/admin_handlers.rs](crates/sandbox/src/admin_handlers.rs): admin, snapshot, wake, and cold-boot routes
+- [crates/sandbox/src/main.rs](../../crates/sandbox/src/main.rs): HTTP surface and service boot
+- [crates/sandbox/src/handlers.rs](../../crates/sandbox/src/handlers.rs): creator-facing sandbox API
+- [crates/sandbox/src/backend/mod.rs](../../crates/sandbox/src/backend/mod.rs): backend enum
+- [crates/sandbox/src/backend/nomad_ch.rs](../../crates/sandbox/src/backend/nomad_ch.rs): Nomad + Cloud Hypervisor backend
+- [crates/sandbox/src/preview.rs](../../crates/sandbox/src/preview.rs): HTTP preview proxy
+- [crates/sandbox/src/preview_ws.rs](../../crates/sandbox/src/preview_ws.rs): WebSocket preview forwarder
+- [crates/sandbox/src/admin_handlers.rs](../../crates/sandbox/src/admin_handlers.rs): admin, snapshot, wake, and cold-boot routes
 
 ## Backends
 
@@ -85,14 +85,14 @@ Snapshot/wake behavior is feature-gated by sandbox config. The admin handlers an
 
 | Working on | Start here |
 | --- | --- |
-| sandbox API behavior | [handlers.rs](crates/sandbox/src/handlers.rs) |
-| backend selection | [backend/mod.rs](crates/sandbox/src/backend/mod.rs) |
-| Nomad + CH runtime | [nomad_ch.rs](crates/sandbox/src/backend/nomad_ch.rs) |
-| preview proxy | [preview.rs](crates/sandbox/src/preview.rs), [preview_ws.rs](crates/sandbox/src/preview_ws.rs) |
-| snapshot/restore | [admin_handlers.rs](crates/sandbox/src/admin_handlers.rs), `docs/runbooks/sandbox-nomad-ch.md` |
+| sandbox API behavior | [handlers.rs](../../crates/sandbox/src/handlers.rs) |
+| backend selection | [backend/mod.rs](../../crates/sandbox/src/backend/mod.rs) |
+| Nomad + CH runtime | [nomad_ch.rs](../../crates/sandbox/src/backend/nomad_ch.rs) |
+| preview proxy | [preview.rs](../../crates/sandbox/src/preview.rs), [preview_ws.rs](../../crates/sandbox/src/preview_ws.rs) |
+| snapshot/restore | [admin_handlers.rs](../../crates/sandbox/src/admin_handlers.rs), `docs/runbooks/sandbox-nomad-ch.md` |
 
 ## Related docs
 
-- [Architecture overview](docs/architecture/overview.md) — the entry point and system map.
-- [Distributed architecture](docs/architecture/distributed.md) — why the sandbox sits off the end-user request hot path.
-- [Nomad + Cloud Hypervisor runbook](docs/runbooks/sandbox-nomad-ch.md) — operating the `nomad-ch` backend.
+- [Architecture overview](../architecture/overview.md) — the entry point and system map.
+- [Distributed architecture](../architecture/distributed.md) — why the sandbox sits off the end-user request hot path.
+- [Nomad + Cloud Hypervisor runbook](../runbooks/sandbox-nomad-ch.md) — operating the `nomad-ch` backend.

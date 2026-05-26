@@ -5,12 +5,12 @@ That compile step replaced the rule walker so inheritance flattening and RPC/pat
 
 ## Relevant files
 
-- [crates/bundle/src/manifest.rs](crates/bundle/src/manifest.rs): `Manifest`
-- [crates/bundle/src/rule.rs](crates/bundle/src/rule.rs): `ResourceEntry`, `AuthLevel`, `ProcedureKind`, `Cors`, `RateLimit`
-- [crates/gateway/src/compiled.rs](crates/gateway/src/compiled.rs): `CompiledManifest`, `EffectivePolicy`, `ResolvedAction`
-- [crates/gateway/src/router/dispatch.rs](crates/gateway/src/router/dispatch.rs): request entry and policy enforcement
-- [crates/gateway/src/router/static_serve.rs](crates/gateway/src/router/static_serve.rs): static asset path
-- [crates/gateway/src/sync.rs](crates/gateway/src/sync.rs): `/internal/routes` poller and route cache
+- [crates/bundle/src/manifest.rs](../../crates/bundle/src/manifest.rs): `Manifest`
+- [crates/bundle/src/rule.rs](../../crates/bundle/src/rule.rs): `ResourceEntry`, `AuthLevel`, `ProcedureKind`, `Cors`, `RateLimit`
+- [crates/gateway/src/compiled.rs](../../crates/gateway/src/compiled.rs): `CompiledManifest`, `EffectivePolicy`, `ResolvedAction`
+- [crates/gateway/src/router/dispatch.rs](../../crates/gateway/src/router/dispatch.rs): request entry and policy enforcement
+- [crates/gateway/src/router/static_serve.rs](../../crates/gateway/src/router/static_serve.rs): static asset path
+- [crates/gateway/src/sync.rs](../../crates/gateway/src/sync.rs): `/internal/routes` poller and route cache
 
 ## Request pipeline
 
@@ -92,7 +92,7 @@ Static serving is handled by `router/static_serve.rs`:
 
 ## Idempotency
 
-Idempotency lives in [idempotency.rs](crates/gateway/src/idempotency.rs).
+Idempotency lives in [idempotency.rs](../../crates/gateway/src/idempotency.rs).
 
 Current behavior:
 
@@ -111,15 +111,15 @@ Gateway polls `/internal/routes` every 5 seconds. `RouteCache::update` validates
 
 | Change | Start here |
 | --- | --- |
-| Resource lookup / policy merge | [compiled.rs](crates/gateway/src/compiled.rs) |
-| Request gating | [dispatch.rs](crates/gateway/src/router/dispatch.rs) |
-| Static asset behavior | [static_serve.rs](crates/gateway/src/router/static_serve.rs) |
-| Route sync | [sync.rs](crates/gateway/src/sync.rs) |
+| Resource lookup / policy merge | [compiled.rs](../../crates/gateway/src/compiled.rs) |
+| Request gating | [dispatch.rs](../../crates/gateway/src/router/dispatch.rs) |
+| Static asset behavior | [static_serve.rs](../../crates/gateway/src/router/static_serve.rs) |
+| Route sync | [sync.rs](../../crates/gateway/src/sync.rs) |
 
 ## Related docs
 
-- [docs/architecture/overview.md](docs/architecture/overview.md): entry point and system map.
-- [docs/architecture/distributed.md](docs/architecture/distributed.md): end-to-end request flow across gateway, worker, and control.
-- [docs/architecture/control-plane.md](docs/architecture/control-plane.md): where route state and manifests come from.
-- [docs/architecture/blob-store.md](docs/architecture/blob-store.md): blob-backed static asset and bundle storage.
-- [docs/reference/zs-standard.md](docs/reference/zs-standard.md): the `/_zs/v1` dispatch contract.
+- [docs/architecture/overview.md](../architecture/overview.md): entry point and system map.
+- [docs/architecture/distributed.md](../architecture/distributed.md): end-to-end request flow across gateway, worker, and control.
+- [docs/architecture/control-plane.md](../architecture/control-plane.md): where route state and manifests come from.
+- [docs/architecture/blob-store.md](../architecture/blob-store.md): blob-backed static asset and bundle storage.
+- [docs/reference/zs-standard.md](../reference/zs-standard.md): the `/_zs/v1` dispatch contract.
