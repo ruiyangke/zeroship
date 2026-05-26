@@ -1,12 +1,8 @@
 {
   "name": "@zeroship/server",
   "version": "0.1.0",
-  "private": true,
   "description": "Server-side helpers for zeroship apps — defineApp, zod convenience, ambient runtime substrate",
   "type": "module",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -14,12 +10,12 @@
     }
   },
   "files": [
-    "dist",
-    "src"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsup",
     "check": "tsc --noEmit",
+    "lint:pkg": "publint && attw --pack .",
     "test": "node --import tsx --test test/*.test.ts test/*.test.tsx"
   },
   "license": "MIT",
@@ -35,7 +31,10 @@
     "@zeroship/types": "workspace:*"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
     "@types/node": "catalog:",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "zeroship": "workspace:*",

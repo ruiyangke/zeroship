@@ -4,7 +4,7 @@
 // it while transforming server modules so procedure exports carry the
 // same metadata as client stubs.
 
-import type { ProcedureKind } from "./types.js";
+import type { ProcedureKind } from "./types";
 
 /** Per-procedure metadata mirrored from the client adapter. */
 export interface ServerProcedureMeta {

@@ -5,7 +5,7 @@
 // synthetic `"zeroship"` module. RPC wrapper markers live in
 // `@zeroship/rpc/server`.
 
-export { defineApp } from "./define-app.js";
+export { defineApp } from "./define-app";
 export {
   type AppDefinition,
   type Resource,
@@ -25,7 +25,7 @@ export {
   type Timeout,
   type DefinedApp,
   DEFINE_APP_MARKER,
-} from "./types.js";
+} from "./types";
 
 // Re-exports of the runtime substrate (the synthetic `"zeroship"`
 // module).
@@ -51,7 +51,7 @@ export {
 // binding.
 //
 // Symmetric with the client-side procedure brander in `@zeroship/rpc`.
-export { __makeServerProcedure } from "./make-server-procedure.js";
+export { __makeServerProcedure } from "./make-server-procedure";
 export type {
   ServerProcedureMeta,
   ServerProcedureFn,
@@ -60,7 +60,7 @@ export type {
   ServerStreamProcedure,
   ServerSubscriptionProcedure,
   ServerActionProcedure,
-} from "./make-server-procedure.js";
+} from "./make-server-procedure";
 
 // ── Zod re-export (optional peer dep) ────────────────────────────────
 //

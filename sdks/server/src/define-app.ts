@@ -2,7 +2,7 @@ import {
   type AppDefinition,
   type DefinedApp,
   DEFINE_APP_MARKER,
-} from "./types.js";
+} from "./types";
 
 /**
  * Declare an app's resource tree and RPC defaults.
