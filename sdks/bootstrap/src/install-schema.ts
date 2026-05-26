@@ -207,14 +207,29 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
     // round-trip. Error code mirrors the Rust-side
     // `RESERVED_SYSTEM_FIELD_NAME`.
     if (SYSTEM_FIELD_NAMES.includes(key)) {
-      throw Object.assign(
-        new Error(
-          `Field name "${key}" is reserved for platform system fields. ` +
-            `System fields (${SYSTEM_FIELD_NAMES.join(", ")}) are managed by ` +
-            `the platform and cannot be overridden.`,
-        ),
-        { code: "RESERVED_SYSTEM_FIELD_NAME" as const },
-      );
+      // Sanctioned exception: `id: t.id("prefix")` is a PREFIX
+      // DECLARATION for the always-present system `id` PK column — not
+      // an attempt to override the column. Allow it through ONLY when
+      // the value is a `type:"id"` builder; the `{type:"id", idPrefix}`
+      // def then reaches `registerModel` (and the Rust schema cache) so
+      // the auto-mint pass can read the declared prefix. Any other type
+      // declared under `id`, and all six other system names, stay
+      // rejected. The Rust column emitter skips this field (no duplicate
+      // `id` column) and its validator mirrors the `usr` fence.
+      const isIdPrefixDecl =
+        key === "id" &&
+        isTypeBuilder(rawVal) &&
+        rawVal.toFieldDef().type === "id";
+      if (!isIdPrefixDecl) {
+        throw Object.assign(
+          new Error(
+            `Field name "${key}" is reserved for platform system fields. ` +
+              `System fields (${SYSTEM_FIELD_NAMES.join(", ")}) are managed by ` +
+              `the platform and cannot be overridden.`,
+          ),
+          { code: "RESERVED_SYSTEM_FIELD_NAME" as const },
+        );
+      }
     }
     if (!isTypeBuilder(rawVal)) {
       throw Object.assign(
