@@ -86,7 +86,7 @@ interface Manifest {
   metadata: ManifestMetadata;
   /** Unified resource tree — see `docs/proposals/rpc.md` §7. */
   resources?: Record<string, Record<string, unknown>>;
-  /** Wire transformer: `"superjson"` (default) or `"json"`. */
+  /** Wire transformer: `"json"` (default) or `"superjson"`. */
   transformer?: "superjson" | "json";
 }
 
@@ -372,7 +372,7 @@ export async function emitZship(
   for (const [key, value] of Object.entries(userResources)) {
     mergedResources[key] = { ...(mergedResources[key] ?? {}), ...value };
   }
-  const transformer = options.rpcExtras?.transformer ?? "superjson";
+  const transformer = options.rpcExtras?.transformer ?? "json";
 
   const manifest: Manifest = {
     version: 1,

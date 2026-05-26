@@ -75,7 +75,7 @@ export interface ClientOptions<App = unknown> {
   headers?: HeaderResolver;
   /**
    * Wire transformer. Must match `manifest.transformer` on the server
-   * side or the wire will fail to decode. Defaults to "superjson".
+   * side or the wire will fail to decode. Defaults to "json".
    */
   transformer?: Transformer;
   /** Default per-attempt timeout in milliseconds. */
@@ -163,9 +163,8 @@ export interface ProcedureHandle<TIn = unknown, TOut = unknown> {
    * URL directly to ai-sdk's `useChat({ api: ... })` — the stream
    * itself is consumed by ai-sdk's parser, not this client.
    *
-   * Returns a Promise<string> when the input requires async serialization
-   * (the default with `transformer: "superjson"`); a plain string when
-   * input is undefined (no body, no query-string).
+   * Returns a Promise<string> when input is encoded into the query string;
+   * a plain string when input is undefined (no body, no query-string).
    */
   streamUrl(input?: TIn): string | Promise<string>;
   /**
@@ -263,7 +262,7 @@ export function client<App = Record<string, never>>(
       "[zeroship/rpc] no fetch implementation — pass `fetch:` in client({}) or run on a runtime that exposes globalThis.fetch.",
     );
   }
-  const transformer: Transformer = options.transformer ?? "superjson";
+  const transformer: Transformer = options.transformer ?? "json";
   const proceduresMeta = options.procedures ?? {};
   const headersResolver = normalizeHeadersResolver(options.headers);
 

@@ -176,19 +176,14 @@ export function createBatchLink(cfg: BatchConfig): BatchLink {
       if (!entry) continue; // Server returned an unknown id; skip.
       byId.delete(slot.id);
       if (slot.status >= 200 && slot.status < 300) {
-        // Output is wrapped in superjson envelope `{ json, meta? }`
-        // when transformer === "superjson"; in json mode it's the
-        // bare value. decodeBody handles both shapes.
+        // Runtime responses may be envelope-shaped even for the JSON
+        // transformer; decodeBody unwraps JSON and revives SuperJSON.
         try {
-          if (cfg.transformer === "json") {
-            entry.resolve(slot.output);
-          } else {
-            const decoded = await decodeBody(
-              JSON.stringify(slot.output),
-              cfg.transformer,
-            );
-            entry.resolve(decoded);
-          }
+          const decoded = await decodeBody(
+            JSON.stringify(slot.output),
+            cfg.transformer,
+          );
+          entry.resolve(decoded);
         } catch (e) {
           entry.reject(e instanceof Error ? e : new Error(String(e)));
         }

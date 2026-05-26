@@ -160,6 +160,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   // `resetSchemaInstalled()` after a deps re-optimize (which forces
   // the runner to rebuild and re-imports the SDK copy).
   let schemaInstalled = false;
+  let schemaRegistration: Promise<void> | undefined;
 
   async function loadNormalized(): Promise<NormalizedUserModule> {
     const mod = await options.loadUserModule();
@@ -169,6 +170,13 @@ export function devEntry(options: DevEntryOptions): DevEntry {
 
   async function maybeRegisterSchema(mod: unknown): Promise<void> {
     if (schemaInstalled) return;
+    if (!schemaRegistration) {
+      schemaRegistration = registerSchema(mod);
+    }
+    await schemaRegistration;
+  }
+
+  async function registerSchema(mod: unknown): Promise<void> {
     const defaultExport =
       (mod && typeof mod === "object" && (mod as { default?: unknown }).default) || null;
     const schema =
@@ -315,6 +323,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     resetSchemaInstalled: () => {
       schemaInstalled = false;
       schemaReady = undefined;
+      schemaRegistration = undefined;
     },
   };
 }

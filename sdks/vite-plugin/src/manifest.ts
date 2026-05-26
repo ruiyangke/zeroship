@@ -4,7 +4,7 @@
 //
 //   - resources    flat map of `<key> -> resource` per
 //                  `docs/proposals/rpc.md` §7
-//   - transformer  always "superjson" by default
+//   - transformer  always "json" by default
 //
 // Validation is wired into the runtime dispatch — the synthetic SSR
 // entry calls `proc.config.input.parse(args)` before invoking the
@@ -750,7 +750,7 @@ export async function computeManifestExtras(
 
   return {
     resources: merged,
-    transformer: "superjson",
+    transformer: "json",
     versionHint: 1,
   };
 }

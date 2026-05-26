@@ -152,9 +152,9 @@ describe("client.stream() — happy path", () => {
     assert.equal(c.url, "https://api.test/_zs/v1/search.todos");
     assert.equal(c.headers["accept"], "text/event-stream");
     assert.equal(c.headers["content-type"], "application/json");
-    // Body is superjson-wrapped input.
+    // Default JSON mode sends the bare input value.
     const parsed = JSON.parse(c.body!);
-    assert.deepEqual(parsed.json, { q: "build" });
+    assert.deepEqual(parsed, { q: "build" });
   });
 
   test("yields string chunks parsed from `0:` lines", async () => {
@@ -420,12 +420,9 @@ describe("client.stream() — errors", () => {
 // ── streamUrl() — for ai-sdk hand-off ─────────────────────────────────
 
 describe("client.streamUrl()", () => {
-  test("returns a URL with base64url-encoded input (async via superjson)", async () => {
-    // streamUrl returns a Promise<string> when input requires async
-    // serialization (the default when transformer is "superjson").
-    // For "json" transformer (synchronous), it can return a plain
-    // string — but the public API stays Promise<string> | string for
-    // forward-compat.
+  test("returns a URL with base64url-encoded input", async () => {
+    // streamUrl returns Promise<string> when input is encoded into the
+    // query string. Undefined input returns a plain string.
     const rpc = client({
       baseUrl: "https://api.test",
       fetch: async () => new Response(),

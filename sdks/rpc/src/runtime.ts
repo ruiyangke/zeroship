@@ -36,7 +36,7 @@ export interface RpcRuntimeOptions {
   auth?: RuntimeAuthValue;
   /** Default headers added to every generated direct call. */
   headers?: HeaderResolver;
-  /** Wire transformer. Defaults to "superjson". */
+  /** Wire transformer. Defaults to "json". */
   transformer?: Transformer;
   /** Default per-attempt timeout in milliseconds. */
   timeout?: number;
@@ -309,7 +309,7 @@ function transportConfig(localOptions?: RpcRuntimeOptions): TransportConfig {
   return {
     baseUrl: merged.baseUrl ?? "",
     fetch: fetchFn,
-    transformer: merged.transformer ?? "superjson",
+    transformer: merged.transformer ?? "json",
     authResolver,
     headersResolver: normalizeHeadersResolver(merged.headers),
     timeout: merged.timeout,

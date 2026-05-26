@@ -8,7 +8,7 @@
  *
  *   - `manifest.resources`   — flat key map per
  *     `docs/proposals/rpc.md` §7
- *   - `manifest.transformer` — `"superjson"` (the current default)
+ *   - `manifest.transformer` — `"json"` (the current default)
  *
  * These tests feed the emitter a tmpdir fixture and inspect the output.
  */
@@ -86,8 +86,8 @@ describe("computeManifestExtras", () => {
         "idempotent passed through from config"
       );
 
-      // Transformer default is superjson.
-      assert.equal(result.transformer, "superjson");
+      // Transformer default is json.
+      assert.equal(result.transformer, "json");
     } finally {
       await fix.cleanup();
     }

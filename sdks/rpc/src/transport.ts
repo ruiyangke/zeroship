@@ -5,7 +5,7 @@
 //
 // Wire shape:
 //
-//   query (small)  → GET /_zs/v1/<id>?input=<base64url-superjson>
+//   query (small)  → GET /_zs/v1/<id>?input=<base64url-json>
 //   query (>6 KB)  → POST /_zs/v1/<id> with `X-Method: GET` header
 //   mutation       → POST /_zs/v1/<id>
 //   stream         → POST /_zs/v1/<id> with Accept: text/event-stream
@@ -884,9 +884,9 @@ export function subscribeCall<TOut = unknown>(
         return;
       }
       attempt = 0;
-      // Re-parse the encoded input so the wire carries the wrapped
-      // superjson `{ json, meta? }` shape, not a string. Undefined
-      // input is omitted from the frame (JSON.stringify drops it),
+      // Re-parse the encoded input so the wire carries the selected
+      // transformer shape, not a string. Undefined input is omitted
+      // from the frame (JSON.stringify drops it),
       // matching `{ t: "hello" }` on the wire.
       const helloFrame: { t: "hello"; input?: unknown } = { t: "hello" };
       if (helloPayload && typeof helloPayload.json === "string") {

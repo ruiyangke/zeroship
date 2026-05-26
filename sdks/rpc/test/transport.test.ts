@@ -1,13 +1,13 @@
 /**
  * Transport behavior.
  *
- *   query     → GET /_zs/v1/<id>?input=<base64url-superjson>
+ *   query     → GET /_zs/v1/<id>?input=<base64url-json>
  *   query (>6KB)
  *             → POST /_zs/v1/<id> with X-Method: GET header
- *   mutation  → POST /_zs/v1/<id> with superjson body
+ *   mutation  → POST /_zs/v1/<id> with JSON body
  *
- * superjson round-trips Date / BigInt / Map / Set faithfully; the client
- * uses it by default but can be set to plain JSON for legacy servers.
+ * JSON is the default. SuperJSON remains opt-in for callers that need
+ * Date / BigInt / Map / Set revival and install the optional dependency.
  */
 
 import { test, describe } from "node:test";
@@ -56,7 +56,8 @@ function makeFetchSpy(impl: (req: RecordedCall) => Response): {
 }
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
-  // Default body shape — superjson envelope { json, meta? }.
+  // Runtime responses can be wrapped as `{ json, meta? }`; JSON-mode
+  // clients unwrap `json` without rich-type revival.
   return new Response(JSON.stringify({ json: body }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
@@ -65,7 +66,7 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
 }
 
 describe("transport — query (GET)", () => {
-  test("query encodes input via base64url superjson and uses GET", async () => {
+  test("query encodes input via base64url superjson when configured", async () => {
     const spy = makeFetchSpy(() => jsonResponse([{ id: 1 }]));
     const rpc = client({
       baseUrl: "https://api.test",
@@ -90,9 +91,7 @@ describe("transport — query (GET)", () => {
     const b64 = inputParam!.replace(/-/g, "+").replace(/_/g, "/");
     const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
     const decoded = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
-    // Either { json: { limit: 50 } } (superjson) or { limit: 50 } (json).
-    const inner = decoded.json ?? decoded;
-    assert.deepEqual(inner, { limit: 50 });
+    assert.deepEqual(decoded.json, { limit: 50 });
   });
 
   test("query without input omits the query parameter", async () => {
@@ -123,14 +122,14 @@ describe("transport — query (GET)", () => {
     assert.equal(c.url, "https://api.test/_zs/v1/hugeQuery");
     assert.equal(c.headers["x-method"], "GET");
     assert.ok(c.body && c.body.length > 100);
-    // The body parses as superjson { json: ... }.
+    // Default JSON mode sends the bare input value.
     const bodyParsed = JSON.parse(c.body!);
-    assert.equal(bodyParsed.json.blob.length, 8 * 1024);
+    assert.equal(bodyParsed.blob.length, 8 * 1024);
   });
 });
 
 describe("transport — mutation (POST)", () => {
-  test("mutation POSTs with superjson body", async () => {
+  test("mutation POSTs with JSON body by default", async () => {
     const spy = makeFetchSpy(() => jsonResponse({ id: 5, text: "hi" }));
     const rpc = client({
       baseUrl: "https://api.test",
@@ -146,7 +145,7 @@ describe("transport — mutation (POST)", () => {
     assert.equal(c.headers["content-type"], "application/json");
     assert.ok(c.body);
     const bodyParsed = JSON.parse(c.body!);
-    assert.deepEqual(bodyParsed.json, { text: "hi" });
+    assert.deepEqual(bodyParsed, { text: "hi" });
   });
 });
 
