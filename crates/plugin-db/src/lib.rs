@@ -24,11 +24,12 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
-use crate::context::with_mut as ctx_mut;
+use crate::context::{BackendInitState, with_mut as ctx_mut};
 use crate::error::DbError;
 
 // Module visibility note:
@@ -655,25 +656,42 @@ fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
 /// zeroship_plugin_db::init_pool_async().await?;
 /// // Now safe to run JS that calls zeroship.db.*
 /// ```
+struct BackendInitGuard;
+
+impl Drop for BackendInitGuard {
+    fn drop(&mut self) {
+        ctx_mut(|c| c.finish_backend_init());
+    }
+}
+
 pub async fn init_pool_async() -> Result<(), String> {
     let url = context::with(|c| c.db_url());
     let Some(url) = url else {
         return Ok(()); // No URL configured — DB plugin is disabled
     };
-    // SQLite installs only a backend handle (no pool), so the old
-    // `pool_initialised()` idempotency check is not enough on its own.
-    // Once any backend is installed for the current URL, repeated lazy
-    // init calls become no-ops.
-    if context::with(|c| c.backend().is_some()) {
-        return Ok(());
+
+    // SQLite installs only a backend handle (no pool), and lazy init
+    // can be reached by multiple request futures before the first open
+    // completes. Make cold init single-flight per isolate so concurrent
+    // startup RPCs wait for the first backend instead of racing PRAGMA
+    // bootstrap against the same dev database file.
+    loop {
+        match ctx_mut(|c| c.begin_backend_init()) {
+            BackendInitState::Ready => return Ok(()),
+            BackendInitState::Acquired => break,
+            BackendInitState::InProgress => {
+                compio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
     }
 
-    let backend = backend_for_url(&url).map_err(DbError::into_string)?;
-    match backend {
-        BackendUrl::Postgres => {
-            let pool = Pool::connect(&url, 8)
-                .await
-                .map_err(|e| {
+    let _init_guard = BackendInitGuard;
+
+    async {
+        let backend = backend_for_url(&url).map_err(DbError::into_string)?;
+        match backend {
+            BackendUrl::Postgres => {
+                let pool = Pool::connect(&url, 8).await.map_err(|e| {
                     // Walk the error source chain so the root cause (e.g. ECONNREFUSED,
                     // TLS handshake failure) reaches the JS console instead of the
                     // generic "error connecting to server" wrapper.
@@ -686,16 +704,18 @@ pub async fn init_pool_async() -> Result<(), String> {
                     msg
                 })?;
 
-            ctx_mut(|c| c.set_pool(Rc::new(pool)));
+                ctx_mut(|c| c.set_pool(Rc::new(pool)));
+            }
+            BackendUrl::Sqlite { path } => {
+                let backend = crate::backend::sqlite::SqliteBackend::open(&path)
+                    .await
+                    .map_err(DbError::into_string)?;
+                ctx_mut(|c| c.set_sqlite_backend(Rc::new(backend)));
+            }
         }
-        BackendUrl::Sqlite { path } => {
-            let backend = crate::backend::sqlite::SqliteBackend::open(&path)
-                .await
-                .map_err(DbError::into_string)?;
-            ctx_mut(|c| c.set_sqlite_backend(Rc::new(backend)));
-        }
+        Ok(())
     }
-    Ok(())
+    .await
 }
 
 #[cfg(test)]

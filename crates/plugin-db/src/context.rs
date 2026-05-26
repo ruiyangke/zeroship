@@ -38,6 +38,16 @@ use crate::backend::{BackendHandle, BrokerPauseGuard, PostgresBackend};
 use crate::broker::ChangeEvent;
 use crate::error::DbError;
 
+/// Result of trying to claim the per-isolate backend initialisation slot.
+pub(crate) enum BackendInitState {
+    /// A backend is already installed; no work needed.
+    Ready,
+    /// This caller claimed the slot and must call `finish_backend_init`.
+    Acquired,
+    /// Another request is currently building the backend.
+    InProgress,
+}
+
 /// Lock state for the in-flight migration. The `client` is held in
 /// an `Option` so callers can `take()` it across an await and
 /// `replace()` it back — the same pattern the transaction slot uses.
@@ -267,6 +277,15 @@ pub struct IsolateDbContext {
     /// `None` until the pool is initialised; same lifecycle as
     /// [`Self::pool`] (cleared whenever the pool is cleared).
     backend: Option<BackendHandle>,
+
+    /// Cold-start single-flight guard for backend initialisation.
+    ///
+    /// `init_pool_async()` may be reached by multiple concurrent RPCs
+    /// before the first one finishes opening SQLite / Postgres. Without
+    /// this flag, each request observes `backend == None` and opens the
+    /// same backing store independently; on SQLite dev DBs that can fail
+    /// during PRAGMA bootstrap with `database is locked`.
+    backend_init_in_progress: bool,
 }
 
 impl IsolateDbContext {
@@ -289,6 +308,7 @@ impl IsolateDbContext {
             schemas: HashMap::new(),
             mask_policies: HashMap::new(),
             backend: None,
+            backend_init_in_progress: false,
         }
     }
 
@@ -321,6 +341,7 @@ impl IsolateDbContext {
     pub(crate) fn clear_pool(&mut self) {
         self.pool = None;
         self.backend = None;
+        self.backend_init_in_progress = false;
     }
 
     /// Install a SQLite backend handle.
@@ -347,6 +368,24 @@ impl IsolateDbContext {
     /// the same shape.
     pub(crate) fn backend(&self) -> Option<BackendHandle> {
         self.backend.clone()
+    }
+
+    /// Claim the backend initialisation slot, or observe the current
+    /// initialisation state.
+    pub(crate) fn begin_backend_init(&mut self) -> BackendInitState {
+        if self.backend.is_some() {
+            BackendInitState::Ready
+        } else if self.backend_init_in_progress {
+            BackendInitState::InProgress
+        } else {
+            self.backend_init_in_progress = true;
+            BackendInitState::Acquired
+        }
+    }
+
+    /// Release the backend initialisation slot after success or failure.
+    pub(crate) fn finish_backend_init(&mut self) {
+        self.backend_init_in_progress = false;
     }
 
     // ----- DB_URL -----------------------------------------------------
