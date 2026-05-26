@@ -1,0 +1,30 @@
+.zs-card {
+  border: var(--zs-border-sm) solid var(--zs-rule);
+  border-radius: var(--zs-radius-md);
+  background: var(--zs-surface-raised);
+  color: var(--zs-ink);
+  box-shadow: var(--zs-shadow-xs);
+}
+
+.zs-card--accent {
+  border-color: color-mix(in oklch, var(--zs-accent) 60%, var(--zs-rule) 40%);
+  background: color-mix(in oklch, var(--zs-accent) 7%, var(--zs-surface-raised) 93%);
+}
+
+.zs-card--danger {
+  border-color: color-mix(in oklch, var(--zs-state-danger) 60%, var(--zs-rule) 40%);
+  background: var(--zs-state-danger-bg);
+}
+
+.zs-card--interactive {
+  transition:
+    border-color var(--zs-motion-base) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-base) var(--zs-motion-ease),
+    transform var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-card--interactive:hover {
+  border-color: var(--zs-rule-strong);
+  box-shadow: var(--zs-shadow-md);
+  transform: translateY(calc(var(--zs-border-sm) * -1));
+}

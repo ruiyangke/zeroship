@@ -1,0 +1,15 @@
+.zs-separator {
+  background: var(--zs-rule);
+  flex: 0 0 auto;
+}
+
+.zs-separator[data-orientation="horizontal"] {
+  width: 100%;
+  height: var(--zs-border-sm);
+}
+
+.zs-separator[data-orientation="vertical"] {
+  width: var(--zs-border-sm);
+  height: auto;
+  align-self: stretch;
+}

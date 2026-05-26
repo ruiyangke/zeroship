@@ -1,0 +1,41 @@
+.zs-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-2);
+  border: var(--zs-border-sm) solid var(--zs-rule);
+  border-radius: var(--zs-radius-pill);
+  background: var(--zs-surface-sunken);
+  color: var(--zs-ink-soft);
+  font-family: var(--zs-font-body);
+  font-size: var(--zs-text-xs);
+  font-weight: 700;
+  letter-spacing: var(--zs-letter-label);
+  line-height: var(--zs-line-tight);
+  padding: var(--zs-space-1) var(--zs-space-3);
+  text-transform: uppercase;
+}
+
+.zs-badge--success {
+  background: var(--zs-state-success-bg);
+  border-color: color-mix(in oklch, var(--zs-state-success) 45%, var(--zs-rule) 55%);
+  color: var(--zs-state-success);
+}
+
+.zs-badge--warn {
+  background: var(--zs-state-warn-bg);
+  border-color: color-mix(in oklch, var(--zs-state-warn) 45%, var(--zs-rule) 55%);
+  color: var(--zs-state-warn);
+}
+
+.zs-badge--danger {
+  background: var(--zs-state-danger-bg);
+  border-color: color-mix(in oklch, var(--zs-state-danger) 45%, var(--zs-rule) 55%);
+  color: var(--zs-state-danger);
+}
+
+.zs-badge--info {
+  background: var(--zs-state-info-bg);
+  border-color: color-mix(in oklch, var(--zs-state-info) 45%, var(--zs-rule) 55%);
+  color: var(--zs-state-info);
+}

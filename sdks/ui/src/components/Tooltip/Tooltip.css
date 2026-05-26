@@ -1,0 +1,40 @@
+.zs-tooltip__trigger {
+  border: var(--zs-border-sm) solid var(--zs-rule);
+  border-radius: var(--zs-radius-sm);
+  background: var(--zs-surface-raised);
+  color: var(--zs-ink);
+  cursor: help;
+  font: inherit;
+  padding: var(--zs-space-2) var(--zs-space-3);
+}
+
+.zs-tooltip__trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--zs-shadow-focus);
+}
+
+.zs-tooltip__positioner {
+  z-index: var(--zs-z-popover);
+}
+
+.zs-tooltip__popup {
+  max-width: calc(var(--zs-space-16) * 6);
+  border: var(--zs-border-sm) solid var(--zs-rule);
+  border-radius: var(--zs-radius-sm);
+  background: var(--zs-ink);
+  color: var(--zs-surface);
+  box-shadow: var(--zs-shadow-md);
+  font-size: var(--zs-text-sm);
+  line-height: var(--zs-line-normal);
+  padding: var(--zs-space-2) var(--zs-space-3);
+  transform-origin: var(--transform-origin);
+  transition:
+    opacity var(--zs-motion-fast) var(--zs-motion-ease),
+    transform var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-tooltip__popup[data-starting-style],
+.zs-tooltip__popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}

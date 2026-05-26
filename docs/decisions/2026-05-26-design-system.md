@@ -160,3 +160,32 @@ Create `sdks/ui` as the design-system package:
 - Product-level theme picker in the builder UI.
 - Wiring `docs/design/ui-design-flow.md` section 4 gates into Critic and
   Reviewer blocker kinds.
+
+## Adopt Base UI for interactive primitives
+
+The component layer now builds its interactive primitives on
+`@base-ui/react` while keeping the Zeroship token contract, package shape, and
+Tailwind-optional theming model. Base UI gives us maintained focus management,
+ARIA wiring, keyboard navigation, popup positioning, and animation lifecycle
+attributes without forcing a visual system. The visual layer remains ours:
+components still read only semantic `--zs-*` tokens, and the Refined Atelier,
+Studio, and Dusk themes continue to provide the complete contract.
+
+The keep/replace split is deliberate. Dialog, Popover, Tooltip, Select, Menu,
+Tabs, Switch, Checkbox, Radio/RadioGroup, Accordion, Toast, Separator, and form
+field a11y are Base-UI-backed wrappers. Button, Card, Badge, Chip, Spinner,
+Table, and EmptyState remain bespoke because they do not need headless
+behavior. The public API stays ergonomic for creators and builder code: wrappers
+like `Dialog`, `Select`, `Tabs`, `Input`, and `Textarea` preserve their
+single-component props while exposing compound parts only for advanced use.
+
+We rejected shadcn-style copy-in primitives for this layer. Copying component
+source would couple the system to Tailwind conventions and make portal
+inheritance harder to reason about. Base UI lets the package own styling and
+tokens directly while relying on a shared accessibility implementation.
+
+Because Base UI portals popups outside the app wrapper, `ThemeProvider` must
+write `data-theme` to `document.documentElement`. The `<html>` element is the
+theme host for runtime apps and Storybook, so Dialog, Select, Menu, Popover,
+Tooltip, and Toast content inherit the correct theme tokens even when rendered
+under `document.body`.

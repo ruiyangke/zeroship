@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "@playwright/test";
 
 const baseUrl = process.env.STORYBOOK_URL;
@@ -7,7 +8,10 @@ if (!baseUrl) {
   throw new Error("Set STORYBOOK_URL to the running static Storybook URL.");
 }
 
-const outDir = process.env.THEME_EVIDENCE_DIR ?? "storybook-static/theme-evidence";
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const outDir = process.env.THEME_EVIDENCE_DIR
+  ? resolve(process.env.THEME_EVIDENCE_DIR)
+  : join(packageRoot, "storybook-static/theme-evidence");
 const themes = [
   { label: "Atelier", value: "atelier" },
   { label: "Studio", value: "studio" },
@@ -39,6 +43,30 @@ for (const theme of themes) {
     }),
   });
 }
+
+const portalUrl = `${baseUrl}/iframe.html?id=components-base-ui--portaled-popup-proof&globals=theme:Dusk`;
+await page.goto(portalUrl, { waitUntil: "networkidle" });
+await page.locator(".zs-dialog__panel").waitFor({ state: "visible" });
+await page.locator(".zs-select__popup").waitFor({ state: "visible" });
+await page.screenshot({ path: join(outDir, "dusk-portaled-dialog-select-open.png") });
+evidence.push({
+  theme: "dusk",
+  screenshot: join(outDir, "dusk-portaled-dialog-select-open.png"),
+  portalProof: await page.evaluate(() => {
+    const dialog = document.querySelector(".zs-dialog__panel");
+    const select = document.querySelector(".zs-select__popup");
+    const htmlTheme = document.documentElement.dataset.theme;
+    const dialogStyles = dialog ? getComputedStyle(dialog) : null;
+    const selectStyles = select ? getComputedStyle(select) : null;
+    return {
+      htmlTheme,
+      dialogBackground: dialogStyles?.backgroundColor,
+      dialogColor: dialogStyles?.color,
+      selectBackground: selectStyles?.backgroundColor,
+      selectColor: selectStyles?.color,
+    };
+  }),
+});
 
 await context.close();
 await browser.close();

@@ -1,0 +1,38 @@
+.zs-table-wrap {
+  overflow: auto;
+  border: var(--zs-border-sm) solid var(--zs-rule);
+  border-radius: var(--zs-radius-md);
+  background: var(--zs-surface-raised);
+}
+
+.zs-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--zs-ink);
+  font-size: var(--zs-text-sm);
+}
+
+.zs-table th,
+.zs-table td {
+  border-bottom: var(--zs-border-sm) solid var(--zs-rule);
+  padding: var(--zs-space-3) var(--zs-space-4);
+  text-align: left;
+  vertical-align: top;
+}
+
+.zs-table th {
+  background: var(--zs-surface-sunken);
+  color: var(--zs-ink-muted);
+  font-size: var(--zs-text-xs);
+  font-weight: 700;
+  letter-spacing: var(--zs-letter-label);
+  text-transform: uppercase;
+}
+
+.zs-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.zs-table__cell--end {
+  text-align: right;
+}
