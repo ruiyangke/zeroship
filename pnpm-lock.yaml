@@ -193,8 +193,8 @@ importers:
         version: 3.25.76
     devDependencies:
       '@playwright/test':
-        specifier: ^1.59.1
-        version: 1.59.1
+        specifier: 1.58.2
+        version: 1.58.2
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
@@ -449,8 +449,8 @@ importers:
         version: 18.3.1(react@18.3.1)
     devDependencies:
       '@playwright/test':
-        specifier: ^1.59.1
-        version: 1.59.1
+        specifier: 1.58.2
+        version: 1.58.2
       '@testing-library/dom':
         specifier: ^10.4.1
         version: 10.4.1
@@ -755,6 +755,9 @@ importers:
         specifier: catalog:react18
         version: 18.3.1(react@18.3.1)
     devDependencies:
+      '@playwright/test':
+        specifier: 1.58.2
+        version: 1.58.2
       '@types/react':
         specifier: catalog:react18
         version: 18.3.28
@@ -767,12 +770,27 @@ importers:
       vite:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
+      vitest:
+        specifier: ^4.1.7
+        version: 4.1.7(@opentelemetry/api@1.9.0)(@types/node@22.19.17)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
+      zeroship:
+        specifier: workspace:*
+        version: link:../..
 
   sdks/auth:
     devDependencies:
+      '@arethetypeswrong/cli':
+        specifier: ^0.18.2
+        version: 0.18.2
       '@zeroship/types':
         specifier: workspace:*
         version: link:../types
+      publint:
+        specifier: ^0.3.21
+        version: 0.3.21
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
       tsx:
         specifier: 'catalog:'
         version: 4.21.0
@@ -850,9 +868,18 @@ importers:
 
   sdks/kv:
     devDependencies:
+      '@arethetypeswrong/cli':
+        specifier: ^0.18.2
+        version: 0.18.2
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
+      publint:
+        specifier: ^0.3.21
+        version: 0.3.21
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
       tsx:
         specifier: 'catalog:'
         version: 4.21.0
@@ -869,6 +896,15 @@ importers:
         specifier: workspace:*
         version: link:../types
     devDependencies:
+      '@arethetypeswrong/cli':
+        specifier: ^0.18.2
+        version: 0.18.2
+      publint:
+        specifier: ^0.3.21
+        version: 0.3.21
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
       tsx:
         specifier: 'catalog:'
         version: 4.21.0
@@ -890,6 +926,9 @@ importers:
 
   sdks/react:
     devDependencies:
+      '@arethetypeswrong/cli':
+        specifier: ^0.18.2
+        version: 0.18.2
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
@@ -902,6 +941,9 @@ importers:
       '@zeroship/db':
         specifier: workspace:*
         version: link:../db
+      publint:
+        specifier: ^0.3.21
+        version: 0.3.21
       react:
         specifier: catalog:react18
         version: 18.3.1
@@ -911,6 +953,9 @@ importers:
       react-test-renderer:
         specifier: catalog:react18
         version: 18.3.1(react@18.3.1)
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
       tsx:
         specifier: 'catalog:'
         version: 4.21.0
@@ -924,9 +969,18 @@ importers:
         specifier: ^2.2.6
         version: 2.2.6
     devDependencies:
+      '@arethetypeswrong/cli':
+        specifier: ^0.18.2
+        version: 0.18.2
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
+      publint:
+        specifier: ^0.3.21
+        version: 0.3.21
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
       tsx:
         specifier: 'catalog:'
         version: 4.21.0
@@ -940,9 +994,18 @@ importers:
         specifier: workspace:*
         version: link:../types
     devDependencies:
+      '@arethetypeswrong/cli':
+        specifier: ^0.18.2
+        version: 0.18.2
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
+      publint:
+        specifier: ^0.3.21
+        version: 0.3.21
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
       tsx:
         specifier: 'catalog:'
         version: 4.21.0
@@ -958,9 +1021,18 @@ importers:
 
   sdks/storage:
     devDependencies:
+      '@arethetypeswrong/cli':
+        specifier: ^0.18.2
+        version: 0.18.2
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
+      publint:
+        specifier: ^0.3.21
+        version: 0.3.21
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
       tsx:
         specifier: 'catalog:'
         version: 4.21.0
@@ -2039,8 +2111,8 @@ packages:
   '@oxc-project/types@0.127.0':
     resolution: {integrity: sha512-aIYXQBo4lCbO4z0R3FHeucQHpF46l2LbMdxRvqvuRuW2OxdnSkcng5B8+K12spgLDj93rtN3+J2Vac/TIO+ciQ==}
 
-  '@playwright/test@1.59.1':
-    resolution: {integrity: sha512-PG6q63nQg5c9rIi4/Z5lR5IVF7yU5MqmKaPOe0HSc0O2cX1fPi96sUQu5j7eo4gKCkB2AnNGoWt7y4/Xx3Kcqg==}
+  '@playwright/test@1.58.2':
+    resolution: {integrity: sha512-akea+6bHYBBfA9uQqSYmlJXn61cTa+jbO87xVLCWbTqbWadRVmhxlXATaOjOgcBaWU4ePo0wB41KMFv3o35IXA==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -4492,13 +4564,13 @@ packages:
   pkg-types@1.3.1:
     resolution: {integrity: sha512-/Jm5M4RvtBFVkKWRu2BLUTNP8/M2a+UwuAX+ae4770q1qVGtfjG+WTCupoZixokjmHiry8uI+dlY8KXYV5HVVQ==}
 
-  playwright-core@1.59.1:
-    resolution: {integrity: sha512-HBV/RJg81z5BiiZ9yPzIiClYV/QMsDCKUyogwH9p3MCP6IYjUFu/MActgYAvK0oWyV9NlwM3GLBjADyWgydVyg==}
+  playwright-core@1.58.2:
+    resolution: {integrity: sha512-yZkEtftgwS8CsfYo7nm0KE8jsvm6i/PTgVtB8DL726wNf6H2IMsDuxCpJj59KDaxCtSnrWan2AeDqM7JBaultg==}
     engines: {node: '>=18'}
     hasBin: true
 
-  playwright@1.59.1:
-    resolution: {integrity: sha512-C8oWjPR3F81yljW9o5OxcWzfh6avkVwDD2VYdwIGqTkl+OGFISgypqzfu7dOe4QNLL2aqcWBmI3PMtLIK233lw==}
+  playwright@1.58.2:
+    resolution: {integrity: sha512-vA30H8Nvkq/cPBnNw4Q8TWz1EJyqgpuinBcHET0YVJVFldr8JDNiU9LaWAE1KqSkRYazuaBhTpB5ZzShOezQ6A==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -6581,9 +6653,9 @@ snapshots:
 
   '@oxc-project/types@0.127.0': {}
 
-  '@playwright/test@1.59.1':
+  '@playwright/test@1.58.2':
     dependencies:
-      playwright: 1.59.1
+      playwright: 1.58.2
 
   '@publint/pack@0.1.4': {}
 
@@ -9121,11 +9193,11 @@ snapshots:
       mlly: 1.8.2
       pathe: 2.0.3
 
-  playwright-core@1.59.1: {}
+  playwright-core@1.58.2: {}
 
-  playwright@1.59.1:
+  playwright@1.58.2:
     dependencies:
-      playwright-core: 1.59.1
+      playwright-core: 1.58.2
     optionalDependencies:
       fsevents: 2.3.2
 

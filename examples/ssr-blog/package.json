@@ -7,7 +7,11 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@tanstack/react-query": "catalog:",
@@ -19,9 +23,12 @@
     "react-dom": "catalog:react18"
   },
   "devDependencies": {
+    "@playwright/test": "1.58.2",
     "@types/react": "catalog:react18",
     "@types/react-dom": "catalog:react18",
     "typescript": "catalog:",
-    "vite": "catalog:"
+    "vite": "catalog:",
+    "vitest": "^4.1.7",
+    "zeroship": "workspace:*"
   }
 }

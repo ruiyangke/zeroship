@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { defineConfig, devices } from "@playwright/test";
 
 // ─── e2e config ──────────────────────────────────────────────────
@@ -28,21 +27,13 @@ export default defineConfig({
   },
   projects: [
     {
+      // On NixOS the npm-downloaded Playwright chromium can't dynamically
+      // link (no glib/nss/etc on the loader path). Run inside `nix develop`,
+      // which sets PLAYWRIGHT_BROWSERS_PATH to the version-matched Nix
+      // browsers (npm @playwright/test is pinned to the nixpkgs
+      // playwright-driver version, 1.58.2, so the chromium revision matches).
       name: "chromium",
-      use: {
-        ...devices["Desktop Chrome"],
-        // On NixOS the bundled Playwright chromium can't dynamically link
-        // (no glib/nss/etc on the system loader path). Default to the
-        // system chromium if one exists; override with
-        // PLAYWRIGHT_CHROMIUM_PATH if you want the bundled one.
-        launchOptions: {
-          executablePath:
-            process.env.PLAYWRIGHT_CHROMIUM_PATH ??
-            (existsSync("/run/current-system/sw/bin/chromium")
-              ? "/run/current-system/sw/bin/chromium"
-              : undefined),
-        },
-      },
+      use: { ...devices["Desktop Chrome"] },
     },
   ],
   webServer: {
