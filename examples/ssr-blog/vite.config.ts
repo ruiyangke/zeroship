@@ -15,12 +15,48 @@
 //
 // The plugin then packs both into `dist/app.zship`.
 /// <reference types="@zeroship/vite-plugin/types" />
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { zeroship } from "@zeroship/vite-plugin";
 
+const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
+const CLIENT_MANIFEST_RESOLVED_ID = "\0" + CLIENT_MANIFEST_VIRTUAL_ID;
+const RUNTIME_ORIGIN = "http://localhost:3001";
+export const SSR_DEV_PROXY_PATTERN =
+  "^/(?!(@vite/|@react-refresh|@id/|@fs/|__vite_ping|__open-in-editor|src/|node_modules/|assets/|_zs/|__zeroship_|.*\\.[\\w]+(?:[?#].*)?$)).*";
+const SSR_DEV_PROXY_RE = new RegExp(SSR_DEV_PROXY_PATTERN);
+
+export function shouldProxySsrDevPath(path: string): boolean {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return SSR_DEV_PROXY_RE.test(normalized);
+}
+
+function devClientManifestPlugin(): Plugin {
+  return {
+    name: "ssr-blog:dev-client-manifest",
+    apply: "serve",
+    enforce: "pre",
+    resolveId(id) {
+      if (id === CLIENT_MANIFEST_VIRTUAL_ID) return CLIENT_MANIFEST_RESOLVED_ID;
+      return null;
+    },
+    load(id) {
+      if (id !== CLIENT_MANIFEST_RESOLVED_ID) return null;
+      return "export default {};";
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), zeroship()],
+  plugins: [devClientManifestPlugin(), react(), zeroship()],
+  server: {
+    proxy: {
+      [SSR_DEV_PROXY_PATTERN]: {
+        target: RUNTIME_ORIGIN,
+        changeOrigin: true,
+      },
+    },
+  },
   build: {
     // Required for the `virtual:zeroship/client-manifest` virtual module
     // to have anything to inline — the plugin reads `dist/.vite/manifest.json`

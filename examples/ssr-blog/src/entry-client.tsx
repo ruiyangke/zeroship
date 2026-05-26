@@ -12,18 +12,21 @@ declare global {
   interface Window { __SSR_PROPS__?: { url: string; dehydrated?: unknown } }
 }
 
-const props = window.__SSR_PROPS__ ?? { url: window.location.pathname };
-const queryClient = new QueryClient();
-const RQHydrationBoundary = HydrationBoundary as unknown as ComponentType<{
-  state?: unknown;
-  children?: ReactNode;
-}>;
+const props = window.__SSR_PROPS__;
 
-hydrateRoot(
-  document.getElementById("root")!,
-  <QueryClientProvider client={queryClient}>
-    <RQHydrationBoundary state={props.dehydrated}>
-      <App url={props.url} />
-    </RQHydrationBoundary>
-  </QueryClientProvider>,
-);
+if (props) {
+  const queryClient = new QueryClient();
+  const RQHydrationBoundary = HydrationBoundary as unknown as ComponentType<{
+    state?: unknown;
+    children?: ReactNode;
+  }>;
+
+  hydrateRoot(
+    document.getElementById("root")!,
+    <QueryClientProvider client={queryClient}>
+      <RQHydrationBoundary state={props.dehydrated}>
+        <App url={props.url} />
+      </RQHydrationBoundary>
+    </QueryClientProvider>,
+  );
+}

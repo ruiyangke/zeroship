@@ -21,12 +21,26 @@ import { POSTS } from "./components/posts";
 import clientManifest from "virtual:zeroship/client-manifest";
 
 /** Resolve the hashed URL for a Vite source path; fall back to the dev path. */
-function clientScriptTag(srcEntry: string): string {
+function clientScriptTag(srcEntry: string, devEntry = srcEntry): string {
   const entry = clientManifest[srcEntry];
   if (entry) return `<script type="module" src="/${entry.file}"></script>`;
   // Dev / no-manifest fallback: ship the source path; Vite serves it
   // through the dev middleware.
-  return `<script type="module" src="/${srcEntry}"></script>`;
+  return `<script type="module" src="${devAssetUrl(devEntry)}"></script>`;
+}
+
+function clientDevPreamble(srcEntry: string): string {
+  if (clientManifest[srcEntry]) return "";
+  const origin = devOrigin();
+  if (!origin) return "";
+  return `<script type="module">
+import RefreshRuntime from "${origin}/@react-refresh";
+RefreshRuntime.injectIntoGlobalHook(window);
+window.$RefreshReg$ = () => {};
+window.$RefreshSig$ = () => (type) => type;
+window.__vite_plugin_react_preamble_installed__ = true;
+</script>
+<script type="module" src="${origin}/@vite/client"></script>`;
 }
 
 /** Inject CSS the client entry imports so the SSR'd HTML doesn't FOUC. */
@@ -41,6 +55,18 @@ function clientStylesheet(srcEntry: string): string {
 // entry), which transitively pulls in `src/entry-client.tsx` via the
 // inline `<script type="module">` tag in `index.html`.
 const ENTRY_SRC = "index.html";
+const DEV_ENTRY_SRC = "src/entry-client.tsx";
+
+function devOrigin(): string | null {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env;
+  return env?.ZEROSHIP_VITE_ORIGIN ?? null;
+}
+
+function devAssetUrl(path: string): string {
+  const origin = devOrigin();
+  return origin ? `${origin}/${path}` : `/${path}`;
+}
 
 function shell(body: string, props: string): string {
   return `<!doctype html>
@@ -48,13 +74,15 @@ function shell(body: string, props: string): string {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
     <title>ssr-blog — zeroship</title>
     ${clientStylesheet(ENTRY_SRC)}
+    ${clientDevPreamble(ENTRY_SRC)}
   </head>
   <body>
     <div id="root">${body}</div>
     <script>window.__SSR_PROPS__ = ${props};</script>
-    ${clientScriptTag(ENTRY_SRC)}
+    ${clientScriptTag(ENTRY_SRC, DEV_ENTRY_SRC)}
   </body>
 </html>`;
 }
