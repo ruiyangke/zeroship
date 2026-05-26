@@ -537,6 +537,29 @@ pub struct ForeignKeyInfo {
     pub deferrable: bool,
 }
 
+fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String> {
+    let mut columns: std::collections::HashSet<String> = crate::query::SYSTEM_FIELD_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+
+    let Some(obj) = schema.as_object() else {
+        return columns;
+    };
+
+    for (field, def) in obj {
+        if crate::query::is_schema_metadata_key(field) {
+            continue;
+        }
+        columns.insert(field.clone());
+        if mask_meta_from_schema_def(def).is_some() {
+            columns.insert(format!("{field}_masked"));
+        }
+    }
+
+    columns
+}
+
 /// Introspect the live schema for the given app + collection. Returns an
 /// empty `LiveSchema` if the schema itself doesn't exist yet (first
 /// deploy).
@@ -1226,45 +1249,13 @@ pub fn compute_diff(
 
     // ----- column drops (destructive) -----
     if let Some(live_cols) = live_cols {
-        let declared_set: std::collections::HashSet<&String> = schema
-            .as_object()
-            .map(|o| o.keys().collect())
-            .unwrap_or_default();
-        // **P5.5 PR 6** — when the SDK declares `mask: Some(...)` on a
-        // parent column, the platform auto-emits a `<col>_masked`
-        // sibling. The sibling is NOT in the user's declared schema —
-        // it would otherwise trip the drop path below and produce a
-        // spurious `DropColumn` op for every deploy. Skip any live
-        // column whose name ends in `_masked` AND whose parent
-        // (`<name>` minus the `_masked` suffix) is in the declared set
-        // with a `mask: Some(_)` block.
-        let masked_siblings_to_keep: std::collections::HashSet<String> = schema
-            .as_object()
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(field, def)| {
-                        if crate::query::is_schema_metadata_key(field) {
-                            return None;
-                        }
-                        mask_meta_from_schema_def(def).map(|_| format!("{field}_masked"))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let desired_columns = desired_physical_columns(schema);
         for col in live_cols.keys() {
-            // System columns and auto-generated platform columns are
-            // never declared in the user schema — skip them.
-            if matches!(col.as_str(), "id" | "created_at" | "updated_at") {
-                continue;
-            }
-            if declared_set.contains(col) {
-                continue;
-            }
-            // Skip a live `_masked` sibling whose parent is declared
-            // with a mask block — the sibling is platform-owned.
-            // Removal-of-mask flows through `MaskRemove` (6c), not
-            // through this generic drop path.
-            if masked_siblings_to_keep.contains(col) {
+            // Compare against the physical desired shape, not just the
+            // creator-declared field map. System fields and generated
+            // siblings are platform-owned columns that must survive
+            // restart-time schema validation.
+            if desired_columns.contains(col) {
                 continue;
             }
             ops.push(DiffOp {
@@ -1456,6 +1447,41 @@ mod tests {
         assert_eq!(drops.len(), 1, "ops: {ops:?}");
         assert_eq!(drops[0].class, ChangeClass::Destructive);
         assert_eq!(drops[0].field.as_deref(), Some("legacy_score"));
+    }
+
+    #[test]
+    fn platform_system_columns_do_not_become_destructive_drops() {
+        // A persisted dev DB contains platform-owned system columns on
+        // every creator table. User schemas never redeclare these
+        // fields, so restart-time validation must not treat them as
+        // undeclared user columns to drop.
+        let mut live = LiveSchema::default();
+        let mut cols = std::collections::HashMap::new();
+        for name in crate::query::SYSTEM_FIELD_NAMES {
+            cols.insert(
+                (*name).to_string(),
+                ColumnInfo {
+                    pg_type: "text".into(),
+                    not_null: matches!(*name, "id" | "created_at" | "updated_at" | "version"),
+                    ..Default::default()
+                },
+            );
+        }
+        cols.insert(
+            "email".to_string(),
+            ColumnInfo {
+                pg_type: "text".into(),
+                ..Default::default()
+            },
+        );
+        live.tables.insert("users".to_string(), cols);
+
+        let declared = json!({ "email": { "type": "string", "required": true } });
+        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        assert!(
+            !ops.iter().any(|op| matches!(op.change_kind, ChangeKind::DropColumn)),
+            "system columns must survive schema revalidation without destructive drops: {ops:?}"
+        );
     }
 
     #[test]
