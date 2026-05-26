@@ -787,3 +787,38 @@ mod backend_url_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod backend_init_tests {
+    use super::{context, ctx_mut, init_pool_async};
+
+    fn set_fresh_db_url(url: &str) {
+        ctx_mut(|c| {
+            c.clear_pool();
+            c.set_db_url(url);
+        });
+    }
+
+    #[compio::test]
+    async fn concurrent_sqlite_lazy_init_shares_one_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite:{}", dir.path().join("cold-init.sqlite").display());
+        set_fresh_db_url(&url);
+
+        let handles = (0..8)
+            .map(|_| compio::runtime::spawn(async { init_pool_async().await }))
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .await
+                .expect("join concurrent init task")
+                .expect("sqlite init should succeed");
+        }
+
+        assert!(
+            context::with(|c| c.backend().is_some()),
+            "concurrent init calls should leave a usable backend installed"
+        );
+    }
+}

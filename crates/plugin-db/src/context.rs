@@ -899,6 +899,50 @@ mod tests {
         assert!(ctx.backend().is_none());
     }
 
+    // ----- backend cold-init single-flight -------------------------------
+
+    #[test]
+    fn backend_init_slot_allows_one_initializer_at_a_time() {
+        let mut ctx = IsolateDbContext::new();
+
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::InProgress
+        ));
+
+        ctx.finish_backend_init();
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        ctx.finish_backend_init();
+    }
+
+    #[test]
+    fn clear_pool_releases_backend_init_slot() {
+        let mut ctx = IsolateDbContext::new();
+
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::InProgress
+        ));
+
+        ctx.clear_pool();
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        ctx.finish_backend_init();
+    }
+
     // ----- REGISTERED_MODELS ---------------------------------------------
 
     #[test]
