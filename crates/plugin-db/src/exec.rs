@@ -10,8 +10,8 @@
 //! - `exec_count` — read path that extracts a single `count` column.
 //! - `exec_mutation` — write path, returns RETURNING rows as
 //!   `Vec<serde_json::Value>`.
-//! - `exec_mutation_with_emit` — write path + broker emit (or queue
-//!   when inside a transaction).
+//! - `exec_mutation_with_emit` — write path + broker wakeup on backends
+//!   that still need SDK-local publication.
 //!
 //! All four route through `run_sql`, which transparently uses the
 //! per-isolate TX client (`IsolateDbContext::tx_conn`) when an explicit
@@ -284,6 +284,10 @@ pub(crate) async fn exec_mutation_with_emit(
     Ok(rows)
 }
 
+fn backend_publishes_committed_changes() -> bool {
+    context::with(|c| matches!(c.backend(), Some(BackendHandle::Sqlite(_))))
+}
+
 /// Build and queue/emit broker events for a mutation's RETURNING rows.
 ///
 /// Split out of [`exec_mutation_with_emit`] so the gating logic can be
@@ -330,6 +334,13 @@ fn emit_for_rows(
         // No rows affected — no broker event. UPDATE with a non-
         // matching filter falls here; subscribers should not see a
         // spurious change.
+        return;
+    }
+    if backend_publishes_committed_changes() {
+        // SQLite has a commit-time CDC publisher wired through the writer
+        // actor's preupdate/commit hooks. The old SDK-local emit was kept
+        // for the Postgres/no-WAL-consumer path; on SQLite it races the CDC
+        // publisher and produces duplicate identical live snapshots.
         return;
     }
     if crate::wal_consumer::is_app_suppressed(app_id)
@@ -548,6 +559,7 @@ mod tests {
     ///   - the per-test build counter.
     fn reset_world() {
         crate::broker::drop_app(None);
+        context::with_mut(|c| c.clear_pool());
         // Clear every suppression key any test in this module sets so
         // ordering between tests on the same thread doesn't leak.
         for key in ["app_suppressed", "app_no_subs", "app_active"] {
@@ -804,6 +816,33 @@ mod tests {
             }
             other => panic!("expected Change variant, got {other:?}"),
         }
+        reset_world();
+    }
+
+    #[test]
+    fn exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes() {
+        reset_world();
+        run(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
+            );
+            context::with_mut(|c| c.set_sqlite_backend(Rc::clone(&backend)));
+            let sub = crate::broker::subscribe("app_active", "messages");
+
+            let rows = vec![synthetic_row()];
+            emit_for_rows(&rows, "app_active", "messages", ChangeOp::Insert);
+
+            assert_eq!(
+                tuple_built_count(),
+                0,
+                "SQLite CDC owns committed-change publication; SDK-local emit must not build"
+            );
+            assert!(
+                sub.pop().is_none(),
+                "SQLite SDK-local emit must not publish a duplicate broker event"
+            );
+        });
         reset_world();
     }
 
