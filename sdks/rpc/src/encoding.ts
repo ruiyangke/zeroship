@@ -50,11 +50,14 @@ function loadSuperjson() {
         return { serialize: D.serialize, deserialize: D.deserialize };
       })
       .catch((e) => {
-        throw new Error(
-          `[zeroship/rpc] superjson is required for transformer: "superjson" but couldn't be loaded: ${(
-            e as Error
-          ).message}. Install \`superjson\` or set \`transformer: "json"\`.`,
-        );
+        const msg = `[zeroship/rpc] superjson is required for transformer: "superjson" but couldn't be loaded: ${(
+          e as Error
+        ).message}. Install \`superjson\` or set \`transformer: "json"\`.`;
+        // Surface in the console too — this is a setup/config error the
+        // developer must fix, and consumers often only render the thrown
+        // error in a transient toast where it's easy to miss.
+        console.error(msg, e);
+        throw new Error(msg);
       });
   }
   return _superjsonPromise;
