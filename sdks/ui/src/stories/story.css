@@ -7,6 +7,15 @@
   padding: var(--zs-space-6);
 }
 
+/* Docs view: each story is embedded in a narrow preview block, so drop the
+   full-viewport height but keep it horizontally centred with comfortable
+   padding. */
+.zs-story-main--docs {
+  min-height: 0;
+  padding: var(--zs-space-6) var(--zs-space-5);
+  border-radius: var(--zs-radius-md);
+}
+
 .zs-sr-only {
   position: absolute;
   width: var(--zs-border-sm);
@@ -20,7 +29,7 @@
 }
 
 .zs-story-shell {
-  width: min(100vw - var(--zs-space-8), 62rem);
+  width: min(100%, 62rem);
   color: var(--zs-ink);
   font-family: var(--zs-font-body);
 }

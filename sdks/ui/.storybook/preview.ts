@@ -19,7 +19,13 @@ const preview: Preview = {
     (Story, context) =>
       createElement(
         "main",
-        { className: "zs-story-main", "aria-label": context.title },
+        {
+          className:
+            context.viewMode === "docs"
+              ? "zs-story-main zs-story-main--docs"
+              : "zs-story-main",
+          "aria-label": context.title,
+        },
         createElement("h1", { className: "zs-sr-only" }, context.title),
         createElement(Story),
       ),
