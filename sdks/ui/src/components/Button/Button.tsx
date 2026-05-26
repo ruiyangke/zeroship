@@ -1,14 +1,18 @@
-import { forwardRef, type ButtonHTMLAttributes } from "react";
+import { forwardRef, type ComponentPropsWithoutRef } from "react";
+import { Button as BaseButton } from "@base-ui/react/button";
 import clsx from "clsx";
 import { Spinner } from "../Spinner";
 
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+type BaseButtonProps = ComponentPropsWithoutRef<typeof BaseButton>;
+
+export interface ButtonProps extends Omit<BaseButtonProps, "className"> {
   variant?: "primary" | "secondary" | "ghost" | "danger";
   size?: "sm" | "md" | "lg";
   loading?: boolean;
+  className?: string;
 }
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
   {
     variant = "primary",
     size = "md",
@@ -22,7 +26,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   ref,
 ) {
   return (
-    <button
+    <BaseButton
       ref={ref}
       type={type}
       disabled={disabled || loading}
@@ -38,6 +42,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     >
       {loading && <Spinner size="sm" />}
       <span className="zs-button__label">{children}</span>
-    </button>
+    </BaseButton>
   );
 });
+
+export const ButtonParts = BaseButton;
