@@ -24,6 +24,10 @@
 
 import { query, mutation } from "@zeroship/rpc/server";
 import { persistGet, persistSet } from "./internal/persist.js";
+import {
+  CRITIC_DIMENSION_LABELS,
+  CRITIC_DIMENSIONS,
+} from "../shared/review-contract.js";
 
 // ─── issue store ────────────────────────────────────────────────
 
@@ -173,7 +177,8 @@ export const addIssue = mutation(async (
 
 // ─── quality scorecard ──────────────────────────────────────────
 //
-// Spec §11.1 names seven quality dimensions. KV-backed per appId via
+// Spec §11.1 plus the UI design-flow gates define the quality dimensions.
+// KV-backed per appId via
 // `internal/persist.ts`. The Critic loop now writes here on every round (see
 // `internal/middleware.ts` data-critic-round handler — the middleware fires
 // `setQualityScores` via `waitUntil()` after extracting the round
@@ -207,51 +212,55 @@ function defaultScores(): QualityScores {
   return {
     overall: "B+",
     last_run_at: null,
-    dimensions: [
-      {
-        key: "correctness",
-        label: "Correctness",
-        grade: "A",
-        rationale: "Compiles cleanly. Smoke test passes.",
-      },
-      {
-        key: "security",
-        label: "Security",
-        grade: "B+",
-        rationale: "No secrets in source. CVE scan pending.",
-      },
-      {
-        key: "performance",
-        label: "Performance",
-        grade: "B",
-        rationale: "Bundle size unmeasured. LCP unmeasured.",
-      },
-      {
-        key: "accessibility",
-        label: "Accessibility",
-        grade: "B-",
-        rationale: "axe scan pending. No alt-text audit yet.",
-      },
-      {
-        key: "ux_completeness",
-        label: "UX completeness",
-        grade: "B",
-        rationale: "Forms render. Empty states partially covered.",
-      },
-      {
-        key: "responsive",
-        label: "Responsive",
-        grade: "B+",
-        rationale: "Layout holds at common breakpoints.",
-      },
-      {
-        key: "code_health",
-        label: "Code health",
-        grade: "A-",
-        rationale: "Lint clean. Type coverage on the high side.",
-      },
-    ],
+    dimensions: CRITIC_DIMENSIONS.map((key) => ({
+      key,
+      label: CRITIC_DIMENSION_LABELS[key],
+      grade: defaultGradeForDimension(key),
+      rationale: defaultRationaleForDimension(key),
+    })),
   };
+}
+
+function defaultGradeForDimension(key: string): QualityGrade {
+  switch (key) {
+    case "accessibility":
+    case "states":
+    case "content":
+      return "B-";
+    case "performance":
+      return "B";
+    case "security":
+    case "responsive":
+    case "composed-from-system":
+      return "B+";
+    case "code_health":
+      return "A-";
+    default:
+      return "A";
+  }
+}
+
+function defaultRationaleForDimension(key: string): string {
+  switch (key) {
+    case "composed-from-system":
+      return "@zeroship/ui composition audit pending.";
+    case "states":
+      return "Empty/loading/error/success/partial state audit pending.";
+    case "responsive":
+      return "Layout holds at common breakpoints.";
+    case "accessibility":
+      return "WCAG AA audit pending.";
+    case "content":
+      return "Copy, validation, and empty-state guidance audit pending.";
+    case "security":
+      return "No secrets in source. CVE scan pending.";
+    case "performance":
+      return "Bundle size unmeasured. LCP unmeasured.";
+    case "code_health":
+      return "Lint clean. Type coverage on the high side.";
+    default:
+      return "Compiles cleanly. Smoke test passes.";
+  }
 }
 
 export interface GetQualityScoresInput { appId: string }

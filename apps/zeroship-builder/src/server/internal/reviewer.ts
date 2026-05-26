@@ -17,6 +17,8 @@
 //       · build / typecheck pass
 //       · no secrets in client bundle
 //       · auth bypass / SQL injection / XSS in changed code
+//       · no dangerouslySetInnerHTML on user content
+//       · critical UI states and serious accessibility violations
 //       · destructive migration safety (drop column, truncate, prod env tweak)
 //       · code-and-migration coupling (schema change ships with the code that uses it)
 //   - Spec §11 also envisions Reviewer wired via deepagents `interruptOn`
@@ -34,22 +36,16 @@ import type { SubAgent } from "deepagents";
 import { z } from "zod";
 
 import { REVIEWER_PROMPT } from "./prompts.js";
+import {
+  REVIEWER_BLOCKER_KINDS,
+  REVIEWER_HARD_GATE_SEVERITIES,
+} from "../../shared/review-contract.js";
 
 export const reviewerResponseSchema = z.object({
   approved: z.boolean(),
   blockers: z.array(
     z.object({
-      kind: z.enum([
-        "security",
-        "correctness",
-        "destructive_op",
-        "secret_leak",
-        "auth_bypass",
-        "injection",
-        "xss",
-        "migration_safety",
-        "code_health",
-      ]),
+      kind: z.enum(REVIEWER_BLOCKER_KINDS),
       // Severity mirrors Critic so the client can render the same
       // colour scheme. Reviewer's bar is higher — anything "high" or
       // "critical" should set approved=false.
@@ -62,14 +58,30 @@ export const reviewerResponseSchema = z.object({
 
 export type ReviewerResponse = z.infer<typeof reviewerResponseSchema>;
 
+export function reviewerHasHardBlockers(review: ReviewerResponse): boolean {
+  return review.blockers.some((blocker) =>
+    REVIEWER_HARD_GATE_SEVERITIES.includes(
+      blocker.severity as (typeof REVIEWER_HARD_GATE_SEVERITIES)[number],
+    ),
+  );
+}
+
+export function normalizeReviewerGate(review: ReviewerResponse): ReviewerResponse {
+  return {
+    ...review,
+    approved: !reviewerHasHardBlockers(review),
+  };
+}
+
 export const reviewer: SubAgent = {
   name: "reviewer",
   description:
     "Manual hard-gate review for destructive operations that are not " +
     "deploys. Deploys must use the deploy tool, which invokes this " +
     "same prompt/schema internally before it can upload. Reviews changes " +
-    "for security (secrets in client, auth bypass, SQL injection, XSS), " +
-    "correctness (build / typecheck status, smoke tests), and " +
+    "for security (secrets in client, auth bypass, injection, XSS), " +
+    "UI hard gates (critical states, serious a11y), correctness " +
+    "(build / typecheck status, smoke tests), and " +
     "destructive-op safety (migrations dropping data, force-pushes, prod " +
     "env tweaks). Returns { approved, blockers: [{kind, severity, why, " +
     "fix?}] }.",

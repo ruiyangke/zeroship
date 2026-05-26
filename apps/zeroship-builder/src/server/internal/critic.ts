@@ -1,7 +1,6 @@
 "use server";
 // Critic SubAgent — reviews Builder's output across quality dimensions
-// (correctness, security, performance, accessibility, ux_completeness,
-// responsive, code_health). Returns structured feedback that Builder's
+// (`CRITIC_DIMENSIONS`). Returns structured feedback that Builder's
 // planning loop checks; if not approved and iteration count < N, Builder
 // revises.
 //
@@ -26,20 +25,13 @@ import type { SubAgent } from "deepagents";
 import { z } from "zod";
 
 import { CRITIC_PROMPT } from "./prompts.js";
+import { CRITIC_DIMENSIONS } from "../../shared/review-contract.js";
 
 export const criticResponseSchema = z.object({
   approved: z.boolean(),
   issues: z.array(
     z.object({
-      dimension: z.enum([
-        "correctness",
-        "security",
-        "performance",
-        "accessibility",
-        "ux_completeness",
-        "responsive",
-        "code_health",
-      ]),
+      dimension: z.enum(CRITIC_DIMENSIONS),
       severity: z.enum(["low", "medium", "high", "critical"]),
       issue: z.string(),
       suggested_fix: z.string(),
@@ -53,9 +45,10 @@ export type CriticResponse = z.infer<typeof criticResponseSchema>;
 export const critic: SubAgent = {
   name: "critic",
   description:
-    "Reviews Builder's recent code changes across 7 quality dimensions " +
-    "(correctness, security, performance, accessibility, ux_completeness, " +
-    "responsive, code_health) and returns structured approval / issues. " +
+    "Reviews Builder's recent code changes across the zeroship quality " +
+    "dimensions (design-system composition, states, responsive, " +
+    "accessibility, content, correctness, security, performance, " +
+    "code_health) and returns structured approval / issues. " +
     "Called by Builder after each commit; iterate until approved or limit hit.",
   systemPrompt: CRITIC_PROMPT,
   // Same model family as Builder. Per-agent model tuning

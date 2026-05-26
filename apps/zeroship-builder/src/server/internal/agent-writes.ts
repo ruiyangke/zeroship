@@ -12,6 +12,11 @@
 // the server agents should be writing here.
 
 import { persistSet } from "./persist.js";
+import {
+  CRITIC_DIMENSION_LABELS,
+  CRITIC_DIMENSIONS,
+  type CriticDimensionKey,
+} from "../../shared/review-contract.js";
 import type { QualityDimension, QualityGrade, QualityScores } from "../agents.js";
 
 const qualityKey = (appId: string) => `quality:${appId}`;
@@ -21,26 +26,6 @@ export interface CriticIssue {
   severity: string;
   note: string;
 }
-
-const KNOWN_DIMENSIONS = [
-  "correctness",
-  "security",
-  "performance",
-  "accessibility",
-  "ux_completeness",
-  "responsive",
-  "code_health",
-] as const;
-
-const DIMENSION_LABELS: Record<string, string> = {
-  correctness: "Correctness",
-  security: "Security",
-  performance: "Performance",
-  accessibility: "Accessibility",
-  ux_completeness: "UX completeness",
-  responsive: "Responsive",
-  code_health: "Code health",
-};
 
 /**
  * Map a per-dimension issue list to the current scoreboard mapping:
@@ -111,18 +96,25 @@ export async function setQualityFromCritic(
   appId: string,
   issues: CriticIssue[],
 ): Promise<void> {
+  await persistSet(qualityKey(appId), qualityScoresFromCriticIssues(issues));
+}
+
+export function qualityScoresFromCriticIssues(
+  issues: CriticIssue[],
+  lastRunAt: string = new Date().toISOString(),
+): QualityScores {
   // Bucket issues by dimension.
   const byDim = new Map<string, CriticIssue[]>();
   for (const i of issues) {
     const key = (i.dimension || "").toLowerCase();
-    if (!KNOWN_DIMENSIONS.includes(key as (typeof KNOWN_DIMENSIONS)[number])) {
+    if (!CRITIC_DIMENSIONS.includes(key as CriticDimensionKey)) {
       continue;
     }
     const list = byDim.get(key) ?? [];
     list.push(i);
     byDim.set(key, list);
   }
-  const dimensions: QualityDimension[] = KNOWN_DIMENSIONS.map((k) => {
+  const dimensions: QualityDimension[] = CRITIC_DIMENSIONS.map((k) => {
     const dimIssues = byDim.get(k) ?? [];
     const grade = gradeFromIssues(dimIssues);
     const rationale =
@@ -132,12 +124,11 @@ export async function setQualityFromCritic(
             .slice(0, 2)
             .map((i) => i.note || `${i.severity} issue`)
             .join(" · ");
-    return { key: k, label: DIMENSION_LABELS[k] ?? k, grade, rationale };
+    return { key: k, label: CRITIC_DIMENSION_LABELS[k], grade, rationale };
   });
-  const scores: QualityScores = {
+  return {
     overall: overallFrom(dimensions),
-    last_run_at: new Date().toISOString(),
+    last_run_at: lastRunAt,
     dimensions,
   };
-  await persistSet(qualityKey(appId), scores);
 }

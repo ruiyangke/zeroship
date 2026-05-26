@@ -34,6 +34,7 @@ import { surveyInputSchema } from "./survey-wire.js";
 import { CONTROL_KEY, CONTROL_URL, OPENAI_API_KEY } from "./env.js";
 import { REVIEWER_PROMPT } from "./prompts.js";
 import {
+  normalizeReviewerGate,
   reviewerResponseSchema,
   type ReviewerResponse,
 } from "./reviewer.js";
@@ -209,6 +210,7 @@ export function createDeployTool(options: CreateDeployToolOptions) {
         blobs_uploaded: deploy.blobs_uploaded ?? null,
         blobs_deduped: deploy.blobs_deduped ?? null,
         reviewer_approved: true,
+        reviewer_warnings: review.blockers.length > 0 ? review.blockers : undefined,
       });
     },
     {
@@ -255,11 +257,11 @@ async function runReviewerGate(args: {
     method: "functionCalling",
   });
 
-  return reviewerModel.invoke([
+  const review = await reviewerModel.invoke([
     new SystemMessage(REVIEWER_PROMPT),
     new HumanMessage(
       [
-        "Review this deploy candidate. Return approved=false for any blocker.",
+        "Review this deploy candidate. Return approved=false only for high or critical blockers; return low/medium findings as warnings.",
         "",
         "## Builder change summary",
         args.changes,
@@ -269,6 +271,7 @@ async function runReviewerGate(args: {
       ].join("\n"),
     ),
   ]);
+  return normalizeReviewerGate(review);
 }
 
 async function downloadArtifact(

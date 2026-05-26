@@ -102,8 +102,8 @@ define → design → validate → ship → measure, collapsed to minutes and on
 
 | Enterprise pillar | zeroship-builder mechanism |
 |---|---|
-| Design system = source of truth | A `@zeroship/ui` component library + design tokens baked into the scaffold; the Builder **composes** governed primitives, never hand-rolls buttons/inputs/layout |
-| Gated, multi-role | Critic dimensions (heuristic + a11y + states + responsive + content) → Reviewer hard gate |
+| Design system = source of truth | `@zeroship/ui` + `@zeroship/ui/styles.css` + `ThemeProvider` are baked into generated React apps; Builder composes governed primitives (`Button`, `Card`, `Dialog`, `Select`, `Tabs`, `Input`, `Textarea`, `Table`, `Badge`, `Toast`/`ToastViewport`, `EmptyState`, `Spinner`, `Checkbox`, `Switch`, `RadioGroup`, `Tooltip`, `Popover`, `Menu`, `Accordion`, `Separator`) and semantic `--zs-*` tokens, never hand-rolls covered controls |
+| Gated, multi-role | Critic dimension keys (`composed-from-system`, `states`, `responsive`, `accessibility`, `content`, `correctness`, `security`, `performance`, `code_health`) → Reviewer hard gate |
 | Research / definition | Wizard (discovery) + PM (IA / plan) |
 | States + a11y + responsive by default | Scaffold templates ship empty/loading/error states, WCAG defaults, breakpoints — the agent *inherits* them |
 | Measure / iterate | SRE + per-deploy scorecard deltas |
@@ -111,10 +111,14 @@ define → design → validate → ship → measure, collapsed to minutes and on
 **The pattern, per generated app:**
 1. **Wizard** clarifies the brief + success intent (Discover).
 2. **PM** sets scope + IA (Define).
-3. **Builder** composes the UI from the `@zeroship/ui` design system + templates, filling
-   in all states, responsive, a11y, content (Design + Build).
+3. **Builder** composes the UI from the `@zeroship/ui` design system + templates, imports
+   `@zeroship/ui/styles.css` once, wraps the root in `ThemeProvider`, and fills in all
+   states, responsive, a11y, content (Design + Build).
 4. **Critic** runs the validation dimensions in a loop with the Builder; **Reviewer**
-   hard-gates before deploy (Validate).
+   hard-gates before deploy with blocker kinds `secrets_in_client`, `injection`, `xss`,
+   `dangerous_html_user_content`, `missing_critical_states`, `serious_accessibility`,
+   `auth_bypass`, `build_or_typecheck`, `migration_safety`, `destructive_op`, `security`,
+   and `correctness` (Validate).
 5. **Deploy tool** ships the built artifact; **SRE** + scorecard measure (Measure).
 
 **The highest-leverage gap to close (today):** pillar #1 — the generated apps are written
@@ -144,7 +148,18 @@ A generated app should not deploy until it clears these — the Critic/Reviewer 
 
 ## 5 · Maintenance
 
-Living doc. As the `@zeroship/ui` design-system substrate lands, update §3's table with the
-concrete package/primitive names and wire the §4 gates into the Critic's dimension list and
-the Reviewer's blocker kinds. The stages (§1) and pillars (§2) are stable; the zeroship
-*mechanisms* (§3–§4) evolve with the build.
+Living doc. The `@zeroship/ui` design-system substrate is the generated-app UI contract:
+generated React apps declare `@zeroship/ui` + `react` + `react-dom`, import
+`@zeroship/ui/styles.css` once, wrap the root in `ThemeProvider`, and compose the primitives
+listed in §3 with semantic `--zs-*` tokens.
+
+Current Critic dimension keys: `composed-from-system`, `states`, `responsive`,
+`accessibility`, `content`, `correctness`, `security`, `performance`, `code_health`.
+
+Current Reviewer blocker kinds: `secrets_in_client`, `injection`, `xss`,
+`dangerous_html_user_content`, `missing_critical_states`, `serious_accessibility`,
+`auth_bypass`, `build_or_typecheck`, `migration_safety`, `destructive_op`, `security`,
+`correctness`. `high` and `critical` block deploy; `medium` remains a warning.
+
+The stages (§1) and pillars (§2) are stable; the zeroship *mechanisms* (§3–§4) evolve with
+the build.
