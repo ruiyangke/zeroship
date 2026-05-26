@@ -10,7 +10,7 @@
     "forceConsistentCasingInFileNames": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
-    "types": ["vite/client", "@zeroship/types"],
+    "types": ["vite/client", "@zeroship/types", "@zeroship/db/env"],
     "paths": {
       "zeroship-schema": ["./src/index.ts"]
     }

@@ -16,7 +16,7 @@
 // Delete what you don't need; this file is a starting point, not a lecture.
 
 import { query, mutation } from "@zeroship/rpc/server";
-import { t, type Db } from "@zeroship/db";
+import { t } from "@zeroship/db";
 import { env } from "zeroship";
 import { bucket } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
@@ -33,7 +33,7 @@ const dbSchema = {
 
 export default { schema: dbSchema };
 
-const db = env.db as Db<typeof dbSchema>;
+const db = env.db; // typed Db<typeof dbSchema> via @zeroship/db/env
 
 const uploads = bucket("uploads");
 
