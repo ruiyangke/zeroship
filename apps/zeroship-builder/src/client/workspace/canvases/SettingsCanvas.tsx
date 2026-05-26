@@ -11,6 +11,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Badge, Button, Card, Dialog, Input } from "@zeroship/ui";
 import {
   archiveApp,
   deleteApp,
@@ -18,9 +19,6 @@ import {
   updatePlan,
   type AppRecord,
 } from "../../api";
-import { Modal } from "../../components/Modal";
-import { StampButton } from "../../components/StampButton";
-import { GhostButton } from "../../components/GhostButton";
 
 export interface SettingsCanvasProps {
   appId: string;
@@ -93,27 +91,24 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
             {PLANS.map((plan) => {
               const active = plan.id === currentPlan;
               return (
-                <div
+                <Card
                   key={plan.id}
                   data-testid={`settings-plan:${plan.id}`}
-                  className={
-                    "grid items-center gap-4 px-5 py-4 border " +
-                    (active
-                      ? "bg-paper-2 border-ink"
-                      : "bg-white border-rule")
-                  }
+                  tone={active ? "accent" : "neutral"}
+                  interactive={!active}
+                  className="grid items-center gap-4 px-5 py-4"
                   style={{ gridTemplateColumns: "1fr auto" }}
                 >
                   <div>
                     <div className="font-serif italic font-medium text-[18px] flex items-baseline gap-2">
                       <span>{plan.label}</span>
                       {active && (
-                        <span
+                        <Badge
                           data-testid="settings-plan-current"
-                          className="font-sans not-italic text-[10px] uppercase tracking-[0.18em] text-tomato"
+                          tone="info"
                         >
                           current
-                        </span>
+                        </Badge>
                       )}
                     </div>
                     <div className="font-serif text-[13px] text-ink-soft mt-0.5">
@@ -125,15 +120,15 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
                       —
                     </span>
                   ) : (
-                    <StampButton
+                    <Button
                       onClick={() => upgrade.mutate(plan.id)}
                       loading={upgrade.isPending && upgrade.variables === plan.id}
                       data-testid={`settings-plan-upgrade:${plan.id}`}
                     >
                       Choose {plan.label}
-                    </StampButton>
+                    </Button>
                   )}
-                </div>
+                </Card>
               );
             })}
           </div>
@@ -143,9 +138,9 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
           title="Archive"
           helper="Tuck a project away without losing it. Reversible — restore any time from the Archived view on Home."
         >
-          <div
+          <Card
             data-testid="settings-archive"
-            className="border border-rule bg-paper-2 p-5 rounded-sm"
+            className="p-5"
           >
             <div className="font-serif italic font-medium text-[16px] mb-1.5 text-ink">
               {isArchived ? "This project is archived" : "Archive this project"}
@@ -156,23 +151,27 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
                 : "Hide it from the default Home view. Code, data, and deploys stay put. You can restore it later."}
             </p>
             {isArchived ? (
-              <GhostButton
+              <Button
+                variant="secondary"
                 onClick={() => unarchive.mutate()}
                 disabled={unarchive.isPending}
+                loading={unarchive.isPending}
                 data-testid="settings-unarchive"
               >
-                {unarchive.isPending ? "Restoring…" : "Restore project"}
-              </GhostButton>
+                Restore project
+              </Button>
             ) : (
-              <GhostButton
+              <Button
+                variant="secondary"
                 onClick={() => archive.mutate()}
                 disabled={archive.isPending}
+                loading={archive.isPending}
                 data-testid="settings-archive-btn"
               >
-                {archive.isPending ? "Archiving…" : "Archive project"}
-              </GhostButton>
+                Archive project
+              </Button>
             )}
-          </div>
+          </Card>
         </Section>
 
         <Section
@@ -181,7 +180,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
           last
           danger
         >
-          <div className="border border-tomato/40 bg-tomato/5 p-5 rounded-sm">
+          <Card tone="danger" className="p-5">
             <div className="font-serif italic font-medium text-[16px] mb-1.5 text-ink">
               Delete this project
             </div>
@@ -189,14 +188,14 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
               The project, its database, all secrets, deploys, and logs go
               away. This can't be undone.
             </p>
-            <GhostButton
-              danger
+            <Button
+              variant="danger"
               onClick={() => setConfirmOpen(true)}
               data-testid="settings-delete"
             >
               Delete project
-            </GhostButton>
-          </div>
+            </Button>
+          </Card>
         </Section>
       </div>
 
@@ -230,7 +229,35 @@ function DeleteConfirm({
   const matches = appName.length > 0 && typed === appName;
 
   return (
-    <Modal open={open} onClose={() => !deleting && onClose()} title="Delete project?">
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!deleting) {
+          if (!next) onClose();
+        }
+      }}
+      title="Delete project?"
+      footer={
+        <>
+          <Button
+            variant="ghost"
+            onClick={onClose}
+            disabled={deleting}
+          >
+            cancel
+          </Button>
+          <Button
+            variant="danger"
+            onClick={() => matches && onConfirm()}
+            disabled={!matches || deleting}
+            loading={deleting}
+            data-testid="settings-delete-confirm"
+          >
+            Delete forever
+          </Button>
+        </>
+      }
+    >
       <div data-testid="settings-delete-modal">
         <p className="font-serif text-[14px] text-ink-soft mb-4 leading-[1.55]">
           Type{" "}
@@ -240,37 +267,16 @@ function DeleteConfirm({
           to confirm. The project, database, secrets, and all deploys are
           permanently deleted.
         </p>
-        <input
+        <Input
           autoFocus
           value={typed}
           onChange={(e) => setTyped(e.target.value)}
           placeholder={appName}
           data-testid="settings-delete-typed"
-          className="w-full px-3 py-2 border border-rule bg-white font-mono text-[13px] outline-none focus:border-ink mb-4"
+          label="Project name"
         />
-        <div className="flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={deleting}
-            className="font-serif italic text-[14px] text-pencil bg-transparent border-0 cursor-pointer disabled:opacity-50"
-          >
-            cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => matches && onConfirm()}
-            disabled={!matches || deleting}
-            data-testid="settings-delete-confirm"
-            className={
-              "font-serif text-[14px] px-4 py-2 border border-tomato text-tomato bg-transparent cursor-pointer hover:bg-tomato hover:text-paper transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-tomato"
-            }
-          >
-            {deleting ? "Deleting…" : "Delete forever"}
-          </button>
-        </div>
       </div>
-    </Modal>
+    </Dialog>
   );
 }
 
@@ -320,14 +326,9 @@ function Field({
   readOnly?: boolean;
 }) {
   return (
-    <label className="block mb-3.5">
-      <span className="block label-uc mb-1">{label}</span>
-      <input
-        value={value}
-        readOnly={readOnly}
-        className="w-full px-3 py-2.5 border border-rule bg-white font-serif text-[15px] text-ink outline-none focus:border-ink read-only:bg-paper-2 read-only:text-ink-soft"
-      />
-    </label>
+    <div className="mb-3.5">
+      <Input label={label} value={value} readOnly={readOnly} />
+    </div>
   );
 }
 
@@ -349,14 +350,13 @@ function CopyField({ label, value }: { label: string; value: string }) {
           className="flex-1 px-3 py-2.5 border border-rule bg-paper-2 font-mono text-[12.5px] text-ink-soft outline-none"
           data-testid="settings-copy-id"
         />
-        <button
-          type="button"
+        <Button
+          variant="secondary"
           onClick={copy}
-          className="px-3 py-2.5 border border-rule bg-white font-serif italic text-[13px] text-ink-soft hover:border-ink hover:text-ink cursor-pointer"
           data-testid="settings-copy-id-btn"
         >
           {copied ? "copied" : "copy"}
-        </button>
+        </Button>
       </div>
     </div>
   );
