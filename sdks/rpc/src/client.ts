@@ -32,10 +32,10 @@ import {
   type SubscribeOptions,
   type SubscriptionHandle,
   type TransportConfig,
-} from "./transport.js";
-import { createBatchLink, type BatchLink } from "./batch.js";
-import { type Transformer } from "./encoding.js";
-import { RpcError } from "./error.js";
+} from "./transport";
+import { createBatchLink, type BatchLink } from "./batch";
+import { type Transformer } from "./encoding";
+import { RpcError } from "./error";
 
 // ── Public option types ────────────────────────────────────────────────
 

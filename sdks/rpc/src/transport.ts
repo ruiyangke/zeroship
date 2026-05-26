@@ -19,9 +19,9 @@
 //   - Idempotency-Key: <uuidv7>      (writes w/ idempotent: true)
 //   - X-Request-Id: <uuidv7>         (every request — for tracing)
 
-import { decodeBody, encodeBody, encodeQueryInput, type Transformer } from "./encoding.js";
-import { parseErrorResponse, RpcError, type ErrorCode } from "./error.js";
-import { newUuidV7 } from "./idempotency.js";
+import { decodeBody, encodeBody, encodeQueryInput, type Transformer } from "./encoding";
+import { parseErrorResponse, RpcError, type ErrorCode } from "./error";
+import { newUuidV7 } from "./idempotency";
 
 /** URL byte threshold above which queries fall back to POST + X-Method:GET. */
 const URL_FALLBACK_BYTES = 6 * 1024;

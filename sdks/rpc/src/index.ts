@@ -4,22 +4,22 @@ export {
   createRpcClient,
   configureRpcClient,
   defineRpcProcedures,
-} from "./runtime.js";
+} from "./runtime";
 export type {
   RpcClientFactory,
   RpcRuntimeOptions,
   RpcCallOptions,
   RpcGeneratedMeta,
   RpcProcedureOptions,
-} from "./runtime.js";
+} from "./runtime";
 
-export { RpcError, ErrorCode, isRpcError, parseErrorResponse } from "./error.js";
-export type { ErrorCode as ErrorCodeType, RpcErrorInit } from "./error.js";
+export { RpcError, ErrorCode, isRpcError, parseErrorResponse } from "./error";
+export type { ErrorCode as ErrorCodeType, RpcErrorInit } from "./error";
 
-export type { Transformer } from "./encoding.js";
-export type { RetryConfig, RetryOptions } from "./transport.js";
+export type { Transformer } from "./encoding";
+export type { RetryConfig, RetryOptions } from "./transport";
 
-export { newUuidV7 } from "./idempotency.js";
+export { newUuidV7 } from "./idempotency";
 export type {
   ProcedureKind,
   ProcedureBuildMeta,
@@ -31,7 +31,7 @@ export type {
   ActionProcedure,
   StreamProcedure,
   SubscriptionProcedure,
-} from "./make-procedure.js";
+} from "./make-procedure";
 
 export type {
   InferRpcContract,
@@ -45,4 +45,4 @@ export type {
   Action,
   Stream,
   Subscription,
-} from "./types.js";
+} from "./types";

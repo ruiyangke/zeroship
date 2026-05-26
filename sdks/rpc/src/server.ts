@@ -11,9 +11,9 @@ import type {
   ProcedureConfig,
   RpcKind,
   ServerProcedure,
-} from "./types.js";
+} from "./types";
 
-export type { ProcedureConfig, RpcKind, ServerProcedure } from "./types.js";
+export type { ProcedureConfig, RpcKind, ServerProcedure } from "./types";
 
 type Handler = (...args: any[]) => unknown;
 type WrapperMarker =

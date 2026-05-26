@@ -1,4 +1,4 @@
-import { type Transformer } from "./encoding.js";
+import { type Transformer } from "./encoding";
 import {
   __makeProcedure,
   type ActionProcedure,
@@ -6,7 +6,7 @@ import {
   type ProcedureFn,
   type QueryProcedure,
   type StreamProcedure,
-} from "./make-procedure.js";
+} from "./make-procedure";
 import {
   sendUnary,
   streamCall,
@@ -15,13 +15,13 @@ import {
   type HeaderResolver,
   type RetryConfig,
   type TransportConfig,
-} from "./transport.js";
+} from "./transport";
 import type {
   ExactRpcProcedureRegistry,
   RegisteredRpcClient,
   RpcClient,
   RpcProcedureRegistry,
-} from "./types.js";
+} from "./types";
 
 export type RuntimeAuthValue =
   | string

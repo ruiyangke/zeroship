@@ -26,11 +26,12 @@ let _superjsonPromise: Promise<{
   serialize: (value: unknown) => { json: unknown; meta?: unknown };
   deserialize: <T = unknown>(payload: { json: unknown; meta?: unknown }) => T;
 }> | null = null;
+const SUPERJSON_MODULE: string = "superjson";
 
 function loadSuperjson() {
   if (!_superjsonPromise) {
     // @ts-ignore — optional peer dep; types may not resolve at compile time.
-    _superjsonPromise = import("superjson")
+    _superjsonPromise = import(SUPERJSON_MODULE)
       .then((m: { default?: unknown; serialize?: unknown; deserialize?: unknown }) => {
         // superjson exports both a default class and named functions.
         // Prefer the named functions; fall back to the default's static

@@ -4,7 +4,7 @@
 // calls it like a normal async function, and framework code can inspect
 // its stable metadata and server-reference brand.
 
-import type { RetryConfig } from "./transport.js";
+import type { RetryConfig } from "./transport";
 
 /** Procedure kind - matches the wire protocol's discriminator. */
 export type ProcedureKind = "query" | "mutation" | "action" | "stream" | "subscription";

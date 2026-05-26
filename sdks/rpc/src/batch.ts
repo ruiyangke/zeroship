@@ -21,10 +21,10 @@
 //   [ {"id":"a","status":200,"output":{...}},
 //     {"id":"b","status":429,"error":{"code":"RESOURCE_EXHAUSTED",...}} ]
 
-import { decodeBody, encodeBody, type Transformer } from "./encoding.js";
-import { parseErrorResponse, RpcError, type ErrorCode } from "./error.js";
-import { newUuidV7 } from "./idempotency.js";
-import type { HeaderValue } from "./transport.js";
+import { decodeBody, encodeBody, type Transformer } from "./encoding";
+import { parseErrorResponse, RpcError, type ErrorCode } from "./error";
+import { newUuidV7 } from "./idempotency";
+import type { HeaderValue } from "./transport";
 
 interface BatchEntry {
   procId: string;

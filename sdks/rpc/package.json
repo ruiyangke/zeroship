@@ -4,9 +4,6 @@
   "private": true,
   "description": "Zeroship RPC client, server wrappers, and shared inferred-contract types",
   "type": "module",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
   "exports": {
     "./client": {
       "types": "./dist/index.d.ts",
@@ -22,11 +19,11 @@
     }
   },
   "files": [
-    "dist",
-    "src"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsup",
+    "lint:pkg": "publint && attw --pack .",
     "check": "tsc --noEmit && tsc -p tsconfig.typecheck.json",
     "test": "node --import tsx --test test/*.test.ts"
   },
@@ -37,7 +34,10 @@
     }
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
     "@types/node": "catalog:",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:"
   },
