@@ -485,6 +485,60 @@ struct CliOutput {
     stderr: String,
 }
 
+const DOCKER_SECCOMP_PROFILE_ENV: &str = "SANDBOX_DOCKER_SECCOMP_PROFILE";
+const DOCKER_SECCOMP_PROFILE_FILE: &str = "seccomp-io-uring.json";
+const DOCKER_SECCOMP_PROFILE_REL: &str = "docker/seccomp-io-uring.json";
+const DOCKER_SECCOMP_PROFILE_SHARE_REL: &str = "../share/zeroship/sandbox/seccomp-io-uring.json";
+
+fn docker_seccomp_profile_path() -> Result<PathBuf, String> {
+    if let Ok(raw) = std::env::var(DOCKER_SECCOMP_PROFILE_ENV) {
+        let path = PathBuf::from(raw);
+        return canonical_seccomp_profile_path(path, DOCKER_SECCOMP_PROFILE_ENV);
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut candidates = vec![manifest_dir.join(DOCKER_SECCOMP_PROFILE_REL)];
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(DOCKER_SECCOMP_PROFILE_SHARE_REL));
+        }
+    }
+
+    candidates.push(PathBuf::from(format!(
+        "/usr/local/share/zeroship/sandbox/{DOCKER_SECCOMP_PROFILE_FILE}"
+    )));
+    candidates.push(PathBuf::from(format!(
+        "/etc/zeroship/sandbox/{DOCKER_SECCOMP_PROFILE_FILE}"
+    )));
+
+    let tried = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    for candidate in candidates {
+        if candidate.is_file() {
+            return canonical_seccomp_profile_path(candidate, "default candidates");
+        }
+    }
+
+    Err(format!(
+        "docker seccomp profile not found; set {DOCKER_SECCOMP_PROFILE_ENV}=<path>. Tried: {tried}"
+    ))
+}
+
+fn canonical_seccomp_profile_path(path: PathBuf, source: &str) -> Result<PathBuf, String> {
+    if !path.is_file() {
+        return Err(format!(
+            "{source} points to {:?}, but it is not a file",
+            path
+        ));
+    }
+    path.canonicalize()
+        .map_err(|e| format!("{source}={path:?}: canonicalize: {e}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_container(
     image: &str,
@@ -522,6 +576,8 @@ async fn run_container(
     let label_project = format!("zeroship.project={project_id}");
     let env_sandbox_id = format!("SANDBOX_AGENT_SANDBOX_ID={sandbox_id}");
     let env_agent_port = format!("SANDBOX_AGENT_PORT={AGENT_PORT}");
+    let seccomp_profile = docker_seccomp_profile_path()?;
+    let seccomp_arg = format!("seccomp={}", seccomp_profile.display());
 
     let args: Vec<&str> = vec![
         "run", "-d", "--rm",
@@ -530,7 +586,7 @@ async fn run_container(
         "--memory", &memory,
         "--cpus", &cpus_s,
         "--pids-limit", "256",
-        "--security-opt", "seccomp=unconfined",
+        "--security-opt", &seccomp_arg,
         "--read-only",
         "--tmpfs", "/tmp:size=128m",
         "--tmpfs", "/root/.npm:size=256m",
