@@ -1784,6 +1784,18 @@ export const t = {
           { code: "ID_INVALID_PREFIX" as const },
         );
       }
+      // `usr` is the platform user-id prefix (`crates/core/src/typed_id.rs`);
+      // reserve it so a creator id can never collide with a platform user id.
+      // The Rust register-model validator mirrors this fence so a hand-built
+      // wire payload can't bypass it.
+      if (prefix === "usr") {
+        throw Object.assign(
+          new Error(
+            `t.id(prefix): "usr" is reserved for platform user ids; choose a different prefix`,
+          ),
+          { code: "ID_RESERVED_PREFIX" as const },
+        );
+      }
     }
     const def: FieldDef = { type: "id" };
     if (prefix !== undefined) def.idPrefix = prefix;

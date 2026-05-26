@@ -52,6 +52,13 @@ pub(crate) const IMMUTABLE_SYSTEM_FIELDS: &[&str] = &["id", "created_at", "creat
 /// "<prefix>_<22 base62 chars>" shape compact).
 const MAX_AUTO_PREFIX_LEN: usize = 4;
 
+/// Typed-id prefixes the auto-derivation must never produce, because
+/// they collide with platform-reserved prefixes (`usr` is the platform
+/// user-id prefix — `crates/core/src/typed_id.rs`). Mirrors
+/// [`crate::query::RESERVED_ID_PREFIXES`]; realistically only a
+/// collection literally named `usrs` (→ `usr`) trips this.
+const RESERVED_AUTO_PREFIXES: &[&str] = &["usr"];
+
 /// Derive a typed_id prefix from a collection name when the schema
 /// does not declare one explicitly.
 ///
@@ -86,10 +93,24 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
         .collect::<String>()
         .to_ascii_lowercase();
     if truncated.is_empty() {
-        "row".to_string()
-    } else {
-        truncated
+        return "row".to_string();
     }
+    if RESERVED_AUTO_PREFIXES.contains(&truncated.as_str()) {
+        // The stripped-stem form landed on a reserved prefix (e.g.
+        // `usrs` → `usr`). Fall back to the un-stripped, capped form
+        // (`usrs` → `usrs`); if THAT is also reserved, the inert `row`.
+        let unstripped: String = collection
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(MAX_AUTO_PREFIX_LEN)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if unstripped.is_empty() || RESERVED_AUTO_PREFIXES.contains(&unstripped.as_str()) {
+            return "row".to_string();
+        }
+        return unstripped;
+    }
+    truncated
 }
 
 /// Resolve the typed_id prefix for a given `(app_id, collection)`.
@@ -569,6 +590,62 @@ mod tests {
     fn derive_prefix_lowercases() {
         assert_eq!(derive_prefix_from_collection_name("Posts"), "post");
         assert_eq!(derive_prefix_from_collection_name("USERS"), "user");
+    }
+
+    #[test]
+    fn derive_prefix_never_yields_reserved_usr() {
+        // **P7** — a collection literally named `usrs` would strip-s to
+        // the reserved `usr` prefix (platform user-id). The guard must
+        // fall back to the un-stripped capped form (`usrs`) instead.
+        let derived = derive_prefix_from_collection_name("usrs");
+        assert_ne!(derived, "usr", "must not produce the reserved usr prefix");
+        assert_eq!(derived, "usrs");
+    }
+
+    // ---- declared idPrefix wins over derivation --------------------
+
+    #[test]
+    fn prefix_for_collection_reads_declared_id_prefix() {
+        // **P7** — when the cached schema carries `id: t.id("blog")`,
+        // `prefix_for_collection` returns the declared prefix instead of
+        // deriving from the collection name.
+        let app_id = "p7_prefix_for_collection_reads_declared";
+        crate::cache_schema_for_tests(
+            app_id,
+            "posts",
+            json!({
+                "id": { "type": "id", "idPrefix": "blog" },
+                "title": { "type": "string" },
+            }),
+        );
+        assert_eq!(prefix_for_collection(app_id, "posts"), "blog");
+    }
+
+    #[test]
+    fn insert_auto_mints_id_with_declared_prefix() {
+        // **P7** — the auto-mint pass honours the declared `idPrefix`
+        // from the cached schema: a `posts` collection declaring
+        // `id: t.id("blog")` mints `blog_...` ids, not `post_...`.
+        let app_id = "p7_insert_auto_mints_declared_prefix";
+        crate::cache_schema_for_tests(
+            app_id,
+            "posts",
+            json!({
+                "id": { "type": "id", "idPrefix": "blog" },
+                "title": { "type": "string" },
+            }),
+        );
+        let mut doc = json!({ "title": "hi" });
+        apply_system_fields_on_insert(&mut doc, app_id, "posts", None);
+        let id = doc
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("id must be minted");
+        assert!(
+            id.starts_with("blog_"),
+            "expected declared 'blog_' prefix, got {id}"
+        );
+        assert_eq!(id.len(), "blog_".len() + 22);
     }
 
     // ---- single-doc injection --------------------------------------

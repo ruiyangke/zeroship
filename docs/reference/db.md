@@ -200,7 +200,7 @@ You never declare these; every collection has them. They're the
 platform "system fields" — full documentation lives in the
 [System fields](#system-fields) section below:
 
-- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62(uuidv7)>`), platform-minted.
+- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62(uuidv7)>`), platform-minted. The `<prefix>` is auto-derived from the collection name; override it with `id: t.id("blog")` — see [Typed-id prefixes](#typed-id-prefixes).
 - `created_at: number` — Unix-ms timestamp at INSERT.
 - `updated_at: number` — Unix-ms timestamp at INSERT; bumped on every UPDATE.
 - `created_by: string | null` — session actor at INSERT (`null` for system writes).
@@ -212,6 +212,50 @@ These seven columns are added by the platform on every table created
 through the schema DSL — `softDelete()` / `withVersioning()` are no
 longer opt-in (the equivalent behaviour is on by default). See
 [System fields](#system-fields) for the full semantics.
+
+### Typed-id prefixes
+
+Every row's `id` is a **typed_id**: `<prefix>_<base62(uuidv7)>`. The
+22-character body is a UUIDv7 — globally unique and sortable by creation
+time. The prefix is a human-readable type tag; it carries **no**
+uniqueness (uniqueness lives entirely in the UUIDv7 body).
+
+**Default — auto-derived from the collection name.** With no
+declaration, the prefix is computed from the collection name: strip a
+trailing `s` (when the name is longer than one character), lowercase,
+take the first 4 ASCII alphanumerics. An empty result falls back to
+`row`.
+
+| Collection   | Auto prefix | Example id              |
+| ------------ | ----------- | ----------------------- |
+| `posts`      | `post`      | `post_01HXY3Z9PQR2…`    |
+| `users`      | `user`      | `user_01HXY3Z9PQR2…`    |
+| `categories` | `cate`      | `cate_01HXY3Z9PQR2…`    |
+
+**Override — `id: t.id("prefix")`.** Declare the prefix explicitly by
+naming the always-present system `id` column with `t.id(...)`:
+
+```ts
+import { schema, t } from "@zeroship/db";
+
+export default {
+  schema: {
+    posts: schema({
+      id:    t.id("blog"),          // rows get ids like blog_<22 base62 chars>
+      title: t.string().required(),
+    }),
+  },
+};
+```
+
+`id: t.id("blog")` is a **prefix declaration** for the system `id`
+column — it does not emit a second column, and it is the only sanctioned
+way to name `id` in a schema (you otherwise never declare `id`). The
+prefix must match `^[a-z][a-z0-9_]*$`.
+
+**`usr` is reserved.** It is the platform user-id prefix, so
+`t.id("usr")` is rejected (and the auto-derivation will never produce it
+either — e.g. a collection named `usrs` derives `usrs`, not `usr`).
 
 ### Per-collection options via `schema()`
 
@@ -1043,7 +1087,7 @@ Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
 
 | Column        | Type (PG)       | Default            | Set by             |
 |---------------|-----------------|--------------------|--------------------|
-| `id`          | `TEXT` PK       | platform-minted    | typed_id (`<prefix>_<base62(uuidv7)>`) |
+| `id`          | `TEXT` PK       | platform-minted    | typed_id (`<prefix>_<base62(uuidv7)>`); prefix auto-derived or set via [`t.id("prefix")`](#typed-id-prefixes) |
 | `created_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT  | DB default         |
 | `updated_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT, bumped on every UPDATE | runtime UPDATE builder |
 | `created_by`  | `TEXT` NULL     | `null` if no actor | session actor at INSERT |
@@ -1054,7 +1098,10 @@ Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
 The field names are **reserved**. Declaring a user field named `id`,
 `created_at`, `updated_at`, `created_by`, `updated_by`, `version`, or
 `deleted_at` rejects at deploy time with `code: "RESERVED_SYSTEM_FIELD_NAME"`
-and a hint listing the reserved set.
+and a hint listing the reserved set. The one sanctioned exception is
+`id: t.id("prefix")`, which declares the typed-id prefix for the system
+`id` column rather than overriding it — see
+[Typed-id prefixes](#typed-id-prefixes).
 
 ### Reading system fields
 

@@ -67,6 +67,46 @@ describe("normalizeSchema — minimal smoke", () => {
   });
 });
 
+describe("normalizeSchema — P7 typed-id prefix (id: t.id(prefix))", () => {
+  test("retains an id:t.id(prefix) field with its idPrefix", () => {
+    const out = normalizeSchema({
+      id: t.id("blog"),
+      title: t.string(),
+    });
+    // The id prefix declaration survives normalization so registerModel
+    // (and the Rust schema cache) can read the declared prefix.
+    assert.equal(out.id.type, "id");
+    assert.equal(out.id.idPrefix, "blog");
+    assert.equal(out.title.type, "string");
+  });
+
+  test("rejects id declared with a non-id type", () => {
+    assert.throws(
+      () => normalizeSchema({ id: t.string() }),
+      (err: unknown) => {
+        assert.equal(
+          (err as { code?: string }).code,
+          "RESERVED_SYSTEM_FIELD_NAME",
+        );
+        return true;
+      },
+    );
+  });
+
+  test("rejects another reserved system field name (version)", () => {
+    assert.throws(
+      () => normalizeSchema({ version: t.number() }),
+      (err: unknown) => {
+        assert.equal(
+          (err as { code?: string }).code,
+          "RESERVED_SYSTEM_FIELD_NAME",
+        );
+        return true;
+      },
+    );
+  });
+});
+
 describe("validateRefTargets — minimal smoke", () => {
   test("throws on a missing target collection", () => {
     try {
