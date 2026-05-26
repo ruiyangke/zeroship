@@ -197,9 +197,9 @@ code {
   gap: 0.8rem;
   padding: 0.85rem 0.5rem 0.85rem 0.25rem;
   border-bottom: 1px solid var(--line);
-  animation: slidein 0.4s cubic-bezier(0.22, 0.7, 0.25, 1) both;
   transition: opacity 0.22s ease, transform 0.22s ease;
 }
+.item.entering { animation: slidein 0.24s cubic-bezier(0.22, 0.7, 0.25, 1) both; }
 .item.leaving { opacity: 0; transform: translateX(10px); }
 .item.pending { opacity: 0.55; }
 
@@ -323,7 +323,7 @@ code {
 
 /* ── motion ──────────────────────────────────────────────────────────── */
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-@keyframes slidein { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@keyframes slidein { from { transform: translateY(5px); } to { transform: none; } }
 @keyframes toastin { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 
 @media (prefers-reduced-motion: reduce) {

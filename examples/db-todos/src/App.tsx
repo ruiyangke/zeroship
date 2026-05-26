@@ -14,6 +14,7 @@ import { TodoRow } from "./TodoRow";
 import { TODO_PRIORITIES, partitionTodos } from "./util";
 
 const qk = (uid: string): ["todos", string] => ["todos", uid];
+const publicUserKey = ["users", "public"] as const;
 
 // Demo seed: plausible-looking random tasks.
 const DEMO_VERBS = ["Review", "Ship", "Draft", "Refactor", "Test", "Deploy", "Sync", "Plan", "Polish", "Migrate", "Benchmark", "Triage"];
@@ -44,10 +45,8 @@ type Banner = { kind: "error"; text: string; code?: string } | null;
 export function App() {
   const qc = useQueryClient();
 
-  const [userId, setUserId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner>(null);
   const [live, setLive] = useState(false);
-  const [pulse, setPulse] = useState(0);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState<Priority>("low");
   const [removing, setRemoving] = useState<Set<string>>(new Set());
@@ -55,6 +54,8 @@ export function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const keyMap = useRef(new Map<string, string>());
   const keySeq = useRef(0);
+  const liveRef = useRef(false);
+  const streamSeq = useRef(0);
   const keyOf = (t: Todo) => t._key ?? keyMap.current.get(t.id) ?? t.id;
 
   const flash = useCallback((text: string, code?: string) => {
@@ -63,15 +64,19 @@ export function App() {
     window.setTimeout(() => setBanner((cur) => (cur === b ? null : cur)), 3400);
   }, []);
 
+  const publicUserQ = useQuery({
+    queryKey: publicUserKey,
+    queryFn: async (): Promise<User> => publicUser({}),
+    staleTime: Infinity,
+    retry: false,
+  });
+  const userId = publicUserQ.data?.id ?? null;
+
   useEffect(() => {
-    let cancelled = false;
-    Promise.resolve(publicUser({}))
-      .then((u: User) => !cancelled && setUserId(u.id))
-      .catch((e: unknown) => !cancelled && flash(errText(e), errCode(e)));
-    return () => {
-      cancelled = true;
-    };
-  }, [flash]);
+    if (publicUserQ.error) {
+      flash(errText(publicUserQ.error), errCode(publicUserQ.error));
+    }
+  }, [publicUserQ.error, flash]);
 
   const uid = userId ?? "";
 
@@ -82,41 +87,57 @@ export function App() {
   });
   const todos = todosQ.data ?? [];
 
-  // Live feed → invalidate (own connection per tab via the nonce reader).
+  const setLiveConnected = useCallback((connected: boolean) => {
+    liveRef.current = connected;
+    setLive(connected);
+  }, []);
+
+  const refreshTodosIfOffline = useCallback(
+    (targetUserId: string) => {
+      if (!liveRef.current) {
+        void qc.invalidateQueries({ queryKey: qk(targetUserId) });
+      }
+    },
+    [qc],
+  );
+
+  // Live feed owns realtime refreshes once connected; listTodos remains the
+  // bootstrap/fallback read, not something every snapshot should refetch.
   useEffect(() => {
     if (!userId) return;
+    const seq = ++streamSeq.current;
     const controller = new AbortController();
     const seen = new Map<string, number>();
-    let t: number | undefined;
+    const updateLive = (connected: boolean) => {
+      if (streamSeq.current === seq) setLiveConnected(connected);
+    };
     (async () => {
       try {
         const stream = todoEvents({ userId }, { signal: controller.signal });
-        setLive(true);
+        updateLive(true);
         for await (const snapshot of stream) {
           if (controller.signal.aborted) break;
-          const sig = snapshot.rows.map((row) => row.id).join(",");
+          const sig = snapshot.rows
+            .map((row) => `${row.id}:${row.version}:${row.done}:${row.archived}:${row.deleted_at ?? ""}`)
+            .join("|");
           const now = Date.now();
           const prev = seen.get(sig);
           if (prev && now - prev < 600) continue;
           seen.set(sig, now);
           if (seen.size > 200) seen.clear();
           qc.setQueryData<Todo[]>(qk(userId), snapshot.rows);
-          setPulse((p) => p + 1);
-          window.clearTimeout(t);
-          t = window.setTimeout(() => void qc.invalidateQueries({ queryKey: qk(userId) }), 180);
         }
       } catch {
         /* aborted / ended */
       } finally {
-        setLive(false);
+        updateLive(false);
       }
     })();
     return () => {
-      window.clearTimeout(t);
       controller.abort();
-      setLive(false);
+      updateLive(false);
     };
-  }, [userId, qc]);
+  }, [userId, qc, setLiveConnected]);
 
   // Optimistic create (raw React Query over the direct-imported caller).
   const createM = useMutation<
@@ -161,7 +182,7 @@ export function App() {
       );
     },
     onSettled: (_d, _e, _input, ctx) => {
-      if (ctx) void qc.invalidateQueries({ queryKey: qk(ctx.userId) });
+      if (ctx) refreshTodosIfOffline(ctx.userId);
     },
   });
 
@@ -194,28 +215,36 @@ export function App() {
 
   const onSetDone = useCallback(
     async (id: string, done: boolean) => {
-      qc.setQueryData<Todo[]>(qk(uid), (old = []) =>
+      if (!uid) return;
+      const key = qk(uid);
+      const prev = qc.getQueryData<Todo[]>(key);
+      qc.setQueryData<Todo[]>(key, (old = []) =>
         old.map((t) => (t.id === id ? { ...t, done } : t)),
       );
       try {
         await setTodoDone({ id, done });
       } catch (e) {
+        qc.setQueryData<Todo[]>(key, prev ?? []);
         flash(errText(e), errCode(e));
       } finally {
-        void qc.invalidateQueries({ queryKey: qk(uid) });
+        refreshTodosIfOffline(uid);
       }
     },
-    [uid, qc, flash],
+    [uid, qc, flash, refreshTodosIfOffline],
   );
 
   const onRemove = useCallback(
     async (id: string, fn: (i: { id: string }) => unknown) => {
+      if (!uid) return;
+      const key = qk(uid);
       setRemoving((s) => new Set(s).add(id));
       await new Promise((r) => setTimeout(r, 220));
-      qc.setQueryData<Todo[]>(qk(uid), (old = []) => old.filter((t) => t.id !== id));
+      const prev = qc.getQueryData<Todo[]>(key);
+      qc.setQueryData<Todo[]>(key, (old = []) => old.filter((t) => t.id !== id));
       try {
         await fn({ id });
       } catch (e) {
+        qc.setQueryData<Todo[]>(key, prev ?? []);
         flash(errText(e), errCode(e));
       } finally {
         setRemoving((s) => {
@@ -223,15 +252,15 @@ export function App() {
           n.delete(id);
           return n;
         });
-        void qc.invalidateQueries({ queryKey: qk(uid) });
+        refreshTodosIfOffline(uid);
       }
     },
-    [uid, qc, flash],
+    [uid, qc, flash, refreshTodosIfOffline],
   );
 
   const { active, done } = useMemo(() => partitionTodos(todos), [todos]);
 
-  const booting = !userId || todosQ.isLoading;
+  const booting = publicUserQ.isPending || todosQ.isLoading;
 
   return (
     <div className="app">
@@ -247,7 +276,7 @@ export function App() {
             {demoLeft > 0 ? `seeding ${demoLeft}…` : "demo"}
           </button>
           <span className="count">{active.length} open</span>
-          <span className={`live ${live ? "on" : ""}`} key={pulse}>
+          <span className={`live ${live ? "on" : ""}`}>
             <i className="dot" />
             {live ? "live" : "offline"}
           </span>
@@ -300,11 +329,10 @@ export function App() {
         </div>
       ) : (
         <ul className="list">
-          {[...active, ...done].map((t, i) => (
+          {[...active, ...done].map((t) => (
             <TodoRow
               key={keyOf(t)}
               todo={t}
-              index={i}
               removing={removing.has(t.id)}
               onSetDone={(done) => void onSetDone(t.id, done)}
               onArchive={() => void onRemove(t.id, archiveTodo)}
