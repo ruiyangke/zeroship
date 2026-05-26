@@ -92,25 +92,36 @@ export const ChoiceControls: Story = {
   ),
 };
 
-export const DialogOpen: Story = {
-  render: () => (
+function DialogOpenDemo() {
+  // Open on load so screenshot/a11y runs catch it, but stateful so Escape /
+  // backdrop / Close actually dismiss it.
+  const [open, setOpen] = useState(true);
+  return (
     <div className="zs-story-shell">
       <Dialog
-        open
-        onOpenChange={() => {}}
+        open={open}
+        onOpenChange={setOpen}
         title="Delete project?"
         description="Dialog focus, dismissal, and labels come from Base UI."
         footer={
           <>
-            <Button variant="ghost">Cancel</Button>
-            <Button variant="danger">Delete forever</Button>
+            <Button variant="ghost" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={() => setOpen(false)}>
+              Delete forever
+            </Button>
           </>
         }
       >
         Type the project name before continuing.
       </Dialog>
     </div>
-  ),
+  );
+}
+
+export const DialogOpen: Story = {
+  render: () => <DialogOpenDemo />,
 };
 
 function DialogKeyboardDemo() {
@@ -273,12 +284,16 @@ export const SurfacesAndFeedback: Story = {
   ),
 };
 
-export const PortaledPopupProof: Story = {
-  render: () => (
+function PortaledPopupProofDemo() {
+  // Open on load (proof needs the popups visible) but closeable via Escape /
+  // backdrop / Close. The Select stays defaultOpen to prove its popup stacks
+  // ABOVE the dialog (z-dropdown > z-modal).
+  const [open, setOpen] = useState(true);
+  return (
     <div className="zs-story-shell">
       <Dialog
-        open
-        onOpenChange={() => {}}
+        open={open}
+        onOpenChange={setOpen}
         title="Dusk portal proof"
         description="The dialog and select popup are portaled under document.body."
       >
@@ -289,5 +304,9 @@ export const PortaledPopupProof: Story = {
         </Select>
       </Dialog>
     </div>
-  ),
+  );
+}
+
+export const PortaledPopupProof: Story = {
+  render: () => <PortaledPopupProofDemo />,
 };

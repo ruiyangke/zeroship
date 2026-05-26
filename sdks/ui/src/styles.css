@@ -92,10 +92,10 @@
   --zs-motion-base: 200ms;
   --zs-motion-slow: 380ms;
   --zs-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
-  --zs-z-dropdown: 20;
-  --zs-z-popover: 30;
   --zs-z-modal: 50;
-  --zs-z-toast: 60;
+  --zs-z-dropdown: 60;
+  --zs-z-popover: 60;
+  --zs-z-toast: 70;
   --zs-border-sm: 0.0625rem;
   --zs-border-md: 0.125rem;
 }
@@ -166,10 +166,10 @@
   --zs-motion-base: 160ms;
   --zs-motion-slow: 260ms;
   --zs-motion-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --zs-z-dropdown: 20;
-  --zs-z-popover: 30;
   --zs-z-modal: 50;
-  --zs-z-toast: 60;
+  --zs-z-dropdown: 60;
+  --zs-z-popover: 60;
+  --zs-z-toast: 70;
   --zs-border-sm: 0.0625rem;
   --zs-border-md: 0.125rem;
 }
@@ -240,10 +240,10 @@
   --zs-motion-base: 190ms;
   --zs-motion-slow: 320ms;
   --zs-motion-ease: cubic-bezier(0.18, 0.82, 0.22, 1);
-  --zs-z-dropdown: 20;
-  --zs-z-popover: 30;
   --zs-z-modal: 50;
-  --zs-z-toast: 60;
+  --zs-z-dropdown: 60;
+  --zs-z-popover: 60;
+  --zs-z-toast: 70;
   --zs-border-sm: 0.0625rem;
   --zs-border-md: 0.125rem;
 }
