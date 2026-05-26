@@ -190,8 +190,13 @@ async function buildTranslatedStream(
   const { ZeroshipSandboxBackend, getOrCreateSandboxFor } = await import(
     "./_sandbox_backend.js"
   );
-  const sandbox = await getOrCreateSandboxFor(threadId);
-  const backend = new ZeroshipSandboxBackend({ id: sandbox.id });
+  const sandbox = await getOrCreateSandboxFor(threadId, {
+    projectSourceId: input.appId ?? threadId,
+  });
+  const backend = new ZeroshipSandboxBackend({
+    id: sandbox.id,
+    userId: sandbox.userId,
+  });
 
   // Pass a process-local MemorySaver as the checkpointer so middleware
   // state survives across turns scoped by `thread_id`.

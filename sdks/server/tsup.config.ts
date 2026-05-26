@@ -13,6 +13,6 @@ const shared = {
 
 export default defineConfig({
   ...shared,
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/typed-id.ts"],
   clean: true,
 });

@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const skipWebServer = process.env.PLAYWRIGHT_NO_WEBSERVER === "1";
+
 // ─── e2e config ──────────────────────────────────────────────────
 //
 // `chat-openai.spec.ts` runs against the worktree's
@@ -36,12 +38,16 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  webServer: {
-    command: "npm run dev -- --port 5173",
-    url: "http://localhost:5173",
-    timeout: 60_000,
-    reuseExistingServer: !process.env.CI,
-    stdout: "ignore",
-    stderr: "pipe",
-  },
+  ...(skipWebServer
+    ? {}
+    : {
+        webServer: {
+          command: "npm run dev -- --port 5173",
+          url: "http://localhost:5173",
+          timeout: 60_000,
+          reuseExistingServer: !process.env.CI,
+          stdout: "ignore",
+          stderr: "pipe",
+        },
+      }),
 });

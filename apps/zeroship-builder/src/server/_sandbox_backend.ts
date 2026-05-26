@@ -28,8 +28,16 @@ import {
   type FileUploadResponse,
   type WriteResult,
 } from "deepagents";
+import { currentUser } from "zeroship";
+import {
+  isTypedId,
+  retagTypedId,
+  typedIdFromStableSeed,
+  typedIdFromUuid,
+} from "@zeroship/server/typed-id";
 
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./env.js";
+import { userinfo } from "./auth.js";
 
 // ─── controller wire shapes (mirrors crates/sandbox/src/handlers.rs) ──
 
@@ -50,7 +58,26 @@ interface ExecResponseWire {
   timed_out?: boolean;
 }
 
-// ─── module-local cache: threadId → sandbox_id ────────────────────────
+export interface SandboxHandle {
+  id: string;
+  userId: string;
+  projectId: string;
+}
+
+export interface SandboxLookupOptions {
+  /**
+   * Stable project/app/thread seed. The workspace passes appId; app-less
+   * dev/test chats fall back to threadId.
+   */
+  projectSourceId?: string;
+  /**
+   * Test/pre-authenticated escape hatch. Production callers leave this
+   * empty so the current request's authenticated user is resolved below.
+   */
+  userId?: string;
+}
+
+// ─── module-local cache: user_id + project_id → sandbox_id ─────────────
 //
 // Idempotent on the wire (the controller dedups on (user_id,
 // project_id)), but fetching a sandbox via the cache is cheaper than
@@ -86,34 +113,86 @@ function controllerBase(): string {
   return SANDBOX_URL();
 }
 
-// The controller's id charset is tighter than typical UUIDs — lowercase
-// `[a-z0-9-]{1,50}` starting with `[a-z0-9]`. `useChat` thread ids are
-// UUIDs (lowercase hex + dashes, 36 chars) and pass cleanly. Anything
-// else gets normalized.
-function sanitizeId(raw: string, fallback: string): string {
-  const lower = raw.toLowerCase();
-  // Replace anything outside [a-z0-9-] with '-'.
-  let cleaned = "";
-  for (const ch of lower) {
-    cleaned +=
-      (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9") || ch === "-"
-        ? ch
-        : "-";
-  }
-  // Trim leading dashes (controller requires first char alnum).
-  cleaned = cleaned.replace(/^-+/, "");
-  // Cap at 50.
-  cleaned = cleaned.slice(0, 50);
-  if (!cleaned) cleaned = fallback;
-  return cleaned;
+const DEV_SANDBOX_USER_UUID = "00000000-0000-7000-8000-000000000001";
+export const DEV_SANDBOX_USER_ID = typedIdFromUuid("usr", DEV_SANDBOX_USER_UUID);
+
+function isLocalDevRuntime(): boolean {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  const env = proc?.env;
+  return env?.NODE_ENV !== "production" && env?.ZEROSHIP_BUILDER_DISABLE_DEV_USER !== "1";
 }
 
-// We don't yet have a real per-creator user_id flowing into Builder —
-// auth lives one layer up (see `auth.ts`) but the chat handler doesn't
-// currently thread it through. For now this adapter uses a placeholder
-// user id. `project_id` derives from `threadId`, so a user with one chat
-// per project still gets one sandbox per chat.
-export const BUILDER_USER_ID = "builder";
+function readCurrentUserId(): string | null {
+  try {
+    const user = currentUser() as { id?: unknown } | null;
+    return typeof user?.id === "string" ? user.id : null;
+  } catch {
+    return null;
+  }
+}
+
+function assertTypedUserId(id: string): string {
+  if (!isTypedId(id, "usr")) {
+    throw new Error(`sandbox user_id must be a usr_ typed-id; got ${JSON.stringify(id)}`);
+  }
+  return id;
+}
+
+function typedUserIdOrNull(id: string): string | null {
+  if (isTypedId(id, "usr")) return id;
+  if (isLocalDevRuntime()) return null;
+  return assertTypedUserId(id);
+}
+
+async function resolveSandboxUserId(explicit?: string): Promise<string> {
+  if (explicit) return assertTypedUserId(explicit);
+
+  const platformUserId = readCurrentUserId();
+  if (platformUserId) {
+    const typed = typedUserIdOrNull(platformUserId);
+    if (typed) return typed;
+  }
+
+  try {
+    const auth = await userinfo();
+    if (auth?.user?.id) {
+      const typed = typedUserIdOrNull(auth.user.id);
+      if (typed) return typed;
+    }
+  } catch (err) {
+    if (!isLocalDevRuntime()) throw err;
+  }
+
+  if (isLocalDevRuntime()) {
+    return DEV_SANDBOX_USER_ID;
+  }
+
+  throw new Error("sandbox user_id unavailable: request is not authenticated");
+}
+
+export function deriveSandboxProjectId(sourceId: string): string {
+  const source = sourceId.trim();
+  if (!source) {
+    throw new Error("sandbox project id source is empty");
+  }
+
+  try {
+    return retagTypedId(source, "prj");
+  } catch {
+    // Not a typed-id; try the control-plane UUID shape used by today's
+    // AppRecord serialization.
+  }
+
+  try {
+    return typedIdFromUuid("prj", source);
+  } catch {
+    // App-less dev/test threads may be opaque AI SDK ids. Hash the seed
+    // into a UUID-shaped value so the controller still gets a stable
+    // typed-id and can dedup across process restarts.
+  }
+
+  return typedIdFromStableSeed("prj", `zeroship-builder:${source}`);
+}
 
 async function controllerCreateSandbox(
   userId: string,
@@ -140,24 +219,29 @@ async function controllerCreateSandbox(
  * on every turn. Idempotent at the wire (the controller dedups on
  * (user_id, project_id)).
  */
-export async function getOrCreateSandboxFor(threadId: string): Promise<{ id: string }> {
-  const cached = _sandboxCache.get(threadId);
-  if (cached) return { id: cached };
-  const pending = _inFlight.get(threadId);
-  if (pending) return { id: await pending };
+export async function getOrCreateSandboxFor(
+  threadId: string,
+  opts: SandboxLookupOptions = {},
+): Promise<SandboxHandle> {
+  const userId = await resolveSandboxUserId(opts.userId);
+  const projectId = deriveSandboxProjectId(opts.projectSourceId ?? threadId);
+  const cacheKey = `${userId}:${projectId}`;
 
-  const projectId = sanitizeId(`builder-${threadId}`, "builder-default");
-  const userId = sanitizeId(BUILDER_USER_ID, "builder");
+  const cached = _sandboxCache.get(cacheKey);
+  if (cached) return { id: cached, userId, projectId };
+  const pending = _inFlight.get(cacheKey);
+  if (pending) return { id: await pending, userId, projectId };
+
   const promise = controllerCreateSandbox(userId, projectId)
     .then((info) => {
-      _sandboxCache.set(threadId, info.sandbox_id);
+      _sandboxCache.set(cacheKey, info.sandbox_id);
       return info.sandbox_id;
     })
     .finally(() => {
-      _inFlight.delete(threadId);
+      _inFlight.delete(cacheKey);
     });
-  _inFlight.set(threadId, promise);
-  return { id: await promise };
+  _inFlight.set(cacheKey, promise);
+  return { id: await promise, userId, projectId };
 }
 getOrCreateSandboxFor.config = { id: "_internal.getOrCreateSandboxFor" };
 
@@ -184,15 +268,17 @@ function encodePath(p: string): string {
 // per-construction RPC).
 export class ZeroshipSandboxBackend extends BaseSandbox {
   public readonly id: string;
+  private readonly userId: string;
 
-  constructor(opts: { id: string }) {
+  constructor(opts: { id: string; userId: string }) {
     super();
     this.id = opts.id;
+    this.userId = assertTypedUserId(opts.userId);
   }
 
   // POST /sandboxes/:id/exec
   async execute(command: string): Promise<ExecuteResponse> {
-    const url = `${controllerBase()}/sandboxes/${this.id}/exec?user_id=${encodeURIComponent(BUILDER_USER_ID)}`;
+    const url = `${controllerBase()}/sandboxes/${this.id}/exec?user_id=${encodeURIComponent(this.userId)}`;
     const res = await fetch(url, {
       method: "POST",
       headers: authHeaders({ "content-type": "application/json" }),
@@ -232,7 +318,7 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
   //      write distinction is enforced by the LLM picking the right
   //      tool, not by us refusing one.)
   async write(filePath: string, content: string): Promise<WriteResult> {
-    const url = `${controllerBase()}/sandboxes/${this.id}/files/${encodePath(filePath)}?user_id=${encodeURIComponent(BUILDER_USER_ID)}`;
+    const url = `${controllerBase()}/sandboxes/${this.id}/files/${encodePath(filePath)}?user_id=${encodeURIComponent(this.userId)}`;
     const res = await fetch(url, {
       method: "PUT",
       headers: authHeaders({ "content-type": "text/plain" }),
@@ -261,7 +347,7 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
   async downloadFiles(paths: string[]): Promise<FileDownloadResponse[]> {
     const out: FileDownloadResponse[] = [];
     for (const p of paths) {
-      const url = `${controllerBase()}/sandboxes/${this.id}/files/${encodePath(p)}?user_id=${encodeURIComponent(BUILDER_USER_ID)}`;
+      const url = `${controllerBase()}/sandboxes/${this.id}/files/${encodePath(p)}?user_id=${encodeURIComponent(this.userId)}`;
       const res = await fetch(url, { headers: authHeaders() });
       if (res.status === 404) {
         out.push({ path: p, content: null, error: "file_not_found" });
@@ -292,7 +378,7 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
   ): Promise<FileUploadResponse[]> {
     const out: FileUploadResponse[] = [];
     for (const [p, bytes] of files) {
-      const url = `${controllerBase()}/sandboxes/${this.id}/files/${encodePath(p)}?user_id=${encodeURIComponent(BUILDER_USER_ID)}`;
+      const url = `${controllerBase()}/sandboxes/${this.id}/files/${encodePath(p)}?user_id=${encodeURIComponent(this.userId)}`;
       // Wrap the Uint8Array as a Blob — the Web Fetch typings vary
       // between platforms over whether `BodyInit` accepts a raw
       // typed-array directly. A Blob is universally accepted and
