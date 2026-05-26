@@ -58,6 +58,8 @@ interface ExecResponseWire {
   timed_out?: boolean;
 }
 
+export const DEFAULT_PREVIEW_PORT = 5173;
+
 export interface SandboxHandle {
   id: string;
   userId: string;
@@ -75,6 +77,11 @@ export interface SandboxLookupOptions {
    * empty so the current request's authenticated user is resolved below.
    */
   userId?: string;
+}
+
+export interface SandboxExecuteOptions {
+  cwd?: string;
+  timeoutMs?: number;
 }
 
 // ─── module-local cache: user_id + project_id → sandbox_id ─────────────
@@ -276,7 +283,7 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
   }
 
   // POST /sandboxes/:id/exec
-  async execute(command: string): Promise<ExecuteResponse> {
+  async execute(command: string, opts: SandboxExecuteOptions = {}): Promise<ExecuteResponse> {
     const url = `${controllerBase()}/sandboxes/${this.id}/exec?user_id=${encodeURIComponent(this.userId)}`;
     const res = await fetch(url, {
       method: "POST",
@@ -284,7 +291,11 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
       // The controller accepts `{cmd, cwd?, timeout_ms?}`. Default
       // timeout (60s) is fine for build/test commands; the controller
       // caps it at 600s anyway.
-      body: JSON.stringify({ cmd: command }),
+      body: JSON.stringify({
+        cmd: command,
+        cwd: opts.cwd,
+        timeout_ms: opts.timeoutMs,
+      }),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -397,4 +408,153 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
     }
     return out;
   }
+}
+
+export interface PreviewServerResult {
+  port: number;
+  status: "ready" | "not_ready";
+  output: string;
+}
+
+function previewServerCommand(port: number): string {
+  return String.raw`set -eu
+PORT="__PREVIEW_PORT__"
+LOG=".zeroship/preview.log"
+PID=".zeroship/preview.pid"
+mkdir -p .zeroship
+
+check_port() {
+  perl -MIO::Socket::INET -e '
+my $port = shift;
+my $socket = IO::Socket::INET->new(
+  PeerAddr => "127.0.0.1",
+  PeerPort => $port,
+  Proto => "tcp",
+  Timeout => 1,
+);
+exit($socket ? 0 : 1);
+' "$PORT" >/dev/null 2>&1
+}
+
+if check_port; then
+  echo "preview already listening on :$PORT"
+  exit 0
+fi
+
+if [ -f "$PID" ]; then
+  OLD_PID="$(cat "$PID" 2>/dev/null || true)"
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "preview pid $OLD_PID is running but :$PORT is not reachable; starting a fresh server"
+  fi
+fi
+
+if [ -f package.json ]; then
+  if ! command -v npm >/dev/null 2>&1 && ! command -v pnpm >/dev/null 2>&1 && ! command -v yarn >/dev/null 2>&1 && ! command -v bun >/dev/null 2>&1; then
+    echo "preview requires a JavaScript package manager, but none is installed in this sandbox"
+    exit 3
+  fi
+
+  if [ ! -d node_modules ]; then
+    if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
+      pnpm install --frozen-lockfile || pnpm install
+    elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then
+      yarn install --frozen-lockfile || yarn install
+    elif [ -f bun.lockb ] && command -v bun >/dev/null 2>&1; then
+      bun install
+    else
+      npm install
+    fi
+  fi
+
+  if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
+    CMD="pnpm dev -- --host 0.0.0.0 --port $PORT"
+  elif [ -f bun.lockb ] && command -v bun >/dev/null 2>&1; then
+    CMD="bun run dev -- --host 0.0.0.0 --port $PORT"
+  elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then
+    CMD="yarn dev --host 0.0.0.0 --port $PORT"
+  else
+    CMD="npm run dev -- --host 0.0.0.0 --port $PORT"
+  fi
+  nohup sh -lc "$CMD" > "$LOG" 2>&1 < /dev/null &
+  echo "$!" > "$PID"
+elif [ -f index.html ] && command -v python3 >/dev/null 2>&1; then
+  nohup python3 -m http.server "$PORT" --bind 0.0.0.0 > "$LOG" 2>&1 < /dev/null &
+  echo "$!" > "$PID"
+elif [ -f index.html ] && command -v perl >/dev/null 2>&1; then
+  cat > .zeroship/preview-static.pl <<'PERL'
+use strict;
+use warnings;
+use IO::Socket::INET;
+my $port = shift @ARGV;
+my $server = IO::Socket::INET->new(
+  LocalAddr => "0.0.0.0",
+  LocalPort => $port,
+  Proto => "tcp",
+  Listen => 10,
+  Reuse => 1,
+) or die "listen failed: $!";
+while (my $client = $server->accept()) {
+  my $line = <$client> // "";
+  while (defined(my $h = <$client>)) {
+    last if $h =~ /^\r?\n$/;
+  }
+  open my $fh, "<", "index.html" or do {
+    print $client "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+    close $client;
+    next;
+  };
+  local $/;
+  my $body = <$fh>;
+  print $client "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " . length($body) . "\r\n\r\n" . $body;
+  close $client;
+}
+PERL
+  nohup perl .zeroship/preview-static.pl "$PORT" > "$LOG" 2>&1 < /dev/null &
+  echo "$!" > "$PID"
+else
+  echo "preview source not ready: expected package.json or index.html in the sandbox root"
+  exit 3
+fi
+
+i=0
+while [ "$i" -lt 80 ]; do
+  if check_port; then
+    echo "preview listening on :$PORT"
+    exit 0
+  fi
+  i=$((i + 1))
+  sleep 0.25
+done
+
+echo "preview did not start on :$PORT"
+if [ -f "$LOG" ]; then
+  echo "--- .zeroship/preview.log ---"
+  tail -80 "$LOG" || true
+fi
+exit 4
+`.replace("__PREVIEW_PORT__", String(port));
+}
+
+export async function ensureSandboxPreviewServer(
+  sandbox: SandboxHandle,
+  port: number = DEFAULT_PREVIEW_PORT,
+): Promise<PreviewServerResult> {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error(`preview port must be in [1024, 65535]; got ${port}`);
+  }
+
+  const backend = new ZeroshipSandboxBackend({
+    id: sandbox.id,
+    userId: sandbox.userId,
+  });
+  const result = await backend.execute(previewServerCommand(port), {
+    timeoutMs: 600_000,
+  });
+  const output = result.output;
+  const ready = (result.exitCode ?? -1) === 0;
+  return {
+    port,
+    status: ready ? "ready" : "not_ready",
+    output,
+  };
 }

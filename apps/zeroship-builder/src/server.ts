@@ -10,6 +10,7 @@ export * from "./server/sandbox";
 export * from "./server/chat";
 export * from "./server/wizard";
 export * from "./server/agents";
+export { previewFetch as fetch } from "./server/preview-proxy";
 // PM/SRE scheduled-worker procs (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.3.2 dual-shape stubs).
 // Both expose a single proc each (`pmDigest`, `sreMonitor`) — kept in
 // dedicated modules rather than folded into agents.ts so the chat-mode

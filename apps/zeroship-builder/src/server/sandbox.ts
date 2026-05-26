@@ -19,7 +19,11 @@
 
 import { action } from "@zeroship/rpc/server";
 import { SANDBOX_URL, SANDBOX_TOKEN } from "./internal/env";
-import { getOrCreateSandboxFor } from "./internal/sandbox-backend";
+import {
+  DEFAULT_PREVIEW_PORT,
+  ensureSandboxPreviewServer,
+  getOrCreateSandboxFor,
+} from "./internal/sandbox-backend";
 
 // The controller's `/sandboxes/:id/*` routes verify ownership via a
 // `?user_id=<id>` query string and 404 on mismatch. Builder's backend
@@ -105,6 +109,37 @@ export const readSandboxFile = action(async (
   }
   return res.text();
 }, { id: "sandbox.readSandboxFile" });
+
+export interface LivePreviewInput {
+  appId: string;
+  port?: number;
+}
+
+export interface LivePreviewInfo {
+  sandboxId: string;
+  port: number;
+  url: string;
+  status: "ready";
+}
+
+export const getLivePreview = action(async (
+  input: LivePreviewInput,
+): Promise<LivePreviewInfo> => {
+  const port = input.port ?? DEFAULT_PREVIEW_PORT;
+  const sandbox = await getOrCreateSandboxFor(input.appId, {
+    projectSourceId: input.appId,
+  });
+  const preview = await ensureSandboxPreviewServer(sandbox, port);
+  if (preview.status !== "ready") {
+    throw new Error(preview.output || `preview server did not start on :${port}`);
+  }
+  return {
+    sandboxId: sandbox.id,
+    port,
+    url: `/api/preview/${encodeURIComponent(input.appId)}/${port}/`,
+    status: "ready",
+  };
+}, { id: "sandbox.getLivePreview" });
 
 // ─── legacy `/sessions/...` procs (kept for orphan tree, scheduled
 // for deletion alongside workspace/tabs) ────────────────────────

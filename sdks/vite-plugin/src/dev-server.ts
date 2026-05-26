@@ -506,56 +506,54 @@ export function devServerPlugin(
 
       // 4. Proxy middleware (returned as pre-middleware) ─────────────────────
       //
-      // Returning a function from configureServer registers it as pre-middleware,
-      // so it runs BEFORE Vite's built-in middleware (including the SPA fallback).
+      // Register directly during configureServer so this runs BEFORE
+      // Vite's built-in middleware (including the SPA fallback).
       // This ensures the runtime's RPC + API paths are proxied to it rather
       // than being caught by Vite's index.html fallback. Forwarded path
       // prefixes:
       //   - /_zs/v1/<id>   ← spec wire (production + dev parity)
       //   - /api/*         ← raw HTTP routes the user app exposes
       //   - /rpc, /_rpc    ← legacy wires kept for in-flight migrations
-      return () => {
-        server.middlewares.use(
-          (
-            req: http.IncomingMessage,
-            res: http.ServerResponse,
-            next: () => void
-          ) => {
-            const url = req.url ?? "";
-            if (
-              !url.startsWith("/_zs/v1/") &&
-              !url.startsWith("/_rpc") &&
-              !url.startsWith("/rpc") &&
-              !url.startsWith("/api/")
-            ) {
-              return next();
-            }
-
-            // Forward path as-is — the dev-bootstrap's `default.fetch`
-            // dispatches /_zs/v1/<id> through `default.rpc`, mirroring
-            // production.
-            const proxyReq = http.request(
-              `http://localhost:${devPort}${url}`,
-              { method: req.method, headers: req.headers },
-              (proxyRes) => {
-                res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
-                proxyRes.pipe(res);
-              }
-            );
-
-            req.on("error", () => proxyReq.destroy());
-            req.pipe(proxyReq);
-
-            proxyReq.on("error", () => {
-              req.destroy();
-              if (!res.headersSent) {
-                res.writeHead(503, { "Content-Type": "application/json" });
-                res.end('{"error":"zeroship API not ready"}');
-              }
-            });
+      server.middlewares.use(
+        (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void
+        ) => {
+          const url = req.url ?? "";
+          if (
+            !url.startsWith("/_zs/v1/") &&
+            !url.startsWith("/_rpc") &&
+            !url.startsWith("/rpc") &&
+            !url.startsWith("/api/")
+          ) {
+            return next();
           }
-        );
-      };
+
+          // Forward path as-is — the dev-bootstrap's `default.fetch`
+          // dispatches /_zs/v1/<id> through `default.rpc`, mirroring
+          // production.
+          const proxyReq = http.request(
+            `http://localhost:${devPort}${url}`,
+            { method: req.method, headers: req.headers },
+            (proxyRes) => {
+              res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+              proxyRes.pipe(res);
+            }
+          );
+
+          req.on("error", () => proxyReq.destroy());
+          req.pipe(proxyReq);
+
+          proxyReq.on("error", () => {
+            req.destroy();
+            if (!res.headersSent) {
+              res.writeHead(503, { "Content-Type": "application/json" });
+              res.end('{"error":"zeroship API not ready"}');
+            }
+          });
+        }
+      );
     },
 
     hotUpdate({ file }: { file: string }) {

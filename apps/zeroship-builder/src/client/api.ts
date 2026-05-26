@@ -56,9 +56,11 @@ export {
 // Sandbox file procs used by the FilesCanvas. Both take object input
 // so the single-input RPC wire delivers every field.
 export {
+  getLivePreview,
   listSandboxFiles,
   readSandboxFile,
   type FileEntry,
+  type LivePreviewInfo,
 } from "../server/sandbox";
 
 // Plan / Health canvas stubs. Every export takes one

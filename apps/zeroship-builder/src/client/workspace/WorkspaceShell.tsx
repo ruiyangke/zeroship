@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getApp } from "../api";
 import { TopBar } from "./TopBar";
 import { CanvasPills, pillsForTier, type CanvasPillId, type CanvasTier } from "./CanvasPills";
-import { PreviewCanvasStub } from "./PreviewCanvasStub";
+import { PreviewCanvas } from "./PreviewCanvas";
 import { FilesCanvas } from "./canvases/FilesCanvas";
 import { LogsCanvas } from "./canvases/LogsCanvas";
 import { EnvCanvas } from "./canvases/EnvCanvas";
@@ -233,7 +233,7 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
               The catch-all at the bottom keeps each pill clickable
               when an appId is not available. */}
           {active === "preview" && (
-            <ErrorBoundary label="the preview"><PreviewCanvasStub /></ErrorBoundary>
+            <ErrorBoundary label="the preview"><PreviewCanvas appId={appId} /></ErrorBoundary>
           )}
           {active === "files" && appId && (
             <ErrorBoundary label="the files canvas"><FilesCanvas appId={appId} /></ErrorBoundary>
