@@ -44,25 +44,74 @@ fi
 mkdir -p "$STATE_DIR" "$WORKSPACE_ROOT" "$PERSIST_DIR"
 
 ensure_postgres() {
-  docker compose up -d postgres
+  if ! docker compose up -d postgres; then
+    if ! existing_postgres_container >/dev/null; then
+      echo "postgres compose start failed and no existing container publishes :5440" >&2
+      docker compose logs --tail=80 postgres >&2 || true
+      exit 1
+    fi
+    echo "Using existing Postgres container on :5440 for sandbox harness." >&2
+  fi
 
   local i
   for i in $(seq 1 60); do
-    if docker compose exec -T postgres pg_isready -U postgres >/dev/null 2>&1; then
+    if postgres_ready; then
       break
     fi
     sleep 1
   done
 
-  if ! docker compose exec -T postgres pg_isready -U postgres >/dev/null 2>&1; then
+  if ! postgres_ready; then
     echo "postgres did not become ready" >&2
-    docker compose logs --tail=80 postgres >&2
+    docker compose logs --tail=80 postgres >&2 || true
     exit 1
   fi
 
-  if ! docker compose exec -T postgres psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'" | grep -qx "1"; then
-    docker compose exec -T postgres createdb -U postgres "$DB_NAME"
+  if ! postgres_db_exists "$DB_NAME"; then
+    create_postgres_db "$DB_NAME"
   fi
+}
+
+existing_postgres_container() {
+  local c
+  c="$(docker ps --format '{{.Names}} {{.Ports}}' \
+    | awk '$0 ~ /0\.0\.0\.0:5440->5432\/tcp|127\.0\.0\.1:5440->5432\/tcp|:::5440->5432\/tcp/ { print $1; exit }')"
+  [[ -n "$c" ]] || return 1
+  printf '%s\n' "$c"
+}
+
+postgres_ready() {
+  if docker compose exec -T postgres pg_isready -U postgres >/dev/null 2>&1; then
+    return 0
+  fi
+  local c
+  c="$(existing_postgres_container || true)"
+  [[ -n "$c" ]] && docker exec "$c" pg_isready -U postgres >/dev/null 2>&1
+}
+
+postgres_db_exists() {
+  local db="$1"
+  if docker compose exec -T postgres psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'" 2>/dev/null | grep -qx "1"; then
+    return 0
+  fi
+  local c
+  c="$(existing_postgres_container || true)"
+  [[ -n "$c" ]] && docker exec "$c" psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$db'" 2>/dev/null | grep -qx "1"
+}
+
+create_postgres_db() {
+  local db="$1"
+  if docker compose exec -T postgres createdb -U postgres "$db" >/dev/null 2>&1; then
+    return 0
+  fi
+  local c
+  c="$(existing_postgres_container || true)"
+  if [[ -n "$c" ]]; then
+    docker exec "$c" createdb -U postgres "$db"
+    return 0
+  fi
+  echo "could not create postgres database $db" >&2
+  exit 1
 }
 
 ensure_network() {

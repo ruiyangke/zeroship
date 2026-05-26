@@ -1,0 +1,62 @@
+[
+  {
+    "id": "todo-board",
+    "title": "M0 Todo Board",
+    "prompt": "Build and launch a simple app called M0 Todo Board for my freelance week. I need to add tasks, mark them done, filter active versus done, and see a small remaining-count summary. Keep the data in the browser for now and ship it when it works.",
+    "criteria": "Compiles in the real sandbox, deploys through the real deploy tool, and the live URL renders a non-empty task app instead of the starter screen."
+  },
+  {
+    "id": "markdown-notes",
+    "title": "M0 Markdown Notes",
+    "prompt": "Build and launch M0 Markdown Notes, a tiny notes app for meeting notes. I want a note title, a markdown text area, a live preview, search over saved notes, and browser-local persistence.",
+    "criteria": "Compiles, deploys, and the reachable app renders a notes interface with editing and preview affordances."
+  },
+  {
+    "id": "url-shortener",
+    "title": "M0 Link Shortener",
+    "prompt": "Build and launch M0 Link Shortener for a small newsletter. Let me paste a long URL, enter a custom short code, save links locally, copy a short-looking link, and show click counts I can increment for demos.",
+    "criteria": "Compiles, deploys, and the reachable app renders a URL/link management surface."
+  },
+  {
+    "id": "poll-voting",
+    "title": "M0 Quick Poll",
+    "prompt": "Build and launch M0 Quick Poll for choosing lunch. I need to create a question with options, vote once per option button, see live totals and percentages, and reset the poll.",
+    "criteria": "Compiles, deploys, and the reachable app renders a poll with voting controls and totals."
+  },
+  {
+    "id": "guestbook",
+    "title": "M0 Guestbook",
+    "prompt": "Build and launch M0 Guestbook for an event table. Visitors should enter their name and a short message, see recent messages, and get clear validation when either field is empty.",
+    "criteria": "Compiles, deploys, and the reachable app renders a guestbook form plus message list."
+  },
+  {
+    "id": "expense-tracker",
+    "title": "M0 Expense Tracker",
+    "prompt": "Build and launch M0 Expense Tracker for a weekend trip. I need to add expenses with amount, category, and note, see total spend, totals by category, and delete mistakes.",
+    "criteria": "Compiles, deploys, and the reachable app renders an expense entry form with totals."
+  },
+  {
+    "id": "link-in-bio",
+    "title": "M0 Link In Bio",
+    "prompt": "Build and launch M0 Link In Bio for a ceramics artist. Make a polished public profile with avatar placeholder, short bio, featured links, a newsletter signup field, and a small editor panel to change the text locally.",
+    "criteria": "Compiles, deploys, and the reachable app renders a profile/link page with editable local content."
+  },
+  {
+    "id": "habit-tracker",
+    "title": "M0 Habit Tracker",
+    "prompt": "Build and launch M0 Habit Tracker for three daily habits. Show a seven-day grid, let me check off habits, display streak counts, and keep progress in local storage.",
+    "criteria": "Compiles, deploys, and the reachable app renders a weekly habit grid with checkoff controls."
+  },
+  {
+    "id": "countdown-timer",
+    "title": "M0 Countdown Timer",
+    "prompt": "Build and launch M0 Countdown Timer for a product launch. Let me set an event name and date/time, show days hours minutes seconds remaining, and include a finished state when the date has passed.",
+    "criteria": "Compiles, deploys, and the reachable app renders a configurable countdown timer."
+  },
+  {
+    "id": "contact-form",
+    "title": "M0 Contact Form",
+    "prompt": "Build and launch M0 Contact Form for a local service business. It needs name, email, service type, and message fields, client-side validation, a success receipt, and a local list of submitted leads.",
+    "criteria": "Compiles, deploys, and the reachable app renders a validated contact form and lead list."
+  }
+]

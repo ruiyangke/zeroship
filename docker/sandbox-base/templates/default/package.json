@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "prebuild": "test -d node_modules || npm install",
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/pack-zship.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

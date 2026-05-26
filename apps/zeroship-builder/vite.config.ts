@@ -13,6 +13,8 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { zeroship } from "@zeroship/vite-plugin";
 
+const devServerPort = Number(process.env.ZEROSHIP_BUILDER_API_PORT ?? "3002");
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), zeroship()],
+  plugins: [react(), tailwindcss(), zeroship({ devServerPort })],
 });

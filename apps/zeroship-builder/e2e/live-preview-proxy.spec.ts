@@ -70,6 +70,7 @@ async function startRoundTripServer(args: {
     "cat > live-preview-roundtrip.pl <<'PERL'",
     "use strict;",
     "use warnings;",
+    "$SIG{PIPE} = 'IGNORE';",
     "use IO::Socket::INET;",
     "my $nonce = $ENV{LIVE_PREVIEW_NONCE} // '';",
     "my $port = int($ENV{LIVE_PREVIEW_PORT} // 5173);",
@@ -81,7 +82,8 @@ async function startRoundTripServer(args: {
     "  Reuse => 1,",
     ") or die \"listen failed: $!\";",
     "while (my $client = $server->accept()) {",
-    "  my $request = <$client> // '';",
+    "  my $request = <$client>;",
+    "  if (!defined($request) || $request eq '') { close $client; next; }",
     "  my $target = '/';",
     "  $target = $1 if $request =~ /^\\S+\\s+(\\S+)/;",
     "  while (defined(my $line = <$client>)) {",
@@ -163,6 +165,18 @@ test.describe("live sandbox preview", () => {
     const backend = await startRoundTripServer({ appId: app.id, nonce });
 
     try {
+      await expect.poll(async () => {
+        const res = await page.request.get(
+          `/api/preview/${encodeURIComponent(app.id)}/${DEFAULT_PREVIEW_PORT}/`,
+          { failOnStatusCode: false },
+        );
+        const body = await res.text();
+        return res.status() === 200 && body.includes(`LIVE_PREVIEW_ROUNDTRIP:${nonce}`);
+      }, {
+        intervals: [500, 1000, 1500, 2000],
+        timeout: 30_000,
+      }).toBe(true);
+
       await page.goto(`/p/${app.id}/preview`);
       const frame = page.getByTestId("preview-frame");
       await expect(frame).toBeVisible({ timeout: 30_000 });

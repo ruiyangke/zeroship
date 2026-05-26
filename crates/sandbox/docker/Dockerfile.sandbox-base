@@ -15,15 +15,33 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     mkdir -p /out && \
     cp /work/target/release/sandbox-agent /out/zeroship-sandbox-agent
 
-FROM debian:12-slim
+FROM node:22-bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates coreutils dash && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      coreutils \
+      curl \
+      dash \
+      git \
+      perl \
+      tar \
+      zstd && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir -p /workspace /home/u /run/keys && \
-    chown nobody:nogroup /workspace /home/u
+    chown nobody:nogroup /workspace /home/u && \
+    npm config set fund false && \
+    npm config set update-notifier false && \
+    git config --system user.email "agent@zeroship.local" && \
+    git config --system user.name "zeroship agent" && \
+    git config --system init.defaultBranch main && \
+    git config --system advice.detachedHead false
 
 COPY --from=builder /out/zeroship-sandbox-agent /usr/local/bin/zeroship-sandbox-agent
+COPY docker/sandbox-base/templates/default /opt/templates/default
+COPY docker/sandbox-base/agent-entrypoint.sh /usr/local/bin/sandbox-agent-entrypoint.sh
+RUN chmod -R a+rwX /opt/templates/default && \
+    chmod +x /usr/local/bin/sandbox-agent-entrypoint.sh
 
 ENV SANDBOX_AGENT_WORKSPACE=/workspace \
     SANDBOX_AGENT_PORT=7777 \
@@ -36,4 +54,4 @@ WORKDIR /workspace
 # docker.rs appends `sleep infinity` after the image name. Keep the
 # real agent as ENTRYPOINT so those words are harmless argv to the
 # Rust binary, not the container's long-running process.
-ENTRYPOINT ["/usr/local/bin/zeroship-sandbox-agent"]
+ENTRYPOINT ["/usr/local/bin/sandbox-agent-entrypoint.sh"]
