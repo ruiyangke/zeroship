@@ -9,6 +9,21 @@ const CANONICAL_CODE_OVERRIDES = Object.freeze({
   version_mismatch: "OPTIMISTIC_CONCURRENCY",
 } satisfies Record<string, string>);
 
+const VALIDATION_ERROR_BRAND = Symbol.for("@zeroship/db/ValidationError");
+const OPTIMISTIC_LOCK_ERROR_BRAND = Symbol.for("@zeroship/db/OptimisticLockError");
+const NOT_FOUND_ERROR_BRAND = Symbol.for("@zeroship/db/NotFoundError");
+const NOT_UNIQUE_ERROR_BRAND = Symbol.for("@zeroship/db/NotUniqueError");
+const INVALID_OPERATION_ERROR_BRAND = Symbol.for("@zeroship/db/InvalidOperationError");
+
+function hasErrorBrand(value: unknown, brand: symbol, name: string): boolean {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (value as Record<PropertyKey, unknown>)[brand] === true &&
+      (value as { name?: unknown }).name === name,
+  );
+}
+
 export function canonicalErrorCode(code: string): string {
   const overrides = CANONICAL_CODE_OVERRIDES as Readonly<Record<string, string>>;
   const overridden = overrides[code] ?? code;
@@ -55,7 +70,12 @@ export interface FieldError {
 export class ValidationError extends Error {
   name = "ValidationError";
   code = "VALIDATION" as const;
+  readonly [VALIDATION_ERROR_BRAND] = true;
   errors: Record<string, FieldError>;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return hasErrorBrand(value, VALIDATION_ERROR_BRAND, "ValidationError");
+  }
 
   constructor(errors: Record<string, FieldError>) {
     const messages = Object.values(errors)
@@ -83,12 +103,17 @@ export class ValidationError extends Error {
 export class OptimisticLockError extends Error {
   name = "OptimisticLockError";
   code = "OPTIMISTIC_CONCURRENCY" as const;
+  readonly [OPTIMISTIC_LOCK_ERROR_BRAND] = true;
   expectedVersion: number;
   /** **P7 PR 4** — always `true` for this error class; advisory flag
    *  the SDK consumer can branch on (`if (e.retryable) retry()`).
    *  Mirrors the `retryable: true` semantics the Rust side carries
    *  in its `hint`. */
   retryable = true as const;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return hasErrorBrand(value, OPTIMISTIC_LOCK_ERROR_BRAND, "OptimisticLockError");
+  }
 
   constructor(expectedVersion: number, collection?: string) {
     super(
@@ -139,7 +164,12 @@ export function mapOptimisticConcurrencyError(
 export class NotFoundError extends Error {
   name = "NotFoundError";
   code = "NOT_FOUND" as const;
+  readonly [NOT_FOUND_ERROR_BRAND] = true;
   collection?: string;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return hasErrorBrand(value, NOT_FOUND_ERROR_BRAND, "NotFoundError");
+  }
 
   constructor(collection?: string) {
     super(
@@ -164,10 +194,15 @@ export class NotFoundError extends Error {
 export class NotUniqueError extends Error {
   name = "NotUniqueError";
   code = "NOT_UNIQUE" as const;
+  readonly [NOT_UNIQUE_ERROR_BRAND] = true;
   collection?: string;
   /** Number of rows the query observed (capped at 2 by the `LIMIT 2`
    *  the terminal applies). */
   count: number;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return hasErrorBrand(value, NOT_UNIQUE_ERROR_BRAND, "NotUniqueError");
+  }
 
   constructor(count: number, collection?: string) {
     super(
@@ -189,7 +224,12 @@ export class NotUniqueError extends Error {
  */
 export class InvalidOperationError extends Error {
   name = "InvalidOperationError";
+  readonly [INVALID_OPERATION_ERROR_BRAND] = true;
   code: string;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return hasErrorBrand(value, INVALID_OPERATION_ERROR_BRAND, "InvalidOperationError");
+  }
 
   constructor(code: string, message: string) {
     super(message);

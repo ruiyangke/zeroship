@@ -3,12 +3,12 @@
  * A Query is a thenable that collects sort/limit/skip/select options and
  * executes the native find call only when awaited or .then() is called.
  */
-import { mapResultDoc } from "./utils.js";
+import { mapResultDoc } from "./utils";
 import {
   InvalidOperationError,
   NotFoundError,
   NotUniqueError,
-} from "./errors.js";
+} from "./errors";
 import {
   PlainObject,
   Result,
@@ -18,7 +18,7 @@ import {
   type WithSpec,
   ok,
   err,
-} from "./types.js";
+} from "./types";
 
 type NativeFn = (
   collection: string,

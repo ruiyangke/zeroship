@@ -28,12 +28,12 @@
  * iterating to completion.
  */
 import {
-  nativeDbFromEnv,
   requireBoundNativeCapability,
   requireCollectionResolver,
   type NativeCollection,
   type NativeSubscriptionLike,
-} from "./native.js";
+} from "./native";
+import { env } from "zeroship";
 
 /** The shape of one event surfaced to a subscriber. */
 export type SubscriptionEvent =
@@ -88,7 +88,7 @@ type NativeSubscription = NativeSubscriptionLike<SubscriptionEvent>;
 
 /** Pull the native handle off `env`, throwing on a misconfigured runtime. */
 function getNativeDbCollection(name: string): NativeCollection {
-  const db = nativeDbFromEnv();
+  const db = (env as { db?: unknown } | undefined)?.db;
   return requireCollectionResolver(db, {
     code: "NATIVE_SUBSCRIPTION_UNAVAILABLE",
     message:

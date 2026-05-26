@@ -1,8 +1,8 @@
-import { ValidationError } from "../errors.js";
-import { trackCollectionAccess } from "../live.js";
-import type { NativeCollection } from "../native.js";
-import { mapFilterOutbound, mapResultDoc } from "../utils.js";
-import type { Filter, PlainObject, Result, Row, VectorMetric } from "../types.js";
+import { ValidationError } from "../errors";
+import { trackCollectionAccess } from "../live";
+import type { NativeCollection } from "../native";
+import { mapFilterOutbound, mapResultDoc } from "../utils";
+import type { Filter, PlainObject, Result, Row, VectorMetric } from "../types";
 
 export interface VectorGeoCollectionInternals<S> {
   _name: string;

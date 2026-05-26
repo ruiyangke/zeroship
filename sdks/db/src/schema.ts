@@ -7,7 +7,7 @@
  * (the framework-internal coordination package). Only the type alias
  * stays here — `Collection` and `validate.ts` reference it.
  */
-import type { FieldDef } from "./types.js";
+import type { FieldDef } from "./types";
 
 /** A normalized schema mapping field names to their FieldDef. */
 export type NormalizedSchema = Record<string, FieldDef>;

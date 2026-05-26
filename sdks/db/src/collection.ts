@@ -3,19 +3,19 @@
  * Each method validates inputs against the schema, maps field names to the native
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
-import type { IdLoader } from "./loader.js";
+import type { IdLoader } from "./loader";
 import {
   requireNativeCollection,
   type NativeCollection,
   type NativeDb,
-} from "./native.js";
+} from "./native";
 import {
   mapNativeError,
   OptimisticLockError,
   ValidationError,
-} from "./errors.js";
-import type { Query } from "./query.js";
-import type { NormalizedSchema } from "./schema.js";
+} from "./errors";
+import type { Query } from "./query";
+import type { NormalizedSchema } from "./schema";
 import type {
   Actor,
   Filter,
@@ -29,8 +29,8 @@ import type {
   UpdateExpression,
   WithRelations,
   WithSpec,
-} from "./types.js";
-import { err, naming, ok } from "./types.js";
+} from "./types";
+import { err, naming, ok } from "./types";
 import {
   aggregateCollection,
   countCollection,
@@ -52,24 +52,24 @@ import {
   updateManyCollection,
   validateArrayPushOps,
   type CrudCollectionInternals,
-} from "./collection/crud.js";
+} from "./collection/crud";
 import {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
-} from "./collection/index-warnings.js";
+} from "./collection/index-warnings";
 import {
   bulkUnmaskCollection,
   type MaskingCollectionInternals,
-} from "./collection/masking.js";
+} from "./collection/masking";
 import {
   loadRelations,
   type RelationsCollectionInternals,
-} from "./collection/relations.js";
+} from "./collection/relations";
 import {
   nearCollection,
   searchCollection,
   type VectorGeoCollectionInternals,
-} from "./collection/vector-geo.js";
+} from "./collection/vector-geo";
 
 export { validateArrayPushOps };
 export { __zeroshipDbResetIndexWarnings, __zeroshipDbWarnedShapesSize };
@@ -452,7 +452,7 @@ export class Collection<
       | {
           vector: number[];
           k?: number;
-          metric?: import("./types.js").VectorMetric;
+          metric?: import("./types").VectorMetric;
           column?: string;
           filter?: Filter<S>;
         }

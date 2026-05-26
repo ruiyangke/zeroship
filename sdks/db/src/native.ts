@@ -1,5 +1,3 @@
-import { env } from "zeroship";
-
 type RequiredSurfaceError = {
   code: string;
   message: string;
@@ -32,10 +30,6 @@ export interface NativeDb extends Omit<ZeroshipDb, "collection" | "transaction">
 
 function throwRequiredSurfaceError(error: RequiredSurfaceError): never {
   throw Object.assign(new Error(error.message), { code: error.code });
-}
-
-export function nativeDbFromEnv(): unknown {
-  return (env as { db?: unknown } | undefined)?.db;
 }
 
 export function requireCollectionResolver(

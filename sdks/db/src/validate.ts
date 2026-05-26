@@ -3,9 +3,9 @@
  * Validates documents and partial update objects against a NormalizedSchema,
  * collecting all field errors before throwing a single ValidationError.
  */
-import { NormalizedSchema } from "./schema.js";
-import { FieldDef, PlainObject } from "./types.js";
-import { ValidationError, FieldError } from "./errors.js";
+import { NormalizedSchema } from "./schema";
+import { FieldDef, PlainObject } from "./types";
+import { ValidationError, FieldError } from "./errors";
 
 type Doc = PlainObject;
 

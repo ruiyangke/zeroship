@@ -2,30 +2,30 @@ import {
   ValidationError,
   OptimisticLockError,
   mapOptimisticConcurrencyError,
-} from "../errors.js";
-import { trackCollectionAccess } from "../live.js";
-import { IdLoader } from "../loader.js";
+} from "../errors";
+import { trackCollectionAccess } from "../live";
+import { IdLoader } from "../loader";
 import {
   requireBoundNativeCapability,
   requireNativeCapability,
   type NativeCollection,
-} from "../native.js";
-import { Query } from "../query.js";
-import type { NormalizedSchema } from "../schema.js";
+} from "../native";
+import { Query } from "../query";
+import type { NormalizedSchema } from "../schema";
 import {
   mapResultDoc,
   mapDocOutbound,
   mapFilterOutbound,
   mapUpdateOutbound,
   translateAggregatePipeline,
-} from "../utils.js";
+} from "../utils";
 import {
   validateDoc,
   checkPartial,
   isValidCalendarDate,
   isJsonSerializable,
   isParseableDateString,
-} from "../validate.js";
+} from "../validate";
 import {
   type Actor,
   type Filter,
@@ -40,9 +40,9 @@ import {
   type WithSpec,
   err,
   ok,
-} from "../types.js";
-import { validateEncryptedFieldsInFilter } from "./encryption-fence.js";
-import { _maybeWarnUnindexedFilter } from "./index-warnings.js";
+} from "../types";
+import { validateEncryptedFieldsInFilter } from "./encryption-fence";
+import { _maybeWarnUnindexedFilter } from "./index-warnings";
 
 export interface CrudCollectionInternals<
   S = PlainObject,

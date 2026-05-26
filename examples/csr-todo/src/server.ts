@@ -35,7 +35,7 @@ const TODOS: Todo[] = [
 ];
 
 export const listTodos = query(
-  async (input: { limit?: number } = {}): Promise<Todo[]> => {
+  async (input: { limit?: number }): Promise<Todo[]> => {
     const limit = input.limit ?? TODOS.length;
     return TODOS.slice(0, limit);
   },

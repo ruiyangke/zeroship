@@ -2,26 +2,20 @@
   "name": "@zeroship/db",
   "version": "0.1.0",
   "description": "Mongoose-compatible database SDK for zeroship",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zeroship-dev/zeroship",
+    "url": "git+https://github.com/zeroship-dev/zeroship.git",
     "directory": "sdks/db"
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
-    },
-    "./env": {
-      "types": "./dist/env.d.ts",
-      "import": "./dist/env.js"
+      "import": "./dist/index.js"
     },
     "./internal": {
       "types": "./dist/internal.d.ts",
@@ -29,7 +23,9 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint:pkg": "publint && attw --pack .",
     "prepublishOnly": "npm run build && npm test",
     "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
   },
@@ -37,7 +33,11 @@
     "@zeroship/types": "workspace:*"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
     "@zeroship/bootstrap": "workspace:*",
+    "fflate": "0.8.2",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "zeroship": "workspace:*"

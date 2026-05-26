@@ -1,5 +1,5 @@
-import type { NormalizedSchema } from "../schema.js";
-import type { NamedIndexSpec, PlainObject } from "../types.js";
+import type { NormalizedSchema } from "../schema";
+import type { NamedIndexSpec, PlainObject } from "../types";
 
 /**
  * D1 — set of `${collection}:${sortedFilterKeys}` shapes already warned

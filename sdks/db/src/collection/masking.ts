@@ -1,8 +1,8 @@
 import {
   requireBoundNativeCapability,
   type NativeCollection,
-} from "../native.js";
-import type { Result, Row, Actor } from "../types.js";
+} from "../native";
+import type { Result, Row, Actor } from "../types";
 
 export interface MaskingCollectionInternals<S> {
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;

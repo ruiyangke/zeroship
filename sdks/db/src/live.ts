@@ -42,8 +42,8 @@
  *     MUST pass `db.live(queryFn, { tables: ["todos"] })` explicitly.
  */
 
-import { subscribe, type Subscription, type SubscriptionEvent } from "./subscribe.js";
-import { anyCollectionInTransaction } from "./tx-state.js";
+import { subscribe, type Subscription, type SubscriptionEvent } from "./subscribe";
+import { anyCollectionInTransaction } from "./tx-state";
 
 /**
  * The minimal contract a `queryFn` return value must satisfy. Either a

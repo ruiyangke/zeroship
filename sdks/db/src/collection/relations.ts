@@ -1,5 +1,5 @@
-import type { NormalizedSchema } from "../schema.js";
-import type { Filter, PlainObject, Result, WithSpec } from "../types.js";
+import type { NormalizedSchema } from "../schema";
+import type { Filter, PlainObject, Result, WithSpec } from "../types";
 
 interface RelationTargetCollection {
   find(filter: Filter<unknown>): PromiseLike<Result<unknown[]>>;
