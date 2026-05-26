@@ -9,11 +9,9 @@
   color: var(--zs-ink-soft);
   font-family: var(--zs-font-body);
   font-size: var(--zs-text-xs);
-  font-weight: 700;
-  letter-spacing: var(--zs-letter-label);
+  font-weight: 600;
   line-height: var(--zs-line-tight);
   padding: var(--zs-space-1) var(--zs-space-3);
-  text-transform: uppercase;
 }
 
 .zs-badge--success {

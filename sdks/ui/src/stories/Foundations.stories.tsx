@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import {
   colorTokenNames,
+  DEFAULT_THEME,
   fontTokenNames,
   radiusTokenNames,
   shadowTokenNames,
@@ -15,10 +16,10 @@ import {
 function useActiveTheme(): ThemeName {
   const read = () => {
     const raw = document.documentElement.dataset.theme;
-    return themes.includes(raw as ThemeName) ? (raw as ThemeName) : "atelier";
+    return themes.includes(raw as ThemeName) ? (raw as ThemeName) : DEFAULT_THEME;
   };
   const [theme, setTheme] = useState<ThemeName>(() =>
-    typeof document === "undefined" ? "atelier" : read(),
+    typeof document === "undefined" ? DEFAULT_THEME : read(),
   );
 
   useEffect(() => {

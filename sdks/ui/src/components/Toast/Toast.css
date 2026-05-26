@@ -14,7 +14,7 @@
   justify-content: space-between;
   gap: var(--zs-space-4);
   border: var(--zs-border-sm) solid var(--zs-rule);
-  border-radius: var(--zs-radius-md);
+  border-radius: var(--zs-radius-lg);
   background: var(--zs-surface-overlay);
   color: var(--zs-ink);
   box-shadow: var(--zs-shadow-lg);
@@ -27,7 +27,7 @@
 .zs-toast[data-starting-style],
 .zs-toast[data-ending-style] {
   opacity: 0;
-  transform: translateY(var(--zs-space-2));
+  transform: scale(0.98);
 }
 
 .zs-toast--success {
@@ -49,7 +49,7 @@
 .zs-toast__title {
   margin: 0;
   font: inherit;
-  font-weight: 700;
+  font-weight: 650;
   line-height: var(--zs-line-tight);
 }
 
@@ -67,11 +67,13 @@
   cursor: pointer;
   font: inherit;
   font-size: var(--zs-text-xs);
-  font-weight: 700;
-  letter-spacing: var(--zs-letter-label);
+  font-weight: 600;
   line-height: var(--zs-line-tight);
   padding: var(--zs-space-1);
-  text-transform: uppercase;
+}
+
+.zs-toast__close:hover {
+  color: var(--zs-ink);
 }
 
 .zs-toast__close:focus-visible {

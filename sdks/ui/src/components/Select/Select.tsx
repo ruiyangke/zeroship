@@ -156,7 +156,11 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
           </BaseSelect.Icon>
         </BaseSelect.Trigger>
         <BaseSelect.Portal>
-          <BaseSelect.Positioner className="zs-select__positioner" sideOffset={4}>
+          <BaseSelect.Positioner
+            alignItemWithTrigger={false}
+            className="zs-select__positioner"
+            sideOffset={4}
+          >
             <BaseSelect.Popup className="zs-select__popup">
               <BaseSelect.List className="zs-select__list">
                 {options.map((item) => (

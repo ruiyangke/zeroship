@@ -11,7 +11,7 @@ read those properties, so the same Button, Dialog, Table, and form controls
 change personality when `data-theme` changes.
 
 Storybook uses `@storybook/addon-themes` with `withThemeByDataAttribute`.
-The toolbar writes `data-theme="atelier" | "studio" | "dusk"` on the
+The toolbar writes `data-theme="studio" | "atelier" | "dusk"` on the
 document element, and every story re-renders against that contract.
 
 ## Contract
@@ -40,7 +40,7 @@ import "@zeroship/ui/styles.css";
 
 export function Root() {
   return (
-    <ThemeProvider defaultTheme="atelier">
+    <ThemeProvider defaultTheme="studio">
       <App />
     </ThemeProvider>
   );

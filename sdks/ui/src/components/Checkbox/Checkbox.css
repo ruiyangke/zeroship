@@ -21,7 +21,10 @@
   border-color: var(--zs-accent);
 }
 
-.zs-checkbox[data-focused] {
+.zs-checkbox[data-focused],
+.zs-checkbox:focus-visible {
+  outline: none;
+  border-color: var(--zs-focus);
   box-shadow: var(--zs-shadow-focus);
 }
 
@@ -31,12 +34,12 @@
 }
 
 .zs-checkbox__indicator {
-  width: var(--zs-space-3);
+  width: calc(var(--zs-space-2) + var(--zs-space-1));
   height: var(--zs-space-3);
-  border-radius: var(--zs-radius-xs);
-  background: currentColor;
+  border-right: var(--zs-border-md) solid currentColor;
+  border-bottom: var(--zs-border-md) solid currentColor;
   opacity: 0;
-  transform: scale(0.78);
+  transform: rotate(45deg) scale(0.72);
   transition:
     opacity var(--zs-motion-fast) var(--zs-motion-ease),
     transform var(--zs-motion-fast) var(--zs-motion-ease);
@@ -45,5 +48,14 @@
 .zs-checkbox[data-checked] .zs-checkbox__indicator,
 .zs-checkbox[data-indeterminate] .zs-checkbox__indicator {
   opacity: 1;
+  transform: rotate(45deg) scale(1);
+}
+
+.zs-checkbox[data-indeterminate] .zs-checkbox__indicator {
+  width: var(--zs-space-3);
+  height: var(--zs-border-md);
+  border: 0;
+  border-radius: var(--zs-radius-pill);
+  background: currentColor;
   transform: scale(1);
 }

@@ -8,24 +8,15 @@
   cursor: pointer;
   font: inherit;
   font-family: var(--zs-font-body);
-  font-weight: 650;
+  font-weight: 600;
   line-height: var(--zs-line-tight);
   text-decoration: none;
   transition:
     background var(--zs-motion-base) var(--zs-motion-ease),
     border-color var(--zs-motion-base) var(--zs-motion-ease),
     color var(--zs-motion-base) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
-    transform var(--zs-motion-fast) var(--zs-motion-ease);
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
   user-select: none;
-}
-
-.zs-button:hover:not(:disabled) {
-  transform: translateY(calc(var(--zs-border-sm) * -1));
-}
-
-.zs-button:active:not(:disabled) {
-  transform: translateY(var(--zs-space-0));
 }
 
 .zs-button:focus-visible {
@@ -45,8 +36,8 @@
 }
 
 .zs-button--md {
-  min-height: calc(var(--zs-space-10) + var(--zs-space-1));
-  padding: var(--zs-space-3) var(--zs-space-4);
+  min-height: var(--zs-space-10);
+  padding: var(--zs-space-2) var(--zs-space-4);
   font-size: var(--zs-text-sm);
 }
 
@@ -72,9 +63,11 @@
   background: var(--zs-surface-raised);
   color: var(--zs-ink);
   border-color: var(--zs-rule);
+  box-shadow: var(--zs-shadow-xs);
 }
 
 .zs-button--secondary:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--zs-surface-sunken) 50%, var(--zs-surface-raised) 50%);
   border-color: var(--zs-rule-strong);
 }
 
@@ -97,4 +90,8 @@
 
 .zs-button--danger:hover:not(:disabled) {
   background: color-mix(in oklch, var(--zs-state-danger) 86%, var(--zs-ink) 14%);
+}
+
+.zs-button:active:not(:disabled) {
+  box-shadow: var(--zs-shadow-xs);
 }

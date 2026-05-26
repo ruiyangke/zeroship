@@ -13,62 +13,76 @@ const outDir = process.env.THEME_EVIDENCE_DIR
   ? resolve(process.env.THEME_EVIDENCE_DIR)
   : join(packageRoot, "storybook-static/theme-evidence");
 const themes = [
-  { label: "Atelier", value: "atelier" },
   { label: "Studio", value: "studio" },
+  { label: "Atelier", value: "atelier" },
   { label: "Dusk", value: "dusk" },
 ];
+const captures = [
+  {
+    slug: "form",
+    storyId: "components-base-ui--field-inputs",
+    before: async (page) => {
+      await page.locator(".zs-story-form").waitFor({ state: "visible" });
+    },
+  },
+  {
+    slug: "open-select",
+    storyId: "components-base-ui--field-inputs",
+    before: async (page) => {
+      await page.locator(".zs-select").first().click();
+      await page.locator(".zs-select__popup").waitFor({ state: "visible" });
+    },
+  },
+  {
+    slug: "dialog",
+    storyId: "components-base-ui--dialog-open",
+    before: async (page) => {
+      await page.locator(".zs-dialog__panel").waitFor({ state: "visible" });
+    },
+  },
+  {
+    slug: "button-states",
+    storyId: "components-base-ui--button-states",
+    before: async (page) => {
+      await page.locator(".zs-button--primary").first().hover();
+      await page.locator(".zs-button--secondary").first().focus();
+    },
+  },
+  {
+    slug: "choice-controls",
+    storyId: "components-base-ui--choice-controls",
+    before: async (page) => {
+      await page.locator(".zs-switch").waitFor({ state: "visible" });
+    },
+  },
+];
+
 const browser = await chromium.launch();
-const context = await browser.newContext({ viewport: { width: 960, height: 540 } });
+const context = await browser.newContext({ viewport: { width: 1100, height: 760 } });
 const page = await context.newPage();
 const evidence = [];
 
 await mkdir(outDir, { recursive: true });
 
 for (const theme of themes) {
-  const url = `${baseUrl}/iframe.html?id=primitives-button--variants&globals=theme:${theme.label}`;
-  await page.goto(url, { waitUntil: "networkidle" });
-  const button = page.locator(".zs-button--primary").first();
-  await button.screenshot({ path: join(outDir, `button-${theme.value}.png`) });
-  evidence.push({
-    theme: theme.value,
-    screenshot: join(outDir, `button-${theme.value}.png`),
-    computed: await button.evaluate((el) => {
-      const styles = getComputedStyle(el);
-      return {
-        backgroundColor: styles.backgroundColor,
-        color: styles.color,
-        borderRadius: styles.borderRadius,
-        fontFamily: styles.fontFamily,
-      };
-    }),
-  });
+  for (const capture of captures) {
+    const url = `${baseUrl}/iframe.html?id=${capture.storyId}&globals=theme:${theme.label}`;
+    await page.goto(url, { waitUntil: "networkidle" });
+    await page.evaluate(() => document.fonts?.ready);
+    await capture.before(page);
+    await page.waitForTimeout(250);
+    const screenshot = join(outDir, `${theme.value}-${capture.slug}.png`);
+    await page.screenshot({ path: screenshot, fullPage: true });
+    evidence.push({
+      theme: theme.value,
+      storyId: capture.storyId,
+      kind: capture.slug,
+      screenshot,
+    });
+  }
 }
-
-const portalUrl = `${baseUrl}/iframe.html?id=components-base-ui--portaled-popup-proof&globals=theme:Dusk`;
-await page.goto(portalUrl, { waitUntil: "networkidle" });
-await page.locator(".zs-dialog__panel").waitFor({ state: "visible" });
-await page.locator(".zs-select__popup").waitFor({ state: "visible" });
-await page.screenshot({ path: join(outDir, "dusk-portaled-dialog-select-open.png") });
-evidence.push({
-  theme: "dusk",
-  screenshot: join(outDir, "dusk-portaled-dialog-select-open.png"),
-  portalProof: await page.evaluate(() => {
-    const dialog = document.querySelector(".zs-dialog__panel");
-    const select = document.querySelector(".zs-select__popup");
-    const htmlTheme = document.documentElement.dataset.theme;
-    const dialogStyles = dialog ? getComputedStyle(dialog) : null;
-    const selectStyles = select ? getComputedStyle(select) : null;
-    return {
-      htmlTheme,
-      dialogBackground: dialogStyles?.backgroundColor,
-      dialogColor: dialogStyles?.color,
-      selectBackground: selectStyles?.backgroundColor,
-      selectColor: selectStyles?.color,
-    };
-  }),
-});
 
 await context.close();
 await browser.close();
-await writeFile(join(outDir, "button-theme-evidence.json"), JSON.stringify(evidence, null, 2));
+await writeFile(join(outDir, "theme-evidence.json"), JSON.stringify(evidence, null, 2));
 console.log(JSON.stringify(evidence, null, 2));

@@ -150,9 +150,10 @@
 }
 
 .zs-type-sample__name {
-  color: var(--zs-ink-muted);
+  color: var(--zs-ink-soft);
   font-family: var(--zs-font-mono);
   font-size: var(--zs-text-xs);
+  font-weight: 600;
 }
 
 .zs-radius-sample,

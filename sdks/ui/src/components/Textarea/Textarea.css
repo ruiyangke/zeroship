@@ -2,14 +2,14 @@
   width: 100%;
   min-height: calc(var(--zs-space-16) + var(--zs-space-12));
   border: var(--zs-border-sm) solid var(--zs-rule);
-  border-radius: var(--zs-radius-sm);
+  border-radius: var(--zs-radius-md);
   background: var(--zs-surface-raised);
   color: var(--zs-ink);
   font: inherit;
   font-family: var(--zs-font-body);
-  font-size: var(--zs-text-md);
+  font-size: var(--zs-text-sm);
   line-height: var(--zs-line-normal);
-  padding: var(--zs-space-4);
+  padding: var(--zs-space-3);
   resize: vertical;
   transition:
     background var(--zs-motion-base) var(--zs-motion-ease),
@@ -18,11 +18,13 @@
 }
 
 .zs-textarea:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--zs-surface-sunken) 45%, var(--zs-surface-raised) 55%);
   border-color: var(--zs-rule-strong);
 }
 
 .zs-textarea:focus-visible {
   outline: none;
+  border-color: var(--zs-focus);
   box-shadow: var(--zs-shadow-focus);
 }
 
@@ -39,4 +41,8 @@
 .zs-textarea:read-only {
   background: var(--zs-surface-sunken);
   color: var(--zs-ink-soft);
+}
+
+.zs-textarea::placeholder {
+  color: var(--zs-ink-muted);
 }

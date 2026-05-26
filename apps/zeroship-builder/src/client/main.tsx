@@ -27,7 +27,7 @@ createRoot(document.getElementById("root")!).render(
     <ErrorBoundary label="the app">
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
-          <ThemeProvider defaultTheme="atelier">
+          <ThemeProvider defaultTheme="studio">
             <App />
           </ThemeProvider>
         </AuthProvider>

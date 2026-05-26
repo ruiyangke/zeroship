@@ -1,9 +1,9 @@
 .zs-card {
   border: var(--zs-border-sm) solid var(--zs-rule);
-  border-radius: var(--zs-radius-md);
+  border-radius: var(--zs-radius-lg);
   background: var(--zs-surface-raised);
   color: var(--zs-ink);
-  box-shadow: var(--zs-shadow-xs);
+  box-shadow: var(--zs-shadow-sm);
 }
 
 .zs-card--accent {
@@ -19,12 +19,10 @@
 .zs-card--interactive {
   transition:
     border-color var(--zs-motion-base) var(--zs-motion-ease),
-    box-shadow var(--zs-motion-base) var(--zs-motion-ease),
-    transform var(--zs-motion-fast) var(--zs-motion-ease);
+    box-shadow var(--zs-motion-base) var(--zs-motion-ease);
 }
 
 .zs-card--interactive:hover {
   border-color: var(--zs-rule-strong);
   box-shadow: var(--zs-shadow-md);
-  transform: translateY(calc(var(--zs-border-sm) * -1));
 }

@@ -3,8 +3,8 @@
   justify-items: center;
   gap: var(--zs-space-3);
   border: var(--zs-border-sm) dashed var(--zs-rule);
-  border-radius: var(--zs-radius-lg);
-  background: var(--zs-surface-sunken);
+  border-radius: var(--zs-radius-xl);
+  background: color-mix(in oklch, var(--zs-surface-sunken) 70%, var(--zs-surface-raised) 30%);
   color: var(--zs-ink-soft);
   padding: var(--zs-space-8);
   text-align: center;
@@ -17,6 +17,7 @@
   height: var(--zs-space-12);
   border-radius: var(--zs-radius-pill);
   background: var(--zs-surface-raised);
+  box-shadow: var(--zs-shadow-sm);
   color: var(--zs-accent);
 }
 

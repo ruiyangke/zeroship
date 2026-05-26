@@ -12,11 +12,9 @@
   font: inherit;
   font-family: var(--zs-font-body);
   font-size: var(--zs-text-xs);
-  font-weight: 700;
-  letter-spacing: var(--zs-letter-label);
+  font-weight: 600;
   line-height: var(--zs-line-tight);
   padding: var(--zs-space-2) var(--zs-space-3);
-  text-transform: uppercase;
   transition:
     background var(--zs-motion-base) var(--zs-motion-ease),
     border-color var(--zs-motion-base) var(--zs-motion-ease),
@@ -26,6 +24,11 @@
 .zs-chip:focus-visible {
   outline: none;
   box-shadow: var(--zs-shadow-focus);
+}
+
+.zs-chip:hover:not(:disabled, .zs-chip--active) {
+  border-color: var(--zs-rule-strong);
+  color: var(--zs-ink);
 }
 
 .zs-chip:disabled {

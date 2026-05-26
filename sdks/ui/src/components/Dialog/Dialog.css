@@ -27,12 +27,12 @@
   max-height: min(90vh, 44rem);
   overflow: auto;
   border: var(--zs-border-sm) solid var(--zs-rule);
-  border-radius: var(--zs-radius-lg);
+  border-radius: var(--zs-radius-xl);
   background: var(--zs-surface-overlay);
   color: var(--zs-ink);
   box-shadow: var(--zs-shadow-lg);
   pointer-events: auto;
-  transform-origin: var(--transform-origin);
+  transform-origin: var(--transform-origin, center);
   transition:
     opacity var(--zs-motion-base) var(--zs-motion-ease),
     transform var(--zs-motion-base) var(--zs-motion-ease);
@@ -41,7 +41,7 @@
 .zs-dialog__panel[data-starting-style],
 .zs-dialog__panel[data-ending-style] {
   opacity: 0;
-  transform: translateY(calc(var(--zs-space-2) * -1)) scale(0.98);
+  transform: scale(0.98);
 }
 
 .zs-dialog__panel:focus-visible {
@@ -93,11 +93,9 @@
   cursor: pointer;
   font: inherit;
   font-size: var(--zs-text-xs);
-  font-weight: 700;
-  letter-spacing: var(--zs-letter-label);
+  font-weight: 600;
   line-height: var(--zs-line-tight);
   padding: var(--zs-space-2) var(--zs-space-3);
-  text-transform: uppercase;
 }
 
 .zs-dialog__close:hover {
@@ -107,5 +105,6 @@
 
 .zs-dialog__close:focus-visible {
   outline: none;
+  border-color: var(--zs-focus);
   box-shadow: var(--zs-shadow-focus);
 }

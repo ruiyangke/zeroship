@@ -8,11 +8,11 @@ const preview: Preview = {
   decorators: [
     withThemeByDataAttribute({
       themes: {
-        Atelier: "atelier",
         Studio: "studio",
+        Atelier: "atelier",
         Dusk: "dusk",
       },
-      defaultTheme: "atelier",
+      defaultTheme: "Studio",
       attributeName: "data-theme",
       parentSelector: "html",
     }),

@@ -8,15 +8,15 @@ import {
   type ReactNode,
 } from "react";
 
-export const themes = ["atelier", "studio", "dusk"] as const;
+export const themes = ["studio", "atelier", "dusk"] as const;
 export type ThemeName = (typeof themes)[number];
 
-export const DEFAULT_THEME: ThemeName = "atelier";
+export const DEFAULT_THEME: ThemeName = "studio";
 export const THEME_STORAGE_KEY = "zeroship-ui-theme";
 
 export const themeLabels: Record<ThemeName, string> = {
-  atelier: "Atelier",
   studio: "Studio",
+  atelier: "Atelier",
   dusk: "Dusk",
 };
 

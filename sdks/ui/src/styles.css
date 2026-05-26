@@ -31,111 +31,48 @@
   box-sizing: border-box;
 }
 
-/* Atelier is the default theme: its tokens live on :root unconditionally so
-   components always have a complete token set, even where no (or an invalid)
-   data-theme is present — e.g. Storybook's Docs inline render, which writes
-   data-theme="undefined". [data-theme="studio"|"dusk"] below only *override*. */
+/* Base typography. Without this, text that doesn't set its own font-family
+   (labels, hints, descriptions, table cells, menu items…) inherits the UA
+   default serif (Times New Roman). Anchor the body font + ink on the theme
+   root so all descendants — including portaled popups under <html> — inherit it. */
 :root,
-[data-theme="atelier"],
-.zs-theme-root[data-theme="atelier"] {
-  --zs-surface: oklch(0.97 0.012 89);
-  --zs-surface-raised: oklch(0.995 0.004 89);
-  --zs-surface-sunken: oklch(0.94 0.014 86);
-  --zs-surface-overlay: oklch(0.985 0.008 88);
-  --zs-ink: oklch(0.18 0.013 60);
-  --zs-ink-soft: oklch(0.4 0.013 65);
-  --zs-ink-muted: oklch(0.48 0.014 70);
-  --zs-accent: oklch(0.55 0.21 25);
-  --zs-accent-hover: oklch(0.49 0.21 25);
-  --zs-accent-ink: oklch(0.985 0.008 88);
-  --zs-state-success: oklch(0.45 0.16 150);
-  --zs-state-success-bg: oklch(0.93 0.05 150);
-  --zs-state-warn: oklch(0.45 0.13 74);
-  --zs-state-warn-bg: oklch(0.94 0.06 82);
-  --zs-state-danger: oklch(0.5 0.21 28);
-  --zs-state-danger-bg: oklch(0.94 0.06 28);
-  --zs-state-info: oklch(0.46 0.14 252);
-  --zs-state-info-bg: oklch(0.92 0.04 252);
-  --zs-rule: oklch(0.78 0.014 75);
-  --zs-rule-strong: oklch(0.58 0.014 72);
-  --zs-focus: oklch(0.61 0.21 27);
-  --zs-backdrop: oklch(0.18 0.013 60 / 0.46);
-  --zs-code-bg: oklch(0.94 0.014 86);
-  --zs-code-ink: oklch(0.25 0.04 68);
-  --zs-font-display: "Fraunces", "Source Serif 4", Georgia, serif;
-  --zs-font-body: "Inter", "Public Sans", system-ui, sans-serif;
-  --zs-font-mono: "JetBrains Mono", ui-monospace, monospace;
-  --zs-text-xs: 0.75rem;
-  --zs-text-sm: 0.875rem;
-  --zs-text-md: 1rem;
-  --zs-text-lg: 1.125rem;
-  --zs-text-xl: 1.375rem;
-  --zs-text-2xl: 1.75rem;
-  --zs-text-3xl: 2.375rem;
-  --zs-line-tight: 1.18;
-  --zs-line-normal: 1.48;
-  --zs-line-relaxed: 1.62;
-  --zs-letter-label: 0.18em;
-  --zs-space-0: 0;
-  --zs-space-1: 0.25rem;
-  --zs-space-2: 0.5rem;
-  --zs-space-3: 0.75rem;
-  --zs-space-4: 1rem;
-  --zs-space-5: 1.25rem;
-  --zs-space-6: 1.5rem;
-  --zs-space-8: 2rem;
-  --zs-space-10: 2.5rem;
-  --zs-space-12: 3rem;
-  --zs-space-16: 4rem;
-  --zs-radius-xs: 0.0625rem;
-  --zs-radius-sm: 0.125rem;
-  --zs-radius-md: 0.25rem;
-  --zs-radius-lg: 0.375rem;
-  --zs-radius-xl: 0.5rem;
-  --zs-radius-pill: 999rem;
-  --zs-shadow-xs: 0 0 0 var(--zs-border-sm) var(--zs-rule);
-  --zs-shadow-sm: 0 0.25rem 0.75rem -0.625rem oklch(0.18 0.013 60 / 0.35);
-  --zs-shadow-md: 0 1.25rem 2rem -1.5rem oklch(0.18 0.013 60 / 0.32);
-  --zs-shadow-lg: 0 2rem 3rem -2rem oklch(0.18 0.013 60 / 0.42);
-  --zs-shadow-focus: 0 0 0 0.1875rem oklch(0.61 0.21 27 / 0.24);
-  --zs-motion-fast: 120ms;
-  --zs-motion-base: 200ms;
-  --zs-motion-slow: 380ms;
-  --zs-motion-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
-  --zs-z-modal: 50;
-  --zs-z-dropdown: 60;
-  --zs-z-popover: 60;
-  --zs-z-toast: 70;
-  --zs-border-sm: 0.0625rem;
-  --zs-border-md: 0.125rem;
+[data-theme],
+.zs-theme-root {
+  font-family: var(--zs-font-body);
+  color: var(--zs-ink);
 }
 
+/* Studio is the default clean-modern theme: its tokens live on :root
+   unconditionally so components always have a complete token set, even where
+   no (or an invalid) data-theme is present — e.g. Storybook's Docs inline
+   render, which writes data-theme="undefined". */
+:root,
 [data-theme="studio"],
 .zs-theme-root[data-theme="studio"] {
-  --zs-surface: oklch(0.985 0.002 260);
-  --zs-surface-raised: oklch(1 0 0);
-  --zs-surface-sunken: oklch(0.955 0.004 260);
-  --zs-surface-overlay: oklch(0.998 0 0);
-  --zs-ink: oklch(0.19 0.012 260);
-  --zs-ink-soft: oklch(0.42 0.014 260);
-  --zs-ink-muted: oklch(0.46 0.014 260);
-  --zs-accent: oklch(0.52 0.18 255);
-  --zs-accent-hover: oklch(0.46 0.19 255);
-  --zs-accent-ink: oklch(0.99 0 0);
-  --zs-state-success: oklch(0.47 0.15 158);
-  --zs-state-success-bg: oklch(0.94 0.04 158);
-  --zs-state-warn: oklch(0.46 0.14 76);
+  --zs-surface: oklch(0.985 0.003 255);
+  --zs-surface-raised: oklch(0.998 0.001 255);
+  --zs-surface-sunken: oklch(0.958 0.004 255);
+  --zs-surface-overlay: oklch(0.996 0.001 255);
+  --zs-ink: oklch(0.205 0.015 255);
+  --zs-ink-soft: oklch(0.43 0.014 255);
+  --zs-ink-muted: oklch(0.56 0.012 255);
+  --zs-accent: oklch(0.49 0.125 224);
+  --zs-accent-hover: oklch(0.43 0.135 224);
+  --zs-accent-ink: oklch(0.99 0.001 255);
+  --zs-state-success: oklch(0.43 0.13 154);
+  --zs-state-success-bg: oklch(0.94 0.04 154);
+  --zs-state-warn: oklch(0.49 0.11 76);
   --zs-state-warn-bg: oklch(0.95 0.05 82);
-  --zs-state-danger: oklch(0.52 0.2 29);
-  --zs-state-danger-bg: oklch(0.95 0.04 29);
-  --zs-state-info: oklch(0.52 0.18 255);
-  --zs-state-info-bg: oklch(0.94 0.035 255);
-  --zs-rule: oklch(0.86 0.006 260);
-  --zs-rule-strong: oklch(0.62 0.01 260);
-  --zs-focus: oklch(0.52 0.18 255);
-  --zs-backdrop: oklch(0.18 0.012 260 / 0.42);
-  --zs-code-bg: oklch(0.955 0.004 260);
-  --zs-code-ink: oklch(0.23 0.04 260);
+  --zs-state-danger: oklch(0.5 0.17 28);
+  --zs-state-danger-bg: oklch(0.95 0.04 28);
+  --zs-state-info: oklch(0.47 0.12 224);
+  --zs-state-info-bg: oklch(0.94 0.035 224);
+  --zs-rule: oklch(0.86 0.006 255);
+  --zs-rule-strong: oklch(0.67 0.012 255);
+  --zs-focus: oklch(0.54 0.13 224);
+  --zs-backdrop: oklch(0.17 0.015 255 / 0.44);
+  --zs-code-bg: oklch(0.952 0.004 255);
+  --zs-code-ink: oklch(0.25 0.04 255);
   --zs-font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
   --zs-font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
   --zs-font-mono: "JetBrains Mono", ui-monospace, monospace;
@@ -147,34 +84,108 @@
   --zs-text-2xl: 1.625rem;
   --zs-text-3xl: 2.125rem;
   --zs-line-tight: 1.16;
-  --zs-line-normal: 1.42;
-  --zs-line-relaxed: 1.55;
-  --zs-letter-label: 0.08em;
+  --zs-line-normal: 1.45;
+  --zs-line-relaxed: 1.6;
+  --zs-letter-label: 0;
   --zs-space-0: 0;
-  --zs-space-1: 0.1875rem;
-  --zs-space-2: 0.375rem;
-  --zs-space-3: 0.625rem;
-  --zs-space-4: 0.875rem;
-  --zs-space-5: 1.125rem;
-  --zs-space-6: 1.375rem;
-  --zs-space-8: 1.75rem;
-  --zs-space-10: 2.25rem;
-  --zs-space-12: 2.75rem;
-  --zs-space-16: 3.5rem;
-  --zs-radius-xs: 0.125rem;
-  --zs-radius-sm: 0.25rem;
-  --zs-radius-md: 0.375rem;
-  --zs-radius-lg: 0.5rem;
-  --zs-radius-xl: 0.625rem;
+  --zs-space-1: 0.25rem;
+  --zs-space-2: 0.5rem;
+  --zs-space-3: 0.75rem;
+  --zs-space-4: 1rem;
+  --zs-space-5: 1.25rem;
+  --zs-space-6: 1.5rem;
+  --zs-space-8: 2rem;
+  --zs-space-10: 2.5rem;
+  --zs-space-12: 3rem;
+  --zs-space-16: 4rem;
+  --zs-radius-xs: 0.25rem;
+  --zs-radius-sm: 0.375rem;
+  --zs-radius-md: 0.5rem;
+  --zs-radius-lg: 0.625rem;
+  --zs-radius-xl: 0.75rem;
   --zs-radius-pill: 999rem;
   --zs-shadow-xs: 0 0 0 var(--zs-border-sm) var(--zs-rule);
-  --zs-shadow-sm: 0 0.5rem 1rem -0.875rem oklch(0.19 0.012 260 / 0.32);
-  --zs-shadow-md: 0 1.25rem 2rem -1.5rem oklch(0.19 0.012 260 / 0.3);
-  --zs-shadow-lg: 0 2rem 3rem -2rem oklch(0.19 0.012 260 / 0.36);
-  --zs-shadow-focus: 0 0 0 0.1875rem oklch(0.52 0.18 255 / 0.24);
-  --zs-motion-fast: 100ms;
-  --zs-motion-base: 160ms;
-  --zs-motion-slow: 260ms;
+  --zs-shadow-sm: 0 0.375rem 0.875rem -0.75rem oklch(0.18 0.015 255 / 0.28), 0 0.125rem 0.25rem -0.1875rem oklch(0.18 0.015 255 / 0.18);
+  --zs-shadow-md: 0 1rem 2rem -1.5rem oklch(0.18 0.015 255 / 0.34), 0 0.25rem 0.75rem -0.5rem oklch(0.18 0.015 255 / 0.2);
+  --zs-shadow-lg: 0 1.5rem 3rem -2rem oklch(0.18 0.015 255 / 0.42), 0 0.5rem 1.25rem -0.75rem oklch(0.18 0.015 255 / 0.22);
+  --zs-shadow-focus: 0 0 0 0.1875rem oklch(0.54 0.13 224 / 0.24);
+  --zs-motion-fast: 120ms;
+  --zs-motion-base: 180ms;
+  --zs-motion-slow: 280ms;
+  --zs-motion-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --zs-z-modal: 50;
+  --zs-z-dropdown: 60;
+  --zs-z-popover: 60;
+  --zs-z-toast: 70;
+  --zs-border-sm: 0.0625rem;
+  --zs-border-md: 0.125rem;
+}
+
+[data-theme="atelier"],
+.zs-theme-root[data-theme="atelier"] {
+  --zs-surface: oklch(0.975 0.01 88);
+  --zs-surface-raised: oklch(0.996 0.004 88);
+  --zs-surface-sunken: oklch(0.948 0.012 86);
+  --zs-surface-overlay: oklch(0.99 0.006 88);
+  --zs-ink: oklch(0.2 0.014 58);
+  --zs-ink-soft: oklch(0.43 0.014 62);
+  --zs-ink-muted: oklch(0.56 0.014 66);
+  --zs-accent: oklch(0.52 0.17 25);
+  --zs-accent-hover: oklch(0.46 0.18 25);
+  --zs-accent-ink: oklch(0.99 0.006 88);
+  --zs-state-success: oklch(0.43 0.13 150);
+  --zs-state-success-bg: oklch(0.94 0.04 150);
+  --zs-state-warn: oklch(0.48 0.11 74);
+  --zs-state-warn-bg: oklch(0.95 0.05 82);
+  --zs-state-danger: oklch(0.5 0.17 28);
+  --zs-state-danger-bg: oklch(0.95 0.04 28);
+  --zs-state-info: oklch(0.46 0.11 230);
+  --zs-state-info-bg: oklch(0.94 0.035 230);
+  --zs-rule: oklch(0.84 0.014 75);
+  --zs-rule-strong: oklch(0.66 0.014 72);
+  --zs-focus: oklch(0.57 0.17 25);
+  --zs-backdrop: oklch(0.18 0.014 58 / 0.44);
+  --zs-code-bg: oklch(0.948 0.012 86);
+  --zs-code-ink: oklch(0.26 0.04 68);
+  --zs-font-display: "Fraunces", "Source Serif 4", Georgia, serif;
+  --zs-font-body: "Inter", "Public Sans", system-ui, sans-serif;
+  --zs-font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --zs-text-xs: 0.75rem;
+  --zs-text-sm: 0.875rem;
+  --zs-text-md: 1rem;
+  --zs-text-lg: 1.125rem;
+  --zs-text-xl: 1.375rem;
+  --zs-text-2xl: 1.75rem;
+  --zs-text-3xl: 2.25rem;
+  --zs-line-tight: 1.18;
+  --zs-line-normal: 1.48;
+  --zs-line-relaxed: 1.62;
+  --zs-letter-label: 0;
+  --zs-space-0: 0;
+  --zs-space-1: 0.25rem;
+  --zs-space-2: 0.5rem;
+  --zs-space-3: 0.75rem;
+  --zs-space-4: 1rem;
+  --zs-space-5: 1.25rem;
+  --zs-space-6: 1.5rem;
+  --zs-space-8: 2rem;
+  --zs-space-10: 2.5rem;
+  --zs-space-12: 3rem;
+  --zs-space-16: 4rem;
+  --zs-radius-xs: 0.25rem;
+  --zs-radius-sm: 0.375rem;
+  --zs-radius-md: 0.5rem;
+  --zs-radius-lg: 0.625rem;
+  --zs-radius-xl: 0.75rem;
+  --zs-radius-pill: 999rem;
+  --zs-shadow-xs: 0 0 0 var(--zs-border-sm) var(--zs-rule);
+  --zs-shadow-sm: 0 0.375rem 0.875rem -0.75rem oklch(0.18 0.014 58 / 0.24), 0 0.125rem 0.25rem -0.1875rem oklch(0.18 0.014 58 / 0.14);
+  --zs-shadow-md: 0 1rem 2rem -1.5rem oklch(0.18 0.014 58 / 0.32), 0 0.25rem 0.75rem -0.5rem oklch(0.18 0.014 58 / 0.18);
+  --zs-shadow-lg: 0 1.5rem 3rem -2rem oklch(0.18 0.014 58 / 0.4), 0 0.5rem 1.25rem -0.75rem oklch(0.18 0.014 58 / 0.2);
+  --zs-shadow-focus: 0 0 0 0.1875rem oklch(0.57 0.17 25 / 0.24);
+  --zs-motion-fast: 120ms;
+  --zs-motion-base: 180ms;
+  --zs-motion-slow: 280ms;
   --zs-motion-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --zs-z-modal: 50;
   --zs-z-dropdown: 60;
@@ -187,30 +198,30 @@
 [data-theme="dusk"],
 .zs-theme-root[data-theme="dusk"] {
   --zs-surface: oklch(0.16 0.025 260);
-  --zs-surface-raised: oklch(0.21 0.03 260);
-  --zs-surface-sunken: oklch(0.12 0.022 260);
-  --zs-surface-overlay: oklch(0.24 0.035 260);
-  --zs-ink: oklch(0.95 0.008 95);
-  --zs-ink-soft: oklch(0.78 0.02 92);
-  --zs-ink-muted: oklch(0.64 0.025 92);
-  --zs-accent: oklch(0.72 0.19 35);
-  --zs-accent-hover: oklch(0.78 0.2 35);
-  --zs-accent-ink: oklch(0.13 0.022 260);
-  --zs-state-success: oklch(0.77 0.17 155);
-  --zs-state-success-bg: oklch(0.26 0.08 155);
-  --zs-state-warn: oklch(0.84 0.16 82);
-  --zs-state-warn-bg: oklch(0.28 0.06 82);
-  --zs-state-danger: oklch(0.72 0.21 25);
-  --zs-state-danger-bg: oklch(0.28 0.08 25);
-  --zs-state-info: oklch(0.78 0.14 215);
-  --zs-state-info-bg: oklch(0.28 0.08 215);
-  --zs-rule: oklch(0.34 0.035 260);
-  --zs-rule-strong: oklch(0.52 0.04 260);
-  --zs-focus: oklch(0.78 0.2 35);
+  --zs-surface-raised: oklch(0.205 0.024 260);
+  --zs-surface-sunken: oklch(0.12 0.02 260);
+  --zs-surface-overlay: oklch(0.235 0.026 260);
+  --zs-ink: oklch(0.95 0.007 95);
+  --zs-ink-soft: oklch(0.78 0.014 92);
+  --zs-ink-muted: oklch(0.65 0.018 92);
+  --zs-accent: oklch(0.72 0.13 165);
+  --zs-accent-hover: oklch(0.79 0.14 165);
+  --zs-accent-ink: oklch(0.12 0.02 260);
+  --zs-state-success: oklch(0.78 0.14 155);
+  --zs-state-success-bg: oklch(0.26 0.06 155);
+  --zs-state-warn: oklch(0.84 0.13 82);
+  --zs-state-warn-bg: oklch(0.28 0.05 82);
+  --zs-state-danger: oklch(0.74 0.17 25);
+  --zs-state-danger-bg: oklch(0.28 0.065 25);
+  --zs-state-info: oklch(0.76 0.11 225);
+  --zs-state-info-bg: oklch(0.28 0.06 225);
+  --zs-rule: oklch(0.34 0.03 260);
+  --zs-rule-strong: oklch(0.54 0.035 260);
+  --zs-focus: oklch(0.78 0.14 165);
   --zs-backdrop: oklch(0.05 0.012 260 / 0.68);
-  --zs-code-bg: oklch(0.12 0.022 260);
-  --zs-code-ink: oklch(0.88 0.04 95);
-  --zs-font-display: "Fraunces", "Source Serif 4", Georgia, serif;
+  --zs-code-bg: oklch(0.12 0.02 260);
+  --zs-code-ink: oklch(0.88 0.035 95);
+  --zs-font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
   --zs-font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
   --zs-font-mono: "JetBrains Mono", ui-monospace, monospace;
   --zs-text-xs: 0.75rem;
@@ -223,7 +234,7 @@
   --zs-line-tight: 1.16;
   --zs-line-normal: 1.5;
   --zs-line-relaxed: 1.65;
-  --zs-letter-label: 0.16em;
+  --zs-letter-label: 0;
   --zs-space-0: 0;
   --zs-space-1: 0.25rem;
   --zs-space-2: 0.5rem;
@@ -235,21 +246,21 @@
   --zs-space-10: 2.5rem;
   --zs-space-12: 3rem;
   --zs-space-16: 4rem;
-  --zs-radius-xs: 0.125rem;
-  --zs-radius-sm: 0.25rem;
+  --zs-radius-xs: 0.25rem;
+  --zs-radius-sm: 0.375rem;
   --zs-radius-md: 0.5rem;
-  --zs-radius-lg: 0.75rem;
-  --zs-radius-xl: 1rem;
+  --zs-radius-lg: 0.625rem;
+  --zs-radius-xl: 0.75rem;
   --zs-radius-pill: 999rem;
   --zs-shadow-xs: 0 0 0 var(--zs-border-sm) var(--zs-rule);
-  --zs-shadow-sm: 0 0.5rem 1.25rem -0.875rem oklch(0.03 0.01 260 / 0.8);
-  --zs-shadow-md: 0 1.25rem 2.5rem -1.5rem oklch(0.03 0.01 260 / 0.82);
-  --zs-shadow-lg: 0 2.5rem 4rem -2rem oklch(0.03 0.01 260 / 0.9);
-  --zs-shadow-focus: 0 0 0 0.1875rem oklch(0.78 0.2 35 / 0.34);
+  --zs-shadow-sm: 0 0.375rem 1rem -0.75rem oklch(0.03 0.01 260 / 0.74), 0 0.125rem 0.25rem -0.1875rem oklch(0.03 0.01 260 / 0.44);
+  --zs-shadow-md: 0 1rem 2.25rem -1.5rem oklch(0.03 0.01 260 / 0.78), 0 0.25rem 0.75rem -0.5rem oklch(0.03 0.01 260 / 0.52);
+  --zs-shadow-lg: 0 1.75rem 3.5rem -2rem oklch(0.03 0.01 260 / 0.86), 0 0.5rem 1.5rem -0.75rem oklch(0.03 0.01 260 / 0.56);
+  --zs-shadow-focus: 0 0 0 0.1875rem oklch(0.78 0.14 165 / 0.34);
   --zs-motion-fast: 120ms;
-  --zs-motion-base: 190ms;
-  --zs-motion-slow: 320ms;
-  --zs-motion-ease: cubic-bezier(0.18, 0.82, 0.22, 1);
+  --zs-motion-base: 180ms;
+  --zs-motion-slow: 280ms;
+  --zs-motion-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --zs-z-modal: 50;
   --zs-z-dropdown: 60;
   --zs-z-popover: 60;
@@ -258,6 +269,7 @@
   --zs-border-md: 0.125rem;
 }
 
+:root,
 [data-theme] {
   --color-paper: var(--zs-surface);
   --color-paper-2: var(--zs-surface-sunken);

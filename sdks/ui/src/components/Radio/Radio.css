@@ -1,6 +1,7 @@
 .zs-radio-group-field {
   display: grid;
   gap: var(--zs-space-2);
+  align-content: start;
   min-inline-size: 0;
   border: 0;
   color: var(--zs-ink);
@@ -17,7 +18,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--zs-space-2);
-  color: var(--zs-ink-soft);
+  color: var(--zs-ink);
   cursor: pointer;
   font-size: var(--zs-text-sm);
   line-height: var(--zs-line-normal);
@@ -47,7 +48,10 @@
   border-color: var(--zs-accent);
 }
 
-.zs-radio[data-focused] {
+.zs-radio[data-focused],
+.zs-radio:focus-visible {
+  outline: none;
+  border-color: var(--zs-focus);
   box-shadow: var(--zs-shadow-focus);
 }
 

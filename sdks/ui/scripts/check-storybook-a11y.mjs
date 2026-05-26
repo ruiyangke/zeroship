@@ -7,8 +7,8 @@ if (!baseUrl) {
 }
 
 const themes = [
-  { label: "Atelier", value: "atelier" },
   { label: "Studio", value: "studio" },
+  { label: "Atelier", value: "atelier" },
   { label: "Dusk", value: "dusk" },
 ];
 const stories = [

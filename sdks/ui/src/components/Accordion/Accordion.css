@@ -5,10 +5,11 @@
 
 .zs-accordion__item {
   border: var(--zs-border-sm) solid var(--zs-rule);
-  border-radius: var(--zs-radius-md);
+  border-radius: var(--zs-radius-lg);
   background: var(--zs-surface-raised);
   color: var(--zs-ink);
   overflow: hidden;
+  box-shadow: var(--zs-shadow-sm);
 }
 
 .zs-accordion__header {
@@ -26,13 +27,14 @@
   color: var(--zs-ink);
   cursor: pointer;
   font: inherit;
-  font-weight: 650;
+  font-weight: 600;
   padding: var(--zs-space-4);
   text-align: left;
 }
 
 .zs-accordion__trigger:focus-visible {
   outline: none;
+  color: var(--zs-ink);
   box-shadow: var(--zs-shadow-focus);
 }
 

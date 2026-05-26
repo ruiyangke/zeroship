@@ -1,16 +1,16 @@
 .zs-field {
   display: grid;
   gap: var(--zs-space-2);
+  align-content: start;
   color: var(--zs-ink);
+  min-width: 0;
 }
 
 .zs-field__label {
-  font-size: var(--zs-text-xs);
-  font-weight: 700;
-  letter-spacing: var(--zs-letter-label);
-  line-height: var(--zs-line-tight);
-  text-transform: uppercase;
-  color: var(--zs-ink-muted);
+  color: var(--zs-ink-soft);
+  font-size: var(--zs-text-sm);
+  font-weight: 600;
+  line-height: var(--zs-line-normal);
 }
 
 .zs-field__hint,
