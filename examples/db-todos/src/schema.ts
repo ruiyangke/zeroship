@@ -6,11 +6,11 @@ import {
 } from "@zeroship/db";
 
 export const dbSchema = {
-  users: {
+  users: schema({
     email:  t.string().required().unique(),
     name:   t.string().required().max(100),
     handle: t.string().required().unique().pattern(/^[a-z0-9_]+$/),
-  },
+  }),
 
   todos: schema({
     userId:   t.ref("users").required(),
