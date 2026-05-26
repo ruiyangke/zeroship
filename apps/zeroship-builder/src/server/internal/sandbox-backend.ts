@@ -36,7 +36,7 @@ import {
   typedIdFromUuid,
 } from "@zeroship/server/typed-id";
 
-import { SANDBOX_URL, SANDBOX_TOKEN } from "./env.js";
+import { SANDBOX_URL, SANDBOX_TOKEN, ZEROSHIP_SDK_REGISTRY } from "./env.js";
 import { userinfo } from "../auth.js";
 
 // ─── controller wire shapes (mirrors crates/sandbox/src/handlers.rs) ──
@@ -98,6 +98,9 @@ const _sandboxCache = new Map<string, string>();
 // would each hit the controller's "find existing" branch and end up
 // with the same sandbox_id, but the second one wastes a round-trip.
 const _inFlight = new Map<string, Promise<string>>();
+
+const NPMRC_PATH = ".npmrc";
+const ZEROSHIP_SCOPE_REGISTRY_RE = /^\s*@zeroship:registry\s*=/i;
 
 // ─── controller HTTP client ──────────────────────────────────────────
 
@@ -235,9 +238,17 @@ export async function getOrCreateSandboxFor(
   const cacheKey = `${userId}:${projectId}`;
 
   const cached = _sandboxCache.get(cacheKey);
-  if (cached) return { id: cached, userId, projectId };
+  if (cached) {
+    const handle = { id: cached, userId, projectId };
+    await ensureSandboxSdkRegistryNpmrc(handle);
+    return handle;
+  }
   const pending = _inFlight.get(cacheKey);
-  if (pending) return { id: await pending, userId, projectId };
+  if (pending) {
+    const handle = { id: await pending, userId, projectId };
+    await ensureSandboxSdkRegistryNpmrc(handle);
+    return handle;
+  }
 
   const promise = controllerCreateSandbox(userId, projectId)
     .then((info) => {
@@ -248,7 +259,9 @@ export async function getOrCreateSandboxFor(
       _inFlight.delete(cacheKey);
     });
   _inFlight.set(cacheKey, promise);
-  return { id: await promise, userId, projectId };
+  const handle = { id: await promise, userId, projectId };
+  await ensureSandboxSdkRegistryNpmrc(handle);
+  return handle;
 }
 
 // ─── path encoding ────────────────────────────────────────────────────
@@ -407,6 +420,59 @@ export class ZeroshipSandboxBackend extends BaseSandbox {
       out.push({ path: p, error: null });
     }
     return out;
+  }
+}
+
+export function sdkRegistryNpmrcLine(registryUrl = ZEROSHIP_SDK_REGISTRY()): string | null {
+  const registry = normalizeSdkRegistryUrl(registryUrl);
+  return registry ? `@zeroship:registry=${registry}` : null;
+}
+
+export function upsertSdkRegistryNpmrc(existing: string, registryUrl: string): string {
+  const line = sdkRegistryNpmrcLine(registryUrl);
+  if (!line) return existing;
+
+  const kept = existing
+    .split(/\r?\n/)
+    .filter((candidate) => !ZEROSHIP_SCOPE_REGISTRY_RE.test(candidate));
+  while (kept.length > 0 && kept[kept.length - 1] === "") {
+    kept.pop();
+  }
+  kept.push(line);
+  return `${kept.join("\n")}\n`;
+}
+
+function normalizeSdkRegistryUrl(registryUrl: string): string {
+  const trimmed = registryUrl.trim();
+  if (!trimmed) return "";
+  if (/[\r\n]/.test(trimmed)) {
+    throw new Error("ZEROSHIP_SDK_REGISTRY must be a single URL, not a multi-line value");
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+async function ensureSandboxSdkRegistryNpmrc(sandbox: SandboxHandle): Promise<void> {
+  const registryUrl = ZEROSHIP_SDK_REGISTRY();
+  if (!registryUrl.trim()) return;
+
+  const backend = new ZeroshipSandboxBackend({
+    id: sandbox.id,
+    userId: sandbox.userId,
+  });
+  let existing = "";
+  const [download] = await backend.downloadFiles([NPMRC_PATH]);
+  if (download?.content && !download.error) {
+    existing = new TextDecoder().decode(download.content);
+  } else if (download && download.error !== "file_not_found") {
+    throw new Error(`failed to read sandbox ${NPMRC_PATH}: ${download.error}`);
+  }
+
+  const next = upsertSdkRegistryNpmrc(existing, registryUrl);
+  if (next === existing) return;
+
+  const write = await backend.write(NPMRC_PATH, next);
+  if (write.error) {
+    throw new Error(`failed to write sandbox ${NPMRC_PATH}: ${write.error}`);
   }
 }
 

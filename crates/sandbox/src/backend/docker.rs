@@ -583,6 +583,7 @@ async fn run_container(
         "run", "-d", "--rm",
         "--name", name,
         "--network", network,
+        "--add-host", "host.docker.internal:host-gateway",
         "--memory", &memory,
         "--cpus", &cpus_s,
         "--pids-limit", "256",

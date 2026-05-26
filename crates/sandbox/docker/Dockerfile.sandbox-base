@@ -28,6 +28,7 @@ RUN apt-get update && \
       tar \
       zstd && \
     rm -rf /var/lib/apt/lists/* && \
+    npm install -g pnpm@9.15.4 && \
     mkdir -p /workspace /home/u /run/keys && \
     chown nobody:nogroup /workspace /home/u && \
     npm config set fund false && \
@@ -43,7 +44,9 @@ COPY docker/sandbox-base/agent-entrypoint.sh /usr/local/bin/sandbox-agent-entryp
 RUN chmod -R a+rwX /opt/templates/default && \
     chmod +x /usr/local/bin/sandbox-agent-entrypoint.sh
 
-ENV SANDBOX_AGENT_WORKSPACE=/workspace \
+ENV PNPM_HOME=/root/.npm/pnpm \
+    npm_config_store_dir=/root/.npm/pnpm-store \
+    SANDBOX_AGENT_WORKSPACE=/workspace \
     SANDBOX_AGENT_PORT=7777 \
     SANDBOX_AGENT_PUBKEY_FILE=/run/keys/controller-pubkey \
     SANDBOX_AGENT_LOG=info

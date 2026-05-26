@@ -9,6 +9,11 @@
 services:
   verdaccio:
     image: verdaccio/verdaccio:6
+    # The committed config keeps `storage: storage` so the same file works
+    # for local-process Verdaccio. In compose that path lives under the
+    # mounted /verdaccio/conf tree; run as root so the named volume can
+    # create htpasswd/tarballs there during local development.
+    user: "0"
     command:
       - verdaccio
       - --config

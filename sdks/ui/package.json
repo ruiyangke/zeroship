@@ -4,6 +4,9 @@
   "description": "zeroship governed React design system: semantic tokens, themes, and core primitives.",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

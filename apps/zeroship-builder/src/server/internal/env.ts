@@ -11,6 +11,7 @@ declare const env: {
   CONTROL_KEY?: string;
   SANDBOX_URL?: string;
   SANDBOX_TOKEN?: string;
+  ZEROSHIP_SDK_REGISTRY?: string;
   OPENAI_API_KEY?: string;
 };
 
@@ -35,5 +36,7 @@ export const CONTROL_KEY  = () => readEnv("CONTROL_KEY",  "dev-master-key");
 export const SANDBOX_URL  = () => readEnv("SANDBOX_URL",  "http://localhost:9091");
 
 export const SANDBOX_TOKEN = () => readEnv("SANDBOX_TOKEN", "test");
+
+export const ZEROSHIP_SDK_REGISTRY = () => readEnv("ZEROSHIP_SDK_REGISTRY", "");
 
 export const OPENAI_API_KEY = () => readEnv("OPENAI_API_KEY", "");
