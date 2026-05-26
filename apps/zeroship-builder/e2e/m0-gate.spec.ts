@@ -29,6 +29,7 @@ const ROOT = resolve(new URL("../../..", import.meta.url).pathname);
 const PROMPTS_PATH = resolve(new URL("./m0-prompts.json", import.meta.url).pathname);
 const RESULTS_PATH = process.env.M0_RESULTS_PATH
   ?? resolve(ROOT, ".zeroship/m0-gate/results.json");
+const LOG_DIR = resolve(ROOT, ".zeroship/m0-gate/logs");
 
 const CONTROL_URL = process.env.CONTROL_URL ?? "http://localhost:9090";
 const CONTROL_KEY = process.env.CONTROL_KEY ?? "dev-master-key";
@@ -130,12 +131,36 @@ function harnessPrompt(prompt: PromptCase): string {
   ].join("\n");
 }
 
-async function readSseChunks(res: Response): Promise<any[]> {
+interface SseReadResult {
+  chunks: any[];
+  rawFrames: string[];
+  parseErrors: string[];
+}
+
+async function readSseChunks(res: Response): Promise<SseReadResult> {
   if (!res.body) throw new Error("chat response had no body");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   const chunks: any[] = [];
+  const rawFrames: string[] = [];
+  const parseErrors: string[] = [];
+
+  const consumeFrame = (frame: string) => {
+    for (const line of frame.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice("data: ".length).trim();
+      if (!data) continue;
+      rawFrames.push(data);
+      if (data === "[DONE]") continue;
+      try {
+        chunks.push(JSON.parse(data));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        parseErrors.push(`invalid SSE JSON: ${message}; data=${data.slice(0, 500)}`);
+      }
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -146,15 +171,12 @@ async function readSseChunks(res: Response): Promise<any[]> {
       const frame = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
       boundary = buffer.indexOf("\n\n");
-      for (const line of frame.split("\n")) {
-        if (!line.startsWith("data: ")) continue;
-        const data = line.slice("data: ".length).trim();
-        if (!data || data === "[DONE]") continue;
-        chunks.push(JSON.parse(data));
-      }
+      consumeFrame(frame);
     }
   }
-  return chunks;
+  const tail = buffer.trim();
+  if (tail) consumeFrame(tail);
+  return { chunks, rawFrames, parseErrors };
 }
 
 function parseToolOutput(output: unknown): any {
@@ -164,6 +186,14 @@ function parseToolOutput(output: unknown): any {
   } catch {
     return output;
   }
+}
+
+function safeLogName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-|-$/g, "").slice(0, 96) || "chat";
+}
+
+function rawPreview(rawFrames: string[]): string {
+  return rawFrames.slice(0, 4).join(" | ").slice(0, 1000);
 }
 
 async function chatTurn(args: {
@@ -179,6 +209,8 @@ async function chatTurn(args: {
   survey?: { token: string };
   toolLog: string[];
   errors: string[];
+  rawSsePath: string;
+  rawPreview: string;
 }> {
   const body = args.resume
     ? { json: { id: args.threadId, appId: args.appId, resume: args.resume } }
@@ -197,13 +229,20 @@ async function chatTurn(args: {
     throw new Error(`chat failed (${res.status}): ${await res.text()}`);
   }
 
-  const chunks = await readSseChunks(res);
+  const sse = await readSseChunks(res);
+  const chunks = sse.chunks;
+  await mkdir(LOG_DIR, { recursive: true });
+  const rawSsePath = resolve(
+    LOG_DIR,
+    `${safeLogName(args.threadId)}-${args.resume ? "resume" : "fresh"}-${Date.now()}.raw.sse`,
+  );
+  await writeFile(rawSsePath, `${sse.rawFrames.join("\n\n")}\n`);
   const toolNames = new Map<string, string>();
   const toolLog: string[] = [];
   let deployHash: string | undefined;
   let deployOutput: any;
   let survey: { token: string } | undefined;
-  const errors: string[] = [];
+  const errors: string[] = [...sse.parseErrors];
 
   for (const chunk of chunks) {
     if (chunk.type === "tool-input-available") {
@@ -234,7 +273,16 @@ async function chatTurn(args: {
     }
   }
 
-  return { chunks, deployHash, deployOutput, survey, toolLog, errors };
+  return {
+    chunks,
+    deployHash,
+    deployOutput,
+    survey,
+    toolLog,
+    errors,
+    rawSsePath,
+    rawPreview: rawPreview(sse.rawFrames),
+  };
 }
 
 async function runBuilderPrompt(prompt: PromptCase, app: { id: string; name: string }) {
@@ -244,6 +292,8 @@ async function runBuilderPrompt(prompt: PromptCase, app: { id: string; name: str
   const messages = [userMessage(harnessPrompt(prompt))];
   const allToolLog: string[] = [];
   const allErrors: string[] = [];
+  const rawSsePaths: string[] = [];
+  const rawPreviews: string[] = [];
   let deployHash: string | undefined;
   let deployOutput: any;
 
@@ -256,6 +306,8 @@ async function runBuilderPrompt(prompt: PromptCase, app: { id: string; name: str
     });
     allToolLog.push(...turn.toolLog);
     allErrors.push(...turn.errors);
+    rawSsePaths.push(turn.rawSsePath);
+    if (turn.rawPreview) rawPreviews.push(turn.rawPreview);
     deployHash = turn.deployHash;
     deployOutput = turn.deployOutput;
 
@@ -271,6 +323,8 @@ async function runBuilderPrompt(prompt: PromptCase, app: { id: string; name: str
       });
       allToolLog.push(...turn.toolLog);
       allErrors.push(...turn.errors);
+      rawSsePaths.push(turn.rawSsePath);
+      if (turn.rawPreview) rawPreviews.push(turn.rawPreview);
       deployHash = turn.deployHash;
       deployOutput = turn.deployOutput;
     }
@@ -281,18 +335,22 @@ async function runBuilderPrompt(prompt: PromptCase, app: { id: string; name: str
   if (deployOutput?.blocked) {
     throw new Error(`deploy blocked: ${JSON.stringify(deployOutput).slice(0, 1200)}`);
   }
+  const rawSuffix = rawSsePaths.length > 0
+    ? `; raw_sse=${rawSsePaths.join(",")}`
+    : "";
   if (allErrors.length > 0) {
-    throw new Error(`agent stream error: ${allErrors.join(" | ")}`);
+    throw new Error(`agent stream error: ${allErrors.join(" | ")}${rawSuffix}`);
   }
   if (allToolLog.length === 0) {
-    throw new Error("agent produced an empty stream before build/deploy");
+    const preview = rawPreviews.length > 0 ? `; raw_preview=${rawPreviews.join(" || ")}` : "";
+    throw new Error(`agent produced an empty stream before build/deploy${rawSuffix}${preview}`);
   }
   if (!deployHash) {
     const controlHash = await getDeployHash(app.id);
     if (controlHash) deployHash = controlHash;
   }
   if (!deployHash) {
-    throw new Error(`agent did not produce a deploy hash; tools=${allToolLog.join(",")}`);
+    throw new Error(`agent did not produce a deploy hash; tools=${allToolLog.join(",")}${rawSuffix}`);
   }
 
   return { deployHash, toolLog: allToolLog };

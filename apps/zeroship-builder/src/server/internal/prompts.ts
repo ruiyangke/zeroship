@@ -60,6 +60,17 @@ Hard rules — these are not optional:
 - Use \`edit_file\` (surgical patches) for any change to an existing file.
   Reserve \`write_file\` for new files or full rewrites.
 
+React app safety:
+- NEVER use \`dangerouslySetInnerHTML\` for user-entered, locally persisted,
+  fetched, or otherwise dynamic content. For markdown previews, render a
+  safe subset as React elements or plain text. Only use HTML injection if a
+  vetted sanitizer is installed, wired correctly, and the build proves it.
+- When the next value depends on existing React state, use functional state
+  setters (\`setItems((prev) => ...)\`). If a second state value depends on
+  the same mutation (for example deleting the active note), compute both from
+  the same filtered array; don't read a stale closed-over state variable
+  immediately after calling a setter.
+
 After non-trivial changes, run a quick check inside the sandbox —
 \`tsc --noEmit\`, \`npm test\`, \`cargo check\`, whatever fits the project — to
 verify nothing's broken before declaring success.
