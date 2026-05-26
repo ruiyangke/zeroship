@@ -7,7 +7,7 @@ export default defineConfig({
   // the runtime bootstrap. No plugin option needed: the entry exports
   // `default = { schema, fetch, rpc }` and that's the wire contract.
   //
-  // `react()` powers the client SPA in `src/ui/`; `zeroship()` discovers
+  // `react()` powers the client SPA in `src/`; `zeroship()` discovers
   // the server procedures in `src/index.ts` and bundles them for the dev
   // runtime. Client + server coexist (mirrors examples/csr-todo).
   plugins: [react(), zeroship()],

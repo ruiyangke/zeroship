@@ -11,7 +11,7 @@
     "resolveJsonModule": true,
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM"],
-    "types": ["@zeroship/types"],
+    "types": ["@zeroship/types", "@zeroship/db/env"],
     "paths": {
       "zeroship-schema": ["./src/server.ts"]
     }

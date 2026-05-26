@@ -36,18 +36,8 @@ type ConfigKind<Config> = Config extends { kind: infer Kind extends RpcKind }
   : never;
 
 type MaybePromise<T> = T | Promise<T>;
-type AnyUnaryHandler =
-  | (() => MaybePromise<unknown>)
-  | ((input: any) => MaybePromise<unknown>);
-type AnyStreamHandler =
-  | (() => MaybePromise<AsyncIterable<unknown>>)
-  | ((input: any) => MaybePromise<AsyncIterable<unknown>>);
-type HandlerInput<H extends (...args: any[]) => unknown> = Parameters<H> extends []
-  ? void
-  : Parameters<H>[0];
-type UnaryOutput<H extends (...args: any[]) => unknown> = Awaited<ReturnType<H>>;
-type StreamOutput<H extends (...args: any[]) => unknown> =
-  Awaited<ReturnType<H>> extends AsyncIterable<infer Item> ? Item : never;
+type StreamItem<Output> =
+  Awaited<Output> extends AsyncIterable<infer Item> ? Item : never;
 
 function attach<H extends Handler>(
   handler: H,
@@ -90,32 +80,64 @@ function attach<H extends Handler>(
 }
 
 export function procedure<
-  const H extends AnyUnaryHandler,
-  const Config extends ProcedureConfig<HandlerInput<H>, UnaryOutput<H>> & {
+  Output,
+  const Config extends ProcedureConfig<void, Awaited<Output>> & {
     kind: "query" | "mutation" | "action";
   },
 >(
-  handler: H,
+  handler: () => MaybePromise<Output>,
   config: Config,
 ): ServerProcedure<
   ConfigKind<Config>,
-  HandlerInput<H>,
-  UnaryOutput<H>,
+  void,
+  Awaited<Output>,
   ConfigId<Config>,
   ConfigMeta<Config>
 >;
 export function procedure<
-  const H extends AnyStreamHandler,
-  const Config extends ProcedureConfig<HandlerInput<H>, StreamOutput<H>> & {
-    kind: "stream" | "subscription";
+  Input,
+  Output,
+  const Config extends ProcedureConfig<Input, Awaited<Output>> & {
+    kind: "query" | "mutation" | "action";
   },
 >(
-  handler: H,
+  handler: (input: Input) => MaybePromise<Output>,
   config: Config,
 ): ServerProcedure<
   ConfigKind<Config>,
-  HandlerInput<H>,
-  StreamOutput<H>,
+  Input,
+  Awaited<Output>,
+  ConfigId<Config>,
+  ConfigMeta<Config>
+>;
+export function procedure<
+  Output extends AsyncIterable<unknown>,
+  const Config extends ProcedureConfig<void, StreamItem<Output>> & {
+    kind: "stream" | "subscription";
+  },
+>(
+  handler: () => MaybePromise<Output>,
+  config: Config,
+): ServerProcedure<
+  ConfigKind<Config>,
+  void,
+  StreamItem<Output>,
+  ConfigId<Config>,
+  ConfigMeta<Config>
+>;
+export function procedure<
+  Input,
+  Output extends AsyncIterable<unknown>,
+  const Config extends ProcedureConfig<Input, StreamItem<Output>> & {
+    kind: "stream" | "subscription";
+  },
+>(
+  handler: (input: Input) => MaybePromise<Output>,
+  config: Config,
+): ServerProcedure<
+  ConfigKind<Config>,
+  Input,
+  StreamItem<Output>,
   ConfigId<Config>,
   ConfigMeta<Config>
 >;
@@ -125,128 +147,188 @@ export function procedure<H extends Handler>(handler: H, config?: ProcedureConfi
 }
 
 export function query<
-  const H extends AnyUnaryHandler,
-  const Config extends ProcedureConfig<HandlerInput<H>, UnaryOutput<H>> = ProcedureConfig<
-    HandlerInput<H>,
-    UnaryOutput<H>
+  Output,
+  const Config extends ProcedureConfig<void, Awaited<Output>> = ProcedureConfig<
+    void,
+    Awaited<Output>
   >,
 >(
-  handler: H,
+  handler: () => MaybePromise<Output>,
   config?: Config,
 ): ServerProcedure<
   "query",
-  HandlerInput<H>,
-  UnaryOutput<H>,
+  void,
+  Awaited<Output>,
   ConfigId<Config>,
   ConfigMeta<Config>
-> {
-  return attach(handler as unknown as Handler, "query", config) as ServerProcedure<
-    "query",
-    HandlerInput<H>,
-    UnaryOutput<H>,
-    ConfigId<Config>,
-    ConfigMeta<Config>
-  >;
+>;
+export function query<
+  Input,
+  Output,
+  const Config extends ProcedureConfig<Input, Awaited<Output>> = ProcedureConfig<
+    Input,
+    Awaited<Output>
+  >,
+>(
+  handler: (input: Input) => MaybePromise<Output>,
+  config?: Config,
+): ServerProcedure<
+  "query",
+  Input,
+  Awaited<Output>,
+  ConfigId<Config>,
+  ConfigMeta<Config>
+>;
+export function query(handler: Handler, config?: ProcedureConfig): any {
+  return attach(handler, "query", config);
 }
 
 export function mutation<
-  const H extends AnyUnaryHandler,
-  const Config extends ProcedureConfig<HandlerInput<H>, UnaryOutput<H>> = ProcedureConfig<
-    HandlerInput<H>,
-    UnaryOutput<H>
+  Output,
+  const Config extends ProcedureConfig<void, Awaited<Output>> = ProcedureConfig<
+    void,
+    Awaited<Output>
   >,
 >(
-  handler: H,
+  handler: () => MaybePromise<Output>,
   config?: Config,
 ): ServerProcedure<
   "mutation",
-  HandlerInput<H>,
-  UnaryOutput<H>,
+  void,
+  Awaited<Output>,
   ConfigId<Config>,
   ConfigMeta<Config>
-> {
-  return attach(handler as unknown as Handler, "mutation", config) as ServerProcedure<
-    "mutation",
-    HandlerInput<H>,
-    UnaryOutput<H>,
-    ConfigId<Config>,
-    ConfigMeta<Config>
-  >;
+>;
+export function mutation<
+  Input,
+  Output,
+  const Config extends ProcedureConfig<Input, Awaited<Output>> = ProcedureConfig<
+    Input,
+    Awaited<Output>
+  >,
+>(
+  handler: (input: Input) => MaybePromise<Output>,
+  config?: Config,
+): ServerProcedure<
+  "mutation",
+  Input,
+  Awaited<Output>,
+  ConfigId<Config>,
+  ConfigMeta<Config>
+>;
+export function mutation(handler: Handler, config?: ProcedureConfig): any {
+  return attach(handler, "mutation", config);
 }
 
 export function action<
-  const H extends AnyUnaryHandler,
-  const Config extends ProcedureConfig<HandlerInput<H>, UnaryOutput<H>> = ProcedureConfig<
-    HandlerInput<H>,
-    UnaryOutput<H>
+  Output,
+  const Config extends ProcedureConfig<void, Awaited<Output>> = ProcedureConfig<
+    void,
+    Awaited<Output>
   >,
 >(
-  handler: H,
+  handler: () => MaybePromise<Output>,
   config?: Config,
 ): ServerProcedure<
   "action",
-  HandlerInput<H>,
-  UnaryOutput<H>,
+  void,
+  Awaited<Output>,
   ConfigId<Config>,
   ConfigMeta<Config>
-> {
-  return attach(handler as unknown as Handler, "action", config) as ServerProcedure<
-    "action",
-    HandlerInput<H>,
-    UnaryOutput<H>,
-    ConfigId<Config>,
-    ConfigMeta<Config>
-  >;
+>;
+export function action<
+  Input,
+  Output,
+  const Config extends ProcedureConfig<Input, Awaited<Output>> = ProcedureConfig<
+    Input,
+    Awaited<Output>
+  >,
+>(
+  handler: (input: Input) => MaybePromise<Output>,
+  config?: Config,
+): ServerProcedure<
+  "action",
+  Input,
+  Awaited<Output>,
+  ConfigId<Config>,
+  ConfigMeta<Config>
+>;
+export function action(handler: Handler, config?: ProcedureConfig): any {
+  return attach(handler, "action", config);
 }
 
 export function stream<
-  const H extends AnyStreamHandler,
-  const Config extends ProcedureConfig<HandlerInput<H>, StreamOutput<H>> = ProcedureConfig<
-    HandlerInput<H>,
-    StreamOutput<H>
+  Output extends AsyncIterable<unknown>,
+  const Config extends ProcedureConfig<void, StreamItem<Output>> = ProcedureConfig<
+    void,
+    StreamItem<Output>
   >,
 >(
-  handler: H,
+  handler: () => MaybePromise<Output>,
   config?: Config,
 ): ServerProcedure<
   "stream",
-  HandlerInput<H>,
-  StreamOutput<H>,
+  void,
+  StreamItem<Output>,
   ConfigId<Config>,
   ConfigMeta<Config>
-> {
-  return attach(handler as unknown as Handler, "stream", config) as ServerProcedure<
-    "stream",
-    HandlerInput<H>,
-    StreamOutput<H>,
-    ConfigId<Config>,
-    ConfigMeta<Config>
-  >;
+>;
+export function stream<
+  Input,
+  Output extends AsyncIterable<unknown>,
+  const Config extends ProcedureConfig<Input, StreamItem<Output>> = ProcedureConfig<
+    Input,
+    StreamItem<Output>
+  >,
+>(
+  handler: (input: Input) => MaybePromise<Output>,
+  config?: Config,
+): ServerProcedure<
+  "stream",
+  Input,
+  StreamItem<Output>,
+  ConfigId<Config>,
+  ConfigMeta<Config>
+>;
+export function stream(handler: Handler, config?: ProcedureConfig): any {
+  return attach(handler, "stream", config);
 }
 
 export function subscription<
-  const H extends AnyStreamHandler,
-  const Config extends ProcedureConfig<HandlerInput<H>, StreamOutput<H>> = ProcedureConfig<
-    HandlerInput<H>,
-    StreamOutput<H>
+  Output extends AsyncIterable<unknown>,
+  const Config extends ProcedureConfig<void, StreamItem<Output>> = ProcedureConfig<
+    void,
+    StreamItem<Output>
   >,
 >(
-  handler: H,
+  handler: () => MaybePromise<Output>,
   config?: Config,
 ): ServerProcedure<
   "subscription",
-  HandlerInput<H>,
-  StreamOutput<H>,
+  void,
+  StreamItem<Output>,
   ConfigId<Config>,
   ConfigMeta<Config>
-> {
-  return attach(handler as unknown as Handler, "subscription", config) as ServerProcedure<
-    "subscription",
-    HandlerInput<H>,
-    StreamOutput<H>,
-    ConfigId<Config>,
-    ConfigMeta<Config>
-  >;
+>;
+export function subscription<
+  Input,
+  Output extends AsyncIterable<unknown>,
+  const Config extends ProcedureConfig<Input, StreamItem<Output>> = ProcedureConfig<
+    Input,
+    StreamItem<Output>
+  >,
+>(
+  handler: (input: Input) => MaybePromise<Output>,
+  config?: Config,
+): ServerProcedure<
+  "subscription",
+  Input,
+  StreamItem<Output>,
+  ConfigId<Config>,
+  ConfigMeta<Config>
+>;
+export function subscription(handler: Handler, config?: ProcedureConfig): any {
+  return attach(handler, "subscription", config);
 }
 
 export type {

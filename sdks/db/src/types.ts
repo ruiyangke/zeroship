@@ -51,8 +51,18 @@ export type RequiredKeys<S> = {
     never
 }[keyof S];
 
+/** Keys whose field builder has a platform-applied insert default. */
+export type DefaultKeys<S> = {
+  [K in keyof S]:
+    S[K] extends TypeBuilder<any, any, any, any, true> ? K :
+    never
+}[keyof S];
+
+/** Read rows include required fields and fields populated by defaults. */
+export type ReadRequiredKeys<S> = RequiredKeys<S> | DefaultKeys<S>;
+
 /** Keys that are not explicitly required. */
-export type OptionalKeys<S> = Exclude<keyof S, RequiredKeys<S>>;
+export type OptionalKeys<S> = Exclude<keyof S, ReadRequiredKeys<S>>;
 
 type HasDefault<T> =
   T extends TypeBuilder<any, any, any, any, true> ? true :
@@ -107,7 +117,7 @@ type IsSchemaDict<S> =
 export type InferSchema<S> = S extends infer T
   ? IsSchemaDict<T> extends true
     ? {
-        [K in RequiredKeys<T>]: InferFieldDef<T[K]>;
+        [K in ReadRequiredKeys<T>]: InferFieldDef<T[K]>;
       } & {
         [K in OptionalKeys<T>]?: InferFieldDef<T[K]>;
       }
@@ -1074,9 +1084,11 @@ export class TypeBuilder<
   }
 
   /** Restricts the field to a fixed set of allowed values. */
-  enum(...values: (string | number)[]): this {
-    this._def.enum = values;
-    return this;
+  enum<const Values extends readonly (T & (string | number))[]>(
+    ...values: Values
+  ): TypeBuilder<Values[number], R, M, E, D> {
+    this._def.enum = [...values];
+    return this as unknown as TypeBuilder<Values[number], R, M, E, D>;
   }
 
   /** For strings: a RegExp the value must match. */

@@ -14,7 +14,7 @@
 
 /** Filter object — MongoDB-style query operators, translated by SDK before native call. */
 interface ZeroshipDbFilter {
-  [field: string]: ZeroshipDbFilterValue;
+  [field: string]: ZeroshipDbFilterValue | ZeroshipDbFilter[] | ZeroshipDbFilter | undefined;
   $and?: ZeroshipDbFilter[];
   $or?: ZeroshipDbFilter[];
   $not?: ZeroshipDbFilter;

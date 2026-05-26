@@ -69,8 +69,8 @@ ALICE_EMAIL="alice-$(date +%s%N | head -c12)@example.com"
 ALICE_HANDLE="alice_$(date +%s%N | head -c10)"
 BOB_EMAIL="bob-$(date +%s%N | head -c12)@example.com"
 BOB_HANDLE="bob_$(date +%s%N | head -c10)"
-ALICE_RES=$(rpc seedUser "{\"email\":\"${ALICE_EMAIL}\",\"name\":\"Alice\",\"handle\":\"${ALICE_HANDLE}\"}")
-BOB_RES=$(rpc seedUser "{\"email\":\"${BOB_EMAIL}\",\"name\":\"Bob\",\"handle\":\"${BOB_HANDLE}\"}")
+ALICE_RES=$(rpc users.seed "{\"email\":\"${ALICE_EMAIL}\",\"name\":\"Alice\",\"handle\":\"${ALICE_HANDLE}\"}")
+BOB_RES=$(rpc users.seed "{\"email\":\"${BOB_EMAIL}\",\"name\":\"Bob\",\"handle\":\"${BOB_HANDLE}\"}")
 
 ALICE_ID=$(extract_id "$ALICE_RES")
 BOB_ID=$(extract_id "$BOB_RES")
@@ -87,7 +87,7 @@ echo "  seeded Alice=$ALICE_ID Bob=$BOB_ID"
 
 echo "[check 1] createTodo via mutation — auto-wrapped in SERIALIZABLE tx"
 
-T1=$(rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"buy milk\",\"priority\":\"low\"}")
+T1=$(rpc todos.create "{\"userId\":\"${ALICE_ID}\",\"title\":\"buy milk\",\"priority\":\"low\"}")
 check "createTodo returned an id" contains "$T1" '"id":'
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ check "createTodo returned an id" contains "$T1" '"id":'
 
 echo "[check 2] FK enforcement — insert with non-existent userId fails"
 
-BAD=$(rpc createTodo '{"userId":"user_doesNotExist0000000","title":"orphan"}')
+BAD=$(rpc todos.create '{"userId":"user_doesNotExist0000000","title":"orphan"}')
 check "orphan insert produced an error" \
   bash -c "echo '$BAD' | grep -qiE 'error|violation|foreign'"
 check "error mentions foreign key or violation" \
@@ -113,8 +113,8 @@ echo "[check 3] capability enforcement — wrapper kinds resolve"
 # so we probe a known wrapped procedure instead: a 405 / 404 would
 # indicate the wrapper was lost; a 200 with the platform's `{json: ...}`
 # envelope confirms `query()` resolved at registration time.
-PROBE_STATUS=$(http_status listTodos "{\"userId\":\"${ALICE_ID}\"}")
-PROBE=$(rpc listTodos "{\"userId\":\"${ALICE_ID}\"}")
+PROBE_STATUS=$(http_status todos.list "{\"userId\":\"${ALICE_ID}\"}")
+PROBE=$(rpc todos.list "{\"userId\":\"${ALICE_ID}\"}")
 check "wrapper-tagged procedure dispatched" \
   bash -c "[ '$PROBE_STATUS' = '200' ] && echo '$PROBE' | grep -q '\"json\":'"
 
@@ -124,7 +124,7 @@ check "wrapper-tagged procedure dispatched" \
 
 echo "[check 4] listTodos query — read-only, returns rows"
 
-LIST=$(rpc listTodos "{\"userId\":\"${ALICE_ID}\"}")
+LIST=$(rpc todos.list "{\"userId\":\"${ALICE_ID}\"}")
 check "listTodos returned an array" contains "$LIST" '\[\|"data"'
 
 # ---------------------------------------------------------------------------
@@ -148,9 +148,9 @@ srv.listen(${SHARE_PORT}, '127.0.0.1');
 SHARE_PID=$!
 sleep 1
 
-SHARE_T=$(rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"share me\",\"priority\":\"low\"}")
+SHARE_T=$(rpc todos.create "{\"userId\":\"${ALICE_ID}\",\"title\":\"share me\",\"priority\":\"low\"}")
 SHARE_ID=$(extract_id "$SHARE_T")
-SHARE_RES=$(rpc shareToWebhook "{\"id\":\"${SHARE_ID}\",\"webhookUrl\":\"http://127.0.0.1:${SHARE_PORT}/\"}")
+SHARE_RES=$(rpc todos.shareToWebhook "{\"id\":\"${SHARE_ID}\",\"webhookUrl\":\"http://127.0.0.1:${SHARE_PORT}/\"}")
 kill $SHARE_PID 2>/dev/null || true
 
 check "shareToWebhook returned a 2xx status" \
@@ -166,10 +166,10 @@ echo "[check 5b] listTodosPage — paginate({cursor,numItems}) round-trip"
 # earlier 'buy milk' + 'share me' creates). With numItems=2 that's at
 # least 3 pages: page1, page2, page3 (isDone).
 for i in 1 2 3 4 5; do
-  rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"task-$i\",\"priority\":\"low\"}" > /dev/null
+  rpc todos.create "{\"userId\":\"${ALICE_ID}\",\"title\":\"task-$i\",\"priority\":\"low\"}" > /dev/null
 done
 
-P1=$(rpc listTodosPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":null,\"numItems\":2}")
+P1=$(rpc todos.listPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":null,\"numItems\":2}")
 check "page 1 returned an envelope with page/continueCursor/isDone" \
   bash -c "echo '$P1' | grep -q '\"page\":' && echo '$P1' | grep -q '\"continueCursor\":' && echo '$P1' | grep -q '\"isDone\":'"
 
@@ -179,7 +179,7 @@ DONE1=$(echo "$P1" | grep -oE '"isDone":(true|false)' | head -1 | cut -d: -f2)
 check "page 1 not done (more rows available)" bash -c "[ \"$DONE1\" = \"false\" ]"
 check "page 1 has non-empty continueCursor" bash -c "[ -n \"$C1\" ]"
 
-P2=$(rpc listTodosPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":\"${C1}\",\"numItems\":2}")
+P2=$(rpc todos.listPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":\"${C1}\",\"numItems\":2}")
 C2=$(echo "$P2" | grep -oE '"continueCursor":"[^"]*"' | head -1 | sed 's/.*"continueCursor":"//;s/"$//')
 
 check "page 2 advances past page 1 (different cursor)" bash -c "[ \"$C1\" != \"$C2\" ]"
@@ -189,7 +189,7 @@ HOPS=0
 CURRENT="$C2"
 DONE_FINAL="false"
 while [ "$HOPS" -lt 5 ] && [ "$DONE_FINAL" = "false" ]; do
-  PN=$(rpc listTodosPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":\"${CURRENT}\",\"numItems\":2}")
+  PN=$(rpc todos.listPage "{\"userId\":\"${ALICE_ID}\",\"cursor\":\"${CURRENT}\",\"numItems\":2}")
   DONE_FINAL=$(echo "$PN" | grep -oE '"isDone":(true|false)' | head -1 | cut -d: -f2)
   CURRENT=$(echo "$PN" | grep -oE '"continueCursor":"[^"]*"' | head -1 | sed 's/.*"continueCursor":"//;s/"$//')
   HOPS=$((HOPS + 1))
@@ -205,7 +205,7 @@ check "pagination terminates with isDone=true within 5 hops" bash -c "[ \"$DONE_
 
 echo "[check 5c] getUserPair — DataLoader batches concurrent db.users.get(id)"
 
-PAIR=$(rpc getUserPair "{\"aId\":\"${ALICE_ID}\",\"bId\":\"${BOB_ID}\"}")
+PAIR=$(rpc users.getPair "{\"aId\":\"${ALICE_ID}\",\"bId\":\"${BOB_ID}\"}")
 check "getUserPair returned Alice's row" \
   bash -c "echo '$PAIR' | grep -q '\"id\":\"${ALICE_ID}\"'"
 check "getUserPair returned Bob's row" \
@@ -219,7 +219,7 @@ check "getUserPair returned Bob's row" \
 
 echo "[check 5d] listTodosWithUser — relation-aware reads eager-load via with"
 
-LWU=$(rpc listTodosWithUser "{\"userId\":\"${ALICE_ID}\"}")
+LWU=$(rpc todos.listWithUser "{\"userId\":\"${ALICE_ID}\"}")
 check "listTodosWithUser returned a row carrying joined user data" \
   bash -c "echo '$LWU' | grep -qE '\"userId\":\\{[^}]*\"email\":'"
 check "joined user row carries Alice's email" \
@@ -235,52 +235,50 @@ AUDIT=$(curl -sS "${URL}/_zs/db/audit/todos" 2>/dev/null || echo '[]')
 check "audit endpoint reachable" bash -c "[ -n '$AUDIT' ]"
 
 # ---------------------------------------------------------------------------
-# Check 7: E2E subscription smoke — WAL / broker path
+# Check 7: E2E live-query stream smoke
 #
 # This exercises the full reactive path:
-#   1. Open `/_zs/v1/subscribeTodos` as an SSE stream (GET with base64url
-#      input envelope).
-#   2. While the stream is open, POST a createTodo mutation from the SAME
-#      isolate — the local-emit path (exec_mutation_with_emit → broker::publish)
-#      delivers a ChangeEvent to the subscription's queue.
-#   3. Assert the SSE output contains a `2:` object line whose JSON carries
-#      `"collection":"todos"` and `"op":"insert"`.
+#   1. Open `/_zs/v1/todos.subscribe` as an SSE stream.
+#   2. The server procedure uses the creator-facing `db.live(queryFn)`
+#      API to stream snapshots for Alice's todos.
+#   3. While the stream is open, POST a createTodo mutation.
+#   4. Assert a later SSE snapshot contains the newly-created title.
 #
 # Transport: text/event-stream over HTTP, NOT WebSocket. The platform encodes
 # AsyncIterator yields as AI-SDK lines: `2:[<json>]\n` for objects, `d:{}\n`
 # for the terminal done frame.
 #
-# Negative-control: if local-emit is broken (broker never receives the event)
-# the curl --max-time will expire with no `2:` line, and the check fails.
+# Negative-control: if `db.live` does not rerun after the write, the
+# curl --max-time expires without the unique title in the stream.
 # ---------------------------------------------------------------------------
 
-echo "[check 7] E2E subscribe → mutation → broker delivery"
+echo "[check 7] E2E db.live → mutation → snapshot delivery"
 
 SSE_FILE=$(mktemp)
 trap 'rm -f "$SSE_FILE"' EXIT
 
-# Input for subscribeTodos: base64url-encode {"json":{}}
-SUB_INPUT=$(printf '{"json":{}}' | base64 | tr '+/' '-_' | tr -d '=\n')
+# Input for todos.subscribe: base64url-encode {"json":{"userId":"..."}}
+SUB_INPUT=$(printf '{"json":{"userId":"%s"}}' "$ALICE_ID" | base64 | tr '+/' '-_' | tr -d '=\n')
 
 # Open the SSE stream in the background, capturing output to a temp file.
 # --max-time 10: give the subscription at most 10 s total; we kill it
 # after we see the first event. --no-buffer: flush lines as they arrive.
 curl -sS --no-buffer --max-time 10 \
   -H "Accept: text/event-stream" \
-  "${RPC}/subscribeTodos?input=${SUB_INPUT}" \
+  "${RPC}/todos.subscribe?input=${SUB_INPUT}" \
   > "$SSE_FILE" 2>&1 &
 SUB_PID=$!
 
 # Allow the SSE connection to be established before writing.
 sleep 0.5
 
-# Write from the same isolate — exercises the local-emit → broker path.
-rpc createTodo "{\"userId\":\"${ALICE_ID}\",\"title\":\"sub-smoke-$(date +%s)\",\"priority\":\"low\"}" > /dev/null
+SUB_TITLE="sub-smoke-$(date +%s%N)"
+rpc todos.create "{\"userId\":\"${ALICE_ID}\",\"title\":\"${SUB_TITLE}\",\"priority\":\"low\"}" > /dev/null
 
-# Wait up to 5 s for the `2:` line to appear in the SSE stream.
+# Wait up to 5 s for a live snapshot carrying the new title.
 DEADLINE=$(( $(date +%s) + 5 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  grep -q '^2:' "$SSE_FILE" 2>/dev/null && break
+  grep -q "$SUB_TITLE" "$SSE_FILE" 2>/dev/null && break
   sleep 0.2
 done
 
@@ -291,11 +289,11 @@ wait "$SUB_PID" 2>/dev/null || true
 check "subscribeTodos SSE delivered a 2: frame within 5s" \
   grep -q '^2:' "$SSE_FILE"
 
-check "2: frame carries collection=todos" \
-  grep -q '"collection":"todos"' "$SSE_FILE"
+check "live snapshot contains the created title" \
+  grep -q "$SUB_TITLE" "$SSE_FILE"
 
-check "2: frame carries op=insert" \
-  grep -q '"op":"insert"' "$SSE_FILE"
+check "2: frame carries snapshot rows" \
+  grep -q '"rows":' "$SSE_FILE"
 
 # ---------------------------------------------------------------------------
 # Result

@@ -19,6 +19,10 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./env": {
+      "types": "./dist/env.d.ts",
+      "import": "./dist/env.js"
+    },
     "./internal": {
       "types": "./dist/internal.d.ts",
       "import": "./dist/internal.js"

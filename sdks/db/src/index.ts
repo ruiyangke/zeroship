@@ -1,7 +1,9 @@
 "use server";
 
-// Primary API — schema declarators
-export { t, naming, schema } from "./types.js";
+// Primary API — schema declarators and their public builder value types.
+export { t, naming, schema, SchemaBuilder, TypeBuilder } from "./types.js";
+export { Collection } from "./collection.js";
+export { Query } from "./query.js";
 export {
   ValidationError,
   OptimisticLockError,
@@ -26,6 +28,7 @@ export type { LiveQuery, LiveOptions } from "./live.js";
 // (installSchema, model, normalizeSchema, ...) into @zeroship/bootstrap;
 // the public type surface stayed here so user code keeps importing from
 // @zeroship/db.
-export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput } from "./db-types.js";
-export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor } from "./types.js";
+export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput, SchemaShape, RowOf, RowInputOf } from "./db-types.js";
+export type { PaginationResult } from "./query.js";
+export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, SystemFields, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, WithRelations, WithSpec } from "./types.js";
 export type { NormalizedSchema } from "./schema.js";

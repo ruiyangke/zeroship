@@ -54,7 +54,7 @@ your project's `tsconfig.json`:
 ```json
 {
   "compilerOptions": {
-    "types": ["@zeroship/types"],
+    "types": ["@zeroship/types", "@zeroship/db/env"],
     "paths": {
       "zeroship-schema": ["./src/index.ts"]
     }
@@ -62,10 +62,18 @@ your project's `tsconfig.json`:
 }
 ```
 
-`@zeroship/types`' ambient `declare module "zeroship"` augmentation reads
-the user's `default.schema` shape via this `paths` alias and narrows
-`env.db` from the bare native handle to a typed `Db<typeof schema>` —
-so `env.db.users.find(...)` typechecks against the declared fields.
+`@zeroship/types` declares the base `zeroship` runtime module.
+`@zeroship/db/env` reads the user's schema via the `zeroship-schema`
+paths alias and narrows `env.db` from the bare native handle to a typed
+`Db<typeof schema>` — so `env.db.users.find(...)` typechecks against
+the declared fields. The alias can point at either the app entry module
+(`default = { schema }`) or a schema-only module whose default export is
+the bare collection map.
+
+Keep this augmentation opt-in. The root `@zeroship/db` package is the
+plain TypeScript SDK surface (`t`, `schema`, `RowOf`, `Db`, etc.) and
+does not require a Zeroship app entry module, so it can be imported by
+ordinary TypeScript projects, shared packages, and tests.
 
 ### Split-file schemas
 
@@ -85,6 +93,20 @@ export default {
 // src/index.ts — entry module
 import schema from "./schema.ts";
 export default { schema };
+```
+
+When using a split schema file, point the `zeroship-schema` alias at
+that schema-only module:
+
+```json
+{
+  "compilerOptions": {
+    "types": ["@zeroship/types", "@zeroship/db/env"],
+    "paths": {
+      "zeroship-schema": ["./src/schema.ts"]
+    }
+  }
+}
 ```
 
 The runtime's bootstrap (`sdks/bootstrap/src/runtime-entry.ts`, embedded
@@ -454,13 +476,10 @@ const { data } = await db.todos.find({}, {
 
 #### v1 limitations (future work)
 
-- **Type plumbing.** The joined field's TS type is `PlainObject | null`,
-  not `Row<TargetSchema> | null`. The target's schema is known at the
-  type layer (`refTarget: "users"`) but threading the parent db's
-  schema map through every Collection's generic would require a larger
-  refactor; v1 ships with the looser type so the runtime can land
-  immediately. Cast at the call site if you need narrowed access:
-  `const u = row.userId as Row<typeof db.users> | null`.
+- **Standalone models degrade.** When `env.db` is schema-typed through
+  `@zeroship/db/env`, joined fields narrow to the referenced row type.
+  Standalone `model()` callers that do not carry a parent schema map
+  still degrade joined fields to `PlainObject | null`.
 - **No projection narrowing.** Drizzle / Prisma support
   `with: { user: { columns: ["email"] } }` to project the joined row.
   v1 always fetches every column of the target.
@@ -532,8 +551,12 @@ your own predicate to retry on additional coded errors:
 ```ts
 await withRetry(fn, {
   max: 5,
-  on: (e) => isOptimisticLockError(e) ||
-             (e as { code?: string }).code === "SERIALIZATION_FAILURE",
+  on: (e) =>
+    isOptimisticLockError(e) ||
+    (typeof e === "object" &&
+      e !== null &&
+      "code" in e &&
+      e.code === "SERIALIZATION_FAILURE"),
   backoff: (attempt) => attempt * 10, // 10ms, 20ms, ...
 });
 ```
@@ -1296,7 +1319,7 @@ hinted columns arrive as bare `T`, others as `MaskedValue<T>`):
 // authorisation upfront and the row carries plaintext for the listed
 // columns when allowed by the per-app mask policy.
 const { data: user } = await env.db.users
-  .find({ id }, { unmask: ["ssn"], actor, reason } as never)
+  .find({ id }, { unmask: ["ssn"], actor, unmaskReason: reason })
   .first();
 user.ssn;    // "123-45-6789"  (plaintext, hint applied)
 user.email;  // MaskedValue<string>  (not hinted)

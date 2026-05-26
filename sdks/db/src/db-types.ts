@@ -74,13 +74,13 @@ import type {
  * Schema definition — plain fields, schema() builder with options, or
  * a top-level `t.union(...)` whose row shape is a discriminated union
  * (proposal §C2). The TypeBuilder form is type-erased to
- * `TypeBuilder<unknown, any>` here so the conditional in `UnwrapSchema`
+ * type-erased builder forms here so the conditional in `UnwrapSchema`
  * can distribute over the union.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type SchemaInput =
   | Record<string, unknown>
-  | SchemaBuilder<Record<string, unknown>>
+  | SchemaBuilder<any>
   | TypeBuilder<unknown, any, any, any, any>;
 
 // ---------------------------------------------------------------------------
@@ -211,10 +211,18 @@ export interface TransactionOptions {
  *   narrows correctly under control flow analysis.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type UnwrapSchema<T> =
+export type SchemaShape<T> =
   T extends SchemaBuilder<infer S> ? S :
   T extends TypeBuilder<infer U, any, any, any, any> ? U :
   T;
+
+type UnwrapSchema<T> = SchemaShape<T>;
+
+/** Read row shape for a plain schema, `schema({...})` builder, or top-level union builder. */
+export type RowOf<T> = Row<SchemaShape<T>>;
+
+/** Insert/upsert input shape for a plain schema, `schema({...})` builder, or top-level union builder. */
+export type RowInputOf<T> = RowInput<SchemaShape<T>>;
 
 /**
  * The typed Collection map produced by `installSchema`. Indexed by
@@ -252,7 +260,13 @@ export type DbExtensions<T extends Record<string, SchemaInput>> = {
    * `db.transaction(tx => ...)`. Returns an AsyncIterableIterator with
    * an explicit `close()` method for teardown.
    */
-  live: <R>(queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown }, options?: LiveOptions) => LiveQuery<R>;
+  live: {
+    <R>(queryFn: () => { then<TResult1 = Result<R[]>, TResult2 = never>(
+      resolve?: ((value: Result<R[]>) => TResult1 | PromiseLike<TResult1>) | null,
+      reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+    ): Promise<TResult1 | TResult2> }, options?: LiveOptions): LiveQuery<R>;
+    <R>(queryFn: () => Promise<R[]> | R[], options?: LiveOptions): LiveQuery<R>;
+  };
 };
 
 /**

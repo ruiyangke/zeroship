@@ -1,20 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRpcClient } from "@zeroship/rpc/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   archiveTodo,
-  completeTodo,
   createTodo,
   deleteTodo,
-  errCode,
   listTodos,
   publicUser,
-  subscribeTodos,
-  type Priority,
-  type Todo,
-} from "./api";
+  setTodoDone,
+} from "./index";
+import type { Priority, Todo, TodoSnapshot, User } from "./types";
 
 const PRIORITIES: Priority[] = ["low", "medium", "high"];
-const qk = (uid: string) => ["todos", uid] as const;
+const qk = (uid: string): ["todos", string] => ["todos", uid];
 
 // Demo seed: plausible-looking random tasks.
 const DEMO_VERBS = ["Review", "Ship", "Draft", "Refactor", "Test", "Deploy", "Sync", "Plan", "Polish", "Migrate", "Benchmark", "Triage"];
@@ -24,6 +22,7 @@ const randomTask = () => ({
   title: `${pick(DEMO_VERBS)} ${pick(DEMO_NOUNS)}`,
   priority: pick(PRIORITIES),
 });
+const todoEvents = createRpcClient().stream<{ userId: string }, TodoSnapshot>("todos.subscribe");
 
 function ago(ms: number): string {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
@@ -35,9 +34,17 @@ function ago(ms: number): string {
   if (h < 24) return `${h}h`;
   return `${Math.round(h / 24)}d`;
 }
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object";
+
+const errCode = (e: unknown): string | undefined => {
+  if (!isRecord(e)) return undefined;
+  return typeof e.code === "string" ? e.code : undefined;
+};
+
 const errText = (e: unknown) => {
   const c = errCode(e);
-  const msg = (e as { message?: string } | null)?.message ?? String(e);
+  const msg = isRecord(e) && typeof e.message === "string" ? e.message : String(e);
   return c ? `${c} · ${msg}` : msg;
 };
 
@@ -67,9 +74,9 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    publicUser({})
-      .then((u) => !cancelled && setUserId(u.id))
-      .catch((e) => !cancelled && flash(errText(e), errCode(e)));
+    Promise.resolve(publicUser({}))
+      .then((u: User) => !cancelled && setUserId(u.id))
+      .catch((e: unknown) => !cancelled && flash(errText(e), errCode(e)));
     return () => {
       cancelled = true;
     };
@@ -79,10 +86,10 @@ export function App() {
 
   const todosQ = useQuery({
     queryKey: qk(uid),
-    queryFn: () => listTodos({ userId: uid }),
+    queryFn: async (): Promise<Todo[]> => listTodos({ userId: uid }),
     enabled: !!userId,
   });
-  const todos = (todosQ.data ?? []) as Todo[];
+  const todos = todosQ.data ?? [];
 
   // Live feed → invalidate (own connection per tab via the nonce reader).
   useEffect(() => {
@@ -92,19 +99,17 @@ export function App() {
     let t: number | undefined;
     (async () => {
       try {
-        const stream = subscribeTodos(controller.signal);
+        const stream = todoEvents({ userId }, { signal: controller.signal });
         setLive(true);
-        for await (const ev of stream) {
+        for await (const snapshot of stream) {
           if (controller.signal.aborted) break;
-          if (ev.collection && ev.collection !== "todos") continue;
-          const pk = String(ev.pk ?? "");
+          const sig = snapshot.rows.map((row) => row.id).join(",");
           const now = Date.now();
-          if (pk) {
-            const prev = seen.get(pk);
-            if (prev && now - prev < 600) continue;
-            seen.set(pk, now);
-            if (seen.size > 200) seen.clear();
-          }
+          const prev = seen.get(sig);
+          if (prev && now - prev < 600) continue;
+          seen.set(sig, now);
+          if (seen.size > 200) seen.clear();
+          qc.setQueryData<Todo[]>(qk(userId), snapshot.rows);
           setPulse((p) => p + 1);
           window.clearTimeout(t);
           t = window.setTimeout(() => void qc.invalidateQueries({ queryKey: qk(userId) }), 180);
@@ -123,8 +128,13 @@ export function App() {
   }, [userId, qc]);
 
   // Optimistic create (raw React Query over the direct-imported caller).
-  const createM = useMutation({
-    mutationFn: createTodo,
+  const createM = useMutation<
+    Todo,
+    unknown,
+    { userId: string; title: string; priority?: Priority },
+    { prev: Todo[] | undefined; ck: string; userId: string }
+  >({
+    mutationFn: async (input) => createTodo(input),
     onMutate: async (input) => {
       const key = qk(input.userId);
       await qc.cancelQueries({ queryKey: key });
@@ -135,6 +145,8 @@ export function App() {
         _key: ck,
         created_at: Date.now(),
         updated_at: Date.now(),
+        created_by: null,
+        updated_by: null,
         version: 1,
         userId: input.userId,
         title: input.title,
@@ -189,13 +201,13 @@ export function App() {
     setDemoLeft(0);
   }, [userId, demoLeft, createM]);
 
-  const onComplete = useCallback(
-    async (id: string) => {
+  const onSetDone = useCallback(
+    async (id: string, done: boolean) => {
       qc.setQueryData<Todo[]>(qk(uid), (old = []) =>
-        old.map((t) => (t.id === id ? { ...t, done: true } : t)),
+        old.map((t) => (t.id === id ? { ...t, done } : t)),
       );
       try {
-        await completeTodo({ id });
+        await setTodoDone({ id, done });
       } catch (e) {
         flash(errText(e), errCode(e));
       } finally {
@@ -206,7 +218,7 @@ export function App() {
   );
 
   const onRemove = useCallback(
-    async (id: string, fn: (i: { id: string }) => Promise<unknown>) => {
+    async (id: string, fn: (i: { id: string }) => unknown) => {
       setRemoving((s) => new Set(s).add(id));
       await new Promise((r) => setTimeout(r, 220));
       qc.setQueryData<Todo[]>(qk(uid), (old = []) => old.filter((t) => t.id !== id));
@@ -308,7 +320,7 @@ export function App() {
               todo={t}
               index={i}
               removing={removing.has(t.id)}
-              onComplete={() => void onComplete(t.id)}
+              onSetDone={(done) => void onSetDone(t.id, done)}
               onArchive={() => void onRemove(t.id, archiveTodo)}
               onDelete={() => void onRemove(t.id, deleteTodo)}
             />
@@ -352,14 +364,14 @@ function Item({
   todo,
   index,
   removing,
-  onComplete,
+  onSetDone,
   onArchive,
   onDelete,
 }: {
   todo: Todo;
   index: number;
   removing: boolean;
-  onComplete: () => void;
+  onSetDone: (done: boolean) => void;
   onArchive: () => void;
   onDelete: () => void;
 }) {
@@ -371,9 +383,9 @@ function Item({
     >
       <button
         className="box"
-        aria-label={todo.done ? "completed" : "mark complete"}
-        onClick={onComplete}
-        disabled={todo.done || pending}
+        aria-label={todo.done ? "mark todo" : "mark complete"}
+        onClick={() => onSetDone(!todo.done)}
+        disabled={pending}
       >
         <Check />
       </button>

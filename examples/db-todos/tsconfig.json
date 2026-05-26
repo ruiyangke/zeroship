@@ -11,9 +11,9 @@
     "noEmit": true,
     "isolatedModules": true,
     "resolveJsonModule": true,
-    "types": ["@zeroship/types", "react", "react-dom"],
+    "types": ["@zeroship/types", "@zeroship/db/env", "react", "react-dom"],
     "paths": {
-      "zeroship-schema": ["./src/index.ts"]
+      "zeroship-schema": ["./src/schema.ts"]
     }
   },
   "include": ["src/**/*"]
