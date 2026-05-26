@@ -66,7 +66,7 @@ export const listTodos = query(
   async ({ userId }: { userId: string }) => {
     const { data, error } = await db.todos
       .find({ userId: userIdFromWire(userId), archived: false })
-      .sort({ created_at: -1 });
+      .sort({ id: -1 });
     if (error) throw error;
     return data ?? [];
   },
@@ -156,7 +156,7 @@ export const subscribeTodos = stream(
     const live = db.live(() =>
       db.todos
         .find({ userId: userIdFromWire(userId), archived: false })
-        .sort({ created_at: -1 }),
+        .sort({ id: -1 }),
     );
     try {
       for await (const rows of live) {
