@@ -67,7 +67,7 @@ import { reviewer } from "./internal/reviewer.js";
 import { pm } from "./internal/pm.js";
 import { sre } from "./internal/sre.js";
 import { BUILDER_SYSTEM } from "./internal/prompts.js";
-import { askSurveyTool } from "./internal/tools.js";
+import { askSurveyTool, createDeployTool } from "./internal/tools.js";
 
 export interface BuilderTurnInput {
   messages?: UIMessage[];
@@ -264,9 +264,14 @@ async function buildTranslatedStream(
         ...sa,
         model,
       }));
+      const deployTool = createDeployTool({
+        backend,
+        appId: input.appId,
+        apiKey,
+      });
       const agent = createDeepAgent({
         model,
-        tools: [askSurveyTool],
+        tools: [askSurveyTool, deployTool],
         backend,
         systemPrompt: BUILDER_SYSTEM,
         checkpointer,

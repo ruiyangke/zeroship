@@ -1,15 +1,18 @@
 "use server";
-// Reviewer SubAgent — pre-deploy hard gate. Runs after Builder + Critic
-// have agreed the change is internally OK; Reviewer's job is the
-// orthogonal "should this leave the workshop?" pass.
+// Reviewer schema + SubAgent. The deploy hard gate invokes
+// REVIEWER_PROMPT + reviewerResponseSchema directly from the deploy
+// tool so the approval check cannot be bypassed by prompt sequencing.
+// The registered SubAgent remains available for non-deploy destructive
+// reviews.
 //
 // Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §11 (role table) + §11.2 (pre-deploy gate matrix) + §4.8.3.2
 // (deepagents fleet mapping):
 //
 //   - SubAgent (one-shot, like Critic but lighter — no iteration loop).
-//   - Builder calls task("reviewer", { changes }) before any deploy or
-//     destructive op. If approved=false, Builder fixes the listed
-//     blockers and re-calls; if it can't, it escalates to the user.
+//   - The deploy tool calls the Reviewer model before any deploy. Builder
+//     calls task("reviewer", { changes }) only for destructive non-deploy
+//     operations. If approved=false, Builder fixes the listed blockers
+//     and re-calls; if it can't, it escalates to the user.
 //   - Reviewer's hard-gate dimensions are the §11.2 matrix:
 //       · build / typecheck pass
 //       · no secrets in client bundle
@@ -19,8 +22,8 @@
 //   - Spec §11 also envisions Reviewer wired via deepagents `interruptOn`
 //     for true human-in-the-loop hard gates (e.g., destructive prod
 //     migration). Per the task brief that integration is DEFERRED — we
-//     ship Reviewer-as-task first and revisit `interruptOn` once the
-//     destructive-op tooling exists.
+//     ship the deploy-tool hard gate first and revisit `interruptOn` once
+//     the destructive-op tooling exists.
 //
 // No tools: same rationale as Critic — Reviewer reviews the diff/change
 // description Builder hands over via the task input. If a future check
@@ -62,14 +65,14 @@ export type ReviewerResponse = z.infer<typeof reviewerResponseSchema>;
 export const reviewer: SubAgent = {
   name: "reviewer",
   description:
-    "Pre-deploy hard gate. Builder calls task(\"reviewer\", { changes }) " +
-    "before any deploy or destructive op. Reviews changes for security " +
-    "(secrets in client, auth bypass, SQL injection, XSS), correctness " +
-    "(build / typecheck status, smoke tests), and destructive-op safety " +
-    "(migrations dropping data, force-pushes, prod env tweaks). Returns " +
-    "{ approved, blockers: [{kind, severity, why, fix?}] }. If not " +
-    "approved, Builder must fix the blockers or escalate to the user " +
-    "before deploying.",
+    "Manual hard-gate review for destructive operations that are not " +
+    "deploys. Deploys must use the deploy tool, which invokes this " +
+    "same prompt/schema internally before it can upload. Reviews changes " +
+    "for security (secrets in client, auth bypass, SQL injection, XSS), " +
+    "correctness (build / typecheck status, smoke tests), and " +
+    "destructive-op safety (migrations dropping data, force-pushes, prod " +
+    "env tweaks). Returns { approved, blockers: [{kind, severity, why, " +
+    "fix?}] }.",
   systemPrompt: REVIEWER_PROMPT,
   // Keep the same model family across the fleet for now. Reviewer's
   // workload is similar in shape to Critic's (one-shot structured
