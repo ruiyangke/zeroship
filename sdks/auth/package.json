@@ -2,9 +2,6 @@
   "name": "@zeroship/auth",
   "version": "0.1.0",
   "description": "Auth SDK for zeroship — platform-managed authentication",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
   "type": "module",
   "license": "MIT",
   "exports": {
@@ -13,13 +10,19 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsup",
+    "lint:pkg": "publint && attw --pack .",
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.2",
     "@zeroship/types": "workspace:*",
+    "publint": "^0.3.21",
+    "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "zeroship": "workspace:*"
