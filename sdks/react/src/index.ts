@@ -35,7 +35,7 @@ export {
   useSuspenseQuery,
   QueryClientProvider,
   createDefaultClient,
-} from "./useQuery.js";
+} from "./useQuery";
 
 export type {
   QueryFactory,
@@ -45,4 +45,4 @@ export type {
   QueryClient,
   QueryClientProviderProps,
   SubscriptionLike,
-} from "./useQuery.js";
+} from "./useQuery";
