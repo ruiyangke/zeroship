@@ -12,7 +12,6 @@
 //       - query   reads only; runs inside READ ONLY tx
 //       - mutation read+write; runs inside SERIALIZABLE tx; refuses fetch
 //       - action  can call fetch(); compose via runQuery/runMutation
-//   • Migration audit log (A3) — backfillArchived in ./migrations.ts
 //
 // Wire conventions match the existing examples (hono-demo etc.):
 //   exports become RPC procedures at /_zs/v1/<name>.
@@ -284,9 +283,3 @@ export const publicUser = mutation(
   },
   { id: "users.public" },
 );
-
-// ---------------------------------------------------------------------------
-// Re-export the migration so the deploy can register it
-// ---------------------------------------------------------------------------
-
-export { backfillArchived } from "./migrations.js";

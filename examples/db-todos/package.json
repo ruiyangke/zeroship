@@ -12,7 +12,6 @@
     "@tanstack/react-query": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "@zeroship/db": "workspace:*",
-    "@zeroship/migrations": "workspace:*",
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",

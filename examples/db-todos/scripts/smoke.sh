@@ -226,10 +226,10 @@ check "joined user row carries Alice's email" \
   bash -c "echo '$LWU' | grep -q \"${ALICE_EMAIL}\""
 
 # ---------------------------------------------------------------------------
-# Check 6: Migration audit row (A3)
+# Check 6: Schema audit endpoint (A3)
 # ---------------------------------------------------------------------------
 
-echo "[check 6] migration audit log — __zeroship_migrations row exists"
+echo "[check 6] schema audit endpoint is reachable"
 
 AUDIT=$(curl -sS "${URL}/_zs/db/audit/todos" 2>/dev/null || echo '[]')
 check "audit endpoint reachable" bash -c "[ -n '$AUDIT' ]"
