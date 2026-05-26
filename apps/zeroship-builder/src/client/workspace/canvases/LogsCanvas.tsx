@@ -34,15 +34,7 @@ export function LogsCanvas({ appId }: LogsCanvasProps) {
 
   const { data: lines, error } = useQuery({
     queryKey: ["app-logs", appId],
-    // The control plane returns 404 when the app exists but has no
-    // logs yet; treat that as an empty list rather than a failure.
-    queryFn: async () => {
-      try {
-        return await getAppLogs(appId);
-      } catch {
-        return [] as string[];
-      }
-    },
+    queryFn: () => getAppLogs(appId),
     refetchInterval: POLL_MS,
     retry: false,
   });

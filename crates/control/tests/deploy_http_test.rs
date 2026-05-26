@@ -122,6 +122,7 @@ fn manifest_for(
             compiler: Some("test".into()),
             built_at: "2026-04-29T00:00:00Z".into(),
         },
+        exports: None,
     }
 }
 
@@ -233,6 +234,8 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
+        worker_urls: Vec::new(),
+        worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         // IMPORTANT: insecure_dev=false so check_admin_auth actually

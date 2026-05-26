@@ -87,6 +87,11 @@ pub struct AppState {
     /// Stripe webhook signing secret. Required in prod; empty +
     /// `insecure_dev=true` skips verification.
     pub stripe_webhook_secret: SecretString,
+    /// Worker HTTP base URLs used for admin log fan-out.
+    pub worker_urls: Vec<String>,
+    /// Shared secret for worker admin endpoints. Empty means dev-only
+    /// unauthenticated workers, matching `zeroship-worker`.
+    pub worker_key: SecretString,
     /// Per-IP rate limiter for mutating admin endpoints. Burst 30,
     /// 60/min steady — generous for honest tooling, fatal for loops.
     pub admin_limiter: Arc<RateLimiter>,

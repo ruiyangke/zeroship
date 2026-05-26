@@ -24,7 +24,7 @@ pub const MAX_DISPATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Verify the gateway-issued bearer token on /dispatch endpoints.
 /// Returns `None` if the request is authorized; otherwise a 401 response.
-fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<HttpResponse> {
+pub(crate) fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<HttpResponse> {
     // Empty worker_key disables the check (dev-only loopback bind enforces this).
     if worker_key.is_empty() {
         return None;
@@ -108,6 +108,7 @@ pub async fn dispatch(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
     envs: web::types::State<SharedEnvs>,
+    logs: web::types::State<crate::logs::SharedLogs>,
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
@@ -200,10 +201,12 @@ pub async fn dispatch(
     };
 
     match outcome {
-        FetchOutcome::Response { status, headers, body, logs: _ } => {
+        FetchOutcome::Response { status, headers, body, logs: request_logs } => {
+            crate::logs::append(&logs, app_id, request_logs);
             make_http_response(status, headers, body)
         }
-        FetchOutcome::Stream { status, headers, body_reader, logs: _ } => {
+        FetchOutcome::Stream { status, headers, body_reader, logs: request_logs } => {
+            crate::logs::append(&logs, app_id, request_logs);
             stream_response(status, &headers, body_reader)
         }
         FetchOutcome::WebSocketUpgrade { .. } => {
@@ -213,13 +216,26 @@ pub async fn dispatch(
         }
         FetchOutcome::Pending { rx, cancel: cf } => {
             match recv_with_timeout(&rx, wall_limit(&runtime), &cf, &runtime).await {
-                Some(Ok(SettledFetch::Response { status, headers, body, .. })) => {
+                Some(Ok(SettledFetch::Response {
+                    status,
+                    headers,
+                    body,
+                    logs: request_logs,
+                })) => {
+                    crate::logs::append(&logs, app_id, request_logs);
                     make_http_response(status, headers, body)
                 }
-                Some(Ok(SettledFetch::Stream { status, headers, body_reader, .. })) => {
+                Some(Ok(SettledFetch::Stream {
+                    status,
+                    headers,
+                    body_reader,
+                    logs: request_logs,
+                })) => {
+                    crate::logs::append(&logs, app_id, request_logs);
                     stream_response(status, &headers, body_reader)
                 }
-                Some(Ok(SettledFetch::WebSocketUpgrade { .. })) => {
+                Some(Ok(SettledFetch::WebSocketUpgrade { logs: request_logs, .. })) => {
+                    crate::logs::append(&logs, app_id, request_logs);
                     make_error_msg(500, "WebSocket upgrade not supported via HTTP dispatch")
                 }
                 Some(Err(e)) => make_error(&e),
@@ -318,6 +334,119 @@ fn make_error(err: &DispatchError) -> HttpResponse {
 fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
     metrics::inc(&metrics::DISPATCH_ERRORS_TOTAL);
     make_error(&DispatchError::new(msg, status))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Once, RwLock};
+
+    use ntex::http::StatusCode;
+    use ntex::web::{self, test};
+    use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+    use zeroship_core::types::AppRuntimeLimits;
+    use zeroship_runtime::init::init_v8;
+
+    use super::*;
+
+    static V8_INIT: Once = Once::new();
+
+    fn init_runtime() {
+        V8_INIT.call_once(init_v8);
+    }
+
+    fn tmpdir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "zs-worker-logs-{label}-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&path).expect("mkdir tmp");
+        path
+    }
+
+    #[compio::test]
+    async fn dispatch_console_lines_are_queryable_from_logs_endpoint() {
+        init_runtime();
+
+        let app_id = Uuid::new_v4();
+        let source = br#"
+            export default {
+              fetch(req) {
+                console.log("b2-real-log", new URL(req.url).pathname);
+                return new Response("ok");
+              }
+            }
+        "#;
+        crate::cache::init_cache(10, None);
+        assert!(crate::cache::load_app(
+            app_id,
+            source,
+            AppRuntimeLimits::default()
+        ));
+
+        let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+        crate::sync::put_env_from_json(
+            &envs,
+            app_id,
+            r#"{"vars":{},"secrets":{},"expose":[]}"#,
+            0,
+        )
+        .expect("insert env");
+        let logs = crate::logs::new_store();
+        let blob_root = tmpdir("blob");
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+        let config = Arc::new(crate::WorkerConfig {
+            control_url: "http://127.0.0.1:1".to_string(),
+            control_key: String::new(),
+            db_url: None,
+            max_isolates: 10,
+            poll_interval_secs: 60,
+            worker_key: String::new(),
+            shutdown_timeout_secs: 0,
+            blob_store,
+        });
+
+        let app = test::init_service(
+            web::App::new()
+                .state(config)
+                .state(envs)
+                .state(logs)
+                .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch)))
+                .service(
+                    web::resource("/logs/{app_id}")
+                        .route(web::get().to(crate::logs::get_logs)),
+                ),
+        )
+        .await;
+
+        let envelope = serde_json::json!({
+            "method": "GET",
+            "url": "http://example.test/from-worker-test",
+            "headers": [],
+            "body": "",
+        });
+        let req = test::TestRequest::post()
+            .uri(&format!("/dispatch/{app_id}"))
+            .set_payload(serde_json::to_vec(&envelope).unwrap())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = test::read_body(resp).await;
+        assert_eq!(&body[..], b"ok");
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/logs/{app_id}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = test::read_body(resp).await;
+        let lines: Vec<String> = serde_json::from_slice(&body).expect("logs json");
+        assert_eq!(lines, vec!["b2-real-log /from-worker-test"]);
+
+        let _ = std::fs::remove_dir_all(blob_root);
+    }
 }
 
 /// Pull bundle from the blob store and load into cache (cold start path).

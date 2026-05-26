@@ -2,6 +2,7 @@ mod handler;
 mod sync;
 mod cache;
 mod metrics;
+mod logs;
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -117,6 +118,7 @@ async fn main() -> std::io::Result<()> {
     // worker threads). Reconcile loops read+write through it, the
     // dispatch handler reads under a brief read lock + Arc clone.
     let shared_envs: SharedEnvs = Arc::new(RwLock::new(std::collections::HashMap::new()));
+    let shared_logs = logs::new_store();
 
     tracing::info!(
         bind = %bind_addr,
@@ -147,6 +149,7 @@ async fn main() -> std::io::Result<()> {
         let config = config.clone();
         let shared = shared_versions.clone();
         let envs = shared_envs.clone();
+        let logs = shared_logs.clone();
         cache::init_cache(config.max_isolates, config.db_url.clone());
         // Per-thread reconcile loop — reads from the shared version map,
         // writes env into the process-wide env cache.
@@ -155,7 +158,9 @@ async fn main() -> std::io::Result<()> {
         web::App::new()
             .state(config)
             .state(envs)
+            .state(logs)
             .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
+            .service(web::resource("/logs/{app_id}").route(web::get().to(logs::get_logs)))
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))

@@ -87,6 +87,7 @@ fn manifest_for(
             compiler: Some("test".into()),
             built_at: "2026-04-29T00:00:00Z".into(),
         },
+        exports: None,
     }
 }
 

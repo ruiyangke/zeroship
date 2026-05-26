@@ -2,6 +2,7 @@
 
 use std::path::Path as StdPath;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::Stream;
 use ntex::web;
@@ -359,12 +360,14 @@ pub async fn set_plan(
     id: Path<String>,
     body: Json<SetPlanBody>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+    if let Some(resp) = check_admin_auth(&req, &state) {
+        return resp;
+    }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
             return web::HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error":"invalid uuid"}))
+                .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
     match state.registry.set_plan(&uid, &body.plan_id).await {
@@ -388,6 +391,86 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
         Ok(usage) => web::HttpResponse::Ok().json(&usage),
         Err(e) => error_response(e),
     }
+}
+
+pub async fn get_app_logs(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    id: Path<String>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+    let uid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error":"invalid uuid"}))
+        }
+    };
+
+    let mut lines = Vec::new();
+    let mut errors = Vec::new();
+    for worker_url in &state.worker_urls {
+        match fetch_worker_logs(worker_url, state.worker_key.expose_secret(), &uid).await {
+            Ok(mut worker_lines) => lines.append(&mut worker_lines),
+            Err(e) => {
+                tracing::warn!(
+                    worker_url = %worker_url,
+                    app_id = %uid,
+                    error = %e,
+                    "control: worker log fetch failed",
+                );
+                errors.push(format!("{worker_url}: {e}"));
+            }
+        }
+    }
+
+    if lines.is_empty() && !errors.is_empty() && errors.len() == state.worker_urls.len() {
+        return web::HttpResponse::BadGateway().json(&serde_json::json!({
+            "error": "worker logs unavailable",
+            "details": errors,
+        }));
+    }
+
+    web::HttpResponse::Ok().json(&lines)
+}
+
+async fn fetch_worker_logs(
+    worker_url: &str,
+    worker_key: &str,
+    app_id: &Uuid,
+) -> Result<Vec<String>, String> {
+    let url = format!("{}/logs/{app_id}", worker_url.trim_end_matches('/'));
+    let client = cyper::Client::new();
+    let mut builder = client
+        .get(&url)
+        .map_err(|e| format!("invalid worker URL: {e}"))?;
+    if !worker_key.is_empty() {
+        builder = builder
+            .header("authorization", &format!("Bearer {worker_key}"))
+            .map_err(|e| format!("invalid auth header: {e}"))?;
+    }
+
+    let response = compio::time::timeout(Duration::from_secs(2), builder.send())
+        .await
+        .map_err(|_| "request timeout".to_string())?
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("read body: {e}"))?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&bytes);
+        return Err(format!(
+            "HTTP {} {}: {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or(""),
+            body,
+        ));
+    }
+
+    serde_json::from_slice::<Vec<String>>(&bytes)
+        .map_err(|e| format!("parse logs JSON: {e}"))
 }
 
 // ---------------------------------------------------------------------------

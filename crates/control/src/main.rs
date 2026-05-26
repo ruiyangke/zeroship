@@ -39,6 +39,8 @@ async fn main() -> std::io::Result<()> {
     let bundles_dir = arg_or_env(&args, "--bundles", "BUNDLES_DIR", "./bundles");
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
     let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
+    let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
+    let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
     let stripe_webhook_secret = arg_or_env(&args, "--stripe-webhook-secret", "STRIPE_WEBHOOK_SECRET", "");
     // Comma-separated list of previous master keys, tried as fallbacks
     // on decrypt failure during a rotation grace period.
@@ -209,6 +211,13 @@ async fn main() -> std::io::Result<()> {
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
+        worker_urls: workers_str
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        worker_key: zeroship_control::SecretString::new(worker_key),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(30, 60))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(50, 600))),
         insecure_dev,
@@ -251,6 +260,10 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/api/apps/{id}/usage")
                     .route(web::get().to(api::get_usage)),
+            )
+            .service(
+                web::resource("/api/apps/{id}/logs")
+                    .route(web::get().to(api::get_app_logs)),
             )
             .service(
                 web::resource("/api/apps/{id}/vars")
