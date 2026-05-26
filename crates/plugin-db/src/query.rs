@@ -412,6 +412,47 @@ pub(crate) fn validate_field_name_for_declaration(name: &str) -> Result<(), Quer
     Ok(())
 }
 
+/// Typed-id prefixes reserved for the platform. A creator-declared
+/// `id: t.id("usr")` would mint ids that collide with platform user
+/// ids (`crates/core/src/typed_id.rs`), so the prefix is rejected.
+/// Only `usr` is reserved for now (matches the SDK-side fence in
+/// `sdks/db/src/types.ts`).
+pub(crate) const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
+
+/// **P7** — validate a creator-declared typed-id prefix (`t.id("blog")`).
+///
+/// Defense-in-depth mirror of the SDK-side check in
+/// `sdks/db/src/types.ts`: the SDK throws at `pnpm dev` build time, but
+/// a hand-built wire payload (a raw `default = { fetch }` deploy calling
+/// `zeroship.db.registerModel` directly) skips the SDK entirely, so the
+/// runtime re-validates at register-model.
+///
+/// Rules:
+/// - must match `^[a-z][a-z0-9_]*$` → [`QueryError::InvalidIdent`]
+/// - must not be a [`RESERVED_ID_PREFIXES`] entry → [`QueryError::ReservedSystemFieldName`]
+///   (reuses the typed `reserved_system_field_name` SDK code; the prefix
+///   collision is morally a system-field reservation).
+pub(crate) fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
+    let valid = prefix
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !valid {
+        return Err(QueryError::InvalidIdent(format!(
+            "t.id(prefix): prefix must match ^[a-z][a-z0-9_]*$ (got '{prefix}')"
+        )));
+    }
+    if RESERVED_ID_PREFIXES.contains(&prefix) {
+        return Err(QueryError::ReservedSystemFieldName(format!(
+            "t.id(prefix): '{prefix}' is reserved for platform ids; choose a different prefix"
+        )));
+    }
+    Ok(())
+}
+
 fn schema_declares_readable_field(schema_hint: Option<&Value>, name: &str) -> bool {
     schema_hint
         .and_then(Value::as_object)
@@ -580,6 +621,22 @@ pub fn build_create_table_with_fks_for_dialect(
             // trip the validator; they are CRDT-like top-level
             // schema metadata rather than column declarations.
             if is_schema_metadata_key(field) {
+                continue;
+            }
+            // **P7** — `id: t.id("prefix")` is a PREFIX DECLARATION for
+            // the system `id` PK column already emitted by
+            // `build_system_field_columns`, NOT a second column. Skip it
+            // so we neither duplicate the `id` column nor trip the
+            // reserved-name fence in `validate_field_name_for_declaration`.
+            // We still validate the declared `idPrefix` here (defense in
+            // depth — mirrors the SDK fence so a hand-built wire payload
+            // can't smuggle a reserved/malformed prefix past register-
+            // model). A field named `id` with any OTHER type falls
+            // through to `field_to_column_for_dialect`, which rejects it.
+            if field == "id" && def.get("type").and_then(|t| t.as_str()) == Some("id") {
+                if let Some(prefix) = def.get("idPrefix").and_then(|p| p.as_str()) {
+                    validate_id_prefix(prefix)?;
+                }
                 continue;
             }
             let col_def = field_to_column_for_dialect(field, def, dialect)?;
@@ -7306,6 +7363,75 @@ mod tests {
             !alter.contains(" UNIQUE"),
             "ADD COLUMN must not emit inline UNIQUE: {}",
             alter
+        );
+    }
+
+    #[test]
+    fn p7_id_prefix_decl_emits_single_id_column() {
+        // **P7** — `id: t.id("blog")` is a prefix declaration for the
+        // system `id` PK column, NOT a second column. The emitter must
+        // skip it: exactly one `id` column (the system PK), no duplicate,
+        // and no reserved-name rejection.
+        let schema = json!({
+            "id": {"type": "id", "idPrefix": "blog"},
+            "title": {"type": "string", "required": true},
+        });
+        let create =
+            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+        // The system PK is emitted as `id TEXT PRIMARY KEY` (unquoted —
+        // see `build_system_field_columns`). The prefix declaration must
+        // NOT add a second column (which would appear as a quoted
+        // `"id"` from the field loop's `quote_ident`).
+        assert!(
+            create.contains("id TEXT PRIMARY KEY"),
+            "system id PK column present: {create}"
+        );
+        assert_eq!(
+            create.matches("\"id\"").count(),
+            0,
+            "no duplicate quoted id column from the prefix declaration: {create}"
+        );
+        assert!(
+            create.contains("\"title\""),
+            "user field still emitted: {create}"
+        );
+    }
+
+    #[test]
+    fn p7_id_prefix_decl_with_reserved_usr_is_rejected() {
+        // Defense in depth: a hand-built wire payload declaring
+        // `id: t.id("usr")` must be rejected at DDL build (mirrors the
+        // SDK fence). Reuses `ReservedSystemFieldName`.
+        let schema = json!({ "id": {"type": "id", "idPrefix": "usr"} });
+        let err = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::ReservedSystemFieldName(_)),
+            "usr prefix must be rejected as reserved, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn p7_id_prefix_decl_with_malformed_prefix_is_rejected() {
+        let schema = json!({ "id": {"type": "id", "idPrefix": "1bad"} });
+        let err = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::InvalidIdent(_)),
+            "malformed prefix must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn p7_id_with_non_id_type_still_rejected() {
+        // A field literally named `id` with a NON-"id" type is NOT a
+        // prefix declaration — it must still trip the reserved-name fence.
+        let schema = json!({ "id": {"type": "string"} });
+        let err = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::ReservedSystemFieldName(_)),
+            "id with non-id type must stay rejected, got {err:?}"
         );
     }
 
