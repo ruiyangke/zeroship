@@ -1,33 +1,52 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { Input, Select, Textarea } from "../index";
+import { Button, Card, Input, Select, Textarea } from "../index";
 
-function FormsDemo() {
+function ContactForm() {
   return (
-    <div className="zs-story-shell zs-story-grid">
-      <Input label="Project name" defaultValue="Supper Society" />
-      <Input label="Slug" defaultValue="supper-society" hint="Used in the public URL." />
-      <Input label="API key" defaultValue="sk_live_hidden" readOnly />
-      <Input label="Budget" defaultValue="$15" error="Enter a monthly limit." />
-      <Textarea
-        label="Brief"
-        defaultValue="A recipe journal for our supper club, with ratings and a monthly host vote."
+    <Card className="zs-story-form zs-story-card-pad">
+      <header className="zs-story-form__header">
+        <h2 className="zs-story-title">Contact support</h2>
+        <p className="zs-story-subtle">We usually reply within one business day.</p>
+      </header>
+      <div className="zs-story-form__row">
+        <Input label="Name" placeholder="Ada Lovelace" />
+        <Input
+          label="Email"
+          type="email"
+          defaultValue="ada@example"
+          error="Enter a valid email address."
+        />
+      </div>
+      <Select
+        label="Topic"
+        defaultValue="billing"
+        items={[
+          { value: "billing", label: "Billing" },
+          { value: "bug", label: "Bug report" },
+          { value: "other", label: "Something else" },
+        ]}
       />
-      <Select label="Plan" defaultValue="maker">
-        <option value="free">Free</option>
-        <option value="maker">Maker</option>
-        <option value="pro">Pro</option>
-      </Select>
-    </div>
+      <Textarea
+        label="Message"
+        rows={4}
+        placeholder="How can we help?"
+        hint="Include steps to reproduce if you're reporting a bug."
+      />
+      <div className="zs-story-form__actions">
+        <Button variant="ghost">Clear</Button>
+        <Button>Send message</Button>
+      </div>
+    </Card>
   );
 }
 
 const meta = {
   title: "Primitives/Forms",
-  component: FormsDemo,
+  component: ContactForm,
   tags: ["autodocs"],
-} satisfies Meta<typeof FormsDemo>;
+} satisfies Meta<typeof ContactForm>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const InputTextareaSelect: Story = {};
+export const ContactSupport: Story = {};

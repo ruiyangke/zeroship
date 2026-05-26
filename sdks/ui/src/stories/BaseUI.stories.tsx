@@ -55,27 +55,51 @@ export const ButtonStates: Story = {
 
 export const FieldInputs: Story = {
   render: () => (
-    <div className="zs-story-shell zs-story-grid">
+    <Card className="zs-story-form zs-story-card-pad">
+      <header className="zs-story-form__header">
+        <h2 className="zs-story-title">Project settings</h2>
+        <p className="zs-story-subtle">How your app appears and how it bills.</p>
+      </header>
       <Input label="Project name" defaultValue="Supper Society" />
-      <Input label="Slug" defaultValue="supper-society" hint="Used in the public URL." />
-      <Input label="API key" defaultValue="sk_live_hidden" readOnly />
-      <Input label="Budget" defaultValue="$15" error="Enter a monthly limit." />
+      <div className="zs-story-form__row">
+        <Input label="Slug" defaultValue="supper-society" hint="Used in the public URL." />
+        <Select
+          label="Plan"
+          defaultValue="maker"
+          items={[
+            { value: "free", label: "Free" },
+            { value: "maker", label: "Maker" },
+            { value: "pro", label: "Pro" },
+          ]}
+        />
+      </div>
+      <Input
+        label="API key"
+        defaultValue="sk_live_hidden"
+        readOnly
+        hint="Rotate from the dashboard."
+      />
+      <Input label="Monthly budget" defaultValue="$15" error="Enter a monthly limit." />
       <Textarea
         label="Brief"
+        rows={3}
         defaultValue="A recipe journal for a supper club with ratings and a host vote."
       />
-      <Select label="Plan" defaultValue="maker">
-        <option value="free">Free</option>
-        <option value="maker">Maker</option>
-        <option value="pro">Pro</option>
-      </Select>
-    </div>
+      <div className="zs-story-form__actions">
+        <Button variant="ghost">Cancel</Button>
+        <Button>Save changes</Button>
+      </div>
+    </Card>
   ),
 };
 
 export const ChoiceControls: Story = {
   render: () => (
-    <div className="zs-story-shell zs-story-grid">
+    <Card className="zs-story-form zs-story-card-pad">
+      <header className="zs-story-form__header">
+        <h2 className="zs-story-title">Access &amp; plan</h2>
+        <p className="zs-story-subtle">Toggle visibility, sign-in, and the billing tier.</p>
+      </header>
       <Switch label="Public app" defaultChecked hint="Available at the public route." />
       <Checkbox label="Require sign-in" defaultChecked />
       <Checkbox label="Mixed inherited setting" indeterminate />
@@ -88,7 +112,7 @@ export const ChoiceControls: Story = {
           { value: "pro", label: "Pro", disabled: true },
         ]}
       />
-    </div>
+    </Card>
   ),
 };
 

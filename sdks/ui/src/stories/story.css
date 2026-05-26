@@ -56,6 +56,43 @@
   padding: var(--zs-space-5);
 }
 
+/* Form demo layout: a constrained, single-column form with optional paired rows
+   and a right-aligned action footer. (Forms are NOT auto-fit grids.) */
+.zs-story-form {
+  width: min(100%, 34rem);
+  display: grid;
+  gap: var(--zs-space-5);
+  text-align: left;
+}
+
+.zs-story-form__header {
+  display: grid;
+  gap: var(--zs-space-1);
+}
+
+.zs-story-form__row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--zs-space-4);
+}
+
+.zs-story-form__row > * {
+  min-width: 0;
+}
+
+.zs-story-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--zs-space-3);
+  margin-top: var(--zs-space-1);
+}
+
+@media (max-width: 34rem) {
+  .zs-story-form__row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .zs-story-title {
   margin: 0;
   color: var(--zs-ink);
