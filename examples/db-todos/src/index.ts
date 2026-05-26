@@ -27,13 +27,14 @@ import {
   type TodoSnapshot,
   type User,
 } from "./schema";
-import type { Db } from "@zeroship/db";
 
 export default { schema: dbSchema };
 
-// Local `db` shorthand for use inside this module — same wrappers
-// `env.db` carries, but spelled the way it'll feel in user code.
-const db = env.db as Db<typeof dbSchema>;
+// Local `db` shorthand for use inside this module. `env.db` is already
+// typed as `Db<typeof dbSchema>` via the `@zeroship/db/env` augmentation
+// (registered in tsconfig `types` + the `zeroship-schema` path alias) —
+// no cast needed.
+const db = env.db;
 
 // Brand types flow from t.ref(): a todo's `userId` is `Id<"users">`.
 // Passing a todo id where a user id is expected is a compile-time error.

@@ -10,12 +10,16 @@
     "directory": "sdks/db"
   },
   "files": [
-    "dist"
+    "dist",
+    "env.d.ts"
   ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./env": {
+      "types": "./env.d.ts"
     },
     "./internal": {
       "types": "./dist/internal.d.ts",

@@ -13,6 +13,7 @@
     "resolveJsonModule": true,
     "types": [
       "@zeroship/types",
+      "@zeroship/db/env",
       "react",
       "react-dom",
       "vitest/globals",
