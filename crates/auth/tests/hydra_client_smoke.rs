@@ -15,22 +15,40 @@ fn admin() -> Option<HydraAdmin> {
 }
 
 #[compio::test]
-async fn jwks_create_and_list() {
+async fn jwks_create_and_delete_roundtrip() {
     let Some(admin) = admin() else {
         eprintln!("skip (no AUTH_HYDRA_ADMIN)");
         return;
     };
 
-    // Probe both bootstrap-managed sets. Either may be absent (404 → None)
-    // or populated; both are acceptable — we only assert no transport / decode
-    // error escapes.
-    let access = admin.get_jwks("zeroship.access-token.v1").await.expect("get access jwks");
-    let id = admin.get_jwks("zeroship.id-token.v1").await.expect("get id jwks");
-    eprintln!(
-        "access set: {} keys, id set: {} keys",
-        access.as_ref().map(|s| s.keys.len()).unwrap_or(0),
-        id.as_ref().map(|s| s.keys.len()).unwrap_or(0),
-    );
+    // Use a scratch keyset name unique per run so concurrent test invocations
+    // don't collide. We avoid the canonical bootstrap-managed sets
+    // (hydra.openid.id-token / hydra.jwt.access-token) so the test stays
+    // self-contained and doesn't require bootstrap to have run.
+    let set = format!("zeroship-smoke-{}", uuid::Uuid::new_v4().simple());
+
+    // Create a scratch JWK.
+    let created = admin.create_jwk(&set, "EdDSA").await.expect("create_jwk");
+    assert!(!created.keys.is_empty(), "create_jwk returned empty keyset");
+
+    // Read it back and verify at least one key exists.
+    let fetched = admin.get_jwks(&set).await.expect("get_jwks");
+    let fetched = fetched.expect("scratch keyset should exist after create");
+    assert!(!fetched.keys.is_empty(), "fetched keyset has no keys");
+
+    // Extract a kid to delete by. Hydra assigns its own kid; the JSON value
+    // shape per JWK is `{"kty":"OKP","crv":"Ed25519","x":"...","kid":"...","use":"sig","alg":"EdDSA"}`.
+    let kid = fetched.keys[0]
+        .get("kid")
+        .and_then(|v| v.as_str())
+        .expect("kid present on returned JWK")
+        .to_string();
+
+    // Clean up.
+    admin.delete_jwk(&set, &kid).await.expect("delete_jwk");
+
+    // Read-back: keyset may now be empty or still present with no keys.
+    // Either way, the test's assertion target (the round-trip itself) succeeded.
 }
 
 #[compio::test]

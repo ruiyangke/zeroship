@@ -25,6 +25,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+mimalloc = { workspace = true }
 
 [lints]
 workspace = true

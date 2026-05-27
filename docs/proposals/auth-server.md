@@ -27,7 +27,7 @@ One identity per human, one global user pool, one place that ever holds raw pass
 | # | Decision | Choice |
 |---|----------|--------|
 | 1 | Service form | New Rust crate `crates/auth/` — compio binary, sibling of gateway/control/worker. Pairs with a sidecar `oryd/hydra` container. |
-| 2 | OIDC engine | **ory/hydra v26.2.x** (current calendar-versioning track since 2025-10). Apache-2.0, OpenID-Foundation-certified. Pinned by major-minor in deployment. |
+| 2 | OIDC engine | **ory/hydra v25.4.0** (current Docker Hub tag; calendar versioning track since 2025-10). Apache-2.0, OpenID-Foundation-certified. Pinned by major-minor in deployment. Bump to v26.x when ory publishes that tag. |
 | 3 | Tenancy model | Single global user pool. The `sub` claim is one zeroship-wide identity (typed_id `usr_…`) for every app and every internal surface. |
 | 4 | Delegation model | OIDC Identity Provider. RPs include the gateway (default RP for hosted creator apps), the control plane, the builder, and third-party apps later. |
 | 5 | Login methods at launch | Email+password, Google OIDC, GitHub OAuth, email magic-link. |

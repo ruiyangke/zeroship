@@ -2,6 +2,9 @@
 //!
 //! Companion process: `oryd/hydra` (OIDC kernel). See docs/proposals/auth-server.md.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 
@@ -11,7 +14,7 @@ use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 use zeroship_auth::store;
 
-#[compio::main]
+#[ntex::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     zeroship_core::observability::init_tracing("info,zeroship_auth=debug");
 

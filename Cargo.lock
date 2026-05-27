@@ -5594,6 +5594,7 @@ dependencies = [
  "cyper",
  "hex",
  "http",
+ "mimalloc",
  "ntex",
  "serde",
  "serde_json",
