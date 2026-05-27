@@ -15,247 +15,13 @@
 //! Every test skips when `AUTH_DB_URL` and `AUTH_HYDRA_ADMIN` aren't both set
 //! (mirroring `e2e_password.rs`).
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use ntex::web;
 use uuid::Uuid;
 
-use zeroship_auth::config::AuthConfig;
-use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::types::OAuth2Client;
-use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::server;
-use zeroship_auth::store::migrations;
-
-// ─── Helpers (duplicated from e2e_password.rs / enum_defense.rs to keep
-//     the test file self-contained — see U8 brief Option A). ──────────────
-
-fn extract_query_param(raw_url: &str, key: &str) -> Option<String> {
-    let parsed = url::Url::parse(raw_url).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.into_owned())
-}
-
-#[derive(Default)]
-struct Jar {
-    inner: std::collections::HashMap<String, String>,
-}
-
-impl Jar {
-    fn absorb(&mut self, resp: &cyper::Response) {
-        for hv in resp.headers().get_all(http::header::SET_COOKIE) {
-            let Ok(s) = hv.to_str() else { continue };
-            let first = s.split(';').next().unwrap_or("");
-            if let Some((name, value)) = first.split_once('=') {
-                let name = name.trim();
-                let value = value.trim();
-                if name.is_empty() {
-                    continue;
-                }
-                if value.is_empty() {
-                    self.inner.remove(name);
-                } else {
-                    self.inner.insert(name.to_string(), value.to_string());
-                }
-            }
-        }
-    }
-
-    fn header(&self) -> String {
-        let mut parts: Vec<String> =
-            self.inner.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        parts.sort();
-        parts.join("; ")
-    }
-}
-
-fn read_set_cookie(resp: &cyper::Response, name: &str) -> Option<String> {
-    for hv in resp.headers().get_all(http::header::SET_COOKIE) {
-        let Ok(s) = hv.to_str() else { continue };
-        let first = s.split(';').next().unwrap_or("");
-        if let Some((n, v)) = first.split_once('=') {
-            if n.trim() == name {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-fn location(resp: &cyper::Response) -> String {
-    resp.headers()
-        .get(http::header::LOCATION)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn rewrite_to_hydra_loopback(raw_url: &str) -> String {
-    for prefix in ["https://auth.zeroship.ai", "http://auth.zeroship.ai"] {
-        if let Some(rest) = raw_url.strip_prefix(prefix) {
-            return format!("http://127.0.0.1:4444{rest}");
-        }
-    }
-    raw_url.to_string()
-}
-
-async fn fresh_login_challenge(
-    http: &cyper::Client,
-    hydra_public: &str,
-    client_id: &str,
-    redirect_uri: &str,
-) -> String {
-    let q = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", client_id)
-        .append_pair("response_type", "code")
-        .append_pair("scope", "openid")
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("state", &format!("st-{}", Uuid::new_v4().simple()))
-        .append_pair("nonce", &format!("nc-{}", Uuid::new_v4().simple()))
-        .append_pair("code_challenge", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-        .append_pair("code_challenge_method", "S256")
-        .finish();
-    let url = format!("{hydra_public}/oauth2/auth?{q}");
-    let resp = http
-        .request(http::Method::GET, &url)
-        .expect("build /oauth2/auth")
-        .send()
-        .await
-        .expect("send /oauth2/auth");
-    let loc = location(&resp);
-    extract_query_param(&loc, "login_challenge")
-        .unwrap_or_else(|| panic!("hydra /oauth2/auth → /login redirect carries no login_challenge: {loc}"))
-}
-
-/// Common bootstrap. Returns `None` if env-skip applies.
-#[allow(dead_code)] // `test_secret` retained for future tests that need to drive the token endpoint
-struct Fixture {
-    srv: ntex::web::test::TestServer,
-    auth_base: String,
-    admin: HydraAdmin,
-    pg: Arc<compio_postgres::Client>,
-    http: cyper::Client,
-    test_client_id: String,
-    test_secret: String,
-    test_redirect: &'static str,
-    hydra_public: String,
-}
-
-impl Fixture {
-    async fn boot() -> Option<Self> {
-        let (Ok(db_url), Ok(hydra_admin_url)) = (
-            std::env::var("AUTH_DB_URL"),
-            std::env::var("AUTH_HYDRA_ADMIN"),
-        ) else {
-            return None;
-        };
-        let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
-
-        let (pg_client, pg_connection) =
-            compio_postgres::connect(&db_url, compio_postgres::NoTls)
-                .await
-                .expect("connect pg");
-        compio::runtime::spawn(async move {
-            if let Err(e) = pg_connection.run().await {
-                eprintln!("[threat_model] pg connection driver: {e}");
-            }
-        })
-        .detach();
-        migrations::migrate(&pg_client).await.expect("migrate");
-        let pg = Arc::new(pg_client);
-
-        let admin = HydraAdmin::new(&hydra_admin_url);
-        let cfg = Arc::new(AuthConfig {
-            addr: "127.0.0.1:0".to_string(),
-            db_url: db_url.clone(),
-            hydra_admin: hydra_admin_url.clone(),
-            hydra_public: hydra_public.clone(),
-            clients_config: "ops/auth-clients.example.toml".to_string(),
-            bootstrap: false,
-            insecure_dev: true,
-        });
-        let admin_state = admin.clone();
-        let cfg_state = cfg.clone();
-        let db_state = pg.clone();
-        let srv = web::test::server(move || {
-            let admin_state = admin_state.clone();
-            let cfg_state = cfg_state.clone();
-            let db_state = db_state.clone();
-            async move {
-                web::App::new()
-                    .state(admin_state)
-                    .state(cfg_state)
-                    .state(db_state)
-                    .middleware(SecurityHeaders)
-                    .configure(server::configure)
-            }
-        })
-        .await;
-        let auth_base = srv.url("").trim_end_matches('/').to_string();
-
-        // Register a fresh hydra OIDC client per fixture so tests are
-        // isolated. `skip_consent=true` lets the rotation test reach the
-        // post-login session cookie without rendering /consent.
-        let test_client_id = format!("threat-{}", Uuid::new_v4().simple());
-        let test_secret = "threat-test-secret".to_string();
-        let test_redirect: &'static str = "http://127.0.0.1:9999/cb";
-        admin
-            .create_client(&OAuth2Client {
-                client_id: test_client_id.clone(),
-                client_name: Some("threat test".into()),
-                client_secret: Some(test_secret.clone()),
-                grant_types: vec!["authorization_code".into()],
-                response_types: vec!["code".into()],
-                redirect_uris: vec![test_redirect.into()],
-                post_logout_redirect_uris: vec![],
-                scope: "openid".into(),
-                token_endpoint_auth_method: "client_secret_post".into(),
-                subject_type: "public".into(),
-                access_token_strategy: None,
-                id_token_signed_response_alg: Some("RS256".into()),
-                audience: vec![],
-                skip_consent: true,
-                require_consent: false,
-                require_logout_consent: false,
-                frontchannel_logout_uri: None,
-                backchannel_logout_uri: None,
-            })
-            .await
-            .expect("create test client");
-
-        Some(Self {
-            srv,
-            auth_base,
-            admin,
-            pg,
-            http: cyper::Client::new(),
-            test_client_id,
-            test_secret,
-            test_redirect,
-            hydra_public,
-        })
-    }
-
-    async fn cleanup(self) {
-        let _ = self.admin.delete_client(&self.test_client_id).await;
-        compio::time::sleep(Duration::from_millis(50)).await;
-        drop(self.srv);
-    }
-
-    async fn fresh_challenge(&self) -> String {
-        fresh_login_challenge(
-            &self.http,
-            &self.hydra_public,
-            &self.test_client_id,
-            self.test_redirect,
-        )
-        .await
-    }
-}
+mod common;
+use common::{
+    cleanup_rate_limits_like, cleanup_user, location, read_set_cookie, rewrite_to_hydra_loopback,
+    CookieJar, Fixture,
+};
 
 // ─── Tests ───────────────────────────────────────────────────────────────
 
@@ -264,7 +30,7 @@ impl Fixture {
 /// re-rendered login form at status 400.
 #[ntex::test]
 async fn login_csrf_missing_field_rejected() {
-    let Some(fx) = Fixture::boot().await else {
+    let Some(fx) = Fixture::boot("threat").await else {
         eprintln!("[threat_model::csrf_missing] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
         return;
     };
@@ -316,7 +82,7 @@ async fn login_csrf_missing_field_rejected() {
 /// §13 "Login CSRF": form `csrf` field ≠ cookie token → reject.
 #[ntex::test]
 async fn login_csrf_mismatched_token_rejected() {
-    let Some(fx) = Fixture::boot().await else {
+    let Some(fx) = Fixture::boot("threat").await else {
         eprintln!("[threat_model::csrf_mismatch] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
         return;
     };
@@ -372,7 +138,7 @@ async fn login_csrf_mismatched_token_rejected() {
 /// apply across login/signup/consent per §14.
 #[ntex::test]
 async fn login_clickjacking_headers_present() {
-    let Some(fx) = Fixture::boot().await else {
+    let Some(fx) = Fixture::boot("threat").await else {
         eprintln!("[threat_model::clickjacking] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
         return;
     };
@@ -415,7 +181,7 @@ async fn login_clickjacking_headers_present() {
 /// `crates/auth` UI pages.
 #[ntex::test]
 async fn login_referrer_policy_set() {
-    let Some(fx) = Fixture::boot().await else {
+    let Some(fx) = Fixture::boot("threat").await else {
         eprintln!("[threat_model::referrer] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
         return;
     };
@@ -449,7 +215,7 @@ async fn login_referrer_policy_set() {
 /// `(email, ip)` tuple.
 #[ntex::test]
 async fn login_rate_limit_kicks_in() {
-    let Some(fx) = Fixture::boot().await else {
+    let Some(fx) = Fixture::boot("threat").await else {
         eprintln!("[threat_model::rate_limit] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
         return;
     };
@@ -462,20 +228,9 @@ async fn login_rate_limit_kicks_in() {
     // (login:ip:127.0.0.1) is shared across all tests this session; its
     // capacity (60/hour) is large enough that the other tests in this
     // binary won't drain it ahead of us.
-    fx.pg
-        .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key LIKE $1",
-            &[&format!("login:eip:{email}:%")],
-        )
-        .await
-        .ok();
-    fx.pg
-        .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key = $1",
-            &[&format!("login:email:{email}")],
-        )
-        .await
-        .ok();
+    let eip_pat = format!("login:eip:{email}:%");
+    let email_pat = format!("login:email:{email}");
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
 
     let mut last_status: u16 = 0;
     for i in 1..=6 {
@@ -524,20 +279,7 @@ async fn login_rate_limit_kicks_in() {
     );
 
     // Cleanup the EIP bucket so re-runs of this test don't carry state.
-    fx.pg
-        .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key LIKE $1",
-            &[&format!("login:eip:{email}:%")],
-        )
-        .await
-        .ok();
-    fx.pg
-        .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key = $1",
-            &[&format!("login:email:{email}")],
-        )
-        .await
-        .ok();
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
 
     fx.cleanup().await;
 }
@@ -563,7 +305,7 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
     let csrf = read_set_cookie(&resp, "__Host-zsidp_csrf")
         .expect("__Host-zsidp_csrf cookie set on GET /login");
 
-    let mut jar = Jar::default();
+    let mut jar = CookieJar::default();
     jar.absorb(&resp);
 
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -615,7 +357,7 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
 /// values differ.
 #[ntex::test]
 async fn session_id_rotates_post_login_success() {
-    let Some(fx) = Fixture::boot().await else {
+    let Some(fx) = Fixture::boot("threat").await else {
         eprintln!("[threat_model::rotate] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
         return;
     };
@@ -640,17 +382,9 @@ async fn session_id_rotates_post_login_success() {
 
     // Reset EIP/email buckets for this email so two back-to-back logins
     // both succeed.
-    fx.pg
-        .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key LIKE $1 \
-              OR bucket_key = $2",
-            &[
-                &format!("login:eip:{email}:%"),
-                &format!("login:email:{email}"),
-            ],
-        )
-        .await
-        .ok();
+    let eip_pat = format!("login:eip:{email}:%");
+    let email_pat = format!("login:email:{email}");
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
 
     let sid1 = one_login(&fx, &email, password).await;
     let sid2 = one_login(&fx, &email, password).await;
@@ -663,32 +397,8 @@ async fn session_id_rotates_post_login_success() {
     assert!(!sid2.is_empty(), "second sid must be non-empty");
 
     // Cleanup.
-    fx.pg
-        .execute(
-            "DELETE FROM auth.sessions WHERE user_id IN \
-             (SELECT id FROM auth.users WHERE email = $1::citext)",
-            &[&email.as_str()],
-        )
-        .await
-        .ok();
-    fx.pg
-        .execute(
-            "DELETE FROM auth.users WHERE email = $1::citext",
-            &[&email.as_str()],
-        )
-        .await
-        .ok();
-    fx.pg
-        .execute(
-            "DELETE FROM auth.rate_limits WHERE bucket_key LIKE $1 \
-              OR bucket_key = $2",
-            &[
-                &format!("login:eip:{email}:%"),
-                &format!("login:email:{email}"),
-            ],
-        )
-        .await
-        .ok();
+    cleanup_user(&fx.pg, &email).await;
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
 
     fx.cleanup().await;
 }

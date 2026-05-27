@@ -29,7 +29,6 @@ use std::time::Duration;
 use base64::Engine as _;
 use ntex::web;
 use serde::Deserialize;
-use sha2::Digest as _;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
@@ -39,122 +38,13 @@ use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 use zeroship_auth::store::migrations;
 
+mod common;
+use common::{
+    assert_redirect, cleanup_user, extract_query_param, location, pkce_challenge_s256,
+    pkce_verifier, read_set_cookie, rewrite_to_hydra_loopback, CookieJar,
+};
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
-
-/// 32 random bytes, base64url-encoded (no padding). Per RFC 7636 §4.1
-/// the verifier is 43-128 chars of `[A-Z][a-z][0-9]-._~`; this yields 43.
-fn pkce_verifier() -> String {
-    use rand::RngCore as _;
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// RFC 7636 §4.2: `BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))`.
-fn pkce_challenge_s256(verifier: &str) -> String {
-    let digest = sha2::Sha256::digest(verifier.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
-}
-
-fn extract_query_param(raw_url: &str, key: &str) -> Option<String> {
-    let parsed = url::Url::parse(raw_url).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.into_owned())
-}
-
-/// Rewrite the host of a URL hydra hands us (always
-/// `https://auth.zeroship.ai/...`) to the loopback admin address used by the
-/// local hydra container.
-fn rewrite_to_hydra_loopback(raw_url: &str) -> String {
-    // We rebuild rather than `set_host` because hydra serves :4444 over plain
-    // HTTP in dev and we want to drop the TLS scheme too.
-    for prefix in ["https://auth.zeroship.ai", "http://auth.zeroship.ai"] {
-        if let Some(rest) = raw_url.strip_prefix(prefix) {
-            return format!("http://127.0.0.1:4444{rest}");
-        }
-    }
-    raw_url.to_string()
-}
-
-/// Minimal cookie jar: `name → value`. Ignores Domain/Path/Expires; the test
-/// flow only hits two hosts (auth-test + hydra-loopback) and never overlaps
-/// cookie names that matter.
-#[derive(Default)]
-struct Jar {
-    inner: std::collections::HashMap<String, String>,
-}
-
-impl Jar {
-    /// Absorb every `Set-Cookie` header from a cyper response.
-    fn absorb(&mut self, resp: &cyper::Response) {
-        for hv in resp.headers().get_all(http::header::SET_COOKIE) {
-            let Ok(s) = hv.to_str() else { continue };
-            // `name=value; ...attrs`. We only care about `name=value`.
-            let first = s.split(';').next().unwrap_or("");
-            if let Some((name, value)) = first.split_once('=') {
-                let name = name.trim();
-                let value = value.trim();
-                if name.is_empty() {
-                    continue;
-                }
-                // Empty value = browser-style deletion; honour it.
-                if value.is_empty() {
-                    self.inner.remove(name);
-                } else {
-                    self.inner.insert(name.to_string(), value.to_string());
-                }
-            }
-        }
-    }
-
-    fn set(&mut self, name: &str, value: &str) {
-        self.inner.insert(name.to_string(), value.to_string());
-    }
-
-    /// Serialize to a `Cookie:` header value (`a=1; b=2`).
-    fn header(&self) -> String {
-        let mut parts: Vec<String> =
-            self.inner.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        parts.sort();
-        parts.join("; ")
-    }
-}
-
-/// Read the `value` field of the first matching `Set-Cookie: <name>=<value>; ...`
-/// header.
-fn read_set_cookie(resp: &cyper::Response, name: &str) -> Option<String> {
-    for hv in resp.headers().get_all(http::header::SET_COOKIE) {
-        let Ok(s) = hv.to_str() else { continue };
-        let first = s.split(';').next().unwrap_or("");
-        if let Some((n, v)) = first.split_once('=') {
-            if n.trim() == name {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-fn location(resp: &cyper::Response) -> String {
-    resp.headers()
-        .get(http::header::LOCATION)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Hydra mixes 302 (Found) and 303 (See Other) across its redirect arms —
-/// both are valid for OAuth flows. Our own handlers use 302 explicitly, but
-/// when we follow hydra's own redirects we accept any 3xx.
-fn assert_redirect(resp: &cyper::Response, what: &str) {
-    let s = resp.status().as_u16();
-    assert!(
-        (300..400).contains(&s),
-        "{what}: expected 3xx redirect, got {s}"
-    );
-}
 
 /// Hydra's `POST /oauth2/token` response body. Fields not asserted on are
 /// still validated by serde (must be present + correct type).
@@ -276,7 +166,7 @@ async fn e2e_password_flow() {
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
     let http = cyper::Client::new();
-    let mut jar = Jar::default();
+    let mut jar = CookieJar::default();
 
     // 5. GET hydra /oauth2/auth → 302 to https://auth.zeroship.ai/login?login_challenge=…
     let auth_url = {
@@ -541,28 +431,7 @@ async fn e2e_password_flow() {
         .delete_client(&test_client_id)
         .await
         .expect("delete test client");
-    // CITEXT columns require an explicit text→citext cast for the bind
-    // (compio-postgres binds &str as TEXT; PG won't auto-cast in a WHERE).
-    // Delete IdP sessions first so the user-row delete doesn't trip the FK.
-    let session_cleanup = pg_client
-        .execute(
-            "DELETE FROM auth.sessions WHERE user_id IN \
-             (SELECT id FROM auth.users WHERE email = $1::citext)",
-            &[&email.as_str()],
-        )
-        .await;
-    if let Err(e) = session_cleanup {
-        eprintln!("[e2e_password] session cleanup failed (non-fatal): {e:?}");
-    }
-    let deleted = pg_client
-        .execute(
-            "DELETE FROM auth.users WHERE email = $1::citext",
-            &[&email.as_str()],
-        )
-        .await;
-    if let Err(e) = deleted {
-        eprintln!("[e2e_password] user cleanup failed (non-fatal): {e:?}");
-    }
+    cleanup_user(&pg_client, &email).await;
 
     // Give the server a beat to flush any pending audit writes before
     // we tear down its thread; otherwise the test occasionally races

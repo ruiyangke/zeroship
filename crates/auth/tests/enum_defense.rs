@@ -29,88 +29,8 @@ use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 use zeroship_auth::store::migrations;
 
-// ─── Helpers (duplicated from e2e_password.rs to keep the test file
-//     self-contained — see U8 brief Option A). ────────────────────────────
-
-fn extract_query_param(raw_url: &str, key: &str) -> Option<String> {
-    let parsed = url::Url::parse(raw_url).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.into_owned())
-}
-
-#[derive(Default)]
-struct Jar {
-    inner: std::collections::HashMap<String, String>,
-}
-
-impl Jar {
-    fn set(&mut self, name: &str, value: &str) {
-        self.inner.insert(name.to_string(), value.to_string());
-    }
-
-    fn header(&self) -> String {
-        let mut parts: Vec<String> =
-            self.inner.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        parts.sort();
-        parts.join("; ")
-    }
-}
-
-fn read_set_cookie(resp: &cyper::Response, name: &str) -> Option<String> {
-    for hv in resp.headers().get_all(http::header::SET_COOKIE) {
-        let Ok(s) = hv.to_str() else { continue };
-        let first = s.split(';').next().unwrap_or("");
-        if let Some((n, v)) = first.split_once('=') {
-            if n.trim() == name {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-fn location(resp: &cyper::Response) -> String {
-    resp.headers()
-        .get(http::header::LOCATION)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// Issue a fresh `login_challenge` from hydra. The challenge is not
-/// single-use until `accept_login` runs — but we never call it here, so
-/// every challenge stays "pending" and is safe to discard.
-async fn fresh_login_challenge(
-    http: &cyper::Client,
-    hydra_public: &str,
-    client_id: &str,
-    redirect_uri: &str,
-) -> String {
-    let q = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", client_id)
-        .append_pair("response_type", "code")
-        .append_pair("scope", "openid")
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("state", &format!("st-{}", Uuid::new_v4().simple()))
-        .append_pair("nonce", &format!("nc-{}", Uuid::new_v4().simple()))
-        // 43-char base64url SHA-256 placeholder — hydra accepts any S256
-        // challenge of the right shape at this step.
-        .append_pair("code_challenge", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-        .append_pair("code_challenge_method", "S256")
-        .finish();
-    let url = format!("{hydra_public}/oauth2/auth?{q}");
-    let resp = http
-        .request(http::Method::GET, &url)
-        .expect("build /oauth2/auth")
-        .send()
-        .await
-        .expect("send /oauth2/auth");
-    let loc = location(&resp);
-    extract_query_param(&loc, "login_challenge")
-        .unwrap_or_else(|| panic!("hydra /oauth2/auth → /login redirect carries no login_challenge: {loc}"))
-}
+mod common;
+use common::{fresh_login_challenge, read_set_cookie, CookieJar};
 
 fn median(durations: &mut [Duration]) -> Duration {
     durations.sort();
@@ -272,7 +192,7 @@ async fn login_failure_responses_are_indistinguishable() {
         );
         let csrf = read_set_cookie(&resp, "__Host-zsidp_csrf")
             .expect("__Host-zsidp_csrf cookie set on GET /login");
-        let mut jar = Jar::default();
+        let mut jar = CookieJar::default();
         jar.set("__Host-zsidp_csrf", &csrf);
 
         let body = url::form_urlencoded::Serializer::new(String::new())
