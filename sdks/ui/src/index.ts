@@ -21,15 +21,22 @@ export {
   type ThemeProviderProps,
 } from "./theme";
 
+// Real, HIG-styled components. Currently: Button.
+export {
+  Button,
+  type ButtonProps,
+  type ButtonRole,
+  type ButtonSize,
+  type ButtonVariant,
+} from "./components";
+
 // Temporary placeholders — see ./placeholders.tsx for migration tracking.
 export {
   Badge,
-  Button,
   Card,
   Dialog,
   Input,
   type BadgeProps,
-  type ButtonProps,
   type CardProps,
   type DialogProps,
   type InputProps,

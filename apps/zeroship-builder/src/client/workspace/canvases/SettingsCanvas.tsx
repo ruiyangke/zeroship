@@ -152,7 +152,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
             </p>
             {isArchived ? (
               <Button
-                variant="secondary"
+                variant="tinted"
                 onClick={() => unarchive.mutate()}
                 disabled={unarchive.isPending}
                 loading={unarchive.isPending}
@@ -162,7 +162,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
               </Button>
             ) : (
               <Button
-                variant="secondary"
+                variant="tinted"
                 onClick={() => archive.mutate()}
                 disabled={archive.isPending}
                 loading={archive.isPending}
@@ -189,7 +189,8 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
               away. This can't be undone.
             </p>
             <Button
-              variant="danger"
+              variant="filled"
+              role="destructive"
               onClick={() => setConfirmOpen(true)}
               data-testid="settings-delete"
             >
@@ -240,14 +241,16 @@ function DeleteConfirm({
       footer={
         <>
           <Button
-            variant="ghost"
+            variant="plain"
+            role="cancel"
             onClick={onClose}
             disabled={deleting}
           >
             cancel
           </Button>
           <Button
-            variant="danger"
+            variant="filled"
+            role="destructive"
             onClick={() => matches && onConfirm()}
             disabled={!matches || deleting}
             loading={deleting}
@@ -351,7 +354,7 @@ function CopyField({ label, value }: { label: string; value: string }) {
           data-testid="settings-copy-id"
         />
         <Button
-          variant="secondary"
+          variant="tinted"
           onClick={copy}
           data-testid="settings-copy-id-btn"
         >

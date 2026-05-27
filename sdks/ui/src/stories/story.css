@@ -1,0 +1,54 @@
+/*
+ * Storybook surface — paints the active theme's mesh under every story so
+ * translucent surfaces actually have something to compose with.
+ */
+.zs-story-main {
+  min-height: 100vh;
+  padding: var(--zs-space-7);
+  background: var(--zs-surface-bg, var(--zs-surface));
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  display: grid;
+  place-items: center;
+}
+
+.zs-story-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--zs-space-4);
+  padding: var(--zs-space-6);
+  background: var(--zs-surface-raised);
+  border-radius: var(--zs-radius-6);
+  backdrop-filter: var(--zs-blur);
+  -webkit-backdrop-filter: var(--zs-blur);
+  box-shadow: 0 0.0625rem 0 0 var(--zs-separator) inset;
+}
+
+.zs-story-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  gap: var(--zs-space-4);
+  padding: var(--zs-space-6);
+  background: var(--zs-surface-raised);
+  border-radius: var(--zs-radius-6);
+  backdrop-filter: var(--zs-blur);
+  -webkit-backdrop-filter: var(--zs-blur);
+  box-shadow: 0 0.0625rem 0 0 var(--zs-separator) inset;
+}
+
+.zs-story-label {
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--zs-space-2);
+}
+
+.zs-story-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--zs-space-2);
+}

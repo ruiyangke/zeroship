@@ -11,21 +11,22 @@ import {
 /**
  * Theme names registered with the design system.
  *
- * The rebuild will populate this with `light` and `dark` as the two
- * first-class themes. Themes vary only palette/accent/density — the
- * design language itself (type scale, spacing, radii, motion, materials,
- * component anatomy) is theme-invariant and lives in the foundation
- * token block. Until those tokens land, the list is empty and
- * ThemeProvider is a passthrough that still establishes a `data-theme`
- * root for future styling.
+ * Themes vary only palette/accent/material defaults — the design
+ * language itself (type scale, spacing, radii, motion, focus, hit
+ * targets) is theme-invariant and lives in the foundation token block
+ * in styles.css.
+ *
+ * Currently registered themes: `crystal` (light glass).
  */
-export const themes = [] as const;
+export const themes = ["crystal"] as const;
 export type ThemeName = (typeof themes)[number] | (string & {});
 
-export const DEFAULT_THEME: ThemeName = "light";
+export const DEFAULT_THEME: ThemeName = "crystal";
 export const THEME_STORAGE_KEY = "zeroship-ui-theme";
 
-export const themeLabels: Record<string, string> = {};
+export const themeLabels: Record<string, string> = {
+  crystal: "Crystal",
+};
 
 export function isThemeName(value: string | null | undefined): value is ThemeName {
   return typeof value === "string" && value.length > 0;

@@ -2,18 +2,13 @@ import type { Preview } from "@storybook/react";
 import { createElement } from "react";
 import { withThemeByDataAttribute } from "@storybook/addon-themes";
 import "../src/styles.css";
+import "../src/stories/story.css";
 
-/*
- * The themes map is intentionally empty during the rebuild. It is
- * repopulated with `light` and `dark` (and any future palette variants)
- * once the foundation tokens land. The decorator stays installed so the
- * toolbar shape is preserved.
- */
 const preview: Preview = {
   decorators: [
     withThemeByDataAttribute({
-      themes: {},
-      defaultTheme: "light",
+      themes: { Crystal: "crystal" },
+      defaultTheme: "Crystal",
       attributeName: "data-theme",
       parentSelector: "html",
     }),

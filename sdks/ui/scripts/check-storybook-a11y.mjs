@@ -7,18 +7,17 @@ if (!baseUrl) {
 }
 
 /*
- * The themes and stories lists are intentionally empty during the rebuild.
- * They are repopulated as components land: each new component adds its
- * story id here, and each new theme (light, dark, ...) adds an entry. The
- * script reports "no stories to check" rather than failing while the
- * system is empty.
+ * Themes and story IDs grow as components land. Each new component
+ * appends its story IDs here; each new palette appends a theme entry.
  */
 const themes = [
-  // { label: "Light", value: "light" },
-  // { label: "Dark", value: "dark" },
+  { label: "Crystal", value: "crystal" },
 ];
 const stories = [
-  // "components-base-ui--button-states",
+  "components-button--all-styles",
+  "components-button--all-sizes",
+  "components-button--all-states",
+  "components-button--destructive",
 ];
 
 if (themes.length === 0 || stories.length === 0) {

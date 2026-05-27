@@ -22,28 +22,8 @@ import type {
 } from "react";
 
 type DivProps = ComponentPropsWithoutRef<"div">;
-type NativeButtonProps = ComponentPropsWithoutRef<"button">;
 type NativeInputProps = ComponentPropsWithoutRef<"input">;
 type SpanProps = ComponentPropsWithoutRef<"span">;
-
-// ───── Button ────────────────────────────────────────────────────────────────
-
-export interface ButtonProps extends NativeButtonProps {
-  variant?: string;
-  tone?: string;
-  size?: string;
-  loading?: boolean;
-}
-
-export function Button({
-  variant: _variant,
-  tone: _tone,
-  size: _size,
-  loading: _loading,
-  ...props
-}: ButtonProps) {
-  return <button {...props} />;
-}
 
 // ───── Input ─────────────────────────────────────────────────────────────────
 
