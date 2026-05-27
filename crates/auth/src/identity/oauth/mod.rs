@@ -6,4 +6,5 @@
 //! stash handling lives in the HTTP layer (`crate::ui::oauth_google` etc.),
 //! not here.
 
+pub mod github;
 pub mod google;
