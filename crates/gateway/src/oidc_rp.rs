@@ -292,6 +292,100 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
+// ─── Cookie helpers ──────────────────────────────────────────────────────
+//
+// Two cookies live on the per-app origin (`{app}.zeroship.ai`):
+//
+// - `__Host-zs_app_session` — opaque session id minted after a successful
+//   OIDC dance. 12 h max-age, set on `/__zs/auth/callback`, cleared on
+//   `/__zs/auth/logout`. The gateway looks this up server-side to resolve
+//   `ZeroShip-User` on every request.
+// - `__Host-zs_oidc_stash` — the signed PKCE+state stash. 10 min max-age,
+//   set on the redirect to hydra, cleared on callback.
+//
+// Both use the `__Host-` prefix which RFC 6265bis (§4.1.3) requires
+// `Path=/`, no `Domain=`, and `Secure`. The dev override drops `Secure`
+// only for HTTP localhost; the rest of the attributes never move.
+
+/// Per-origin app session cookie name. Set after a successful code
+/// exchange; cleared on logout.
+pub const APP_SESSION_COOKIE: &str = "__Host-zs_app_session";
+
+/// 12-hour absolute lifetime for the app session cookie.
+pub const APP_SESSION_MAX_AGE_SECS: i64 = 12 * 3600;
+
+/// Build the `Set-Cookie` header value for the per-app session.
+///
+/// `insecure_dev = true` drops `Secure` so localhost HTTP works. In
+/// production this MUST be false (the `__Host-` prefix requires Secure).
+#[must_use]
+pub fn set_app_session_cookie(session_id: &uuid::Uuid, insecure_dev: bool) -> String {
+    let secure = if insecure_dev { "" } else { "; Secure" };
+    format!(
+        "{APP_SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={APP_SESSION_MAX_AGE_SECS}"
+    )
+}
+
+/// Clear the per-app session cookie on logout.
+#[must_use]
+pub fn clear_app_session_cookie(insecure_dev: bool) -> String {
+    let secure = if insecure_dev { "" } else { "; Secure" };
+    format!("{APP_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+}
+
+/// Parse the app session UUID from a `Cookie` header value.
+#[must_use]
+pub fn parse_app_session_cookie(cookie_header: &str) -> Option<uuid::Uuid> {
+    let prefix = format!("{APP_SESSION_COOKIE}=");
+    for part in cookie_header.split(';') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix(&prefix) {
+            return uuid::Uuid::parse_str(rest).ok();
+        }
+    }
+    None
+}
+
+/// PKCE/state stash cookie name. Lives only between the initial redirect
+/// to hydra and the eventual `/__zs/auth/callback`.
+pub const STASH_COOKIE: &str = "__Host-zs_oidc_stash";
+
+/// 10-minute window for the OIDC dance to complete. After this the user
+/// has to re-initiate.
+pub const STASH_MAX_AGE_SECS: i64 = 600;
+
+/// Build the `Set-Cookie` header value for the OIDC stash.
+#[must_use]
+pub fn set_stash_cookie(value: &str, insecure_dev: bool) -> String {
+    let secure = if insecure_dev { "" } else { "; Secure" };
+    format!(
+        "{STASH_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={STASH_MAX_AGE_SECS}"
+    )
+}
+
+/// Clear the OIDC stash cookie. Set on the callback response so the
+/// short-lived stash doesn't linger after the dance completes.
+#[must_use]
+pub fn clear_stash_cookie(insecure_dev: bool) -> String {
+    let secure = if insecure_dev { "" } else { "; Secure" };
+    format!("{STASH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+}
+
+/// Parse the raw stash value out of a `Cookie` header. Returns the
+/// signed-blob string; pass it to `Stash::decode` (via
+/// `OidcRp::finish_callback`) to verify and recover the payload.
+#[must_use]
+pub fn parse_stash_cookie(cookie_header: &str) -> Option<String> {
+    let prefix = format!("{STASH_COOKIE}=");
+    for part in cookie_header.split(';') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix(&prefix) {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +481,82 @@ mod tests {
         assert!(Stash::decode("@@@.@@@", &key).is_none());
         // Empty.
         assert!(Stash::decode("", &key).is_none());
+    }
+
+    // ─── App session cookie ─────────────────────────────────────────
+
+    #[test]
+    fn app_session_set_cookie_has_secure_in_prod() {
+        let id = uuid::Uuid::new_v4();
+        let c = set_app_session_cookie(&id, false);
+        assert!(c.starts_with("__Host-zs_app_session="));
+        assert!(c.contains(&id.to_string()));
+        assert!(c.contains("Path=/"));
+        assert!(c.contains("HttpOnly"));
+        assert!(c.contains("SameSite=Lax"));
+        assert!(c.contains("Secure"));
+        assert!(c.contains("Max-Age=43200")); // 12h
+    }
+
+    #[test]
+    fn app_session_set_cookie_drops_secure_in_dev() {
+        let id = uuid::Uuid::new_v4();
+        let c = set_app_session_cookie(&id, true);
+        assert!(!c.contains("Secure"), "dev cookie must NOT have Secure: {c}");
+        assert!(c.contains("HttpOnly"));
+        assert!(c.contains("SameSite=Lax"));
+    }
+
+    #[test]
+    fn app_session_clear_cookie_zero_max_age() {
+        let c = clear_app_session_cookie(false);
+        assert!(c.contains("Max-Age=0"));
+        assert!(c.contains("Secure"));
+        let dev = clear_app_session_cookie(true);
+        assert!(!dev.contains("Secure"));
+    }
+
+    #[test]
+    fn app_session_parse_cookie_roundtrips() {
+        let id = uuid::Uuid::new_v4();
+        let header = format!("foo=bar; __Host-zs_app_session={id}; baz=qux");
+        assert_eq!(parse_app_session_cookie(&header), Some(id));
+        assert_eq!(parse_app_session_cookie("nothing-here"), None);
+        assert_eq!(parse_app_session_cookie("__Host-zs_app_session=not-a-uuid"), None);
+    }
+
+    // ─── Stash cookie ───────────────────────────────────────────────
+
+    #[test]
+    fn stash_set_cookie_has_secure_in_prod() {
+        let c = set_stash_cookie("payload.signed", false);
+        assert!(c.starts_with("__Host-zs_oidc_stash=payload.signed"));
+        assert!(c.contains("Path=/"));
+        assert!(c.contains("HttpOnly"));
+        assert!(c.contains("SameSite=Lax"));
+        assert!(c.contains("Secure"));
+        assert!(c.contains("Max-Age=600")); // 10 min
+    }
+
+    #[test]
+    fn stash_set_cookie_drops_secure_in_dev() {
+        let c = set_stash_cookie("v", true);
+        assert!(!c.contains("Secure"));
+    }
+
+    #[test]
+    fn stash_clear_cookie_zero_max_age() {
+        let c = clear_stash_cookie(false);
+        assert!(c.contains("Max-Age=0"));
+        assert!(c.contains("Secure"));
+        let dev = clear_stash_cookie(true);
+        assert!(!dev.contains("Secure"));
+    }
+
+    #[test]
+    fn stash_parse_cookie_roundtrips() {
+        let header = "foo=bar; __Host-zs_oidc_stash=abc.def; baz=qux";
+        assert_eq!(parse_stash_cookie(header), Some("abc.def".into()));
+        assert_eq!(parse_stash_cookie("nothing"), None);
     }
 }
