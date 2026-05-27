@@ -2,3 +2,4 @@
 //! CRUD modules are added in later phases as they're needed.
 
 pub mod migrations;
+pub mod ratelimit;

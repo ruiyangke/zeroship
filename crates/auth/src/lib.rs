@@ -5,5 +5,6 @@ pub mod config;
 pub mod error;
 pub mod hydra_client;
 pub mod identity;
+pub mod ratelimit;
 pub mod server;
 pub mod store;
