@@ -63,6 +63,46 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
     })
 }
 
+/// Validate an `IdP` session by id. Returns the row if valid, `None`
+/// otherwise. Slides `idle_expires_at` forward on every successful
+/// validation (the `IdP` session's sliding 30-min idle window).
+///
+/// "Valid" means: row exists, not revoked, idle and absolute expiries
+/// both in the future. The check + slide is one atomic
+/// `UPDATE ... RETURNING` so concurrent requests can't race the sliding
+/// window. Mirrors `gateway::sessions::validate`.
+///
+/// # Errors
+///
+/// `AuthError::Db` on PG failure.
+pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> {
+    let rows = conn
+        .query(
+            "UPDATE auth.sessions \
+             SET idle_expires_at = NOW() + ($2::text || ' minutes')::interval \
+             WHERE id = $1 \
+               AND revoked_at IS NULL \
+               AND idle_expires_at > NOW() \
+               AND abs_expires_at > NOW() \
+             RETURNING id, user_id, auth_method, amr, acr, idle_expires_at, abs_expires_at",
+            &[
+                &id,
+                &crate::sessions::login::IDLE_MINUTES.to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("sessions validate: {e}")))?;
+    Ok(rows.first().map(|row| Session {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        auth_method: row.get("auth_method"),
+        amr: row.get("amr"),
+        acr: row.try_get("acr").ok(),
+        idle_expires_at: row.get("idle_expires_at"),
+        abs_expires_at: row.get("abs_expires_at"),
+    }))
+}
+
 /// Revoke a session (set `revoked_at = NOW()`).
 ///
 /// # Errors

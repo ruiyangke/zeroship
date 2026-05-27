@@ -60,6 +60,15 @@ pub fn configure(
                 web::resource("/link")
                     .route(web::get().to(ui::link::get))
                     .route(web::post().to(ui::link::post)),
+            )
+            // `/me` is the signed-in user's profile page; `/me/unlink/<provider>`
+            // is the POST target for the per-identity Unlink form. Both
+            // require an `__Host-zsidp_session` cookie — the handlers
+            // themselves do the validation (no middleware gate yet).
+            .service(web::resource("/me").route(web::get().to(ui::me::get)))
+            .service(
+                web::resource("/me/unlink/{provider}")
+                    .route(web::post().to(ui::me::unlink)),
             );
 
         if google_enabled {

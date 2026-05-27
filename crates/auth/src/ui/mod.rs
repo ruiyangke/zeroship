@@ -12,6 +12,7 @@
 pub mod consent;
 pub mod link;
 pub mod login;
+pub mod me;
 pub mod oauth_github;
 pub mod oauth_google;
 pub mod oauth_stash;
@@ -75,4 +76,32 @@ pub struct ConsentPage<'a> {
     pub client_name: &'a str,
     pub scopes: Vec<&'a str>,
     pub error: Option<&'a str>,
+}
+
+/// One row in the linked-identities list on `/me`. Mirrors
+/// `store::identities::Identity` but trimmed to the fields the template
+/// surfaces — kept as borrowed strings so the page struct stays zero-copy.
+#[derive(Debug)]
+pub struct LinkedIdentity<'a> {
+    pub provider: &'a str,
+    pub email_at_link: &'a str,
+}
+
+/// `/me` profile page (P4-U6).
+///
+/// Logged-in-user only; the handler resolves the user from the
+/// `__Host-zsidp_session` cookie before rendering. The `error`/`success`
+/// arms are mutually exclusive in practice but kept independent so
+/// future flows can layer messages without touching the template.
+#[derive(Debug, Template)]
+#[template(path = "me.html")]
+pub struct MePage<'a> {
+    pub email: &'a str,
+    pub name: &'a str,
+    pub avatar_url: Option<&'a str>,
+    pub has_password: bool,
+    pub identities: Vec<LinkedIdentity<'a>>,
+    pub csrf: &'a str,
+    pub error: Option<&'a str>,
+    pub success: Option<&'a str>,
 }
