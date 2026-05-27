@@ -34,6 +34,15 @@ const stories = [
   "components-input--rtl",
   "components-input--long-label-and-description",
   "components-input--inside-form",
+  // slice-2 review-fix additions (item 24)
+  "components-input--field-size-inheritance",
+  "components-input--error-boolean-only",
+  "components-input--with-external-description",
+  "components-input--field-disabled-propagation",
+  "components-input--horizontal-layout-with-error",
+  "components-input--input-ref-integration",
+  "components-input--autofill",
+  "components-input--custom-validate",
 ];
 
 const mimeMap = new Map([

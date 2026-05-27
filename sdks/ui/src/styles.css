@@ -142,6 +142,11 @@
      these gaps so consumers can sub-theme spacing in one place. */
   --zs-field-gap: var(--zs-space-2);           /* 8 — label/control/desc/err stack gap */
   --zs-field-label-gap: var(--zs-space-1);     /* 4 — inline label↔required indicator gap */
+  /* Horizontal Field label cell width. Promoted to a foundation token
+     (rather than only an inline `var(...)` fallback) so per-form-section
+     overrides via CSS or inline `--zs-field-horizontal-label-w: …` are
+     discoverable. Item 17 of the slice-2 review fix brief. */
+  --zs-field-horizontal-label-w: 10rem;        /* 160 */
 }
 
 @media (prefers-reduced-motion: reduce) {

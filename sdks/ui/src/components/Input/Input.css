@@ -3,7 +3,7 @@
  *
  * Anatomy:
  *   .zs-input                    — bordered shell (focus ring lives here)
- *     ├─ .zs-input__slot--start  — optional leading adornment (aria-hidden)
+ *     ├─ .zs-input__slot--start  — optional leading adornment (aria-hidden by default)
  *     ├─ .zs-input__control      — the native <input>
  *     └─ .zs-input__slot--end    — optional trailing adornment
  *
@@ -19,9 +19,16 @@
  *     changes don't shift surrounding layout. `0.0625rem` ≈ one device unit.
  *   - Logical properties only (inline-size, padding-inline, margin-inline-*)
  *     so RTL flips correctly. Verified via the RTL story.
- *   - 44pt HIG hit target on coarse pointers: small inputs (2rem) get an
- *     invisible ::before that extends the tap area without growing the box,
- *     mirroring Button's approach.
+ *   - 44pt HIG hit target on coarse pointers: small inputs grow their
+ *     `min-block-size` to the HIG hit minimum so a small input on touch
+ *     is genuinely tappable. No invisible pseudo-element trickery —
+ *     that approach catches no events because the element underneath
+ *     (the wrapper) is non-focusable and `pointer-events: none` on the
+ *     pseudo passes the tap through to whatever sits in the box-model
+ *     overflow above/below the input. The previous implementation was
+ *     functionally inert; the previous-iteration approach inherited
+ *     directly from Button (which uses the pseudo because Button IS
+ *     focusable). Item 3 of the slice-2 review fix brief.
  *
  * Motion: ease-in-out on background-color + box-shadow only. Slow enough
  * to feel deliberate, fast enough not to feel laggy. honored by the
@@ -55,22 +62,6 @@
     color var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
-/* ─── 44pt hit target on coarse pointers (small inputs) ──────────────── */
-@media (pointer: coarse) {
-  .zs-input:not([data-disabled]):not([data-readonly])::before {
-    content: "";
-    position: absolute;
-    inset-block: 50%;
-    inset-inline: 50%;
-    transform: translate(-50%, -50%);
-    inline-size: max(100%, var(--zs-hit-min));
-    block-size: max(100%, var(--zs-hit-min));
-    pointer-events: none;        /* the input itself catches the tap; the
-                                    ::before just guarantees there's a
-                                    44pt visual neighborhood. */
-  }
-}
-
 /* ─── sizes ──────────────────────────────────────────────────────────── */
 .zs-input--sm {
   block-size: var(--zs-control-h-sm);
@@ -78,6 +69,16 @@
   border-radius: var(--zs-control-radius-sm);
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
+}
+
+/* 44pt HIG hit target on coarse pointers — small inputs only grow their
+   tap area on touch devices. The desktop visual stays as designed
+   (2rem high); on touch the box itself becomes 2.75rem so a finger has
+   a genuine target. */
+@media (pointer: coarse) {
+  .zs-input--sm {
+    min-block-size: var(--zs-hit-min);
+  }
 }
 
 .zs-input--lg {
@@ -200,9 +201,28 @@
   opacity: 1;
 }
 
+/* iOS Safari zooms when an input has a computed font-size < 1rem (16
+   device-units) on focus. Our `sm` variant uses subheadline (0.9375rem
+   ≈ 15 device-units) which would trip the zoom. Clamp the INNER input
+   font to a 1rem minimum so the wrapper's visual sizing stays as
+   designed (height + padding follow the subheadline token) but the
+   text inside renders at 16 device-units on focus — Mobile Safari's
+   zoom threshold is absolute. Item 6 of the slice-2 review fix brief. */
+.zs-input--sm .zs-input__control {
+  font-size: max(1rem, var(--zs-text-subheadline-size));
+  line-height: var(--zs-text-subheadline-line);
+}
+
 /* Chrome's yellow autofill background bleeds through the wrapper's bg.
    The long inset shadow trick paints the input's fill back to the
-   surface color; -webkit-text-fill-color keeps the text legible. */
+   surface color; -webkit-text-fill-color keeps the text legible.
+   Firefox 86+ exposes the un-prefixed `:autofill` selector; older
+   Firefox falls back to the prefixed variant alongside Chrome. Item 13
+   of the slice-2 review fix brief. */
+.zs-input__control:autofill,
+.zs-input__control:autofill:hover,
+.zs-input__control:autofill:focus,
+.zs-input__control:autofill:active,
 .zs-input__control:-webkit-autofill,
 .zs-input__control:-webkit-autofill:hover,
 .zs-input__control:-webkit-autofill:focus,
@@ -210,6 +230,9 @@
   -webkit-box-shadow: 0 0 0 1000rem var(--zs-input-bg) inset;
   -webkit-text-fill-color: var(--zs-input-ink);
   caret-color: var(--zs-input-ink);
+  /* Firefox paints its own autofill background; -moz-appearance: none
+     lets the inset-shadow trick win there too. */
+  -moz-appearance: none;
 }
 
 /* Hide number-input spinners — they conflict with our endSlot pattern
@@ -284,5 +307,12 @@
   }
   .zs-input__slot {
     color: CanvasText;
+  }
+  /* Disabled slot falls to GrayText so the entire row reads
+     greyed-out together rather than leaving the slot icon in
+     full-contrast CanvasText. Item 15 of the slice-2 review fix
+     brief. */
+  .zs-input[data-disabled] .zs-input__slot {
+    color: GrayText;
   }
 }

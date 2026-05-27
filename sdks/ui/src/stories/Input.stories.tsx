@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { useRef, useState } from "react";
 import { Field, Input, Button } from "../components";
 
 const meta: Meta<typeof Input> = {
@@ -195,11 +196,15 @@ export const WithSlots: Story = {
         <span className="zs-story-label">Both (currency + unit)</span>
         <Field>
           <Field.Label>Budget</Field.Label>
+          {/* Currency / unit slots carry semantic meaning, so the AT tree
+              announces "49 dollars per month" rather than just "49". Slots
+              are no longer aria-hidden by default — item 16 of the
+              slice-2 review fix brief. */}
           <Input
             type="number"
             defaultValue={49}
-            startSlot={<span aria-hidden="true">$</span>}
-            endSlot={<span aria-hidden="true">/mo</span>}
+            startSlot="$"
+            endSlot="/mo"
           />
         </Field>
       </div>
@@ -304,6 +309,18 @@ export const Required: Story = {
           </Field.Label>
           <Input placeholder="A short blurb…" />
         </Field>
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zs-story-label">Combined shorthand (auto-marker)</span>
+        {/* The combined shorthand auto-inserts <Field.Required /> when
+            both `label` and `required` are set — item 10. */}
+        <Input
+          label="Email"
+          description="We will send a confirmation link."
+          required
+          type="email"
+          placeholder="you@example.com"
+        />
       </div>
     </div>
   ),
@@ -449,8 +466,8 @@ export const RTL: Story = {
           <Input
             type="number"
             defaultValue={49}
-            startSlot={<span aria-hidden="true">₪</span>}
-            endSlot={<span aria-hidden="true">/חודש</span>}
+            startSlot="₪"
+            endSlot="/חודש"
           />
         </Field>
       </div>
@@ -498,11 +515,13 @@ export const InsideForm: Story = {
     docs: {
       description: {
         story:
-          "Form integration: tab order flows Email → Password → Submit. " +
-          "Each control's `aria-describedby` references its description " +
-          "(and error when shown). The Submit button uses real " +
-          "`type=\"submit\"`. Try submitting empty to see browser " +
-          "validation fire alongside Field's `valueMissing` match.",
+          "Native form submission; Base UI's Field validation feeds into " +
+          "the native `submit` event. Tab order flows Email → Password " +
+          "→ Submit. Each control's `aria-describedby` references its " +
+          "description (and error when shown). The Submit button uses " +
+          "real `type=\"submit\"`. Try submitting empty to see browser " +
+          "validation fire alongside Field's `valueMissing` match. " +
+          "(A Base UI `<Form>` integration ships in a later slice.)",
       },
     },
   },
@@ -538,6 +557,322 @@ export const InsideForm: Story = {
           </Button>
         </div>
       </form>
+    </div>
+  ),
+};
+
+/* ─── 13. Field size inheritance ─────────────────────────────────────── */
+export const FieldSizeInheritance: Story = {
+  name: "Field size inheritance",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`<Field size=\"sm\">` cascades into a contained Input that " +
+          "doesn't explicitly set its own size. The Input on the right " +
+          "overrides the inherited size — the consumer's prop always " +
+          "wins.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Field size inheritance">
+      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zs-story-label">Field size=sm → Input inherits</span>
+        <Field size="sm">
+          <Field.Label>Slug</Field.Label>
+          <Input placeholder="acme-prod" />
+        </Field>
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zs-story-label">Field size=lg → Input inherits</span>
+        <Field size="lg">
+          <Field.Label>Title</Field.Label>
+          <Input placeholder="My great project" />
+        </Field>
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zs-story-label">Field=sm + Input size=lg → override wins</span>
+        <Field size="sm">
+          <Field.Label>Override</Field.Label>
+          <Input size="lg" placeholder="explicit lg" />
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 14. Error boolean only (no message) ────────────────────────────── */
+export const ErrorBooleanOnly: Story = {
+  name: "Error boolean only",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Demonstrates `invalid` and `error={true}` — both flip the " +
+          "invalid visual without rendering a message. Useful when an " +
+          "external surface (a banner, a list) owns the error text and " +
+          "the Input just needs to look invalid.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Invalid without message">
+      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zs-story-label">invalid (decomposed)</span>
+        <Field>
+          <Field.Label>Token</Field.Label>
+          <Input invalid defaultValue="bad-token" />
+        </Field>
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zs-story-label">error={"{true}"} (combined)</span>
+        <Input label="Token" error={true} defaultValue="bad-token" />
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 14rem", minWidth: "12rem" }}>
+        <span className="zs-story-label">error={"{false}"} → no wrap</span>
+        {/* error={false} should NOT trigger combined wrapping. Item 9 of
+            the slice-2 review fix brief. The Input renders bare here. */}
+        <Input
+          aria-label="Token (no wrap when error=false)"
+          error={false}
+          defaultValue="token"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 15. With external description ──────────────────────────────────── */
+export const WithExternalDescription: Story = {
+  name: "With external description",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "When a consumer passes their own `aria-describedby`, it MERGES " +
+          "with Field's auto-wired description id rather than clobbering " +
+          "it. Open DevTools and inspect the rendered <input> — its " +
+          "aria-describedby contains BOTH ids, space-separated.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="External aria-describedby">
+      <div className="zs-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem" }}>
+        <span className="zs-story-label">Field description + external hint</span>
+        <p id="external-help" style={{ margin: 0, fontSize: "0.8125rem" }}>
+          External help: paste your API key from the dashboard.
+        </p>
+        <Field>
+          <Field.Label>API key</Field.Label>
+          <Input
+            data-testid="input-with-external-aria"
+            aria-describedby="external-help"
+            placeholder="sk-…"
+          />
+          <Field.Description>
+            Tokens are stored hashed at rest.
+          </Field.Description>
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 16. Field disabled propagation ─────────────────────────────────── */
+export const FieldDisabledPropagation: Story = {
+  name: "Field disabled propagation",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`<Field disabled>` greys the entire row and propagates to the " +
+          "contained Input via FieldContext — the Input visually disables " +
+          "without the consumer needing to repeat `disabled` on it.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Field disabled propagation">
+      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zs-story-label">Field disabled</span>
+        <Field disabled>
+          <Field.Label>Region</Field.Label>
+          <Input defaultValue="us-east-1" />
+          <Field.Description>Cannot be changed after deploy.</Field.Description>
+        </Field>
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "14rem" }}>
+        <span className="zs-story-label">Field NOT disabled (control)</span>
+        <Field>
+          <Field.Label>Region</Field.Label>
+          <Input defaultValue="us-east-1" />
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 17. Horizontal layout with error ───────────────────────────────── */
+export const HorizontalLayoutWithError: Story = {
+  name: "Horizontal layout with error",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Verifies the Grid-based horizontal layout: label left-column, " +
+          "control + description + error stack in the right column. The " +
+          "previous flex-wrap approach mis-placed description + error " +
+          "inline with the control.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Horizontal with error">
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 100%", minWidth: "20rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
+      >
+        <Field orientation="horizontal" invalid>
+          <Field.Label>Slug</Field.Label>
+          <Input defaultValue="ACME" />
+          <Field.Description>Lowercase letters, numbers, and hyphens only.</Field.Description>
+          <Field.Error match>Slug must be lowercase.</Field.Error>
+        </Field>
+        <Field orientation="horizontal" required invalid>
+          <Field.Label>
+            Admin email <Field.Required />
+          </Field.Label>
+          <Input type="email" defaultValue="ada@" />
+          <Field.Description>For billing and alerts.</Field.Description>
+          <Field.Error match>Enter a valid email address.</Field.Error>
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 18. Input ref integration ──────────────────────────────────────── */
+export const InputRefIntegration: Story = {
+  name: "Input ref integration",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "The forwardRef'd ref composes with Base UI's internal ref, so " +
+          "BOTH land on the rendered `<input>`. Click the Focus button to " +
+          "verify the consumer-supplied ref can call `.focus()`. " +
+          "(Without ref composition, the consumer's ref would be null and " +
+          "the button would no-op.)",
+      },
+    },
+  },
+  render: function InputRefIntegrationRender() {
+    const inputRef = useRef<HTMLInputElement | null>(null);
+    const [status, setStatus] = useState<string>("idle");
+    return (
+      <div className="zs-story-row" role="group" aria-label="Ref integration">
+        <div className="zs-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem", gap: "0.5rem" }}>
+          <span className="zs-story-label">Consumer ref → input.focus()</span>
+          <Field>
+            <Field.Label>Search query</Field.Label>
+            <Input
+              ref={inputRef}
+              data-testid="input-ref-target"
+              placeholder="Type here after focusing…"
+            />
+          </Field>
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <Button
+              variant="filled"
+              onClick={() => {
+                inputRef.current?.focus();
+                setStatus(
+                  document.activeElement === inputRef.current
+                    ? "focused"
+                    : "ref-missing",
+                );
+              }}
+            >
+              Focus input
+            </Button>
+            <span data-testid="input-ref-status" style={{ fontSize: "0.8125rem" }}>
+              status: {status}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  },
+};
+
+/* ─── 19. Autofill demo ──────────────────────────────────────────────── */
+export const Autofill: Story = {
+  name: "Autofill",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Email + password inputs with `autoComplete` set so browsers " +
+          "can autofill from their credential manager. Visually verifies " +
+          "that the autofill background trick (long inset shadow) keeps " +
+          "the input on-surface across Chrome and Firefox.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Autofill demo">
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 22rem", minWidth: "18rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
+      >
+        <Field>
+          <Field.Label>Email</Field.Label>
+          <Input type="email" name="email" autoComplete="email" placeholder="you@example.com" />
+        </Field>
+        <Field>
+          <Field.Label>Password</Field.Label>
+          <Input
+            type="password"
+            name="password"
+            autoComplete="current-password"
+            placeholder="••••••••"
+          />
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 20. Custom validate ────────────────────────────────────────────── */
+export const CustomValidate: Story = {
+  name: "Custom validate",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Uses Base UI's `validate` prop on `<Field>` to enforce a " +
+          "domain rule (the value 'admin' is reserved). The Field's " +
+          "Error renders the message returned by `validate`. " +
+          "Validation runs on blur (validationMode=\"onBlur\").",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Custom validate">
+      <div className="zs-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem" }}>
+        <span className="zs-story-label">Reserved-username check</span>
+        <Field
+          validationMode="onBlur"
+          validate={(v) => (v === "admin" ? "‘admin’ is reserved." : null)}
+        >
+          <Field.Label>Username</Field.Label>
+          <Input defaultValue="admin" />
+          <Field.Description>Type ‘admin’ and tab away.</Field.Description>
+          <Field.Error />
+        </Field>
+      </div>
     </div>
   ),
 };

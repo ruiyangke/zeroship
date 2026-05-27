@@ -48,6 +48,18 @@
  *   visibility). This is the INVERSE of Button.tsx, where our
  *   internal props beat the caller — here, Base UI's wiring is
  *   what we protect.
+ *
+ *   Two exceptions where caller intent has to *merge with* Base UI's
+ *   wiring rather than be overridden:
+ *
+ *    a) `ref` — Base UI's `controlProps.ref` is used internally for
+ *       validation registration, autofill detection, and focus
+ *       management. We compose it with the forwardRef'd ref via
+ *       `composeRefs` so both land on the same node (item 1).
+ *
+ *    b) `aria-describedby` — Base UI auto-extends with Field's
+ *       description + error ids; consumers may have their own external
+ *       descriptions. We merge with a space-separated union (item 2).
  */
 import {
   forwardRef,
@@ -80,6 +92,15 @@ export interface InputProps
   /** Trailing adornment INSIDE the bordered shell (icon, button, …). */
   endSlot?: ReactNode;
 
+  /*
+   * Slot accessibility: by default neither slot is `aria-hidden`. The
+   * earlier version unconditionally `aria-hidden`'d the startSlot,
+   * which silenced semantic prefixes like `$` / `€` / `¥` (item 16).
+   * Consumers wrap decorative icons in `<span aria-hidden="true">`
+   * themselves — interactive buttons, currency labels, and unit
+   * suffixes stay in the AT tree automatically.
+   */
+
   /**
    * Force the invalid visual state independent of Field validation.
    * Useful when an external library (server validation, Standard
@@ -101,8 +122,10 @@ export interface InputProps
 
   /**
    * Combined-shorthand error. A ReactNode renders as the error message;
-   * `true` flips the invalid styling without text. Setting any error
-   * (truthy) forces `invalid` on the inline Field.
+   * `true` flips the invalid styling without text. Setting any truthy
+   * error forces `invalid` on the inline Field. Passing `false`
+   * explicitly does NOT trigger the inline Field wrap — useful for
+   * conditional error rendering at the call site.
    */
   error?: ReactNode | boolean;
 
@@ -116,9 +139,42 @@ function classnames(...parts: Array<string | false | null | undefined>): string 
   return parts.filter(Boolean).join(" ");
 }
 
+/* ─── ref composition (item 1) ───────────────────────────────────────── */
+
+/**
+ * Apply a value to a React ref of any flavor (callback, object, null).
+ * Used by `composeRefs` to fan a single value out to multiple refs.
+ */
+function setRef<T>(ref: Ref<T> | undefined, value: T | null): void {
+  if (typeof ref === "function") {
+    ref(value);
+  } else if (ref != null) {
+    (ref as React.MutableRefObject<T | null>).current = value;
+  }
+}
+
+/**
+ * Compose multiple React refs into a single callback ref. Necessary
+ * here because Base UI's `controlProps.ref` AND the consumer's
+ * forwardRef'd ref both need to point at the rendered `<input>`. The
+ * previous implementation only set the forwardRef, dropping Base UI's
+ * internal ref — which broke validation registration, autofill
+ * detection, and focus management.
+ */
+function composeRefs<T>(...refs: Array<Ref<T> | undefined>): Ref<T> {
+  return (value: T | null) => {
+    for (const ref of refs) setRef(ref, value);
+  };
+}
+
 /* ─── inner shell — the styled bordered box w/ slots + control ──────── */
 
-type ControlRenderProps = ComponentPropsWithRef<"input">;
+type ControlRenderProps = ComponentPropsWithRef<"input"> & {
+  className?: string;
+  readOnly?: boolean;
+  "aria-describedby"?: string;
+  "aria-invalid"?: React.AriaAttributes["aria-invalid"];
+};
 
 interface InnerProps extends InputProps {
   /** Internal: the `aria-invalid` source from the outer combined wrapper. */
@@ -138,10 +194,17 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
     wrapperProps,
     wrapperStyle,
     required: requiredProp,
+    disabled: disabledProp,
     ...rest
   },
   ref,
 ) {
+  // Destructure caller's aria-describedby out of `rest` so we can union
+  // it with Base UI's auto-wired one further down. Without this, the
+  // {...controlProps} spread loses the caller's id (or vice versa,
+  // depending on spread order) — see item 2.
+  const { "aria-describedby": callerDescribedBy, ...restRender } = rest;
+
   const fieldCtx = useFieldContext();
   // Inherit size from the enclosing Field if the consumer didn't set one;
   // fall back to medium.
@@ -149,6 +212,12 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
   // Inherit required from the enclosing Field when not set explicitly. The
   // HTML attribute on <input> is what drives `aria-required`, so we mirror.
   const required = requiredProp ?? fieldCtx?.required ?? false;
+  // Inherit disabled too — Base UI Field.Root's `disabled` propagates
+  // its data-disabled to the row, but our visual styles read it off the
+  // shell. The render-prop's `state.disabled` reflects the merged value,
+  // but a forwarded `disabled` prop on the native input pins the
+  // attribute itself for native form behavior.
+  const disabled = disabledProp ?? fieldCtx?.disabled ?? false;
   const isInvalid = invalid === true || forcedInvalid === true;
 
   return (
@@ -158,12 +227,13 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
       // FieldControl so its controlled/uncontrolled state machine and
       // ValidityState wiring see them. Base UI then re-emits them via
       // the `render` callback's `controlProps`.
-      {...(rest as Record<string, unknown>)}
+      {...restRender}
       // The control is the source of truth for value/onChange/etc.
       // `render` projects our styled shell while preserving every aria
       // attribute Base UI builds (id / aria-describedby / aria-invalid /
       // aria-required / etc.).
       required={required}
+      disabled={disabled || undefined}
       render={(controlProps: ControlRenderProps, state) => {
         // state: { disabled, touched, dirty, valid, filled, focused }
         const dataInvalid =
@@ -171,8 +241,16 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
         const dataDisabled = state.disabled ? "" : undefined;
         const dataFocused = state.focused ? "" : undefined;
         const dataFilled = state.filled ? "" : undefined;
-        const dataReadonly =
-          (controlProps as { readOnly?: boolean }).readOnly ? "" : undefined;
+        const dataReadonly = controlProps.readOnly ? "" : undefined;
+
+        // Union Base UI's auto-wired aria-describedby with the
+        // caller's external id(s). Order: Base UI first (description
+        // + error), then caller — keeps Field's own announcements
+        // primary while letting external help text follow.
+        const mergedDescribedBy =
+          [controlProps["aria-describedby"], callerDescribedBy]
+            .filter(Boolean)
+            .join(" ") || undefined;
 
         return (
           <div
@@ -183,6 +261,7 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
               `zs-input--${variant}`,
               `zs-input--${size}`,
               wrapperClassName,
+              wrapperProps?.className,
             )}
             data-variant={variant}
             data-size={size}
@@ -193,10 +272,10 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
             data-filled={dataFilled}
           >
             {startSlot != null ? (
-              <span
-                className="zs-input__slot zs-input__slot--start"
-                aria-hidden="true"
-              >
+              // No `aria-hidden` by default — consumers wrap decorative
+              // icons themselves so semantic prefixes (currency, units)
+              // stay announced. See InputProps slot-accessibility note.
+              <span className="zs-input__slot zs-input__slot--start">
                 {startSlot}
               </span>
             ) : null}
@@ -207,21 +286,27 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
              * attributes (id, aria-describedby, aria-invalid, aria-labelledby).
              *
              * Spread `controlProps` first; our shell-specific className
-             * comes after via the dedicated prop. The aria-invalid and
-             * aria-required overrides at the bottom are belt-and-braces:
-             * `invalid` is a styling-only flag that doesn't go through
-             * Field's ValidityState (so controlProps won't carry it);
-             * `required` exposes the attribute that browsers populate
-             * into the ax tree but don't expose as an attribute, so AT
-             * scripts (and axe) can see it directly.
+             * comes after via the dedicated prop. The `ref` is composed
+             * so BOTH the forwardRef'd ref AND Base UI's internal ref
+             * land on the same node — Base UI uses its ref for
+             * validation registration / autofill detection. The
+             * aria-describedby is unioned (not replaced). The
+             * aria-invalid and aria-required overrides are
+             * belt-and-braces: `invalid` is a styling-only flag that
+             * doesn't go through Field's ValidityState (so controlProps
+             * won't carry it); `required` exposes the attribute that
+             * browsers populate into the ax tree but don't expose as
+             * an attribute, so AT scripts (and axe) can see it
+             * directly.
              */}
             <input
               {...controlProps}
-              ref={ref as Ref<HTMLInputElement>}
+              ref={composeRefs(ref, controlProps.ref)}
+              aria-describedby={mergedDescribedBy}
               className={classnames(
                 "zs-input__control",
                 className,
-                (controlProps as { className?: string }).className,
+                controlProps.className,
               )}
               aria-invalid={
                 isInvalid || controlProps["aria-invalid"] || undefined
@@ -247,35 +332,53 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
   ref,
 ) {
   const { label, description, error, ...rest } = props;
+  // `error={false}` is an explicit "no error" intent — don't promote it
+  // to combined-wrapping. Only consider error truthy if it's a defined,
+  // non-null, non-false value (either a ReactNode message or `true`).
+  const errorIsTruthyOrMessage =
+    error !== undefined && error !== null && error !== false;
   const hasCombined =
-    label != null || description != null || error != null;
+    label != null || description != null || errorIsTruthyOrMessage;
 
   if (!hasCombined) {
     return <InputInner {...rest} ref={ref} />;
   }
 
-  const errorIsTruthy = error !== undefined && error !== null && error !== false;
   const errorMessage =
     error !== true && error !== false && error != null ? error : null;
   // The inline Field's `invalid` is whatever the caller explicitly
   // requested or whatever the `error` payload implies. We feed it into
   // BaseField.Root so Field state matches the shorthand intent.
-  const inlineInvalid = props.invalid === true || errorIsTruthy;
+  const inlineInvalid = props.invalid === true || errorIsTruthyOrMessage;
 
   return (
     <Field
       invalid={inlineInvalid || undefined}
       required={props.required}
     >
-      {label != null ? <Field.Label>{label}</Field.Label> : null}
+      {label != null ? (
+        <Field.Label>
+          {label}
+          {props.required ? (
+            <>
+              {" "}
+              <Field.Required />
+            </>
+          ) : null}
+        </Field.Label>
+      ) : null}
       <InputInner {...rest} ref={ref} forcedInvalid={inlineInvalid} />
       {description != null ? (
         <Field.Description>{description}</Field.Description>
       ) : null}
       {errorMessage != null ? (
-        // `match` defaults to a falsy ValidityState lookup; passing the
-        // boolean `true` lets us drive visibility from the prop instead
-        // of native validity.
+        // `match` accepts `boolean | keyof ValidityState | undefined`
+        // per the @base-ui/react@1.4.1 source
+        // (node_modules/.pnpm/@base-ui+react@1.4.1/.../field/error/
+        // FieldError.d.ts:25 — `match?: boolean | keyof ValidityState`).
+        // Passing the bare boolean `match` (shorthand for `match={true}`)
+        // lets the shorthand drive visibility from the prop instead of
+        // native validity. Item 7 of the slice-2 review-fix brief.
         <Field.Error match>{errorMessage}</Field.Error>
       ) : null}
     </Field>

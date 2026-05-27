@@ -30,32 +30,26 @@
   color: var(--zs-label);
 }
 
+/* ─── Horizontal orientation ─────────────────────────────────────────────
+ * CSS Grid: label cell on the left, everything else (control,
+ * description, error) stacks in the right column. Two columns; row gap
+ * stays consistent with vertical. Item 4 of the slice-2 review fix
+ * brief (replaces the broken flex-wrap approach that left description +
+ * error inline with the control rather than stacking below).
+ */
 .zs-field--horizontal {
-  flex-direction: row;
-  align-items: flex-start;
-  gap: var(--zs-space-4);
+  display: grid;
+  grid-template-columns: var(--zs-field-horizontal-label-w) 1fr;
+  column-gap: var(--zs-space-4);
+  row-gap: var(--zs-field-gap);
+  align-items: start;
 }
-
-/* In horizontal mode the label cell needs a fixed-ish width so multiple
-   horizontal Fields stack visually. We expose the cell width as a
-   custom property so consumers can override per form section without
-   reaching into the css. */
 .zs-field--horizontal > .zs-field__label {
-  flex: 0 0 auto;
-  inline-size: var(--zs-field-horizontal-label-w, 10rem);
+  grid-column: 1;
   padding-block-start: var(--zs-space-2);  /* visually center w/ control */
 }
-
-/* The .zs-field__description / .zs-field__error stay below the control
-   in horizontal mode too. We achieve that with a flex order trick on
-   the control wrapper: it grows to fill, and helpers stack inside. */
-.zs-field--horizontal {
-  /* the rest of the children (control, description, error) collapse
-     into a flex column so the label sits left, the stack right. */
-  flex-wrap: wrap;
-}
 .zs-field--horizontal > :not(.zs-field__label) {
-  flex: 1 1 0;
+  grid-column: 2;
   min-inline-size: 0;
 }
 
