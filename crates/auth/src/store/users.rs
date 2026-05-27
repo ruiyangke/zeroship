@@ -32,6 +32,35 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
     Ok(rows.first().map(row_to_user))
 }
 
+/// Look up a user by their primary key (`auth.users.id`).
+///
+/// The argument is the UUID rendered as a hyphenated string — that's the
+/// shape `accept_login` stamps into the hydra session as `subject`, and
+/// what the consent challenge then surfaces back via `info.subject`.
+///
+/// Returns `Ok(None)` if the string doesn't parse as a UUID OR if no row
+/// matches. Callers handling consent flows treat both as "subject unknown
+/// to us" → fall back to a minimal `id_token` (sub-only, claims omitted).
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure (parse failure is NOT an error —
+/// it's a `None`, since the subject string is attacker-influenced).
+pub async fn find_by_id(conn: &Client, id: &str) -> Result<Option<UserRow>> {
+    let Ok(uuid) = uuid::Uuid::parse_str(id) else {
+        return Ok(None);
+    };
+    let rows = conn
+        .query(
+            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until \
+             FROM auth.users WHERE id = $1",
+            &[&uuid],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("users find_by_id: {e}")))?;
+    Ok(rows.first().map(row_to_user))
+}
+
 /// Insert a new user. Returns the created row.
 ///
 /// # Errors

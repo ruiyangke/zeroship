@@ -9,3 +9,11 @@ button { padding: 0.5rem 1rem; border: 0; background: #111; color: white; border
 .error { padding: 0.75rem; border: 1px solid #c00; border-radius: 0.25rem; color: #c00; background: #fee; font-size: 0.875rem; }
 a { color: inherit; }
 p { font-size: 0.875rem; margin-top: 1rem; }
+.subtle { color: #888; font-size: 0.875rem; margin-top: -1rem; }
+.scopes { list-style: none; padding: 0; }
+.scopes li { padding: 0.5rem; background: #f5f5f5; margin: 0.25rem 0; border-radius: 0.25rem; font-size: 0.95rem; }
+.checkbox { display: flex; gap: 0.5rem; align-items: center; font-size: 0.875rem; }
+.buttons { display: flex; gap: 0.75rem; margin-top: 1rem; }
+.buttons button { flex: 1; }
+.buttons button.primary { background: #111; color: white; }
+.buttons button:not(.primary) { background: #f0f0f0; color: #111; }

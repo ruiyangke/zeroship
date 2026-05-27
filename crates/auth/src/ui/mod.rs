@@ -62,3 +62,17 @@ pub struct LinkPage<'a> {
     pub provider: &'a str,
     pub error: Option<&'a str>,
 }
+
+/// `/consent` GET page — third-party RP consent form (P4-U5). The handler
+/// translates each requested scope into a human-readable string via
+/// `consent::translate_scope` before constructing this struct.
+#[derive(Debug, Template)]
+#[template(path = "consent.html")]
+pub struct ConsentPage<'a> {
+    pub challenge: &'a str,
+    pub csrf: &'a str,
+    pub client_id: &'a str,
+    pub client_name: &'a str,
+    pub scopes: Vec<&'a str>,
+    pub error: Option<&'a str>,
+}

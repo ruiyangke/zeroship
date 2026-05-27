@@ -46,7 +46,11 @@ pub fn configure(
                     .route(web::get().to(ui::signup::get))
                     .route(web::post().to(ui::signup::post)),
             )
-            .service(web::resource("/consent").route(web::get().to(ui::consent::get)))
+            .service(
+                web::resource("/consent")
+                    .route(web::get().to(ui::consent::get))
+                    .route(web::post().to(ui::consent::post)),
+            )
             // `/link` is always registered — it's hit only via a pending
             // token issued by the federation callbacks, so a route that
             // exists without configured providers harms nothing and lets
