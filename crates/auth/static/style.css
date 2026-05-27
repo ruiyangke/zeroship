@@ -25,3 +25,46 @@ p { font-size: 0.875rem; margin-top: 1rem; }
 .identities form { display: inline; margin: 0; }
 .small { padding: 0.25rem 0.5rem; font-size: 0.875rem; background: #ddd; color: #111; }
 .success { padding: 0.75rem; background: #efe; color: #060; border: 1px solid #6c6; border-radius: 0.25rem; font-size: 0.875rem; }
+
+.oauth-divider {
+  text-align: center;
+  margin: 1.5rem 0 1rem;
+  font-size: 0.75rem;
+  color: #888;
+  position: relative;
+}
+.oauth-divider::before, .oauth-divider::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 35%;
+  border-top: 1px solid #ccc;
+}
+.oauth-divider::before { left: 0; }
+.oauth-divider::after { right: 0; }
+.oauth-divider span { background: white; padding: 0 0.75rem; position: relative; z-index: 1; }
+
+.oauth-buttons {
+  display: grid;
+  gap: 0.5rem;
+}
+.oauth-button {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid currentColor;
+  border-radius: 0.25rem;
+  text-decoration: none;
+  color: inherit;
+  font-size: 1rem;
+  background: transparent;
+}
+.oauth-button:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+.oauth-icon { flex-shrink: 0; }
+@media (prefers-color-scheme: dark) {
+  .oauth-divider span { background: canvas; }
+  .oauth-button:hover { background: rgba(255, 255, 255, 0.08); }
+}

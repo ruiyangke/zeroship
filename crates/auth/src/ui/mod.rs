@@ -30,6 +30,8 @@ pub struct LoginPage<'a> {
     pub csrf: &'a str,
     pub error: Option<&'a str>,
     pub client_name: &'a str,
+    pub google_enabled: bool,
+    pub github_enabled: bool,
 }
 
 /// `/signup` GET page. Same `login_challenge` carries through so that

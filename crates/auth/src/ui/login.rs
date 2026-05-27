@@ -80,6 +80,8 @@ pub async fn get(
         csrf: &csrf_token,
         error: None,
         client_name: info.client.client_name.as_deref().unwrap_or(&info.client.client_id),
+        google_enabled: cfg.google_client_id.is_some(),
+        github_enabled: cfg.github_client_id.is_some(),
     };
     let body = match page.render() {
         Ok(b) => b,
@@ -406,6 +408,8 @@ fn render_login_error(
         csrf: &csrf_token,
         error: Some(err),
         client_name,
+        google_enabled: cfg.google_client_id.is_some(),
+        github_enabled: cfg.github_client_id.is_some(),
     };
     let body = page
         .render()
@@ -416,4 +420,50 @@ fn render_login_error(
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use askama::Template;
+
+    #[test]
+    fn login_page_oauth_buttons_gated_by_config() {
+        let page = LoginPage {
+            challenge: "abc",
+            csrf: "xyz",
+            error: None,
+            client_name: "Test",
+            google_enabled: true,
+            github_enabled: false,
+        };
+        let html = page.render().expect("render");
+        assert!(
+            html.contains("/oauth/google/start"),
+            "google button should be present"
+        );
+        assert!(
+            !html.contains("/oauth/github/start"),
+            "github button should be absent"
+        );
+        assert!(html.contains("Sign in with Google"));
+    }
+
+    #[test]
+    fn login_page_hides_section_if_no_oauth() {
+        let page = LoginPage {
+            challenge: "abc",
+            csrf: "xyz",
+            error: None,
+            client_name: "Test",
+            google_enabled: false,
+            github_enabled: false,
+        };
+        let html = page.render().expect("render");
+        assert!(
+            !html.contains("oauth-buttons"),
+            "OAuth section should be hidden"
+        );
+        assert!(!html.contains("or sign in with"));
+    }
 }
