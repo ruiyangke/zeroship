@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, auth_service, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    api, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
 
@@ -53,22 +53,39 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
     let registry = Registry::new(db_url).await.expect("registry");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
-    let auth = auth_service::AuthService::new(db_url, "test-jwt-secret-please-ignore")
-        .await
-        .expect("auth service");
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let vfs: Arc<dyn BundleStore + Send + Sync> = Arc::new(
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
+    // Post-U8 the OIDC RP + auth-pg are non-Optional on AppState. This
+    // test never exercises /auth/callback or `require_console_session`,
+    // so we wire in a hermetic dev stub and reuse the control PG client
+    // for `auth_pg` — neither field is touched by the code path under
+    // test (`/api/apps/{id}/logs` reaches the worker via master-key
+    // Bearer auth).
+    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
+        "http://localhost:4444",
+        "console.zeroship.ai",
+        "test-oidc-secret".to_string(),
+        b"test-stash-key".to_vec(),
+    ));
+    let (auth_pg_client, auth_pg_conn) =
+        compio_postgres::connect(db_url, compio_postgres::NoTls)
+            .await
+            .expect("auth-pg connect");
+    compio::runtime::spawn(async move {
+        let _ = auth_pg_conn.run().await;
+    })
+    .detach();
+    let auth_pg = Arc::new(auth_pg_client);
+
     Fixture {
         state: Arc::new(AppState {
             registry,
             env_store,
             stripe_store,
-            auth,
-            google_oauth: None,
             vfs,
             blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
@@ -81,8 +98,8 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
-            oidc_rp: None,
-            auth_pg: None,
+            oidc_rp,
+            auth_pg,
         }),
         blob_root,
         deploy_tmp_dir,

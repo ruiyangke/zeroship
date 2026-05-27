@@ -36,7 +36,7 @@ use zeroship_bundle::{
     ManifestMetadata, WorkerCode,
 };
 use zeroship_control::{
-    api, auth_service, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    api, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
 
@@ -214,21 +214,37 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
         .expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
-    let auth = auth_service::AuthService::new(db_url, "test-jwt-secret-please-ignore")
-        .await
-        .expect("auth service");
 
     let blob_store: Arc<dyn BlobStore> = blob_store_concrete.clone();
     let vfs: Arc<dyn BundleStore + Send + Sync> = Arc::new(
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
+    // Post-U8 the OIDC RP + auth-pg are non-Optional on AppState. The
+    // deploy tests authenticate via the master-key Bearer header, never
+    // via the console-session cookie, so we wire in a hermetic dev stub
+    // and reuse the control PG client for `auth_pg`. Neither field is
+    // exercised by the deploy code path.
+    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
+        "http://localhost:4444",
+        "console.zeroship.ai",
+        "test-oidc-secret".to_string(),
+        b"test-stash-key".to_vec(),
+    ));
+    let (auth_pg_client, auth_pg_conn) =
+        compio_postgres::connect(db_url, compio_postgres::NoTls)
+            .await
+            .expect("auth-pg connect");
+    compio::runtime::spawn(async move {
+        let _ = auth_pg_conn.run().await;
+    })
+    .detach();
+    let auth_pg = Arc::new(auth_pg_client);
+
     let state = Arc::new(AppState {
         registry,
         env_store,
         stripe_store,
-        auth,
-        google_oauth: None,
         vfs,
         blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
@@ -239,13 +255,13 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         // IMPORTANT: insecure_dev=false so check_admin_auth actually
-        // runs the master-key/session path. Tests that want the auth
+        // runs the master-key Bearer path. Tests that want the auth
         // gate to *fail* simply omit the bearer header.
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
-        oidc_rp: None,
-        auth_pg: None,
+        oidc_rp,
+        auth_pg,
     });
 
     Fixture {

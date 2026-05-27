@@ -31,15 +31,16 @@ zeroize = "1"
 # (B: AsRef<[u8]>) so the helper compiles against ntex's `Bytes` from
 # the request payload. We need `futures::Stream` in the public signature.
 futures = { workspace = true }
-# Auth
-bcrypt = { workspace = true }
-jsonwebtoken = { workspace = true }
+# Auth — OIDC RP only post-U8. PKCE / state RNG + the legacy bcrypt
+# password hasher + JWT cookie minter (which all lived under
+# `auth_service` / `auth_handlers` / `oauth.rs`) were retired alongside
+# those modules. The OIDC RP gets its CSRF + verifier bytes from
+# `zeroship-core` and its JWKS verify path from `zeroship-core`'s
+# `oidc_verify` module.
 base64 = { workspace = true }
 cyper = { workspace = true }
 url = { workspace = true }
 http = { workspace = true }
-# RNG for OAuth state / PKCE — small, no async runtime dep.
-rand = "0.8"
 tracing = { workspace = true }
 # Phase 3 U7 — control plane OIDC RP module + console session store.
 # `hmac` is already present above (used by the legacy stripe webhook

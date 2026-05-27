@@ -10,9 +10,10 @@
 //! (`__Host-zs_console_session`) and stores the user profile in
 //! `auth.console_sessions`.
 //!
-//! Wiring into HTTP handlers lives in `api.rs`; U7 only adds the new
-//! flow alongside the legacy `auth_handlers` / `auth_service` chain.
-//! U8 retires the legacy path.
+//! Wiring into HTTP handlers lives in `api.rs`. Post-U8 this is the
+//! only console-auth surface — the legacy `auth_handlers` /
+//! `auth_service` chain was retired in the same change that made
+//! `AppState.oidc_rp` non-Optional.
 
 use std::sync::Arc;
 

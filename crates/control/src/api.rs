@@ -46,13 +46,11 @@ pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Opti
         return None;
     }
 
-    // Authenticated dashboard sessions count as admin. Cookie is
-    // httpOnly, signed JWT — set by /auth/login or /auth/google/callback.
-    if crate::auth_handlers::validate_session(req, state).is_some() {
-        return None;
-    }
-
-    // Fallback: master-key Bearer header — for tooling (CLI, agents).
+    // Master-key Bearer header — the canonical path for tooling
+    // (CLI, agents, builder service). Dashboard sessions go through
+    // the async `require_console_session` helper (U7); the legacy
+    // JWT-cookie session that U8 retired was the only reason this
+    // sync helper ever needed a cookie path.
     let header = req
         .headers()
         .get("authorization")
@@ -474,14 +472,16 @@ async fn fetch_worker_logs(
 }
 
 // ---------------------------------------------------------------------------
-// /auth/callback — control plane OIDC RP callback (P3-U7)
+// /auth/callback — control plane OIDC RP callback (P3-U7 / U8)
 // ---------------------------------------------------------------------------
 //
 // `console.zeroship.ai` is registered with hydra as a first-party OIDC
 // client (`skip_consent=true`). The control plane is the relying party:
 // it owns the authorize redirect, the stash cookie, and the callback
-// code exchange. The legacy `/auth/*` handlers (login, register,
-// userinfo, etc.) live alongside this until U8 retires them.
+// code exchange. This is the canonical (and only) console-auth surface
+// since U8 retired the legacy `/auth/login`, `/auth/register`,
+// `/auth/userinfo`, `/auth/consent`, `/auth/authorize`, and
+// `/auth/google/*` handlers along with `auth_service`.
 
 /// Handle `GET /auth/callback?code=…&state=…` on `console.zeroship.ai`.
 ///
@@ -494,18 +494,8 @@ pub async fn auth_callback(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let Some(oidc_rp) = state.oidc_rp.as_ref() else {
-        return render_callback_error(
-            state.insecure_dev,
-            "console OIDC RP not configured (set --auth-public, --console-oidc-secret, --stash-signing-key)",
-        );
-    };
-    let Some(pg) = state.auth_pg.as_ref() else {
-        return render_callback_error(
-            state.insecure_dev,
-            "console session database not configured (set --auth-db)",
-        );
-    };
+    let oidc_rp = &state.oidc_rp;
+    let pg = &state.auth_pg;
 
     // 1. Parse query (code + state). Hydra may also send `error=...`
     //    for user-denied consent; surface it directly.
@@ -618,8 +608,6 @@ fn html_escape(s: &str) -> String {
 /// production always uses `https://`. The redirect target is computed
 /// from the request's `Host` header.
 ///
-/// Not yet wired into existing dashboard routes — that flip is U8.
-///
 /// # Errors
 ///
 /// Returns `Err(HttpResponse)` whenever the caller should send a
@@ -639,17 +627,7 @@ pub async fn require_console_session(
         return Err(reject_response(req, state));
     };
 
-    let Some(pg) = state.auth_pg.as_ref() else {
-        // The console OIDC RP is enabled but the auth DB isn't —
-        // misconfiguration. Surface a clear 500 instead of silently
-        // bouncing through OIDC every request.
-        tracing::error!(
-            "control: require_console_session called without state.auth_pg"
-        );
-        return Err(web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({"error": "auth db not configured"})));
-    };
-
+    let pg = &state.auth_pg;
     match crate::console_sessions::validate(pg, id).await {
         Ok(Some(session)) => Ok(session),
         Ok(None) => Err(reject_response(req, state)),
@@ -693,12 +671,7 @@ fn wants_html(req: &web::HttpRequest) -> bool {
 /// Stash cookie carries the PKCE verifier + state + original_path so
 /// the callback can resume.
 fn start_oidc_redirect(req: &web::HttpRequest, state: &AppState) -> web::HttpResponse {
-    let Some(oidc_rp) = state.oidc_rp.as_ref() else {
-        return render_callback_error(
-            state.insecure_dev,
-            "console OIDC RP not configured",
-        );
-    };
+    let oidc_rp = &state.oidc_rp;
     let original_path = req
         .uri()
         .path_and_query()
@@ -729,11 +702,10 @@ fn start_oidc_redirect(req: &web::HttpRequest, state: &AppState) -> web::HttpRes
 mod console_auth_tests {
     //! Standalone tests for the `require_console_session` helper.
     //!
-    //! Constructing a full `AppState` here would require a live PG +
-    //! a configured `AuthService`, so we exercise the cookie-parsing
-    //! / `wants_html` / `reject` branches via the leaf helpers. The
-    //! full integration is covered by the dashboard middleware tests
-    //! landed in U8 (which run against the real `AppState`).
+    //! Constructing a full `AppState` here would require a live PG,
+    //! so we exercise the cookie-parsing / `wants_html` / `reject`
+    //! branches via the leaf helpers. The full integration is covered
+    //! by `console_sessions_test.rs` which runs against a real PG.
 
     use super::*;
     use ntex::http::header::{self, HeaderValue};

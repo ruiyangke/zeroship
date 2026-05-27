@@ -6,8 +6,6 @@
 
 pub mod api;
 pub mod audit;
-pub mod auth_handlers;
-pub mod auth_service;
 pub mod console_sessions;
 pub mod deploy;
 pub mod env_handlers;
@@ -15,7 +13,6 @@ pub mod env_store;
 pub mod http_util;
 pub mod internal;
 pub mod metering;
-pub mod oauth;
 pub mod oidc_rp;
 pub mod rate_limit;
 pub mod registry;
@@ -76,9 +73,6 @@ pub struct AppState {
     pub registry: Registry,
     pub env_store: EnvStore,
     pub stripe_store: StripeStore,
-    pub auth: auth_service::AuthService,
-    /// Optional Google OAuth config — `Some` enables /auth/google/* routes.
-    pub google_oauth: Option<oauth::GoogleConfig>,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
     /// Content-addressed blob store. Backs `.zship` ingestion. The
     /// gateway reads asset bytes from its own `BlobStore` instance,
@@ -123,14 +117,14 @@ pub struct AppState {
     pub deploy_tmp_dir: std::path::PathBuf,
     /// OIDC relying-party for `console.zeroship.ai`. Drives the
     /// authorize-redirect → callback → session-mint flow on the
-    /// creator dashboard (proposal §2.3). `None` disables the new
-    /// flow — the legacy `auth_handlers` chain remains the only auth
-    /// surface until U8 retires it.
-    pub oidc_rp: Option<Arc<oidc_rp::ConsoleOidcRp>>,
+    /// creator dashboard (proposal §2.3). Mandatory now that U8 has
+    /// retired the legacy `auth_service` / `auth_handlers` chain —
+    /// the OIDC RP is the only console-auth surface.
+    pub oidc_rp: Arc<oidc_rp::ConsoleOidcRp>,
     /// Postgres client pointed at the `auth` schema, used by
     /// `console_sessions::{create,validate,revoke}`. Distinct from the
     /// `registry` PG client (which talks to the control schema)
     /// because in multi-DB deployments the auth tables may live in a
-    /// separate cluster.
-    pub auth_pg: Option<Arc<compio_postgres::Client>>,
+    /// separate cluster. Mandatory post-U8.
+    pub auth_pg: Arc<compio_postgres::Client>,
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, auth_handlers, auth_service, env_handlers, internal, oauth, oidc_rp, stripe_handlers,
+    api, env_handlers, internal, oidc_rp, stripe_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -165,46 +165,12 @@ async fn main() -> std::io::Result<()> {
     .expect("env store init");
     let stripe_store = StripeStore::new(registry.clone());
 
-    // JWT secret — used to sign session cookies. Must be stable across
-    // restarts in prod (else everyone gets logged out). In dev a random
-    // boot-time secret is fine.
-    let jwt_secret = arg_or_env(&args, "--jwt-secret", "JWT_SECRET", "");
-    let jwt_secret = if jwt_secret.is_empty() {
-        if !insecure_dev {
-            tracing::error!("control: refusing to start; --jwt-secret / JWT_SECRET required (or pass --dev-insecure)");
-            std::process::exit(1);
-        }
-        // Stable fallback so cookies survive a quick restart in dev.
-        "dev-jwt-secret-please-override-in-prod".to_string()
-    } else {
-        jwt_secret
-    };
-
-    let auth = auth_service::AuthService::new(&db_url, &jwt_secret)
-        .await
-        .expect("failed to init auth service");
-
-    // Optional Google OAuth config — only set if all three env vars present.
-    let google_client_id = env_or("GOOGLE_CLIENT_ID", "");
-    let google_client_secret = env_or("GOOGLE_CLIENT_SECRET", "");
-    let google_redirect = env_or("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/google/callback");
-    let google_oauth = if !google_client_id.is_empty() && !google_client_secret.is_empty() {
-        tracing::info!(redirect_uri = %google_redirect, "control: Google OAuth enabled");
-        Some(oauth::GoogleConfig {
-            client_id: google_client_id,
-            client_secret: google_client_secret,
-            redirect_uri: google_redirect,
-        })
-    } else {
-        tracing::info!("control: Google OAuth disabled (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET)");
-        None
-    };
-
-    // Phase 3 U7 — control plane OIDC RP for `console.zeroship.ai`.
-    // Optional: when `--auth-public` or `--console-oidc-secret` is
-    // empty, the new RP path is disabled and the legacy
-    // `auth_handlers` chain remains the only auth surface. U8 retires
-    // the legacy path and makes these mandatory.
+    // Phase 3 U7/U8 — control plane OIDC RP for `console.zeroship.ai`.
+    // Mandatory post-U8: the legacy `auth_handlers` / `auth_service`
+    // chain has been retired, so the OIDC RP is the only console-auth
+    // surface. Refuses to boot unless all four pieces are configured
+    // (`--dev-insecure` permits the empty-stash-key shortcut for
+    // localhost only).
     let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "");
     let console_oidc_secret =
         arg_or_env(&args, "--console-oidc-secret", "CONSOLE_OIDC_SECRET", "");
@@ -216,47 +182,72 @@ async fn main() -> std::io::Result<()> {
     );
     let auth_db_url = arg_or_env(&args, "--auth-db", "AUTH_DB_URL", "");
 
-    let oidc_rp = if !auth_public.is_empty() && !console_oidc_secret.is_empty() {
-        if stash_signing_key.is_empty() && !insecure_dev {
+    if !insecure_dev {
+        let mut missing = Vec::new();
+        if auth_public.is_empty() {
+            missing.push("--auth-public / AUTH_PUBLIC");
+        }
+        if console_oidc_secret.is_empty() {
+            missing.push("--console-oidc-secret / CONSOLE_OIDC_SECRET");
+        }
+        if stash_signing_key.is_empty() {
+            missing.push("--stash-signing-key / STASH_SIGNING_KEY");
+        }
+        if auth_db_url.is_empty() {
+            missing.push("--auth-db / AUTH_DB_URL");
+        }
+        if !missing.is_empty() {
             tracing::error!(
-                "control: refusing to enable console OIDC RP without --stash-signing-key (set --dev-insecure to override)"
+                missing = %missing.join(", "),
+                "control: refusing to start; OIDC RP requires all four flags. \
+                 Pass --dev-insecure to run with localhost defaults."
             );
             std::process::exit(1);
         }
-        let key = if stash_signing_key.is_empty() {
-            // Dev-only fallback. Ephemeral keys are fine for the
-            // 10-minute stash window during local development; in
-            // prod the guard above already exited.
-            b"dev-stash-key-please-rotate".to_vec()
-        } else {
-            stash_signing_key.into_bytes()
-        };
-        tracing::info!(
-            auth_public = %auth_public,
-            "control: console OIDC RP enabled"
-        );
-        Some(Arc::new(oidc_rp::ConsoleOidcRp::new(
-            &auth_public,
-            "console.zeroship.ai",
-            console_oidc_secret,
-            key,
-        )))
-    } else {
-        tracing::info!(
-            "control: console OIDC RP disabled (set --auth-public + --console-oidc-secret to enable)"
-        );
-        None
-    };
+    }
 
-    let auth_pg: Option<Arc<compio_postgres::Client>> = if auth_db_url.is_empty() {
-        if oidc_rp.is_some() {
-            tracing::warn!(
-                "control: console OIDC RP is configured but --auth-db is empty; /auth/callback will 500"
-            );
-        }
-        None
+    let stash_key_bytes = if stash_signing_key.is_empty() {
+        // Dev-only fallback. Ephemeral keys are fine for the 10-minute
+        // stash window during local development; in prod the guard
+        // above already exited.
+        b"dev-stash-key-please-rotate".to_vec()
     } else {
-        let (pg_client, pg_conn) = compio_postgres::connect(&auth_db_url, compio_postgres::NoTls)
+        stash_signing_key.into_bytes()
+    };
+    let auth_public_value = if auth_public.is_empty() {
+        // Dev-only fallback so a `--dev-insecure` boot succeeds without
+        // a configured hydra. Production exited above.
+        "http://localhost:4444".to_string()
+    } else {
+        auth_public.clone()
+    };
+    let console_oidc_secret_value = if console_oidc_secret.is_empty() {
+        "dev-console-oidc-secret".to_string()
+    } else {
+        console_oidc_secret
+    };
+    tracing::info!(
+        auth_public = %auth_public_value,
+        "control: console OIDC RP enabled"
+    );
+    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
+        &auth_public_value,
+        "console.zeroship.ai",
+        console_oidc_secret_value,
+        stash_key_bytes,
+    ));
+
+    let auth_pg: Arc<compio_postgres::Client> = {
+        let resolved = if auth_db_url.is_empty() {
+            // Dev fallback: reuse the control DB URL so /auth/callback
+            // works against a single local Postgres without operator
+            // ceremony. Production refused to start without --auth-db
+            // above.
+            db_url.clone()
+        } else {
+            auth_db_url
+        };
+        let (pg_client, pg_conn) = compio_postgres::connect(&resolved, compio_postgres::NoTls)
             .await
             .expect("control: auth-pg connect");
         compio::runtime::spawn(async move {
@@ -265,15 +256,13 @@ async fn main() -> std::io::Result<()> {
             }
         })
         .detach();
-        Some(Arc::new(pg_client))
+        Arc::new(pg_client)
     };
 
     let state = Arc::new(AppState {
         registry,
         env_store,
         stripe_store,
-        auth,
-        google_oauth,
         vfs,
         blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
@@ -362,18 +351,12 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/audit")
                     .route(web::get().to(env_handlers::list_audit)),
             )
-            // --- Auth (creator + end-user) ---
-            .service(web::resource("/auth/register").route(web::post().to(auth_handlers::register)))
-            .service(web::resource("/auth/login").route(web::post().to(auth_handlers::login)))
-            .service(web::resource("/auth/logout").route(web::post().to(auth_handlers::logout)))
-            .service(web::resource("/auth/userinfo").route(web::get().to(auth_handlers::userinfo)))
-            .service(web::resource("/auth/consent").route(web::post().to(auth_handlers::consent)))
-            .service(web::resource("/auth/authorize").route(web::get().to(auth_handlers::authorize)))
-            .service(web::resource("/auth/google/start").route(web::get().to(auth_handlers::google_start)))
-            .service(web::resource("/auth/google/callback").route(web::get().to(auth_handlers::google_callback)))
-            // New OIDC RP callback for the `console.zeroship.ai` client
-            // (P3-U7). Sibling of the legacy /auth/* handlers; U8
-            // retires those and this becomes the canonical entry.
+            // --- Auth (creator console) ---
+            // OIDC RP callback for the `console.zeroship.ai` client.
+            // The legacy `/auth/{login,register,logout,userinfo,consent,
+            // authorize,google/*}` handlers were retired in P3-U8 along
+            // with `auth_service` / `auth_handlers`; this is now the
+            // only console-auth surface.
             .service(web::resource("/auth/callback").route(web::get().to(api::auth_callback)))
             // --- Stripe Connect ---
             .service(
