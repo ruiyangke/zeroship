@@ -10,6 +10,7 @@
 //! "text/html; charset=utf-8").body(rendered)`.
 
 pub mod login;
+pub mod signup;
 
 use askama::Template;
 
