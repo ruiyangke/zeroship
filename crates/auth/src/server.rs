@@ -88,7 +88,20 @@ pub fn configure(
             )
             // Email verification (P5-U5). Token issued at /signup is
             // redeemed here; sets auth.users.email_verified_at = NOW().
-            .service(web::resource("/verify").route(web::get().to(ui::verify::get)));
+            .service(web::resource("/verify").route(web::get().to(ui::verify::get)))
+            // Password reset (P5-U6). /forgot issues a 1h reset token
+            // (enumeration-resistant); /reset redeems it and updates
+            // auth.users.password_hash.
+            .service(
+                web::resource("/forgot")
+                    .route(web::get().to(ui::forgot::get))
+                    .route(web::post().to(ui::forgot::post)),
+            )
+            .service(
+                web::resource("/reset")
+                    .route(web::get().to(ui::reset::get))
+                    .route(web::post().to(ui::reset::post)),
+            );
 
         if google_enabled {
             cfg.service(

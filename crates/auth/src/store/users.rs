@@ -94,6 +94,23 @@ pub async fn create(
     Ok(row_to_user(row))
 }
 
+/// Replace `auth.users.password_hash` with a fresh PHC string (Argon2id).
+/// Used by the password-reset flow (P5-U6) to set a new credential after
+/// a valid reset-token redeem.
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure.
+pub async fn update_password_hash(conn: &Client, id: uuid::Uuid, phc: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE auth.users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+        &[&phc, &id],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("users update_password_hash: {e}")))?;
+    Ok(())
+}
+
 /// Bump `last_login_at` to `NOW()`.
 ///
 /// # Errors

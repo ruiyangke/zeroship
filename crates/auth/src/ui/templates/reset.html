@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Set new password · zeroship{% endblock %}
+{% block body %}
+<h2>Set a new password</h2>
+{% if let Some(err) = error %}<div class="error">{{ err }}</div>{% endif %}
+<form method="POST" action="/reset">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <label>New password (15+ characters)
+    <input type="password" name="password" minlength="15" autocomplete="new-password" required autofocus>
+  </label>
+  <button type="submit">Update password</button>
+</form>
+{% endblock %}

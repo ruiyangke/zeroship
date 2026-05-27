@@ -10,6 +10,7 @@
 //! "text/html; charset=utf-8").body(rendered)`.
 
 pub mod consent;
+pub mod forgot;
 pub mod link;
 pub mod login;
 pub mod magic;
@@ -17,6 +18,7 @@ pub mod me;
 pub mod oauth_github;
 pub mod oauth_google;
 pub mod oauth_stash;
+pub mod reset;
 pub mod signup;
 pub mod verify;
 
@@ -129,6 +131,33 @@ pub struct MagicShowCodePage<'a> {
 #[template(path = "verify_ok.html")]
 pub struct VerifyOkPage<'a> {
     pub email: &'a str,
+}
+
+/// `/forgot` GET + POST page (P5-U6).
+///
+/// The `sent` flag toggles the form off and renders the post-submit
+/// confirmation copy ("if an account exists, we sent a link…"). The
+/// form and confirmation share a page so the response is identical to
+/// the attacker whether the email exists or not — enumeration defense.
+#[derive(Debug, Template)]
+#[template(path = "forgot.html")]
+pub struct ForgotPage<'a> {
+    pub csrf: &'a str,
+    pub error: Option<&'a str>,
+    pub sent: bool,
+}
+
+/// `/reset` GET + POST page (P5-U6).
+///
+/// Surfaces the new-password form; the hidden `token` field carries the
+/// reset token between GET and POST so the user can re-submit on
+/// validation errors without re-clicking the email link.
+#[derive(Debug, Template)]
+#[template(path = "reset.html")]
+pub struct ResetPage<'a> {
+    pub token: &'a str,
+    pub csrf: &'a str,
+    pub error: Option<&'a str>,
 }
 
 /// `/me` profile page (P4-U6).
