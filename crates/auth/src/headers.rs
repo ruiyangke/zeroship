@@ -1,11 +1,14 @@
 //! Security headers applied to every `crates/auth` response. Hydra
 //! sets its own on `/oauth2/*` responses.
 //!
-//! Phase 2 exposes [`apply`] as a per-handler call site; Phase 2 Unit U6
-//! installs it as ntex middleware so handlers don't have to remember.
+//! [`apply`] writes the headers into a `HeaderMap`; [`SecurityHeaders`] is
+//! the ntex middleware that wires it onto every outgoing response in
+//! [`crate::server::run`].
 
 use ntex::http::header::{HeaderName, HeaderValue};
 use ntex::http::HeaderMap;
+use ntex::service::{cfg::SharedCfg, Middleware, Service, ServiceCtx};
+use ntex::web::{WebRequest, WebResponse};
 
 /// Apply the standard security headers to an outgoing response's header map.
 ///
@@ -58,4 +61,49 @@ fn static_set(headers: &mut HeaderMap, name: &'static str, value: &'static str) 
         HeaderName::from_static(name),
         HeaderValue::from_static(value),
     );
+}
+
+/// ntex middleware factory that runs [`apply`] on every outgoing response.
+///
+/// Installed in [`crate::server::run`] via `App::middleware(SecurityHeaders)`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SecurityHeaders;
+
+impl<S> Middleware<S, SharedCfg> for SecurityHeaders {
+    type Service = SecurityHeadersService<S>;
+
+    fn create(&self, service: S, _: SharedCfg) -> Self::Service {
+        SecurityHeadersService { service }
+    }
+}
+
+#[derive(Debug)]
+pub struct SecurityHeadersService<S> {
+    service: S,
+}
+
+// ntex `WebRequest` and `ServiceCtx` are intentionally `!Send` (single-threaded
+// executor), so the futures here can't be `Send`; same shape as ntex's own
+// `DefaultHeaders` middleware.
+#[allow(clippy::future_not_send)]
+impl<S, E> Service<WebRequest<E>> for SecurityHeadersService<S>
+where
+    S: Service<WebRequest<E>, Response = WebResponse>,
+{
+    type Response = WebResponse;
+    type Error = S::Error;
+
+    ntex::forward_poll!(service);
+    ntex::forward_ready!(service);
+    ntex::forward_shutdown!(service);
+
+    async fn call(
+        &self,
+        req: WebRequest<E>,
+        ctx: ServiceCtx<'_, Self>,
+    ) -> Result<Self::Response, Self::Error> {
+        let mut res = ctx.call(&self.service, req).await?;
+        apply(res.headers_mut());
+        Ok(res)
+    }
 }

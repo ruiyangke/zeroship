@@ -22,6 +22,7 @@ use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
+use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
@@ -189,6 +190,7 @@ impl Fixture {
                     .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
+                    .middleware(SecurityHeaders)
                     .configure(server::configure)
             }
         })

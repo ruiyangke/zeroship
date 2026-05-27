@@ -6,6 +6,7 @@ use std::sync::Arc;
 use ntex::web;
 
 use crate::config::AuthConfig;
+use crate::headers::SecurityHeaders;
 use crate::hydra_client::HydraAdmin;
 use crate::ui;
 
@@ -85,6 +86,7 @@ pub async fn run(
             .state(admin.clone())
             .state(cfg.clone())
             .state(db.clone())
+            .middleware(SecurityHeaders)
             .configure(configure)
     })
     .bind(&addr)?
