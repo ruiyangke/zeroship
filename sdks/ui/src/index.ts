@@ -25,7 +25,7 @@ export {
 export {
   Button,
   type ButtonProps,
-  type ButtonRole,
+  type ButtonIntent,
   type ButtonSize,
   type ButtonVariant,
 } from "./components";

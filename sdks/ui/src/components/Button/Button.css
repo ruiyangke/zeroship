@@ -1,20 +1,22 @@
 /*
- * Button — HIG Style × Role matrix.
+ * Button — HIG Style × Intent matrix.
  *
  * Anatomy:
  *   .zs-button
- *     ├─ .zs-button__label       — visible label (hidden via visibility
- *     │                            when aria-busy, preserving width).
- *     ├─ .zs-button__start       — optional leading slot.
- *     ├─ .zs-button__end         — optional trailing slot.
+ *     ├─ .zs-button__inner       — wraps slots+label; active-scale lives here
+ *     │  ├─ .zs-button__start    — optional leading slot.
+ *     │  ├─ .zs-button__label    — visible label (hidden via opacity:0
+ *     │  │                         when aria-busy, preserving width and
+ *     │  │                         the accessible name).
+ *     │  └─ .zs-button__end      — optional trailing slot.
  *     └─ .zs-button__spinner     — absolutely-centered spinner when loading.
  *
  * Modifier classes (one of each axis):
  *   sizes:    --small | --medium | --large
  *   variants: --filled | --tinted | --gray | --plain
- *   role:     --destructive  (additive — overrides accent palette with
- *                              --zs-system-red; never combined with
- *                              role="primary")
+ *   intent:   --destructive  (additive — overrides accent palette with
+ *                              --zs-system-red; for gray, only the label
+ *                              receives the red signal)
  */
 
 /* ─── base ─────────────────────────────────────────────────────────────── */
@@ -30,30 +32,58 @@
   font-family: var(--zs-font-system);
   white-space: nowrap;
   text-decoration: none;
-  /* 44pt HIG-min hit target is enforced via an invisible inset; small
-     buttons can be 2rem visually but a transparent ::before extends the
-     hit area to --zs-hit-min on coarse pointers. */
+  /* When asChild renders an <a> as the button root, override the UA
+     link color so the anchor adopts the button's color. */
+  color: inherit;
+  /* 44pt HIG-min hit target is enforced via an invisible ::before that
+     extends in BOTH axes (icon-only small buttons can be <44pt wide too).
+     The ::before lives on the button (not the inner), so the active-state
+     scale below does not scale the hit area. */
   transition:
     background-color var(--zs-motion-fast) var(--zs-motion-ease),
-    color var(--zs-motion-fast) var(--zs-motion-ease),
-    transform var(--zs-motion-fast) var(--zs-motion-spring);
+    color var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
 @media (pointer: coarse) {
-  .zs-button::before {
+  .zs-button:not(:disabled):not([aria-busy="true"])::before {
     content: "";
     position: absolute;
-    inset: 50% 0 0 0;
-    transform: translateY(-50%);
-    height: var(--zs-hit-min);
-    width: 100%;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    inline-size: max(100%, var(--zs-hit-min));
+    block-size: max(100%, var(--zs-hit-min));
     pointer-events: auto;
   }
 }
 
-.zs-button__label {
+.zs-button__inner {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-2);
+  /* Allow the label child to shrink and ellipsize inside this flex
+     container — without min-width:0 the inner asserts its content's
+     intrinsic size and the label's overflow: hidden never engages. */
+  min-width: 0;
+  max-width: 100%;
+  /* Position ensures the inner sits above the ::before hit-area overlay. */
+  position: relative;
+  z-index: 1;
+  transition: transform var(--zs-motion-fast) var(--zs-motion-spring);
+}
+
+.zs-button__label {
+  /* Long-label policy: clip + ellipsize. Block display (not inline-flex)
+     so `overflow: hidden` + `text-overflow: ellipsis` constrain the
+     label's layout box to the flex-shrunk width. `min-width: 0` allows
+     the label to shrink below its content's intrinsic size. */
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .zs-button__start,
@@ -68,14 +98,17 @@
   outline-offset: var(--zs-focus-ring-offset);
 }
 
-.zs-button:active:not(:disabled):not([aria-busy="true"]) {
+.zs-button:active:not(:disabled):not([aria-busy="true"]) .zs-button__inner {
   transform: scale(0.97);
 }
 
 .zs-button:disabled,
 .zs-button[aria-busy="true"] {
+  /* HTML `disabled` already prevents activation; we keep `cursor:
+     not-allowed` for affordance. `pointer-events: none` is deliberately
+     NOT set — it would hide the cursor (defeating not-allowed) and let
+     clicks fall through to underlying elements. */
   cursor: not-allowed;
-  pointer-events: none;
 }
 
 /* Disabled styling is applied per-variant so colors compose with the mesh
@@ -89,7 +122,6 @@
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
   font-weight: 600;
-  letter-spacing: -0.002em;
   border-radius: var(--zs-radius-2);           /* 6 */
 }
 
@@ -99,7 +131,6 @@
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
   font-weight: 600;
-  letter-spacing: -0.004em;
   border-radius: var(--zs-radius-3);           /* 8 */
 }
 
@@ -109,7 +140,6 @@
   font-size: var(--zs-text-headline-size);
   line-height: var(--zs-text-headline-line);
   font-weight: 600;
-  letter-spacing: -0.004em;
   border-radius: var(--zs-radius-4);           /* 10 */
 }
 
@@ -118,8 +148,10 @@
   background: var(--zs-accent);
   color: var(--zs-accent-ink);
 }
-.zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
-  background: var(--zs-accent-hover);
+@media (hover: hover) {
+  .zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
+    background: var(--zs-accent-hover);
+  }
 }
 .zs-button--filled:active:not(:disabled):not([aria-busy="true"]) {
   background: var(--zs-accent-active);
@@ -132,10 +164,14 @@
 
 .zs-button--tinted {
   background: color-mix(in oklch, var(--zs-accent) 18%, transparent);
-  color: var(--zs-accent);
+  /* Tinted text uses the deeper accent variant so contrast against the
+     tinted fill clears 4.5:1 — the regular --zs-accent fails at ~3.8:1. */
+  color: var(--zs-accent-active);
 }
-.zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-accent) 28%, transparent);
+@media (hover: hover) {
+  .zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
+    background: color-mix(in oklch, var(--zs-accent) 28%, transparent);
+  }
 }
 .zs-button--tinted:active:not(:disabled):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-accent) 36%, transparent);
@@ -150,8 +186,10 @@
   background: var(--zs-fill-secondary);
   color: var(--zs-label);
 }
-.zs-button--gray:hover:not(:disabled):not([aria-busy="true"]) {
-  background: var(--zs-fill);
+@media (hover: hover) {
+  .zs-button--gray:hover:not(:disabled):not([aria-busy="true"]) {
+    background: var(--zs-fill);
+  }
 }
 .zs-button--gray:active:not(:disabled):not([aria-busy="true"]) {
   background: var(--zs-fill);
@@ -166,8 +204,10 @@
   background: transparent;
   color: var(--zs-accent);
 }
-.zs-button--plain:hover:not(:disabled):not([aria-busy="true"]) {
-  background: var(--zs-fill-tertiary);
+@media (hover: hover) {
+  .zs-button--plain:hover:not(:disabled):not([aria-busy="true"]) {
+    background: var(--zs-fill-tertiary);
+  }
 }
 .zs-button--plain:active:not(:disabled):not([aria-busy="true"]) {
   background: var(--zs-fill);
@@ -178,13 +218,15 @@
   background: transparent;
 }
 
-/* ─── destructive override (HIG Role; works across variants) ───────────── */
+/* ─── destructive override (HIG intent; works across variants) ─────────── */
 .zs-button--destructive.zs-button--filled {
   background: var(--zs-system-red);
   color: var(--zs-accent-ink);
 }
-.zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
-  background: var(--zs-system-red-hover);
+@media (hover: hover) {
+  .zs-button--destructive.zs-button--filled:hover:not(:disabled):not([aria-busy="true"]) {
+    background: var(--zs-system-red-hover);
+  }
 }
 .zs-button--destructive.zs-button--filled:active:not(:disabled):not([aria-busy="true"]) {
   background: var(--zs-system-red-active);
@@ -196,10 +238,13 @@
 
 .zs-button--destructive.zs-button--tinted {
   background: color-mix(in oklch, var(--zs-system-red) 18%, transparent);
-  color: var(--zs-system-red);
+  /* Same pattern as tinted-accent: use the deeper red so contrast holds. */
+  color: var(--zs-system-red-active);
 }
-.zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-system-red) 28%, transparent);
+@media (hover: hover) {
+  .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
+    background: color-mix(in oklch, var(--zs-system-red) 28%, transparent);
+  }
 }
 .zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-system-red) 36%, transparent);
@@ -213,30 +258,54 @@
 .zs-button--destructive.zs-button--plain {
   color: var(--zs-system-red);
 }
-.zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-system-red) 12%, transparent);
+@media (hover: hover) {
+  .zs-button--destructive.zs-button--plain:hover:not(:disabled):not([aria-busy="true"]) {
+    background: color-mix(in oklch, var(--zs-system-red) 12%, transparent);
+  }
 }
 .zs-button--destructive.zs-button--plain:active:not(:disabled):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zs-system-red) 18%, transparent);
 }
+.zs-button--destructive.zs-button--plain:disabled,
+.zs-button--destructive.zs-button--plain[aria-busy="true"] {
+  /* Without this, the destructive-plain disabled state keeps system-red
+     text — wrong signal for a disabled control. Defer to the neutral
+     disabled label color. */
+  color: var(--zs-label-tertiary);
+  background: transparent;
+}
 
-/* zs-button--destructive.zs-button--gray intentionally falls through to
-   the gray styling — HIG does not define a strong combination here, and
-   the destructive intent reaches the user through layout + label. */
+/* gray + destructive: keep the neutral gray fill (HIG has no strong
+   combination for this), but signal destructive intent through the LABEL
+   color so the cell isn't silently neutral. */
+.zs-button--destructive.zs-button--gray {
+  color: var(--zs-system-red);
+}
+@media (hover: hover) {
+  .zs-button--destructive.zs-button--gray:hover:not(:disabled):not([aria-busy="true"]) {
+    color: var(--zs-system-red-hover);
+  }
+}
+.zs-button--destructive.zs-button--gray:active:not(:disabled):not([aria-busy="true"]) {
+  color: var(--zs-system-red-active);
+}
+.zs-button--destructive.zs-button--gray:disabled,
+.zs-button--destructive.zs-button--gray[aria-busy="true"] {
+  color: color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary));
+}
 
 /* ─── loading ──────────────────────────────────────────────────────────── */
 /* When loading, we hide the label/slots visually but keep them in the
    accessibility tree so screen readers (and axe) still see the button's
-   discernible name. `color: transparent` and `opacity: 0` on slots keep
-   the layout box (preserving button width) without using `visibility:
-   hidden`, which removes elements from the AT tree. */
-.zs-button[aria-busy="true"] .zs-button__label {
-  color: transparent;
-  text-shadow: none;
-}
+   discernible name. `opacity: 0` preserves the box (so the button width
+   doesn't collapse) and keeps the label in the AT tree, unlike
+   `visibility: hidden` which removes it. `pointer-events: none` is
+   belt-and-braces (the button is already disabled+aria-busy). */
+.zs-button[aria-busy="true"] .zs-button__label,
 .zs-button[aria-busy="true"] .zs-button__start,
 .zs-button[aria-busy="true"] .zs-button__end {
   opacity: 0;
+  pointer-events: none;
 }
 
 .zs-button__spinner {
@@ -256,6 +325,7 @@
 .zs-button__spinner circle {
   fill: none;
   stroke: currentColor;
+  /* SVG attribute units (viewBox space), not CSS px. */
   stroke-width: 2;
   stroke-linecap: round;
   stroke-dasharray: 30 50;
@@ -267,6 +337,40 @@
 
 @media (prefers-reduced-motion: reduce) {
   .zs-button__spinner svg {
-    animation-duration: 0.01ms;
+    /* Stop the keyframe entirely; the partial-circle arc stays static. */
+    animation: none;
+  }
+}
+
+/* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ─── */
+/* Defer to system tokens so buttons stay identifiable when the user has
+   forced colors on. Border-width is a hairline (0.0625rem ≈ one device
+   pixel at default zoom) expressed in rem to honor the no-raw-px rule. */
+@media (forced-colors: active) {
+  .zs-button {
+    border: 0.0625rem solid CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-button--filled {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .zs-button--tinted,
+  .zs-button--gray {
+    background: Canvas;
+    color: CanvasText;
+  }
+  .zs-button--plain {
+    background: transparent;
+    color: LinkText;
+  }
+  .zs-button:disabled,
+  .zs-button[aria-busy="true"] {
+    color: GrayText;
+    border-color: GrayText;
+  }
+  .zs-button:focus-visible {
+    outline: 0.125rem solid Highlight;
+    outline-offset: 0.125rem;
   }
 }

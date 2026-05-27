@@ -26,6 +26,12 @@ const stories = [
   "components-button--all-sizes",
   "components-button--all-states",
   "components-button--destructive",
+  "components-button--destructive-disabled",
+  "components-button--loading-destructive",
+  "components-button--with-slots",
+  "components-button--long-label",
+  "components-button--focus-visible",
+  "components-button--as-child",
 ];
 
 const mimeMap = new Map([

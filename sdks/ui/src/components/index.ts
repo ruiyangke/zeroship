@@ -2,6 +2,6 @@ export { Button } from "./Button";
 export type {
   ButtonProps,
   ButtonVariant,
-  ButtonRole,
+  ButtonIntent,
   ButtonSize,
 } from "./Button";

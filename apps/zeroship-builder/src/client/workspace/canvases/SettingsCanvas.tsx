@@ -190,7 +190,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
             </p>
             <Button
               variant="filled"
-              role="destructive"
+              intent="destructive"
               onClick={() => setConfirmOpen(true)}
               data-testid="settings-delete"
             >
@@ -242,7 +242,6 @@ function DeleteConfirm({
         <>
           <Button
             variant="plain"
-            role="cancel"
             onClick={onClose}
             disabled={deleting}
           >
@@ -250,7 +249,7 @@ function DeleteConfirm({
           </Button>
           <Button
             variant="filled"
-            role="destructive"
+            intent="destructive"
             onClick={() => matches && onConfirm()}
             disabled={!matches || deleting}
             loading={deleting}
