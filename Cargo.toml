@@ -176,6 +176,7 @@ zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
+zeroship-auth = { path = "crates/auth" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

@@ -35,9 +35,17 @@ thiserror = { workspace = true }
 cyper = { workspace = true }
 http = { workspace = true }
 rand = "0.8"
+# Phase 3 U4 — per-origin app session store (`auth.gateway_sessions`).
+compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+# Phase 3 U4 smoke test runs `zeroship_auth::store::migrations::migrate`
+# against a live PG to guarantee the `auth.gateway_sessions` table
+# exists before the CRUD round-trip. NOT a runtime dep — the gateway
+# bin never imports `zeroship-auth`.
+zeroship-auth = { workspace = true }
 
 [lints]
 workspace = true

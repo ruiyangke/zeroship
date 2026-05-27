@@ -5812,7 +5812,9 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
+ "chrono",
  "compio",
+ "compio-postgres",
  "cyper",
  "hex",
  "hmac 0.12.1",
@@ -5832,6 +5834,7 @@ dependencies = [
  "url",
  "uuid",
  "xxhash-rust",
+ "zeroship-auth",
  "zeroship-bundle",
  "zeroship-core",
 ]
