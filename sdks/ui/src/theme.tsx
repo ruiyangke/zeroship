@@ -11,15 +11,18 @@ import {
 /**
  * Theme names registered with the design system.
  *
- * The HIG-anchored rebuild will populate this with `hig-light` and `hig-dark`
- * as the two first-class themes. Until the foundation tokens land, the list
- * is empty and ThemeProvider becomes a passthrough that still establishes a
- * `data-theme` root for future styling.
+ * The rebuild will populate this with `light` and `dark` as the two
+ * first-class themes. Themes vary only palette/accent/density — the
+ * design language itself (type scale, spacing, radii, motion, materials,
+ * component anatomy) is theme-invariant and lives in the foundation
+ * token block. Until those tokens land, the list is empty and
+ * ThemeProvider is a passthrough that still establishes a `data-theme`
+ * root for future styling.
  */
 export const themes = [] as const;
 export type ThemeName = (typeof themes)[number] | (string & {});
 
-export const DEFAULT_THEME: ThemeName = "hig-light";
+export const DEFAULT_THEME: ThemeName = "light";
 export const THEME_STORAGE_KEY = "zeroship-ui-theme";
 
 export const themeLabels: Record<string, string> = {};

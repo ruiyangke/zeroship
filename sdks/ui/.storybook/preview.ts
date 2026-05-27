@@ -4,16 +4,16 @@ import { withThemeByDataAttribute } from "@storybook/addon-themes";
 import "../src/styles.css";
 
 /*
- * The themes map is intentionally empty during the Apple-HIG rebuild.
- * It is repopulated with `hig-light` / `hig-dark` (and any future palette
- * variants) once the foundation tokens land. The decorator stays installed
- * so the toolbar shape is preserved.
+ * The themes map is intentionally empty during the rebuild. It is
+ * repopulated with `light` and `dark` (and any future palette variants)
+ * once the foundation tokens land. The decorator stays installed so the
+ * toolbar shape is preserved.
  */
 const preview: Preview = {
   decorators: [
     withThemeByDataAttribute({
       themes: {},
-      defaultTheme: "hig-light",
+      defaultTheme: "light",
       attributeName: "data-theme",
       parentSelector: "html",
     }),

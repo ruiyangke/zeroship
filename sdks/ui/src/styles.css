@@ -1,14 +1,17 @@
 /*
  * @zeroship/ui — base stylesheet
  *
- * Design system is being rebuilt against Apple Human Interface Guidelines.
  * Tokens, themes, and component styles will land here as components are
- * implemented. See docs/superpowers/specs/2026-05-26-apple-hig-design-system.md.
+ * implemented. See docs/superpowers/specs/2026-05-26-design-system.md.
  *
  * Hard rule (carried forward from the prior system):
  *   - Components read CSS custom properties only.
- *   - Theme blocks ([data-theme="..."]) own all token values.
- *   - No raw hex, no raw px in component or theme CSS — oklch() + rem only.
+ *   - Foundation tokens (type scale, spacing, radii, motion, materials,
+ *     focus ring, hit targets) are theme-invariant — same values across
+ *     every theme.
+ *   - Theme blocks ([data-theme="..."]) override only the palette/density
+ *     tokens (label, fill, separator, system-blue/green/red/...).
+ *   - No raw hex, no raw px — oklch() + rem only.
  */
 
 *,
@@ -17,4 +20,4 @@
   box-sizing: border-box;
 }
 
-/* Theme blocks land here under [data-theme="hig-light"] / [data-theme="hig-dark"]. */
+/* Theme blocks land here under [data-theme="light"] / [data-theme="dark"]. */

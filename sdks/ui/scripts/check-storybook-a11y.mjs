@@ -7,22 +7,22 @@ if (!baseUrl) {
 }
 
 /*
- * The themes and stories lists are intentionally empty during the Apple-HIG
- * rebuild. They are repopulated as components land: each new component adds
- * its story id here, and each new theme (hig-light, hig-dark, ...) adds an
- * entry. The script reports "no stories to check" rather than failing while
- * the system is empty.
+ * The themes and stories lists are intentionally empty during the rebuild.
+ * They are repopulated as components land: each new component adds its
+ * story id here, and each new theme (light, dark, ...) adds an entry. The
+ * script reports "no stories to check" rather than failing while the
+ * system is empty.
  */
 const themes = [
-  // { label: "HIG Light", value: "hig-light" },
-  // { label: "HIG Dark", value: "hig-dark" },
+  // { label: "Light", value: "light" },
+  // { label: "Dark", value: "dark" },
 ];
 const stories = [
   // "components-base-ui--button-states",
 ];
 
 if (themes.length === 0 || stories.length === 0) {
-  console.log("A11y check skipped — no themes or stories registered yet (HIG rebuild in progress).");
+  console.log("A11y check skipped — no themes or stories registered yet (rebuild in progress).");
   process.exit(0);
 }
 
