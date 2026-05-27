@@ -234,9 +234,9 @@ async fn e2e_password_flow() {
     let auth_base = srv.url("").trim_end_matches('/').to_string();
     eprintln!("[e2e_password] auth server at {auth_base}");
 
-    // 3. Register a test OIDC client with hydra. RS256 because that's what
-    //    hydra has in its keyset by default (bootstrap with EdDSA hasn't
-    //    run — see crates/auth/src/bootstrap.rs).
+    // 3. Register a test OIDC client with hydra. EdDSA is the platform's
+    //    primary algorithm and is now ensured by per-algorithm bootstrap
+    //    (see crates/auth/src/bootstrap/keys.rs).
     let test_client_id = format!("e2e-{}", Uuid::new_v4().simple());
     let test_redirect = "http://127.0.0.1:9999/cb"; // never actually fetched
     let test_secret = "e2e-test-secret-do-not-use-in-prod".to_string();
@@ -252,7 +252,7 @@ async fn e2e_password_flow() {
         token_endpoint_auth_method: "client_secret_post".into(),
         subject_type: "public".into(),
         access_token_strategy: None,
-        id_token_signed_response_alg: Some("RS256".into()),
+        id_token_signed_response_alg: Some("EdDSA".into()),
         audience: vec![],
         skip_consent: true,
         require_consent: false,

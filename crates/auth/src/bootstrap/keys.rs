@@ -1,5 +1,12 @@
-//! First-boot JWK generation. Called only when `--bootstrap` is set
-//! and the relevant hydra key sets are empty.
+//! First-boot JWK generation. Called only when `--bootstrap` is set.
+//!
+//! Per-algorithm idempotency: for each requested algorithm in a keyset,
+//! we add a key only if no key with that `alg` is already present. This
+//! lets a re-boot heal a partially-populated keyset (e.g. one that has
+//! `RS256` only, and now needs `EdDSA` added) without disturbing existing
+//! keys.
+
+use std::collections::HashSet;
 
 use crate::error::Result;
 use crate::hydra_client::HydraAdmin;
@@ -7,8 +14,9 @@ use crate::hydra_client::HydraAdmin;
 pub const ID_TOKEN_SET: &str = "hydra.openid.id-token";
 pub const ACCESS_TOKEN_SET: &str = "hydra.jwt.access-token";
 
-/// Ensures hydra has at least one signing key in each set. Idempotent:
-/// returns immediately if the set is non-empty.
+/// Ensures hydra has a signing key for each requested algorithm in each set.
+/// Idempotent: per-algorithm presence check, so re-running is safe and will
+/// only add keys for algorithms that are missing.
 ///
 /// # Errors
 ///
@@ -22,12 +30,24 @@ pub async fn ensure_signing_keys(admin: &HydraAdmin) -> Result<()> {
 
 async fn ensure_set(admin: &HydraAdmin, set: &str, algs: &[&str]) -> Result<()> {
     let existing = admin.get_jwks(set).await?;
-    let count = existing.as_ref().map_or(0, |j| j.keys.len());
-    if count > 0 {
-        tracing::info!(set, count, "hydra key set already populated; skipping");
-        return Ok(());
-    }
+    let existing_algs: HashSet<String> = match existing {
+        Some(j) => j
+            .keys
+            .iter()
+            .filter_map(|k| {
+                k.get("alg")
+                    .and_then(serde_json::Value::as_str)
+                    .map(std::string::ToString::to_string)
+            })
+            .collect(),
+        None => HashSet::new(),
+    };
+
     for alg in algs {
+        if existing_algs.contains(*alg) {
+            tracing::info!(set, alg, "hydra key already present; skipping");
+            continue;
+        }
         tracing::info!(set, alg, "creating hydra JWK");
         admin.create_jwk(set, alg).await?;
     }
