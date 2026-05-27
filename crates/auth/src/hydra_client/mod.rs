@@ -7,6 +7,7 @@
 
 pub mod consent;
 pub mod login;
+pub mod logout;
 pub mod types;
 
 use serde::{de::DeserializeOwned, Serialize};
