@@ -4,4 +4,5 @@
 pub mod audit;
 pub mod migrations;
 pub mod ratelimit;
+pub mod sessions;
 pub mod users;

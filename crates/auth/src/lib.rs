@@ -8,4 +8,5 @@ pub mod hydra_client;
 pub mod identity;
 pub mod ratelimit;
 pub mod server;
+pub mod sessions;
 pub mod store;
