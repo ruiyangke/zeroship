@@ -1,29 +1,31 @@
 /**
- * @zeroship/auth — Universal auth SDK (works in both server and client).
+ * @zeroship/auth — thin wrapper around the platform-injected `env.auth.*`
+ * namespace.
  *
- * The platform manages authentication. The app just reads the current user.
- * No tokens, no passwords, no login logic.
+ * After Phase 3 of the auth-server migration the gateway HMAC-signs the
+ * authenticated identity into a `ZeroShip-User` header, the worker
+ * verifies + parses that header, and the runtime exposes the resulting
+ * user via the kernel `env.auth.getUser()` / `requireUser()` primitives.
+ * This package is the creator-facing ergonomic surface on top.
+ *
+ * Authenticated identity is server-side only. Client-side React code that
+ * needs the user must call back through a server fetch handler / RPC; the
+ * previous `window.__zs_user` browser fallback has been removed.
  *
  * Usage:
+ *
  *   import { auth } from "@zeroship/auth";
  *
- *   const user = auth.getUser();       // { id, email, name, avatar } | null
- *   const user = auth.requireUser();   // throws if not authenticated
- *   auth.signOut();                    // redirects to platform logout (client only)
+ *   export default {
+ *     async fetch(req, env) {
+ *       const user = auth.getUser();        // User | null
+ *       if (!user) return new Response("sign in please", { status: 401 });
+ *       return new Response(`hello ${user.name ?? user.id}`);
+ *     },
+ *   };
  *
- * ## Server-side status (kernel-cut transition)
- *
- * Between PR 1 D1 (deleted the `globalThis.zeroship` facade) and the
- * future AuthPlugin wiring, the server-side `env.auth` namespace is NOT
- * populated. Server calls to `getUser()` fall back to `null` and
- * `requireUser()` throws "Authentication required". The client-side
- * path (`window.__zs_user`) remains fully functional for SSR'd HTML.
- *
- * TODO(PR 4+): re-enable server-side getUser by either (a) adding an
- * AuthPlugin that exposes `env.auth.getUser()` via the registrar, or
- * (b) reading the gateway-injected user directly off a request-scoped
- * context exposed through the `zeroship` module. The orphan callbacks
- * in `crates/runtime/src/auth.rs` still exist and can be re-wired.
+ *   // Or short-circuit with the throw helper:
+ *   const user = auth.requireUser();        // throws if unauthenticated
  */
 
 import { env } from "zeroship";
@@ -37,84 +39,65 @@ export interface User {
   emailVerified: boolean;
 }
 
-declare global {
-  interface Window {
-    __zs_user?: User | null;
-  }
-}
-
 /**
- * Shape the SDK expects on `env.auth` when an AuthPlugin is registered.
- * Kept narrow so the server lookup doesn't silently accept malformed
- * shapes — calls that miss `getUser` fall through to the null path.
+ * Shape of the platform-injected `env.auth` namespace. Kept narrow so the
+ * SDK refuses to silently accept malformed shapes — a missing `getUser`
+ * resolves to `null` instead of returning whatever the callee installed.
  */
 interface EnvAuth {
   getUser?: () => User | null;
   requireUser?: () => User;
 }
 
-/** Resolve `env.auth` if an auth plugin is registered on this runtime. */
+/** Resolve `env.auth` if the auth plugin is registered on this runtime. */
 function envAuth(): EnvAuth | null {
   const ea = (env as { auth?: EnvAuth } | undefined)?.auth;
   return ea && typeof ea === "object" ? ea : null;
 }
 
-/**
- * Auth — works in both server and client contexts.
- *
- * - Server (`"use server"` modules): reads from `env.auth.getUser()`
- *   if an AuthPlugin is registered. Currently no such plugin exists on
- *   the kernel-cut branch (see file-level TODO), so server calls
- *   degrade to returning null / throwing "Authentication required".
- * - Client (React components): reads from `window.__zs_user`
- *   (injected by the gateway into the SSR'd HTML).
- */
 export const auth = {
   /**
-   * Returns the authenticated user, or `null` if not authenticated.
-   * Zero cost — no network call in either context.
+   * Returns the authenticated user, or `null` if the request is anonymous.
+   * Resolves against `env.auth.getUser()` — a kernel primitive backed by
+   * per-request state populated from the gateway's `ZeroShip-User` header.
    */
   getUser(): User | null {
-    // Server: env.auth namespace (populated by AuthPlugin when registered).
     const ea = envAuth();
-    if (ea?.getUser) {
-      return ea.getUser();
-    }
-    // Client: gateway-injected window global
-    if (typeof window !== "undefined" && window.__zs_user) {
-      return window.__zs_user;
-    }
-    return null;
+    return ea?.getUser ? ea.getUser() : null;
   },
 
   /**
-   * Returns the authenticated user, or throws an error.
-   * On the server, the gateway intercepts the 401 and redirects to the login page.
+   * Returns the authenticated user, or throws "Authentication required".
+   * The kernel primitive throws an Error; the gateway/worker dispatch path
+   * translates that into a 401 for the requesting client.
    */
   requireUser(): User {
-    // Server: use env.auth.requireUser which throws with 401 status.
     const ea = envAuth();
     if (ea?.requireUser) {
       return ea.requireUser();
     }
-    // Fallback (both no-AuthPlugin server and client): manual null check.
-    const user = this.getUser();
-    if (!user) throw new Error("Authentication required");
-    return user;
+    throw new Error("Authentication required");
   },
 
-  /** Returns true if a user is authenticated. */
+  /** Returns `true` if the current request is authenticated. */
   isLoggedIn(): boolean {
     return this.getUser() !== null;
   },
 
   /**
-   * Signs the user out by redirecting to the platform logout page.
-   * Client-only — no-op on the server.
+   * Trigger sign-out. Returns a 302 Response the handler should return
+   * directly; the gateway's `/__zs/auth/signout` endpoint clears the
+   * per-app session cookie and redirects to the OIDC end-session flow.
    */
-  signOut(): void {
-    if (typeof window !== "undefined") {
-      window.location.href = "/__auth/logout";
-    }
+  signOut(returnTo?: string): Response {
+    const location = `/__zs/auth/signout${
+      returnTo ? `?return=${encodeURIComponent(returnTo)}` : ""
+    }`;
+    return new Response(null, {
+      status: 302,
+      headers: { Location: location },
+    });
   },
 };
+
+export default auth;

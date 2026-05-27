@@ -26,14 +26,11 @@ For HTML requests that need login, the gateway redirects to the control plane au
 
 The package name is `@zeroship/auth`, with a single root export defined in [sdks/auth/package.json](../../sdks/auth/package.json). There is no `@zeroship/auth/client` export.
 
-The current helper lives in [sdks/auth/src/index.ts](../../sdks/auth/src/index.ts):
+The helper lives in [sdks/auth/src/index.ts](../../sdks/auth/src/index.ts):
 
-- `auth.getUser()`
-- `auth.requireUser()`
-- `auth.signOut()`
+- `auth.getUser()` — returns the authenticated user from `env.auth.getUser()`, or `null` if the request is anonymous.
+- `auth.requireUser()` — returns the user or throws `Authentication required`.
+- `auth.isLoggedIn()` — convenience boolean.
+- `auth.signOut(returnTo?)` — returns a 302 Response to `/__zs/auth/signout`.
 
-`auth.getUser()` first checks `env.auth` if it exists, then falls back to `window.__zs_user` in the browser, and otherwise returns `null`.
-
-## Current limitation
-
-The runtime-side auth helper exists in [crates/runtime/src/auth.rs](../../crates/runtime/src/auth.rs), but the source trees listed above do not currently register a native `env.auth` plugin alongside `env.db`, `env.kv`, or `env.storage`. The JS helper therefore carries the browser fallback path in [sdks/auth/src/index.ts](../../sdks/auth/src/index.ts).
+The runtime injects the authenticated identity via `env.auth.user` (parsed from the gateway's HMAC-signed `ZeroShip-User` header); `auth.getUser()` reads it directly and `auth.requireUser()` throws a 401-shaped Error if absent. The previous `window.__zs_user` browser fallback has been removed — authenticated identity is server-side only, and client code that needs the user calls back through a server fetch handler / RPC.
