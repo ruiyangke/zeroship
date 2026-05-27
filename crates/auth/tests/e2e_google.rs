@@ -155,6 +155,15 @@ async fn google_federation_creates_new_user() {
         github_user_url: "https://api.github.com/user".to_string(),
         github_emails_url: "https://api.github.com/user/emails".to_string(),
         stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
+        mailer: "stdout".to_string(),
+        smtp_host: None,
+        smtp_port: 587,
+        smtp_username: None,
+        smtp_password: None,
+        smtp_starttls: true,
+        resend_api_key: None,
+        mail_from_email: "test@zeroship.test".to_string(),
+        mail_from_name: "Test".to_string(),
     });
     let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
 

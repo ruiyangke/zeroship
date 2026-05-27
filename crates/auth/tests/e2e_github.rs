@@ -56,8 +56,10 @@ impl GithubFixture {
     /// provider. Returns `None` if the env-skip env vars aren't set
     /// — each test then `eprintln`s + returns.
     //
-    // `!Send` cyper + ntex server handles.
-    #[allow(clippy::future_not_send)]
+    // `!Send` cyper + ntex server handles. Line-count growth comes
+    // from the `AuthConfig {}` literal — each new platform-wide field
+    // adds a fixture line; sub-extraction would just move that pile.
+    #[allow(clippy::future_not_send, clippy::too_many_lines)]
     async fn boot(mock: &MockProvider) -> Option<Self> {
         let (Ok(db_url), Ok(hydra_admin_url)) = (
             std::env::var("AUTH_DB_URL"),
@@ -133,6 +135,15 @@ impl GithubFixture {
             github_user_url: mock.github_user_url(),
             github_emails_url: mock.github_emails_url(),
             stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
+            mailer: "stdout".to_string(),
+            smtp_host: None,
+            smtp_port: 587,
+            smtp_username: None,
+            smtp_password: None,
+            smtp_starttls: true,
+            resend_api_key: None,
+            mail_from_email: "test@zeroship.test".to_string(),
+            mail_from_name: "Test".to_string(),
         });
 
         let admin_state = admin.clone();

@@ -155,4 +155,46 @@ pub struct AuthConfig {
         default_value = "https://api.github.com/user/emails"
     )]
     pub github_emails_url: String,
+
+    // ─── Mailer (driver selection + per-driver creds) ────────────────────
+    /// Mailer driver: `stdout` (dev default) | `smtp` | `resend`.
+    #[arg(long, env = "AUTH_MAILER", default_value = "stdout")]
+    pub mailer: String,
+
+    /// SMTP relay hostname (required when `--mailer=smtp`).
+    #[arg(long, env = "AUTH_SMTP_HOST")]
+    pub smtp_host: Option<String>,
+
+    /// SMTP port. Defaults to 587 (STARTTLS); use 465 for implicit SMTPS.
+    #[arg(long, env = "AUTH_SMTP_PORT", default_value = "587")]
+    pub smtp_port: u16,
+
+    /// SMTP username (optional — server may allow unauthenticated relays).
+    #[arg(long, env = "AUTH_SMTP_USERNAME")]
+    pub smtp_username: Option<String>,
+
+    /// SMTP password (paired with `--smtp-username`).
+    #[arg(long, env = "AUTH_SMTP_PASSWORD")]
+    pub smtp_password: Option<String>,
+
+    /// `true` ⇒ open plaintext then upgrade with STARTTLS (port 587).
+    /// `false` ⇒ open implicit TLS / SMTPS (port 465).
+    #[arg(long, env = "AUTH_SMTP_STARTTLS", default_value = "true")]
+    pub smtp_starttls: bool,
+
+    /// Resend API key (required when `--mailer=resend`).
+    #[arg(long, env = "AUTH_RESEND_API_KEY")]
+    pub resend_api_key: Option<String>,
+
+    /// `From` address every transactional mail uses.
+    #[arg(
+        long,
+        env = "AUTH_MAIL_FROM_EMAIL",
+        default_value = "auth@zeroship.ai"
+    )]
+    pub mail_from_email: String,
+
+    /// `From` display name every transactional mail uses.
+    #[arg(long, env = "AUTH_MAIL_FROM_NAME", default_value = "zeroship")]
+    pub mail_from_name: String,
 }

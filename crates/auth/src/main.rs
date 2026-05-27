@@ -13,7 +13,11 @@ use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
 use zeroship_auth::config::AuthConfig;
+use zeroship_auth::error::AuthError;
 use zeroship_auth::hydra_client::HydraAdmin;
+use zeroship_auth::mailer::{
+    Mailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
+};
 use zeroship_auth::server;
 use zeroship_auth::store;
 
@@ -73,11 +77,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // 5. Serve. `server::run` takes ownership of the PG client (it wraps
+    // 5. Build the mailer driver. `--mailer=stdout` is the dev default;
+    //    `smtp` and `resend` are the production drivers. Missing creds
+    //    for the selected driver is a fatal config error — we'd rather
+    //    fail loudly at boot than silently swallow magic-link / reset
+    //    mails at request time.
+    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
+    tracing::info!(driver = %cfg.mailer, "mailer ready");
+
+    // 6. Serve. `server::run` takes ownership of the PG client (it wraps
     //    it in `Arc` internally) so the spawned connection task stays
     //    live for the entire server lifetime — `Arc` keeps the client
     //    alive across worker tasks; on shutdown the last `Arc` drop
     //    unblocks the background connection driver.
-    server::run(cfg, admin, client, google_jwks).await?;
+    server::run(cfg, admin, client, google_jwks, mailer).await?;
     Ok(())
+}
+
+/// Translate `--mailer` + per-driver flags into a concrete
+/// `Arc<dyn Mailer>`. Returns [`AuthError::Config`] when the selected
+/// driver's required credentials aren't set, so the startup error
+/// names exactly which env var is missing.
+fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
+    match cfg.mailer.as_str() {
+        "stdout" => Ok(Arc::new(StdoutMailer)),
+        "smtp" => {
+            let host = cfg.smtp_host.clone().ok_or_else(|| {
+                AuthError::Config(
+                    "AUTH_SMTP_HOST is required when --mailer=smtp".into(),
+                )
+            })?;
+            let driver = SmtpMailer::new(&SmtpConfig {
+                host,
+                port: cfg.smtp_port,
+                username: cfg.smtp_username.clone(),
+                password: cfg.smtp_password.clone(),
+                use_starttls: cfg.smtp_starttls,
+            })
+            .map_err(|e| AuthError::Config(format!("smtp mailer: {e}")))?;
+            Ok(Arc::new(driver))
+        }
+        "resend" => {
+            let api_key = cfg.resend_api_key.clone().ok_or_else(|| {
+                AuthError::Config(
+                    "AUTH_RESEND_API_KEY is required when --mailer=resend".into(),
+                )
+            })?;
+            Ok(Arc::new(ResendMailer::new(ResendConfig { api_key })))
+        }
+        other => Err(AuthError::Config(format!(
+            "unknown mailer: {other:?}; use stdout|smtp|resend"
+        ))),
+    }
 }

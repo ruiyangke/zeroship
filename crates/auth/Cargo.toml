@@ -31,6 +31,12 @@ mimalloc = { workspace = true }
 # Mailer trait uses `async fn` in trait — `#[async_trait]` keeps the trait
 # object-safe (so we can store `Arc<dyn Mailer>` in `AppCtx`).
 async-trait = { workspace = true }
+# SMTP mailer driver — BLOCKING `SmtpTransport` wrapped in
+# `compio::runtime::spawn_blocking` (no tokio in the event loop).
+# Crate-local pin, not workspace; the auth server is the only consumer.
+# Features chosen explicitly to AVOID `tokio1*` (which would pull
+# tokio in) and `native-tls` (we standardize on rustls).
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder", "pool", "hostname"] }
 
 # Password hashing (Argon2id, PHC strings).
 # Not workspace-pinned — auth is the only consumer today.

@@ -11,6 +11,8 @@
 //! mechanically enforceable: the suppression check is a SQL query, so the
 //! trait demands a connection handle alongside the message.
 
+pub mod resend;
+pub mod smtp;
 pub mod stdout;
 pub mod types;
 
@@ -18,6 +20,9 @@ use async_trait::async_trait;
 use compio_postgres::Client;
 
 use crate::store::suppressions;
+pub use resend::{ResendConfig, ResendMailer};
+pub use smtp::{SmtpConfig, SmtpMailer};
+pub use stdout::StdoutMailer;
 pub use types::{Address, Email, MailerError, MessageId};
 
 /// Outbound email transport. Implementations MUST check

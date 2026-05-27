@@ -9,6 +9,7 @@ use zeroship_core::oidc_verify::JwksCache;
 use crate::config::AuthConfig;
 use crate::headers::SecurityHeaders;
 use crate::hydra_client::HydraAdmin;
+use crate::mailer::Mailer;
 use crate::ui;
 
 /// Bundled stylesheet served at `/static/style.css`. Compiled into the
@@ -128,6 +129,9 @@ async fn style() -> web::HttpResponse {
 ///   Google `OAuth` is enabled. The `/oauth/google/*` routes are gated on
 ///   the same predicate, so handlers always find this state present at
 ///   request time.
+/// - `Arc<dyn Mailer>` — outbound transactional mailer (stdout / SMTP /
+///   Resend). Selected by `--mailer` in [`crate::main`]; threaded
+///   uniformly so handlers can always extract `State<Arc<dyn Mailer>>`.
 ///
 /// # Errors
 ///
@@ -143,6 +147,7 @@ pub async fn run(
     admin: HydraAdmin,
     db: compio_postgres::Client,
     google_jwks: Option<Arc<JwksCache>>,
+    mailer: Arc<dyn Mailer>,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();
@@ -155,6 +160,7 @@ pub async fn run(
             .state(admin.clone())
             .state(cfg.clone())
             .state(db.clone())
+            .state(mailer.clone())
             .middleware(SecurityHeaders);
         if let Some(jwks) = google_jwks.clone() {
             app = app.state(jwks);
