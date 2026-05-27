@@ -1,4 +1,4 @@
-//! `auth.sessions` CRUD — the IdP login session at auth.zeroship.ai.
+//! `auth.sessions` CRUD — the `IdP` login session at `auth.zeroship.ai`.
 
 use compio_postgres::Client;
 

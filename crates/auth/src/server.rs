@@ -72,6 +72,11 @@ async fn style() -> web::HttpResponse {
 ///
 /// Returns the underlying `std::io::Error` if binding fails or the
 /// server loop exits with an error.
+//
+// ntex's per-thread server future is intentionally `!Send` (it holds
+// per-worker state in `Rc`s). Marking `run` `!Send` is a structural
+// property of `ntex::web::server`, not an actionable defect.
+#[allow(clippy::future_not_send)]
 pub async fn run(
     cfg: AuthConfig,
     admin: HydraAdmin,

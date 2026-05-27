@@ -9,7 +9,7 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_ADDR", default_value = "0.0.0.0:9092")]
     pub addr: String,
 
-    /// PostgreSQL DSN.
+    /// `PostgreSQL` DSN.
     #[arg(long, env = "AUTH_DB_URL")]
     pub db_url: String,
 
@@ -25,8 +25,8 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_CLIENTS_CONFIG", default_value = "/etc/zeroship/auth-clients.toml")]
     pub clients_config: String,
 
-    /// Allow first-boot JWK + client creation. Without this, an empty hydra_jwk
-    /// set is a fatal startup error.
+    /// Allow first-boot JWK + client creation. Without this, an empty
+    /// `hydra_jwk` set is a fatal startup error.
     #[arg(long, env = "AUTH_BOOTSTRAP")]
     pub bootstrap: bool,
 

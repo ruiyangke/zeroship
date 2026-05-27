@@ -34,6 +34,10 @@ pub struct LoginQuery {
     pub login_challenge: String,
 }
 
+// ntex's per-thread service futures are intentionally `!Send` (Rc-based
+// internal state). Marking each handler `#[allow(clippy::future_not_send)]`
+// is the canonical workaround; the lint is structural, not actionable.
+#[allow(clippy::future_not_send)]
 pub async fn get(
     req: HttpRequest,
     query: ntex::web::types::Query<LoginQuery>,
@@ -132,6 +136,9 @@ pub struct LoginForm {
 ///    failure mode (400 / 401 / 429 / 500). Cookies refreshed so the form
 ///    stays usable for a retry.
 #[allow(clippy::too_many_lines)]
+// ntex's per-thread service futures are intentionally `!Send`. See note on
+// `get`.
+#[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
     query: ntex::web::types::Query<LoginQuery>,

@@ -6,10 +6,10 @@
 //! 2. `login_csrf_mismatched_token_rejected` — bogus `csrf` form field
 //! 3. `login_clickjacking_headers_present` — CSP `frame-ancestors 'none'` + XFO DENY
 //! 4. `login_referrer_policy_set` — `Referrer-Policy: no-referrer`
-//! 5. `login_rate_limit_kicks_in` — LOGIN_EIP bucket throttles the 6th attempt
+//! 5. `login_rate_limit_kicks_in` — `LOGIN_EIP` bucket throttles the 6th attempt
 //! 6. `session_id_rotates_post_login_success` — session cookie value differs across two logins
 //!
-//! Rows like "Open redirect on redirect_uri" and "Refresh-token reuse" are
+//! Rows like "Open redirect on `redirect_uri`" and "Refresh-token reuse" are
 //! [hydra]-owned per §13 and live outside this harness.
 //!
 //! Every test skips when `AUTH_DB_URL` and `AUTH_HYDRA_ADMIN` aren't both set
@@ -210,7 +210,7 @@ async fn login_referrer_policy_set() {
     fx.cleanup().await;
 }
 
-/// §13 "Brute force / credential stuffing": LOGIN_EIP bucket (capacity 5)
+/// §13 "Brute force / credential stuffing": `LOGIN_EIP` bucket (capacity 5)
 /// must throttle the 6th login attempt within a 15-min window for the same
 /// `(email, ip)` tuple.
 #[ntex::test]
@@ -286,6 +286,9 @@ async fn login_rate_limit_kicks_in() {
 
 /// Drive one full successful POST /login round-trip and return the
 /// `__Host-zsidp_session` cookie value. Helper for the rotation test.
+//
+// `Fixture` carries `!Send` ntex/cyper handles.
+#[allow(clippy::future_not_send)]
 async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
     let challenge = fx.fresh_challenge().await;
     let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);

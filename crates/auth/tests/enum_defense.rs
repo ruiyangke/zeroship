@@ -37,6 +37,59 @@ fn median(durations: &mut [Duration]) -> Duration {
     durations[durations.len() / 2]
 }
 
+/// Drive `POST /login` once with the given (challenge, email, password) and
+/// return (status, `body_len`, elapsed). Each call also performs the
+/// `GET /login` round-trip so the form CSRF + cookie are freshly minted.
+//
+// cyper client is `!Send` (per-thread connection handle).
+#[allow(clippy::future_not_send)]
+async fn one_failure(
+    http: &cyper::Client,
+    auth_base: &str,
+    challenge: &str,
+    email: &str,
+    password: &str,
+) -> (u16, usize, Duration) {
+    let login_url = format!("{auth_base}/login?login_challenge={challenge}");
+    let resp = http
+        .request(http::Method::GET, &login_url)
+        .expect("build GET /login")
+        .send()
+        .await
+        .expect("send GET /login");
+    assert!(
+        resp.status().is_success(),
+        "GET /login expected 200, got {}",
+        resp.status()
+    );
+    let csrf = read_set_cookie(&resp, "__Host-zsidp_csrf")
+        .expect("__Host-zsidp_csrf cookie set on GET /login");
+    let mut jar = CookieJar::default();
+    jar.set("__Host-zsidp_csrf", &csrf);
+
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", &csrf)
+        .append_pair("email", email)
+        .append_pair("password", password)
+        .finish();
+    let t0 = Instant::now();
+    let resp = http
+        .request(http::Method::POST, &login_url)
+        .expect("build POST /login")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header("cookie", jar.header())
+        .expect("cookie header")
+        .body(body)
+        .send()
+        .await
+        .expect("send POST /login");
+    let elapsed = t0.elapsed();
+    let status = resp.status().as_u16();
+    let body_bytes = resp.text().await.expect("body");
+    (status, body_bytes.len(), elapsed)
+}
+
 // ─── Test ────────────────────────────────────────────────────────────────
 
 const N_PAIRS: usize = 4;
@@ -166,57 +219,6 @@ async fn login_failure_responses_are_indistinguishable() {
     let mut missing_times: Vec<Duration> = Vec::with_capacity(N_PAIRS);
     let mut wrong_pw_resps: Vec<(u16, usize)> = Vec::with_capacity(N_PAIRS);
     let mut missing_resps: Vec<(u16, usize)> = Vec::with_capacity(N_PAIRS);
-
-    // Helper: drive POST /login once with the given (challenge, email,
-    // password) and return (status, body_len, elapsed). Each call also
-    // performs the GET /login round-trip so the form CSRF + cookie are
-    // freshly minted.
-    async fn one_failure(
-        http: &cyper::Client,
-        auth_base: &str,
-        challenge: &str,
-        email: &str,
-        password: &str,
-    ) -> (u16, usize, Duration) {
-        let login_url = format!("{auth_base}/login?login_challenge={challenge}");
-        let resp = http
-            .request(http::Method::GET, &login_url)
-            .expect("build GET /login")
-            .send()
-            .await
-            .expect("send GET /login");
-        assert!(
-            resp.status().is_success(),
-            "GET /login expected 200, got {}",
-            resp.status()
-        );
-        let csrf = read_set_cookie(&resp, "__Host-zsidp_csrf")
-            .expect("__Host-zsidp_csrf cookie set on GET /login");
-        let mut jar = CookieJar::default();
-        jar.set("__Host-zsidp_csrf", &csrf);
-
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("csrf", &csrf)
-            .append_pair("email", email)
-            .append_pair("password", password)
-            .finish();
-        let t0 = Instant::now();
-        let resp = http
-            .request(http::Method::POST, &login_url)
-            .expect("build POST /login")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .expect("content-type")
-            .header("cookie", jar.header())
-            .expect("cookie header")
-            .body(body)
-            .send()
-            .await
-            .expect("send POST /login");
-        let elapsed = t0.elapsed();
-        let status = resp.status().as_u16();
-        let body_bytes = resp.text().await.expect("body");
-        (status, body_bytes.len(), elapsed)
-    }
 
     for i in 0..N_PAIRS {
         // Same login_challenge for BOTH arms so the rendered form's

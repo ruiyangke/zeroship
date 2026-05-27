@@ -29,6 +29,8 @@ pub struct ConsentQuery {
     pub consent_challenge: String,
 }
 
+// ntex's per-thread service futures are intentionally `!Send`.
+#[allow(clippy::future_not_send)]
 pub async fn get(
     query: ntex::web::types::Query<ConsentQuery>,
     admin: ntex::web::types::State<HydraAdmin>,

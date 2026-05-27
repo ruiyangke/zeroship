@@ -1,4 +1,4 @@
-//! IdP login session cookie at `auth.zeroship.ai`. Cookie name:
+//! `IdP` login session cookie at `auth.zeroship.ai`. Cookie name:
 //! `__Host-zsidp_session`. 12 h hard absolute, 30 min sliding idle.
 
 pub const COOKIE_NAME: &str = "__Host-zsidp_session";
@@ -6,7 +6,7 @@ pub const COOKIE_NAME: &str = "__Host-zsidp_session";
 pub const IDLE_MINUTES: i64 = 30;
 pub const ABSOLUTE_HOURS: i64 = 12;
 
-/// Build the `Set-Cookie` header value for the IdP session.
+/// Build the `Set-Cookie` header value for the `IdP` session.
 ///
 /// `insecure_dev = true` drops the `Secure` flag (so localhost HTTP works).
 /// In production this MUST be false.

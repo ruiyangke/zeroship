@@ -1,4 +1,4 @@
-//! Server-rendered HTML UI for the IdP. Templates compiled via askama.
+//! Server-rendered HTML UI for the `IdP`. Templates compiled via askama.
 //!
 //! Template sources live under `crates/auth/src/ui/templates/` and are
 //! discovered through the `[package.metadata.askama] dirs = ["src/ui/templates"]`

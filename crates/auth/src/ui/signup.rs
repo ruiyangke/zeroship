@@ -41,7 +41,9 @@ pub struct SignupForm {
 /// Marked `async` to satisfy ntex's `Handler` trait (route registration in
 /// P2-U6 expects the handler to return a future); the body itself is
 /// non-blocking.
-#[allow(clippy::unused_async)]
+//
+// ntex's per-thread service futures are intentionally `!Send`.
+#[allow(clippy::unused_async, clippy::future_not_send)]
 pub async fn get(
     query: ntex::web::types::Query<SignupQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
@@ -62,6 +64,8 @@ pub async fn get(
     resp.body(body)
 }
 
+// ntex's per-thread service futures are intentionally `!Send`.
+#[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
     query: ntex::web::types::Query<SignupQuery>,

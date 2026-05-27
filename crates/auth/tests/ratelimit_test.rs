@@ -4,6 +4,9 @@ use compio_postgres::{connect, NoTls};
 use zeroship_auth::ratelimit::{consume, Bucket};
 use zeroship_auth::store::migrations;
 
+// compio-postgres's `Client` is `!Send` (it owns an io_uring submission
+// handle). All async helpers that touch it inherit that.
+#[allow(clippy::future_not_send)]
 async fn pg_or_skip() -> Option<compio_postgres::Client> {
     let dsn = std::env::var("AUTH_DB_URL").ok()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");

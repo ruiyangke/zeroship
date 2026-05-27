@@ -50,11 +50,19 @@ pub fn verify(password: &str, phc: &str) -> Result<bool> {
     }
 }
 
-/// Pre-computed dummy hash. Used by the login handler when no user matches the
-/// submitted email, so the failure path runs the same code and spends the same
-/// wall time as the real verify path. Defeats login-side email enumeration.
+/// Pre-computed dummy hash for the missing-user branch of `/login`.
+///
+/// Used by the login handler when no user matches the submitted email, so the
+/// failure path runs the same code and spends the same wall time as the real
+/// verify path. Defeats login-side email enumeration.
 ///
 /// Hashed once on first call and memoised.
+///
+/// # Panics
+///
+/// Panics if Argon2 hashing of the padding constant fails — which would
+/// indicate the global Argon2 configuration is corrupt, an unrecoverable
+/// invariant violation.
 #[must_use]
 pub fn dummy_hash() -> &'static str {
     static D: OnceLock<String> = OnceLock::new();

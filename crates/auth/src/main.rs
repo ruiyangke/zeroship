@@ -1,4 +1,4 @@
-//! zeroship-auth — the OIDC IdP login UI + identity flows + hydra admin client.
+//! zeroship-auth — the `OIDC` `IdP` login UI + identity flows + hydra admin client.
 //!
 //! Companion process: `oryd/hydra` (OIDC kernel). See docs/proposals/auth-server.md.
 

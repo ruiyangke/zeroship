@@ -1,4 +1,4 @@
-//! Double-submit CSRF token. The IdP's own login/signup/consent forms
+//! Double-submit CSRF token. The `IdP`'s own login/signup/consent forms
 //! carry a `csrf` form field that MUST match a `__Host-zsidp_csrf` cookie.
 //!
 //! Cookie is **NOT** `HttpOnly` — the inline `<script nonce>` reads it for

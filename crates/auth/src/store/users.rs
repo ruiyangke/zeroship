@@ -65,7 +65,7 @@ pub async fn create(
     Ok(row_to_user(row))
 }
 
-/// Bump `last_login_at` to NOW().
+/// Bump `last_login_at` to `NOW()`.
 ///
 /// # Errors
 ///

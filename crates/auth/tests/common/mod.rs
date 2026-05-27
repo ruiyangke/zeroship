@@ -251,6 +251,10 @@ impl Fixture {
     ///
     /// `client_id_prefix` is used to disambiguate the registered hydra
     /// client across concurrent tests / binaries (e.g. `"threat"`, `"enum"`).
+    //
+    // The Fixture holds ntex's `TestServer` + cyper client, both of which
+    // are intentionally `!Send`. Test helper futures here inherit that.
+    #[allow(clippy::future_not_send)]
     pub async fn boot(client_id_prefix: &str) -> Option<Self> {
         let (Ok(db_url), Ok(hydra_admin_url)) = (
             std::env::var("AUTH_DB_URL"),
@@ -346,12 +350,16 @@ impl Fixture {
         })
     }
 
+    // `TestServer` + cyper client are `!Send`; see note on `boot`.
+    #[allow(clippy::future_not_send)]
     pub async fn cleanup(self) {
         let _ = self.admin.delete_client(&self.test_client_id).await;
         compio::time::sleep(Duration::from_millis(50)).await;
         drop(self.srv);
     }
 
+    // cyper client is `!Send`; see note on `boot`.
+    #[allow(clippy::future_not_send)]
     pub async fn fresh_challenge(&self) -> String {
         fresh_login_challenge(
             &self.http,

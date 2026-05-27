@@ -25,7 +25,11 @@ pub struct HydraAdmin {
 
 impl std::fmt::Debug for HydraAdmin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HydraAdmin").field("base", &self.base).finish()
+        // `cyper::Client` doesn't implement `Debug`; we elide it via
+        // `finish_non_exhaustive` rather than a noisy placeholder.
+        f.debug_struct("HydraAdmin")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
     }
 }
 
@@ -56,6 +60,9 @@ impl HydraAdmin {
         finish::<T>(res, path).await
     }
 
+    // cyper's request future holds an internal `!Send` connection handle;
+    // the lint here is structural, not actionable.
+    #[allow(clippy::future_not_send)]
     pub(crate) async fn put<B: Serialize, T: DeserializeOwned>(
         &self, path: &str, query: &[(&str, &str)], body: &B,
     ) -> Result<T> {
@@ -80,6 +87,8 @@ impl HydraAdmin {
         finish::<T>(res, path).await
     }
 
+    // cyper's request future holds an internal `!Send` connection handle.
+    #[allow(clippy::future_not_send)]
     pub(crate) async fn post<B: Serialize, T: DeserializeOwned>(
         &self, path: &str, body: &B,
     ) -> Result<T> {
