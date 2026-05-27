@@ -12,6 +12,9 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
+# PKCE verifier generation (shared with gateway OIDC RP + auth tests).
+rand = "0.8"
+base64 = { workspace = true }
 thiserror = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }

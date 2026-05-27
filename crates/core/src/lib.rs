@@ -6,6 +6,7 @@ pub mod typed_id;
 pub mod crypto;
 pub mod observability;
 pub mod oidc_verify;
+pub mod pkce;
 pub mod preview_ports;
 pub mod superjson;
 

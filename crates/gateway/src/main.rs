@@ -4,6 +4,7 @@ mod compiled;
 mod dispatch;
 mod enforce;
 mod idempotency;
+mod oidc_rp;
 mod proxy;
 mod router;
 mod sync;

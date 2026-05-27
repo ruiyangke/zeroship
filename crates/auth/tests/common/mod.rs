@@ -21,9 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
 use ntex::web;
-use sha2::Digest as _;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
@@ -34,20 +32,20 @@ use zeroship_auth::server;
 use zeroship_auth::store::migrations;
 
 // ─── PKCE ────────────────────────────────────────────────────────────────
+//
+// Canonical implementations live in `zeroship_core::pkce` so the gateway
+// OIDC RP module and these integration tests share one source. These
+// thin wrappers exist purely to preserve the historical names used
+// throughout the auth test suite (`pkce_verifier`, `pkce_challenge_s256`).
 
-/// 32 random bytes, base64url-encoded (no padding). Per RFC 7636 §4.1
-/// the verifier is 43-128 chars of `[A-Z][a-z][0-9]-._~`; this yields 43.
+/// See [`zeroship_core::pkce::generate_verifier`].
 pub fn pkce_verifier() -> String {
-    use rand::RngCore as _;
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    zeroship_core::pkce::generate_verifier()
 }
 
-/// RFC 7636 §4.2: `BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))`.
+/// See [`zeroship_core::pkce::s256_challenge`].
 pub fn pkce_challenge_s256(verifier: &str) -> String {
-    let digest = sha2::Sha256::digest(verifier.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    zeroship_core::pkce::s256_challenge(verifier)
 }
 
 // ─── HTTP helpers ────────────────────────────────────────────────────────
