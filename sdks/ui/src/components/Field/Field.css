@@ -1,0 +1,133 @@
+/*
+ * Field — HIG-anchored form-frame.
+ *
+ * Anatomy:
+ *   .zs-field                  — the root (Base UI Field.Root → <div>)
+ *     ├─ .zs-field__label      — Base UI Field.Label → <label>
+ *     │   └─ .zs-field__required (or .zs-field__required--fallback)
+ *     ├─ <Input>               — see Input.css
+ *     ├─ .zs-field__description — Base UI Field.Description → <p>
+ *     └─ .zs-field__error      — Base UI Field.Error → <div>
+ *
+ * Modifier classes (one of each axis):
+ *   orientation:  --vertical | --horizontal
+ *   size:         --sm | --md | --lg     (optional; cascades to children)
+ *
+ * No focus / disabled / invalid styles live here — those belong on the
+ * control. Field handles only LAYOUT and the static text styles for
+ * label / description / error.
+ *
+ * RTL: every directional spacing rule uses logical properties
+ * (margin-inline-*, padding-inline-*). Tested via the RTL story.
+ */
+
+.zs-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-field-gap);
+  min-inline-size: 0;                  /* let children shrink in flex parents */
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+.zs-field--horizontal {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--zs-space-4);
+}
+
+/* In horizontal mode the label cell needs a fixed-ish width so multiple
+   horizontal Fields stack visually. We expose the cell width as a
+   custom property so consumers can override per form section without
+   reaching into the css. */
+.zs-field--horizontal > .zs-field__label {
+  flex: 0 0 auto;
+  inline-size: var(--zs-field-horizontal-label-w, 10rem);
+  padding-block-start: var(--zs-space-2);  /* visually center w/ control */
+}
+
+/* The .zs-field__description / .zs-field__error stay below the control
+   in horizontal mode too. We achieve that with a flex order trick on
+   the control wrapper: it grows to fill, and helpers stack inside. */
+.zs-field--horizontal {
+  /* the rest of the children (control, description, error) collapse
+     into a flex column so the label sits left, the stack right. */
+  flex-wrap: wrap;
+}
+.zs-field--horizontal > :not(.zs-field__label) {
+  flex: 1 1 0;
+  min-inline-size: 0;
+}
+
+/* ─── Label ───────────────────────────────────────────────────────────── */
+.zs-field__label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--zs-field-label-gap);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 600;
+  color: var(--zs-field-label-ink);
+}
+
+/* When the enclosing Field is disabled, the auto-bound label takes the
+   disabled label color so the entire row reads grayed-out together. */
+.zs-field[data-disabled] > .zs-field__label,
+.zs-field__label[data-disabled] {
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── Description ─────────────────────────────────────────────────────── */
+.zs-field__description {
+  margin: 0;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-field-description-ink);
+}
+
+/* ─── Error ───────────────────────────────────────────────────────────── */
+/* Multiple <Field.Error match="…"> can render at once (e.g. valueMissing
+   + typeMismatch). Stack them with a small gap so the row stays legible. */
+.zs-field__error {
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-field-error-ink);
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-half);
+}
+
+/* ─── Required indicator ──────────────────────────────────────────────── */
+.zs-field__required {
+  color: var(--zs-field-required-ink);
+  font-weight: 700;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+/* `--fallback` uses label-secondary (not tertiary) so the "(optional)"
+   text clears 4.5:1 contrast against the surface for the smaller font
+   size (footnote ≈ 0.8125rem). Tertiary is fine for body/subheadline sizes
+   but lands at ~4.46:1 here. */
+.zs-field__required--fallback {
+  color: var(--zs-label-secondary);
+  font-weight: 400;
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+/* ─── forced-colors / Windows High Contrast ───────────────────────────── */
+@media (forced-colors: active) {
+  .zs-field__label {
+    color: CanvasText;
+  }
+  .zs-field__description {
+    color: GrayText;
+  }
+  .zs-field__error,
+  .zs-field__required {
+    color: Mark;
+  }
+  .zs-field__required--fallback {
+    color: GrayText;
+  }
+}

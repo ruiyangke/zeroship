@@ -22,25 +22,7 @@ import type {
 } from "react";
 
 type DivProps = ComponentPropsWithoutRef<"div">;
-type NativeInputProps = ComponentPropsWithoutRef<"input">;
 type SpanProps = ComponentPropsWithoutRef<"span">;
-
-// ───── Input ─────────────────────────────────────────────────────────────────
-
-export interface InputProps extends NativeInputProps {
-  label?: ReactNode;
-  hint?: ReactNode;
-  error?: ReactNode;
-}
-
-export function Input({
-  label: _label,
-  hint: _hint,
-  error: _error,
-  ...props
-}: InputProps) {
-  return <input {...props} />;
-}
 
 // ───── Card ──────────────────────────────────────────────────────────────────
 

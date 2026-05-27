@@ -1,0 +1,288 @@
+/*
+ * Input — HIG-anchored single-line text field shell.
+ *
+ * Anatomy:
+ *   .zs-input                    — bordered shell (focus ring lives here)
+ *     ├─ .zs-input__slot--start  — optional leading adornment (aria-hidden)
+ *     ├─ .zs-input__control      — the native <input>
+ *     └─ .zs-input__slot--end    — optional trailing adornment
+ *
+ * Modifier classes (one of each axis):
+ *   variant:  --outline | --filled | --plain
+ *   size:     --sm | --md | --lg
+ *
+ * State surface (driven by data-* attributes from Base UI Field state):
+ *   data-focused | data-disabled | data-readonly | data-invalid | data-filled
+ *
+ * Layout discipline:
+ *   - The hairline border is `box-shadow inset` (NOT `border:`) so state
+ *     changes don't shift surrounding layout. `0.0625rem` ≈ one device unit.
+ *   - Logical properties only (inline-size, padding-inline, margin-inline-*)
+ *     so RTL flips correctly. Verified via the RTL story.
+ *   - 44pt HIG hit target on coarse pointers: small inputs (2rem) get an
+ *     invisible ::before that extends the tap area without growing the box,
+ *     mirroring Button's approach.
+ *
+ * Motion: ease-in-out on background-color + box-shadow only. Slow enough
+ * to feel deliberate, fast enough not to feel laggy. honored by the
+ * `prefers-reduced-motion: reduce` override on root tokens.
+ */
+
+.zs-input {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  inline-size: 100%;
+  block-size: var(--zs-control-h-md);
+  padding-inline: var(--zs-control-px-md);
+  border-radius: var(--zs-control-radius-md);
+  background: var(--zs-input-bg);
+  color: var(--zs-input-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  /* 0.0625rem hairline (≈ one device unit) via box-shadow inset → no layout shift on
+     state change. Keep the second shadow slot occupied with a 0/0
+     transparent so the focus-ring transition has something to morph
+     into / out of without snapping. */
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* ─── 44pt hit target on coarse pointers (small inputs) ──────────────── */
+@media (pointer: coarse) {
+  .zs-input:not([data-disabled]):not([data-readonly])::before {
+    content: "";
+    position: absolute;
+    inset-block: 50%;
+    inset-inline: 50%;
+    transform: translate(-50%, -50%);
+    inline-size: max(100%, var(--zs-hit-min));
+    block-size: max(100%, var(--zs-hit-min));
+    pointer-events: none;        /* the input itself catches the tap; the
+                                    ::before just guarantees there's a
+                                    44pt visual neighborhood. */
+  }
+}
+
+/* ─── sizes ──────────────────────────────────────────────────────────── */
+.zs-input--sm {
+  block-size: var(--zs-control-h-sm);
+  padding-inline: var(--zs-control-px-sm);
+  border-radius: var(--zs-control-radius-sm);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+
+.zs-input--lg {
+  block-size: var(--zs-control-h-lg);
+  padding-inline: var(--zs-control-px-lg);
+  border-radius: var(--zs-control-radius-lg);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+
+/* ─── variants ───────────────────────────────────────────────────────── */
+.zs-input--filled {
+  background: var(--zs-input-bg-filled);
+  box-shadow:
+    inset 0 0 0 0.0625rem transparent,
+    0 0 0 0 transparent;
+}
+
+.zs-input--plain {
+  background: transparent;
+  padding-inline: 0;
+  box-shadow:
+    inset 0 0 0 0.0625rem transparent,
+    0 0 0 0 transparent;
+}
+
+/* ─── hover (hover-capable pointers only) ────────────────────────────── */
+@media (hover: hover) {
+  .zs-input:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+    background: var(--zs-input-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+  .zs-input--filled:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+    background: var(--zs-input-bg-filled-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem transparent,
+      0 0 0 0 transparent;
+  }
+  .zs-input--plain:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+    background: transparent;
+    box-shadow:
+      inset 0 0 0 0.0625rem transparent,
+      0 0 0 0 transparent;
+  }
+}
+
+/* ─── focused — the wrapper owns the ring so slots + control share it ── */
+.zs-input[data-focused] {
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-focus-ring-color);
+}
+.zs-input--filled[data-focused] {
+  background: var(--zs-input-bg-filled);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-focus-ring-color);
+}
+.zs-input--plain[data-focused] {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 0 transparent,
+    0 0 0 var(--zs-focus-ring-width) var(--zs-focus-ring-color);
+}
+
+/* ─── invalid ────────────────────────────────────────────────────────── */
+.zs-input[data-invalid] {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 0 transparent;
+}
+.zs-input[data-invalid][data-focused] {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 var(--zs-focus-ring-width)
+      color-mix(in oklch, var(--zs-system-red) 35%, transparent);
+}
+
+/* ─── readonly — flat fill, no focus accent, no hover affordance ──────── */
+.zs-input[data-readonly] {
+  background: var(--zs-input-bg);
+  color: var(--zs-input-ink);
+  cursor: default;
+}
+
+/* ─── disabled ───────────────────────────────────────────────────────── */
+.zs-input[data-disabled] {
+  background: var(--zs-input-bg-disabled);
+  color: var(--zs-input-ink-disabled);
+  cursor: not-allowed;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+}
+.zs-input[data-disabled] .zs-input__control {
+  cursor: not-allowed;
+}
+
+/* ─── the native input ───────────────────────────────────────────────── */
+.zs-input__control {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+  padding: 0;
+  margin: 0;
+}
+.zs-input__control::placeholder {
+  color: var(--zs-input-placeholder);
+  /* Some UAs render placeholder text at lower opacity by default; pin
+     to 1 so our oklch token controls contrast deterministically. */
+  opacity: 1;
+}
+
+/* Chrome's yellow autofill background bleeds through the wrapper's bg.
+   The long inset shadow trick paints the input's fill back to the
+   surface color; -webkit-text-fill-color keeps the text legible. */
+.zs-input__control:-webkit-autofill,
+.zs-input__control:-webkit-autofill:hover,
+.zs-input__control:-webkit-autofill:focus,
+.zs-input__control:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000rem var(--zs-input-bg) inset;
+  -webkit-text-fill-color: var(--zs-input-ink);
+  caret-color: var(--zs-input-ink);
+}
+
+/* Hide number-input spinners — they conflict with our endSlot pattern
+   for currency / unit suffixes. Numbers stay typeable; only the
+   browser-painted spinners disappear. */
+.zs-input__control[type="number"]::-webkit-outer-spin-button,
+.zs-input__control[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.zs-input__control[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* search-input "X" — disable the UA-painted clear; we expose one via
+   endSlot when consumers ask for it. */
+.zs-input__control[type="search"]::-webkit-search-cancel-button,
+.zs-input__control[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+}
+
+/* ─── slots ──────────────────────────────────────────────────────────── */
+.zs-input__slot {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--zs-label-secondary);
+}
+.zs-input__slot--start {
+  margin-inline-end: var(--zs-space-1);
+}
+.zs-input__slot--end {
+  margin-inline-start: var(--zs-space-1);
+}
+.zs-input[data-disabled] .zs-input__slot {
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── forced-colors / Windows High Contrast ──────────────────────────── */
+@media (forced-colors: active) {
+  .zs-input {
+    background: Field;
+    color: FieldText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+    forced-color-adjust: none;
+  }
+  .zs-input[data-focused] {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-input[data-invalid] {
+    box-shadow:
+      inset 0 0 0 0.0625rem Mark,
+      0 0 0 0 transparent;
+  }
+  .zs-input[data-invalid][data-focused] {
+    box-shadow:
+      inset 0 0 0 0.0625rem Mark,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-input[data-disabled] {
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-input__control::placeholder {
+    color: GrayText;
+  }
+  .zs-input__slot {
+    color: CanvasText;
+  }
+}

@@ -14,6 +14,8 @@
  *   - No raw hex, no raw px — oklch() + rem only (blur radii too).
  */
 @import "./components/Button/Button.css";
+@import "./components/Field/Field.css";
+@import "./components/Input/Input.css";
 
 *,
 *::before,
@@ -120,6 +122,26 @@
 
   /* ─── HIG 44pt minimum tappable */
   --zs-hit-min: 2.75rem;                       /* 44 */
+
+  /* ─── Control sizing — Input today; Select / Textarea / etc. follow.
+     Sizes mirror Button so an Input next to a Button reads coherent
+     (HIG: controls share a visual rhythm). The 44pt HIG-min hit target
+     is honored by Input via the same invisible ::before trick Button
+     uses on coarse pointers. */
+  --zs-control-h-sm: 2rem;                     /* 32 — matches Button.small */
+  --zs-control-h-md: 2.5rem;                   /* 40 — matches Button.medium */
+  --zs-control-h-lg: 3rem;                     /* 48 — matches Button.large */
+  --zs-control-px-sm: var(--zs-space-3);       /* 12 */
+  --zs-control-px-md: var(--zs-space-4);       /* 16 */
+  --zs-control-px-lg: var(--zs-space-5);       /* 20 */
+  --zs-control-radius-sm: var(--zs-radius-2);  /* 6 */
+  --zs-control-radius-md: var(--zs-radius-3);  /* 8 */
+  --zs-control-radius-lg: var(--zs-radius-4);  /* 10 */
+
+  /* ─── Field layout — vertical and horizontal Field shells lean on
+     these gaps so consumers can sub-theme spacing in one place. */
+  --zs-field-gap: var(--zs-space-2);           /* 8 — label/control/desc/err stack gap */
+  --zs-field-label-gap: var(--zs-space-1);     /* 4 — inline label↔required indicator gap */
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -190,4 +212,30 @@
   /* ─── Material — glass */
   --zs-blur: blur(1rem) saturate(1.25);
   --zs-backdrop: oklch(0.5 0.05 275 / 0.3);
+
+  /* ─── Input palette (slice 2).
+     Outline = subtle delineation from the surface; Filled = pronounced
+     neutral; Plain = no chrome (text-field-on-row look). Border colors
+     stay subtle and only shift on hover/focus/invalid so the field
+     never visually "thickens" between states (the box-shadow inset
+     keeps layout stable). */
+  --zs-input-bg: var(--zs-fill-quaternary);
+  --zs-input-bg-hover: var(--zs-fill-tertiary);
+  --zs-input-bg-focus: var(--zs-surface-raised);
+  --zs-input-bg-disabled: var(--zs-fill-quaternary);
+  --zs-input-bg-filled: var(--zs-fill-secondary);
+  --zs-input-bg-filled-hover: var(--zs-fill);
+  --zs-input-border: var(--zs-separator);
+  --zs-input-border-hover: var(--zs-separator-strong);
+  --zs-input-border-focus: var(--zs-accent);
+  --zs-input-border-invalid: var(--zs-system-red);
+  --zs-input-ink: var(--zs-label);
+  --zs-input-placeholder: var(--zs-label-tertiary);
+  --zs-input-ink-disabled: var(--zs-label-tertiary);
+
+  /* ─── Field text */
+  --zs-field-label-ink: var(--zs-label);
+  --zs-field-description-ink: var(--zs-label-secondary);
+  --zs-field-error-ink: var(--zs-system-red);
+  --zs-field-required-ink: var(--zs-system-red);
 }

@@ -24,6 +24,18 @@ const stories = [
   "components-button--long-label",
   "components-button--focus-visible",
   "components-button--as-child",
+  "components-input--all-variants",
+  "components-input--all-sizes",
+  "components-input--all-states",
+  "components-input--with-slots",
+  "components-input--decomposed",
+  "components-input--combined",
+  "components-input--required",
+  "components-input--input-types",
+  "components-input--horizontal-layout",
+  "components-input--rtl",
+  "components-input--long-label-and-description",
+  "components-input--inside-form",
 ];
 
 if (themes.length === 0 || stories.length === 0) {
