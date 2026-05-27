@@ -33,4 +33,42 @@ pub struct AuthConfig {
     /// Dev mode: drop the Secure flag on cookies. ONLY for localhost.
     #[arg(long, env = "AUTH_INSECURE_DEV")]
     pub insecure_dev: bool,
+
+    // ─── Google OAuth (optional — federation routes registered only when set) ───
+    /// Google OAuth 2.0 client ID. Without it, `/oauth/google/*` routes are
+    /// not registered (auth still boots).
+    #[arg(long, env = "AUTH_GOOGLE_CLIENT_ID")]
+    pub google_client_id: Option<String>,
+
+    /// Google OAuth 2.0 client secret.
+    #[arg(long, env = "AUTH_GOOGLE_CLIENT_SECRET")]
+    pub google_client_secret: Option<String>,
+
+    /// Redirect URI registered with Google. Must match the value configured in
+    /// the Google Cloud Console exactly.
+    #[arg(
+        long,
+        env = "AUTH_GOOGLE_REDIRECT_URI",
+        default_value = "https://auth.zeroship.ai/oauth/google/callback"
+    )]
+    pub google_redirect_uri: String,
+
+    // ─── GitHub OAuth (optional) ───
+    /// GitHub OAuth App client ID. Without it, `/oauth/github/*` routes are
+    /// not registered (auth still boots).
+    #[arg(long, env = "AUTH_GITHUB_CLIENT_ID")]
+    pub github_client_id: Option<String>,
+
+    /// GitHub OAuth App client secret.
+    #[arg(long, env = "AUTH_GITHUB_CLIENT_SECRET")]
+    pub github_client_secret: Option<String>,
+
+    /// Callback URL registered on the GitHub OAuth App. Must match what's set
+    /// in the app's settings.
+    #[arg(
+        long,
+        env = "AUTH_GITHUB_REDIRECT_URI",
+        default_value = "https://auth.zeroship.ai/oauth/github/callback"
+    )]
+    pub github_redirect_uri: String,
 }

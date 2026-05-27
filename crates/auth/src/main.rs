@@ -21,6 +21,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = AuthConfig::parse();
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
+    // OAuth provider credentials are optional. We log a warning per disabled
+    // provider so it's obvious during boot which federation arms aren't wired
+    // up. Actual route gating happens in U2.2 (Google) + U3.2 (GitHub).
+    if cfg.google_client_id.is_none() {
+        tracing::warn!(
+            "Google OAuth disabled — set AUTH_GOOGLE_CLIENT_ID + AUTH_GOOGLE_CLIENT_SECRET to enable"
+        );
+    }
+    if cfg.github_client_id.is_none() {
+        tracing::warn!(
+            "GitHub OAuth disabled — set AUTH_GITHUB_CLIENT_ID + AUTH_GITHUB_CLIENT_SECRET to enable"
+        );
+    }
+
     // 1. Open PG.
     let (client, connection) = connect(&cfg.db_url, NoTls).await?;
     compio::runtime::spawn(async move {

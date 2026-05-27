@@ -98,6 +98,12 @@ async fn e2e_password_flow() {
         clients_config: "ops/auth-clients.example.toml".to_string(),
         bootstrap: false,
         insecure_dev: true, // drop Secure flag so the cyper client sees cookies on http://
+        google_client_id: None,
+        google_client_secret: None,
+        google_redirect_uri: "https://auth.zeroship.ai/oauth/google/callback".to_string(),
+        github_client_id: None,
+        github_client_secret: None,
+        github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
     });
 
     // 2. Boot the auth server via `ntex::web::test::server` — runs the

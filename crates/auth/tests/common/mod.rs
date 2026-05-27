@@ -285,6 +285,12 @@ impl Fixture {
             clients_config: "ops/auth-clients.example.toml".to_string(),
             bootstrap: false,
             insecure_dev: true,
+            google_client_id: None,
+            google_client_secret: None,
+            google_redirect_uri: "https://auth.zeroship.ai/oauth/google/callback".to_string(),
+            github_client_id: None,
+            github_client_secret: None,
+            github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
         });
         let admin_state = admin.clone();
         let cfg_state = cfg.clone();
