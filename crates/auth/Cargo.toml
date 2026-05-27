@@ -28,6 +28,9 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 mimalloc = { workspace = true }
+# Mailer trait uses `async fn` in trait — `#[async_trait]` keeps the trait
+# object-safe (so we can store `Arc<dyn Mailer>` in `AppCtx`).
+async-trait = { workspace = true }
 
 # Password hashing (Argon2id, PHC strings).
 # Not workspace-pinned — auth is the only consumer today.

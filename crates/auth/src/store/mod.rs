@@ -6,4 +6,5 @@ pub mod identities;
 pub mod migrations;
 pub mod ratelimit;
 pub mod sessions;
+pub mod suppressions;
 pub mod users;

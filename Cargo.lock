@@ -5678,6 +5678,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "askama",
+ "async-trait",
  "base64",
  "chrono",
  "clap",
