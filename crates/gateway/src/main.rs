@@ -30,6 +30,18 @@ pub struct GateConfig {
     /// workers can verify forwarded identity was not forged by an attacker
     /// with direct network access. Empty disables both checks (dev only).
     pub worker_key: String,
+    /// Upstream URL for Ory Hydra's public OIDC endpoints. The gateway
+    /// forwards `auth.zeroship.ai/{oauth2,.well-known}/*` (plus
+    /// `/userinfo`) here. Compose-internal default points at the
+    /// `hydra` service on its 4444 port.
+    pub hydra_public: String,
+    /// Upstream URL for `crates/auth` — the login/signup UI, OAuth2
+    /// consent handlers, and webhook surfaces. Everything on the
+    /// `auth.zeroship.ai` host that is NOT an OIDC protocol endpoint
+    /// is forwarded here. Defaults to the compose-internal `auth`
+    /// service; will be wired through once the service joins compose
+    /// (Phase 3 Unit U11).
+    pub auth_public: String,
 }
 
 #[allow(missing_debug_implementations)]
@@ -82,6 +94,8 @@ async fn main() -> std::io::Result<()> {
         "BLOB_CACHE_DISK_ROOT",
         "./blob-cache",
     );
+    let hydra_public = arg_or_env(&args, "--hydra-public", "HYDRA_PUBLIC", "http://hydra:4444");
+    let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "http://auth:9092");
 
     if worker_key.is_empty() {
         tracing::warn!(
@@ -142,6 +156,8 @@ async fn main() -> std::io::Result<()> {
             poll_interval_secs: poll_interval.parse().unwrap_or(5),
             auth_secret,
             worker_key,
+            hydra_public,
+            auth_public,
         },
         routes: sync::RouteCache::new(),
         hash_ring,

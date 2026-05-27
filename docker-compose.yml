@@ -59,7 +59,9 @@ services:
           --control-key platform-key \
           --worker-key worker-key \
           --workers "$$WORKERS" \
-          --poll-interval 3
+          --poll-interval 3 \
+          --hydra-public http://hydra:4444 \
+          --auth-public http://auth:9092
     ports:
       - "8000:8000"
     security_opt:
