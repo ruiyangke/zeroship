@@ -16,9 +16,12 @@ use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::identity::password;
+use crate::identity::{password, verification};
+use crate::mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
+use crate::mailer::{Address, Mailer};
 use crate::store::users;
 use crate::ui::{ErrorPage, SignupPage};
 
@@ -65,13 +68,14 @@ pub async fn get(
 }
 
 // ntex's per-thread service futures are intentionally `!Send`.
-#[allow(clippy::future_not_send)]
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn post(
     req: HttpRequest,
     query: ntex::web::types::Query<SignupQuery>,
     form: ntex::web::types::Form<SignupForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    mailer: ntex::web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     let challenge = query.login_challenge.clone().unwrap_or_default();
 
@@ -125,12 +129,90 @@ pub async fn post(
     // email is logged but produces the same response as a successful
     // insert — the attacker cannot probe email existence via this endpoint.
     let name = form.name.trim();
-    if let Err(e) = users::create(db.as_ref(), &email, name, Some(&phc)).await {
-        tracing::info!(error = %e, "signup users::create rejected (duplicate or otherwise)");
+    let created = match users::create(db.as_ref(), &email, name, Some(&phc)).await {
+        Ok(u) => Some(u),
+        Err(e) => {
+            tracing::info!(error = %e, "signup users::create rejected (duplicate or otherwise)");
+            None
+        }
+    };
+
+    // 5b. On a successful create, issue a verification token and email
+    //     it to the user. Both the token issue and the email send are
+    //     best-effort — a failure is logged but never surfaced to the
+    //     user, because:
+    //     - revealing an issue failure would leak DB load / connectivity;
+    //     - revealing a send failure would leak suppression status,
+    //       defeating enumeration defense for known-bouncer addresses;
+    //     - users can request a resend later (deferred to a future phase).
+    if let Some(user) = &created {
+        match verification::issue(db.as_ref(), user.id, &user.email).await {
+            Ok(issued) => {
+                let link = format!(
+                    "{}/verify?t={}",
+                    cfg.public_url(),
+                    issued.raw,
+                );
+                let name_hint = user
+                    .name
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("there");
+
+                let html = VerifyEmailHtml {
+                    name: name_hint,
+                    link: &link,
+                    expires_in: "24 hours",
+                }
+                .render()
+                .unwrap_or_default();
+                let text = VerifyEmailText {
+                    name: name_hint,
+                    link: &link,
+                    expires_in: "24 hours",
+                }
+                .render()
+                .unwrap_or_default();
+
+                let msg = build_email(
+                    Address {
+                        email: user.email.clone(),
+                        name: Some(user.name.clone()),
+                    },
+                    Address {
+                        email: cfg.mail_from_email.clone(),
+                        name: Some(cfg.mail_from_name.clone()),
+                    },
+                    "Verify your zeroship email".into(),
+                    text,
+                    html,
+                    vec!["verification".into()],
+                );
+                if let Err(e) = mailer.send(db.as_ref(), msg).await {
+                    tracing::warn!(error = %e, user_id = %user.id, "verification email send failed");
+                }
+
+                audit::emit(
+                    db.as_ref(),
+                    &AuditEvent {
+                        event_type: "verification_issued",
+                        outcome: "success",
+                        user_id: Some(&user.id),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, user_id = %user.id, "verification token issue failed");
+                // Don't fail the signup — the user can request resend later.
+            }
+        }
     }
 
     // 6. Redirect to /login carrying the same challenge so the user can
-    // immediately sign in (Phase 5 will insert an email-verification step).
+    // immediately sign in. The verification email is in their inbox;
+    // verifying is decoupled from sign-in.
     let to = if challenge.is_empty() {
         "/login".to_string()
     } else {

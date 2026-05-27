@@ -85,7 +85,10 @@ pub fn configure(
             .service(
                 web::resource("/magic/complete")
                     .route(web::post().to(ui::magic::complete)),
-            );
+            )
+            // Email verification (P5-U5). Token issued at /signup is
+            // redeemed here; sets auth.users.email_verified_at = NOW().
+            .service(web::resource("/verify").route(web::get().to(ui::verify::get)));
 
         if google_enabled {
             cfg.service(

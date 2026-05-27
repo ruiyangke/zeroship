@@ -18,6 +18,7 @@ pub mod oauth_github;
 pub mod oauth_google;
 pub mod oauth_stash;
 pub mod signup;
+pub mod verify;
 
 use askama::Template;
 
@@ -119,6 +120,14 @@ pub struct MagicAwaitCodePage<'a> {
 #[template(path = "magic_show_code.html")]
 pub struct MagicShowCodePage<'a> {
     pub code: &'a str,
+    pub email: &'a str,
+}
+
+/// `/verify` GET page (P5-U5) — shown after a successful email-verification
+/// token redeem. Pure confirmation; no follow-up action required.
+#[derive(Debug, Template)]
+#[template(path = "verify_ok.html")]
+pub struct VerifyOkPage<'a> {
     pub email: &'a str,
 }
 

@@ -35,6 +35,7 @@ use zeroship_auth::config::AuthConfig;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
+use zeroship_auth::mailer::{Mailer, StdoutMailer};
 use zeroship_auth::server;
 use zeroship_auth::store::migrations;
 
@@ -132,15 +133,18 @@ async fn e2e_password_flow() {
     let admin_state = admin.clone();
     let cfg_state = cfg.clone();
     let db_state = pg_client.clone();
+    let mailer_state: Arc<dyn Mailer> = Arc::new(StdoutMailer);
     let srv = web::test::server(move || {
         let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
+        let mailer_state = mailer_state.clone();
         async move {
             web::App::new()
                 .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
+                .state(mailer_state)
                 .middleware(SecurityHeaders)
                 .configure(server::configure(false, false))
         }
