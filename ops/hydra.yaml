@@ -1,0 +1,50 @@
+dsn: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+
+serve:
+  public:
+    port: 4444
+    host: 0.0.0.0
+  admin:
+    port: 4445
+    host: 0.0.0.0           # in production: 127.0.0.1; in compose we share network
+  cookies:
+    same_site_mode: Lax
+    domain: auth.zeroship.ai
+
+urls:
+  self:
+    issuer: https://auth.zeroship.ai/
+    public: https://auth.zeroship.ai/
+  login:   https://auth.zeroship.ai/login
+  consent: https://auth.zeroship.ai/consent
+  logout:  https://auth.zeroship.ai/logout
+  error:   https://auth.zeroship.ai/error
+
+strategies:
+  access_token: opaque
+
+oauth2:
+  pkce:
+    enforced_for_public_clients: true
+    enforced: true
+  grant:
+    refresh_token:
+      rotation_grace_period: 30s
+      rotation_grace_reuse_count: 3
+
+ttl:
+  access_token: 1h
+  refresh_token: 720h
+  id_token: 1h
+  auth_code: 60s
+  login_consent_request: 1h
+
+oidc:
+  subject_identifiers:
+    supported_types: [public]
+  dynamic_client_registration:
+    enabled: false
+
+log:
+  level: info
+  format: json

@@ -93,6 +93,42 @@ services:
     depends_on:
       - control
 
+  # ory/hydra — OIDC kernel sidecar for crates/auth.
+  # public port 4444 (proxied via gateway at auth.zeroship.ai/oauth2/*)
+  # admin port 4445 (production: loopback only; in compose we share the network)
+  # Config lives at ops/hydra.yaml; secrets come from env.
+  hydra:
+    image: oryd/hydra:v2.4.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      hydra-migrate:
+        condition: service_completed_successfully
+    environment:
+      DSN: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+      SECRETS_SYSTEM: ${SECRETS_SYSTEM:-dev-secret-please-change-this-please}
+      SECRETS_COOKIE: ${SECRETS_COOKIE:-dev-secret-please-change-this-please}
+    volumes:
+      - ./ops/hydra.yaml:/etc/config/hydra/hydra.yaml:ro
+    command: serve all --dev --config /etc/config/hydra/hydra.yaml
+    ports:
+      - "4444:4444"
+      # Admin port 4445 intentionally NOT mapped to host. Compose's
+      # internal network is sufficient for crates/auth ↔ hydra-admin.
+
+  # One-shot migrator. Runs hydra's own schema migrations into the
+  # shared zeroship Postgres database (creates the hydra_* tables
+  # alongside the auth.* schema we own).
+  hydra-migrate:
+    image: oryd/hydra:v2.4.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DSN: postgres://postgres:zeroship@postgres:5432/zeroship?sslmode=disable
+    command: migrate sql up -e --yes
+    restart: on-failure
+
   # zeroship-sandbox — Docker-backed dev containers for the AI builder.
   # Spawns sibling containers (Docker-out-of-Docker) by mounting
   # /var/run/docker.sock from the host. Bind-mounts the host's
