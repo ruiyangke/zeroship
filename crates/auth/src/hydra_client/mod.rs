@@ -5,6 +5,7 @@
 //! cyper-based client. The cyper invocation idiom mirrors
 //! `crates/control/src/oauth.rs`.
 
+pub mod login;
 pub mod types;
 
 use serde::{de::DeserializeOwned, Serialize};
