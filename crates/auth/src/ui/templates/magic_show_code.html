@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Sign-in code · zeroship{% endblock %}
+{% block body %}
+<h2>One more step</h2>
+<p>Sign-in for <strong>{{ email }}</strong> was started on a different device. Type this code there to continue:</p>
+<p class="code-display"><code>{{ code }}</code></p>
+<p class="subtle">The code expires in 5 minutes. You can close this tab once you've typed the code on your other device.</p>
+{% endblock %}

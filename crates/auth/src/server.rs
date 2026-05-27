@@ -72,13 +72,19 @@ pub fn configure(
                     .route(web::post().to(ui::me::unlink)),
             )
             // Magic-link login (P5-U4). Universal — always registered,
-            // no per-provider gating. `/magic/verify` + `/magic/complete`
-            // land in U4.3.
+            // no per-provider gating.
             .service(
                 web::resource("/magic/start").route(web::post().to(ui::magic::start)),
             )
             .service(
                 web::resource("/magic/await").route(web::get().to(ui::magic::await_code)),
+            )
+            .service(
+                web::resource("/magic/verify").route(web::get().to(ui::magic::verify)),
+            )
+            .service(
+                web::resource("/magic/complete")
+                    .route(web::post().to(ui::magic::complete)),
             );
 
         if google_enabled {

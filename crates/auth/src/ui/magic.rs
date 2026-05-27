@@ -13,24 +13,46 @@
 //!   code-entry form. The check-email page already embeds the same form
 //!   inside a `<details>` toggle; this route exists for direct entry.
 //!
-//! `verify` (GET) + `complete` (POST) land in P5-U4.3.
+//! - **GET `/magic/verify?t=<token>&login_challenge=<…>`** — redeem the
+//!   magic-link token. If the redeeming browser presents the matching
+//!   `__Host-zsidp_magic_csrf` cookie (same-device path) → mint session,
+//!   `accept_login`, 302 to hydra. If the cookie is missing or different
+//!   (cross-device) → generate a 6-digit code, persist it under the
+//!   magic-link's CSRF nonce, render the code on the redeeming device.
+//!
+//! - **POST `/magic/complete`** — the cross-device completion form. The
+//!   requesting device posts the 6-digit code it saw on the redeeming
+//!   device; we atomically consume `auth.magic_completions`, look up the
+//!   user, mint a session, `accept_login`, redirect.
+//!
+//! User creation: a successful redeem on an unknown email creates a new
+//! `auth.users` row with `email_verified_at = NOW()` — clicking the link
+//! is itself proof of email ownership. Reuses `find_or_create_magic_user`
+//! for both same-device and cross-device.
 
 use askama::Template;
-use ntex::http::header::{HeaderValue, COOKIE, SET_COOKIE, USER_AGENT};
+use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE, USER_AGENT};
 use ntex::web::{HttpRequest, HttpResponse};
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use url::form_urlencoded;
+use uuid::Uuid;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
+use crate::error::{AuthError, Result};
+use crate::hydra_client::types::AcceptLoginRequest;
+use crate::hydra_client::HydraAdmin;
 use crate::identity::magic_link;
 use crate::mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
 use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket};
-use crate::ui::{ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage};
+use crate::sessions::login as session_cookie;
+use crate::store::{sessions, users};
+use crate::ui::{ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage, MagicShowCodePage};
 
 // ─── Cookie helpers ──────────────────────────────────────────────────
 
@@ -54,12 +76,19 @@ pub(crate) fn magic_csrf_set_cookie(nonce: &str, insecure_dev: bool) -> String {
     )
 }
 
+/// Build the `Set-Cookie` header value for clearing the magic-link
+/// CSRF cookie. Used after a successful redeem so the nonce can't be
+/// reused.
+fn magic_csrf_clear_cookie(insecure_dev: bool) -> String {
+    let secure = if insecure_dev { "" } else { "; Secure" };
+    format!("{MAGIC_CSRF_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+}
+
 /// Parse the magic-link CSRF nonce from a request's `Cookie` header
 /// value.
 ///
-/// Used by `/magic/verify` (P5-U4.3) to decide same-device vs
-/// cross-device on redeem.
-#[allow(dead_code)] // used by U4.3 `/magic/verify`
+/// Used by `/magic/verify` to decide same-device vs cross-device on
+/// redeem.
 pub(crate) fn parse_magic_csrf_cookie(cookie_header: &str) -> Option<String> {
     for part in cookie_header.split(';') {
         let part = part.trim();
@@ -301,6 +330,354 @@ pub async fn await_code(
     resp.body(body)
 }
 
+// ─── GET /magic/verify ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct MagicVerifyQuery {
+    pub t: String,
+    pub login_challenge: String,
+}
+
+/// `/magic/verify` — the link the user clicks in the email. Atomically
+/// redeem the token, then branch on whether the redeeming browser
+/// presents the matching `__Host-zsidp_magic_csrf` cookie:
+///
+/// - **Same-device**: mint a session, `accept_login`, 302 to hydra.
+/// - **Cross-device**: generate a 6-digit code, persist it in
+///   `auth.magic_completions`, render the code on this device for the
+///   user to type back on the requesting device.
+#[allow(clippy::future_not_send)]
+pub async fn verify(
+    req: HttpRequest,
+    query: ntex::web::types::Query<MagicVerifyQuery>,
+    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    admin: ntex::web::types::State<HydraAdmin>,
+) -> HttpResponse {
+    // 1. Redeem.
+    let redeemed = match magic_link::redeem(db.as_ref(), &query.t).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "magic_redeem",
+                    outcome: "failure",
+                    auth_method: Some("magic"),
+                    detail: json!({ "reason": "invalid_or_expired" }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return render_error_page("link invalid or expired", None);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "magic_link::redeem failed");
+            return render_error_page("internal error", Some("redeem"));
+        }
+    };
+
+    // 2. Same-device predicate.
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let cookie_nonce = parse_magic_csrf_cookie(cookie_header);
+    let same_device = cookie_nonce.as_deref() == Some(redeemed.csrf_nonce.as_str());
+
+    // 3. Find-or-create the user.
+    let user_id = match find_or_create_magic_user(db.as_ref(), &redeemed.email).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "magic_link find-or-create failed");
+            return render_error_page("internal error", Some("user lookup"));
+        }
+    };
+
+    if same_device {
+        same_device_finish(db.as_ref(), &admin, &cfg, user_id, &query.login_challenge).await
+    } else {
+        cross_device_show_code(
+            db.as_ref(),
+            user_id,
+            &redeemed.email,
+            &redeemed.csrf_nonce,
+            &query.login_challenge,
+        )
+        .await
+    }
+}
+
+/// Same-device path: mint session, `accept_login`, 302 to hydra.
+#[allow(clippy::future_not_send)]
+async fn same_device_finish(
+    db: &compio_postgres::Client,
+    admin: &HydraAdmin,
+    cfg: &AuthConfig,
+    user_id: Uuid,
+    login_challenge: &str,
+) -> HttpResponse {
+    let session = match sessions::create(
+        db,
+        &sessions::CreateSession {
+            user_id,
+            auth_method: "magic",
+            amr: vec!["magic".into()],
+            acr: Some("urn:zeroship:magic"),
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "magic sessions::create failed");
+            return render_error_page("internal error", Some("session"));
+        }
+    };
+
+    if let Err(e) = users::touch_last_login(db, user_id).await {
+        tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
+    }
+
+    let accept = AcceptLoginRequest {
+        subject: user_id.to_string(),
+        remember: Some(true),
+        remember_for: Some(3600),
+        acr: Some("urn:zeroship:magic".into()),
+        amr: Some(vec!["magic".into()]),
+        ..Default::default()
+    };
+    let redirect_to = match admin.accept_login(login_challenge, &accept).await {
+        Ok(r) => r.redirect_to,
+        Err(e) => {
+            tracing::error!(error = %e, "magic accept_login failed");
+            return render_error_page("internal error", Some("hydra"));
+        }
+    };
+
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "magic_redeemed_same_device",
+            outcome: "success",
+            user_id: Some(&user_id),
+            auth_method: Some("magic"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut resp = HttpResponse::Found();
+    resp.header(
+        LOCATION,
+        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
+    );
+    resp.header(
+        SET_COOKIE,
+        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+    );
+    // Clear the requesting-device cookie so a future stray click can't
+    // be replayed in a same-device check.
+    resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
+    resp.finish()
+}
+
+/// Cross-device path: stash a fresh 6-digit code in
+/// `auth.magic_completions`, render the code on this (redeeming) device.
+#[allow(clippy::future_not_send)]
+async fn cross_device_show_code(
+    db: &compio_postgres::Client,
+    user_id: Uuid,
+    email: &str,
+    csrf_nonce: &str,
+    login_challenge: &str,
+) -> HttpResponse {
+    let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
+    // 5-minute window — short, since the user is actively typing.
+    if let Err(e) =
+        completions_store::create(db, csrf_nonce, &code, email, login_challenge, 300).await
+    {
+        tracing::error!(error = %e, "magic_completions insert failed");
+        return render_error_page("internal error", Some("completion"));
+    }
+
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "magic_redeemed_cross_device",
+            outcome: "success",
+            user_id: Some(&user_id),
+            auth_method: Some("magic"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let page = MagicShowCodePage { code: &code, email };
+    let body = page
+        .render()
+        .unwrap_or_else(|_| format!("<h1>Code: {code}</h1>"));
+    let mut resp = HttpResponse::Ok();
+    resp.content_type("text/html; charset=utf-8");
+    resp.body(body)
+}
+
+// ─── POST /magic/complete ────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct MagicCompleteForm {
+    pub csrf: String,
+    pub csrf_nonce: String,
+    pub login_challenge: String,
+    pub code: String,
+}
+
+/// `/magic/complete` POST — cross-device completion. The requesting
+/// device posts the 6-digit code shown on the redeeming device; we
+/// atomically consume the row + mint a session + `accept_login`.
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+pub async fn complete(
+    req: HttpRequest,
+    form: ntex::web::types::Form<MagicCompleteForm>,
+    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    admin: ntex::web::types::State<HydraAdmin>,
+) -> HttpResponse {
+    // 1. CSRF.
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let cookie_token = csrf::parse_cookie(cookie_header);
+    if cookie_token
+        .as_deref()
+        .is_none_or(|c| !csrf::matches(&form.csrf, c))
+    {
+        return render_error_page("invalid request", Some("csrf"));
+    }
+
+    // 2. Consume atomically.
+    let completion =
+        match completions_store::consume(db.as_ref(), &form.csrf_nonce, &form.code).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                audit::emit(
+                    db.as_ref(),
+                    &AuditEvent {
+                        event_type: "magic_complete",
+                        outcome: "failure",
+                        auth_method: Some("magic"),
+                        detail: json!({ "reason": "code_invalid_or_expired" }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+                return render_error_page("code invalid or expired", None);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "magic_completions consume failed");
+                return render_error_page("internal error", Some("complete"));
+            }
+        };
+
+    // 3. Defence: form `login_challenge` must match the one stashed at
+    //    issue time. Defeats a forged challenge swap on the requesting
+    //    device.
+    if form.login_challenge != completion.login_challenge {
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "magic_complete",
+                outcome: "failure",
+                auth_method: Some("magic"),
+                detail: json!({ "reason": "login_challenge_mismatch" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_page("session mismatch", None);
+    }
+
+    // 4. Find-or-create the user (must succeed — the redeem path
+    //    already found-or-created, so this is effectively a lookup).
+    let user_id = match find_or_create_magic_user(db.as_ref(), &completion.email).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, "magic complete find-or-create failed");
+            return render_error_page("internal error", Some("user lookup"));
+        }
+    };
+
+    // 5. Mint session + accept_login + 302 — mirrors same-device path.
+    let session = match sessions::create(
+        db.as_ref(),
+        &sessions::CreateSession {
+            user_id,
+            auth_method: "magic",
+            amr: vec!["magic".into()],
+            acr: Some("urn:zeroship:magic"),
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "magic complete sessions::create failed");
+            return render_error_page("internal error", Some("session"));
+        }
+    };
+
+    if let Err(e) = users::touch_last_login(db.as_ref(), user_id).await {
+        tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
+    }
+
+    let accept = AcceptLoginRequest {
+        subject: user_id.to_string(),
+        remember: Some(true),
+        remember_for: Some(3600),
+        acr: Some("urn:zeroship:magic".into()),
+        amr: Some(vec!["magic".into()]),
+        ..Default::default()
+    };
+    let redirect_to = match admin.accept_login(&form.login_challenge, &accept).await {
+        Ok(r) => r.redirect_to,
+        Err(e) => {
+            tracing::error!(error = %e, "magic complete accept_login failed");
+            return render_error_page("internal error", Some("hydra"));
+        }
+    };
+
+    audit::emit(
+        db.as_ref(),
+        &AuditEvent {
+            event_type: "magic_complete",
+            outcome: "success",
+            user_id: Some(&user_id),
+            auth_method: Some("magic"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut resp = HttpResponse::Found();
+    resp.header(
+        LOCATION,
+        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
+    );
+    resp.header(
+        SET_COOKIE,
+        session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+    );
+    resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
+    resp.finish()
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 fn render_error_page(error: &str, error_description: Option<&str>) -> HttpResponse {
@@ -315,6 +692,113 @@ fn render_error_page(error: &str, error_description: Option<&str>) -> HttpRespon
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
 }
+
+/// Find a user by `email`, creating them with `email_verified_at = NOW()`
+/// if absent (clicking the magic link is itself proof of email
+/// ownership).
+async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) -> Result<Uuid> {
+    if let Some(user) = users::find_by_email(db, email).await? {
+        if user.email_verified_at.is_none() {
+            // Magic-link click counts as email verification — make
+            // sure the row reflects that (no-op if already verified).
+            db.execute(
+                "UPDATE auth.users SET email_verified_at = NOW() \
+                 WHERE id = $1 AND email_verified_at IS NULL",
+                &[&user.id],
+            )
+            .await
+            .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
+        }
+        return Ok(user.id);
+    }
+    let name = email.split('@').next().unwrap_or("user");
+    let user = users::create(db, email, name, None).await?;
+    db.execute(
+        "UPDATE auth.users SET email_verified_at = NOW() WHERE id = $1",
+        &[&user.id],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
+    Ok(user.id)
+}
+
+// ─── auth.magic_completions store ────────────────────────────────────
+
+mod completions_store {
+    use compio_postgres::Client;
+
+    use crate::error::{AuthError, Result};
+
+    #[derive(Debug, Clone)]
+    pub struct Completion {
+        pub email: String,
+        pub login_challenge: String,
+    }
+
+    /// Insert a fresh completion row. `expires_secs` is the lifetime
+    /// from now until the code expires (5 minutes at the caller).
+    ///
+    /// `csrf_nonce` is the PRIMARY KEY — at most one outstanding
+    /// completion per magic-link issue. The single-use redeem in
+    /// `identity::magic_link::redeem` makes a second insert impossible
+    /// in practice; `ON CONFLICT … DO UPDATE` is defence-in-depth so
+    /// re-running the test suite (which short-circuits the single-use
+    /// invariant by tweaking the row directly) still works.
+    pub async fn create(
+        db: &Client,
+        csrf_nonce: &str,
+        code: &str,
+        email: &str,
+        login_challenge: &str,
+        expires_secs: i64,
+    ) -> Result<()> {
+        db.execute(
+            "INSERT INTO auth.magic_completions \
+                (csrf_nonce, code, email, login_challenge, expires_at) \
+             VALUES ($1, $2, $3::citext, $4, NOW() + ($5::text || ' seconds')::interval) \
+             ON CONFLICT (csrf_nonce) DO UPDATE SET \
+                code = EXCLUDED.code, \
+                email = EXCLUDED.email, \
+                login_challenge = EXCLUDED.login_challenge, \
+                expires_at = EXCLUDED.expires_at, \
+                consumed_at = NULL",
+            &[
+                &csrf_nonce,
+                &code,
+                &email,
+                &login_challenge,
+                &expires_secs.to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_completions insert: {e}")))?;
+        Ok(())
+    }
+
+    /// Atomically consume a completion row.
+    pub async fn consume(
+        db: &Client,
+        csrf_nonce: &str,
+        code: &str,
+    ) -> Result<Option<Completion>> {
+        let rows = db
+            .query(
+                "UPDATE auth.magic_completions SET consumed_at = NOW() \
+                 WHERE csrf_nonce = $1 AND code = $2 \
+                   AND consumed_at IS NULL AND expires_at > NOW() \
+                 RETURNING email::text, login_challenge",
+                &[&csrf_nonce, &code],
+            )
+            .await
+            .map_err(|e| AuthError::Db(format!("magic_completions consume: {e}")))?;
+        Ok(rows.first().map(|r| Completion {
+            email: r.get("email"),
+            login_challenge: r.get("login_challenge"),
+        }))
+    }
+}
+
+// ─── Email-related helpers (start-only) ──────────────────────────────
 
 /// Best-effort device label extracted from a `User-Agent` header. We
 /// don't ship a full UA parser; the value is purely for the email body

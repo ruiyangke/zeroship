@@ -113,6 +113,15 @@ pub struct MagicAwaitCodePage<'a> {
     pub email: &'a str,
 }
 
+/// `/magic/verify` cross-device branch — displays a 6-digit code on the
+/// redeeming device for the user to type back on the requesting device.
+#[derive(Debug, Template)]
+#[template(path = "magic_show_code.html")]
+pub struct MagicShowCodePage<'a> {
+    pub code: &'a str,
+    pub email: &'a str,
+}
+
 /// `/me` profile page (P4-U6).
 ///
 /// Logged-in-user only; the handler resolves the user from the
