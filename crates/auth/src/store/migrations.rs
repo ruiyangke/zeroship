@@ -125,6 +125,26 @@ const STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_app_idx ON auth.gateway_sessions (app_id, user_id)",
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_idle_idx ON auth.gateway_sessions (idle_expires_at) WHERE revoked_at IS NULL",
+
+    // 5.10 console sessions — per-origin `__Host-zs_console_session`
+    // cookies validated by the control plane (the OIDC RP for the
+    // creator dashboard at `console.zeroship.ai`). Shape mirrors
+    // `auth.gateway_sessions`, minus `app_id` because there is only
+    // ever one console origin. Proposal §2.3 + §9.2.
+    "CREATE TABLE IF NOT EXISTS auth.console_sessions (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id         TEXT NOT NULL,
+        email           CITEXT,
+        name            TEXT,
+        avatar_url      TEXT,
+        email_verified  BOOLEAN NOT NULL DEFAULT FALSE,
+        issued_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        idle_expires_at TIMESTAMPTZ NOT NULL,
+        abs_expires_at  TIMESTAMPTZ NOT NULL,
+        revoked_at      TIMESTAMPTZ
+    )",
+    "CREATE INDEX IF NOT EXISTS auth_console_sessions_user_idx ON auth.console_sessions (user_id)",
+    "CREATE INDEX IF NOT EXISTS auth_console_sessions_idle_idx ON auth.console_sessions (idle_expires_at) WHERE revoked_at IS NULL",
 ];
 
 /// Apply all migrations in order. Each statement is idempotent and safe to
