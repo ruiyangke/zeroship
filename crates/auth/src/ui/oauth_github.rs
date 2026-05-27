@@ -230,7 +230,14 @@ pub async fn callback(
     let raw_profile = serde_json::to_value(&id).ok();
     let profile = build_resolved_profile(&id, raw_profile.as_ref());
 
-    let outcome = match linker::resolve_or_link(db.as_ref(), &profile).await {
+    let outcome = match linker::resolve_or_link(
+        db.as_ref(),
+        &profile,
+        &stash.login_challenge,
+        cfg.stash_signing_key.as_bytes(),
+    )
+    .await
+    {
         Ok(o) => o,
         Err(e) => {
             tracing::error!(error = %e, "linker::resolve_or_link failed");
@@ -251,6 +258,35 @@ pub async fn callback(
 
     let user_id = match outcome {
         LinkOutcome::Existing { user_id } | LinkOutcome::Created { user_id } => user_id,
+        LinkOutcome::NeedsConfirmation { pending_token, .. } => {
+            // Email collided with a locally-credentialed user. Bounce to
+            // /link?token=… so the user can confirm with their existing
+            // zeroship password — hydra stays pending until /link POST
+            // resolves the challenge.
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "oauth_link_needs_confirmation",
+                    outcome: "success",
+                    auth_method: Some(PROVIDER),
+                    detail: json!({ "subject": id.subject, "email": id.email }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let location = format!("/link?token={pending_token}");
+            let mut resp = HttpResponse::Found();
+            resp.header(
+                LOCATION,
+                HeaderValue::from_str(&location)
+                    .unwrap_or_else(|_| HeaderValue::from_static("/link")),
+            );
+            resp.header(
+                SET_COOKIE,
+                clear_stash_cookie(GITHUB_STASH_COOKIE, cfg.insecure_dev),
+            );
+            return resp.finish();
+        }
     };
 
     // Best-effort: bump last_login_at on the user row.
