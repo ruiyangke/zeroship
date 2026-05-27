@@ -45,13 +45,17 @@ const stories = [
   "components-input--input-ref-integration",
   "components-input--autofill",
   "components-input--custom-validate",
-  // slice 3: Card / Dialog / AlertDialog (22 new = 8 + 8 + 6).
+  // slice 3: Card / Dialog / AlertDialog.
   "components-card--all-variants",
   "components-card--all-sizes",
   "components-card--decomposed",
   "components-card--with-media",
+  "components-card--media-sides",
   "components-card--interactive",
+  "components-card--interactive-with-keyboard",
+  "components-card--interactive-without-on-click",
   "components-card--as-child",
+  "components-card--as-child-ref-composition",
   "components-card--ghost",
   "components-card--with-form-inside",
   "components-dialog--default",

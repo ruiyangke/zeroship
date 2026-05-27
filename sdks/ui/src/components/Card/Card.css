@@ -3,13 +3,14 @@
  *
  * Anatomy:
  *   .zs-card                     surface; flex column; opaque base; clipped.
- *     ├─ .zs-card__header        row — Title/Description left, Action right.
+ *     ├─ .zs-card__header        grid — Title/Description col 1, Action col 2.
  *     │  ├─ .zs-card__title      heading.
  *     │  ├─ .zs-card__description subtitle.
- *     │  └─ .zs-card__action     auto-margin-inline-start to push right.
+ *     │  └─ .zs-card__action     col 2; spans rows; centered vertically.
  *     ├─ .zs-card__media         edge-bleed media slot (data-side="...").
  *     ├─ .zs-card__body          main content stack.
- *     └─ .zs-card__footer        button row (data-align="end|start|between").
+ *     └─ .zs-card__footer        button row (data-align="end|start|between";
+ *                                   data-divider="top" adds a hairline).
  *
  * Modifier classes:
  *   sizes:    --sm | --lg  (md is the default; no class needed)
@@ -17,12 +18,19 @@
  *
  * Glass-surface invariant: every variant except `ghost` declares an
  * OPAQUE background-color so axe's color-contrast walk can resolve at
- * the card boundary. `backdrop-filter` is layered on top for the glass
- * look when themes swap --zs-surface to a translucent value.
+ * the card boundary. Hover state preserves the invariant by LAYERING a
+ * translucent tint via background-image: linear-gradient (axe walks
+ * background-color first, so the opaque base remains computable).
+ * `backdrop-filter` is gated through --zs-card-backdrop-filter so
+ * opaque themes get `none` and pay no compositing cost (item 18).
  */
 
 /* ─── base ─────────────────────────────────────────────────────────────── */
 .zs-card {
+  /* `isolation: isolate` creates a stacking context so a fill-mode
+   * Card.Media can sit at z-index: 0 underneath its siblings without
+   * mutating each direct child's position (review-fix item 17). */
+  isolation: isolate;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -30,8 +38,15 @@
   padding: var(--zs-card-padding-md);
   border-radius: var(--zs-card-radius-md);
   background-color: var(--zs-surface);
-  backdrop-filter: var(--zs-material-regular);
-  -webkit-backdrop-filter: var(--zs-material-regular);
+  /* Themes set --zs-card-backdrop-filter to `none` when the surface is
+   * opaque (no visual contribution; skip the compositing cost). The
+   * fallback to --zs-material-regular keeps the historical behavior
+   * for themes that haven't opted in. */
+  backdrop-filter: var(--zs-card-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-card-backdrop-filter,
+    var(--zs-material-regular)
+  );
   color: var(--zs-label);
   font-family: var(--zs-font-system);
   overflow: hidden; /* clips Card.Media to the border-radius. */
@@ -51,9 +66,8 @@
 }
 
 /* ─── variants ─────────────────────────────────────────────────────────── */
-.zs-card--surface {
-  /* base styles already declare the opaque surface — no overrides. */
-}
+/* `.zs-card--surface` has no overrides — the base block already declares
+ * the opaque surface. (Empty rule removed; review-fix item 21.) */
 .zs-card--elevated {
   box-shadow: var(--zs-shadow-2);
 }
@@ -76,10 +90,40 @@
 }
 @media (hover: hover) {
   .zs-card[data-interactive]:hover {
-    background-color: var(--zs-fill-quaternary);
+    /* Layer a translucent tint OVER the opaque base via an inset
+     * box-shadow rather than a background-image gradient.
+     *
+     * Why box-shadow over `background-image: linear-gradient(opaque,
+     * opaque)`: axe-core's color-contrast walk inspects
+     * `background-color` first, but the moment ANY background-image
+     * resolves to a non-`none` computed value it cannot determine the
+     * effective background. linear-gradient produces an
+     * "Element's background color could not be determined due to a
+     * background gradient" incomplete result (verified during the
+     * slice-3 review-fix run).
+     *
+     * `box-shadow inset` is layered ON TOP of background-color in
+     * paint order but DOES NOT change the computed
+     * background-image/background-color — axe still resolves the
+     * opaque base and finds the contrast. Visually identical to the
+     * gradient tint (macOS list-row hover signal). Slice-3 review-
+     * fix item 2 + verification step 6. */
+    box-shadow: inset 0 0 0 100rem var(--zs-card-hover-tint);
   }
+  /* Elevated has an existing box-shadow — combine the hover tint
+   * inset with the deeper drop-shadow so neither overrides the
+   * other. */
   .zs-card--elevated[data-interactive]:hover {
-    box-shadow: var(--zs-shadow-3);
+    box-shadow:
+      inset 0 0 0 100rem var(--zs-card-hover-tint),
+      var(--zs-shadow-3);
+  }
+  /* Outline variant carries the inset hairline as a box-shadow; combine
+   * with the hover tint so the outline survives hover. */
+  .zs-card--outline[data-interactive]:hover {
+    box-shadow:
+      inset 0 0 0 100rem var(--zs-card-hover-tint),
+      0 0 0 0.0625rem var(--zs-separator) inset;
   }
 }
 .zs-card[data-interactive]:focus-visible {
@@ -89,16 +133,40 @@
 .zs-card[data-interactive]:active {
   transform: scale(0.99);
 }
+/* Disabled / aria-disabled — neutralise the interactive affordances. */
+.zs-card[data-interactive]:disabled,
+.zs-card[data-interactive][aria-disabled="true"] {
+  cursor: not-allowed;
+  pointer-events: none;
+  opacity: 0.55;
+}
 
 /* ─── Header ───────────────────────────────────────────────────────────── */
+/* Grid: Title + Description stack in column 1; Action lives in column 2
+ * and spans both rows, centered. The previous flex-row layout couldn't
+ * stack Title and Description without an anonymous wrapper div (each
+ * was a column). With grid the documented API ("direct children of
+ * Header") matches what gets rendered (review-fix item 3). */
 .zs-card__header {
-  display: flex;
-  flex-direction: row;
-  gap: var(--zs-space-3);
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: var(--zs-space-3);
+  align-items: start;
+}
+.zs-card__header > .zs-card__title {
+  grid-column: 1;
+  /* Allow the title column to shrink below its intrinsic size so very
+   * long titles can wrap or truncate (review-fix item 12). */
+  min-inline-size: 0;
+}
+.zs-card__header > .zs-card__description {
+  grid-column: 1;
+  min-inline-size: 0;
 }
 .zs-card__header > .zs-card__action {
-  margin-inline-start: auto;
+  grid-column: 2;
+  grid-row: 1 / -1;
+  align-self: center;
 }
 
 /* Title — size scales with the Card size. */
@@ -106,18 +174,20 @@
   margin: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
-  font-weight: 600;
+  font-weight: var(--zs-text-title-3-weight);
   letter-spacing: var(--zs-text-title-3-tracking);
   color: var(--zs-label);
 }
 .zs-card--sm .zs-card__title {
   font-size: var(--zs-text-headline-size);
   line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
   letter-spacing: var(--zs-text-headline-tracking);
 }
 .zs-card--lg .zs-card__title {
   font-size: var(--zs-text-title-2-size);
   line-height: var(--zs-text-title-2-line);
+  font-weight: var(--zs-text-title-2-weight);
   letter-spacing: var(--zs-text-title-2-tracking);
 }
 
@@ -132,16 +202,16 @@
   line-height: var(--zs-text-footnote-line);
 }
 
-/* Stack title + description vertically when both are direct children of
- * Header. Each is a block-level element by default, so the natural
- * flow already produces the stack; the gap is the only thing we need. */
+/* Direct Title → Description pair gets a half-space gap. With grid the
+ * adjacent-sibling selector resolves correctly because both subparts
+ * are direct children of .zs-card__header. */
 .zs-card__header > .zs-card__title + .zs-card__description {
   margin-block-start: var(--zs-space-half);
 }
 
 /* Action: no default styling — consumer drops a Button or similar
- * interactive node inside. The margin-inline-start: auto above pushes
- * it to the trailing edge of Header. */
+ * interactive node inside. Grid column 2 + align-self: center pin it
+ * to the trailing edge of Header. */
 .zs-card__action {
   display: inline-flex;
   align-items: center;
@@ -153,6 +223,14 @@
   display: block;
   background-color: var(--zs-fill-tertiary);
 }
+/* Normalise the common embedded media elements so consumers get a
+ * sensible default without dropping into bespoke CSS. */
+.zs-card__media :is(img, picture, video) {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+  object-fit: cover;
+}
 .zs-card__media[data-side="top"] {
   margin-inline: calc(var(--zs-card-padding-md) * -1);
   margin-block-start: calc(var(--zs-card-padding-md) * -1);
@@ -163,21 +241,14 @@
   margin-block-end: calc(var(--zs-card-padding-md) * -1);
   margin-block-start: 0;
 }
-.zs-card__media[data-side="left"] {
-  margin-inline-start: calc(var(--zs-card-padding-md) * -1);
-}
-.zs-card__media[data-side="right"] {
-  margin-inline-end: calc(var(--zs-card-padding-md) * -1);
-}
 .zs-card__media[data-side="fill"] {
   position: absolute;
   inset: 0;
+  /* z-index: 0 anchors the fill layer; siblings sit above implicitly
+   * via DOM order inside the .zs-card stacking context (review-fix
+   * item 17 — `isolation: isolate` on the root). */
   z-index: 0;
   pointer-events: none;
-}
-.zs-card > :not(.zs-card__media[data-side="fill"]) {
-  position: relative;
-  z-index: 1;
 }
 
 /* Edge-bleed margins scale with the card size token. */
@@ -209,11 +280,29 @@
   gap: var(--zs-space-3);
   color: var(--zs-label);
 }
+/* Normalise direct-child prose margins so a single `<p>` slotted into
+ * Body doesn't double-up with the card padding (review-fix item 14). */
+.zs-card__body > p:first-child,
+.zs-card__body > ul:first-child,
+.zs-card__body > ol:first-child {
+  margin-block-start: 0;
+}
+.zs-card__body > p:last-child,
+.zs-card__body > ul:last-child,
+.zs-card__body > ol:last-child {
+  margin-block-end: 0;
+}
 
 /* ─── Footer ───────────────────────────────────────────────────────────── */
 .zs-card__footer {
   display: flex;
+  /* Allow wrapping so a footer with many buttons or a long label
+   * cluster doesn't overflow its card (review-fix item 13). With
+   * justify-content: flex-end the wrapped buttons still trail the
+   * footer row. */
+  flex-wrap: wrap;
   gap: var(--zs-space-2);
+  row-gap: var(--zs-space-2);
   align-items: center;
   justify-content: flex-end;
 }
@@ -225,6 +314,11 @@
 }
 .zs-card__footer[data-align="end"] {
   justify-content: flex-end;
+}
+.zs-card__footer[data-divider="top"] {
+  padding-block-start: var(--zs-space-4);
+  border-block-start: 0.0625rem solid var(--zs-separator);
+  margin-block-start: var(--zs-space-2);
 }
 
 /* ─── forced-colors ────────────────────────────────────────────────────── */

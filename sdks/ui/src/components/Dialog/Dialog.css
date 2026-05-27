@@ -69,8 +69,14 @@
   max-inline-size: var(--zs-dialog-max-width-md);
   max-block-size: calc(100dvh - var(--zs-space-7) * 2);
   background-color: var(--zs-surface);
-  backdrop-filter: var(--zs-material-regular);
-  -webkit-backdrop-filter: var(--zs-material-regular);
+  /* Themes set --zs-dialog-backdrop-filter to `none` when the surface
+   * is opaque (no visual contribution; skip compositing cost). Same
+   * gate pattern as Card; review-fix item 18. */
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
   border-radius: var(--zs-dialog-radius);
   box-shadow: var(--zs-shadow-dialog);
   color: var(--zs-label);

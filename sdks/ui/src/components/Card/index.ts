@@ -6,6 +6,11 @@ export type {
   CardMediaSide,
   CardMediaProps,
   CardFooterAlign,
+  CardFooterDivider,
   CardFooterProps,
   CardTitleProps,
+  CardHeaderProps,
+  CardBodyProps,
+  CardActionProps,
+  CardDescriptionProps,
 } from "./Card";

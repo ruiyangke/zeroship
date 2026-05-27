@@ -11,6 +11,7 @@ import {
   type Ref,
 } from "react";
 import { Slot } from "../_slot";
+import { classnames } from "../_classnames";
 
 export type ButtonVariant = "filled" | "tinted" | "gray" | "plain";
 export type ButtonIntent = "normal" | "destructive";
@@ -80,10 +81,6 @@ export interface ButtonProps
    *   for real `<button>` elements.
    */
   asChild?: boolean;
-}
-
-function classnames(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
 }
 
 /* ─── Slot helpers extracted to ../_slot ──────────────────────────────

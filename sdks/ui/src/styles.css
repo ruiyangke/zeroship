@@ -273,6 +273,20 @@
   /* Material tint for the glass Dialog backdrop (translucent surface). */
   --zs-material-tint: color-mix(in oklch, var(--zs-surface) 80%, transparent);
 
+  /* ─── Card hover tint (review-fix item 2).
+     Translucent label overlay layered ON TOP of the opaque card surface.
+     Layering instead of replacing keeps the opaque base computable for
+     axe's color-contrast walk. 4% label-over-surface reads as a barely-
+     visible darken, matching the macOS list-row hover signal. */
+  --zs-card-hover-tint: color-mix(in oklch, var(--zs-label) 4%, transparent);
+
+  /* ─── Card / Dialog backdrop-filter gate (review-fix item 18).
+     Crystal surfaces are opaque (--zs-surface above), so backdrop-filter
+     has no visual contribution and pays compositing cost for nothing.
+     A future translucent theme would set these to var(--zs-material-*). */
+  --zs-card-backdrop-filter: none;
+  --zs-dialog-backdrop-filter: none;
+
   /* ─── Input palette (slice 2).
      Outline = subtle delineation from the surface; Filled = pronounced
      neutral; Plain = no chrome (text-field-on-row look). Border colors

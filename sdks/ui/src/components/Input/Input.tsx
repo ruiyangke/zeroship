@@ -71,6 +71,7 @@ import {
 } from "react";
 import { Field as BaseField } from "@base-ui/react/field";
 import { Field, useFieldContext } from "../Field";
+import { classnames } from "../_classnames";
 
 export type InputSize = "sm" | "md" | "lg";
 export type InputVariant = "outline" | "filled" | "plain";
@@ -133,10 +134,6 @@ export interface InputProps
   wrapperClassName?: string;
   wrapperProps?: ComponentPropsWithoutRef<"div">;
   wrapperStyle?: CSSProperties;
-}
-
-function classnames(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
 }
 
 /* ─── ref composition (item 1) ───────────────────────────────────────── */

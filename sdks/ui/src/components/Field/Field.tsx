@@ -55,6 +55,7 @@ import {
   type ReactNode,
 } from "react";
 import { Field as BaseField } from "@base-ui/react/field";
+import { classnames } from "../_classnames";
 
 export type FieldOrientation = "vertical" | "horizontal";
 export type FieldSize = "sm" | "md" | "lg";
@@ -107,10 +108,6 @@ const FieldContext = createContext<FieldContextValue | null>(null);
  */
 export function useFieldContext(): FieldContextValue | null {
   return useContext(FieldContext);
-}
-
-function classnames(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
 }
 
 /* ─── styled wrappers around Base UI parts ───────────────────────────── */

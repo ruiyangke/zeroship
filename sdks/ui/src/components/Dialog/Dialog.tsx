@@ -61,6 +61,7 @@ import {
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Button, type ButtonProps } from "../Button";
 import { composeRefs } from "../_slot";
+import { classnames } from "../_classnames";
 
 export type DialogSize = "sm" | "md" | "lg" | "full";
 export type DialogPlacement = "center" | "top";
@@ -102,10 +103,6 @@ export interface DialogProps {
    */
   dismissible?: boolean;
   children?: ReactNode;
-}
-
-function classnames(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
 }
 
 /* Compose our static class with a Base UI className that may be either

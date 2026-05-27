@@ -39,6 +39,7 @@ import {
 import { AlertDialog as BaseAlertDialog } from "@base-ui/react/alert-dialog";
 import { Button, type ButtonProps } from "../Button";
 import { composeRefs } from "../_slot";
+import { classnames } from "../_classnames";
 
 export type AlertDialogSize = "sm" | "md" | "lg";
 export type AlertDialogActionTone = "normal" | "destructive";
@@ -62,10 +63,6 @@ export interface AlertDialogProps {
     eventDetails: BaseChangeEventDetails,
   ) => void;
   children?: ReactNode;
-}
-
-function classnames(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
 }
 
 function composeBaseClass<S>(

@@ -23,9 +23,15 @@
  * the entire card in an <a> (anti-pattern #2 from the survey).
  *
  * The Card root accepts `asChild` so the consumer can render-as an <a>
- * or <button> when the whole-card-clickable pattern is genuinely
- * desired — at which point THE CONSUMER decides about nested
- * interactives. (We never auto-wrap.)
+ * when the whole-card-clickable pattern is genuinely desired — at
+ * which point THE CONSUMER decides about nested interactives. (We
+ * never auto-wrap.)
+ *
+ * Render-as targets: prefer an `<a href>` for whole-card-clickable.
+ * `<button>` is INVALID HTML when the card contains block-level
+ * descendants (Header/Title/Body emit div/h3/p), so we dev-warn when
+ * an asChild button is detected (item 6 from the slice-3 review-fix
+ * brief).
  *
  * Anti-patterns we explicitly avoid (15-item survey list, items 1-15 in
  * the brief):
@@ -42,18 +48,38 @@
 import {
   forwardRef,
   isValidElement,
-  cloneElement,
   type ComponentPropsWithoutRef,
-  type ReactElement,
+  type KeyboardEvent,
+  type MouseEvent,
   type ReactNode,
   type Ref,
 } from "react";
-import { Slot, composeRefs } from "../_slot";
+import { Slot, composeRefs, getElementRef } from "../_slot";
+import { classnames } from "../_classnames";
 
 export type CardVariant = "surface" | "elevated" | "outline" | "ghost";
 export type CardSize = "sm" | "md" | "lg";
-export type CardMediaSide = "top" | "bottom" | "left" | "right" | "fill";
+/**
+ * Edge-bleed Media slot position. `"top"` and `"bottom"` pull a
+ * negative margin out to the card edge; `"fill"` is an absolutely
+ * positioned decorative background layer (defaults to
+ * `aria-hidden="true"` — item 16).
+ *
+ * `"left"` and `"right"` were exposed in the original surface but
+ * never implemented (the Card root is flex-column, so margin-inline
+ * couldn't produce a horizontal layout). Removed pre-launch (item 7
+ * from the slice-3 review-fix brief). A real horizontal Media layout
+ * needs a row-orientation Card variant that the grid-based root can
+ * support; deferred to a future slice.
+ */
+export type CardMediaSide = "top" | "bottom" | "fill";
 export type CardFooterAlign = "start" | "between" | "end";
+/**
+ * Optional divider modifier for Footer.
+ * - `"top"`: render a hairline separator above the footer with extra
+ *   top padding so the button row reads as a distinct affordance band.
+ */
+export type CardFooterDivider = "top";
 
 export interface CardProps extends ComponentPropsWithoutRef<"div"> {
   /**
@@ -74,30 +100,34 @@ export interface CardProps extends ComponentPropsWithoutRef<"div"> {
 
   /**
    * Apply interactive states (hover, focus-visible ring, active press)
-   * even when not rendered as a button/anchor. Does NOT add an
-   * `onClick` handler — the consumer wires that themselves. When
-   * `interactive` is true we set `tabIndex={0}` so the card is
-   * focusable, and emit `data-interactive` so the CSS hooks light up.
+   * even when not rendered as a button/anchor.
+   *
+   * When `interactive` is true AND `asChild` is false, the Card:
+   *   - sets `tabIndex={0}` so it is focusable,
+   *   - sets `role="button"` so AT announces it as a control,
+   *   - wires `onKeyDown` to forward Enter/Space to `onClick`.
+   *
+   * If the consumer didn't pass `onClick`, `interactive` becomes a
+   * no-op visual modifier and a dev-mode console.warn fires —
+   * keyboard users can't activate a "fake control". For
+   * whole-card-clickable, prefer `asChild` with a real anchor.
    */
   interactive?: boolean;
 
   /**
    * Render-as the single child element rather than a `<div>`. Used
-   * for the whole-card-clickable pattern with an <a> or <button>:
+   * for the whole-card-clickable pattern with an `<a>`:
    *
    *   <Card asChild><a href="/post/42">…children…</a></Card>
    *
-   * When `asChild` is set, the child element's `children` keep their
+   * Prefer an anchor — `<button>` is INVALID HTML when Card subparts
+   * render block content. The asChild child's children keep their
    * place inside the card; we don't swap them out. The CONSUMER
    * decides about nested interactives — we don't auto-wrap.
    */
   asChild?: boolean;
 
   children?: ReactNode;
-}
-
-function classnames(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
 }
 
 /* ─── Card root ──────────────────────────────────────────────────────── */
@@ -110,6 +140,8 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     asChild = false,
     className,
     children,
+    onClick,
+    onKeyDown,
     ...rest
   },
   ref,
@@ -127,28 +159,98 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     "data-interactive": interactive ? "" : undefined,
   } as Record<string, string | undefined>;
 
+  // Dev-mode validation surfaces guidance the AI agent / consumer can
+  // act on. Gated to non-production via `process.env.NODE_ENV` —
+  // bundlers (Vite, Webpack, Rollup, tsup-via-downstream) replace this
+  // identifier so the whole branch DCEs out of production builds.
+  // Slice-3 review-fix items 1 + 6.
+  if (process.env.NODE_ENV !== "production") {
+    if (interactive && !asChild && typeof onClick !== "function") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "Card interactive=true but no onClick handler; keyboard users can't activate it. " +
+          "Pass onClick, or use asChild with a real link/button if you don't want onClick.",
+      );
+    }
+    if (asChild && isValidElement(children)) {
+      const childType = (children as { type?: unknown }).type;
+      if (childType === "button") {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "Card asChild=<button> is invalid HTML because Card subparts render block content " +
+            "(Header/Title/Body emit div/h3/p). Use an <a href> for whole-card-clickable, " +
+            "or place a Button outside the card.",
+        );
+      }
+    }
+  }
+
+  // Keyboard activation: when we own a non-native interactive div, Enter
+  // and Space MUST fire onClick — otherwise tabIndex=0 + focus ring is
+  // a "fake control" trap (review-fix items 1 + 20).
+  const handleKeyDown =
+    interactive && !asChild && typeof onClick === "function"
+      ? (event: KeyboardEvent<HTMLDivElement>) => {
+          if (typeof onKeyDown === "function") {
+            onKeyDown(event);
+            if (event.defaultPrevented) return;
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            // Synthesize a click — onClick is typed for the div, so the
+            // KeyboardEvent stand-in is the closest thing to "the user
+            // activated this control". React's synthetic-event base type
+            // is compatible enough that the handler can read .currentTarget.
+            onClick(
+              event as unknown as MouseEvent<HTMLDivElement>,
+            );
+          }
+        }
+      : onKeyDown;
+
   if (asChild) {
-    if (!isValidElement(children)) return null;
+    if (!isValidElement(children)) {
+      if (process.env.NODE_ENV !== "production") {
+        console.error(
+          "Card asChild expects a single React element child; received " +
+            typeof children +
+            "; rendering nothing.",
+        );
+      }
+      return null;
+    }
+    // The child element brings its own focusability semantics: anchors
+    // via href, buttons inherently. We DO NOT inject tabIndex here —
+    // if the consumer asChilds a non-focusable element, that's their
+    // bug to fix (review-fix item 10).
     return (
       <Slot
         {...rest}
         {...dataProps}
         ref={ref as Ref<unknown>}
         className={composedClassName}
-        tabIndex={interactive ? 0 : undefined}
+        onClick={onClick}
+        onKeyDown={onKeyDown}
       >
         {children}
       </Slot>
     );
   }
 
+  const interactiveAriaProps = interactive
+    ? ({ role: "button" } as const)
+    : undefined;
+
   return (
     <div
       {...rest}
       {...dataProps}
+      {...interactiveAriaProps}
       ref={ref as Ref<HTMLDivElement>}
       className={composedClassName}
       tabIndex={interactive ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={handleKeyDown}
     >
       {children}
     </div>
@@ -162,7 +264,12 @@ type DivProps = ComponentPropsWithoutRef<"div">;
 type HeadingProps = ComponentPropsWithoutRef<"h3">;
 type ParagraphProps = ComponentPropsWithoutRef<"p">;
 
-const CardHeader = forwardRef<HTMLDivElement, DivProps>(
+export type CardHeaderProps = DivProps;
+export type CardBodyProps = DivProps;
+export type CardActionProps = DivProps;
+export type CardDescriptionProps = ParagraphProps;
+
+const CardHeader = forwardRef<HTMLDivElement, CardHeaderProps>(
   function CardHeader({ className, ...rest }, ref) {
     return (
       <div
@@ -184,19 +291,31 @@ export interface CardTitleProps extends HeadingProps {
 const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
   function CardTitle({ asChild = false, className, children, ...rest }, ref) {
     if (asChild) {
-      if (!isValidElement(children)) return null;
-      const child = children as ReactElement<{ className?: string }> & {
-        ref?: Ref<unknown>;
-      };
-      return cloneElement(child, {
-        ...rest,
-        ref: composeRefs(ref as Ref<unknown>, child.ref),
-        className: classnames(
-          "zs-card__title",
-          child.props.className,
-          className,
-        ),
-      } as Record<string, unknown>);
+      if (!isValidElement(children)) {
+        if (process.env.NODE_ENV !== "production") {
+          console.error(
+            "Card.Title asChild expects a single React element child; received " +
+              typeof children +
+              "; rendering nothing.",
+          );
+        }
+        return null;
+      }
+      // Route asChild through Slot so className composition, style
+      // shallow-merge, event composition with defaultPrevented short-
+      // circuit, and React-19 ref access all behave identically to
+      // Card root (review-fix item 8). composeRefs is wired into Slot;
+      // we still pass our ref so a parent forwarding into Card.Title
+      // lands at the rendered element.
+      return (
+        <Slot
+          {...rest}
+          ref={composeRefs(ref as Ref<unknown>, getElementRef(children))}
+          className={classnames("zs-card__title", className)}
+        >
+          {children}
+        </Slot>
+      );
     }
     return (
       <h3
@@ -211,7 +330,7 @@ const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
 );
 CardTitle.displayName = "Card.Title";
 
-const CardDescription = forwardRef<HTMLParagraphElement, ParagraphProps>(
+const CardDescription = forwardRef<HTMLParagraphElement, CardDescriptionProps>(
   function CardDescription({ className, ...rest }, ref) {
     return (
       <p
@@ -224,7 +343,7 @@ const CardDescription = forwardRef<HTMLParagraphElement, ParagraphProps>(
 );
 CardDescription.displayName = "Card.Description";
 
-const CardAction = forwardRef<HTMLDivElement, DivProps>(
+const CardAction = forwardRef<HTMLDivElement, CardActionProps>(
   function CardAction({ className, ...rest }, ref) {
     return (
       <div
@@ -244,19 +363,28 @@ export interface CardMediaProps extends DivProps {
 
 const CardMedia = forwardRef<HTMLDivElement, CardMediaProps>(
   function CardMedia({ side = "top", className, ...rest }, ref) {
+    // `side="fill"` is a decorative background layer — default it to
+    // aria-hidden so AT doesn't double-announce the card surface
+    // (review-fix item 16). Consumers wanting a meaningful fill-mode
+    // media override via the `rest` spread (which runs last, so
+    // {...rest} wins over the hard-coded value here? No — JSX spread
+    // semantics are last-write-wins; we put the spread LAST below so
+    // explicit aria-hidden={false} from the consumer applies).
+    const isDecorative = side === "fill";
     return (
       <div
         ref={ref}
+        aria-hidden={isDecorative ? true : undefined}
+        {...rest}
         className={classnames("zs-card__media", className)}
         data-side={side}
-        {...rest}
       />
     );
   },
 );
 CardMedia.displayName = "Card.Media";
 
-const CardBody = forwardRef<HTMLDivElement, DivProps>(
+const CardBody = forwardRef<HTMLDivElement, CardBodyProps>(
   function CardBody({ className, ...rest }, ref) {
     return (
       <div
@@ -272,15 +400,19 @@ CardBody.displayName = "Card.Body";
 export interface CardFooterProps extends DivProps {
   /** Justify-content of the button row. Default `end` (HIG-standard). */
   align?: CardFooterAlign;
+  /** Optional hairline divider — `"top"` adds a separator and extra
+   *  top padding so the footer reads as a distinct band. */
+  divider?: CardFooterDivider;
 }
 
 const CardFooter = forwardRef<HTMLDivElement, CardFooterProps>(
-  function CardFooter({ align = "end", className, ...rest }, ref) {
+  function CardFooter({ align = "end", divider, className, ...rest }, ref) {
     return (
       <div
         ref={ref}
         className={classnames("zs-card__footer", className)}
         data-align={align}
+        data-divider={divider}
         {...rest}
       />
     );

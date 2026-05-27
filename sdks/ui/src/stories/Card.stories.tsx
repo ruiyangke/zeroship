@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { useRef, useState, type CSSProperties } from "react";
 import { Button, Card, Field, Input } from "../components";
 
 const meta: Meta<typeof Card> = {
@@ -59,12 +60,10 @@ export const AllVariants: Story = {
           style={{ flex: "1 1 14rem", minInlineSize: "14rem" }}
         >
           <Card.Header>
-            <div>
-              <Card.Title>{variant}</Card.Title>
-              <Card.Description>Lorem ipsum dolor sit amet.</Card.Description>
-            </div>
+            <Card.Title>{variant}</Card.Title>
+            <Card.Description>Lorem ipsum dolor sit amet.</Card.Description>
           </Card.Header>
-          <Card.Body>Tab tab content sit here.</Card.Body>
+          <Card.Body>Tab content sits here.</Card.Body>
         </Card>
       ))}
     </div>
@@ -83,12 +82,10 @@ export const AllSizes: Story = {
           style={{ flex: "1 1 14rem", minInlineSize: "14rem" }}
         >
           <Card.Header>
-            <div>
-              <Card.Title>Card {size}</Card.Title>
-              <Card.Description>
-                Padding, gap, and radius scale with the size token.
-              </Card.Description>
-            </div>
+            <Card.Title>Card {size}</Card.Title>
+            <Card.Description>
+              Padding, gap, and radius scale with the size token.
+            </Card.Description>
           </Card.Header>
           <Card.Body>Body content goes here.</Card.Body>
         </Card>
@@ -98,18 +95,19 @@ export const AllSizes: Story = {
 };
 
 /* ─── 3. Decomposed ──────────────────────────────────────────────────── */
+/* Direct Title + Description + Action — Header is a CSS Grid (col 1 ↔
+ * Title/Description stack, col 2 ↔ Action spanning rows). No anonymous
+ * wrapper div needed (slice-3 review-fix item 3). */
 export const Decomposed: Story = {
   name: "Decomposed",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Decomposed card">
       <Card style={{ inlineSize: "32rem", maxInlineSize: "100%" }}>
         <Card.Header>
-          <div>
-            <Card.Title>Project settings</Card.Title>
-            <Card.Description>
-              Identity, plan, and danger zone for this app.
-            </Card.Description>
-          </div>
+          <Card.Title>Project settings</Card.Title>
+          <Card.Description>
+            Identity, plan, and danger zone for this app.
+          </Card.Description>
           <Card.Action>
             <Button size="small" variant="tinted">
               Edit
@@ -142,10 +140,8 @@ export const WithMedia: Story = {
           <MediaPlaceholder label="cover image" />
         </Card.Media>
         <Card.Header>
-          <div>
-            <Card.Title>Sunset cover</Card.Title>
-            <Card.Description>Edge-bleed top media slot.</Card.Description>
-          </div>
+          <Card.Title>Sunset cover</Card.Title>
+          <Card.Description>Edge-bleed top media slot.</Card.Description>
         </Card.Header>
         <Card.Body>
           The card's overflow: hidden clips the media to the corner
@@ -156,30 +152,160 @@ export const WithMedia: Story = {
   ),
 };
 
-/* ─── 5. Interactive ─────────────────────────────────────────────────── */
-export const Interactive: Story = {
-  name: "Interactive",
+/* ─── 4b. Media sides (review-fix item 20) ───────────────────────────── */
+/* Covers the surviving `side` values — top, bottom, fill — after item
+ * 7 removed left/right (never implemented; type narrowed pre-launch). */
+export const MediaSides: Story = {
+  name: "Media sides",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Interactive card">
-      <Card
-        interactive
-        variant="elevated"
-        style={{ inlineSize: "20rem", cursor: "pointer" }}
-      >
+    <div className="zs-story-row" role="group" aria-label="Card media sides">
+      <Card style={{ inlineSize: "16rem" }}>
+        <Card.Media side="top">
+          <MediaPlaceholder label="side=top" />
+        </Card.Media>
         <Card.Header>
-          <div>
-            <Card.Title>Hover & focus me</Card.Title>
-            <Card.Description>
-              tabIndex=0; focus-visible ring; hover background shift; active scale.
-            </Card.Description>
-          </div>
+          <Card.Title>Top</Card.Title>
+          <Card.Description>Edge-bleed above Header.</Card.Description>
         </Card.Header>
-        <Card.Body>
-          The Card never adds its own onClick — the consumer wires it.
-        </Card.Body>
+        <Card.Body>Default placement.</Card.Body>
+      </Card>
+      <Card style={{ inlineSize: "16rem" }}>
+        <Card.Header>
+          <Card.Title>Bottom</Card.Title>
+          <Card.Description>Edge-bleed below Body.</Card.Description>
+        </Card.Header>
+        <Card.Body>Footer-adjacent.</Card.Body>
+        <Card.Media side="bottom">
+          <MediaPlaceholder label="side=bottom" />
+        </Card.Media>
+      </Card>
+      <Card
+        variant="elevated"
+        style={{ inlineSize: "16rem", color: "var(--zs-accent-ink)" }}
+      >
+        <Card.Media side="fill">
+          <MediaPlaceholder label="side=fill (decorative)" />
+        </Card.Media>
+        <Card.Header>
+          <Card.Title style={{ color: "var(--zs-accent-ink)" }}>
+            Fill
+          </Card.Title>
+          <Card.Description style={{ color: "var(--zs-accent-ink)" }}>
+            aria-hidden by default.
+          </Card.Description>
+        </Card.Header>
+        <Card.Body>Content sits above the fill layer.</Card.Body>
       </Card>
     </div>
   ),
+};
+
+/* ─── 5. Interactive ─────────────────────────────────────────────────── */
+/* Recommended pattern: asChild with a real anchor. The whole card is
+ * the click target, and the browser owns focusability + keyboard
+ * activation natively (Enter on anchors). Replaces the old "interactive
+ * plain div without onClick" story which was a keyboard trap; that
+ * scenario now lives in the CAUTION story below to document the
+ * dev-mode warning. */
+export const Interactive: Story = {
+  name: "Interactive",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Interactive card (asChild anchor)">
+      <Card
+        asChild
+        interactive
+        variant="elevated"
+        style={{ inlineSize: "20rem" }}
+      >
+        <a href="#cards" data-testid="card-interactive-anchor">
+          <Card.Header>
+            <Card.Title>Open project</Card.Title>
+            <Card.Description>
+              The whole card is the click target — a real &lt;a href&gt;.
+            </Card.Description>
+          </Card.Header>
+          <Card.Body>
+            Browser handles focusability + Enter activation natively.
+          </Card.Body>
+        </a>
+      </Card>
+    </div>
+  ),
+};
+
+/* ─── 5b. Interactive with keyboard (review-fix items 1 + 20) ───────── */
+/* When the consumer DOES want a plain-div interactive Card (e.g., the
+ * whole card needs to trigger a JS-only action like opening a Dialog),
+ * pass `onClick`. The Card sets role="button", tabIndex=0, and wires
+ * Enter/Space to onClick — keyboard users can activate the same way
+ * mouse users can. */
+function InteractiveWithKeyboardImpl() {
+  const [count, setCount] = useState(0);
+  return (
+    <div className="zs-story-row" role="group" aria-label="Interactive card with keyboard">
+      <Card
+        interactive
+        variant="elevated"
+        onClick={() => setCount((n) => n + 1)}
+        data-testid="card-interactive-keyboard"
+        style={{ inlineSize: "20rem" }}
+      >
+        <Card.Header>
+          <Card.Title>Activate me</Card.Title>
+          <Card.Description>
+            Click, or focus + Enter, or focus + Space.
+          </Card.Description>
+        </Card.Header>
+        <Card.Body>
+          <p data-testid="card-interactive-counter">
+            Activations: <strong>{count}</strong>
+          </p>
+        </Card.Body>
+      </Card>
+    </div>
+  );
+}
+export const InteractiveWithKeyboard: Story = {
+  name: "Interactive with keyboard",
+  render: () => <InteractiveWithKeyboardImpl />,
+};
+
+/* ─── 5c. Interactive without onClick (CAUTION) ──────────────────────── */
+/* DOCUMENTED ANTI-PATTERN: `interactive` without `onClick` puts a
+ * focusable card in the tab order with no way to activate it. The
+ * Card emits a dev-mode console.warn on render; keep this story so
+ * the warning is exercised in the aria-wiring check. */
+function InteractiveWithoutOnClickImpl() {
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Interactive card without onClick (caution)"
+    >
+      <Card
+        interactive
+        variant="outline"
+        data-testid="card-interactive-no-onclick"
+        style={{ inlineSize: "20rem" }}
+      >
+        <Card.Header>
+          <Card.Title>Caution</Card.Title>
+          <Card.Description>
+            interactive=true without onClick — keyboard users can't
+            activate. Dev console emits a warning.
+          </Card.Description>
+        </Card.Header>
+        <Card.Body>
+          Prefer asChild with a real &lt;a&gt; / &lt;button&gt;, or pass
+          onClick.
+        </Card.Body>
+      </Card>
+    </div>
+  );
+}
+export const InteractiveWithoutOnClick: Story = {
+  name: "Interactive without onClick (caution)",
+  render: () => <InteractiveWithoutOnClickImpl />,
 };
 
 /* ─── 6. AsChild ─────────────────────────────────────────────────────── */
@@ -195,12 +321,10 @@ export const AsChild: Story = {
       >
         <a href="#cards" data-testid="card-as-child">
           <Card.Header>
-            <div>
-              <Card.Title>Whole-card link</Card.Title>
-              <Card.Description>
-                Renders as an &lt;a&gt; — the entire card is the click target.
-              </Card.Description>
-            </div>
+            <Card.Title>Whole-card link</Card.Title>
+            <Card.Description>
+              Renders as an &lt;a&gt; — the entire card is the click target.
+            </Card.Description>
           </Card.Header>
           <Card.Body>
             Consumer is responsible for nested-interactive concerns.
@@ -211,6 +335,70 @@ export const AsChild: Story = {
   ),
 };
 
+/* ─── 6b. AsChild ref composition (review-fix item 4) ───────────────── */
+/* React-19 deprecated `element.ref` for function components; refs now
+ * live on `element.props.ref`. This story wires BOTH a consumer-
+ * supplied ref AND uses the Card root's own ref, and proves both
+ * resolve to the rendered <a> via a tiny status panel. */
+function AsChildRefCompositionImpl() {
+  const consumerRef = useRef<HTMLAnchorElement | null>(null);
+  const [status, setStatus] = useState("idle");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Card asChild ref composition"
+    >
+      <Card asChild variant="outline" style={{ inlineSize: "20rem" }}>
+        <a
+          href="#refs"
+          ref={consumerRef}
+          data-testid="card-aschild-ref-anchor"
+        >
+          <Card.Header>
+            <Card.Title>Ref composition</Card.Title>
+            <Card.Description>
+              Consumer ref + Slot ref both land on the rendered anchor.
+            </Card.Description>
+          </Card.Header>
+          <Card.Body>Click verify to compare.</Card.Body>
+        </a>
+      </Card>
+      <div className="zs-story-row">
+        <Button
+          size="small"
+          variant="tinted"
+          onClick={() => {
+            const el = consumerRef.current;
+            setStatus(
+              el && el.tagName === "A" && el.getAttribute("href") === "#refs"
+                ? "ref-attached"
+                : "ref-missing",
+            );
+          }}
+        >
+          Verify consumer ref
+        </Button>
+        <span
+          data-testid="card-aschild-ref-status"
+          style={
+            {
+              fontFamily: "var(--zs-font-system)",
+              alignSelf: "center",
+            } satisfies CSSProperties
+          }
+        >
+          {status}
+        </span>
+      </div>
+    </div>
+  );
+}
+export const AsChildRefComposition: Story = {
+  name: "asChild ref composition",
+  render: () => <AsChildRefCompositionImpl />,
+};
+
 /* ─── 7. Ghost ───────────────────────────────────────────────────────── */
 export const Ghost: Story = {
   name: "Ghost",
@@ -218,20 +406,16 @@ export const Ghost: Story = {
     <div className="zs-story-row" role="group" aria-label="Ghost card nesting">
       <Card variant="surface" style={{ inlineSize: "30rem" }}>
         <Card.Header>
-          <div>
-            <Card.Title>Outer surface</Card.Title>
-            <Card.Description>Opaque base; safe for axe contrast.</Card.Description>
-          </div>
+          <Card.Title>Outer surface</Card.Title>
+          <Card.Description>Opaque base; safe for axe contrast.</Card.Description>
         </Card.Header>
         <Card.Body>
           <Card variant="ghost" size="sm">
             <Card.Header>
-              <div>
-                <Card.Title>Inner ghost</Card.Title>
-                <Card.Description>
-                  Transparent — intended for nesting inside an opaque parent.
-                </Card.Description>
-              </div>
+              <Card.Title>Inner ghost</Card.Title>
+              <Card.Description>
+                Transparent — intended for nesting inside an opaque parent.
+              </Card.Description>
             </Card.Header>
             <Card.Body>Body content reads through the parent surface.</Card.Body>
           </Card>
@@ -248,12 +432,10 @@ export const WithFormInside: Story = {
     <div className="zs-story-row" role="group" aria-label="Card with form">
       <Card style={{ inlineSize: "26rem" }}>
         <Card.Header>
-          <div>
-            <Card.Title>Invite a teammate</Card.Title>
-            <Card.Description>
-              They'll get an email with a join link.
-            </Card.Description>
-          </div>
+          <Card.Title>Invite a teammate</Card.Title>
+          <Card.Description>
+            They'll get an email with a join link.
+          </Card.Description>
         </Card.Header>
         <Card.Body>
           <Field>
@@ -264,7 +446,7 @@ export const WithFormInside: Story = {
             </Field.Description>
           </Field>
         </Card.Body>
-        <Card.Footer>
+        <Card.Footer divider="top">
           <Button variant="plain">Cancel</Button>
           <Button>Send invite</Button>
         </Card.Footer>

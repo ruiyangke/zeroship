@@ -26,8 +26,12 @@ const stories = [
   "components-card--all-sizes",
   "components-card--decomposed",
   "components-card--with-media",
+  "components-card--media-sides",
   "components-card--interactive",
+  "components-card--interactive-with-keyboard",
+  "components-card--interactive-without-on-click",
   "components-card--as-child",
+  "components-card--as-child-ref-composition",
   "components-card--ghost",
   "components-card--with-form-inside",
 ];
