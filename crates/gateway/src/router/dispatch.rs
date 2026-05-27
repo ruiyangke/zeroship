@@ -233,6 +233,14 @@ pub async fn handle_subdomain(
         return route_auth_host(req, state, body).await;
     }
 
+    // OIDC callback for hosted creator apps. Intercepted *before*
+    // manifest dispatch so the path can never collide with a route
+    // the creator wrote (the `/__zs/` prefix is reserved). See
+    // U5.3 / proposal §10.2.
+    if req.uri().path() == "/__zs/auth/callback" {
+        return handle_auth_callback(req, state).await;
+    }
+
     let app_name = match extract_app_name(&req, None) {
         Some(name) => name,
         None => {
@@ -1168,6 +1176,147 @@ fn unauthenticated_response(req: &HttpRequest, state: &Arc<GateState>) -> HttpRe
     }
 }
 
+// ---------------------------------------------------------------------------
+// /__zs/auth/callback — the gateway-owned OIDC callback per hosted app
+// ---------------------------------------------------------------------------
+
+/// Handle `/__zs/auth/callback` on any `{app}.zeroship.ai` host. Reads
+/// the signed stash cookie + `code`/`state` query, exchanges with
+/// hydra via `OidcRp::finish_callback`, persists a row in
+/// `auth.gateway_sessions`, sets the per-origin
+/// `__Host-zs_app_session` cookie, clears the stash cookie, and 302s
+/// back to the original path the user was trying to reach when the
+/// dance started.
+async fn handle_auth_callback(
+    req: HttpRequest,
+    state: web::types::State<Arc<GateState>>,
+) -> HttpResponse {
+    // app_id is the subdomain — same logic the manifest dispatcher
+    // uses for normal requests.
+    let Some(app_id) = extract_app_name(&req, None) else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "host header missing or unparseable",
+        );
+    };
+
+    // 1. Parse query (code + state). Hydra may also send `error=...`
+    //    for user-denied consent; surface it directly.
+    let query_str = req.uri().query().unwrap_or("");
+    let mut code: Option<String> = None;
+    let mut state_param: Option<String> = None;
+    let mut oauth_error: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query_str.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state_param = Some(v.into_owned()),
+            "error" => oauth_error = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    if let Some(e) = oauth_error {
+        return render_callback_error(state.config.insecure_dev, &format!("oauth error: {e}"));
+    }
+    let (Some(code), Some(state_param)) = (code, state_param) else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "missing code or state query parameter",
+        );
+    };
+
+    // 2. Read the signed stash cookie.
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(stash) = oidc_rp::parse_stash_cookie(cookie_header) else {
+        return render_callback_error(state.config.insecure_dev, "missing stash cookie");
+    };
+
+    // 3. Exchange the code with hydra + verify the ID token.
+    let (claims, original_path) = match state
+        .oidc_rp
+        .finish_callback(&code, &state_param, &stash)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "gateway: oidc callback failed");
+            return render_callback_error(state.config.insecure_dev, &e.to_string());
+        }
+    };
+
+    // 4. Create a per-origin session row.
+    let Some(db) = state.db.as_ref() else {
+        return render_callback_error(
+            state.config.insecure_dev,
+            "gateway not configured with a session database",
+        );
+    };
+    let session = match crate::sessions::create(
+        db,
+        &crate::sessions::NewSession {
+            user_id: &claims.sub,
+            app_id: &app_id,
+            email: claims.email.as_deref(),
+            name: claims.name.as_deref(),
+            avatar_url: claims.picture.as_deref(),
+            email_verified: claims.email_verified.unwrap_or(false),
+        },
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "gateway: session create failed");
+            return render_callback_error(state.config.insecure_dev, "session create failed");
+        }
+    };
+
+    // 5. 302 back to the original path, set app-session cookie, clear
+    //    the stash cookie. Two `Set-Cookie` headers on one response is
+    //    valid per RFC 6265 §3 (and is how hydra emits its own cookies).
+    let mut builder = HttpResponse::Found();
+    builder.header("location", original_path.clone());
+    builder.header(
+        "set-cookie",
+        oidc_rp::set_app_session_cookie(&session.id, state.config.insecure_dev),
+    );
+    builder.header(
+        "set-cookie",
+        oidc_rp::clear_stash_cookie(state.config.insecure_dev),
+    );
+    builder.finish()
+}
+
+/// Render the failed-callback page. Generic on purpose — leaking
+/// hydra's error string to the user would be a noisy debugging tool
+/// for an attacker. The structured error is already in the gateway log
+/// at warn / error.
+fn render_callback_error(_insecure_dev: bool, msg: &str) -> HttpResponse {
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Sign-in failed</title>\
+        <h1>Sign-in failed</h1><p>{}</p>\
+        <p><a href=\"/\">Back to app</a></p>",
+        html_escape(msg),
+    );
+    HttpResponse::BadRequest()
+        .content_type("text/html; charset=utf-8")
+        .body(body)
+}
+
+/// Minimal HTML-escape — enough to make the rendered error page safe
+/// when the upstream message contains user input (state token,
+/// query-string echo, etc).
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 /// Build the 302 → hydra redirect that kicks off the OIDC dance.
 /// Stash cookie carries the PKCE verifier + state + original_path so
 /// the callback can resume.
@@ -2061,5 +2210,114 @@ mod tests {
         );
         // `/userinfo` is exact-match; substring matches must not steal.
         assert_eq!(classify_auth_path("/userinfo/foo"), AuthUpstream::Auth);
+    }
+
+    // -----------------------------------------------------------------------
+    // OIDC RP integration — auth redirect + callback handler
+    // -----------------------------------------------------------------------
+
+    /// `wants_html` should fire on `text/html`-containing Accept
+    /// headers and ignore everything else. The classifier drives the
+    /// 302-vs-401 split for unauthenticated requests.
+    #[test]
+    fn wants_html_recognizes_browser_accept() {
+        let html = ntex::web::test::TestRequest::default()
+            .header("accept", "text/html,application/xhtml+xml;q=0.9")
+            .to_http_request();
+        assert!(wants_html(&html));
+
+        let json = ntex::web::test::TestRequest::default()
+            .header("accept", "application/json")
+            .to_http_request();
+        assert!(!wants_html(&json));
+
+        let none = ntex::web::test::TestRequest::default().to_http_request();
+        assert!(!wants_html(&none));
+    }
+
+    /// `unauthenticated_response` returns 401+WWW-Authenticate for API
+    /// callers (no `Accept: text/html`). This is the contract that
+    /// lets `fetch()` callers surface their own login UI instead of
+    /// following a 302 into hydra they can't render.
+    #[test]
+    fn unauthenticated_response_returns_401_for_api_clients() {
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept", "application/json")
+            .to_http_request();
+        let state = build_idempotency_state();
+        let resp = unauthenticated_response(&req, &state);
+        assert_eq!(resp.status(), ntex::http::StatusCode::UNAUTHORIZED);
+        let wa = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(wa.contains("Bearer"), "got www-authenticate = {wa:?}");
+    }
+
+    /// HTML navigations get a 302 → hydra with the stash cookie set.
+    /// The redirect target carries the gateway's client_id, the PKCE
+    /// challenge, and the per-app `redirect_uri` derived from the Host
+    /// header.
+    #[test]
+    fn unauthenticated_response_redirects_html_clients_to_hydra() {
+        let req = ntex::web::test::TestRequest::default()
+            .header("accept", "text/html")
+            .header("host", "myapp.zeroship.localhost")
+            .uri("/dashboard?welcome=true")
+            .to_http_request();
+        let state = build_idempotency_state();
+        let resp = unauthenticated_response(&req, &state);
+        assert_eq!(resp.status(), ntex::http::StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("/oauth2/auth?"),
+            "location must point at hydra's /oauth2/auth; got {location:?}"
+        );
+        assert!(location.contains("client_id=gateway"));
+        assert!(location.contains("code_challenge="));
+        // `redirect_uri` is the per-host callback path; insecure_dev=true
+        // in the test fixture, so scheme is http.
+        assert!(
+            location.contains("redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zs%2Fauth%2Fcallback"),
+            "redirect_uri must include the per-host callback path; got {location:?}"
+        );
+        // Stash cookie set.
+        let set_cookie = resp
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            set_cookie.starts_with("__Host-zs_oidc_stash="),
+            "must set the stash cookie; got {set_cookie:?}"
+        );
+    }
+
+    /// `render_callback_error` returns a 400 HTML page and escapes
+    /// the inserted message so a malicious upstream cannot smuggle
+    /// markup through the failure path.
+    #[test]
+    fn render_callback_error_returns_html_400_and_escapes_message() {
+        let resp = render_callback_error(true, "<script>alert(1)</script>");
+        assert_eq!(resp.status(), ntex::http::StatusCode::BAD_REQUEST);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.starts_with("text/html"), "got content-type {ct:?}");
+    }
+
+    #[test]
+    fn html_escape_neutralizes_tags_and_quotes() {
+        assert_eq!(
+            html_escape(r#"<script>alert("x" & 'y')</script>"#),
+            "&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;",
+        );
     }
 }
