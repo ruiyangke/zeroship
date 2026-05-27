@@ -712,17 +712,18 @@ Honour `prompt=none|login|consent` per OIDC Core §3.1.2.1.
 
 In-place, single-PR, no back-compat.
 
-1. **New crate** `crates/auth/` per §4.
-2. **Hydra deployment**: add `oryd/hydra:v26.2.x` to compose / Nomad spec. `hydra migrate sql up` runs as an init step. Hydra config (§16) lives in `ops/hydra.yaml`.
-3. **`auth.*` schema** added via `crates/auth/src/store/migrations.rs`. The existing `auth_users` / `auth_app_consents` / `auth_sessions` tables in the public schema are migrated by `INSERT INTO auth.users SELECT … FROM auth_users` once, then the public-schema tables are `DROP TABLE`d in the same transaction.
-4. **Control plane** loses `auth_service.rs`, `auth_handlers.rs`, `oauth.rs`, and the `/auth/*` routes. It gains a small `crates/control/src/oidc_rp.rs` that runs an OIDC client against `auth.zeroship.ai`.
-5. **Gateway** loses `crates/gateway/src/user_auth.rs`'s JWT-cookie path. It gains an OIDC RP module that:
+1. **Retire the orphaned legacy `crates/auth/`.** A previous attempt at the auth service (bcrypt + the tokio-shaped `openidconnect` crate + Apple/Meta/Google/GitHub OAuth providers) lives on main but nothing depends on `zeroship-auth` from elsewhere in the workspace — it is dead code. Delete the legacy contents wholesale before laying down the new skeleton; git history preserves the old code if anything ever needs to be retrieved.
+2. **New crate** `crates/auth/` per §4, replacing the legacy contents.
+3. **Hydra deployment**: add `oryd/hydra:v25.4.0` (current Docker Hub tag) to compose / Nomad spec. `hydra migrate sql up` runs as an init step. Hydra config (§16) lives in `ops/hydra.yaml`.
+4. **`auth.*` schema** added via `crates/auth/src/store/migrations.rs`. The existing `auth_users` / `auth_app_consents` / `auth_sessions` tables in the public schema are migrated by `INSERT INTO auth.users SELECT … FROM auth_users` once, then the public-schema tables are `DROP TABLE`d in the same transaction.
+5. **Control plane** loses `auth_service.rs`, `auth_handlers.rs`, `oauth.rs`, and the `/auth/*` routes. It gains a small `crates/control/src/oidc_rp.rs` that runs an OIDC client against `auth.zeroship.ai`.
+6. **Gateway** loses `crates/gateway/src/user_auth.rs`'s JWT-cookie path. It gains an OIDC RP module that:
    - On unauthenticated HTML requests, redirects to `auth.zeroship.ai/oauth2/auth`.
    - On `/__zs/auth/callback`, exchanges the code at `auth.zeroship.ai/oauth2/token`, validates the ID token against cached JWKS, sets `__Host-zs_app_session` at the app's origin.
    - The HMAC-signed `ZeroShip-User` payload to the worker is **unchanged**.
-6. **Gateway** also gains a proxy rule for the `auth.zeroship.ai/oauth2/*` and `auth.zeroship.ai/.well-known/*` prefixes — forwards to hydra's public port.
-7. **`sdks/auth`** is reduced: the browser fallback (`window.__zs_user`) is deleted. The package becomes a thin `env.auth.getUser() / requireUser() / signOut()` wrapper around the platform-injected identity. (`env.auth` becomes a newly-registered native namespace — currently "planned" in AGENTS.md.)
-8. **Existing skew gets fixed:** the `email_verified` claim issue disappears because hydra now owns the JWT shape; the gateway parses real ID tokens, not shared-secret JWTs.
+7. **Gateway** also gains a proxy rule for the `auth.zeroship.ai/oauth2/*` and `auth.zeroship.ai/.well-known/*` prefixes — forwards to hydra's public port.
+8. **`sdks/auth`** is reduced: the browser fallback (`window.__zs_user`) is deleted. The package becomes a thin `env.auth.getUser() / requireUser() / signOut()` wrapper around the platform-injected identity. (`env.auth` becomes a newly-registered native namespace — currently "planned" in AGENTS.md.)
+9. **Existing skew gets fixed:** the `email_verified` claim issue disappears because hydra now owns the JWT shape; the gateway parses real ID tokens, not shared-secret JWTs.
 
 No `@deprecated` aliases. No `__zs_session` cookie shim. Pre-launch posture per AGENTS.md.
 
