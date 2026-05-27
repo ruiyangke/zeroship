@@ -37,6 +37,11 @@
  * surface, zero color-contrast incompletes.
  */
 .zs-story-main {
+  /* Full viewport in canvas view so the mesh fills the stage. In
+     autodocs viewmode each story preview embeds in a smaller frame;
+     full-vh there inflates every preview and buries the prop table.
+     The .docs-story selector targets the docs wrapper to shrink the
+     stage; canvas view retains 100vh. */
   min-height: 100vh;
   padding: var(--zs-space-7);
   background: var(--zs-surface-bg, var(--zs-surface));
@@ -44,6 +49,14 @@
   font-family: var(--zs-font-system);
   display: grid;
   place-items: center;
+}
+
+/* Storybook wraps each docs preview in a .docs-story container. When
+   our story-main appears inside that container, shrink to content
+   height so the prop table can sit immediately below. */
+.docs-story .zs-story-main {
+  min-height: auto;
+  padding: var(--zs-space-5);
 }
 
 .zs-story-row {
