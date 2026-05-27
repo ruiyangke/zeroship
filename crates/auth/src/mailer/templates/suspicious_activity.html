@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html><body style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:1rem">
+<h2 style="color:#c00">Suspicious activity on your zeroship account</h2>
+<p>Hi {{ name }},</p>
+<p>We noticed: <strong>{{ event }}</strong> at {{ time }}.</p>
+<p>If this was you, you can ignore this email — no action is needed. If you don't recognize this activity, we recommend changing your password.</p>
+{% if let Some(link) = action_link %}
+<p style="margin:2rem 0"><a href="{{ link }}" style="display:inline-block;padding:0.75rem 1.25rem;background:#c00;color:#fff;text-decoration:none;border-radius:4px">Change your password</a></p>
+{% endif %}
+</body></html>

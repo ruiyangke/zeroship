@@ -5,4 +5,4 @@
 # Askama 0.13 will let us move this into `[package.metadata.askama]` in
 # `Cargo.toml`; until we upgrade, this file is the canonical config.
 [general]
-dirs = ["src/ui/templates"]
+dirs = ["src/ui/templates", "src/mailer/templates"]

@@ -14,6 +14,7 @@
 pub mod resend;
 pub mod smtp;
 pub mod stdout;
+pub mod templates;
 pub mod types;
 
 use async_trait::async_trait;
