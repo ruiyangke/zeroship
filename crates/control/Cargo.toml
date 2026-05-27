@@ -11,7 +11,9 @@ path = "src/main.rs"
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
-compio-postgres = { workspace = true }
+# `with-chrono-0_4` so the console_sessions store can pull
+# `TIMESTAMPTZ` columns into `chrono::DateTime<Utc>` directly.
+compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
 compio = { workspace = true }
 memmap2 = { workspace = true }
 ntex = { workspace = true }
@@ -39,6 +41,11 @@ http = { workspace = true }
 # RNG for OAuth state / PKCE — small, no async runtime dep.
 rand = "0.8"
 tracing = { workspace = true }
+# Phase 3 U7 — control plane OIDC RP module + console session store.
+# `hmac` is already present above (used by the legacy stripe webhook
+# verifier); reuse it here for the stash cookie HMAC envelope.
+thiserror = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and
@@ -50,6 +57,12 @@ zstd = { workspace = true }
 # inputs. The production helper is generic over `B: AsRef<[u8]>` so
 # `bytes` itself isn't a runtime dep.
 bytes = { workspace = true }
+# Phase 3 U7 console_sessions smoke test runs
+# `zeroship_auth::store::migrations::migrate` against a live PG to
+# guarantee the `auth.console_sessions` table exists before the CRUD
+# round-trip. NOT a runtime dep — the control bin never imports
+# `zeroship-auth`.
+zeroship-auth = { workspace = true }
 
 [lints]
 workspace = true
