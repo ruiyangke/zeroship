@@ -3,10 +3,12 @@ mod blob_cache;
 mod compiled;
 mod dispatch;
 mod enforce;
+mod error;
 mod idempotency;
 mod oidc_rp;
 mod proxy;
 mod router;
+mod sessions;
 mod sync;
 mod user_auth;
 
@@ -43,6 +45,11 @@ pub struct GateConfig {
     /// service; will be wired through once the service joins compose
     /// (Phase 3 Unit U11).
     pub auth_public: String,
+    /// Dev-only flag. When true the gateway emits cookies without the
+    /// `Secure` attribute so the localhost HTTP flow works in `pnpm dev`
+    /// / docker-compose. Production MUST set this to false — the
+    /// `__Host-` cookie prefix RFC 6265bis §4.1.3 requires `Secure`.
+    pub insecure_dev: bool,
 }
 
 #[allow(missing_debug_implementations)]
@@ -72,6 +79,17 @@ pub struct GateState {
     /// mutations to the worker; on a hit it returns the stored
     /// response without touching V8.
     pub idempotency_store: std::sync::Arc<dyn idempotency::IdempotencyStore>,
+    /// OIDC relying-party engine for hosted creator apps. Drives the
+    /// per-origin authorize-redirect → callback → session-mint flow
+    /// (proposal §2.2 + §10.2). One RP instance services every
+    /// `{app}.zeroship.ai` host — the per-app `redirect_uri` is the
+    /// only thing that changes per request.
+    pub oidc_rp: Arc<oidc_rp::OidcRp>,
+    /// Postgres client used by the gateway's per-origin session store
+    /// (`auth.gateway_sessions`). `Option` because the binary supports
+    /// a dev "no-DB" mode (when `--db` is empty); test fixtures also
+    /// rely on `None` to construct `GateState` without a live PG.
+    pub db: Option<Arc<compio_postgres::Client>>,
 }
 
 #[ntex::main]
@@ -97,6 +115,21 @@ async fn main() -> std::io::Result<()> {
     );
     let hydra_public = arg_or_env(&args, "--hydra-public", "HYDRA_PUBLIC", "http://hydra:4444");
     let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "http://auth:9092");
+    let pg_dsn = arg_or_env(&args, "--db", "DATABASE_URL", "");
+    let oidc_client_secret = arg_or_env(
+        &args,
+        "--gateway-oidc-secret",
+        "GATEWAY_OIDC_SECRET",
+        "dev-secret-rotate-me-too",
+    );
+    let stash_signing_key = arg_or_env(
+        &args,
+        "--stash-signing-key",
+        "STASH_SIGNING_KEY",
+        "dev-stash-key-please-rotate",
+    );
+    let insecure_dev = arg_or_env(&args, "--insecure-dev", "INSECURE_DEV", "false")
+        .eq_ignore_ascii_case("true");
 
     if worker_key.is_empty() {
         tracing::warn!(
@@ -149,6 +182,39 @@ async fn main() -> std::io::Result<()> {
 
     let hash_ring = proxy::HashRing::new(worker_urls.clone(), max_per_worker);
 
+    // Postgres client for the per-origin session store. The binary
+    // accepts an empty DSN (`--db ""`) for dev / smoke modes that don't
+    // exercise the OIDC RP path; downstream handlers gracefully return
+    // 401 when `db` is None instead of panicking.
+    let db: Option<Arc<compio_postgres::Client>> = if pg_dsn.is_empty() {
+        tracing::warn!(
+            "DATABASE_URL not set — gateway session validation disabled (all auth-gated requests will 401)"
+        );
+        None
+    } else {
+        let (pg_client, pg_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
+            .await
+            .expect("gateway: pg connect");
+        compio::runtime::spawn(async move {
+            if let Err(e) = pg_conn.run().await {
+                tracing::error!(error = %e, "gateway/pg connection ended");
+            }
+        })
+        .detach();
+        Some(Arc::new(pg_client))
+    };
+
+    // OIDC RP — services every `{app}.zeroship.ai` host. The
+    // `client_id` matches the entry registered in
+    // `ops/auth-clients.example.toml`; `redirect_uri` is per-app and
+    // built at the dispatch site.
+    let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
+        &auth_public,
+        "gateway",
+        oidc_client_secret,
+        stash_signing_key.into_bytes(),
+    ));
+
     let state = Arc::new(GateState {
         config: GateConfig {
             control_url,
@@ -159,6 +225,7 @@ async fn main() -> std::io::Result<()> {
             worker_key,
             hydra_public,
             auth_public,
+            insecure_dev,
         },
         routes: sync::RouteCache::new(),
         hash_ring,
@@ -169,6 +236,8 @@ async fn main() -> std::io::Result<()> {
         blob_cache: blob_cache::BlobCache::new(blob_cache_bytes),
         disk_cache,
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
+        oidc_rp,
+        db,
     });
 
     sync::start_sync(state.clone());

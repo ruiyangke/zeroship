@@ -5,4 +5,5 @@
 //! `proxy`, `enforce`, …) continue to be `mod xxx;` from `main.rs`.
 
 pub mod error;
+pub mod oidc_rp;
 pub mod sessions;

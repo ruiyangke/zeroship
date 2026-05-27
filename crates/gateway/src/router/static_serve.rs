@@ -884,6 +884,7 @@ mod tests {
                 worker_key: String::new(),
                 hydra_public: String::new(),
                 auth_public: String::new(),
+                insecure_dev: true,
             },
             routes: crate::sync::RouteCache::new(),
             hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
@@ -894,6 +895,13 @@ mod tests {
             blob_cache: BlobCache::new(8 * 1024 * 1024),
             disk_cache: disk,
             idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
+            oidc_rp: Arc::new(crate::oidc_rp::OidcRp::new(
+                "http://auth.test",
+                "gateway",
+                "test-secret",
+                b"test-stash-key-32-bytes-long----".to_vec(),
+            )),
+            db: None,
         }
     }
 

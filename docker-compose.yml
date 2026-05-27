@@ -61,14 +61,29 @@ services:
           --workers "$$WORKERS" \
           --poll-interval 3 \
           --hydra-public http://hydra:4444 \
-          --auth-public http://auth:9092
+          --auth-public http://auth:9092 \
+          --db postgres://postgres:zeroship@postgres:5432/zeroship \
+          --insecure-dev true
+    environment:
+      # OAuth2 client_secret registered for the `gateway` client in
+      # ops/auth-clients.example.toml. The gateway exchanges this on
+      # the per-app OIDC code-exchange (Phase 3 §10.2).
+      GATEWAY_OIDC_SECRET: ${GATEWAY_OIDC_SECRET:-dev-secret-rotate-me-too}
+      # HMAC key signing the per-request __Host-zs_oidc_stash cookie.
+      # Tampering is rejected at decode time; rotating this key
+      # invalidates any in-flight OIDC dances.
+      STASH_SIGNING_KEY: ${STASH_SIGNING_KEY:-dev-stash-key-please-rotate}
     ports:
       - "8000:8000"
     security_opt:
       - seccomp:unconfined
     depends_on:
-      - control
-      - worker
+      postgres:
+        condition: service_healthy
+      control:
+        condition: service_started
+      worker:
+        condition: service_started
 
   worker:
     build: .
