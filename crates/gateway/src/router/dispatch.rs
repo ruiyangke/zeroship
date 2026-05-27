@@ -222,6 +222,14 @@ pub async fn handle_subdomain(
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
+    // `auth.zeroship.ai` is a platform-internal host, not a creator app.
+    // The gateway proxies OIDC protocol endpoints (`/oauth2/*`,
+    // `/.well-known/*`, `/userinfo`) to Ory Hydra; everything else
+    // (login UI, OAuth2 consent handlers, webhooks) goes to crates/auth.
+    if is_auth_host(&req) {
+        return route_auth_host(req, state, body).await;
+    }
+
     let app_name = match extract_app_name(&req, None) {
         Some(name) => name,
         None => {
@@ -231,6 +239,91 @@ pub async fn handle_subdomain(
     };
     let tail = path.into_inner();
     handle_request(req, state, &app_name, &tail, body).await
+}
+
+// ---------------------------------------------------------------------------
+// auth.zeroship.ai routing
+// ---------------------------------------------------------------------------
+
+/// Which upstream a given `auth.zeroship.ai` request path should be
+/// forwarded to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthUpstream {
+    /// OIDC protocol endpoints implemented by Ory Hydra.
+    Hydra,
+    /// Login UI, OAuth2 consent handlers, and webhooks — implemented
+    /// by `crates/auth`.
+    Auth,
+}
+
+/// Classify an inbound `auth.zeroship.ai` path. The protocol endpoints
+/// listed here are the public hydra contract:
+///
+///   * `/oauth2/auth`, `/oauth2/token`, `/oauth2/revoke`, …
+///   * `/.well-known/openid-configuration`, `/.well-known/jwks.json`
+///   * `/userinfo`
+///
+/// Everything else is handled by `crates/auth` (login HTML, consent
+/// callbacks, signup, password reset, …).
+pub(crate) fn classify_auth_path(path: &str) -> AuthUpstream {
+    if path.starts_with("/oauth2/")
+        || path.starts_with("/.well-known/")
+        || path == "/userinfo"
+    {
+        AuthUpstream::Hydra
+    } else {
+        AuthUpstream::Auth
+    }
+}
+
+/// True when the request's Host header is the auth.zeroship.ai
+/// platform host. Strips an optional port. Tolerates dev hostnames
+/// like `auth.zeroship.localhost` by matching the `auth.zeroship.`
+/// prefix as well — exact-match on `auth.zeroship.ai` is the
+/// production case.
+fn is_auth_host(req: &HttpRequest) -> bool {
+    let Some(host_hdr) = req.headers().get("host").and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let host = host_hdr.split(':').next().unwrap_or(host_hdr);
+    let host_lc = host.to_ascii_lowercase();
+    host_lc == "auth.zeroship.ai" || host_lc.starts_with("auth.zeroship.")
+}
+
+async fn route_auth_host(
+    req: HttpRequest,
+    state: web::types::State<Arc<GateState>>,
+    body: Bytes,
+) -> HttpResponse {
+    let path = req.uri().path();
+    let upstream_base = match classify_auth_path(path) {
+        AuthUpstream::Hydra => state.config.hydra_public.as_str(),
+        AuthUpstream::Auth => state.config.auth_public.as_str(),
+    };
+
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for (name, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            headers.push((name.as_str().to_string(), v.to_string()));
+        }
+    }
+
+    let method = req.method().as_str();
+
+    match proxy::forward_http(upstream_base, method, path_and_query, &headers, &body).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(error = %e, upstream = %upstream_base, "auth-host proxy error");
+            HttpResponse::BadGateway()
+                .json(&serde_json::json!({"error": format!("auth proxy: {e}")}))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,6 +1245,8 @@ mod tests {
                 poll_interval_secs: 5,
                 auth_secret: String::new(),
                 worker_key: String::new(),
+                hydra_public: String::new(),
+                auth_public: String::new(),
             },
             routes: crate::sync::RouteCache::new(),
             hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
@@ -1850,5 +1945,53 @@ mod tests {
             .lookup_resource("/_zs/v1/todoTicker")
             .expect("subscription resource");
         assert_eq!(p.kind, Some(ProcedureKind::Subscription));
+    }
+
+    // ----------------------------------------------------------------------
+    // auth.zeroship.ai routing — classify_auth_path
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn classify_auth_path_oauth2_routes_to_hydra() {
+        assert_eq!(classify_auth_path("/oauth2/auth"), AuthUpstream::Hydra);
+        assert_eq!(classify_auth_path("/oauth2/token"), AuthUpstream::Hydra);
+        assert_eq!(classify_auth_path("/oauth2/revoke"), AuthUpstream::Hydra);
+        assert_eq!(
+            classify_auth_path("/oauth2/sessions/logout"),
+            AuthUpstream::Hydra
+        );
+    }
+
+    #[test]
+    fn classify_auth_path_well_known_routes_to_hydra() {
+        assert_eq!(
+            classify_auth_path("/.well-known/openid-configuration"),
+            AuthUpstream::Hydra
+        );
+        assert_eq!(
+            classify_auth_path("/.well-known/jwks.json"),
+            AuthUpstream::Hydra
+        );
+    }
+
+    #[test]
+    fn classify_auth_path_userinfo_routes_to_hydra() {
+        assert_eq!(classify_auth_path("/userinfo"), AuthUpstream::Hydra);
+    }
+
+    #[test]
+    fn classify_auth_path_ui_and_callbacks_route_to_auth() {
+        assert_eq!(classify_auth_path("/login"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/signup"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/consent"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/static/main.css"), AuthUpstream::Auth);
+        // A path that contains but does not start with `/oauth2/` must
+        // still go to auth — the prefix match is anchored.
+        assert_eq!(
+            classify_auth_path("/something/oauth2/auth"),
+            AuthUpstream::Auth
+        );
+        // `/userinfo` is exact-match; substring matches must not steal.
+        assert_eq!(classify_auth_path("/userinfo/foo"), AuthUpstream::Auth);
     }
 }

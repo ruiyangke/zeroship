@@ -882,6 +882,8 @@ mod tests {
                 poll_interval_secs: 5,
                 auth_secret: String::new(),
                 worker_key: String::new(),
+                hydra_public: String::new(),
+                auth_public: String::new(),
             },
             routes: crate::sync::RouteCache::new(),
             hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
