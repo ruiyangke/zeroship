@@ -4,7 +4,7 @@
 
 use clap::Parser;
 
-use zeroship_auth::config::AuthConfig;
+use zeroship_auth::{config::AuthConfig, server};
 
 #[compio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,7 +13,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = AuthConfig::parse();
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
-    // Server start lives in Task 3.
-    let _ = cfg;
+    server::run(cfg).await?;
     Ok(())
 }
