@@ -24,7 +24,7 @@
  *      and the contrast walk succeeds — no incompletes on descendant
  *      text.
  *   2. The surface element ALSO declares `backdrop-filter:
- *      var(--zs-blur)`. With a fully-opaque background the filter has
+ *      var(--zs-material-regular)`. With a fully-opaque background the filter has
  *      no visual effect today, but the declaration is kept so themes
  *      that swap `--zs-surface` to a translucent value (e.g. a Glass
  *      theme) get the frosted look without restructuring the markup.
@@ -54,8 +54,8 @@
   gap: var(--zs-space-4);
   padding: var(--zs-space-6);
   background-color: var(--zs-surface);
-  backdrop-filter: var(--zs-blur);
-  -webkit-backdrop-filter: var(--zs-blur);
+  backdrop-filter: var(--zs-material-regular);
+  -webkit-backdrop-filter: var(--zs-material-regular);
   border-radius: var(--zs-radius-6);
   box-shadow: 0 0.0625rem 0 0 var(--zs-separator) inset;
 }
@@ -67,8 +67,8 @@
   gap: var(--zs-space-4);
   padding: var(--zs-space-6);
   background-color: var(--zs-surface);
-  backdrop-filter: var(--zs-blur);
-  -webkit-backdrop-filter: var(--zs-blur);
+  backdrop-filter: var(--zs-material-regular);
+  -webkit-backdrop-filter: var(--zs-material-regular);
   border-radius: var(--zs-radius-6);
   box-shadow: 0 0.0625rem 0 0 var(--zs-separator) inset;
 }

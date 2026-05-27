@@ -1,0 +1,261 @@
+/*
+ * Dialog — HIG Sheets.
+ *
+ * Anatomy:
+ *   .zs-dialog-backdrop          fixed-position overlay; tinted via
+ *                                  data-tint="scrim|material|none".
+ *     └─ .zs-dialog-popup        the sheet — opaque surface; rounded;
+ *                                  shadow; scrolls internally; data-
+ *                                  size="sm|md|lg|full", data-placement.
+ *         ├─ .zs-dialog__header  Title + Description + close button.
+ *         ├─ .zs-dialog__body    scroll container.
+ *         └─ .zs-dialog__footer  button row (right-aligned by default).
+ *
+ * Base UI emits `data-starting-style` and `data-ending-style` on
+ * Popup and Backdrop while the open/close transitions are running.
+ * We hook the visible state off those data attributes so animations
+ * are declarative and reduced-motion-aware.
+ *
+ * Glass-surface invariant: the Popup declares an opaque background
+ * (--zs-surface). The Backdrop uses --zs-scrim (a color-mix translucent
+ * black) — the Popup itself is opaque so axe's color-contrast walk
+ * terminates inside the Popup and never tries to resolve descendants
+ * against the translucent Backdrop.
+ */
+
+/* ─── Backdrop ─────────────────────────────────────────────────────────── */
+.zs-dialog-backdrop {
+  /* Base UI emits Backdrop and Popup as SIBLINGS inside Portal — the
+   * Backdrop is the overlay; the Popup positions itself independently
+   * (centered via the rules below). */
+  position: fixed;
+  inset: 0;
+  z-index: var(--zs-z-modal);
+  background-color: var(--zs-scrim);
+  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-dialog-backdrop[data-tint="material"] {
+  background-color: var(--zs-material-tint);
+  backdrop-filter: var(--zs-material-thick);
+  -webkit-backdrop-filter: var(--zs-material-thick);
+}
+.zs-dialog-backdrop[data-tint="none"] {
+  background-color: transparent;
+}
+.zs-dialog-backdrop[data-starting-style],
+.zs-dialog-backdrop[data-ending-style] {
+  opacity: 0;
+}
+
+/* ─── Popup ────────────────────────────────────────────────────────────── */
+.zs-dialog-popup {
+  /* Popup positions itself — Base UI's DOM puts Backdrop and Popup as
+   * siblings, so we center the Popup directly on the viewport. */
+  position: fixed;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  /* Translate -50%, -50% to centre, then layer in the nested-scale
+   * + enter/leave deltas. The base transform sets the origin so
+   * sizing math works regardless of nesting depth. */
+  --zs-nested-scale: calc(1 - var(--nested-dialogs, 0) * 0.02);
+  --zs-nested-offset: calc(var(--nested-dialogs, 0) * 0.5rem);
+  transform: translate(-50%, calc(-50% + var(--zs-nested-offset)))
+    scale(var(--zs-nested-scale));
+  transform-origin: center;
+  z-index: calc(var(--zs-z-modal) + 1);
+  display: flex;
+  flex-direction: column;
+  inline-size: calc(100% - var(--zs-space-7) * 2);
+  max-inline-size: var(--zs-dialog-max-width-md);
+  max-block-size: calc(100dvh - var(--zs-space-7) * 2);
+  background-color: var(--zs-surface);
+  backdrop-filter: var(--zs-material-regular);
+  -webkit-backdrop-filter: var(--zs-material-regular);
+  border-radius: var(--zs-dialog-radius);
+  box-shadow: var(--zs-shadow-dialog);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  overflow: hidden;
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* sizes */
+.zs-dialog-popup[data-size="sm"] {
+  max-inline-size: var(--zs-dialog-max-width-sm);
+}
+.zs-dialog-popup[data-size="lg"] {
+  max-inline-size: var(--zs-dialog-max-width-lg);
+}
+.zs-dialog-popup[data-size="full"] {
+  /* Full takeover — anchor to the inset edges instead of centering. */
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  transform: none;
+  max-inline-size: none;
+  inline-size: 100dvw;
+  max-block-size: 100dvh;
+  block-size: 100dvh;
+  border-radius: 0;
+}
+
+/* placement */
+.zs-dialog-popup[data-placement="top"] {
+  inset-block-start: max(var(--zs-space-9), env(safe-area-inset-top));
+  transform: translate(-50%, calc(var(--zs-nested-offset)))
+    scale(var(--zs-nested-scale));
+}
+
+/* enter/leave transitions — Base UI emits data-starting/ending-style
+ * during the open/close transition windows. The translate(-50%, -50%)
+ * has to stay in the transform expression so the popup doesn't snap
+ * to the inset corner mid-transition. */
+.zs-dialog-popup[data-starting-style] {
+  opacity: 0;
+  transform: translate(-50%, calc(-50% + 0.5rem)) scale(0.96);
+}
+.zs-dialog-popup[data-ending-style] {
+  opacity: 0;
+  transform: translate(-50%, calc(-50% + 0.25rem)) scale(0.98);
+}
+.zs-dialog-popup[data-placement="top"][data-starting-style] {
+  transform: translate(-50%, 0.5rem) scale(0.96);
+}
+.zs-dialog-popup[data-placement="top"][data-ending-style] {
+  transform: translate(-50%, 0.25rem) scale(0.98);
+}
+.zs-dialog-popup[data-size="full"][data-starting-style],
+.zs-dialog-popup[data-size="full"][data-ending-style] {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zs-dialog-popup,
+  .zs-dialog-popup[data-starting-style],
+  .zs-dialog-popup[data-ending-style] {
+    transition: none;
+  }
+  .zs-dialog-backdrop {
+    transition: none;
+  }
+}
+
+/* ─── Header ───────────────────────────────────────────────────────────── */
+.zs-dialog__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--zs-space-3);
+  padding: var(--zs-dialog-padding);
+  padding-block-end: var(--zs-space-3);
+}
+.zs-dialog__header-content {
+  flex: 1;
+  min-inline-size: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-1);
+}
+.zs-dialog__header-close {
+  /* Auto-X close button inside the header, NOT absolutely positioned
+   * outside it (anti-pattern #3). Render as an unstyled <button> that
+   * picks up a hit-target via the same 44pt invisible-pseudo trick
+   * Button uses on coarse pointers. */
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  inline-size: 1.75rem;
+  block-size: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--zs-radius-full);
+  color: var(--zs-label-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+  /* Visual square is small; the hit target is 44pt via the same
+   * invisible-pseudo trick Button.css uses on coarse pointers. */
+  position: relative;
+}
+@media (hover: hover) {
+  .zs-dialog__header-close:hover {
+    background-color: var(--zs-fill-tertiary);
+    color: var(--zs-label);
+  }
+}
+.zs-dialog__header-close:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+@media (pointer: coarse) {
+  .zs-dialog__header-close::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    inline-size: max(100%, var(--zs-hit-min));
+    block-size: max(100%, var(--zs-hit-min));
+  }
+}
+
+/* ─── Title / Description ──────────────────────────────────────────────── */
+.zs-dialog__title {
+  margin: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: 600;
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+}
+.zs-dialog__description {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── Body / Footer ────────────────────────────────────────────────────── */
+.zs-dialog__body {
+  padding-inline: var(--zs-dialog-padding);
+  padding-block: 0;
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+  color: var(--zs-label);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+.zs-dialog__footer {
+  display: flex;
+  gap: var(--zs-space-2);
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--zs-dialog-padding);
+  padding-block-start: var(--zs-space-4);
+}
+
+/* ─── forced-colors ────────────────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-dialog-popup {
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: 0 0 0 0.0625rem CanvasText inset;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .zs-dialog-backdrop[data-tint="scrim"],
+  .zs-dialog-backdrop[data-tint="material"] {
+    background-color: color-mix(in oklch, CanvasText 40%, transparent);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .zs-dialog__header-close:focus-visible {
+    outline-color: Highlight;
+  }
+}

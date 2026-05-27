@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, Dialog, Input } from "@zeroship/ui";
+import { AlertDialog, Badge, Button, Card, Input } from "@zeroship/ui";
 import {
   archiveApp,
   deleteApp,
@@ -94,7 +94,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
                 <Card
                   key={plan.id}
                   data-testid={`settings-plan:${plan.id}`}
-                  tone={active ? "accent" : "neutral"}
+                  variant={active ? "elevated" : "outline"}
                   interactive={!active}
                   className="grid items-center gap-4 px-5 py-4"
                   style={{ gridTemplateColumns: "1fr auto" }}
@@ -180,7 +180,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
           last
           danger
         >
-          <Card tone="danger" className="p-5">
+          <Card variant="outline" className="p-5">
             <div className="font-serif italic font-medium text-[16px] mb-1.5 text-ink">
               Delete this project
             </div>
@@ -230,55 +230,58 @@ function DeleteConfirm({
   const matches = appName.length > 0 && typed === appName;
 
   return (
-    <Dialog
+    <AlertDialog
       open={open}
-      onOpenChange={(next) => {
-        if (!deleting) {
-          if (!next) onClose();
-        }
+      onOpenChange={(nextOpen) => {
+        // While a delete is in flight, do nothing — the AlertDialog
+        // must remain open until the mutation resolves. Once it's
+        // safe to close, surface the close intent to the parent.
+        if (deleting) return;
+        if (!nextOpen) onClose();
       }}
-      title="Delete project?"
-      footer={
-        <>
-          <Button
-            variant="plain"
-            onClick={onClose}
-            disabled={deleting}
-          >
-            cancel
-          </Button>
-          <Button
-            variant="filled"
-            intent="destructive"
-            onClick={() => matches && onConfirm()}
-            disabled={!matches || deleting}
-            loading={deleting}
-            data-testid="settings-delete-confirm"
-          >
-            Delete forever
-          </Button>
-        </>
-      }
     >
-      <div data-testid="settings-delete-modal">
-        <p className="font-serif text-[14px] text-ink-soft mb-4 leading-[1.55]">
-          Type{" "}
-          <code className="font-mono text-[12.5px] bg-paper-2 px-1.5 py-0.5 rounded-[2px] border border-rule text-ink">
-            {appName || "—"}
-          </code>{" "}
-          to confirm. The project, database, secrets, and all deploys are
-          permanently deleted.
-        </p>
-        <Input
-          autoFocus
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          placeholder={appName}
-          data-testid="settings-delete-typed"
-          label="Project name"
-        />
-      </div>
-    </Dialog>
+      <AlertDialog.Portal>
+        <AlertDialog.Backdrop />
+        <AlertDialog.Popup data-testid="settings-delete-modal">
+          <AlertDialog.Header>
+            <AlertDialog.Title>Delete project?</AlertDialog.Title>
+            <AlertDialog.Description>
+              This permanently deletes the project, database, secrets, and all
+              deploys. Type{" "}
+              <code className="font-mono text-[12.5px] bg-paper-2 px-1.5 py-0.5 rounded-[2px] border border-rule text-ink">
+                {appName || "—"}
+              </code>{" "}
+              to confirm.
+            </AlertDialog.Description>
+          </AlertDialog.Header>
+          <AlertDialog.Body>
+            <Input
+              autoFocus
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              placeholder={appName}
+              data-testid="settings-delete-typed"
+              label="Project name"
+            />
+          </AlertDialog.Body>
+          <AlertDialog.Footer>
+            <AlertDialog.Cancel disabled={deleting}>cancel</AlertDialog.Cancel>
+            <AlertDialog.Action
+              tone="destructive"
+              disabled={!matches || deleting}
+              loading={deleting}
+              preventClose
+              onClick={() => {
+                if (matches) onConfirm();
+              }}
+              data-testid="settings-delete-confirm"
+            >
+              Delete forever
+            </AlertDialog.Action>
+          </AlertDialog.Footer>
+        </AlertDialog.Popup>
+      </AlertDialog.Portal>
+    </AlertDialog>
   );
 }
 

@@ -6,13 +6,11 @@ import {
   useImperativeHandle,
   useRef,
   type ButtonHTMLAttributes,
-  type CSSProperties,
-  type MutableRefObject,
   type ReactElement,
   type ReactNode,
   type Ref,
-  type SyntheticEvent,
 } from "react";
+import { Slot } from "../_slot";
 
 export type ButtonVariant = "filled" | "tinted" | "gray" | "plain";
 export type ButtonIntent = "normal" | "destructive";
@@ -88,74 +86,10 @@ function classnames(...parts: Array<string | false | null | undefined>): string 
   return parts.filter(Boolean).join(" ");
 }
 
-/* ─── inline Slot (no @radix-ui/react-slot dep) ──────────────────────── */
-/*
- * Merges our props onto a single React-element child. Handlers compose
- * (child's handler runs first, ours after — child can preventDefault if
- * it wants), className concatenates, style shallow-merges, refs fan out.
+/* ─── Slot helpers extracted to ../_slot ──────────────────────────────
+ * Card / Dialog / future asChild-aware components import the same
+ * helpers, keeping one canonical Slot semantics across the package.
  */
-type SlotProps = Record<string, unknown> & {
-  children?: ReactNode;
-};
-
-function setRef<T>(ref: Ref<T> | undefined, value: T | null) {
-  if (typeof ref === "function") {
-    ref(value);
-  } else if (ref && typeof ref === "object") {
-    (ref as MutableRefObject<T | null>).current = value;
-  }
-}
-
-function composeRefs<T>(...refs: Array<Ref<T> | undefined>) {
-  return (value: T | null) => {
-    for (const ref of refs) setRef(ref, value);
-  };
-}
-
-function mergeProps(
-  ours: Record<string, unknown>,
-  theirs: Record<string, unknown>,
-): Record<string, unknown> {
-  const merged: Record<string, unknown> = { ...theirs, ...ours };
-
-  for (const key of Object.keys(ours)) {
-    const oursValue = ours[key];
-    const theirsValue = theirs[key];
-
-    if (key === "className" && typeof oursValue === "string" && typeof theirsValue === "string") {
-      merged[key] = classnames(theirsValue, oursValue);
-    } else if (key === "style" && oursValue && theirsValue) {
-      merged[key] = { ...(theirsValue as CSSProperties), ...(oursValue as CSSProperties) };
-    } else if (/^on[A-Z]/.test(key) && typeof oursValue === "function" && typeof theirsValue === "function") {
-      merged[key] = (event: SyntheticEvent) => {
-        (theirsValue as (e: SyntheticEvent) => void)(event);
-        if (!event.defaultPrevented) {
-          (oursValue as (e: SyntheticEvent) => void)(event);
-        }
-      };
-    }
-  }
-
-  return merged;
-}
-
-function Slot({ children, ...props }: SlotProps) {
-  if (!isValidElement(children)) return null;
-  const child = children as ReactElement<Record<string, unknown>> & {
-    ref?: Ref<unknown>;
-  };
-  const merged = mergeProps(
-    props as Record<string, unknown>,
-    child.props as Record<string, unknown>,
-  );
-  if ((props as { ref?: Ref<unknown> }).ref || child.ref) {
-    merged.ref = composeRefs(
-      (props as { ref?: Ref<unknown> }).ref,
-      child.ref,
-    );
-  }
-  return cloneElement(child, merged);
-}
 
 /**
  * Inline spinner SVG. Honors prefers-reduced-motion via Button.css.

@@ -1,0 +1,82 @@
+/*
+ * AlertDialog — overrides on top of Dialog.css. The Popup inherits
+ * `.zs-dialog-popup`'s base styling; this file tightens radius,
+ * padding, max-width, and switches the Footer to a grid that adapts
+ * to button count.
+ *
+ * Footer auto-layout per HIG Alerts:
+ *   - 1 button  → full-width (single column).
+ *   - 2 buttons → side-by-side (Cancel left, Action right).
+ *   - 3+        → stacked vertically; destructive at bottom (visual
+ *                  order matches the source order, so callers put the
+ *                  destructive action LAST per HIG guidance).
+ */
+
+/* ─── Popup ────────────────────────────────────────────────────────────── */
+.zs-alertdialog-popup {
+  /* Default to the small size + tighter radius + alert padding. */
+  max-inline-size: var(--zs-dialog-max-width-sm);
+  border-radius: var(--zs-dialog-radius-alert);
+}
+.zs-alertdialog-popup[data-size="md"] {
+  max-inline-size: var(--zs-dialog-max-width-md);
+}
+.zs-alertdialog-popup[data-size="lg"] {
+  max-inline-size: var(--zs-dialog-max-width-lg);
+}
+
+/* ─── Header (tighter padding) ─────────────────────────────────────────── */
+.zs-alertdialog__header {
+  padding: var(--zs-dialog-padding-alert);
+  padding-block-end: var(--zs-space-2);
+}
+
+/* ─── Body (tighter padding) ───────────────────────────────────────────── */
+.zs-alertdialog__body {
+  padding-inline: var(--zs-dialog-padding-alert);
+}
+
+/* ─── Footer (grid; adapts to button count) ────────────────────────────── */
+.zs-alertdialog__footer {
+  display: grid;
+  gap: var(--zs-space-2);
+  padding: var(--zs-dialog-padding-alert);
+  padding-block-start: var(--zs-space-3);
+  /* Reset Dialog footer's flex justification — grid handles layout now. */
+  justify-content: stretch;
+  align-items: stretch;
+}
+
+/* One button — full-width single column. */
+.zs-alertdialog__footer[data-button-count="1"] {
+  grid-template-columns: 1fr;
+}
+
+/* Two buttons — side-by-side. Cancel left, Action right. The buttons
+ * themselves stretch to fill the cells via the rule below. */
+.zs-alertdialog__footer[data-button-count="2"] {
+  grid-template-columns: 1fr 1fr;
+}
+
+/* 3+ buttons — stacked vertically. */
+.zs-alertdialog__footer[data-button-count="3+"] {
+  grid-template-columns: 1fr;
+}
+
+/* Make every direct child fill the cell so the visual width matches the
+ * grid math. (Button's default is inline-flex; we widen to 100% only
+ * inside an AlertDialog footer.) */
+.zs-alertdialog__footer > .zs-button,
+.zs-alertdialog__footer > * {
+  inline-size: 100%;
+  display: inline-flex;
+  justify-content: center;
+}
+
+/* ─── forced-colors ────────────────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-alertdialog-popup {
+    /* Inherits .zs-dialog-popup forced-colors rules; nothing more to
+     * tweak here — the alert is structurally the same surface. */
+  }
+}

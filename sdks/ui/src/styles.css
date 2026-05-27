@@ -10,12 +10,15 @@
  *     every theme.
  *   - Theme blocks ([data-theme="..."]) override only the palette/material
  *     tokens (label, fill, separator, system-blue/green/red/..., accent,
- *     surface, blur, backdrop).
+ *     surface, material, backdrop).
  *   - No raw hex, no raw px — oklch() + rem only (blur radii too).
  */
 @import "./components/Button/Button.css";
 @import "./components/Field/Field.css";
 @import "./components/Input/Input.css";
+@import "./components/Card/Card.css";
+@import "./components/Dialog/Dialog.css";
+@import "./components/AlertDialog/AlertDialog.css";
 
 *,
 *::before,
@@ -147,6 +150,52 @@
      overrides via CSS or inline `--zs-field-horizontal-label-w: …` are
      discoverable. Item 17 of the slice-2 review fix brief. */
   --zs-field-horizontal-label-w: 10rem;        /* 160 */
+
+  /* ─── Material thicknesses — HIG vocabulary. The default values here
+     are theme-invariant; the per-theme `--zs-material-regular` override
+     below tunes the saturation for that theme. */
+  --zs-material-ultra-thin:  blur(0.5rem) saturate(1.6);
+  --zs-material-thin:        blur(1rem) saturate(1.6);
+  --zs-material-regular:     blur(1.5rem) saturate(1.8);   /* surfaces default */
+  --zs-material-thick:       blur(2rem) saturate(1.8);     /* backdrop default */
+  --zs-material-ultra-thick: blur(2.5rem) saturate(2);
+
+  /* ─── Shadow scale — elevation as a function of depth. All shadows
+     use oklch alpha; no rgb literals. Each entry is two layers (a
+     larger ambient + a smaller crisp) for the HIG layered-shadow feel. */
+  --zs-shadow-1: 0 0.0625rem 0.125rem oklch(0 0 0 / 0.06),
+                 0 0.0625rem 0.125rem oklch(0 0 0 / 0.04);
+  --zs-shadow-2: 0 0.25rem 0.5rem oklch(0 0 0 / 0.08),
+                 0 0.125rem 0.25rem oklch(0 0 0 / 0.06);
+  --zs-shadow-3: 0 0.5rem 1rem oklch(0 0 0 / 0.1),
+                 0 0.25rem 0.5rem oklch(0 0 0 / 0.06);
+  --zs-shadow-4: 0 1rem 2rem oklch(0 0 0 / 0.12),
+                 0 0.5rem 1rem oklch(0 0 0 / 0.08);
+  --zs-shadow-dialog: 0 1.5rem 4rem oklch(0 0 0 / 0.35),
+                      0 0.5rem 1.5rem oklch(0 0 0 / 0.18);
+
+  /* ─── Card sizing */
+  --zs-card-radius-sm: var(--zs-radius-4);     /* 10 */
+  --zs-card-radius-md: var(--zs-radius-5);     /* 12 — default */
+  --zs-card-radius-lg: var(--zs-radius-6);     /* 16 */
+  --zs-card-padding-sm: var(--zs-space-4);     /* 16 */
+  --zs-card-padding-md: var(--zs-space-6);     /* 24 — default */
+  --zs-card-padding-lg: var(--zs-space-7);     /* 32 */
+  --zs-card-gap-sm: var(--zs-space-3);         /* 12 */
+  --zs-card-gap-md: var(--zs-space-4);         /* 16 */
+  --zs-card-gap-lg: var(--zs-space-5);         /* 20 */
+
+  /* ─── Dialog sizing. max-widths in rem so user font-size scales them. */
+  --zs-dialog-radius: var(--zs-radius-7);             /* 22 — standard sheet */
+  --zs-dialog-radius-alert: var(--zs-radius-5);       /* 12 — tighter for alerts */
+  --zs-dialog-max-width-sm: 22.5rem;                  /* 360 */
+  --zs-dialog-max-width-md: 32.5rem;                  /* 520 — default */
+  --zs-dialog-max-width-lg: 45rem;                    /* 720 */
+  --zs-dialog-padding: var(--zs-space-6);             /* 24 */
+  --zs-dialog-padding-alert: var(--zs-space-5);       /* 20 */
+
+  /* Modal z-stack token consumed by Dialog/AlertDialog backdrops. */
+  --zs-z-modal: 50;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -214,9 +263,15 @@
   --zs-focus: oklch(0.55 0.18 285);
   --zs-focus-ring-color: oklch(0.55 0.18 285 / 0.35);
 
-  /* ─── Material — glass */
-  --zs-blur: blur(1rem) saturate(1.25);
+  /* ─── Material — glass. Crystal is the light glass, so a less intense
+     saturation is gentler than the root default. */
+  --zs-material-regular: blur(1.5rem) saturate(1.25);
   --zs-backdrop: oklch(0.5 0.05 275 / 0.3);
+
+  /* Scrim for the standard Dialog backdrop (40% black overlay). */
+  --zs-scrim: color-mix(in oklch, black 40%, transparent);
+  /* Material tint for the glass Dialog backdrop (translucent surface). */
+  --zs-material-tint: color-mix(in oklch, var(--zs-surface) 80%, transparent);
 
   /* ─── Input palette (slice 2).
      Outline = subtle delineation from the surface; Filled = pronounced

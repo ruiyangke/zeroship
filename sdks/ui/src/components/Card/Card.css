@@ -1,0 +1,244 @@
+/*
+ * Card — HIG Boxes implementation.
+ *
+ * Anatomy:
+ *   .zs-card                     surface; flex column; opaque base; clipped.
+ *     ├─ .zs-card__header        row — Title/Description left, Action right.
+ *     │  ├─ .zs-card__title      heading.
+ *     │  ├─ .zs-card__description subtitle.
+ *     │  └─ .zs-card__action     auto-margin-inline-start to push right.
+ *     ├─ .zs-card__media         edge-bleed media slot (data-side="...").
+ *     ├─ .zs-card__body          main content stack.
+ *     └─ .zs-card__footer        button row (data-align="end|start|between").
+ *
+ * Modifier classes:
+ *   sizes:    --sm | --lg  (md is the default; no class needed)
+ *   variants: --surface | --elevated | --outline | --ghost
+ *
+ * Glass-surface invariant: every variant except `ghost` declares an
+ * OPAQUE background-color so axe's color-contrast walk can resolve at
+ * the card boundary. `backdrop-filter` is layered on top for the glass
+ * look when themes swap --zs-surface to a translucent value.
+ */
+
+/* ─── base ─────────────────────────────────────────────────────────────── */
+.zs-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-card-gap-md);
+  padding: var(--zs-card-padding-md);
+  border-radius: var(--zs-card-radius-md);
+  background-color: var(--zs-surface);
+  backdrop-filter: var(--zs-material-regular);
+  -webkit-backdrop-filter: var(--zs-material-regular);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  overflow: hidden; /* clips Card.Media to the border-radius. */
+  text-decoration: none; /* asChild → <a> shouldn't underline. */
+}
+
+/* ─── sizes ────────────────────────────────────────────────────────────── */
+.zs-card--sm {
+  padding: var(--zs-card-padding-sm);
+  gap: var(--zs-card-gap-sm);
+  border-radius: var(--zs-card-radius-sm);
+}
+.zs-card--lg {
+  padding: var(--zs-card-padding-lg);
+  gap: var(--zs-card-gap-lg);
+  border-radius: var(--zs-card-radius-lg);
+}
+
+/* ─── variants ─────────────────────────────────────────────────────────── */
+.zs-card--surface {
+  /* base styles already declare the opaque surface — no overrides. */
+}
+.zs-card--elevated {
+  box-shadow: var(--zs-shadow-2);
+}
+.zs-card--outline {
+  box-shadow: 0 0 0 0.0625rem var(--zs-separator) inset;
+}
+.zs-card--ghost {
+  background-color: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ─── interactive states ───────────────────────────────────────────────── */
+.zs-card[data-interactive] {
+  cursor: pointer;
+  transition:
+    transform var(--zs-motion-fast) var(--zs-motion-spring),
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+}
+@media (hover: hover) {
+  .zs-card[data-interactive]:hover {
+    background-color: var(--zs-fill-quaternary);
+  }
+  .zs-card--elevated[data-interactive]:hover {
+    box-shadow: var(--zs-shadow-3);
+  }
+}
+.zs-card[data-interactive]:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+.zs-card[data-interactive]:active {
+  transform: scale(0.99);
+}
+
+/* ─── Header ───────────────────────────────────────────────────────────── */
+.zs-card__header {
+  display: flex;
+  flex-direction: row;
+  gap: var(--zs-space-3);
+  align-items: flex-start;
+}
+.zs-card__header > .zs-card__action {
+  margin-inline-start: auto;
+}
+
+/* Title — size scales with the Card size. */
+.zs-card__title {
+  margin: 0;
+  font-size: var(--zs-text-title-3-size);
+  line-height: var(--zs-text-title-3-line);
+  font-weight: 600;
+  letter-spacing: var(--zs-text-title-3-tracking);
+  color: var(--zs-label);
+}
+.zs-card--sm .zs-card__title {
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  letter-spacing: var(--zs-text-headline-tracking);
+}
+.zs-card--lg .zs-card__title {
+  font-size: var(--zs-text-title-2-size);
+  line-height: var(--zs-text-title-2-line);
+  letter-spacing: var(--zs-text-title-2-tracking);
+}
+
+.zs-card__description {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+.zs-card--sm .zs-card__description {
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+/* Stack title + description vertically when both are direct children of
+ * Header. Each is a block-level element by default, so the natural
+ * flow already produces the stack; the gap is the only thing we need. */
+.zs-card__header > .zs-card__title + .zs-card__description {
+  margin-block-start: var(--zs-space-half);
+}
+
+/* Action: no default styling — consumer drops a Button or similar
+ * interactive node inside. The margin-inline-start: auto above pushes
+ * it to the trailing edge of Header. */
+.zs-card__action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+}
+
+/* ─── Media ────────────────────────────────────────────────────────────── */
+.zs-card__media {
+  display: block;
+  background-color: var(--zs-fill-tertiary);
+}
+.zs-card__media[data-side="top"] {
+  margin-inline: calc(var(--zs-card-padding-md) * -1);
+  margin-block-start: calc(var(--zs-card-padding-md) * -1);
+  margin-block-end: 0;
+}
+.zs-card__media[data-side="bottom"] {
+  margin-inline: calc(var(--zs-card-padding-md) * -1);
+  margin-block-end: calc(var(--zs-card-padding-md) * -1);
+  margin-block-start: 0;
+}
+.zs-card__media[data-side="left"] {
+  margin-inline-start: calc(var(--zs-card-padding-md) * -1);
+}
+.zs-card__media[data-side="right"] {
+  margin-inline-end: calc(var(--zs-card-padding-md) * -1);
+}
+.zs-card__media[data-side="fill"] {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+.zs-card > :not(.zs-card__media[data-side="fill"]) {
+  position: relative;
+  z-index: 1;
+}
+
+/* Edge-bleed margins scale with the card size token. */
+.zs-card--sm .zs-card__media[data-side="top"],
+.zs-card--sm .zs-card__media[data-side="bottom"] {
+  margin-inline: calc(var(--zs-card-padding-sm) * -1);
+}
+.zs-card--sm .zs-card__media[data-side="top"] {
+  margin-block-start: calc(var(--zs-card-padding-sm) * -1);
+}
+.zs-card--sm .zs-card__media[data-side="bottom"] {
+  margin-block-end: calc(var(--zs-card-padding-sm) * -1);
+}
+.zs-card--lg .zs-card__media[data-side="top"],
+.zs-card--lg .zs-card__media[data-side="bottom"] {
+  margin-inline: calc(var(--zs-card-padding-lg) * -1);
+}
+.zs-card--lg .zs-card__media[data-side="top"] {
+  margin-block-start: calc(var(--zs-card-padding-lg) * -1);
+}
+.zs-card--lg .zs-card__media[data-side="bottom"] {
+  margin-block-end: calc(var(--zs-card-padding-lg) * -1);
+}
+
+/* ─── Body ─────────────────────────────────────────────────────────────── */
+.zs-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-3);
+  color: var(--zs-label);
+}
+
+/* ─── Footer ───────────────────────────────────────────────────────────── */
+.zs-card__footer {
+  display: flex;
+  gap: var(--zs-space-2);
+  align-items: center;
+  justify-content: flex-end;
+}
+.zs-card__footer[data-align="start"] {
+  justify-content: flex-start;
+}
+.zs-card__footer[data-align="between"] {
+  justify-content: space-between;
+}
+.zs-card__footer[data-align="end"] {
+  justify-content: flex-end;
+}
+
+/* ─── forced-colors ────────────────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-card {
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: 0 0 0 0.0625rem CanvasText inset;
+  }
+  .zs-card--ghost {
+    background: transparent;
+    box-shadow: none;
+  }
+  .zs-card[data-interactive]:focus-visible {
+    outline-color: Highlight;
+  }
+}
