@@ -5,12 +5,16 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::sync::Arc;
+
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
+use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
+use zeroship_auth::identity::oauth::google;
 use zeroship_auth::server;
 use zeroship_auth::store;
 
@@ -35,6 +39,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Loud warning when the stash signing key still has its dev default —
+    // production deployments MUST override AUTH_STASH_SIGNING_KEY.
+    if cfg.stash_signing_key.starts_with("dev-only-") {
+        tracing::warn!(
+            "AUTH_STASH_SIGNING_KEY is using the dev default — set a strong (≥32-byte) value before serving real traffic"
+        );
+    }
+
     // 1. Open PG.
     let (client, connection) = connect(&cfg.db_url, NoTls).await?;
     compio::runtime::spawn(async move {
@@ -53,11 +65,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bootstrap::run(&admin, cfg.bootstrap, &cfg.clients_config).await?;
     tracing::info!("bootstrap complete");
 
-    // 4. Serve. `server::run` takes ownership of the PG client (it wraps
-    // it in `Arc` internally) so the spawned connection task stays live
-    // for the entire server lifetime — `Arc` keeps the client alive
-    // across worker tasks; on shutdown the last `Arc` drop unblocks the
-    // background connection driver.
-    server::run(cfg, admin, client).await?;
+    // 4. Build the Google JWKS cache. Only constructed when Google OAuth
+    //    is wired up — the cache eagerly does nothing (lazy refresh on
+    //    first verify), so we don't burn a startup roundtrip on Google.
+    let google_jwks = if cfg.google_client_id.is_some() {
+        Some(Arc::new(JwksCache::new(google::GOOGLE_JWKS_URL)))
+    } else {
+        None
+    };
+
+    // 5. Serve. `server::run` takes ownership of the PG client (it wraps
+    //    it in `Arc` internally) so the spawned connection task stays
+    //    live for the entire server lifetime — `Arc` keeps the client
+    //    alive across worker tasks; on shutdown the last `Arc` drop
+    //    unblocks the background connection driver.
+    server::run(cfg, admin, client, google_jwks).await?;
     Ok(())
 }

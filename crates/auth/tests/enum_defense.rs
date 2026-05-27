@@ -136,6 +136,7 @@ async fn login_failure_responses_are_indistinguishable() {
         github_client_id: None,
         github_client_secret: None,
         github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
+        stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
     });
     let admin_state = admin.clone();
     let cfg_state = cfg.clone();
@@ -150,7 +151,7 @@ async fn login_failure_responses_are_indistinguishable() {
                 .state(cfg_state)
                 .state(db_state)
                 .middleware(SecurityHeaders)
-                .configure(server::configure)
+                .configure(server::configure(false))
         }
     })
     .await;

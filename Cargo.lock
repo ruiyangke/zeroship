@@ -5685,6 +5685,7 @@ dependencies = [
  "compio-postgres",
  "cyper",
  "hex",
+ "hmac 0.12.1",
  "http",
  "mimalloc",
  "ntex",

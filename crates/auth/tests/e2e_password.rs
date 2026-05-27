@@ -104,6 +104,7 @@ async fn e2e_password_flow() {
         github_client_id: None,
         github_client_secret: None,
         github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
+        stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
     });
 
     // 2. Boot the auth server via `ntex::web::test::server` — runs the
@@ -123,7 +124,7 @@ async fn e2e_password_flow() {
                 .state(cfg_state)
                 .state(db_state)
                 .middleware(SecurityHeaders)
-                .configure(server::configure)
+                .configure(server::configure(false))
         }
     })
     .await;

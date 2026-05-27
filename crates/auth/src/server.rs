@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use ntex::web;
+use zeroship_core::oidc_verify::JwksCache;
 
 use crate::config::AuthConfig;
 use crate::headers::SecurityHeaders;
@@ -16,26 +17,43 @@ const STATIC_CSS: &str = include_str!("../static/style.css");
 
 /// Register every route the auth server exposes.
 ///
-/// State (`Arc<HydraAdmin>`-equivalent, `Arc<AuthConfig>`, `Arc<Client>`)
-/// is registered on the `App` in [`run`]; this function only wires URL
-/// paths to handlers.
-pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(healthz)
-        .service(readyz)
-        .service(style)
-        .service(
-            web::resource("/login")
-                .route(web::get().to(ui::login::get))
-                .route(web::post().to(ui::login::post)),
-        )
-        .service(
-            web::resource("/signup")
-                .route(web::get().to(ui::signup::get))
-                .route(web::post().to(ui::signup::post)),
-        )
-        .service(
-            web::resource("/consent").route(web::get().to(ui::consent::get)),
-        );
+/// State (`Arc<HydraAdmin>`-equivalent, `Arc<AuthConfig>`, `Arc<Client>`,
+/// and optionally `Arc<JwksCache>` for Google) is registered on the `App`
+/// in [`run`]; this function only wires URL paths to handlers.
+///
+/// `google_enabled` gates the `/oauth/google/*` routes — when Google
+/// `OAuth` credentials are not configured we don't register dead routes
+/// that would return runtime "missing `JwksCache` state" errors.
+pub fn configure(google_enabled: bool) -> impl Fn(&mut web::ServiceConfig) {
+    move |cfg: &mut web::ServiceConfig| {
+        cfg.service(healthz)
+            .service(readyz)
+            .service(style)
+            .service(
+                web::resource("/login")
+                    .route(web::get().to(ui::login::get))
+                    .route(web::post().to(ui::login::post)),
+            )
+            .service(
+                web::resource("/signup")
+                    .route(web::get().to(ui::signup::get))
+                    .route(web::post().to(ui::signup::post)),
+            )
+            .service(
+                web::resource("/consent").route(web::get().to(ui::consent::get)),
+            );
+
+        if google_enabled {
+            cfg.service(
+                web::resource("/oauth/google/start")
+                    .route(web::get().to(ui::oauth_google::start)),
+            )
+            .service(
+                web::resource("/oauth/google/callback")
+                    .route(web::get().to(ui::oauth_google::callback)),
+            );
+        }
+    }
 }
 
 #[web::get("/healthz")]
@@ -58,7 +76,7 @@ async fn style() -> web::HttpResponse {
 
 /// Bind and run the ntex HTTP server.
 ///
-/// Threads three shared-state slots through ntex's `App::state`:
+/// Threads shared-state slots through ntex's `App::state`:
 ///
 /// - `HydraAdmin` — hydra admin API client (cheap to clone; holds an
 ///   internal `cyper::Client`).
@@ -67,6 +85,10 @@ async fn style() -> web::HttpResponse {
 /// - `Arc<compio_postgres::Client>` — the PG client; `Client` is not
 ///   itself `Clone`, so it must be wrapped before being shared across
 ///   worker tasks.
+/// - `Arc<JwksCache>` — Google's JWKS cache, ONLY registered when
+///   Google `OAuth` is enabled. The `/oauth/google/*` routes are gated on
+///   the same predicate, so handlers always find this state present at
+///   request time.
 ///
 /// # Errors
 ///
@@ -81,18 +103,23 @@ pub async fn run(
     cfg: AuthConfig,
     admin: HydraAdmin,
     db: compio_postgres::Client,
+    google_jwks: Option<Arc<JwksCache>>,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let cfg = Arc::new(cfg);
     let db = Arc::new(db);
+    let google_enabled = google_jwks.is_some();
 
     web::server(async move || {
-        web::App::new()
+        let mut app = web::App::new()
             .state(admin.clone())
             .state(cfg.clone())
             .state(db.clone())
-            .middleware(SecurityHeaders)
-            .configure(configure)
+            .middleware(SecurityHeaders);
+        if let Some(jwks) = google_jwks.clone() {
+            app = app.state(jwks);
+        }
+        app.configure(configure(google_enabled))
     })
     .bind(&addr)?
     .run()

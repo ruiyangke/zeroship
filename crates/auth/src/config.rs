@@ -34,6 +34,18 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_INSECURE_DEV")]
     pub insecure_dev: bool,
 
+    /// HMAC key (≥32 bytes recommended) used to sign the short-lived
+    /// federation stash cookie (`__Host-zsidp_google_stash` etc.). A weak
+    /// or default value lets an attacker forge stash cookies and bypass
+    /// the OAuth state/PKCE check, so production deployments MUST set
+    /// this explicitly. The dev default loudly warns at boot.
+    #[arg(
+        long,
+        env = "AUTH_STASH_SIGNING_KEY",
+        default_value = "dev-only-stash-signing-key-not-for-production-use!!"
+    )]
+    pub stash_signing_key: String,
+
     // ─── Google OAuth (optional — federation routes registered only when set) ───
     /// Google OAuth 2.0 client ID. Without it, `/oauth/google/*` routes are
     /// not registered (auth still boots).
