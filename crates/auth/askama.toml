@@ -1,0 +1,8 @@
+# Askama 0.12 configuration. Co-locate templates with the UI module
+# (`src/ui/templates/`) rather than askama's default `templates/` directory
+# at the crate root.
+#
+# Askama 0.13 will let us move this into `[package.metadata.askama]` in
+# `Cargo.toml`; until we upgrade, this file is the canonical config.
+[general]
+dirs = ["src/ui/templates"]

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Error · zeroship{% endblock %}
+{% block body %}
+<h2>{{ error }}</h2>
+{% if let Some(desc) = error_description %}
+  <p>{{ desc }}</p>
+{% endif %}
+<p><a href="/login">Back to sign in</a></p>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Sign in · zeroship{% endblock %}
+{% block body %}
+<h2>Sign in to {{ client_name }}</h2>
+{% if let Some(err) = error %}
+  <div class="error">{{ err }}</div>
+{% endif %}
+<form method="POST" action="/login?login_challenge={{ challenge }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Email
+    <input type="email" name="email" autocomplete="username" required autofocus>
+  </label>
+  <label>Password
+    <input type="password" name="password" autocomplete="current-password" required>
+  </label>
+  <button type="submit">Sign in</button>
+</form>
+<p><a href="/signup?login_challenge={{ challenge }}">Create an account</a></p>
+{% endblock %}

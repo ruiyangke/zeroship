@@ -1,0 +1,11 @@
+:root { color-scheme: light dark; }
+body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1rem; }
+h1 { font-size: 1rem; opacity: 0.6; margin-bottom: 2rem; }
+h2 { font-size: 1.5rem; margin-bottom: 1.5rem; }
+form { display: grid; gap: 1rem; }
+label { display: grid; gap: 0.25rem; font-size: 0.875rem; }
+input { padding: 0.5rem 0.75rem; border: 1px solid currentColor; border-radius: 0.25rem; font-size: 1rem; background: transparent; }
+button { padding: 0.5rem 1rem; border: 0; background: #111; color: white; border-radius: 0.25rem; font-size: 1rem; cursor: pointer; }
+.error { padding: 0.75rem; border: 1px solid #c00; border-radius: 0.25rem; color: #c00; background: #fee; font-size: 0.875rem; }
+a { color: inherit; }
+p { font-size: 0.875rem; margin-top: 1rem; }

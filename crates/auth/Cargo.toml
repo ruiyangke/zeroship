@@ -37,6 +37,14 @@ base64 = { workspace = true }
 # Timestamps for `auth.users` (`email_verified_at`, `locked_until`, etc.).
 # Pins must match `postgres-types`' `with-chrono-0_4` major.
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+# Compile-time-checked HTML templates for the login/signup/error pages.
+# No web-framework integration feature — the handler calls `.render()`
+# and stuffs the resulting `String` into an `ntex::web::HttpResponse` body.
+#
+# Template-directory override lives in `askama.toml` next to this file
+# (askama 0.12 reads its config from that file, not from
+# `[package.metadata.askama]` — that mechanism only landed in 0.13+).
+askama = "0.12"
 
 [lints]
 workspace = true
