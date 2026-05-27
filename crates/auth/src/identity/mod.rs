@@ -2,5 +2,6 @@
 //! (Google/GitHub OAuth). Phase 5 adds magic-link + email verification.
 
 pub mod linker;
+pub mod magic_link;
 pub mod oauth;
 pub mod password;
