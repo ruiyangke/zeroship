@@ -17,18 +17,6 @@ use zeroship_core::pkce::{generate_verifier, s256_challenge};
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
 
-const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-
-/// Expected `iss` claim on Google ID tokens. Google emits this exact
-/// string (no trailing slash) per its `OpenID` discovery document.
-pub const GOOGLE_ISSUER: &str = "https://accounts.google.com";
-
-/// Google's JWKS URL — the JSON Web Key Set used to verify ID-token
-/// signatures. Stable; built into the [`JwksCache`] at boot when Google
-/// `OAuth` is enabled.
-pub const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
-
 /// Subset of Google's `/token` response. Only `id_token` is consumed
 /// (verified against Google's JWKS); the access token / refresh token
 /// aren't needed — we don't make further Google API calls after the OIDC
@@ -101,7 +89,7 @@ pub fn start_authorize_url(cfg: &AuthConfig) -> Result<AuthorizeStart> {
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
         .finish();
-    let url = format!("{GOOGLE_AUTH_URL}?{query}");
+    let url = format!("{}?{query}", cfg.google_auth_url);
 
     Ok(AuthorizeStart {
         url,
@@ -145,7 +133,7 @@ pub async fn complete_callback(
 
     let client = cyper::Client::new();
     let resp = client
-        .request(http::Method::POST, GOOGLE_TOKEN_URL)
+        .request(http::Method::POST, cfg.google_token_url.as_str())
         .map_err(|e| AuthError::Internal(format!("google token build: {e}")))?
         .header("content-type", "application/x-www-form-urlencoded")
         .map_err(|e| AuthError::Internal(format!("google token header: {e}")))?
@@ -174,7 +162,7 @@ pub async fn complete_callback(
     let claims: TokenClaims = verify_id_token(
         jwks,
         &tr.id_token,
-        GOOGLE_ISSUER,
+        cfg.google_issuer.as_str(),
         client_id,
         Some(expected_nonce),
     )
@@ -224,7 +212,7 @@ mod tests {
         let cfg = cfg_with_google();
         let start = start_authorize_url(&cfg).expect("start");
         assert!(
-            start.url.starts_with(GOOGLE_AUTH_URL),
+            start.url.starts_with(cfg.google_auth_url.as_str()),
             "url base: {}",
             start.url
         );

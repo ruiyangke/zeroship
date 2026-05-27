@@ -65,6 +65,45 @@ pub struct AuthConfig {
     )]
     pub google_redirect_uri: String,
 
+    /// Google's authorize endpoint. Overridable so the e2e tests can point
+    /// at an in-process [`tests/common/mock_provider`] instead of the real
+    /// Google. Production deployments should leave the default in place.
+    #[arg(
+        long,
+        env = "AUTH_GOOGLE_AUTH_URL",
+        default_value = "https://accounts.google.com/o/oauth2/v2/auth"
+    )]
+    pub google_auth_url: String,
+
+    /// Google's token endpoint. Overridable for tests; production leaves
+    /// the default.
+    #[arg(
+        long,
+        env = "AUTH_GOOGLE_TOKEN_URL",
+        default_value = "https://oauth2.googleapis.com/token"
+    )]
+    pub google_token_url: String,
+
+    /// Google's JWKS endpoint. Overridable for tests; production leaves
+    /// the default.
+    #[arg(
+        long,
+        env = "AUTH_GOOGLE_JWKS_URL",
+        default_value = "https://www.googleapis.com/oauth2/v3/certs"
+    )]
+    pub google_jwks_url: String,
+
+    /// Expected `iss` claim on Google ID tokens. Overridable for tests
+    /// (mock provider uses its own loopback base URL); production leaves
+    /// the default — Google emits this exact string per its OIDC
+    /// discovery document.
+    #[arg(
+        long,
+        env = "AUTH_GOOGLE_ISSUER",
+        default_value = "https://accounts.google.com"
+    )]
+    pub google_issuer: String,
+
     // ─── GitHub OAuth (optional) ───
     /// GitHub OAuth App client ID. Without it, `/oauth/github/*` routes are
     /// not registered (auth still boots).
@@ -83,4 +122,37 @@ pub struct AuthConfig {
         default_value = "https://auth.zeroship.ai/oauth/github/callback"
     )]
     pub github_redirect_uri: String,
+
+    /// GitHub's authorize endpoint. Overridable for the federation e2e
+    /// tests; production deployments leave the default in place.
+    #[arg(
+        long,
+        env = "AUTH_GITHUB_AUTHORIZE_URL",
+        default_value = "https://github.com/login/oauth/authorize"
+    )]
+    pub github_authorize_url: String,
+
+    /// GitHub's token endpoint. Overridable for tests.
+    #[arg(
+        long,
+        env = "AUTH_GITHUB_TOKEN_URL",
+        default_value = "https://github.com/login/oauth/access_token"
+    )]
+    pub github_token_url: String,
+
+    /// GitHub's `/user` endpoint. Overridable for tests.
+    #[arg(
+        long,
+        env = "AUTH_GITHUB_USER_URL",
+        default_value = "https://api.github.com/user"
+    )]
+    pub github_user_url: String,
+
+    /// GitHub's `/user/emails` endpoint. Overridable for tests.
+    #[arg(
+        long,
+        env = "AUTH_GITHUB_EMAILS_URL",
+        default_value = "https://api.github.com/user/emails"
+    )]
+    pub github_emails_url: String,
 }

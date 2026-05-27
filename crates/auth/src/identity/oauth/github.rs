@@ -27,11 +27,6 @@ use zeroship_core::pkce::{generate_verifier, s256_challenge};
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
 
-const GITHUB_AUTHORIZE_URL: &str = "https://github.com/login/oauth/authorize";
-const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const GITHUB_USER_URL: &str = "https://api.github.com/user";
-const GITHUB_EMAILS_URL: &str = "https://api.github.com/user/emails";
-
 /// `@users.noreply.github.com` addresses are GitHub's pseudonymous
 /// "keep my real email private" mailbox — they don't deliver mail. We
 /// refuse to use them as the canonical identity for a zeroship account.
@@ -90,7 +85,7 @@ pub fn start_authorize_url(cfg: &AuthConfig) -> Result<AuthorizeStart> {
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
         .finish();
-    let url = format!("{GITHUB_AUTHORIZE_URL}?{query}");
+    let url = format!("{}?{query}", cfg.github_authorize_url);
 
     Ok(AuthorizeStart {
         url,
@@ -138,7 +133,7 @@ pub async fn complete_callback(
         .finish();
 
     let resp = client
-        .request(http::Method::POST, GITHUB_TOKEN_URL)
+        .request(http::Method::POST, cfg.github_token_url.as_str())
         .map_err(|e| AuthError::Internal(format!("github token build: {e}")))?
         .header("content-type", "application/x-www-form-urlencoded")
         .map_err(|e| AuthError::Internal(format!("github token header: {e}")))?
@@ -173,11 +168,20 @@ pub async fn complete_callback(
     }
 
     // 2. GET /user
-    let user = get_with_token::<UserResponse>(&client, GITHUB_USER_URL, &tr.access_token).await?;
+    let user = get_with_token::<UserResponse>(
+        &client,
+        cfg.github_user_url.as_str(),
+        &tr.access_token,
+    )
+    .await?;
 
     // 3. GET /user/emails
-    let emails: Vec<EmailEntry> =
-        get_with_token(&client, GITHUB_EMAILS_URL, &tr.access_token).await?;
+    let emails: Vec<EmailEntry> = get_with_token(
+        &client,
+        cfg.github_emails_url.as_str(),
+        &tr.access_token,
+    )
+    .await?;
 
     // 4. Pick primary + verified + not @users.noreply.github.com
     let chosen = emails
@@ -298,7 +302,7 @@ mod tests {
         let cfg = cfg_with_github();
         let start = start_authorize_url(&cfg).expect("start");
         assert!(
-            start.url.starts_with(GITHUB_AUTHORIZE_URL),
+            start.url.starts_with(cfg.github_authorize_url.as_str()),
             "url base: {}",
             start.url
         );

@@ -48,5 +48,15 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 # `[package.metadata.askama]` — that mechanism only landed in 0.13+).
 askama = "0.12"
 
+# Test-only dependencies: the in-process MockProvider fixture used by
+# `tests/e2e_google.rs` + `tests/e2e_github.rs` signs JWTs with a
+# generated Ed25519 keypair and serves them as a JWKS, so we pull in
+# `jsonwebtoken` (encode side — verify side already lives in
+# `zeroship-core`) and `ed25519-dalek` (with the `pkcs8` feature so we
+# can hand the JWT encoder a PKCS#8-DER-encoded private key).
+[dev-dependencies]
+jsonwebtoken = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+
 [lints]
 workspace = true

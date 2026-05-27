@@ -133,9 +133,17 @@ async fn login_failure_responses_are_indistinguishable() {
         google_client_id: None,
         google_client_secret: None,
         google_redirect_uri: "https://auth.zeroship.ai/oauth/google/callback".to_string(),
+        google_auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+        google_token_url: "https://oauth2.googleapis.com/token".to_string(),
+        google_jwks_url: "https://www.googleapis.com/oauth2/v3/certs".to_string(),
+        google_issuer: "https://accounts.google.com".to_string(),
         github_client_id: None,
         github_client_secret: None,
         github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
+        github_authorize_url: "https://github.com/login/oauth/authorize".to_string(),
+        github_token_url: "https://github.com/login/oauth/access_token".to_string(),
+        github_user_url: "https://api.github.com/user".to_string(),
+        github_emails_url: "https://api.github.com/user/emails".to_string(),
         stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
     });
     let admin_state = admin.clone();

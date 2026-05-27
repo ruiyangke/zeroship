@@ -14,7 +14,6 @@ use zeroship_core::oidc_verify::JwksCache;
 use zeroship_auth::bootstrap;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::identity::oauth::google;
 use zeroship_auth::server;
 use zeroship_auth::store;
 
@@ -69,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    is wired up — the cache eagerly does nothing (lazy refresh on
     //    first verify), so we don't burn a startup roundtrip on Google.
     let google_jwks = if cfg.google_client_id.is_some() {
-        Some(Arc::new(JwksCache::new(google::GOOGLE_JWKS_URL)))
+        Some(Arc::new(JwksCache::new(&cfg.google_jwks_url)))
     } else {
         None
     };
