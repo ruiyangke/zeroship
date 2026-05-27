@@ -68,3 +68,23 @@ p { font-size: 0.875rem; margin-top: 1rem; }
   .oauth-divider span { background: canvas; }
   .oauth-button:hover { background: rgba(255, 255, 255, 0.08); }
 }
+
+.magic-link-option { margin-top: 1.5rem; }
+.magic-link-option summary { cursor: pointer; font-size: 0.875rem; color: #888; padding: 0.25rem 0; }
+.magic-link-option form { margin-top: 0.75rem; }
+.magic-cross-device { margin-top: 1.5rem; }
+.magic-cross-device summary { cursor: pointer; font-size: 0.875rem; color: #888; padding: 0.25rem 0; }
+.magic-cross-device form { margin-top: 0.75rem; }
+.code-display {
+  text-align: center;
+  font-size: 2.5rem;
+  letter-spacing: 0.5rem;
+  padding: 1rem;
+  background: #f5f5f5;
+  border-radius: 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: 1.5rem 0;
+}
+@media (prefers-color-scheme: dark) {
+  .code-display { background: rgba(255, 255, 255, 0.06); }
+}

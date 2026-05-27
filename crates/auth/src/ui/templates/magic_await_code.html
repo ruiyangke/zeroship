@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Enter your sign-in code · zeroship{% endblock %}
+{% block body %}
+<h2>Enter your sign-in code</h2>
+<p>Sign-in for <strong>{{ email }}</strong> is waiting on the 6-digit code shown on the device where you opened the email link.</p>
+<form method="POST" action="/magic/complete">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="csrf_nonce" value="{{ csrf_nonce }}">
+  <input type="hidden" name="login_challenge" value="{{ login_challenge }}">
+  <label>6-digit code
+    <input name="code" pattern="[0-9]{6}" inputmode="numeric" maxlength="6" autocomplete="one-time-code" autofocus required>
+  </label>
+  <button type="submit">Sign in</button>
+</form>
+<p><a href="/login?login_challenge={{ login_challenge }}">Back to sign in</a></p>
+{% endblock %}

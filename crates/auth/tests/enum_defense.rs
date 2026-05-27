@@ -154,6 +154,7 @@ async fn login_failure_responses_are_indistinguishable() {
         resend_api_key: None,
         mail_from_email: "test@zeroship.test".to_string(),
         mail_from_name: "Test".to_string(),
+        public_url: "http://localhost:0".to_string(),
     });
     let admin_state = admin.clone();
     let cfg_state = cfg.clone();

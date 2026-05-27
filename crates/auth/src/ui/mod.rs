@@ -12,6 +12,7 @@
 pub mod consent;
 pub mod link;
 pub mod login;
+pub mod magic;
 pub mod me;
 pub mod oauth_github;
 pub mod oauth_google;
@@ -87,6 +88,29 @@ pub struct ConsentPage<'a> {
 pub struct LinkedIdentity<'a> {
     pub provider: &'a str,
     pub email_at_link: &'a str,
+}
+
+/// `/magic/start` POST success page — "Check your email" with an
+/// optional code-entry form for the cross-device flow. The visible form
+/// is hidden behind a `<details>` toggle on the same page.
+#[derive(Debug, Template)]
+#[template(path = "magic_check_email.html")]
+pub struct MagicCheckEmailPage<'a> {
+    pub csrf: &'a str,
+    pub login_challenge: &'a str,
+    pub csrf_nonce: &'a str,
+    pub email: &'a str,
+}
+
+/// `/magic/await` GET — alternate landing for the cross-device code-entry
+/// form (deep-linkable variant of `MagicCheckEmailPage`'s inner form).
+#[derive(Debug, Template)]
+#[template(path = "magic_await_code.html")]
+pub struct MagicAwaitCodePage<'a> {
+    pub csrf: &'a str,
+    pub login_challenge: &'a str,
+    pub csrf_nonce: &'a str,
+    pub email: &'a str,
 }
 
 /// `/me` profile page (P4-U6).

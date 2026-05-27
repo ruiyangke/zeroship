@@ -39,5 +39,18 @@
     {% endif %}
   </div>
 {% endif %}
+<div class="magic-link-option">
+  <details>
+    <summary>Email me a sign-in link instead</summary>
+    <form method="POST" action="/magic/start">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="login_challenge" value="{{ challenge }}">
+      <label>Email
+        <input type="email" name="email" autocomplete="email" required>
+      </label>
+      <button type="submit">Email me a link</button>
+    </form>
+  </details>
+</div>
 <p><a href="/signup?login_challenge={{ challenge }}">Create an account</a></p>
 {% endblock %}

@@ -197,4 +197,28 @@ pub struct AuthConfig {
     /// `From` display name every transactional mail uses.
     #[arg(long, env = "AUTH_MAIL_FROM_NAME", default_value = "zeroship")]
     pub mail_from_name: String,
+
+    /// Public, externally-reachable origin of this auth server. Used when
+    /// constructing absolute URLs embedded in outbound email (e.g. the
+    /// magic-link href). Distinct from [`Self::addr`] — that's the bind
+    /// address (`0.0.0.0:9092` in prod, which is NOT a real origin).
+    ///
+    /// Defaults to the dev-loopback value; production deployments MUST
+    /// override with the auth host, including scheme + (optional) port.
+    #[arg(
+        long,
+        env = "AUTH_PUBLIC_URL",
+        default_value = "http://localhost:9092"
+    )]
+    pub public_url: String,
+}
+
+impl AuthConfig {
+    /// External origin of this auth server (no trailing slash). Returns
+    /// [`Self::public_url`] with any trailing `/` trimmed so callers can
+    /// freely concatenate `/magic/verify?…`.
+    #[must_use]
+    pub fn public_url(&self) -> String {
+        self.public_url.trim_end_matches('/').to_string()
+    }
 }

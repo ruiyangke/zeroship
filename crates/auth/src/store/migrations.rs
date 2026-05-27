@@ -64,6 +64,23 @@ const STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS auth_magic_email_idx ON auth.magic_links (email)",
 
+    // 5.4b magic-link cross-device completions — when the redeeming device's
+    // `__Host-zsidp_magic_csrf` cookie doesn't match the requesting device's
+    // (i.e., the user opened the email link on a different browser), we
+    // surface a 6-digit code on the redeeming device and require the user
+    // to type it back into the original requesting device. One row per
+    // pending cross-device flow, keyed by the magic-link's CSRF nonce.
+    "CREATE TABLE IF NOT EXISTS auth.magic_completions (
+        csrf_nonce       TEXT PRIMARY KEY,
+        code             TEXT NOT NULL,
+        email            CITEXT NOT NULL,
+        login_challenge  TEXT NOT NULL,
+        expires_at       TIMESTAMPTZ NOT NULL,
+        consumed_at      TIMESTAMPTZ
+    )",
+    "CREATE INDEX IF NOT EXISTS auth_magic_completions_expires_idx \
+        ON auth.magic_completions (expires_at) WHERE consumed_at IS NULL",
+
     // 5.5 email verifications
     "CREATE TABLE IF NOT EXISTS auth.email_verifications (
         token_hash  BYTEA PRIMARY KEY,
