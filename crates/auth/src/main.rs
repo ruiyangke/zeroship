@@ -39,9 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bootstrap::run(&admin, cfg.bootstrap, &cfg.clients_config).await?;
     tracing::info!("bootstrap complete");
 
-    // 4. Serve. `client` stays bound in this scope until `main` returns so the
-    // spawned connection task is not torn down by client drop before exit.
-    server::run(cfg).await?;
-    drop(client);
+    // 4. Serve. `server::run` takes ownership of the PG client (it wraps
+    // it in `Arc` internally) so the spawned connection task stays live
+    // for the entire server lifetime — `Arc` keeps the client alive
+    // across worker tasks; on shutdown the last `Arc` drop unblocks the
+    // background connection driver.
+    server::run(cfg, admin, client).await?;
     Ok(())
 }
