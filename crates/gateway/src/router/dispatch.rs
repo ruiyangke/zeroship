@@ -22,9 +22,11 @@ use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use uuid::Uuid;
 
-use crate::{enforce, idempotency, proxy, user_auth, GateState};
+use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
-use super::auth::{auth_satisfied, extract_session_cookie, jwt_subject_unverified};
+use super::auth::{
+    extract_session_cookie, jwt_subject_unverified, resolve_auth, AuthOutcome,
+};
 use super::cors::{build_preflight_response, inject_cors_response_headers};
 use super::helpers::resource_key_hash;
 use super::static_serve::serve_resource_tree_static;
@@ -95,10 +97,11 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 ///   transports). Reads from `connection_info().remote()` so a trusted
 ///   proxy's `X-Forwarded-For` is honored when present (matches what
 ///   the gateway already does for scheme detection a few lines below).
-/// * `RateLimitPer::Session` — the `__zs_session` cookie value.
-///   Anonymous callers (no cookie) fall back to the IP so an
-///   unauthenticated burst still gets bucketed; without the fallback
-///   they'd all share one "" key.
+/// * `RateLimitPer::Session` — the `__Host-zs_app_session` cookie
+///   value (the per-origin session id the gateway mints on
+///   `/__zs/auth/callback`). Anonymous callers (no cookie) fall back
+///   to the IP so an unauthenticated burst still gets bucketed;
+///   without the fallback they'd all share one "" key.
 /// * `RateLimitPer::App` — constant `"app"`. One bucket platform-wide;
 ///   `(app_id, rule_idx, "app")` is the key, equivalent to a global
 ///   per-app limit at the rule level.
@@ -163,7 +166,7 @@ pub(crate) fn is_websocket_upgrade(req: &HttpRequest) -> bool {
 ///   1. JWT subject (extracted from `Authorization: Bearer <jwt>` —
 ///      we do NOT verify the signature here; the gateway's auth
 ///      gate already ran and treats verification failures as 401).
-///   2. `__zs_session` cookie value (browser tab affinity).
+///   2. `__Host-zs_app_session` cookie value (browser tab affinity).
 ///   3. `Sec-WebSocket-Key` (per-connection nonce — same connection
 ///      always hashes to the same bucket; reconnects vary).
 ///   4. Client IP (last-resort fallback for unauthenticated callers
@@ -474,13 +477,19 @@ async fn execute_resource_tree(
 
     // 3. Auth gate. `anon` always passes (subject to
     //    `publicly_accessible` being set, which is enforced at
-    //    validate-time). `user`/`admin` require a session cookie.
-    //    Richer admin-vs-user role checks will arrive with the auth
-    //    tier.
-    if !auth_satisfied(&req, policy, &state.config.auth_secret, app_id) {
-        return HttpResponse::Unauthorized()
-            .json(&serde_json::json!({"error": "authentication required"}));
-    }
+    //    validate-time). `user`/`admin` require a valid
+    //    `__Host-zs_app_session` cookie. Richer admin-vs-user role
+    //    checks will arrive with the auth tier.
+    //
+    //    On miss for an HTML navigation we kick off the OIDC dance via
+    //    a 302 → hydra; API clients see a 401 with a `WWW-Authenticate`
+    //    challenge so they can prompt the user out-of-band.
+    let user_header_from_gate = match resolve_auth(&req, &state, policy, app_id).await {
+        AuthOutcome::Allowed { user_header } => user_header,
+        AuthOutcome::Unauthenticated => {
+            return unauthenticated_response(&req, &state);
+        }
+    };
 
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
     //    require the request's `Origin` to match.
@@ -603,6 +612,7 @@ async fn execute_resource_tree(
                     &compiled_route.entry,
                     tail,
                     body,
+                    user_header_from_gate.clone(),
                     wall_start,
                 )
                 .await
@@ -632,6 +642,7 @@ async fn execute_resource_tree(
                 &compiled_route.entry,
                 tail,
                 body,
+                user_header_from_gate.clone(),
                 wall_start,
             )
             .await
@@ -1033,13 +1044,15 @@ async fn handle_subscription_dispatch(
 /// `_rpc/*` URLs (routed inside the kernel via the bootstrap) and plain
 /// HTTP requests. Enables streaming responses (e.g., SSE for LLM token
 /// streaming).
+#[allow(clippy::too_many_arguments)] // post-U5 arg count; refactor candidate for U6+.
 async fn handle_dispatch(
     req: HttpRequest,
-    state: &GateState,
+    state: &Arc<GateState>,
     app_id: &Uuid,
     route: &zeroship_core::types::RouteEntry,
     tail: &str,
     body: Bytes,
+    user_header_value: Option<String>,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     // Rate limit
@@ -1051,19 +1064,6 @@ async fn handle_dispatch(
     let _guard = match enforce::acquire_concurrency(&state.concurrency, app_id) {
         Ok(guard) => guard,
         Err(resp) => return resp,
-    };
-
-    // Extract user from __zs_session cookie
-    let user_header_value = if !state.config.auth_secret.is_empty() {
-        let cookie = req
-            .headers()
-            .get("cookie")
-            .and_then(|v| v.to_str().ok());
-        let app_id_str = app_id.to_string();
-        user_auth::extract_user(cookie, &state.config.auth_secret, &app_id_str)
-            .map(|u| user_auth::encode_user_header(&u, &state.config.worker_key))
-    } else {
-        None
     };
 
     // Reconstruct the URL the JS handler will see.
@@ -1109,24 +1109,14 @@ async fn handle_dispatch(
         }
     };
 
-    // Handle 401 response: redirect browser requests to the auth page.
-    if response.status() == ntex::http::StatusCode::UNAUTHORIZED {
-        let accepts_html = req
-            .headers()
-            .get("accept")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("text/html"));
-
-        if accepts_html {
-            let original_path = req.uri().path();
-            let auth_url = format!(
-                "{}/auth/authorize?app_id={}&return={}",
-                state.config.control_url, app_id, original_path
-            );
-            return HttpResponse::Found()
-                .header("location", auth_url)
-                .finish();
-        }
+    // 401 from worker on an HTML navigation → start the OIDC dance.
+    // The worker reaches this branch on resources its own JS code
+    // gated as `user`/`admin` when the gateway forwarded without a
+    // `ZeroShip-User` header. (Resource-tree `user`/`admin` are
+    // already short-circuited by `auth_satisfied` upstream, so they
+    // never reach the worker.) API clients still see the 401 verbatim.
+    if response.status() == ntex::http::StatusCode::UNAUTHORIZED && wants_html(&req) {
+        return start_oidc_redirect(&req, state);
     }
 
     // Add response headers.
@@ -1141,6 +1131,76 @@ async fn handle_dispatch(
     );
 
     response
+}
+
+// ---------------------------------------------------------------------------
+// Unauthenticated request handling — HTML vs API split
+// ---------------------------------------------------------------------------
+
+/// True when the request looks like an HTML navigation rather than an
+/// API call. The classification rule is the canonical browser
+/// signature: `Accept: text/html` somewhere in the header value. The
+/// gateway only triggers the OIDC redirect dance on these — `fetch()`
+/// callers see a 401 with `WWW-Authenticate: Bearer` so they can
+/// surface an in-app login prompt themselves.
+fn wants_html(req: &HttpRequest) -> bool {
+    req.headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/html"))
+}
+
+/// Build the unauthenticated response: 302 → `auth.zeroship.ai/oauth2/auth`
+/// for HTML navigations, 401 with a `WWW-Authenticate` challenge for
+/// API clients. Sets the `__Host-zs_oidc_stash` cookie carrying PKCE,
+/// state, and the original path so `/__zs/auth/callback` can finish
+/// the dance.
+fn unauthenticated_response(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+    if wants_html(req) {
+        start_oidc_redirect(req, state)
+    } else {
+        HttpResponse::Unauthorized()
+            .header("www-authenticate", "Bearer realm=\"zeroship\"")
+            .json(&serde_json::json!({
+                "code": "UNAUTHENTICATED",
+                "message": "authentication required",
+            }))
+    }
+}
+
+/// Build the 302 → hydra redirect that kicks off the OIDC dance.
+/// Stash cookie carries the PKCE verifier + state + original_path so
+/// the callback can resume.
+fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+    let original_path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let scheme = if state.config.insecure_dev {
+        "http"
+    } else {
+        "https"
+    };
+    let redirect_uri = format!("{scheme}://{host}/__zs/auth/callback");
+
+    let (auth_url, stash) = state
+        .oidc_rp
+        .build_authorize_redirect(&original_path, &redirect_uri);
+
+    let mut builder = HttpResponse::Found();
+    builder.header("location", auth_url);
+    builder.header(
+        "set-cookie",
+        oidc_rp::set_stash_cookie(&stash, state.config.insecure_dev),
+    );
+    builder.finish()
 }
 
 #[cfg(test)]
@@ -1277,7 +1337,7 @@ mod tests {
         // RateLimitPer::App always returns "app" regardless of IP or
         // cookie state — every caller shares the same bucket.
         let req = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=abc")
+            .header("cookie", "__Host-zs_app_session=abc")
             .to_http_request();
         assert_eq!(compute_bucket_id(&req, RateLimitPer::App), "app");
     }
@@ -1296,7 +1356,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header(
                 "cookie",
-                "other=foo; __zs_session=abc123; trailing=x",
+                "other=foo; __Host-zs_app_session=abc123; trailing=x",
             )
             .to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::Session);
@@ -1305,7 +1365,7 @@ mod tests {
 
     #[test]
     fn compute_bucket_id_session_falls_back_to_ip_when_cookie_missing() {
-        // Anonymous caller (no __zs_session) → fall back to IP. The
+        // Anonymous caller (no __Host-zs_app_session) → fall back to IP. The
         // TestRequest has no peer → "unknown".
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "other=foo")
@@ -1350,7 +1410,7 @@ mod tests {
 
     #[test]
     fn router_wiring_session_buckets_separate_from_ip_buckets() {
-        // Two requests carrying distinct __zs_session cookies under
+        // Two requests carrying distinct __Host-zs_app_session cookies under
         // RateLimitPer::Session must hit independent buckets even when
         // the IP is the same.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
@@ -1358,10 +1418,10 @@ mod tests {
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
 
         let req_a = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=user-a")
+            .header("cookie", "__Host-zs_app_session=user-a")
             .to_http_request();
         let req_b = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=user-b")
+            .header("cookie", "__Host-zs_app_session=user-b")
             .to_http_request();
         let bucket_a = compute_bucket_id(&req_a, rl.per);
         let bucket_b = compute_bucket_id(&req_b, rl.per);
@@ -1834,7 +1894,7 @@ mod tests {
         let jwt = format!("h.{payload}.s");
         let req = ntex::web::test::TestRequest::default()
             .header("authorization", format!("Bearer {jwt}"))
-            .header("cookie", "__zs_session=cookieval")
+            .header("cookie", "__Host-zs_app_session=cookieval")
             .to_http_request();
         assert_eq!(subscription_affinity_key(&req), "sub:alice");
     }
@@ -1842,7 +1902,7 @@ mod tests {
     #[test]
     fn subscription_affinity_falls_back_to_cookie() {
         let req = ntex::web::test::TestRequest::default()
-            .header("cookie", "__zs_session=tok123")
+            .header("cookie", "__Host-zs_app_session=tok123")
             .to_http_request();
         assert_eq!(subscription_affinity_key(&req), "sess:tok123");
     }

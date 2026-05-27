@@ -8,13 +8,10 @@
 //! (`__Host-zs_app_session`) — the ID token from hydra never reaches the
 //! creator app or the browser.
 //!
-//! Wiring into the dispatch pipeline lives in U5; this module only
-//! publishes the type + its methods. Dead-code warnings on the
-//! callback-side surface (`OidcRpError`, `TokenResponse`, the
-//! `finish_callback` method) are silenced at module scope until U5
-//! lights them up.
-
-#![allow(dead_code)]
+//! Wiring into the dispatch pipeline lives in U5 — the gateway's
+//! dispatch handler calls `OidcRp::build_authorize_redirect` on
+//! unauthenticated HTML requests and `OidcRp::finish_callback` from
+//! the `/__zs/auth/callback` handler.
 
 use std::sync::Arc;
 
@@ -384,6 +381,46 @@ pub fn parse_stash_cookie(cookie_header: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ─── Worker header encoding ──────────────────────────────────────────────
+//
+// Post-callback the gateway resolves the per-request `ZeroShip-User`
+// header from the app-session row (not from the ID token directly).
+// The payload shape and HMAC envelope are byte-identical to what
+// `user_auth::encode_user_header` emits today; the worker decodes
+// either source identically. `user_auth.rs` is removed in P3-U6.
+
+/// Public user shape forwarded to the worker as the JSON body of the
+/// `ZeroShip-User` header. JWT internals (`sub` rename, `app`/`exp`
+/// stripping) live elsewhere; this struct is what the worker actually
+/// deserializes after MAC verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerUser<'a> {
+    pub id: &'a str,
+    pub email: &'a str,
+    pub name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<&'a str>,
+    pub email_verified: bool,
+}
+
+/// Serialize the authenticated user as `base64(JSON).<hex-hmac>` for
+/// the `ZeroShip-User` header. The worker decodes the base64 portion
+/// and verifies the HMAC against the same `worker_key` before trusting
+/// the identity.
+///
+/// Signing prevents a caller with direct network access to the worker
+/// from forging a user identity, even if the worker's endpoint
+/// bearer-auth were ever bypassed.
+#[must_use]
+pub fn encode_user_header(user: &WorkerUser<'_>, worker_key: &str) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    let json = serde_json::to_string(user).unwrap_or_default();
+    let b64 = B64.encode(json.as_bytes());
+    let mac = zeroship_core::auth::hmac_sha256_hex(worker_key.as_bytes(), b64.as_bytes());
+    format!("{b64}.{mac}")
 }
 
 #[cfg(test)]

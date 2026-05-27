@@ -1,10 +1,13 @@
-//! JWT session middleware — extracts and validates the `__zs_session` cookie.
+//! Legacy JWT session middleware (`__zs_session` cookie).
 //!
-//! The gateway reads the `__zs_session` cookie from every request, validates the
-//! JWT signature + expiry, checks it is scoped to the current app, and (if valid)
-//! encodes the user as a base64-JSON header (`ZeroShip-User`) for the worker.
-//!
-//! The worker never sees the JWT — it only receives the decoded user object.
+//! P3-U5 retired this path from the dispatch handler — the gateway now
+//! validates per-origin `__Host-zs_app_session` cookies via the
+//! `sessions` module and mints `ZeroShip-User` headers in `oidc_rp`.
+//! This file remains compiled but unused so the diff for U6 (deletion)
+//! is mechanical; nothing in the gateway or its tests references these
+//! symbols any longer.
+
+#![allow(dead_code)]
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
