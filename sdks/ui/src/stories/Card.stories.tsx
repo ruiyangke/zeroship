@@ -63,7 +63,7 @@ export const AllVariants: Story = {
             <Card.Title>{variant}</Card.Title>
             <Card.Description>Lorem ipsum dolor sit amet.</Card.Description>
           </Card.Header>
-          <Card.Body>Tab content sits here.</Card.Body>
+          <Card.Content>Tab content sits here.</Card.Content>
         </Card>
       ))}
     </div>
@@ -87,7 +87,7 @@ export const AllSizes: Story = {
               Padding, gap, and radius scale with the size token.
             </Card.Description>
           </Card.Header>
-          <Card.Body>Body content goes here.</Card.Body>
+          <Card.Content>Body content goes here.</Card.Content>
         </Card>
       ))}
     </div>
@@ -114,13 +114,13 @@ export const Decomposed: Story = {
             </Button>
           </Card.Action>
         </Card.Header>
-        <Card.Body>
+        <Card.Content>
           <p>
             The Header / Body / Footer split is a layout convention; no
             ARIA on these layers. The accessible heading hierarchy comes
             from Card.Title.
           </p>
-        </Card.Body>
+        </Card.Content>
         <Card.Footer>
           <Button variant="plain">Cancel</Button>
           <Button>Save changes</Button>
@@ -143,10 +143,10 @@ export const WithMedia: Story = {
           <Card.Title>Sunset cover</Card.Title>
           <Card.Description>Edge-bleed top media slot.</Card.Description>
         </Card.Header>
-        <Card.Body>
+        <Card.Content>
           The card's overflow: hidden clips the media to the corner
           radius — no negative-margin overflow trick.
-        </Card.Body>
+        </Card.Content>
       </Card>
     </div>
   ),
@@ -167,14 +167,14 @@ export const MediaSides: Story = {
           <Card.Title>Top</Card.Title>
           <Card.Description>Edge-bleed above Header.</Card.Description>
         </Card.Header>
-        <Card.Body>Default placement.</Card.Body>
+        <Card.Content>Default placement.</Card.Content>
       </Card>
       <Card style={{ inlineSize: "16rem" }}>
         <Card.Header>
           <Card.Title>Bottom</Card.Title>
           <Card.Description>Edge-bleed below Body.</Card.Description>
         </Card.Header>
-        <Card.Body>Footer-adjacent.</Card.Body>
+        <Card.Content>Footer-adjacent.</Card.Content>
         <Card.Media side="bottom">
           <MediaPlaceholder label="side=bottom" />
         </Card.Media>
@@ -194,7 +194,7 @@ export const MediaSides: Story = {
             aria-hidden by default.
           </Card.Description>
         </Card.Header>
-        <Card.Body>Content sits above the fill layer.</Card.Body>
+        <Card.Content>Content sits above the fill layer.</Card.Content>
       </Card>
     </div>
   ),
@@ -224,9 +224,9 @@ export const Interactive: Story = {
               The whole card is the click target — a real &lt;a href&gt;.
             </Card.Description>
           </Card.Header>
-          <Card.Body>
+          <Card.Content>
             Browser handles focusability + Enter activation natively.
-          </Card.Body>
+          </Card.Content>
         </a>
       </Card>
     </div>
@@ -256,11 +256,11 @@ function InteractiveWithKeyboardImpl() {
             Click, or focus + Enter, or focus + Space.
           </Card.Description>
         </Card.Header>
-        <Card.Body>
+        <Card.Content>
           <p data-testid="card-interactive-counter">
             Activations: <strong>{count}</strong>
           </p>
-        </Card.Body>
+        </Card.Content>
       </Card>
     </div>
   );
@@ -295,10 +295,10 @@ function InteractiveWithoutOnClickImpl() {
             activate. Dev console emits a warning.
           </Card.Description>
         </Card.Header>
-        <Card.Body>
+        <Card.Content>
           Prefer asChild with a real &lt;a&gt; / &lt;button&gt;, or pass
           onClick.
-        </Card.Body>
+        </Card.Content>
       </Card>
     </div>
   );
@@ -326,9 +326,9 @@ export const AsChild: Story = {
               Renders as an &lt;a&gt; — the entire card is the click target.
             </Card.Description>
           </Card.Header>
-          <Card.Body>
+          <Card.Content>
             Consumer is responsible for nested-interactive concerns.
-          </Card.Body>
+          </Card.Content>
         </a>
       </Card>
     </div>
@@ -339,7 +339,13 @@ export const AsChild: Story = {
 /* React-19 deprecated `element.ref` for function components; refs now
  * live on `element.props.ref`. This story wires BOTH a consumer-
  * supplied ref AND uses the Card root's own ref, and proves both
- * resolve to the rendered <a> via a tiny status panel. */
+ * resolve to the rendered <a> via a tiny status panel.
+ *
+ * The verification region is itself a labeled Card so the
+ * subject-Card and the verifier-Card sit as two equal, clearly-bounded
+ * cells (visual-polish item 3 — fixes the "half-rendered" appearance
+ * codex flagged when the previous bare-div verifier floated next to
+ * the subject Card). */
 function AsChildRefCompositionImpl() {
   const consumerRef = useRef<HTMLAnchorElement | null>(null);
   const [status, setStatus] = useState("idle");
@@ -361,36 +367,45 @@ function AsChildRefCompositionImpl() {
               Consumer ref + Slot ref both land on the rendered anchor.
             </Card.Description>
           </Card.Header>
-          <Card.Body>Click verify to compare.</Card.Body>
+          <Card.Content>Click verify to compare.</Card.Content>
         </a>
       </Card>
-      <div className="zs-story-row">
-        <Button
-          size="small"
-          variant="tinted"
-          onClick={() => {
-            const el = consumerRef.current;
-            setStatus(
-              el && el.tagName === "A" && el.getAttribute("href") === "#refs"
-                ? "ref-attached"
-                : "ref-missing",
-            );
-          }}
-        >
-          Verify consumer ref
-        </Button>
-        <span
-          data-testid="card-aschild-ref-status"
-          style={
-            {
-              fontFamily: "var(--zs-font-system)",
-              alignSelf: "center",
-            } satisfies CSSProperties
-          }
-        >
-          {status}
-        </span>
-      </div>
+      <Card variant="surface" style={{ inlineSize: "20rem" }}>
+        <Card.Header>
+          <Card.Title>Verification</Card.Title>
+          <Card.Description>
+            Click verify — the ref should resolve to the rendered &lt;a&gt;.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content>
+          <Button
+            size="small"
+            variant="tinted"
+            onClick={() => {
+              const el = consumerRef.current;
+              setStatus(
+                el && el.tagName === "A" && el.getAttribute("href") === "#refs"
+                  ? "ref-attached"
+                  : "ref-missing",
+              );
+            }}
+          >
+            Verify consumer ref
+          </Button>
+          <span
+            data-testid="card-aschild-ref-status"
+            style={
+              {
+                fontFamily: "var(--zs-font-system)",
+                fontSize: "var(--zs-text-footnote-size)",
+                color: "var(--zs-label-secondary)",
+              } satisfies CSSProperties
+            }
+          >
+            {status}
+          </span>
+        </Card.Content>
+      </Card>
     </div>
   );
 }
@@ -409,7 +424,7 @@ export const Ghost: Story = {
           <Card.Title>Outer surface</Card.Title>
           <Card.Description>Opaque base; safe for axe contrast.</Card.Description>
         </Card.Header>
-        <Card.Body>
+        <Card.Content>
           <Card variant="ghost" size="sm">
             <Card.Header>
               <Card.Title>Inner ghost</Card.Title>
@@ -417,15 +432,21 @@ export const Ghost: Story = {
                 Transparent — intended for nesting inside an opaque parent.
               </Card.Description>
             </Card.Header>
-            <Card.Body>Body content reads through the parent surface.</Card.Body>
+            <Card.Content>Body content reads through the parent surface.</Card.Content>
           </Card>
-        </Card.Body>
+        </Card.Content>
       </Card>
     </div>
   ),
 };
 
 /* ─── 8. With form inside ────────────────────────────────────────────── */
+/* HIG-aligned convention: forms embedded inside a Card use smaller
+ * controls (Input size="sm", Button size="small"). macOS list-row
+ * forms ship mini controls; reading a form inside a Card with default
+ * (md) controls feels chunky because the card already supplies the
+ * outer container. The story models the recommended pattern so the
+ * AI agent / consumer mimics it. Visual-polish item 7. */
 export const WithFormInside: Story = {
   name: "With form inside",
   render: () => (
@@ -437,18 +458,24 @@ export const WithFormInside: Story = {
             They'll get an email with a join link.
           </Card.Description>
         </Card.Header>
-        <Card.Body>
+        <Card.Content>
           <Field>
             <Field.Label>Email address</Field.Label>
-            <Input type="email" placeholder="teammate@company.com" />
+            <Input
+              type="email"
+              size="sm"
+              placeholder="teammate@company.com"
+            />
             <Field.Description>
               We'll never share their address.
             </Field.Description>
           </Field>
-        </Card.Body>
+        </Card.Content>
         <Card.Footer divider="top">
-          <Button variant="plain">Cancel</Button>
-          <Button>Send invite</Button>
+          <Button size="small" variant="plain">
+            Cancel
+          </Button>
+          <Button size="small">Send invite</Button>
         </Card.Footer>
       </Card>
     </div>

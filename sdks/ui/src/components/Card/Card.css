@@ -8,7 +8,9 @@
  *     │  ├─ .zs-card__description subtitle.
  *     │  └─ .zs-card__action     col 2; spans rows; centered vertically.
  *     ├─ .zs-card__media         edge-bleed media slot (data-side="...").
- *     ├─ .zs-card__body          main content stack.
+ *     ├─ .zs-card__content       main content stack (renamed from __body;
+ *     │                          visual-polish item 10 — shadcn/MUI/Chakra
+ *     │                          vocabulary).
  *     └─ .zs-card__footer        button row (data-align="end|start|between";
  *                                   data-divider="top" adds a hairline).
  *
@@ -66,8 +68,13 @@
 }
 
 /* ─── variants ─────────────────────────────────────────────────────────── */
-/* `.zs-card--surface` has no overrides — the base block already declares
- * the opaque surface. (Empty rule removed; review-fix item 21.) */
+/* `.zs-card--surface` gets a subtle inset hairline so it doesn't collapse
+ * visually when sat on a same-color parent surface. Token-driven so a
+ * theme can opt out by setting --zs-card-surface-edge: none. Visual-
+ * polish item 1. */
+.zs-card--surface {
+  box-shadow: var(--zs-card-surface-edge);
+}
 .zs-card--elevated {
   box-shadow: var(--zs-shadow-2);
 }
@@ -110,6 +117,14 @@
      * fix item 2 + verification step 6. */
     box-shadow: inset 0 0 0 100rem var(--zs-card-hover-tint);
   }
+  /* Surface variant carries its subtle inset hairline as a box-shadow;
+   * combine with the hover tint so the edge survives hover.
+   * Visual-polish item 1. */
+  .zs-card--surface[data-interactive]:hover {
+    box-shadow:
+      inset 0 0 0 100rem var(--zs-card-hover-tint),
+      var(--zs-card-surface-edge);
+  }
   /* Elevated has an existing box-shadow — combine the hover tint
    * inset with the deeper drop-shadow so neither overrides the
    * other. */
@@ -146,12 +161,21 @@
  * and spans both rows, centered. The previous flex-row layout couldn't
  * stack Title and Description without an anonymous wrapper div (each
  * was a column). With grid the documented API ("direct children of
- * Header") matches what gets rendered (review-fix item 3). */
+ * Header") matches what gets rendered (review-fix item 3).
+ *
+ * Visual-polish item 8: collapse to a single column when no
+ * Card.Action is present so the second `auto` column doesn't reserve
+ * blank space. `:has()` baseline: Chrome 105+ / Safari 15.4+ /
+ * Firefox 121+ — all our targets. */
 .zs-card__header {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr;
   column-gap: var(--zs-space-3);
+  row-gap: var(--zs-space-half);
   align-items: start;
+}
+.zs-card__header:has(.zs-card__action) {
+  grid-template-columns: 1fr auto;
 }
 .zs-card__header > .zs-card__title {
   grid-column: 1;
@@ -195,19 +219,29 @@
   margin: 0;
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
+  /* Color-based hierarchy: description sits one step BELOW Title.
+   *
+   * Visual-polish item 6 originally proposed --zs-label-tertiary for
+   * a further visual recede; measured contrast against the crystal
+   * --zs-surface clocked 4.46 at the subheadline size, JUST below the
+   * 4.5:1 WCAG-AA threshold. The brief's documented fallback applies:
+   * keep on label-secondary (font-weight is already 400 so the
+   * hierarchy still reads visually under Title — Title is 600/700,
+   * Description is 400). A11y bar protected. */
   color: var(--zs-label-secondary);
+}
+.zs-card[data-disabled] .zs-card__description {
+  color: var(--zs-label-tertiary);
 }
 .zs-card--sm .zs-card__description {
   font-size: var(--zs-text-footnote-size);
   line-height: var(--zs-text-footnote-line);
 }
 
-/* Direct Title → Description pair gets a half-space gap. With grid the
- * adjacent-sibling selector resolves correctly because both subparts
- * are direct children of .zs-card__header. */
-.zs-card__header > .zs-card__title + .zs-card__description {
-  margin-block-start: var(--zs-space-half);
-}
+/* The Title → Description half-space gap is now expressed as the
+ * grid's `row-gap` on .zs-card__header (visual-polish item 8). The
+ * previous adjacent-sibling margin rule was removed so the spacing
+ * doesn't compound. */
 
 /* Action: no default styling — consumer drops a Button or similar
  * interactive node inside. Grid column 2 + align-self: center pin it
@@ -235,11 +269,54 @@
   margin-inline: calc(var(--zs-card-padding-md) * -1);
   margin-block-start: calc(var(--zs-card-padding-md) * -1);
   margin-block-end: 0;
+  /* Inherit the Card's border-radius on the matching corners so the
+   * media's rounded edge LITERALLY matches the card's rounded edge
+   * — the "continuous corner" feel codex flagged as missing. Logical
+   * properties keep RTL/vertical-writing-mode correct.
+   * Visual-polish item 2 (cause B). */
+  border-start-start-radius: inherit;
+  border-start-end-radius: inherit;
 }
 .zs-card__media[data-side="bottom"] {
   margin-inline: calc(var(--zs-card-padding-md) * -1);
   margin-block-end: calc(var(--zs-card-padding-md) * -1);
   margin-block-start: 0;
+  /* Mirror item-2 cause B on the trailing edge. */
+  border-end-start-radius: inherit;
+  border-end-end-radius: inherit;
+}
+/* Cause A: the Card root's `gap` adds vertical space between flex
+ * children. With an edge-bleed Media followed by Header, the gap (16
+ * at md) reads as too tight — Header looks crowded against the
+ * media. Replace the gap with the card's padding token so the
+ * media-to-Header rhythm matches the card's overall padding-block,
+ * giving Media room to breathe.
+ *
+ * We add (padding − gap) so the total margin between media bottom
+ * and Header top equals the padding token exactly. Flex/grid `gap`
+ * applies regardless of child margins, so adding extra positive
+ * margin tops it up to the desired total.
+ * Visual-polish item 2 (cause A). */
+.zs-card > .zs-card__media[data-side="top"] + * {
+  margin-block-start: calc(var(--zs-card-padding-md) - var(--zs-card-gap-md));
+}
+.zs-card--sm > .zs-card__media[data-side="top"] + * {
+  margin-block-start: calc(var(--zs-card-padding-sm) - var(--zs-card-gap-sm));
+}
+.zs-card--lg > .zs-card__media[data-side="top"] + * {
+  margin-block-start: calc(var(--zs-card-padding-lg) - var(--zs-card-gap-lg));
+}
+/* Mirror the same correction on the bottom-bleed media so the
+ * preceding Header/Body has a full padding worth of room above the
+ * media instead of just the gap. */
+.zs-card > * + .zs-card__media[data-side="bottom"] {
+  margin-block-start: calc(var(--zs-card-padding-md) - var(--zs-card-gap-md));
+}
+.zs-card--sm > * + .zs-card__media[data-side="bottom"] {
+  margin-block-start: calc(var(--zs-card-padding-sm) - var(--zs-card-gap-sm));
+}
+.zs-card--lg > * + .zs-card__media[data-side="bottom"] {
+  margin-block-start: calc(var(--zs-card-padding-lg) - var(--zs-card-gap-lg));
 }
 .zs-card__media[data-side="fill"] {
   position: absolute;
@@ -273,23 +350,25 @@
   margin-block-end: calc(var(--zs-card-padding-lg) * -1);
 }
 
-/* ─── Body ─────────────────────────────────────────────────────────────── */
-.zs-card__body {
+/* ─── Content ──────────────────────────────────────────────────────────── */
+/* Renamed from `.zs-card__body` for shadcn/MUI/Chakra vocabulary parity
+ * (visual-polish item 10). Pre-launch — no aliases. */
+.zs-card__content {
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-3);
   color: var(--zs-label);
 }
 /* Normalise direct-child prose margins so a single `<p>` slotted into
- * Body doesn't double-up with the card padding (review-fix item 14). */
-.zs-card__body > p:first-child,
-.zs-card__body > ul:first-child,
-.zs-card__body > ol:first-child {
+ * Content doesn't double-up with the card padding (review-fix item 14). */
+.zs-card__content > p:first-child,
+.zs-card__content > ul:first-child,
+.zs-card__content > ol:first-child {
   margin-block-start: 0;
 }
-.zs-card__body > p:last-child,
-.zs-card__body > ul:last-child,
-.zs-card__body > ol:last-child {
+.zs-card__content > p:last-child,
+.zs-card__content > ul:last-child,
+.zs-card__content > ol:last-child {
   margin-block-end: 0;
 }
 

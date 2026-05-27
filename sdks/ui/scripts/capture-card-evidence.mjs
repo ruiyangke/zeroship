@@ -5,6 +5,13 @@
  *
  * Self-contained: serves on a random free port, then cleans up the
  * server + browser whether the run succeeds or fails.
+ *
+ * Visual-polish item 4: in addition to the 12 static story captures,
+ * we now capture three interaction states (Interactive hover,
+ * Interactive-with-keyboard focus, AsChild hover). Each entry in
+ * `stories` is either a story ID (default static capture) or
+ * `{ storyId, suffix, interact }` where `interact(page)` mutates the
+ * page before the screenshot.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -28,9 +35,39 @@ const stories = [
   "components-card--with-media",
   "components-card--media-sides",
   "components-card--interactive",
+  {
+    storyId: "components-card--interactive",
+    suffix: "-hover",
+    interact: async (page) => {
+      const target = page.locator(".zs-card[data-interactive]").first();
+      await target.hover();
+      // Give the transition (motion-fast = 150ms) time to settle.
+      await page.waitForTimeout(250);
+    },
+  },
   "components-card--interactive-with-keyboard",
+  {
+    storyId: "components-card--interactive-with-keyboard",
+    suffix: "-focus",
+    interact: async (page) => {
+      // Tab into the page so focus lands on the first interactive
+      // Card. The story renders a single role=button Card with
+      // tabIndex=0; one Tab from body lands it.
+      await page.keyboard.press("Tab");
+      await page.waitForTimeout(150);
+    },
+  },
   "components-card--interactive-without-on-click",
   "components-card--as-child",
+  {
+    storyId: "components-card--as-child",
+    suffix: "-hover",
+    interact: async (page) => {
+      const target = page.locator(".zs-card[data-interactive]").first();
+      await target.hover();
+      await page.waitForTimeout(250);
+    },
+  },
   "components-card--as-child-ref-composition",
   "components-card--ghost",
   "components-card--with-form-inside",
@@ -107,16 +144,25 @@ try {
   await mkdir(outDir, { recursive: true });
 
   for (const theme of themes) {
-    for (const storyId of stories) {
+    for (const entry of stories) {
+      const storyId = typeof entry === "string" ? entry : entry.storyId;
+      const suffix = typeof entry === "string" ? "" : (entry.suffix ?? "");
+      const interact = typeof entry === "string" ? null : entry.interact;
       const themeGlobal = encodeURIComponent(theme.label);
       const target = `${baseUrl}/iframe.html?id=${storyId}&globals=theme:${themeGlobal}`;
       await page.goto(target, { waitUntil: "networkidle" });
       await page.evaluate(() => document.fonts && document.fonts.ready);
       await page.locator(".zs-card").first().waitFor({ state: "visible", timeout: 5000 });
       await page.waitForTimeout(200);
-      const file = join(outDir, `${theme.value}-card-${storyId}.png`);
+      if (interact) {
+        await interact(page);
+      }
+      const file = join(
+        outDir,
+        `${theme.value}-card-${storyId}${suffix}.png`,
+      );
       await page.screenshot({ path: file, fullPage: true });
-      evidence.push({ theme: theme.value, storyId, screenshot: file });
+      evidence.push({ theme: theme.value, storyId, suffix, screenshot: file });
     }
   }
 

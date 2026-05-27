@@ -10,7 +10,7 @@ export type {
   CardFooterProps,
   CardTitleProps,
   CardHeaderProps,
-  CardBodyProps,
+  CardContentProps,
   CardActionProps,
   CardDescriptionProps,
 } from "./Card";

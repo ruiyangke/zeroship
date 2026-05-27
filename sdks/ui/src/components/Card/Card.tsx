@@ -11,12 +11,13 @@
  *       <Card.Description>Subtitle</Card.Description>
  *       <Card.Action><Button>…</Button></Card.Action>
  *     </Card.Header>
- *     <Card.Body>…</Card.Body>
+ *     <Card.Content>…</Card.Content>
  *     <Card.Footer><Button>…</Button></Card.Footer>
  *   </Card>
  *
- * Aria semantics: Card subparts are layout-only — Header, Body, Footer
- * are <div>s with no role. The accessible heading hierarchy comes from
+ * Aria semantics: Card subparts are layout-only — Header, Content,
+ * Footer are <div>s with no role. The accessible heading hierarchy
+ * comes from
  * Card.Title (an <h3> by default; `asChild` lets you swap to h2/h4 so
  * the level matches the surrounding document outline). This matches
  * shadcn/Chakra/Park UI and avoids HIG-violation patterns like wrapping
@@ -44,6 +45,12 @@
  *    card edge; the Card root has `overflow: hidden` so the media
  *    clips to the card's border-radius (no negative-margin overflow
  *    trick without clip).
+ *
+ * Subpart vocabulary: each subpart emits a `data-slot="card-<name>"`
+ * attribute alongside its class. Aligns with the shadcn ecosystem
+ * vocabulary and lets consumers target Card subparts by data-slot in
+ * CSS without leaking our internal BEM class names. Visual-polish
+ * item 9.
  */
 import {
   forwardRef,
@@ -154,6 +161,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
   );
 
   const dataProps = {
+    "data-slot": "card",
     "data-variant": variant,
     "data-size": size,
     "data-interactive": interactive ? "" : undefined,
@@ -265,7 +273,7 @@ type HeadingProps = ComponentPropsWithoutRef<"h3">;
 type ParagraphProps = ComponentPropsWithoutRef<"p">;
 
 export type CardHeaderProps = DivProps;
-export type CardBodyProps = DivProps;
+export type CardContentProps = DivProps;
 export type CardActionProps = DivProps;
 export type CardDescriptionProps = ParagraphProps;
 
@@ -274,6 +282,7 @@ const CardHeader = forwardRef<HTMLDivElement, CardHeaderProps>(
     return (
       <div
         ref={ref}
+        data-slot="card-header"
         className={classnames("zs-card__header", className)}
         {...rest}
       />
@@ -311,6 +320,7 @@ const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
         <Slot
           {...rest}
           ref={composeRefs(ref as Ref<unknown>, getElementRef(children))}
+          data-slot="card-title"
           className={classnames("zs-card__title", className)}
         >
           {children}
@@ -320,6 +330,7 @@ const CardTitle = forwardRef<HTMLHeadingElement, CardTitleProps>(
     return (
       <h3
         ref={ref}
+        data-slot="card-title"
         className={classnames("zs-card__title", className)}
         {...rest}
       >
@@ -335,6 +346,7 @@ const CardDescription = forwardRef<HTMLParagraphElement, CardDescriptionProps>(
     return (
       <p
         ref={ref}
+        data-slot="card-description"
         className={classnames("zs-card__description", className)}
         {...rest}
       />
@@ -348,6 +360,7 @@ const CardAction = forwardRef<HTMLDivElement, CardActionProps>(
     return (
       <div
         ref={ref}
+        data-slot="card-action"
         className={classnames("zs-card__action", className)}
         {...rest}
       />
@@ -376,6 +389,7 @@ const CardMedia = forwardRef<HTMLDivElement, CardMediaProps>(
         ref={ref}
         aria-hidden={isDecorative ? true : undefined}
         {...rest}
+        data-slot="card-media"
         className={classnames("zs-card__media", className)}
         data-side={side}
       />
@@ -384,18 +398,19 @@ const CardMedia = forwardRef<HTMLDivElement, CardMediaProps>(
 );
 CardMedia.displayName = "Card.Media";
 
-const CardBody = forwardRef<HTMLDivElement, CardBodyProps>(
-  function CardBody({ className, ...rest }, ref) {
+const CardContent = forwardRef<HTMLDivElement, CardContentProps>(
+  function CardContent({ className, ...rest }, ref) {
     return (
       <div
         ref={ref}
-        className={classnames("zs-card__body", className)}
+        data-slot="card-content"
+        className={classnames("zs-card__content", className)}
         {...rest}
       />
     );
   },
 );
-CardBody.displayName = "Card.Body";
+CardContent.displayName = "Card.Content";
 
 export interface CardFooterProps extends DivProps {
   /** Justify-content of the button row. Default `end` (HIG-standard). */
@@ -410,6 +425,7 @@ const CardFooter = forwardRef<HTMLDivElement, CardFooterProps>(
     return (
       <div
         ref={ref}
+        data-slot="card-footer"
         className={classnames("zs-card__footer", className)}
         data-align={align}
         data-divider={divider}
@@ -428,7 +444,7 @@ type CardComponent = typeof CardRoot & {
   Description: typeof CardDescription;
   Action: typeof CardAction;
   Media: typeof CardMedia;
-  Body: typeof CardBody;
+  Content: typeof CardContent;
   Footer: typeof CardFooter;
 };
 
@@ -438,5 +454,5 @@ Card.Title = CardTitle;
 Card.Description = CardDescription;
 Card.Action = CardAction;
 Card.Media = CardMedia;
-Card.Body = CardBody;
+Card.Content = CardContent;
 Card.Footer = CardFooter;

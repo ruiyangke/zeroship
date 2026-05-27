@@ -185,6 +185,18 @@
   --zs-card-gap-md: var(--zs-space-4);         /* 16 */
   --zs-card-gap-lg: var(--zs-space-5);         /* 20 */
 
+  /* ─── Card surface edge — subtle inset hairline so a surface Card
+     sitting on a same-color parent surface still reads as a distinct
+     cell. Theme-invariant default; themes may opt out by setting the
+     token to a zero-sized invisible shadow:
+       --zs-card-surface-edge: 0 0 0 0 transparent;
+     (Using a zero-sized transparent shadow rather than `none` so the
+     value remains valid when composed into a multi-shadow list at
+     hover state.) The hairline uses --zs-fill-tertiary (theme-defined)
+     so dark themes get a subtle light edge and light themes get a
+     subtle dark edge. Visual-polish item 1. */
+  --zs-card-surface-edge: 0 0 0 0.0625rem var(--zs-fill-tertiary) inset;
+
   /* ─── Dialog sizing. max-widths in rem so user font-size scales them. */
   --zs-dialog-radius: var(--zs-radius-7);             /* 22 — standard sheet */
   --zs-dialog-radius-alert: var(--zs-radius-5);       /* 12 — tighter for alerts */
@@ -242,11 +254,19 @@
   --zs-separator: oklch(0.5 0.02 275 / 0.18);
   --zs-separator-strong: oklch(0.5 0.02 275 / 0.4);
 
-  /* ─── Accent — HIG system-blue analog (saturated indigo-blue).
-     Hover/active deepen the lightness; ink is the near-white label. */
-  --zs-accent: oklch(0.55 0.18 285);
-  --zs-accent-hover: oklch(0.49 0.19 285);
-  --zs-accent-active: oklch(0.45 0.2 285);
+  /* ─── Accent — HIG iOS systemBlue analog. Hue centered at 250 (in
+     oklch's 0–360 hue space, ~245–255 is the canonical systemBlue
+     range); earlier 285 leaned visibly indigo-purple.
+     Lightness deepened from 0.55 → 0.52 on the base because the
+     hue-250 blue at L=0.55 measured 4.42:1 against the crystal
+     surface on Button-plain (just under the 4.5 AA threshold); the
+     deeper L=0.52 puts plain-button text back above 4.5 while
+     keeping the systemBlue character (within the brief's permitted
+     "deepen the lightness slightly" bound). Hover/active deepen
+     further; ink is the near-white label. Visual-polish item 5. */
+  --zs-accent: oklch(0.52 0.18 250);
+  --zs-accent-hover: oklch(0.47 0.19 250);
+  --zs-accent-active: oklch(0.43 0.2 250);
   --zs-accent-ink: oklch(0.99 0.005 255);
 
   /* ─── HIG system colors (semantic).
@@ -259,9 +279,11 @@
   --zs-system-yellow: oklch(0.85 0.15 95);
   --zs-system-orange: oklch(0.7 0.2 50);
 
-  /* ─── Focus */
-  --zs-focus: oklch(0.55 0.18 285);
-  --zs-focus-ring-color: oklch(0.55 0.18 285 / 0.35);
+  /* ─── Focus — same hue/lightness family as accent so the focus ring
+     reads as a sibling of the systemBlue accent (visual-polish item 5).
+     Lightness matches the deepened accent base for consistency. */
+  --zs-focus: oklch(0.52 0.18 250);
+  --zs-focus-ring-color: oklch(0.52 0.18 250 / 0.35);
 
   /* ─── Material — glass. Crystal is the light glass, so a less intense
      saturation is gentler than the root default. */

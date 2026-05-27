@@ -25,8 +25,13 @@ export type {
   CardMediaSide,
   CardMediaProps,
   CardFooterAlign,
+  CardFooterDivider,
   CardFooterProps,
+  CardHeaderProps,
   CardTitleProps,
+  CardDescriptionProps,
+  CardActionProps,
+  CardContentProps,
 } from "./Card";
 
 export { Dialog } from "./Dialog";
