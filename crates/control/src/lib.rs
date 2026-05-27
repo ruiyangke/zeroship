@@ -121,4 +121,16 @@ pub struct AppState {
     /// type. Files are unlinked immediately after ingest (success or
     /// failure).
     pub deploy_tmp_dir: std::path::PathBuf,
+    /// OIDC relying-party for `console.zeroship.ai`. Drives the
+    /// authorize-redirect → callback → session-mint flow on the
+    /// creator dashboard (proposal §2.3). `None` disables the new
+    /// flow — the legacy `auth_handlers` chain remains the only auth
+    /// surface until U8 retires it.
+    pub oidc_rp: Option<Arc<oidc_rp::ConsoleOidcRp>>,
+    /// Postgres client pointed at the `auth` schema, used by
+    /// `console_sessions::{create,validate,revoke}`. Distinct from the
+    /// `registry` PG client (which talks to the control schema)
+    /// because in multi-DB deployments the auth tables may live in a
+    /// separate cluster.
+    pub auth_pg: Option<Arc<compio_postgres::Client>>,
 }

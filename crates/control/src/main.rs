@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, auth_handlers, auth_service, env_handlers, internal, oauth, stripe_handlers,
+    api, auth_handlers, auth_service, env_handlers, internal, oauth, oidc_rp, stripe_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -200,6 +200,74 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
+    // Phase 3 U7 — control plane OIDC RP for `console.zeroship.ai`.
+    // Optional: when `--auth-public` or `--console-oidc-secret` is
+    // empty, the new RP path is disabled and the legacy
+    // `auth_handlers` chain remains the only auth surface. U8 retires
+    // the legacy path and makes these mandatory.
+    let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "");
+    let console_oidc_secret =
+        arg_or_env(&args, "--console-oidc-secret", "CONSOLE_OIDC_SECRET", "");
+    let stash_signing_key = arg_or_env(
+        &args,
+        "--stash-signing-key",
+        "STASH_SIGNING_KEY",
+        "",
+    );
+    let auth_db_url = arg_or_env(&args, "--auth-db", "AUTH_DB_URL", "");
+
+    let oidc_rp = if !auth_public.is_empty() && !console_oidc_secret.is_empty() {
+        if stash_signing_key.is_empty() && !insecure_dev {
+            tracing::error!(
+                "control: refusing to enable console OIDC RP without --stash-signing-key (set --dev-insecure to override)"
+            );
+            std::process::exit(1);
+        }
+        let key = if stash_signing_key.is_empty() {
+            // Dev-only fallback. Ephemeral keys are fine for the
+            // 10-minute stash window during local development; in
+            // prod the guard above already exited.
+            b"dev-stash-key-please-rotate".to_vec()
+        } else {
+            stash_signing_key.into_bytes()
+        };
+        tracing::info!(
+            auth_public = %auth_public,
+            "control: console OIDC RP enabled"
+        );
+        Some(Arc::new(oidc_rp::ConsoleOidcRp::new(
+            &auth_public,
+            "console.zeroship.ai",
+            console_oidc_secret,
+            key,
+        )))
+    } else {
+        tracing::info!(
+            "control: console OIDC RP disabled (set --auth-public + --console-oidc-secret to enable)"
+        );
+        None
+    };
+
+    let auth_pg: Option<Arc<compio_postgres::Client>> = if auth_db_url.is_empty() {
+        if oidc_rp.is_some() {
+            tracing::warn!(
+                "control: console OIDC RP is configured but --auth-db is empty; /auth/callback will 500"
+            );
+        }
+        None
+    } else {
+        let (pg_client, pg_conn) = compio_postgres::connect(&auth_db_url, compio_postgres::NoTls)
+            .await
+            .expect("control: auth-pg connect");
+        compio::runtime::spawn(async move {
+            if let Err(e) = pg_conn.run().await {
+                tracing::error!(error = %e, "control/auth-pg connection ended");
+            }
+        })
+        .detach();
+        Some(Arc::new(pg_client))
+    };
+
     let state = Arc::new(AppState {
         registry,
         env_store,
@@ -223,6 +291,8 @@ async fn main() -> std::io::Result<()> {
         insecure_dev,
         trust_proxy,
         deploy_tmp_dir,
+        oidc_rp,
+        auth_pg,
     });
 
     let bind_addr = format!("0.0.0.0:{port}");
@@ -301,6 +371,10 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/auth/authorize").route(web::get().to(auth_handlers::authorize)))
             .service(web::resource("/auth/google/start").route(web::get().to(auth_handlers::google_start)))
             .service(web::resource("/auth/google/callback").route(web::get().to(auth_handlers::google_callback)))
+            // New OIDC RP callback for the `console.zeroship.ai` client
+            // (P3-U7). Sibling of the legacy /auth/* handlers; U8
+            // retires those and this becomes the canonical entry.
+            .service(web::resource("/auth/callback").route(web::get().to(api::auth_callback)))
             // --- Stripe Connect ---
             .service(
                 web::resource("/api/creators/{id}/stripe/onboard")

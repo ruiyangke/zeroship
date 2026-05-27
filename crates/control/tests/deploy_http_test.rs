@@ -244,6 +244,8 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
+        oidc_rp: None,
+        auth_pg: None,
     });
 
     Fixture {

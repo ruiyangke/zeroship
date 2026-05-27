@@ -474,6 +474,333 @@ async fn fetch_worker_logs(
 }
 
 // ---------------------------------------------------------------------------
+// /auth/callback — control plane OIDC RP callback (P3-U7)
+// ---------------------------------------------------------------------------
+//
+// `console.zeroship.ai` is registered with hydra as a first-party OIDC
+// client (`skip_consent=true`). The control plane is the relying party:
+// it owns the authorize redirect, the stash cookie, and the callback
+// code exchange. The legacy `/auth/*` handlers (login, register,
+// userinfo, etc.) live alongside this until U8 retires them.
+
+/// Handle `GET /auth/callback?code=…&state=…` on `console.zeroship.ai`.
+///
+/// Reads the signed `__Host-zs_console_stash` cookie, exchanges the
+/// code with hydra via `ConsoleOidcRp::finish_callback`, persists a
+/// row in `auth.console_sessions`, sets `__Host-zs_console_session`,
+/// clears the stash cookie, and 302s back to the original path the
+/// user was trying to reach when the dance started.
+pub async fn auth_callback(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let Some(oidc_rp) = state.oidc_rp.as_ref() else {
+        return render_callback_error(
+            state.insecure_dev,
+            "console OIDC RP not configured (set --auth-public, --console-oidc-secret, --stash-signing-key)",
+        );
+    };
+    let Some(pg) = state.auth_pg.as_ref() else {
+        return render_callback_error(
+            state.insecure_dev,
+            "console session database not configured (set --auth-db)",
+        );
+    };
+
+    // 1. Parse query (code + state). Hydra may also send `error=...`
+    //    for user-denied consent; surface it directly.
+    let query_str = req.uri().query().unwrap_or("");
+    let mut code: Option<String> = None;
+    let mut state_param: Option<String> = None;
+    let mut oauth_error: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query_str.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state_param = Some(v.into_owned()),
+            "error" => oauth_error = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    if let Some(e) = oauth_error {
+        return render_callback_error(state.insecure_dev, &format!("oauth error: {e}"));
+    }
+    let (Some(code), Some(state_param)) = (code, state_param) else {
+        return render_callback_error(
+            state.insecure_dev,
+            "missing code or state query parameter",
+        );
+    };
+
+    // 2. Read the signed stash cookie.
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(stash) = crate::oidc_rp::parse_console_stash_cookie(cookie_header) else {
+        return render_callback_error(state.insecure_dev, "missing stash cookie");
+    };
+
+    // 3. Exchange the code with hydra + verify the ID token.
+    let (claims, original_path) = match oidc_rp
+        .finish_callback(&code, &state_param, &stash)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "control: oidc callback failed");
+            return render_callback_error(state.insecure_dev, &e.to_string());
+        }
+    };
+
+    // 4. Create a per-origin console session row.
+    let session = match crate::console_sessions::create(pg, &claims).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "control: console session create failed");
+            return render_callback_error(state.insecure_dev, "session create failed");
+        }
+    };
+
+    // 5. 302 back to the original path, set console-session cookie,
+    //    clear the stash cookie. Two `Set-Cookie` headers on one
+    //    response is valid per RFC 6265 §3.
+    let mut builder = web::HttpResponse::Found();
+    builder.header("location", original_path);
+    builder.header(
+        "set-cookie",
+        crate::oidc_rp::set_console_session_cookie(&session.id, state.insecure_dev),
+    );
+    builder.header(
+        "set-cookie",
+        crate::oidc_rp::clear_console_stash_cookie(state.insecure_dev),
+    );
+    builder.finish()
+}
+
+/// Render the failed-callback page. Generic on purpose — leaking the
+/// hydra error string to the user would help an attacker probe. The
+/// structured error is already in the control log at warn / error.
+fn render_callback_error(_insecure_dev: bool, msg: &str) -> web::HttpResponse {
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Sign-in failed</title>\
+        <h1>Sign-in failed</h1><p>{}</p>\
+        <p><a href=\"/\">Back to dashboard</a></p>",
+        html_escape(msg),
+    );
+    web::HttpResponse::BadRequest()
+        .content_type("text/html; charset=utf-8")
+        .body(body)
+}
+
+/// Minimal HTML-escape — enough to make the rendered error page safe
+/// when the upstream message contains user input.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Validate the `__Host-zs_console_session` cookie and return either
+/// the live session or an `Err(HttpResponse)` the caller must return
+/// directly. On miss / expired:
+///   - "wants HTML" (no `Accept` containing `application/json`,
+///     `text/event-stream`, or `application/x-zship`) → 302 to
+///     `/oauth2/auth` (kicks off the dance, original path stashed).
+///   - everything else → 401 JSON envelope.
+///
+/// On success: returns the [`ConsoleSession`] with `idle_expires_at`
+/// already slid forward by `console_sessions::validate`.
+///
+/// `state.insecure_dev = true` builds an `http://` redirect_uri;
+/// production always uses `https://`. The redirect target is computed
+/// from the request's `Host` header.
+///
+/// Not yet wired into existing dashboard routes — that flip is U8.
+///
+/// # Errors
+///
+/// Returns `Err(HttpResponse)` whenever the caller should send a
+/// non-2xx response (missing cookie, validate miss, infrastructure not
+/// configured). The error variant is always a fully-formed response —
+/// never propagated up the stack as a real `Err`.
+pub async fn require_console_session(
+    req: &web::HttpRequest,
+    state: &AppState,
+) -> std::result::Result<crate::console_sessions::ConsoleSession, web::HttpResponse> {
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(id) = crate::oidc_rp::parse_console_session_cookie(cookie_header) else {
+        return Err(reject_response(req, state));
+    };
+
+    let Some(pg) = state.auth_pg.as_ref() else {
+        // The console OIDC RP is enabled but the auth DB isn't —
+        // misconfiguration. Surface a clear 500 instead of silently
+        // bouncing through OIDC every request.
+        tracing::error!(
+            "control: require_console_session called without state.auth_pg"
+        );
+        return Err(web::HttpResponse::InternalServerError()
+            .json(&serde_json::json!({"error": "auth db not configured"})));
+    };
+
+    match crate::console_sessions::validate(pg, id).await {
+        Ok(Some(session)) => Ok(session),
+        Ok(None) => Err(reject_response(req, state)),
+        Err(e) => {
+            tracing::error!(error = %e, "control: console_sessions::validate failed");
+            Err(web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": "session validate failed"})))
+        }
+    }
+}
+
+/// 302 → hydra (HTML clients) or 401 JSON (API clients).
+fn reject_response(req: &web::HttpRequest, state: &AppState) -> web::HttpResponse {
+    if wants_html(req) {
+        start_oidc_redirect(req, state)
+    } else {
+        reject_unauth_response()
+    }
+}
+
+fn reject_unauth_response() -> web::HttpResponse {
+    web::HttpResponse::Unauthorized()
+        .json(&serde_json::json!({"error": "unauthenticated"}))
+}
+
+/// True when the request looks like an HTML/browser navigation.
+/// Anything that prefers JSON/SSE/zship is an API call and gets a
+/// 401, not a 302.
+fn wants_html(req: &web::HttpRequest) -> bool {
+    let accept = req
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    !accept.contains("application/json")
+        && !accept.contains("text/event-stream")
+        && !accept.contains("application/x-zship")
+}
+
+/// Build the 302 → hydra redirect that kicks off the OIDC dance.
+/// Stash cookie carries the PKCE verifier + state + original_path so
+/// the callback can resume.
+fn start_oidc_redirect(req: &web::HttpRequest, state: &AppState) -> web::HttpResponse {
+    let Some(oidc_rp) = state.oidc_rp.as_ref() else {
+        return render_callback_error(
+            state.insecure_dev,
+            "console OIDC RP not configured",
+        );
+    };
+    let original_path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let scheme = if state.insecure_dev { "http" } else { "https" };
+    let redirect_uri = format!("{scheme}://{host}/auth/callback");
+
+    let (auth_url, stash) =
+        oidc_rp.build_authorize_redirect(&original_path, &redirect_uri);
+
+    let mut builder = web::HttpResponse::Found();
+    builder.header("location", auth_url);
+    builder.header(
+        "set-cookie",
+        crate::oidc_rp::set_console_stash_cookie(&stash, state.insecure_dev),
+    );
+    builder.finish()
+}
+
+#[cfg(test)]
+mod console_auth_tests {
+    //! Standalone tests for the `require_console_session` helper.
+    //!
+    //! Constructing a full `AppState` here would require a live PG +
+    //! a configured `AuthService`, so we exercise the cookie-parsing
+    //! / `wants_html` / `reject` branches via the leaf helpers. The
+    //! full integration is covered by the dashboard middleware tests
+    //! landed in U8 (which run against the real `AppState`).
+
+    use super::*;
+    use ntex::http::header::{self, HeaderValue};
+    use ntex::http::Method;
+    use ntex::web::test::TestRequest;
+
+    #[test]
+    fn wants_html_returns_true_for_browser_accept() {
+        let req = TestRequest::default()
+            .header(
+                header::ACCEPT,
+                HeaderValue::from_static(
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
+            )
+            .method(Method::GET)
+            .to_http_request();
+        assert!(wants_html(&req));
+    }
+
+    #[test]
+    fn wants_html_returns_false_for_json_accept() {
+        let req = TestRequest::default()
+            .header(
+                header::ACCEPT,
+                HeaderValue::from_static("application/json"),
+            )
+            .method(Method::GET)
+            .to_http_request();
+        assert!(!wants_html(&req));
+    }
+
+    #[test]
+    fn wants_html_returns_false_for_sse_accept() {
+        let req = TestRequest::default()
+            .header(
+                header::ACCEPT,
+                HeaderValue::from_static("text/event-stream"),
+            )
+            .method(Method::GET)
+            .to_http_request();
+        assert!(!wants_html(&req));
+    }
+
+    #[test]
+    fn wants_html_returns_true_for_missing_accept() {
+        // Browsers always set Accept; missing-Accept is unusual but the
+        // safe default is "treat as HTML" so curl users still get a
+        // redirect they can follow.
+        let req = TestRequest::default().method(Method::GET).to_http_request();
+        assert!(wants_html(&req));
+    }
+
+    #[test]
+    fn reject_unauth_response_is_401_json() {
+        let resp = reject_unauth_response();
+        assert_eq!(resp.status().as_u16(), 401);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("application/json"), "want JSON, got {ct}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Streaming helper — used by `deploy()` to land the request body in a
 // tmp file before mmap+ingest. Generic over the stream type so the
 // helper is unit-testable with `futures::stream::iter`; production

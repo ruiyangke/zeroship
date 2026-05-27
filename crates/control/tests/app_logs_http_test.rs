@@ -81,6 +81,8 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
+            oidc_rp: None,
+            auth_pg: None,
         }),
         blob_root,
         deploy_tmp_dir,
