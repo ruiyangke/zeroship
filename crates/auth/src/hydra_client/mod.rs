@@ -5,6 +5,7 @@
 //! cyper-based client. The cyper invocation idiom mirrors
 //! `crates/control/src/oauth.rs`.
 
+pub mod clients;
 pub mod consent;
 pub mod login;
 pub mod logout;
