@@ -2,19 +2,18 @@ import type { Preview } from "@storybook/react";
 import { createElement } from "react";
 import { withThemeByDataAttribute } from "@storybook/addon-themes";
 import "../src/styles.css";
-import "../src/stories/story.css";
 
+/*
+ * The themes map is intentionally empty during the Apple-HIG rebuild.
+ * It is repopulated with `hig-light` / `hig-dark` (and any future palette
+ * variants) once the foundation tokens land. The decorator stays installed
+ * so the toolbar shape is preserved.
+ */
 const preview: Preview = {
   decorators: [
     withThemeByDataAttribute({
-      themes: {
-        Studio: "studio",
-        Atelier: "atelier",
-        Dusk: "dusk",
-        "Glass Dark": "glass-dark",
-        "Glass Light": "glass-light",
-      },
-      defaultTheme: "Studio",
+      themes: {},
+      defaultTheme: "hig-light",
       attributeName: "data-theme",
       parentSelector: "html",
     }),
@@ -22,13 +21,9 @@ const preview: Preview = {
       createElement(
         "main",
         {
-          className:
-            context.viewMode === "docs"
-              ? "zs-story-main zs-story-main--docs"
-              : "zs-story-main",
+          className: "zs-story-main",
           "aria-label": context.title,
         },
-        createElement("h1", { className: "zs-sr-only" }, context.title),
         createElement(Story),
       ),
   ],
@@ -53,10 +48,6 @@ const preview: Preview = {
     docs: {
       toc: true,
     },
-    // The story decorator (.zs-story-main) is full-bleed by design — it paints the
-    // theme surface and centers content itself (min-height:100vh, place-items:center).
-    // "fullscreen" lets it fill the canvas; "centered" shrink-wrapped it to content
-    // width, leaving the themed area a narrow strip with large blank gutters.
     layout: "fullscreen",
   },
 };

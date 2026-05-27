@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,4 +30,3 @@ await writeFile(
   join(root, "dist", "styles.css"),
   await inlineImports(join(root, "src", "styles.css")),
 );
-await copyFile(join(root, "src", "tailwind.css"), join(root, "dist", "tailwind.css"));

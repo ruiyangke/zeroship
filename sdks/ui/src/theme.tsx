@@ -8,22 +8,24 @@ import {
   type ReactNode,
 } from "react";
 
-export const themes = ["studio", "atelier", "dusk", "glass-dark", "glass-light"] as const;
-export type ThemeName = (typeof themes)[number];
+/**
+ * Theme names registered with the design system.
+ *
+ * The HIG-anchored rebuild will populate this with `hig-light` and `hig-dark`
+ * as the two first-class themes. Until the foundation tokens land, the list
+ * is empty and ThemeProvider becomes a passthrough that still establishes a
+ * `data-theme` root for future styling.
+ */
+export const themes = [] as const;
+export type ThemeName = (typeof themes)[number] | (string & {});
 
-export const DEFAULT_THEME: ThemeName = "studio";
+export const DEFAULT_THEME: ThemeName = "hig-light";
 export const THEME_STORAGE_KEY = "zeroship-ui-theme";
 
-export const themeLabels: Record<ThemeName, string> = {
-  studio: "Studio",
-  atelier: "Atelier",
-  dusk: "Dusk",
-  "glass-dark": "Glass Dark",
-  "glass-light": "Glass Light",
-};
+export const themeLabels: Record<string, string> = {};
 
 export function isThemeName(value: string | null | undefined): value is ThemeName {
-  return themes.includes(value as ThemeName);
+  return typeof value === "string" && value.length > 0;
 }
 
 interface ThemeContextValue {

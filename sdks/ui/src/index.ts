@@ -1,3 +1,14 @@
+/**
+ * @zeroship/ui — public surface.
+ *
+ * Mid-rebuild against Apple Human Interface Guidelines. The exports below
+ * are intentionally narrow: theme primitives plus temporary native-HTML
+ * placeholders for the component names other packages still import. As
+ * HIG-styled components land they replace the corresponding placeholder
+ * exports in this file.
+ */
+import "./styles.css";
+
 export {
   DEFAULT_THEME,
   THEME_STORAGE_KEY,
@@ -9,84 +20,17 @@ export {
   type ThemeName,
   type ThemeProviderProps,
 } from "./theme";
+
+// Temporary placeholders — see ./placeholders.tsx for migration tracking.
 export {
-  colorTokenNames,
-  fontTokenNames,
-  motionTokenNames,
-  radiusTokenNames,
-  shadowTokenNames,
-  spaceTokenNames,
-  textTokenNames,
-  tokenContract,
-  zTokenNames,
-} from "./tokens";
-export {
-  Accordion,
-  AccordionParts,
   Badge,
   Button,
   Card,
-  Checkbox,
-  CheckboxParts,
-  Chip,
   Dialog,
-  DialogParts,
-  EmptyState,
-  FieldFrame,
-  FieldParts,
   Input,
-  Menu,
-  MenuParts,
-  Popover,
-  PopoverParts,
-  Radio,
-  RadioGroup,
-  RadioGroupParts,
-  RadioParts,
-  Select,
-  SelectParts,
-  Separator,
-  SeparatorParts,
-  Spinner,
-  Switch,
-  SwitchParts,
-  Table,
-  Tabs,
-  TabsParts,
-  Textarea,
-  ToastParts,
-  Toast,
-  ToastViewport,
-  Tooltip,
-  TooltipParts,
-  type AccordionItemOption,
-  type AccordionProps,
   type BadgeProps,
   type ButtonProps,
   type CardProps,
-  type CheckboxProps,
-  type ChipProps,
   type DialogProps,
-  type EmptyStateProps,
-  type FieldFrameProps,
   type InputProps,
-  type MenuItemOption,
-  type MenuProps,
-  type PopoverProps,
-  type RadioGroupItem,
-  type RadioGroupProps,
-  type RadioProps,
-  type SelectItemOption,
-  type SelectProps,
-  type SeparatorProps,
-  type SpinnerProps,
-  type SwitchProps,
-  type TableColumn,
-  type TableProps,
-  type TabsItem,
-  type TabsProps,
-  type TextareaProps,
-  type ToastProps,
-  type ToastViewportProps,
-  type TooltipProps,
-} from "./components";
+} from "./placeholders";

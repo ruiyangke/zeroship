@@ -6,27 +6,25 @@ if (!baseUrl) {
   throw new Error("Set STORYBOOK_URL to the running static Storybook URL.");
 }
 
+/*
+ * The themes and stories lists are intentionally empty during the Apple-HIG
+ * rebuild. They are repopulated as components land: each new component adds
+ * its story id here, and each new theme (hig-light, hig-dark, ...) adds an
+ * entry. The script reports "no stories to check" rather than failing while
+ * the system is empty.
+ */
 const themes = [
-  { label: "Studio", value: "studio" },
-  { label: "Atelier", value: "atelier" },
-  { label: "Dusk", value: "dusk" },
-  { label: "Glass Dark", value: "glass-dark" },
-  { label: "Glass Light", value: "glass-light" },
+  // { label: "HIG Light", value: "hig-light" },
+  // { label: "HIG Dark", value: "hig-dark" },
 ];
 const stories = [
-  "components-base-ui--button-states",
-  "components-base-ui--field-inputs",
-  "components-base-ui--choice-controls",
-  "components-base-ui--dialog-open",
-  "components-base-ui--dialog-keyboard",
-  "components-base-ui--popover-open",
-  "components-base-ui--tooltip-open",
-  "components-base-ui--menu-open",
-  "components-base-ui--tabs-accordion-table",
-  "components-base-ui--surfaces-and-feedback",
-  "components-base-ui--portaled-popup-proof",
-  "foundations-tokens--active-theme",
+  // "components-base-ui--button-states",
 ];
+
+if (themes.length === 0 || stories.length === 0) {
+  console.log("A11y check skipped — no themes or stories registered yet (HIG rebuild in progress).");
+  process.exit(0);
+}
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
