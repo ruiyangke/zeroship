@@ -176,6 +176,9 @@ async fn gateway_oidc_rp_full_dance() {
 
     // 2. Boot crates/auth in-process on a random port.
     let admin = HydraAdmin::new(&hydra_admin_url);
+    // Federation (Google/GitHub) is OFF for this test: the gateway↔auth
+    // password-login flow doesn't exercise the `/oauth/{google,github}/*`
+    // routes, so we pass `None` client IDs and `configure(false, false)`.
     let cfg = Arc::new(AuthConfig {
         addr: "127.0.0.1:0".to_string(),
         db_url: db_url.clone(),
@@ -184,6 +187,21 @@ async fn gateway_oidc_rp_full_dance() {
         clients_config: "ops/auth-clients.example.toml".to_string(),
         bootstrap: false,
         insecure_dev: true,
+        stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
+        google_client_id: None,
+        google_client_secret: None,
+        google_redirect_uri: "https://auth.zeroship.ai/oauth/google/callback".to_string(),
+        google_auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+        google_token_url: "https://oauth2.googleapis.com/token".to_string(),
+        google_jwks_url: "https://www.googleapis.com/oauth2/v3/certs".to_string(),
+        google_issuer: "https://accounts.google.com".to_string(),
+        github_client_id: None,
+        github_client_secret: None,
+        github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
+        github_authorize_url: "https://github.com/login/oauth/authorize".to_string(),
+        github_token_url: "https://github.com/login/oauth/access_token".to_string(),
+        github_user_url: "https://api.github.com/user".to_string(),
+        github_emails_url: "https://api.github.com/user/emails".to_string(),
     });
     let admin_state = admin.clone();
     let cfg_state = cfg.clone();
@@ -198,7 +216,7 @@ async fn gateway_oidc_rp_full_dance() {
                 .state(cfg_state)
                 .state(db_state)
                 .middleware(SecurityHeaders)
-                .configure(server::configure)
+                .configure(server::configure(false, false))
         }
     })
     .await;
