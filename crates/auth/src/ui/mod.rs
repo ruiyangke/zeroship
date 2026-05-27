@@ -9,6 +9,8 @@
 //! resulting `String` into `ntex::web::HttpResponse::Ok().content_type(
 //! "text/html; charset=utf-8").body(rendered)`.
 
+pub mod login;
+
 use askama::Template;
 
 /// `/login` GET page. The handler resolves `client_name` from
