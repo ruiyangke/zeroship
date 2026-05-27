@@ -98,7 +98,7 @@ services:
   # admin port 4445 (production: loopback only; in compose we share the network)
   # Config lives at ops/hydra.yaml; secrets come from env.
   hydra:
-    image: oryd/hydra:v2.4.0
+    image: oryd/hydra:v25.4.0
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,14 +113,18 @@ services:
     command: serve all --dev --config /etc/config/hydra/hydra.yaml
     ports:
       - "4444:4444"
-      # Admin port 4445 intentionally NOT mapped to host. Compose's
-      # internal network is sufficient for crates/auth ↔ hydra-admin.
+      # Admin port 4445 IS mapped for dev convenience (running smoke
+      # tests like `cargo test -p zeroship-auth --test
+      # hydra_client_smoke` from the host). In production we bind to
+      # 127.0.0.1 and gate access via firewall — the admin API is
+      # privileged and must never face the public internet.
+      - "4445:4445"
 
   # One-shot migrator. Runs hydra's own schema migrations into the
   # shared zeroship Postgres database (creates the hydra_* tables
   # alongside the auth.* schema we own).
   hydra-migrate:
-    image: oryd/hydra:v2.4.0
+    image: oryd/hydra:v25.4.0
     depends_on:
       postgres:
         condition: service_healthy
