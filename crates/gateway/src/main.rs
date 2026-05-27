@@ -10,7 +10,6 @@ mod proxy;
 mod router;
 mod sessions;
 mod sync;
-mod user_auth;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -387,9 +387,8 @@ pub fn parse_stash_cookie(cookie_header: &str) -> Option<String> {
 //
 // Post-callback the gateway resolves the per-request `ZeroShip-User`
 // header from the app-session row (not from the ID token directly).
-// The payload shape and HMAC envelope are byte-identical to what
-// `user_auth::encode_user_header` emits today; the worker decodes
-// either source identically. `user_auth.rs` is removed in P3-U6.
+// The payload shape and HMAC envelope are the canonical wire format;
+// the worker MAC-verifies and deserializes `WorkerUser` from it.
 
 /// Public user shape forwarded to the worker as the JSON body of the
 /// `ZeroShip-User` header. JWT internals (`sub` rename, `app`/`exp`
