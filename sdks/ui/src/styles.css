@@ -284,6 +284,12 @@
      Lightness matches the deepened accent base for consistency. */
   --zs-focus: oklch(0.52 0.18 250);
   --zs-focus-ring-color: oklch(0.52 0.18 250 / 0.35);
+  /* Input-specific focus ring — visual-polish item 7. Apple-quiet form
+     control focus uses a softer halo than buttons; Button keeps the
+     0.35 alpha for its primary-action ring. Reducing alpha 0.35 → 0.25
+     tones the double-edge effect codex flagged on inputs without
+     touching Button's heavier ring. */
+  --zs-input-focus-ring-color: oklch(0.52 0.18 250 / 0.25);
 
   /* ─── Material — glass. Crystal is the light glass, so a less intense
      saturation is gentler than the root default. */
@@ -319,15 +325,36 @@
   --zs-input-bg-hover: var(--zs-fill-tertiary);
   --zs-input-bg-focus: var(--zs-surface-raised);
   --zs-input-bg-disabled: var(--zs-fill-quaternary);
-  --zs-input-bg-filled: var(--zs-fill-secondary);
-  --zs-input-bg-filled-hover: var(--zs-fill);
+  /* Filled bumped from --zs-fill-secondary (~0.13 alpha) to --zs-fill
+     (~0.18 alpha) so outline (--zs-fill-quaternary ~0.06) and filled
+     read as visually distinct shells (visual-polish item 6). The hover
+     deepens via color-mix on label-over-transparent so a hovered filled
+     input lands ~12% label tint — clearly darker than the resting
+     filled state and clearly heavier than outline-hover. */
+  --zs-input-bg-filled: var(--zs-fill);
+  --zs-input-bg-filled-hover: color-mix(in oklch, var(--zs-label) 12%, transparent);
   --zs-input-border: var(--zs-separator);
   --zs-input-border-hover: var(--zs-separator-strong);
   --zs-input-border-focus: var(--zs-accent);
   --zs-input-border-invalid: var(--zs-system-red);
   --zs-input-ink: var(--zs-label);
   --zs-input-placeholder: var(--zs-label-tertiary);
+  /* Disabled ink stays on --zs-label-tertiary. The brief proposed
+     shifting to --zs-label-quaternary (one rung weaker) for "Apple-quiet
+     disabled feel"; measured against --zs-input-bg-disabled
+     (--zs-fill-quaternary ≈ 0.06 alpha over the crystal surface), the
+     quaternary label (L=0.68) lands around 3.2:1 — below the readable
+     threshold even though axe exempts disabled controls from AA. Same
+     contingency the Card-polish commit hit with Description (kept on
+     label-secondary instead of tertiary). Visual-polish item 10
+     contingency fired; documented and reverted to tertiary. */
   --zs-input-ink-disabled: var(--zs-label-tertiary);
+  /* Readonly palette — visual-polish item 5. Background shifts up one
+     fill step so readonly reads as "presented, not editable" rather
+     than as another flavor of default. Ink softens to label-secondary
+     so the row visually recedes without going greyed-out. */
+  --zs-input-bg-readonly: var(--zs-fill-tertiary);
+  --zs-input-ink-readonly: var(--zs-label-secondary);
 
   /* ─── Field text */
   --zs-field-label-ink: var(--zs-label);

@@ -97,11 +97,18 @@
     0 0 0 0 transparent;
 }
 
+/* Plain variant — visual-polish item 4. Without chrome the plain
+   variant previously read as a static placeholder; the HIG iOS keyboard
+   text-field idiom is a flat field with a single baseline hairline. The
+   baseline lives in the inset shadow's BOTTOM edge (0 -0.0625rem) and
+   intensifies to the accent color on focus — same affordance pattern,
+   reduced ink. Hover bumps the hairline to separator-strong so a
+   hover-capable cursor confirms the cell is interactive. */
 .zs-input--plain {
   background: transparent;
   padding-inline: 0;
   box-shadow:
-    inset 0 0 0 0.0625rem transparent,
+    inset 0 -0.0625rem 0 0 var(--zs-separator),
     0 0 0 0 transparent;
 }
 
@@ -122,29 +129,35 @@
   .zs-input--plain:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
     background: transparent;
     box-shadow:
-      inset 0 0 0 0.0625rem transparent,
+      inset 0 -0.0625rem 0 0 var(--zs-separator-strong),
       0 0 0 0 transparent;
   }
 }
 
-/* ─── focused — the wrapper owns the ring so slots + control share it ── */
+/* ─── focused — the wrapper owns the ring so slots + control share it.
+   Visual-polish item 7: use --zs-input-focus-ring-color (alpha 0.25)
+   instead of the heavier --zs-focus-ring-color (0.35) so the input
+   focus halo reads quieter, closer to Apple's form-control focus.
+   Button keeps the heavier ring via its own selectors. */
 .zs-input[data-focused] {
   background: var(--zs-input-bg-focus);
   box-shadow:
     inset 0 0 0 0.0625rem var(--zs-input-border-focus),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-focus-ring-color);
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
 .zs-input--filled[data-focused] {
   background: var(--zs-input-bg-filled);
   box-shadow:
     inset 0 0 0 0.0625rem var(--zs-input-border-focus),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-focus-ring-color);
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
+/* Plain on focus: intensify the baseline to the accent and keep the
+   quieter input ring as the halo. Visual-polish items 4 + 7. */
 .zs-input--plain[data-focused] {
   background: transparent;
   box-shadow:
-    inset 0 0 0 0 transparent,
-    0 0 0 var(--zs-focus-ring-width) var(--zs-focus-ring-color);
+    inset 0 -0.0625rem 0 0 var(--zs-accent),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
 
 /* ─── invalid ────────────────────────────────────────────────────────── */
@@ -160,11 +173,22 @@
       color-mix(in oklch, var(--zs-system-red) 35%, transparent);
 }
 
-/* ─── readonly — flat fill, no focus accent, no hover affordance ──────── */
+/* ─── readonly — distinct from default + disabled. Visual-polish item 5.
+   HIG-aligned for non-editable text:
+     - background lifts one fill step (--zs-input-bg-readonly) so the
+       cell visibly differs from a default editable input
+     - value italicizes (HIG's read-only / static text convention)
+     - cursor stays the default arrow — not the disabled not-allowed
+       (readonly is presented, not blocked) */
 .zs-input[data-readonly] {
-  background: var(--zs-input-bg);
-  color: var(--zs-input-ink);
+  background: var(--zs-input-bg-readonly);
+  color: var(--zs-input-ink-readonly);
   cursor: default;
+}
+.zs-input[data-readonly] .zs-input__control {
+  cursor: default;
+  font-style: italic;
+  color: var(--zs-input-ink-readonly);
 }
 
 /* ─── disabled ───────────────────────────────────────────────────────── */
@@ -199,6 +223,33 @@
   /* Some UAs render placeholder text at lower opacity by default; pin
      to 1 so our oklch token controls contrast deterministically. */
   opacity: 1;
+}
+
+/* Right-edge fade for overflowing values. Visual-polish item 2.
+   When a long value extends past the visible area, fade the trailing
+   1.5rem so the user sees "more content here" rather than a hard cut.
+   On focus, the fade lifts and the input's native scrolling reveals
+   the full value. The mask lives on the native input element (which
+   has no descendant text nodes axe could walk through), so the gradient
+   stays an INPUT-level effect and does not trigger axe's color-contrast
+   incompletes on surrounding text. */
+.zs-input__control {
+  mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent 100%);
+}
+.zs-input__control:focus {
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+/* RTL flip — the overflow direction is now inline-end on the left. */
+.zs-input__control[dir="rtl"],
+[dir="rtl"] .zs-input__control {
+  mask-image: linear-gradient(to left, black calc(100% - 1.5rem), transparent 100%);
+  -webkit-mask-image: linear-gradient(to left, black calc(100% - 1.5rem), transparent 100%);
+}
+[dir="rtl"] .zs-input__control:focus {
+  mask-image: none;
+  -webkit-mask-image: none;
 }
 
 /* iOS Safari zooms when an input has a computed font-size < 1rem (16
@@ -252,6 +303,33 @@
 .zs-input__control[type="search"]::-webkit-search-cancel-button,
 .zs-input__control[type="search"]::-webkit-search-decoration {
   -webkit-appearance: none;
+}
+
+/* Date / time picker indicator — replace the UA's black calendar glyph
+   with a lucide-weight outline in label-secondary ink so it matches
+   the start-slot search icon used elsewhere. Visual-polish item 9.
+   The mask paints `currentColor` from the inline SVG with a solid
+   background swatch via mask-composite; we pick the swatch from
+   --zs-label-secondary so the glyph reads as a sibling of the other
+   adornments. Inline data URI; no extra files. */
+.zs-input__control[type="date"]::-webkit-calendar-picker-indicator,
+.zs-input__control[type="time"]::-webkit-calendar-picker-indicator,
+.zs-input__control[type="datetime-local"]::-webkit-calendar-picker-indicator,
+.zs-input__control[type="month"]::-webkit-calendar-picker-indicator,
+.zs-input__control[type="week"]::-webkit-calendar-picker-indicator {
+  filter: none;
+  background-color: var(--zs-label-secondary);
+  background-image: none;
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M11 1v1.5h2.25A1.75 1.75 0 0 1 15 4.25v9.5A1.75 1.75 0 0 1 13.25 15.5h-10.5A1.75 1.75 0 0 1 1 13.75v-9.5C1 3.286 1.786 2.5 2.75 2.5H5V1h1.5v1.5h3V1H11Zm2.5 6h-11v6.75c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V7Z' fill='black'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M11 1v1.5h2.25A1.75 1.75 0 0 1 15 4.25v9.5A1.75 1.75 0 0 1 13.25 15.5h-10.5A1.75 1.75 0 0 1 1 13.75v-9.5C1 3.286 1.786 2.5 2.75 2.5H5V1h1.5v1.5h3V1H11Zm2.5 6h-11v6.75c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25V7Z' fill='black'/></svg>");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 1rem;
+  mask-size: 1rem;
+  cursor: pointer;
+  opacity: 1;
 }
 
 /* ─── slots ──────────────────────────────────────────────────────────── */

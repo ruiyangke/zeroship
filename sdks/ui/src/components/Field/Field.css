@@ -98,15 +98,22 @@
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
 }
-/* `--fallback` uses label-secondary (not tertiary) so the "(optional)"
-   text clears 4.5:1 contrast against the surface for the smaller font
-   size (footnote ≈ 0.8125rem). Tertiary is fine for body/subheadline sizes
-   but lands at ~4.46:1 here. */
+/* `--fallback` ("(optional)") — visual-polish item 8.
+   Step down one type token (footnote → caption-1, 13 → 12) and add a
+   small inline-start gap so it reads as metadata trailing the label.
+   The brief proposed shifting color to --zs-label-tertiary as well,
+   but tertiary at footnote size already measured ~4.46:1 on the
+   crystal surface (below the 4.5:1 AA threshold); at the smaller
+   caption-1 size 4.5:1 still applies to normal-weight body text
+   (WCAG 1.4.3). Item 8 contingency fires: keep color on
+   --zs-label-secondary and let the size + spacing carry the recede.
+   Same fallback the Card-polish commit made for Description. */
 .zs-field__required--fallback {
   color: var(--zs-label-secondary);
   font-weight: 400;
-  font-size: var(--zs-text-footnote-size);
-  line-height: var(--zs-text-footnote-line);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  margin-inline-start: var(--zs-space-1);
 }
 
 /* ─── forced-colors / Windows High Contrast ───────────────────────────── */

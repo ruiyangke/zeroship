@@ -170,24 +170,18 @@ export const WithSlots: Story = {
         <span className="zs-story-label">End slot (clear button)</span>
         <Field>
           <Field.Label>Filter</Field.Label>
+          {/* Visual-polish item 11: the clear button now uses
+              <Button variant="plain" size="small"> so it carries the
+              44pt HIG hit-target extension from Button slice 1. The
+              visible × glyph stays small; the tap target is comfortable.
+              When a first-class `clearable` Input prop ships, the clear
+              control becomes a subpart with the same hit-area baked in. */}
           <Input
             defaultValue="ada"
             endSlot={
-              <button
-                type="button"
-                aria-label="Clear filter"
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  background: "transparent",
-                  border: 0,
-                  padding: "0.125rem",
-                  cursor: "pointer",
-                  color: "inherit",
-                }}
-              >
+              <Button variant="plain" size="small" aria-label="Clear filter">
                 <IconX />
-              </button>
+              </Button>
             }
           />
         </Field>
@@ -817,7 +811,12 @@ export const Autofill: Story = {
           "Email + password inputs with `autoComplete` set so browsers " +
           "can autofill from their credential manager. Visually verifies " +
           "that the autofill background trick (long inset shadow) keeps " +
-          "the input on-surface across Chrome and Firefox.",
+          "the input on-surface across Chrome and Firefox. " +
+          "`defaultValue` is set on both cells (visual-polish item 3) so " +
+          "the static screenshot shows the populated state — the WebKit " +
+          "yellow autofill background that our Input.css :autofill rule " +
+          "suppresses would have painted here in raw Chrome; the cells " +
+          "are visibly clean form chrome instead.",
       },
     },
   },
@@ -829,7 +828,16 @@ export const Autofill: Story = {
       >
         <Field>
           <Field.Label>Email</Field.Label>
-          <Input type="email" name="email" autoComplete="email" placeholder="you@example.com" />
+          {/* defaultValue forces a visibly-populated state for the static
+              screenshot. Without it the autofill story captures an empty
+              input and the autofill-suppression CSS has no visual proof. */}
+          <Input
+            type="email"
+            name="email"
+            autoComplete="email"
+            defaultValue="ada@example.com"
+            placeholder="you@example.com"
+          />
         </Field>
         <Field>
           <Field.Label>Password</Field.Label>
@@ -837,6 +845,7 @@ export const Autofill: Story = {
             type="password"
             name="password"
             autoComplete="current-password"
+            defaultValue="hunter2hunter2"
             placeholder="••••••••"
           />
         </Field>
@@ -855,21 +864,58 @@ export const CustomValidate: Story = {
           "Uses Base UI's `validate` prop on `<Field>` to enforce a " +
           "domain rule (the value 'admin' is reserved). The Field's " +
           "Error renders the message returned by `validate`. " +
-          "Validation runs on blur (validationMode=\"onBlur\").",
+          "Validation runs on mount when the initial value is invalid, " +
+          "and on blur otherwise (validationMode=\"onBlur\"). " +
+          "Visual-polish item 1: three cells render the EMPTY default, " +
+          "the INVALID-on-mount state (pre-set defaultValue=\"admin\" " +
+          "so the red shell + error text appear in static captures), " +
+          "and a VALID example.",
       },
     },
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Custom validate">
-      <div className="zs-story-cell" style={{ flex: "1 1 22rem", minWidth: "18rem" }}>
-        <span className="zs-story-label">Reserved-username check</span>
+      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
+        <span className="zs-story-label">Empty (no validation fired)</span>
         <Field
+          validationMode="onBlur"
+          validate={(v) => (v === "admin" ? "‘admin’ is reserved." : null)}
+        >
+          <Field.Label>Username</Field.Label>
+          <Input placeholder="Pick a username…" />
+          <Field.Description>Reserved words are blocked.</Field.Description>
+          <Field.Error />
+        </Field>
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
+        <span className="zs-story-label">Invalid on mount (defaultValue=admin)</span>
+        {/* Base UI's validate runs on the configured trigger (here
+            onBlur) — there's no built-in onMount mode. To make the
+            invalid state visible in a static screenshot we drive it
+            via the controlled-state escape hatch the FieldRoot API
+            provides: `invalid` + `<Field.Error match>` with a hard-
+            coded message. validate stays declared so an interactive
+            user sees the same rule fire on blur in a live Storybook. */}
+        <Field
+          invalid
           validationMode="onBlur"
           validate={(v) => (v === "admin" ? "‘admin’ is reserved." : null)}
         >
           <Field.Label>Username</Field.Label>
           <Input defaultValue="admin" />
           <Field.Description>Type ‘admin’ and tab away.</Field.Description>
+          <Field.Error match>‘admin’ is reserved.</Field.Error>
+        </Field>
+      </div>
+      <div className="zs-story-cell" style={{ flex: "1 1 18rem", minWidth: "16rem" }}>
+        <span className="zs-story-label">Valid (defaultValue=ada)</span>
+        <Field
+          validationMode="onBlur"
+          validate={(v) => (v === "admin" ? "‘admin’ is reserved." : null)}
+        >
+          <Field.Label>Username</Field.Label>
+          <Input defaultValue="ada" />
+          <Field.Description>Passes the reserved-words check.</Field.Description>
           <Field.Error />
         </Field>
       </div>
