@@ -16,12 +16,21 @@ thiserror = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
 zeroship-bundle = { workspace = true }
+# OIDC verifier — JWKS cache + ID-token verification used by both
+# gateway (P3-U3) and control plane (P3-U7) as OIDC RPs.
+jsonwebtoken = { workspace = true }
+parking_lot = "0.12"
+cyper = { workspace = true }
+http = { workspace = true }
 # Observability — tracing subscriber init shared across all binaries.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-log = { workspace = true }
 tracing-logfmt = { workspace = true }
 tracing-bunyan-formatter = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true }
 
 [lints]
 workspace = true
