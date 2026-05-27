@@ -10,6 +10,7 @@
 //! "text/html; charset=utf-8").body(rendered)`.
 
 pub mod consent;
+pub mod link;
 pub mod login;
 pub mod oauth_github;
 pub mod oauth_google;
@@ -47,4 +48,17 @@ pub struct SignupPage<'a> {
 pub struct ErrorPage<'a> {
     pub error: &'a str,
     pub error_description: Option<&'a str>,
+}
+
+/// `/link` GET/POST page — shown after a federation callback detects an
+/// email collision with a locally-credentialed account. The user
+/// re-enters their zeroship password to confirm the link.
+#[derive(Debug, Template)]
+#[template(path = "link.html")]
+pub struct LinkPage<'a> {
+    pub token: &'a str,
+    pub csrf: &'a str,
+    pub existing_email: &'a str,
+    pub provider: &'a str,
+    pub error: Option<&'a str>,
 }
