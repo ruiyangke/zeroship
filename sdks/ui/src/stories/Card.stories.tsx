@@ -20,12 +20,25 @@ type Story = StoryObj<typeof Card>;
  * surfaces, but here the placeholder is `aria-hidden` and has no
  * text descendants in the AT tree. The label is rendered inside an
  * inner badge with an opaque background to keep contrast resolvable. */
-function MediaPlaceholder({ label }: { label: string }) {
+function MediaPlaceholder({
+  label,
+  fill = false,
+}: {
+  label: string;
+  /**
+   * When `true`, the placeholder fills its parent (used inside
+   * `Card.Media side="fill"` where the parent is `position: absolute;
+   * inset: 0`). Otherwise it has a fixed 8rem block-size, which is the
+   * right shape for top/bottom edge-bleed cells.
+   */
+  fill?: boolean;
+}) {
   return (
     <div
       aria-hidden="true"
       style={{
-        blockSize: "8rem",
+        blockSize: fill ? "100%" : "8rem",
+        inlineSize: fill ? "100%" : undefined,
         backgroundColor: "var(--zs-accent)",
         display: "grid",
         placeItems: "center",
@@ -184,7 +197,7 @@ export const MediaSides: Story = {
         style={{ inlineSize: "16rem", color: "var(--zs-accent-ink)" }}
       >
         <Card.Media side="fill">
-          <MediaPlaceholder label="side=fill (decorative)" />
+          <MediaPlaceholder label="side=fill (decorative)" fill />
         </Card.Media>
         <Card.Header>
           <Card.Title style={{ color: "var(--zs-accent-ink)" }}>
