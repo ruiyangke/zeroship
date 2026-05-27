@@ -27,5 +27,11 @@ thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 mimalloc = { workspace = true }
 
+# Password hashing (Argon2id, PHC strings).
+# Not workspace-pinned — auth is the only consumer today.
+argon2 = "0.5"
+password-hash = "0.5"
+rand = "0.8"
+
 [lints]
 workspace = true
