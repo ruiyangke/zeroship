@@ -11,6 +11,7 @@
 
 pub mod consent;
 pub mod login;
+pub mod oauth_github;
 pub mod oauth_google;
 pub mod oauth_stash;
 pub mod signup;

@@ -24,7 +24,14 @@ const STATIC_CSS: &str = include_str!("../static/style.css");
 /// `google_enabled` gates the `/oauth/google/*` routes — when Google
 /// `OAuth` credentials are not configured we don't register dead routes
 /// that would return runtime "missing `JwksCache` state" errors.
-pub fn configure(google_enabled: bool) -> impl Fn(&mut web::ServiceConfig) {
+/// `github_enabled` gates `/oauth/github/*` the same way; GitHub has no
+/// `JwksCache` (it's OAuth 2.0, not OIDC), but the predicate keeps the
+/// route table small and makes "no upstream creds → no upstream route"
+/// uniform across providers.
+pub fn configure(
+    google_enabled: bool,
+    github_enabled: bool,
+) -> impl Fn(&mut web::ServiceConfig) {
     move |cfg: &mut web::ServiceConfig| {
         cfg.service(healthz)
             .service(readyz)
@@ -39,9 +46,7 @@ pub fn configure(google_enabled: bool) -> impl Fn(&mut web::ServiceConfig) {
                     .route(web::get().to(ui::signup::get))
                     .route(web::post().to(ui::signup::post)),
             )
-            .service(
-                web::resource("/consent").route(web::get().to(ui::consent::get)),
-            );
+            .service(web::resource("/consent").route(web::get().to(ui::consent::get)));
 
         if google_enabled {
             cfg.service(
@@ -51,6 +56,17 @@ pub fn configure(google_enabled: bool) -> impl Fn(&mut web::ServiceConfig) {
             .service(
                 web::resource("/oauth/google/callback")
                     .route(web::get().to(ui::oauth_google::callback)),
+            );
+        }
+
+        if github_enabled {
+            cfg.service(
+                web::resource("/oauth/github/start")
+                    .route(web::get().to(ui::oauth_github::start)),
+            )
+            .service(
+                web::resource("/oauth/github/callback")
+                    .route(web::get().to(ui::oauth_github::callback)),
             );
         }
     }
@@ -106,9 +122,10 @@ pub async fn run(
     google_jwks: Option<Arc<JwksCache>>,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
+    let google_enabled = google_jwks.is_some();
+    let github_enabled = cfg.github_client_id.is_some();
     let cfg = Arc::new(cfg);
     let db = Arc::new(db);
-    let google_enabled = google_jwks.is_some();
 
     web::server(async move || {
         let mut app = web::App::new()
@@ -119,7 +136,7 @@ pub async fn run(
         if let Some(jwks) = google_jwks.clone() {
             app = app.state(jwks);
         }
-        app.configure(configure(google_enabled))
+        app.configure(configure(google_enabled, github_enabled))
     })
     .bind(&addr)?
     .run()

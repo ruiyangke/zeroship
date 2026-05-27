@@ -124,7 +124,7 @@ async fn e2e_password_flow() {
                 .state(cfg_state)
                 .state(db_state)
                 .middleware(SecurityHeaders)
-                .configure(server::configure(false))
+                .configure(server::configure(false, false))
         }
     })
     .await;

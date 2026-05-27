@@ -90,32 +90,44 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 /// enough that abandoned dances expire on their own.
 pub const GOOGLE_STASH_COOKIE: &str = "__Host-zsidp_google_stash";
 
+/// GitHub federation stash cookie.
+///
+/// Same wire format and lifetime as the Google stash; a separate cookie
+/// name so concurrent dances (a user who triggered both providers via
+/// different tabs) don't clobber each other.
+pub const GITHUB_STASH_COOKIE: &str = "__Host-zsidp_github_stash";
+
 /// 10-minute window for the OAuth dance to complete.
 pub const STASH_MAX_AGE_SECS: i64 = 600;
 
-/// Build the `Set-Cookie` header for the Google stash. `insecure_dev`
-/// drops `Secure` (localhost-only override).
+/// Build a `Set-Cookie` header for a stash cookie with the given name.
+/// `insecure_dev` drops `Secure` (localhost-only override).
+///
+/// The cookie is `HttpOnly; SameSite=Lax; Path=/`. `__Host-` prefix
+/// (used by both [`GOOGLE_STASH_COOKIE`] and [`GITHUB_STASH_COOKIE`])
+/// additionally forces `Secure` + `Path=/` + no `Domain` at the browser
+/// level — defence in depth against subdomain-cookie attacks.
 #[must_use]
-pub fn set_google_stash_cookie(value: &str, insecure_dev: bool) -> String {
+pub fn set_stash_cookie(name: &str, value: &str, insecure_dev: bool) -> String {
     let secure = if insecure_dev { "" } else { "; Secure" };
     format!(
-        "{GOOGLE_STASH_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={STASH_MAX_AGE_SECS}"
+        "{name}={value}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={STASH_MAX_AGE_SECS}"
     )
 }
 
-/// Clear the Google stash cookie (set on the callback response so the
+/// Clear the named stash cookie (set on the callback response so the
 /// short-lived stash doesn't linger).
 #[must_use]
-pub fn clear_google_stash_cookie(insecure_dev: bool) -> String {
+pub fn clear_stash_cookie(name: &str, insecure_dev: bool) -> String {
     let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{GOOGLE_STASH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+    format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
 }
 
-/// Extract the raw stash blob from a `Cookie` header. Returns the
+/// Extract the named stash blob from a `Cookie` header. Returns the
 /// signed string verbatim — pass to [`OAuthStash::decode`] to verify.
 #[must_use]
-pub fn parse_google_stash_cookie(cookie_header: &str) -> Option<String> {
-    let prefix = format!("{GOOGLE_STASH_COOKIE}=");
+pub fn parse_stash_cookie(cookie_header: &str, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&prefix) {
@@ -177,7 +189,7 @@ mod tests {
 
     #[test]
     fn google_set_cookie_has_secure_in_prod() {
-        let c = set_google_stash_cookie("payload.signed", false);
+        let c = set_stash_cookie(GOOGLE_STASH_COOKIE, "payload.signed", false);
         assert!(c.starts_with("__Host-zsidp_google_stash=payload.signed"));
         assert!(c.contains("Path=/"));
         assert!(c.contains("HttpOnly"));
@@ -188,23 +200,49 @@ mod tests {
 
     #[test]
     fn google_set_cookie_drops_secure_in_dev() {
-        let c = set_google_stash_cookie("v", true);
+        let c = set_stash_cookie(GOOGLE_STASH_COOKIE, "v", true);
         assert!(!c.contains("Secure"));
     }
 
     #[test]
     fn google_clear_cookie_zero_max_age() {
-        let c = clear_google_stash_cookie(false);
+        let c = clear_stash_cookie(GOOGLE_STASH_COOKIE, false);
         assert!(c.contains("Max-Age=0"));
         assert!(c.contains("Secure"));
-        let dev = clear_google_stash_cookie(true);
+        let dev = clear_stash_cookie(GOOGLE_STASH_COOKIE, true);
         assert!(!dev.contains("Secure"));
     }
 
     #[test]
     fn google_parse_cookie_roundtrips() {
         let header = "foo=bar; __Host-zsidp_google_stash=abc.def; baz=qux";
-        assert_eq!(parse_google_stash_cookie(header), Some("abc.def".into()));
-        assert_eq!(parse_google_stash_cookie("nothing"), None);
+        assert_eq!(
+            parse_stash_cookie(header, GOOGLE_STASH_COOKIE),
+            Some("abc.def".into())
+        );
+        assert_eq!(parse_stash_cookie("nothing", GOOGLE_STASH_COOKIE), None);
+    }
+
+    #[test]
+    fn github_cookie_name_is_distinct() {
+        // Concurrent dances must not collide on cookie storage.
+        assert_ne!(GOOGLE_STASH_COOKIE, GITHUB_STASH_COOKIE);
+        let g = set_stash_cookie(GOOGLE_STASH_COOKIE, "v", false);
+        let h = set_stash_cookie(GITHUB_STASH_COOKIE, "v", false);
+        assert!(g.starts_with("__Host-zsidp_google_stash="));
+        assert!(h.starts_with("__Host-zsidp_github_stash="));
+    }
+
+    #[test]
+    fn github_parse_cookie_isolated_from_google() {
+        let header = "__Host-zsidp_github_stash=gh.payload; __Host-zsidp_google_stash=go.payload";
+        assert_eq!(
+            parse_stash_cookie(header, GITHUB_STASH_COOKIE),
+            Some("gh.payload".into())
+        );
+        assert_eq!(
+            parse_stash_cookie(header, GOOGLE_STASH_COOKIE),
+            Some("go.payload".into())
+        );
     }
 }

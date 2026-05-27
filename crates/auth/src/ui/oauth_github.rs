@@ -1,23 +1,24 @@
-//! `/oauth/google/start` + `/oauth/google/callback` — Google OIDC federation.
+//! `/oauth/github/start` + `/oauth/github/callback` — GitHub OAuth 2.0
+//! federation.
 //!
-//! Flow:
+//! Mirrors `oauth_google` except for the OIDC-specific bits:
 //!
-//!   1. **start** — `?login_challenge=…` arrives on the auth server. We
-//!      generate PKCE+state+nonce via [`identity::oauth::google`], stash
-//!      them (plus the `login_challenge`) in a signed cookie, and 302 to
-//!      `accounts.google.com/o/oauth2/v2/auth`.
-//!   2. **callback** — `?code=…&state=…` arrives back. We re-read the
-//!      stash, verify state, exchange the code for an ID token, verify
-//!      that against Google's JWKS, resolve / create the local user via
-//!      [`identity::linker`], create an `auth.sessions` row, and finally
-//!      call hydra's `accept_login` to hand control back to the OIDC
-//!      pipeline. The `IdP` session cookie is dropped on the same
-//!      response so subsequent SSO requests skip the login form.
+//!   - **No `nonce`** — GitHub is OAuth 2.0, not OIDC. There's no
+//!     ID token to bind a nonce against, so the stash field carries an
+//!     empty string.
+//!   - **No `JwksCache`** — `github::complete_callback` doesn't verify
+//!     any JWT signature; it fetches `/user` + `/user/emails` against
+//!     GitHub's REST API using the access token.
+//!   - **Provider trust** — `provider_trusted_for_email` is always
+//!     `true` because the email-picker in
+//!     [`crate::identity::oauth::github`] only returns a `primary &&
+//!     verified` address. There is no Workspace-domain analogue;
+//!     GitHub's signal IS the verified flag on the email row.
+//!   - **Cookie name** — `__Host-zsidp_github_stash` so a concurrent
+//!     Google dance in another tab doesn't clobber it.
 //!
-//! Route gating: the auth server only registers these routes when
-//! `cfg.google_client_id.is_some()` (see [`crate::server::configure`]).
-//! The `Arc<JwksCache>` state is registered under the same predicate, so
-//! handlers always find it present at request time.
+//! Route gating: registered only when `cfg.github_client_id.is_some()`
+//! (see [`crate::server::configure`]).
 
 use std::sync::Arc;
 
@@ -26,23 +27,22 @@ use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
-use zeroship_core::oidc_verify::JwksCache;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
 use crate::identity::linker::{self, LinkOutcome, ResolvedProfile};
-use crate::identity::oauth::google::{self, GoogleIdentity};
+use crate::identity::oauth::github::{self, GitHubIdentity};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::oauth_stash::{
-    clear_stash_cookie, parse_stash_cookie, set_stash_cookie, OAuthStash, GOOGLE_STASH_COOKIE,
+    clear_stash_cookie, parse_stash_cookie, set_stash_cookie, OAuthStash, GITHUB_STASH_COOKIE,
 };
 use crate::ui::ErrorPage;
 
-const PROVIDER: &str = "google";
-const ACR_GOOGLE: &str = "urn:zeroship:google";
+const PROVIDER: &str = "github";
+const ACR_GITHUB: &str = "urn:zeroship:github";
 
 #[derive(Debug, Deserialize)]
 pub struct StartQuery {
@@ -53,38 +53,39 @@ pub struct StartQuery {
 pub struct CallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
-    /// `error`/`error_description` are set when Google rejects the
-    /// request (e.g. user-cancelled consent). We surface a friendly
-    /// page instead of trying to exchange a non-existent code.
+    /// `error`/`error_description` are set when GitHub rejects the
+    /// request (e.g. user-cancelled the OAuth app authorisation). We
+    /// surface a friendly page instead of trying to exchange a
+    /// non-existent code.
     pub error: Option<String>,
     pub error_description: Option<String>,
 }
 
-// ─── /oauth/google/start ─────────────────────────────────────────────────
+// ─── /oauth/github/start ─────────────────────────────────────────────────
 
-/// Begin the Google OAuth dance.
+/// Begin the GitHub OAuth dance.
 ///
-/// ntex's per-thread service futures are intentionally `!Send` (their
-/// internal state uses `Rc`s), so handler functions can't be `Send` — the
-/// `#[allow(clippy::future_not_send)]` here is structural, matching the
-/// rest of the auth `ui::*` handlers.
+/// `!Send` for the same structural reason `oauth_google::start` is:
+/// ntex's per-thread service futures hold `Rc`-backed state.
 #[allow(clippy::future_not_send)]
 pub async fn start(
     query: ntex::web::types::Query<StartQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let auth_start = match google::start_authorize_url(&cfg) {
+    let auth_start = match github::start_authorize_url(&cfg) {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "google start_authorize_url failed");
-            return render_error("google sign-in unavailable", Some(&e.to_string()));
+            tracing::error!(error = %e, "github start_authorize_url failed");
+            return render_error("github sign-in unavailable", Some(&e.to_string()));
         }
     };
 
     let stash = OAuthStash {
         state: auth_start.state.clone(),
         verifier: auth_start.verifier,
-        nonce: auth_start.nonce.clone(),
+        // GitHub is OAuth 2.0 — no nonce. We carry an empty string
+        // through the stash so the shared payload shape is unchanged.
+        nonce: String::new(),
         login_challenge: query.login_challenge.clone(),
     };
     let cookie_value = stash.encode(cfg.stash_signing_key.as_bytes());
@@ -92,20 +93,19 @@ pub async fn start(
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,
-        HeaderValue::from_str(&auth_start.url)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
+        HeaderValue::from_str(&auth_start.url).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
     resp.header(
         SET_COOKIE,
-        set_stash_cookie(GOOGLE_STASH_COOKIE, &cookie_value, cfg.insecure_dev),
+        set_stash_cookie(GITHUB_STASH_COOKIE, &cookie_value, cfg.insecure_dev),
     );
     resp.finish()
 }
 
-// ─── /oauth/google/callback ──────────────────────────────────────────────
+// ─── /oauth/github/callback ──────────────────────────────────────────────
 
-/// Finish the Google OAuth dance — verify state, exchange code, link, then
-/// hand off to hydra.
+/// Finish the GitHub OAuth dance — verify state, exchange code, fetch
+/// profile + emails, link, then hand off to hydra.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::future_not_send)]
 pub async fn callback(
@@ -114,17 +114,13 @@ pub async fn callback(
     admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
-    jwks: ntex::web::types::State<Arc<JwksCache>>,
 ) -> HttpResponse {
-    // Read + verify stash cookie. We need this even on the upstream-error
-    // path so we can report which login_challenge failed (and clear the
-    // cookie).
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let Some(stash_blob) = parse_stash_cookie(cookie_header, GOOGLE_STASH_COOKIE) else {
+    let Some(stash_blob) = parse_stash_cookie(cookie_header, GITHUB_STASH_COOKIE) else {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
@@ -153,9 +149,7 @@ pub async fn callback(
         return render_error_clearing("invalid request", Some("stash invalid"), &cfg);
     };
 
-    // Upstream rejection path — Google returned `?error=...` (e.g. user
-    // declined). Surface the upstream description verbatim; no need to
-    // try the code exchange.
+    // Upstream rejection path — GitHub returned `?error=...`.
     if let Some(err) = query.error.as_deref() {
         audit::emit(
             db.as_ref(),
@@ -173,7 +167,7 @@ pub async fn callback(
         )
         .await;
         return render_error_clearing(
-            "google sign-in cancelled",
+            "github sign-in cancelled",
             query.error_description.as_deref(),
             &cfg,
         );
@@ -202,40 +196,37 @@ pub async fn callback(
         return render_error_clearing("invalid request", Some("state mismatch"), &cfg);
     }
 
-    // Token exchange + ID-token verify.
-    let id = match google::complete_callback(
-        &cfg,
-        code,
-        &stash.verifier,
-        &stash.nonce,
-        jwks.as_ref(),
-    )
-    .await
-    {
+    // Token exchange + /user + /user/emails.
+    let id = match github::complete_callback(&cfg, code, &stash.verifier).await {
         Ok(id) => id,
         Err(e) => {
-            tracing::warn!(error = %e, "google complete_callback failed");
+            tracing::warn!(error = %e, "github complete_callback failed");
+            // The picker-failure error string is distinctive; surface a
+            // more specific audit reason so dashboards can split
+            // "verified-email" issues from generic upstream failures.
+            let reason = if e.to_string().contains("primary + verified email") {
+                "email_picker_failed"
+            } else {
+                "upstream_error"
+            };
             audit::emit(
                 db.as_ref(),
                 &AuditEvent {
                     event_type: "oauth_callback_failure",
                     outcome: "failure",
                     auth_method: Some(PROVIDER),
-                    detail: json!({ "reason": "verify_failed", "error": e.to_string() }),
+                    detail: json!({ "reason": reason, "error": e.to_string() }),
                     ..Default::default()
                 },
             )
             .await;
-            return render_error_clearing("google sign-in failed", Some(&e.to_string()), &cfg);
+            return render_error_clearing("github sign-in failed", Some(&e.to_string()), &cfg);
         }
     };
 
-    // Build the ResolvedProfile. We trust Google for email verification
-    // when the email_verified claim is true AND either the address is a
-    // consumer `@gmail.com` (Google operates that domain end-to-end) or
-    // the `hd` claim is set (Workspace-controlled domain). For any other
-    // domain we still accept the email but require the unverified-auto-
-    // create gate in the linker to refuse fresh-account creation.
+    // Build the ResolvedProfile. The github picker guarantees
+    // `chosen.verified == true`, so both `email_verified` and
+    // `provider_trusted_for_email` are unconditionally true here.
     let raw_profile = serde_json::to_value(&id).ok();
     let profile = build_resolved_profile(&id, raw_profile.as_ref());
 
@@ -267,15 +258,14 @@ pub async fn callback(
         tracing::warn!(error = %e, user_id = %user_id, "touch_last_login failed");
     }
 
-    // IdP session row at auth.zeroship.ai. Same lifetime + amr/acr shape
-    // the password flow uses, just with the OAuth method tag.
+    // IdP session row at auth.zeroship.ai.
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
             user_id,
             auth_method: PROVIDER,
             amr: vec!["oauth".into()],
-            acr: Some(ACR_GOOGLE),
+            acr: Some(ACR_GITHUB),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },
@@ -294,7 +284,7 @@ pub async fn callback(
         subject: user_id.to_string(),
         remember: Some(true),
         remember_for: Some(3600),
-        acr: Some(ACR_GOOGLE.into()),
+        acr: Some(ACR_GITHUB.into()),
         amr: Some(vec!["oauth".into()]),
         ..Default::default()
     };
@@ -315,8 +305,8 @@ pub async fn callback(
             auth_method: Some(PROVIDER),
             detail: json!({
                 "subject": id.subject,
+                "login": id.login,
                 "created": matches!(outcome, LinkOutcome::Created { .. }),
-                "hd": id.hd,
             }),
             ..Default::default()
         },
@@ -326,39 +316,38 @@ pub async fn callback(
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,
-        HeaderValue::from_str(&redirect_to)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
+        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
-    // Drop the IdP session cookie + clear the now-spent stash on the same
-    // response. ntex's `header()` appends, so two SET_COOKIE values both
-    // make it onto the wire.
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
     resp.header(
         SET_COOKIE,
-        clear_stash_cookie(GOOGLE_STASH_COOKIE, cfg.insecure_dev),
+        clear_stash_cookie(GITHUB_STASH_COOKIE, cfg.insecure_dev),
     );
     resp.finish()
 }
 
-/// Build a [`ResolvedProfile`] from the Google identity. Borrows from `id`
-/// for `&str` fields so we don't have to clone strings into the profile.
+/// Build a [`ResolvedProfile`] from the GitHub identity.
+///
+/// Because the [`github::complete_callback`] picker only ever returns a
+/// `primary && verified && !noreply` address, the email is always
+/// considered verified, and the provider is always trusted for the
+/// email (the picker already enforced GitHub's verified flag — there
+/// is no additional Workspace-domain analogue).
 fn build_resolved_profile<'a>(
-    id: &'a GoogleIdentity,
+    id: &'a GitHubIdentity,
     raw_profile: Option<&serde_json::Value>,
 ) -> ResolvedProfile<'a> {
-    let provider_trusted_for_email = id.email_verified
-        && (id.email.ends_with("@gmail.com") || id.hd.is_some());
     ResolvedProfile {
         provider: PROVIDER,
         subject: &id.subject,
         email: &id.email,
-        email_verified: id.email_verified,
-        name: id.name.as_deref(),
-        avatar_url: id.picture.as_deref(),
-        provider_trusted_for_email,
+        email_verified: true,
+        name: id.name.as_deref().or(Some(&id.login)),
+        avatar_url: id.avatar_url.as_deref(),
+        provider_trusted_for_email: true,
         raw_profile: raw_profile.cloned(),
     }
 }
@@ -376,9 +365,9 @@ fn render_error(error: &str, error_description: Option<&str>) -> HttpResponse {
     resp.body(body)
 }
 
-/// Same as [`render_error`] but also clears the stash cookie. Use on the
-/// callback path so an aborted dance doesn't leave a stale stash on the
-/// browser.
+/// Same as [`render_error`] but also clears the stash cookie. Use on
+/// the callback path so an aborted dance doesn't leave a stale stash
+/// on the browser.
 fn render_error_clearing(
     error: &str,
     error_description: Option<&str>,
@@ -395,7 +384,7 @@ fn render_error_clearing(
     resp.content_type("text/html; charset=utf-8");
     resp.header(
         SET_COOKIE,
-        clear_stash_cookie(GOOGLE_STASH_COOKIE, cfg.insecure_dev),
+        clear_stash_cookie(GITHUB_STASH_COOKIE, cfg.insecure_dev),
     );
     resp.body(body)
 }
@@ -404,45 +393,35 @@ fn render_error_clearing(
 mod tests {
     use super::*;
 
-    fn id(email: &str, hd: Option<&str>, verified: bool) -> GoogleIdentity {
-        GoogleIdentity {
-            subject: "sub-1".into(),
+    fn id(email: &str, name: Option<&str>) -> GitHubIdentity {
+        GitHubIdentity {
+            subject: "12345".into(),
+            login: "alice".into(),
             email: email.into(),
-            email_verified: verified,
-            name: Some("Ada".into()),
-            picture: Some("https://lh3/x".into()),
-            hd: hd.map(String::from),
+            name: name.map(String::from),
+            avatar_url: Some("https://avatars/x".into()),
         }
     }
 
     #[test]
-    fn provider_trusted_for_consumer_gmail() {
-        let g = id("a@gmail.com", None, true);
+    fn always_trusted_because_picker_enforces_verified() {
+        let g = id("alice@example.com", Some("Alice"));
         let p = build_resolved_profile(&g, None);
         assert!(p.provider_trusted_for_email);
+        assert!(p.email_verified);
+        assert_eq!(p.provider, "github");
+        assert_eq!(p.subject, "12345");
+        assert_eq!(p.email, "alice@example.com");
+        assert_eq!(p.name, Some("Alice"));
     }
 
     #[test]
-    fn provider_trusted_for_workspace_hd() {
-        let g = id("a@example.com", Some("example.com"), true);
+    fn name_falls_back_to_login_when_absent() {
+        // GitHub `/user` returns `name: null` when the user hasn't set
+        // a display name. We carry the login as a sensible default so
+        // `auth.users.name` never lands as an empty string.
+        let g = id("alice@example.com", None);
         let p = build_resolved_profile(&g, None);
-        assert!(p.provider_trusted_for_email);
-    }
-
-    #[test]
-    fn provider_not_trusted_for_unverified_email() {
-        // Even on @gmail.com we don't trust unverified email — Google
-        // shouldn't issue email_verified=false on its own domain, but
-        // the policy is "verified == precondition".
-        let g = id("a@gmail.com", None, false);
-        let p = build_resolved_profile(&g, None);
-        assert!(!p.provider_trusted_for_email);
-    }
-
-    #[test]
-    fn provider_not_trusted_for_arbitrary_domain_without_hd() {
-        let g = id("a@example.com", None, true);
-        let p = build_resolved_profile(&g, None);
-        assert!(!p.provider_trusted_for_email);
+        assert_eq!(p.name, Some("alice"));
     }
 }

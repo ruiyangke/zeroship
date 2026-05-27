@@ -306,7 +306,7 @@ impl Fixture {
                     .state(cfg_state)
                     .state(db_state)
                     .middleware(SecurityHeaders)
-                    .configure(server::configure(false))
+                    .configure(server::configure(false, false))
             }
         })
         .await;
