@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useRef, useState } from "react";
 import { Button, Field, Form, type FormActions, Input } from "../components";
 
@@ -61,6 +62,16 @@ export const BasicSubmit: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const email = canvas.getByRole("textbox", { name: /email/i });
+    await userEvent.clear(email);
+    await userEvent.type(email, "updated@example.com");
+    await userEvent.click(canvas.getByRole("button", { name: /^submit$/i }));
+    await expect(
+      canvas.getByText("submitted: email=updated@example.com"),
+    ).toBeInTheDocument();
+  },
 };
 
 /* ─── 2. With server-side validation errors ───────────────────────── */
@@ -109,6 +120,16 @@ export const WithValidation: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const email = canvas.getByRole("textbox", { name: /email/i });
+    await expect(email).not.toHaveAttribute("aria-invalid", "true");
+    await userEvent.click(canvas.getByRole("button", { name: /^submit$/i }));
+    await waitFor(() => expect(email).toHaveAttribute("aria-invalid", "true"));
+    await expect(
+      canvas.getByText("That email is already in use."),
+    ).toBeInTheDocument();
+  },
 };
 
 /* ─── 3. Validation modes ─────────────────────────────────────────── */
@@ -152,6 +173,23 @@ export const ValidationModes: Story = {
       ))}
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const emailInputs = canvas.getAllByRole("textbox", { name: /email/i });
+    const submitButtons = canvas.getAllByRole("button", { name: /^submit$/i });
+
+    await userEvent.click(submitButtons[0]);
+    await waitFor(() =>
+      expect(emailInputs[0]).toHaveAttribute("aria-invalid", "true"),
+    );
+    await expect(canvas.getByText("Email is required.")).toBeInTheDocument();
+
+    await userEvent.type(emailInputs[2], "not-an-email");
+    await waitFor(() =>
+      expect(emailInputs[2]).toHaveAttribute("aria-invalid", "true"),
+    );
+    await expect(canvas.getByText("Enter a valid email.")).toBeInTheDocument();
+  },
 };
 
 /* ─── 4. Variants — default and card ──────────────────────────────── */
@@ -245,6 +283,19 @@ export const WithFields: Story = {
       </Button>
     </Form>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const fullName = canvas.getByRole("textbox", { name: /full name/i });
+    const email = canvas.getByRole("textbox", { name: /^email/i });
+
+    await userEvent.click(canvas.getByRole("button", { name: /sign up/i }));
+    await waitFor(() =>
+      expect(fullName).toHaveAttribute("aria-invalid", "true"),
+    );
+    await expect(email).toHaveAttribute("aria-invalid", "true");
+    await expect(canvas.getByText("Name is required.")).toBeInTheDocument();
+    await expect(canvas.getByText("Email is required.")).toBeInTheDocument();
+  },
 };
 
 /* ─── 6. actionsRef.validate() ────────────────────────────────────── */
@@ -304,6 +355,16 @@ export const ActionsRefValidate: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const email = canvas.getByRole("textbox", { name: /email \(required\)/i });
+    await userEvent.click(canvas.getByRole("button", { name: /validate now/i }));
+    await waitFor(() =>
+      expect(email).toHaveAttribute("aria-invalid", "true"),
+    );
+    await expect(canvas.getByText("validate() called")).toBeInTheDocument();
+    await expect(canvas.getByText("Email is required.")).toBeInTheDocument();
+  },
 };
 
 /* ─── 7. Disabled — every control disabled via Field cascade ──────── */
@@ -339,6 +400,18 @@ export const Disabled: Story = {
       </Button>
     </Form>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const email = canvas.getByRole("textbox", { name: /^email$/i });
+    const password = canvas.getByLabelText(/password/i);
+    const submit = canvas.getByRole("button", { name: /submit \(disabled\)/i });
+
+    await expect(email).toBeDisabled();
+    await expect(password).toBeDisabled();
+    await expect(submit).toBeDisabled();
+    await userEvent.click(submit);
+    await expect(submit).not.toHaveFocus();
+  },
 };
 
 /* ─── 8. RTL ──────────────────────────────────────────────────────── */

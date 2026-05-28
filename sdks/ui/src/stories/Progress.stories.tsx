@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, within } from "@storybook/test";
 import { Progress } from "../components";
 
 const meta: Meta<typeof Progress> = {
@@ -36,6 +37,17 @@ export const Determinate: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const progress = canvas.getByRole("progressbar", {
+      name: /upload progress/i,
+    });
+
+    await expect(progress).toHaveAttribute("aria-valuemin", "0");
+    await expect(progress).toHaveAttribute("aria-valuemax", "100");
+    await expect(progress).toHaveAttribute("aria-valuenow", "42");
+    await expect(progress).toHaveAttribute("data-status", "progressing");
+  },
 };
 
 /* ─── 2. Indeterminate — value=null ────────────────────────────────── */
@@ -63,6 +75,14 @@ export const Indeterminate: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const progress = canvas.getByRole("progressbar", { name: /loading/i });
+
+    await expect(progress).not.toHaveAttribute("aria-valuenow");
+    await expect(progress).toHaveAttribute("aria-valuetext", "Loading");
+    await expect(progress).toHaveAttribute("data-status", "indeterminate");
+  },
 };
 
 /* ─── 3. AllSizes — sm / md / lg ───────────────────────────────────── */
@@ -104,6 +124,15 @@ export const AllSizes: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const progress = canvas.getByRole("progressbar", {
+      name: /download progress/i,
+    });
+
+    await expect(progress).toHaveAttribute("aria-valuenow", "68");
+    await expect(canvas.getByText("68%")).toBeInTheDocument();
+  },
 };
 
 /* ─── 4. WithValue — percentage label ──────────────────────────────── */
@@ -132,6 +161,14 @@ export const WithValue: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const progress = canvas.getByRole("progressbar", { name: /backup/i });
+
+    await expect(progress).toHaveAttribute("aria-valuenow", "100");
+    await expect(progress).toHaveAttribute("data-status", "complete");
+    await expect(canvas.getByText("100%")).toBeInTheDocument();
+  },
 };
 
 /* ─── 5. CompletionCelebrate — value === max ───────────────────────── */
@@ -159,6 +196,66 @@ export const CompletionCelebrate: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const progress = canvas.getByRole("progressbar", {
+      name: /uploading photo\.jpg/i,
+    });
+
+    await expect(progress).toHaveAttribute("aria-valuenow", "33");
+    await expect(canvas.getByText("33%")).toBeInTheDocument();
+  },
+};
+
+/* ─── 8. External aria labelling ───────────────────────────────────── */
+export const ExternalAriaLabelling: Story = {
+  name: "External aria labelling",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "External aria-labelledby, aria-describedby, and aria-valuetext " +
+          "forward to the progress root without clobbering determinate " +
+          "value semantics.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Progress external aria">
+      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+        <span id="progress-import-label" className="zs-story-label">
+          Import progress
+        </span>
+        <span id="progress-import-description" style={{ fontSize: "0.8125rem" }}>
+          Rows copied into the workspace.
+        </span>
+        <Progress
+          value={7}
+          max={10}
+          showValue
+          aria-labelledby="progress-import-label"
+          aria-describedby="progress-import-description"
+          aria-valuetext="Seven of ten rows imported"
+        />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const progress = canvas.getByRole("progressbar", {
+      name: /import progress/i,
+    });
+
+    await expect(progress).toHaveAttribute("aria-valuenow", "7");
+    await expect(progress).toHaveAttribute(
+      "aria-valuetext",
+      "Seven of ten rows imported",
+    );
+    await expect(progress).toHaveAttribute(
+      "aria-describedby",
+      "progress-import-description",
+    );
+  },
 };
 
 /* ─── 6. WithLabel — label + showValue ─────────────────────────────── */

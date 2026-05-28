@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useEffect, useRef, type CSSProperties } from "react";
 import { Form } from "@base-ui/react/form";
 import { Field, OtpField } from "../components";
@@ -55,6 +56,20 @@ export const Basic: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const cells = canvas.getAllByRole("textbox");
+
+    await expect(cells).toHaveLength(6);
+    await userEvent.click(cells[0]);
+    await userEvent.type(cells[0], "123456");
+    for (const [index, cell] of cells.entries()) {
+      await expect(cell).toHaveValue(String(index + 1));
+    }
+    await expect(cells[5]).toHaveFocus();
+    await userEvent.keyboard("{Backspace}");
+    await expect(cells[5]).toHaveValue("");
+  },
 };
 
 /* ─── 2. CustomLength — 4-digit PIN ────────────────────────────────── */
@@ -80,6 +95,18 @@ export const CustomLength: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const cells = canvas.getAllByRole("textbox");
+
+    await expect(cells).toHaveLength(4);
+    await userEvent.click(cells[0]);
+    await userEvent.paste("98765");
+    await expect(cells[0]).toHaveValue("9");
+    await expect(cells[1]).toHaveValue("8");
+    await expect(cells[2]).toHaveValue("7");
+    await expect(cells[3]).toHaveValue("6");
+  },
 };
 
 /* ─── 3. AllSizes — sm / md / lg ───────────────────────────────────── */
@@ -115,6 +142,18 @@ export const AllSizes: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const firstCell = canvas.getAllByRole("textbox")[0];
+    await userEvent.click(firstCell);
+    await userEvent.type(firstCell, "123456");
+    await waitFor(() =>
+      expect(firstCell.closest(".zs-otp-field")).toHaveAttribute(
+        "data-complete",
+        "",
+      ),
+    );
+  },
 };
 
 /* ─── 4. AllVariants — default / outline ───────────────────────────── */
@@ -236,6 +275,16 @@ export const RequiredInvalid: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const firstCell = canvas.getAllByRole("textbox")[0];
+    await waitFor(() =>
+      expect(firstCell).toHaveAttribute("aria-invalid", "true"),
+    );
+    await expect(
+      canvas.getByText("Enter your verification code."),
+    ).toBeInTheDocument();
+  },
 };
 
 /* ─── 7. Disabled ──────────────────────────────────────────────────── */
@@ -255,9 +304,86 @@ export const Disabled: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const cells = canvas.getAllByRole("textbox");
+
+    for (const cell of cells) {
+      await expect(cell).toBeDisabled();
+    }
+    await userEvent.click(cells[0]);
+    await expect(cells[0]).not.toHaveFocus();
+  },
 };
 
-/* ─── 8. RTL ──────────────────────────────────────────────────────── */
+/* ─── 8. Standalone aria paths ─────────────────────────────────────── */
+export const StandaloneAriaPaths: Story = {
+  name: "Standalone aria paths",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Bare OtpField rows without Field context. One relies on the " +
+          "built-in hidden label fallback, one forwards aria-label plus " +
+          "aria-describedby, and one forwards aria-labelledby.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Standalone OTP aria paths"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
+    >
+      <div className="zs-story-cell">
+        <span className="zs-story-label">Hidden-label fallback</span>
+        <OtpField length={3} />
+      </div>
+      <div className="zs-story-cell">
+        <span id="otp-explicit-description" className="zs-story-label">
+          Backup code is three digits.
+        </span>
+        <OtpField
+          length={3}
+          aria-label="Backup code"
+          aria-describedby="otp-explicit-description"
+        />
+      </div>
+      <div className="zs-story-cell">
+        <span id="otp-labelledby" className="zs-story-label">
+          Recovery code
+        </span>
+        <OtpField length={3} aria-labelledby="otp-labelledby" />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const cells = canvas.getAllByRole("textbox");
+
+    await expect(cells).toHaveLength(9);
+    await userEvent.click(cells[0]);
+    await userEvent.type(cells[0], "135");
+    await expect(cells[0]).toHaveValue("1");
+    await expect(cells[1]).toHaveValue("3");
+    await expect(cells[2]).toHaveValue("5");
+
+    await userEvent.click(cells[3]);
+    await userEvent.type(cells[3], "246");
+    await expect(cells[3]).toHaveValue("2");
+    await expect(cells[4]).toHaveValue("4");
+    await expect(cells[5]).toHaveValue("6");
+
+    await userEvent.click(cells[6]);
+    await userEvent.type(cells[6], "789");
+    await expect(cells[6]).toHaveValue("7");
+    await expect(cells[7]).toHaveValue("8");
+    await expect(cells[8]).toHaveValue("9");
+  },
+};
+
+/* ─── 9. RTL ──────────────────────────────────────────────────────── */
 export const RTL: Story = {
   name: "RTL",
   parameters: {
@@ -285,4 +411,3 @@ export const RTL: Story = {
     </div>
   ),
 };
-
