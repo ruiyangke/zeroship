@@ -1,2 +1,6 @@
-export { Fieldset } from "./Fieldset";
-export type { FieldsetProps, FieldsetSize } from "./Fieldset";
+export { Fieldset, useFieldsetDisabledContext } from "./Fieldset";
+export type {
+  FieldsetLegendProps,
+  FieldsetProps,
+  FieldsetSize,
+} from "./Fieldset";

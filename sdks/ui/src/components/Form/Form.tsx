@@ -65,8 +65,17 @@ export type FormVariant = "default" | "card";
 
 type BaseFormElementProps = ComponentPropsWithRef<typeof BaseForm>;
 
+/**
+ * Imperative actions handle for `<Form actionsRef={…}>`. Re-exported
+ * from Base UI's `<Form.Actions>` so consumers can write
+ * `useRef<FormActions>(null)` against it without importing the Base UI
+ * type directly. Same shape, different name — keeps the public surface
+ * scoped to `@zeroship/ui`.
+ */
+export type FormActions = BaseForm.Actions;
+
 export interface FormProps<
-  FormValues extends Record<string, unknown> = Record<string, unknown>,
+  FormValues extends object = Record<string, unknown>,
 > extends Omit<
     BaseFormElementProps,
     "render" | "className" | "onFormSubmit"
@@ -94,8 +103,8 @@ export interface FormProps<
    * validate every Field. Useful before kicking off a manual `fetch`
    * outside the submit flow.
    *
-   * Typed via the Base UI form actions shape so consumers can
-   * `useRef<FormActions>(null)` against it directly.
+   * Typed against the `FormActions` re-export so consumers write
+   * `useRef<FormActions>(null)` directly without reaching into Base UI.
    */
   actionsRef?: BaseFormElementProps["actionsRef"];
 
@@ -133,7 +142,7 @@ export interface FormProps<
 }
 
 function FormRoot<
-  FormValues extends Record<string, unknown> = Record<string, unknown>,
+  FormValues extends object = Record<string, unknown>,
 >(
   {
     variant = "default",
@@ -166,7 +175,7 @@ function FormRoot<
 }
 
 type FormComponent = <
-  FormValues extends Record<string, unknown> = Record<string, unknown>,
+  FormValues extends object = Record<string, unknown>,
 >(
   props: FormProps<FormValues> & React.RefAttributes<HTMLFormElement>,
 ) => React.ReactElement | null;

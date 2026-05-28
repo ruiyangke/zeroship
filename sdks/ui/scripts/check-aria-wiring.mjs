@@ -2297,6 +2297,52 @@ await open("components-fieldset--disabled-cascade");
   );
 }
 
+/* ─── 65b. Fieldset disabled cascades to nested Checkbox ───────────── *
+ *
+ * The visible Checkbox chip is a non-native Base UI `<span>` whose
+ * `disabled` is driven by the React prop, NOT by the native
+ * `<fieldset disabled>` cascade. The wave1-slice8 fix added a
+ * `FieldsetDisabledContext` the chip consumes. The aria-wiring
+ * contract: the chip MUST carry Base UI's `data-disabled` attribute
+ * (Base UI emits it whenever the disabled prop is true), AND the
+ * underlying hidden form input MUST also report `.disabled === true`
+ * (native cascade + Base UI's prop propagation both arrive here). */
+{
+  const chip = page.locator('[data-testid="fieldset-disabled-checkbox"]');
+  await chip.waitFor({ state: "visible", timeout: 5000 });
+  const chipDataDisabled = await chip.getAttribute("data-disabled");
+  // The hidden form input is rendered as a sibling/descendant by
+  // Base UI's Checkbox.Root; locate the underlying <input> inside
+  // the wrapping <label> row by name.
+  const hiddenInput = page.locator('input[type="checkbox"][name="newsletter"]');
+  const inputDisabled = await hiddenInput.evaluate((el) => el.disabled);
+  const ok = chipDataDisabled !== null && inputDisabled === true;
+  report(
+    "Fieldset disabled cascades to nested Checkbox (data-disabled chip + hidden input .disabled)",
+    ok,
+    `chipDataDisabled=${chipDataDisabled} inputDisabled=${inputDisabled}`,
+  );
+}
+
+/* ─── 65c. Fieldset disabled cascades to nested Switch ─────────────── *
+ *
+ * Same shape as 65b but for Switch — its visible track is also a
+ * non-native Base UI part. The chip carries `data-disabled` and the
+ * underlying hidden input reports `.disabled === true`. */
+{
+  const track = page.locator('[data-testid="fieldset-disabled-switch"]');
+  await track.waitFor({ state: "visible", timeout: 5000 });
+  const trackDataDisabled = await track.getAttribute("data-disabled");
+  const hiddenInput = page.locator('input[type="checkbox"][name="notifications"]');
+  const inputDisabled = await hiddenInput.evaluate((el) => el.disabled);
+  const ok = trackDataDisabled !== null && inputDisabled === true;
+  report(
+    "Fieldset disabled cascades to nested Switch (data-disabled track + hidden input .disabled)",
+    ok,
+    `trackDataDisabled=${trackDataDisabled} inputDisabled=${inputDisabled}`,
+  );
+}
+
 /* ─── 66. Fieldset.Legend id is referenced by aria-labelledby ──────── *
  *
  * The Base UI Fieldset.Root binds `aria-labelledby` to the Legend's

@@ -64,7 +64,9 @@
  * callbacks. Field / Dialog / Card all share this shape.
  */
 import {
+  createContext,
   forwardRef,
+  useContext,
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
 } from "react";
@@ -87,10 +89,41 @@ export interface FieldsetProps extends Omit<BaseFieldsetRootProps, "render"> {
   className?: string;
 }
 
+/* ─── Fieldset disabled context ───────────────────────────────────── *
+ *
+ * Native `<fieldset disabled>` cascades to descendant native form
+ * controls at the AT + layout layers, but our Checkbox / Switch /
+ * Radio / Toggle visible roots are non-native chrome (`<span>` /
+ * `<button>`-shaped Base UI parts) whose `disabled` is driven by the
+ * React prop, NOT by the native form-control cascade. Without this
+ * context, a `<Fieldset disabled>` would render greyed-out chrome
+ * for `<Input>` (via the underlying disabled native input) but leave
+ * a Checkbox / Switch / Radio / Toggle visibly enabled — even though
+ * the hidden form control underneath gets the native cascade.
+ *
+ * We expose a tiny boolean context the four selection primitives
+ * consume alongside `useFieldDisabledContext()`. The cascade rule
+ * inside each primitive becomes:
+ *   `disabled = explicitProp ?? groupCtx?.disabled ?? fieldDisabled ?? fieldsetDisabled`
+ * — explicit prop wins, then any wrapping group (RadioGroup /
+ * ToggleGroup), then a wrapping Field, then a wrapping Fieldset.
+ */
+const FieldsetDisabledContext = createContext<boolean>(false);
+
+/**
+ * Read whether the nearest enclosing Fieldset is disabled. Returns
+ * `false` outside of one. Selection primitives compose this with
+ * the Field disabled context — see Fieldset.tsx file-header note.
+ */
+export function useFieldsetDisabledContext(): boolean {
+  return useContext(FieldsetDisabledContext);
+}
+
 /* ─── styled passthroughs around Base UI parts ────────────────────── */
 
 type LegendProps = ComponentPropsWithoutRef<typeof BaseFieldset.Legend>;
-const FieldsetLegend = forwardRef<HTMLDivElement, LegendProps>(
+export type FieldsetLegendProps = Omit<LegendProps, "render">;
+const FieldsetLegend = forwardRef<HTMLDivElement, FieldsetLegendProps>(
   function FieldsetLegend({ className, ...rest }, ref) {
     return (
       <BaseFieldset.Legend
@@ -118,27 +151,37 @@ function FieldsetRoot(
   }: FieldsetProps,
   ref: React.ForwardedRef<HTMLFieldSetElement>,
 ) {
+  // Inherit a wrapping Fieldset's disabled state — when a
+  // `<Fieldset disabled>` wraps a non-disabled inner Fieldset, the
+  // inner one should still report disabled to its selection
+  // descendants. Native cascade handles the DOM; we propagate the
+  // React-context signal in step.
+  const parentFieldsetDisabled = useContext(FieldsetDisabledContext);
+  const effectiveDisabled = disabled || parentFieldsetDisabled;
+
   return (
-    <BaseFieldset.Root
-      // Base UI's Fieldset.Root ref is typed `HTMLElement`; we
-      // narrow at the namespace export to the natural
-      // `HTMLFieldSetElement` so consumers forwarding refs land on
-      // the expected element type.
-      ref={ref as React.Ref<HTMLElement>}
-      disabled={disabled}
-      className={composeBaseClass(
-        classnames(
-          "zs-fieldset",
-          size !== "md" ? `zs-fieldset--${size}` : null,
-        ),
-        className,
-      )}
-      data-size={size}
-      data-disabled={disabled ? "" : undefined}
-      {...rest}
-    >
-      {children}
-    </BaseFieldset.Root>
+    <FieldsetDisabledContext.Provider value={effectiveDisabled}>
+      <BaseFieldset.Root
+        // Base UI's Fieldset.Root ref is typed `HTMLElement`; we
+        // narrow at the namespace export to the natural
+        // `HTMLFieldSetElement` so consumers forwarding refs land on
+        // the expected element type.
+        ref={ref as React.Ref<HTMLElement>}
+        disabled={disabled}
+        className={composeBaseClass(
+          classnames(
+            "zs-fieldset",
+            size !== "md" ? `zs-fieldset--${size}` : null,
+          ),
+          className,
+        )}
+        data-size={size}
+        data-disabled={disabled ? "" : undefined}
+        {...rest}
+      >
+        {children}
+      </BaseFieldset.Root>
+    </FieldsetDisabledContext.Provider>
   );
 }
 

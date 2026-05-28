@@ -53,6 +53,7 @@ import {
   useFieldDisabledContext,
   useFieldVisualSize,
 } from "../Field";
+import { useFieldsetDisabledContext } from "../Fieldset";
 import { classnames } from "../_classnames";
 import { SelectionRow } from "../_selection-row";
 
@@ -100,11 +101,18 @@ export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
   ref,
 ) {
   // Unconditional hook calls — cascade resolution happens after.
+  // The wrapping Fieldset's disabled signal flows through a separate
+  // context because the visible track is a non-native Base UI part
+  // and doesn't pick up native `<fieldset disabled>` cascade.
   const fieldSize = useFieldVisualSize();
   const fieldDisabled = useFieldDisabledContext();
+  const fieldsetDisabled = useFieldsetDisabledContext();
   const fieldCtx = useFieldContext();
   const size: SwitchSize = sizeProp ?? fieldSize ?? "md";
-  const disabled = disabledProp ?? fieldDisabled;
+  // OR the two booleans rather than ??-chain — `??` would short-
+  // circuit on a legitimate `false` from the inner Field and never
+  // consult the outer Fieldset.
+  const disabled = disabledProp ?? (fieldDisabled || fieldsetDisabled);
   const required = requiredProp ?? fieldCtx?.required ?? false;
 
   const trackClassName = classnames(

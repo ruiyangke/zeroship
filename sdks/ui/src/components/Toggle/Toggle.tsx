@@ -65,6 +65,8 @@ import {
 } from "react";
 import { Toggle as BaseToggle } from "@base-ui/react/toggle";
 import { ToggleGroup as BaseToggleGroup } from "@base-ui/react/toggle-group";
+import { useFieldDisabledContext } from "../Field";
+import { useFieldsetDisabledContext } from "../Fieldset";
 import { Slot } from "../_slot";
 import { classnames } from "../_classnames";
 
@@ -235,7 +237,14 @@ function ToggleGroupInner<Value extends string = string>(
     ) => void;
   };
 
-  const disabled = disabledProp ?? false;
+  // Cascade disabled from a wrapping Field / Fieldset when the group
+  // itself doesn't set it. Same shape as the other selection
+  // primitives — both context hooks return `boolean` so we OR them
+  // rather than ??-chain (a `false` from Field would otherwise
+  // shadow a `true` from a wrapping Fieldset).
+  const fieldDisabled = useFieldDisabledContext();
+  const fieldsetDisabled = useFieldsetDisabledContext();
+  const disabled = disabledProp ?? (fieldDisabled || fieldsetDisabled);
   const isMultiple = multiple === true;
 
   // Dev-warn guards (contingency: 6+ segments, mixed icon/text). Both
@@ -449,11 +458,17 @@ function ToggleInner<Value extends string = string>(
 ) {
   const groupCtx = useToggleGroupContext();
 
-  // Explicit prop wins over group context; group context wins over the
-  // default. Mirrors the Radio + Field cascade in the rest of the slate.
+  // Explicit prop wins over group context; group context wins over a
+  // wrapping Field / Fieldset; finally the canonical default.
+  // Mirrors the Radio cascade. Both Field + Fieldset hooks return
+  // `boolean` so we OR them rather than ??-chain (a `false` from
+  // Field would otherwise shadow a `true` from a wrapping Fieldset).
+  const fieldDisabled = useFieldDisabledContext();
+  const fieldsetDisabled = useFieldsetDisabledContext();
   const size: ToggleSize = sizeProp ?? groupCtx?.size ?? "md";
   const variant: ToggleVariant = variantProp ?? groupCtx?.variant ?? "default";
-  const disabled = disabledProp ?? groupCtx?.disabled ?? false;
+  const disabled =
+    disabledProp ?? groupCtx?.disabled ?? (fieldDisabled || fieldsetDisabled);
 
   // Detect whether the asChild target is a native `<button>` so we can
   // drive Base UI's `nativeButton` correctly. Contingency from the brief

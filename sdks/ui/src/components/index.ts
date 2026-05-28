@@ -142,10 +142,14 @@ export type {
 } from "./Slider";
 
 export { Form } from "./Form";
-export type { FormProps, FormVariant } from "./Form";
+export type { FormActions, FormProps, FormVariant } from "./Form";
 
-export { Fieldset } from "./Fieldset";
-export type { FieldsetProps, FieldsetSize } from "./Fieldset";
+export { Fieldset, useFieldsetDisabledContext } from "./Fieldset";
+export type {
+  FieldsetLegendProps,
+  FieldsetProps,
+  FieldsetSize,
+} from "./Fieldset";
 
 export { AlertDialog } from "./AlertDialog";
 export type {

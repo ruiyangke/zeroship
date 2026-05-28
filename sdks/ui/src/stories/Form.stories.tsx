@@ -1,7 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { useRef, useState } from "react";
-import type { Form as BaseForm } from "@base-ui/react/form";
-import { Button, Field, Form, Input } from "../components";
+import { Button, Field, Form, type FormActions, Input } from "../components";
 
 const meta: Meta<typeof Form> = {
   title: "Components/Form",
@@ -14,11 +13,6 @@ const meta: Meta<typeof Form> = {
 export default meta;
 
 type Story = StoryObj<typeof Form>;
-
-/* The Base UI form actions shape — `validate(fieldName?)` for
- * programmatic validation triggers. Imported as a type so the
- * ActionsRef-validate story can `useRef<FormActions>(null)`. */
-type FormActions = BaseForm.Actions;
 
 /* ─── 1. Basic submit handler ──────────────────────────────────────── */
 export const BasicSubmit: Story = {
@@ -53,7 +47,6 @@ export const BasicSubmit: Story = {
             <Field.Label>Email</Field.Label>
             <Input
               type="email"
-              name="email"
               defaultValue="hello@example.com"
               data-testid="form-basic-email"
             />
@@ -104,7 +97,6 @@ export const WithValidation: Story = {
             <Field.Label>Email</Field.Label>
             <Input
               type="email"
-              name="email"
               defaultValue="taken@example.com"
               data-testid="form-server-errors-email"
             />
@@ -143,9 +135,9 @@ export const ValidationModes: Story = {
           style={{ maxWidth: "18rem", display: "grid", gap: "0.5rem" }}
         >
           <span className="zs-story-label">{mode}</span>
-          <Field>
+          <Field name={`email-${mode}`}>
             <Field.Label>Email</Field.Label>
-            <Input type="email" name={`email-${mode}`} required />
+            <Input type="email" required />
             <Field.Error match="typeMismatch">
               Enter a valid email.
             </Field.Error>
@@ -181,9 +173,9 @@ export const Variants: Story = {
       <div className="zs-story-cell" style={{ maxWidth: "26rem" }}>
         <span className="zs-story-label">default</span>
         <Form style={{ display: "grid", gap: "0.75rem" }}>
-          <Field>
+          <Field name="name">
             <Field.Label>Name</Field.Label>
-            <Input name="name" defaultValue="Ada Lovelace" />
+            <Input defaultValue="Ada Lovelace" />
           </Field>
           <Button type="submit" variant="filled">
             Save
@@ -197,9 +189,9 @@ export const Variants: Story = {
           data-testid="form-card"
           style={{ display: "grid", gap: "0.75rem" }}
         >
-          <Field>
+          <Field name="name">
             <Field.Label>Name</Field.Label>
-            <Input name="name" defaultValue="Grace Hopper" />
+            <Input defaultValue="Grace Hopper" />
           </Field>
           <Button type="submit" variant="filled">
             Save
@@ -229,24 +221,24 @@ export const WithFields: Story = {
       className="zs-story-cell"
       style={{ maxWidth: "28rem", display: "grid", gap: "0.75rem" }}
     >
-      <Field required>
+      <Field name="name" required>
         <Field.Label>
           Full name <Field.Required />
         </Field.Label>
-        <Input name="name" required />
+        <Input required />
         <Field.Error match="valueMissing">Name is required.</Field.Error>
       </Field>
-      <Field required>
+      <Field name="email" required>
         <Field.Label>
           Email <Field.Required />
         </Field.Label>
-        <Input type="email" name="email" required />
+        <Input type="email" required />
         <Field.Error match="typeMismatch">Enter a valid email.</Field.Error>
         <Field.Error match="valueMissing">Email is required.</Field.Error>
       </Field>
-      <Field>
+      <Field name="company">
         <Field.Label>Company (optional)</Field.Label>
-        <Input name="company" />
+        <Input />
       </Field>
       <Button type="submit" variant="filled">
         Sign up
@@ -288,7 +280,6 @@ export const ActionsRefValidate: Story = {
             <Field.Label>Email (required)</Field.Label>
             <Input
               type="email"
-              name="email"
               required
               data-testid="form-actions-ref-email"
             />
@@ -335,13 +326,13 @@ export const Disabled: Story = {
       className="zs-story-cell"
       style={{ maxWidth: "26rem", display: "grid", gap: "0.75rem" }}
     >
-      <Field disabled>
+      <Field name="email" disabled>
         <Field.Label>Email</Field.Label>
-        <Input name="email" defaultValue="locked@example.com" />
+        <Input defaultValue="locked@example.com" />
       </Field>
-      <Field disabled>
+      <Field name="password" disabled>
         <Field.Label>Password</Field.Label>
-        <Input type="password" name="password" />
+        <Input type="password" />
       </Field>
       <Button type="submit" variant="filled" disabled>
         Submit (disabled)
@@ -370,17 +361,17 @@ export const RTL: Story = {
         className="zs-story-cell"
         style={{ maxWidth: "28rem", display: "grid", gap: "0.75rem" }}
       >
-        <Field required>
+        <Field name="name-rtl" required>
           <Field.Label>
             שם מלא <Field.Required />
           </Field.Label>
-          <Input name="name-rtl" required />
+          <Input required />
         </Field>
-        <Field required>
+        <Field name="email-rtl" required>
           <Field.Label>
             דוא״ל <Field.Required />
           </Field.Label>
-          <Input type="email" name="email-rtl" required />
+          <Input type="email" required />
         </Field>
         <Button type="submit" variant="filled">
           הרשמה
