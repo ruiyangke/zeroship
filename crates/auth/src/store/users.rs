@@ -1,6 +1,6 @@
 //! `auth.users` CRUD.
 
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient};
 
 use crate::error::{AuthError, Result};
 
@@ -101,7 +101,11 @@ pub async fn create(
 /// # Errors
 ///
 /// Returns `AuthError::Db` on PG failure.
-pub async fn update_password_hash(conn: &Client, id: uuid::Uuid, phc: &str) -> Result<()> {
+pub async fn update_password_hash(
+    conn: &(impl GenericClient + Sync),
+    id: uuid::Uuid,
+    phc: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE auth.users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
         &[&phc, &id],

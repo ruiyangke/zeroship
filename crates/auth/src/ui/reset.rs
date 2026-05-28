@@ -145,7 +145,9 @@ pub async fn post(
     // 6. Persist the new hash, audit, revoke existing sessions, and consume
     //    outstanding reset tokens in one transaction. The reset token itself
     //    was already consumed by the atomic redeem above.
-    let revoked = match complete_password_reset(db.as_ref(), user.id, &redeemed.email, &phc).await {
+    let revoked = match complete_password_reset(&cfg.db_url, user.id, &redeemed.email, &phc)
+        .await
+    {
         Ok(counts) => counts,
         Err(e) => {
             tracing::error!(error = %e, user_id = %user.id, "password_reset completion failed");
@@ -180,25 +182,36 @@ struct ResetRevocationCounts {
 }
 
 async fn complete_password_reset(
-    conn: &compio_postgres::Client,
+    db_url: &str,
     user_id: uuid::Uuid,
     email: &str,
     phc: &str,
 ) -> Result<ResetRevocationCounts> {
-    conn.execute("BEGIN", &[])
+    let (mut conn, connection) = compio_postgres::connect(db_url, compio_postgres::NoTls)
         .await
-        .map_err(|e| AuthError::Db(format!("password_reset begin: {e}")))?;
+        .map_err(|e| AuthError::Db(format!("password_reset connect dedicated tx: {e}")))?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            tracing::error!(error = %e, "password_reset dedicated tx connection ended");
+        }
+    })
+    .detach();
 
-    let result = complete_password_reset_tx(conn, user_id, email, phc).await;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset begin tx: {e}")))?;
+
+    let result = complete_password_reset_tx(&tx, user_id, email, phc).await;
     match result {
         Ok(counts) => {
-            conn.execute("COMMIT", &[])
+            tx.commit()
                 .await
                 .map_err(|e| AuthError::Db(format!("password_reset commit: {e}")))?;
             Ok(counts)
         }
         Err(e) => {
-            if let Err(rollback_err) = conn.execute("ROLLBACK", &[]).await {
+            if let Err(rollback_err) = tx.rollback().await {
                 tracing::error!(error = %rollback_err, "password_reset rollback failed");
             }
             Err(e)
@@ -207,7 +220,7 @@ async fn complete_password_reset(
 }
 
 async fn complete_password_reset_tx(
-    conn: &compio_postgres::Client,
+    conn: &(impl compio_postgres::GenericClient + Sync),
     user_id: uuid::Uuid,
     email: &str,
     phc: &str,

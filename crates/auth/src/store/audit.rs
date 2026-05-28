@@ -1,6 +1,6 @@
 //! Audit event insert into `auth.audit_events`.
 
-use compio_postgres::Client;
+use compio_postgres::GenericClient;
 use serde_json::Value;
 
 use crate::error::{AuthError, Result};
@@ -12,7 +12,7 @@ use crate::error::{AuthError, Result};
 /// Returns `AuthError::Db` on PG failure.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert(
-    conn: &Client,
+    conn: &(impl GenericClient + Sync),
     event_type: &str,
     outcome: &str,
     user_id: Option<&uuid::Uuid>,
