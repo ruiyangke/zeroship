@@ -4,6 +4,9 @@ use std::fmt::{Display, Formatter};
 pub enum AuthzError {
     CedarParse(String),
     CedarValidation(String),
+    CedarEntities(String),
+    CedarRequest(String),
+    Db(String),
     PolicyJsonShape(String),
     Validation(String),
 }
@@ -15,6 +18,9 @@ impl Display for AuthzError {
         match self {
             Self::CedarParse(message) => write!(f, "Cedar parse error: {message}"),
             Self::CedarValidation(message) => write!(f, "Cedar validation error: {message}"),
+            Self::CedarEntities(message) => write!(f, "Cedar entities error: {message}"),
+            Self::CedarRequest(message) => write!(f, "Cedar request error: {message}"),
+            Self::Db(message) => write!(f, "database error: {message}"),
             Self::PolicyJsonShape(message) => write!(f, "policy JSON shape error: {message}"),
             Self::Validation(message) => write!(f, "validation error: {message}"),
         }

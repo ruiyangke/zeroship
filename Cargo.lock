@@ -6470,10 +6470,16 @@ name = "zeroship-authz"
 version = "0.1.0"
 dependencies = [
  "cedar-policy",
+ "compio",
+ "compio-postgres",
  "hex",
+ "lru",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "zeroship-auth",
 ]
 
 [[package]]
@@ -6523,6 +6529,7 @@ dependencies = [
  "uuid",
  "zeroize",
  "zeroship-auth",
+ "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",
  "zstd",

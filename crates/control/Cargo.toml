@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
+zeroship-authz = { workspace = true }
 # `with-chrono-0_4` so the console_sessions store can pull
 # `TIMESTAMPTZ` columns into `chrono::DateTime<Utc>` directly.
 compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
