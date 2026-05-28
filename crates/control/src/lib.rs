@@ -18,6 +18,7 @@ pub mod http_util;
 pub mod internal;
 pub mod metering;
 pub mod oidc_rp;
+pub mod oauth_grants_handlers;
 pub mod oauth_handlers;
 pub mod rate_limit;
 pub mod registry;

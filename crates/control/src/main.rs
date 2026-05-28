@@ -8,8 +8,8 @@ use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
-    oauth_handlers, oidc_rp, stripe_handlers, token_handlers, AppState, EnvStore, Quota,
-    RateLimiter, Registry, StripeStore,
+    oauth_grants_handlers, oauth_handlers, oidc_rp, stripe_handlers, token_handlers, AppState,
+    EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -459,6 +459,7 @@ async fn main() -> std::io::Result<()> {
             // only console-auth surface.
             .service(web::resource("/auth/callback").route(web::get().to(api::auth_callback)))
             .configure(token_handlers::configure)
+            .configure(oauth_grants_handlers::configure)
             // OIDC Back-Channel Logout 1.0 RP endpoint. Hydra POSTs
             // here on user sign-out; we verify the logout_token and
             // revoke the user's console sessions. The URI must match
