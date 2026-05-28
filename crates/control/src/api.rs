@@ -112,7 +112,11 @@ pub async fn create_app(
     }
 }
 
-pub async fn list_apps(state: State<Arc<AppState>>) -> web::HttpResponse {
+pub async fn list_apps(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     match state.registry.list_apps().await {
         Ok(apps) => web::HttpResponse::Ok().json(&apps),
         Err(e) => error_response(e),

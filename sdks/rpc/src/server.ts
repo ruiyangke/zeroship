@@ -9,11 +9,17 @@ import type {
   ClientRpcMeta,
   NoClientRpcMeta,
   ProcedureConfig,
+  ResponseStreamProcedure,
   RpcKind,
   ServerProcedure,
 } from "./types";
 
-export type { ProcedureConfig, RpcKind, ServerProcedure } from "./types";
+export type {
+  ProcedureConfig,
+  ResponseStreamProcedure,
+  RpcKind,
+  ServerProcedure,
+} from "./types";
 
 type Handler = (...args: any[]) => unknown;
 type WrapperMarker =
@@ -291,6 +297,23 @@ export function stream<
   ConfigMeta<Config>
 >;
 export function stream(handler: Handler, config?: ProcedureConfig): any {
+  return attach(handler, "stream", config);
+}
+
+export function streamResponse<
+  const Config extends ProcedureConfig<void, never> = ProcedureConfig<void, never>,
+>(
+  handler: () => MaybePromise<Response>,
+  config?: Config,
+): ResponseStreamProcedure<void, ConfigId<Config>, ConfigMeta<Config>>;
+export function streamResponse<
+  Input,
+  const Config extends ProcedureConfig<Input, never> = ProcedureConfig<Input, never>,
+>(
+  handler: (input: Input) => MaybePromise<Response>,
+  config?: Config,
+): ResponseStreamProcedure<Input, ConfigId<Config>, ConfigMeta<Config>>;
+export function streamResponse(handler: Handler, config?: ProcedureConfig): any {
   return attach(handler, "stream", config);
 }
 
