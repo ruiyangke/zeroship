@@ -374,7 +374,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
     let creator = fresh_creator_id();
 
     pg.execute(
-        "INSERT INTO creator_account_history (creator_id, stripe_account_id)
+        "INSERT INTO control.creator_account_history (creator_id, stripe_account_id)
          VALUES ($1, 'acct_openHistoryA12')",
         &[&creator],
     )
@@ -382,7 +382,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
     .expect("insert first open history row");
     let duplicate = pg
         .execute(
-            "INSERT INTO creator_account_history (creator_id, stripe_account_id)
+            "INSERT INTO control.creator_account_history (creator_id, stripe_account_id)
              VALUES ($1, 'acct_openHistoryB34')",
             &[&creator],
         )
@@ -392,7 +392,7 @@ async fn creator_history_allows_only_one_open_row_per_creator() {
         "schema must reject a second open creator_account_history row"
     );
 
-    pg.execute("DELETE FROM creator_account_history WHERE creator_id = $1", &[&creator])
+    pg.execute("DELETE FROM control.creator_account_history WHERE creator_id = $1", &[&creator])
         .await
         .ok();
 }

@@ -2,10 +2,10 @@
 //!
 //! Two tables (migrations in `registry.rs`):
 //!
-//! - `creator_accounts(creator_id UUID PK, stripe_account_id TEXT, onboarded_at)`
+//! - `control.creator_accounts(creator_id UUID PK, stripe_account_id TEXT, onboarded_at)`
 //!   One row per creator once they finish Stripe onboarding.
 //!
-//! - `payouts(id, creator_id FK, event_id UNIQUE, event_type, gross_amount,
+//! - `control.payouts(id, creator_id FK, event_id UNIQUE, event_type, gross_amount,
 //!    platform_fee, net_amount, currency, occurred_at, created_at)`
 //!   One row per Stripe webhook event that moves money. `event_id` is
 //!   Stripe's `evt_...` — the UNIQUE constraint makes retries idempotent.
@@ -154,7 +154,7 @@ impl StripeStore {
                 // get_account_history.
                 "SELECT creator_id, stripe_account_id,
                     to_char(onboarded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS onboarded_at
-                 FROM creator_accounts
+                 FROM control.creator_accounts
                  WHERE creator_id = $1 AND unlinked_at IS NULL",
                 &[&creator_id],
             )
@@ -182,7 +182,7 @@ impl StripeStore {
                     CASE WHEN unlinked_at IS NULL THEN NULL
                          ELSE to_char(unlinked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
                     END AS unlinked_at_text
-                 FROM creator_account_history
+                 FROM control.creator_account_history
                  WHERE creator_id = $1
                  ORDER BY linked_at DESC",
                 &[&creator_id],
@@ -240,7 +240,7 @@ impl StripeStore {
         // `occurred_at::text` was timezone-dependent.
         let rows = conn
             .query(
-                "INSERT INTO payouts(creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at, payload_hash)
+                "INSERT INTO control.payouts(creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at, payload_hash)
                  VALUES($1, $2, $3, $4, $5, $6, $7, to_timestamp($8::double precision), $9)
                  ON CONFLICT (event_id) DO NOTHING
                  RETURNING id,
@@ -258,7 +258,7 @@ impl StripeStore {
                 if let Some(new_hash) = payload_hash {
                     let stored = conn
                         .query(
-                            "SELECT payload_hash FROM payouts WHERE event_id = $1",
+                            "SELECT payload_hash FROM control.payouts WHERE event_id = $1",
                             &[&event_id],
                         )
                         .await
@@ -294,7 +294,7 @@ impl StripeStore {
         })
     }
 
-    /// Aggregate totals (sum over `payouts`).
+    /// Aggregate totals (sum over `control.payouts`).
     pub async fn total_earnings(&self, creator_id: Uuid) -> Result<Totals, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         // SUM(BIGINT) returns NUMERIC in Postgres — cast back to BIGINT
@@ -305,7 +305,7 @@ impl StripeStore {
                     COALESCE(SUM(gross_amount), 0)::BIGINT AS gross,
                     COALESCE(SUM(platform_fee), 0)::BIGINT AS fee,
                     COALESCE(SUM(net_amount), 0)::BIGINT AS net
-                 FROM payouts WHERE creator_id = $1",
+                 FROM control.payouts WHERE creator_id = $1",
                 &[&creator_id],
             )
             .await
@@ -330,7 +330,7 @@ impl StripeStore {
             .query(
                 "SELECT id, creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency,
                     to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS occurred_at
-                 FROM payouts
+                 FROM control.payouts
                  WHERE creator_id = $1
                  ORDER BY occurred_at DESC
                  LIMIT $2",
@@ -367,7 +367,7 @@ async fn link_account_txn(
     // FOR UPDATE serializes genuine relinks for creators with a live row.
     let current = conn
         .query(
-            "SELECT stripe_account_id FROM creator_accounts
+            "SELECT stripe_account_id FROM control.creator_accounts
              WHERE creator_id = $1 AND unlinked_at IS NULL
              FOR UPDATE",
             &[&creator_id],
@@ -378,7 +378,7 @@ async fn link_account_txn(
         let current_acct: String = row.get("stripe_account_id");
         if current_acct == stripe_account_id {
             conn.execute(
-                "UPDATE creator_accounts SET onboarded_at = NOW() WHERE creator_id = $1",
+                "UPDATE control.creator_accounts SET onboarded_at = NOW() WHERE creator_id = $1",
                 &[&creator_id],
             )
             .await
@@ -389,7 +389,7 @@ async fn link_account_txn(
 
     // Close any open history row.
     conn.execute(
-        "UPDATE creator_account_history SET unlinked_at = NOW()
+        "UPDATE control.creator_account_history SET unlinked_at = NOW()
          WHERE creator_id = $1 AND unlinked_at IS NULL",
         &[&creator_id],
     )
@@ -397,14 +397,14 @@ async fn link_account_txn(
     .map_err(|e| StripeError::Db(e.to_string()))?;
     // Open new history row.
     conn.execute(
-        "INSERT INTO creator_account_history(creator_id, stripe_account_id) VALUES($1, $2)",
+        "INSERT INTO control.creator_account_history(creator_id, stripe_account_id) VALUES($1, $2)",
         &[&creator_id, &stripe_account_id],
     )
     .await
     .map_err(|e| StripeError::Db(e.to_string()))?;
     // Upsert live row.
     conn.execute(
-        "INSERT INTO creator_accounts(creator_id, stripe_account_id, unlinked_at)
+        "INSERT INTO control.creator_accounts(creator_id, stripe_account_id, unlinked_at)
          VALUES($1, $2, NULL)
          ON CONFLICT (creator_id) DO UPDATE
             SET stripe_account_id = EXCLUDED.stripe_account_id,
@@ -424,7 +424,7 @@ async fn unlink_account_txn(
 ) -> Result<bool, StripeError> {
     let n = conn
         .execute(
-            "UPDATE creator_accounts SET unlinked_at = NOW()
+            "UPDATE control.creator_accounts SET unlinked_at = NOW()
              WHERE creator_id = $1 AND unlinked_at IS NULL",
             &[&creator_id],
         )
@@ -432,7 +432,7 @@ async fn unlink_account_txn(
         .map_err(|e| StripeError::Db(e.to_string()))?;
     if n > 0 {
         conn.execute(
-            "UPDATE creator_account_history SET unlinked_at = NOW()
+            "UPDATE control.creator_account_history SET unlinked_at = NOW()
              WHERE creator_id = $1 AND unlinked_at IS NULL",
             &[&creator_id],
         )

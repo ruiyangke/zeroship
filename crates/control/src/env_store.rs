@@ -1,7 +1,7 @@
 //! Per-app secrets + vars store. Secrets are encrypted at rest with
 //! AES-256-GCM using a key derived from the control-plane master key.
 //!
-//! Wire format for secrets in Postgres: the `app_secrets.ciphertext`
+//! Wire format for secrets in Postgres: the `control.app_secrets.ciphertext`
 //! BYTEA column holds `nonce(12) || ciphertext || tag(16)` exactly as
 //! produced by `zeroship_core::crypto::encrypt`.
 
@@ -155,7 +155,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT ciphertext FROM app_secrets WHERE app_id = $1 AND key_name = $2",
+                "SELECT ciphertext FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
                 &[&app_id, &key_name],
             )
             .await
@@ -175,7 +175,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name, value FROM app_vars WHERE app_id = $1 ORDER BY key_name",
+                "SELECT key_name, value FROM control.app_vars WHERE app_id = $1 ORDER BY key_name",
                 &[&app_id],
             )
             .await
@@ -200,7 +200,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         conn.execute(
-            "INSERT INTO app_vars(app_id, key_name, value) VALUES($1, $2, $3)
+            "INSERT INTO control.app_vars(app_id, key_name, value) VALUES($1, $2, $3)
              ON CONFLICT (app_id, key_name) DO UPDATE
                 SET value = EXCLUDED.value, updated_at = NOW()",
             &[&app_id, &key, &value],
@@ -219,7 +219,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "DELETE FROM app_vars WHERE app_id = $1 AND key_name = $2",
+                "DELETE FROM control.app_vars WHERE app_id = $1 AND key_name = $2",
                 &[&app_id, &key],
             )
             .await
@@ -251,7 +251,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name FROM app_secrets WHERE app_id = $1 ORDER BY key_name",
+                "SELECT key_name FROM control.app_secrets WHERE app_id = $1 ORDER BY key_name",
                 &[&app_id],
             )
             .await
@@ -273,7 +273,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         conn.execute(
-            "INSERT INTO app_secrets(app_id, key_name, ciphertext) VALUES($1, $2, $3)
+            "INSERT INTO control.app_secrets(app_id, key_name, ciphertext) VALUES($1, $2, $3)
              ON CONFLICT (app_id, key_name) DO UPDATE
                 SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()",
             &[&app_id, &key, &ct],
@@ -292,7 +292,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "DELETE FROM app_secrets WHERE app_id = $1 AND key_name = $2",
+                "DELETE FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
                 &[&app_id, &key],
             )
             .await
@@ -322,7 +322,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let exists = conn
-            .query("SELECT 1 FROM apps WHERE id = $1", &[&app_id])
+            .query("SELECT 1 FROM control.apps WHERE id = $1", &[&app_id])
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         if exists.is_empty() {
@@ -335,7 +335,7 @@ impl EnvStore {
         }
         let rows = conn
             .query(
-                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                "SELECT key_name, ciphertext FROM control.app_secrets WHERE app_id = $1",
                 &[&app_id],
             )
             .await
@@ -375,7 +375,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name FROM app_env_expose WHERE app_id = $1 ORDER BY key_name",
+                "SELECT key_name FROM control.app_env_expose WHERE app_id = $1 ORDER BY key_name",
                 &[&app_id],
             )
             .await
@@ -415,14 +415,14 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         tx.execute(
-            "DELETE FROM app_env_expose WHERE app_id = $1",
+            "DELETE FROM control.app_env_expose WHERE app_id = $1",
             &[&app_id],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
         for name in &sorted {
             tx.execute(
-                "INSERT INTO app_env_expose(app_id, key_name) VALUES($1, $2)
+                "INSERT INTO control.app_env_expose(app_id, key_name) VALUES($1, $2)
                  ON CONFLICT (app_id, key_name) DO NOTHING",
                 &[&app_id, &name],
             )
@@ -464,7 +464,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let exists = conn
-            .query("SELECT 1 FROM apps WHERE id = $1", &[&app_id])
+            .query("SELECT 1 FROM control.apps WHERE id = $1", &[&app_id])
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         if exists.is_empty() {
@@ -481,7 +481,7 @@ impl EnvStore {
         // (primary first, then any rotation-grace previous keys).
         let secret_rows = conn
             .query(
-                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                "SELECT key_name, ciphertext FROM control.app_secrets WHERE app_id = $1",
                 &[&app_id],
             )
             .await
@@ -524,7 +524,7 @@ impl EnvStore {
         let conn = self.registry.conn().await.map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                "SELECT key_name, ciphertext FROM control.app_secrets WHERE app_id = $1",
                 &[&app_id],
             )
             .await
@@ -562,7 +562,7 @@ impl EnvStore {
             let plain = Zeroizing::new(crypto::decrypt_with_keys(&all_keys, &ct)?);
             let new_ct = crypto::encrypt(&self.primary_key, &plain)?;
             conn.execute(
-                "UPDATE app_secrets SET ciphertext = $1, updated_at = NOW()
+                "UPDATE control.app_secrets SET ciphertext = $1, updated_at = NOW()
                  WHERE app_id = $2 AND key_name = $3",
                 &[&new_ct, &app_id, &k],
             )

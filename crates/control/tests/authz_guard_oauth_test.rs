@@ -170,7 +170,7 @@ impl Fixture {
             let _ = self
                 .state
                 .auth_pg
-                .execute("DELETE FROM apps WHERE id = $1", &[&app_id])
+                .execute("DELETE FROM control.apps WHERE id = $1", &[&app_id])
                 .await;
         }
         let _ = self
