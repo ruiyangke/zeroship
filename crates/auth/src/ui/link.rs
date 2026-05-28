@@ -369,6 +369,7 @@ pub async fn post(
             // local password to confirm the link. Both factors land in amr.
             amr: vec!["oauth".into(), "pwd".into()],
             acr: Some(acr_static),
+            expected_credential_version: None,
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },

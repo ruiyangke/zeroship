@@ -23,8 +23,15 @@ fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
     http_util::source_ip(req, state.trust_proxy)
 }
 
-fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
-    http_util::rate_limit(req, &state.admin_limiter, state.trust_proxy)
+async fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+    http_util::rate_limit(
+        req,
+        state.auth_pg.as_ref(),
+        "admin",
+        state.admin_limiter.quota(),
+        state.trust_proxy,
+    )
+    .await
 }
 
 fn bad_uuid() -> web::HttpResponse {
@@ -67,7 +74,7 @@ pub async fn list_vars(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     if let Err(resp) = authz
         .require(AuthzAction::EnvRead, Resource::App { id: id.to_string() }, &state)
@@ -94,7 +101,7 @@ pub async fn set_var(
     body: Json<SetKv>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     if let Err(resp) = authz
         .require(AuthzAction::EnvWrite, Resource::App { id: id.to_string() }, &state)
@@ -125,7 +132,7 @@ pub async fn delete_var(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     if let Err(resp) = authz
@@ -162,7 +169,7 @@ pub async fn list_secrets(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     if let Err(resp) = authz
         .require(AuthzAction::SecretsRead, Resource::App { id: id.to_string() }, &state)
@@ -183,7 +190,7 @@ pub async fn set_secret(
     body: Json<SetKv>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     if let Err(resp) = authz
         .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
@@ -221,7 +228,7 @@ pub async fn list_expose(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     if let Err(resp) = authz
         .require(AuthzAction::SecretsRead, Resource::App { id: id.to_string() }, &state)
@@ -260,7 +267,7 @@ pub async fn set_expose(
     body: Json<SetExposeBody>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     if let Err(resp) = authz
         .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
@@ -304,7 +311,7 @@ pub async fn list_audit(
     query: web::types::Query<AuditQuery>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
     if let Err(resp) = authz
         .require(AuthzAction::AppsRead, Resource::App { id: id.to_string() }, &state)
@@ -345,7 +352,7 @@ pub async fn delete_secret(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
     if let Err(resp) = authz

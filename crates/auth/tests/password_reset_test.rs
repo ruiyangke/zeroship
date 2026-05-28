@@ -170,6 +170,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
+            expected_credential_version: None,
             idle_minutes: 30,
             absolute_hours: 12,
         },

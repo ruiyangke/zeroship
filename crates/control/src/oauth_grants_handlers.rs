@@ -110,33 +110,55 @@ pub async fn revoke_grant(
             tracing::error!(
                 error = %err,
                 client_id = %client_id,
-                "control: oauth grant delete failed"
+                "control: oauth grant lock connection failed"
             );
             return web::HttpResponse::InternalServerError()
                 .json(&json!({"error": "oauth_grant_delete_failed"}));
         }
     };
+    let lock_key = oauth_grant_lock_key(&authz.principal_id, &client_id);
+    let revoked = match with_advisory_lock(&conn, lock_key, || async {
+        let rows = conn
+            .query(
+                "SELECT 1 FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",
+                &[&authz.principal_id, &client_id],
+            )
+            .await
+            .map_err(|err| AuthError::Db(format!("oauth grant lookup: {err}")))?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
 
     if deleted == 0 {
         return web::HttpResponse::NotFound().json(&json!({"error": "oauth_grant_not_found"}));
     }
     EntityCache::invalidate(authz.principal_id);
 
-    if let Err(err) = hydra_revoke_consent_sessions(
-        &state.hydra_admin_url,
-        &authz.principal_id.to_string(),
-        &client_id,
-    )
+        conn.execute(
+            "DELETE FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",
+            &[&authz.principal_id, &client_id],
+        )
+        .await
+        .map_err(|err| AuthError::Db(format!("oauth grant delete: {err}")))?;
+        Ok(true)
+    })
     .await
     {
-        tracing::error!(
-            error = %err,
-            client_id = %client_id,
-            subject = %authz.principal_id,
-            "control: hydra oauth grant token revoke failed"
-        );
-        return web::HttpResponse::InternalServerError()
-            .json(&json!({"error": "hydra_oauth_grant_revoke_failed"}));
+        Ok(revoked) => revoked,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                client_id = %client_id,
+                subject = %authz.principal_id,
+                "control: oauth grant locked revoke failed"
+            );
+            return web::HttpResponse::InternalServerError()
+                .json(&json!({"error": "oauth_grant_revoke_failed"}));
+        }
+    };
+
+    if !revoked {
+        return web::HttpResponse::NotFound().json(&json!({"error": "oauth_grant_not_found"}));
     }
 
     web::HttpResponse::NoContent().finish()
@@ -147,6 +169,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(
             web::resource("/me/oauth-grants/{client_id}").route(web::delete().to(revoke_grant)),
         );
+}
+
+async fn open_dedicated_auth_pg(db_url: &str) -> Result<compio_postgres::Client, String> {
+    let (client, connection) = compio_postgres::connect(db_url, compio_postgres::NoTls)
+        .await
+        .map_err(|err| err.to_string())?;
+    compio::runtime::spawn(async move {
+        if let Err(err) = connection.run().await {
+            tracing::error!(error = %err, "control: oauth grant lock connection ended");
+        }
+    })
+    .detach();
+    Ok(client)
 }
 
 #[allow(clippy::future_not_send)]

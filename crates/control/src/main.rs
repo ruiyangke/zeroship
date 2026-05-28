@@ -376,17 +376,17 @@ async fn main() -> std::io::Result<()> {
         &hydra_admin_url_value,
     ));
 
+    let auth_db_url_resolved = if auth_db_url.is_empty() {
+        // Dev fallback: reuse the control DB URL so /auth/callback
+        // works against a single local Postgres without operator
+        // ceremony. Production refused to start without --auth-db
+        // above.
+        db_url.clone()
+    } else {
+        auth_db_url
+    };
     let auth_pg: Arc<compio_postgres::Client> = {
-        let resolved = if auth_db_url.is_empty() {
-            // Dev fallback: reuse the control DB URL so /auth/callback
-            // works against a single local Postgres without operator
-            // ceremony. Production refused to start without --auth-db
-            // above.
-            db_url.clone()
-        } else {
-            auth_db_url
-        };
-        let (pg_client, pg_conn) = compio_postgres::connect(&resolved, compio_postgres::NoTls)
+        let (pg_client, pg_conn) = compio_postgres::connect(&auth_db_url_resolved, compio_postgres::NoTls)
             .await
             .expect("control: auth-pg connect");
         compio::runtime::spawn(async move {
@@ -410,6 +410,7 @@ async fn main() -> std::io::Result<()> {
             hydra_admin_url: hydra_admin_url_value.clone(),
             redirect_uri: builder_redirect_uri,
             client_secret_path: builder_client_secret_path,
+            auth_db_url: auth_db_url_resolved.clone(),
         };
         bootstrap_builder::bootstrap_builder_oauth_client(&auth_pg, &cfg)
             .await
@@ -442,6 +443,7 @@ async fn main() -> std::io::Result<()> {
         deploy_tmp_dir,
         oidc_rp,
         auth_pg,
+        auth_db_url: auth_db_url_resolved,
         hydra_admin_url: hydra_admin_url_value,
         expected_oauth_audience,
         static_policies: zeroship_authz::load_platform_policies()

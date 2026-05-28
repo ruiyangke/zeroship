@@ -8,6 +8,7 @@ use compio_postgres::Client;
 use rand::RngCore as _;
 use serde::Serialize;
 use uuid::Uuid;
+use zeroship_auth::advisory_lock::{with_advisory_lock, BOOTSTRAP_CLIENTS_LOCK};
 use zeroship_authz::Scope;
 
 use crate::trusted_clients;
@@ -35,6 +36,7 @@ pub struct BuilderClientBootstrapConfig {
     pub hydra_admin_url: String,
     pub redirect_uri: String,
     pub client_secret_path: PathBuf,
+    pub auth_db_url: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,7 +92,7 @@ struct HydraCreateClientRequest<'a> {
 }
 
 pub async fn bootstrap_builder_oauth_client(
-    pg: &Client,
+    _pg: &Client,
     cfg: &BuilderClientBootstrapConfig,
 ) -> Result<BuilderClientBootstrapResult, BuilderClientBootstrapError> {
     if !cfg.enabled {
@@ -174,7 +176,7 @@ async fn expected_oauth_client_present(
     }
 }
 
-async fn insert_oauth_client(
+async fn upsert_oauth_client(
     pg: &Client,
     cfg: &BuilderClientBootstrapConfig,
 ) -> Result<bool, BuilderClientBootstrapError> {
@@ -205,6 +207,21 @@ async fn insert_oauth_client(
         .await
         .map_err(|err| BuilderClientBootstrapError::Db(err.to_string()))?;
     Ok(!rows.is_empty())
+}
+
+async fn open_dedicated_auth_pg(
+    db_url: &str,
+) -> Result<compio_postgres::Client, BuilderClientBootstrapError> {
+    let (client, connection) = compio_postgres::connect(db_url, compio_postgres::NoTls)
+        .await
+        .map_err(|err| BuilderClientBootstrapError::Db(format!("lock connect: {err}")))?;
+    compio::runtime::spawn(async move {
+        if let Err(err) = connection.run().await {
+            tracing::error!(error = %err, "control: builder bootstrap lock connection ended");
+        }
+    })
+    .detach();
+    Ok(client)
 }
 
 fn ensure_client_secret(path: &Path) -> Result<String, BuilderClientBootstrapError> {
@@ -267,7 +284,7 @@ fn is_valid_client_secret(secret: &str) -> bool {
     secret.len() == 64 && secret.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-async fn create_hydra_client(
+async fn reconcile_hydra_client(
     cfg: &BuilderClientBootstrapConfig,
     client_secret: &str,
 ) -> Result<(), BuilderClientBootstrapError> {
@@ -291,10 +308,57 @@ async fn create_hydra_client(
         subject_type: "public",
         skip_consent: trusted_clients::is_trusted(BUILDER_CLIENT_ID),
     };
-    let body_bytes = serde_json::to_vec(&body)
+    match send_hydra_client_request(
+        http::Method::POST,
+        &hydra_url(&cfg.hydra_admin_url, "/admin/clients"),
+        &body,
+    )
+    .await?
+    {
+        HydraStatus::Success => Ok(()),
+        HydraStatus::Conflict => {
+            ensure_hydra_client_exists(cfg).await?;
+            send_hydra_client_request(
+                http::Method::PUT,
+                &hydra_url(
+                    &cfg.hydra_admin_url,
+                    &format!("/admin/clients/{BUILDER_CLIENT_ID}"),
+                ),
+                &body,
+            )
+            .await?
+            .into_result("PUT /admin/clients/{client_id}")
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HydraStatus {
+    Success,
+    Conflict,
+}
+
+impl HydraStatus {
+    fn into_result(self, op: &str) -> Result<(), BuilderClientBootstrapError> {
+        match self {
+            Self::Success => Ok(()),
+            Self::Conflict => Err(BuilderClientBootstrapError::Hydra(format!(
+                "{op} returned unexpected 409"
+            ))),
+        }
+    }
+}
+
+async fn send_hydra_client_request(
+    method: http::Method,
+    url: &str,
+    body: &HydraCreateClientRequest<'_>,
+) -> Result<HydraStatus, BuilderClientBootstrapError> {
+    let body_bytes = serde_json::to_vec(body)
         .map_err(|err| BuilderClientBootstrapError::Encode(err.to_string()))?;
+    let method_label = method.as_str().to_string();
     let res = cyper::Client::new()
-        .request(http::Method::POST, hydra_url(&cfg.hydra_admin_url, "/admin/clients"))
+        .request(method, url)
         .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
         .header("content-type", "application/json")
         .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
@@ -307,11 +371,40 @@ async fn create_hydra_client(
         .text()
         .await
         .map_err(|err| BuilderClientBootstrapError::Hydra(format!("read response: {err}")))?;
-    if (200..300).contains(&status) || status == 409 {
+    if (200..300).contains(&status) {
+        Ok(HydraStatus::Success)
+    } else if status == 409 {
+        Ok(HydraStatus::Conflict)
+    } else {
+        Err(BuilderClientBootstrapError::Hydra(format!(
+            "{method_label} {url} returned {status}: {response_body}"
+        )))
+    }
+}
+
+async fn ensure_hydra_client_exists(
+    cfg: &BuilderClientBootstrapConfig,
+) -> Result<(), BuilderClientBootstrapError> {
+    let url = hydra_url(
+        &cfg.hydra_admin_url,
+        &format!("/admin/clients/{BUILDER_CLIENT_ID}"),
+    );
+    let res = cyper::Client::new()
+        .request(http::Method::GET, url.clone())
+        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
+        .send()
+        .await
+        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("transport: {err}")))?;
+    let status = res.status().as_u16();
+    let response_body = res
+        .text()
+        .await
+        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("read response: {err}")))?;
+    if (200..300).contains(&status) {
         Ok(())
     } else {
         Err(BuilderClientBootstrapError::Hydra(format!(
-            "POST /admin/clients returned {status}: {response_body}"
+            "GET {url} returned {status}: {response_body}"
         )))
     }
 }

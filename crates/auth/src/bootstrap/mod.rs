@@ -13,6 +13,7 @@ pub mod keys;
 
 use compio_postgres::Client;
 
+use crate::advisory_lock::{with_advisory_lock, BOOTSTRAP_CLIENTS_LOCK};
 use crate::error::Result;
 use crate::hydra_client::HydraAdmin;
 use clients_config::ClientsConfig;
@@ -45,7 +46,7 @@ pub async fn run(
         ));
     }
 
-    reconcile_clients(admin, clients_config_path).await
+    reconcile_clients(admin, db, clients_config_path).await
 }
 
 async fn keys_empty(admin: &HydraAdmin) -> Result<bool> {
@@ -55,20 +56,23 @@ async fn keys_empty(admin: &HydraAdmin) -> Result<bool> {
        b.is_none_or(|j| j.keys.is_empty()))
 }
 
-async fn reconcile_clients(admin: &HydraAdmin, path: &str) -> Result<()> {
+async fn reconcile_clients(admin: &HydraAdmin, db: &Client, path: &str) -> Result<()> {
     let cfg = ClientsConfig::from_path(path)?;
-    for entry in &cfg.clients {
-        let desired = entry.to_oauth2_client();
-        match admin.get_client(&entry.client_id).await? {
-            None => {
-                tracing::info!(client_id = %entry.client_id, "registering OIDC client");
-                admin.create_client(&desired).await?;
-            }
-            Some(_existing) => {
-                tracing::info!(client_id = %entry.client_id, "updating OIDC client");
-                admin.update_client(&desired).await?;
+    with_advisory_lock(db, BOOTSTRAP_CLIENTS_LOCK, || async {
+        for entry in &cfg.clients {
+            let desired = entry.to_oauth2_client();
+            match admin.get_client(&entry.client_id).await? {
+                None => {
+                    tracing::info!(client_id = %entry.client_id, "registering OIDC client");
+                    admin.create_client(&desired).await?;
+                }
+                Some(_existing) => {
+                    tracing::info!(client_id = %entry.client_id, "updating OIDC client");
+                    admin.update_client(&desired).await?;
+                }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
 }

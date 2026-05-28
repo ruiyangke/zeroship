@@ -425,6 +425,7 @@ pub async fn post(
             auth_method: "pwd",
             amr: vec!["pwd".into()],
             acr: Some("urn:zeroship:pwd"),
+            expected_credential_version: Some(u.credential_version),
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },

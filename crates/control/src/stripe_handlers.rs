@@ -29,12 +29,20 @@ fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
     http_util::source_ip(req, state.trust_proxy)
 }
 
-fn rate_limit(
+async fn rate_limit(
     req: &web::HttpRequest,
     limiter: &crate::RateLimiter,
+    namespace: &str,
     state: &AppState,
 ) -> Option<web::HttpResponse> {
-    http_util::rate_limit(req, limiter, state.trust_proxy)
+    http_util::rate_limit(
+        req,
+        state.auth_pg.as_ref(),
+        namespace,
+        limiter.quota(),
+        state.trust_proxy,
+    )
+    .await
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -78,7 +86,7 @@ pub async fn onboard(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
     if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
         return resp;
     }
@@ -106,7 +114,7 @@ pub async fn callback(
     body: web::types::Json<CallbackBody>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
     if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
         return resp;
     }
@@ -136,7 +144,7 @@ pub async fn earnings(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
     if let Err(resp) = authz.require(AuthzAction::BillingRead, Resource::Any, &state).await {
         return resp;
     }
@@ -177,7 +185,7 @@ pub async fn unlink(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
     if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
         return resp;
     }
@@ -377,7 +385,7 @@ pub async fn webhook(
     // webhook signature and this route has no user principal.
     // Rate limit FIRST — body cap second. Cheap-to-reject things go
     // before expensive ones (parsing 256 KiB, HMAC, DB write).
-    if let Some(r) = rate_limit(&req, &state.webhook_limiter, &state) {
+    if let Some(r) = rate_limit(&req, &state.webhook_limiter, "webhook", &state).await {
         return r;
     }
     if body.len() > MAX_WEBHOOK_BODY_BYTES {

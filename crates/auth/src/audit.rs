@@ -3,7 +3,7 @@
 //! Every event lands in both: PG `auth.audit_events` (for query/retention)
 //! and stdout JSON (for SIEM ingestion, per proposal §15).
 
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient};
 use serde_json::{json, Value};
 
 use crate::error::Result;
@@ -65,7 +65,7 @@ pub async fn emit(conn: &Client, ev: &AuditEvent<'_>) {
 /// # Errors
 ///
 /// Returns `AuthError::Db` (via the `store::insert` propagation) on PG insert failure.
-pub async fn emit_strict(conn: &Client, ev: &AuditEvent<'_>) -> Result<()> {
+pub async fn emit_strict(conn: &(impl GenericClient + Sync), ev: &AuditEvent<'_>) -> Result<()> {
     let stdout_payload = json!({
         "type": ev.event_type, "outcome": ev.outcome,
         "user_id": ev.user_id, "client_id": ev.client_id,
