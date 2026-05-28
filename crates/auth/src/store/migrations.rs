@@ -92,6 +92,22 @@ const STATEMENTS: &[&str] = &[
     "ALTER TABLE auth.magic_links \
         ADD COLUMN IF NOT EXISTS consumed_pending_at TIMESTAMPTZ",
     "CREATE INDEX IF NOT EXISTS auth_magic_email_idx ON auth.magic_links (email)",
+    "WITH ranked AS (
+        SELECT token_hash,
+               ROW_NUMBER() OVER (
+                   PARTITION BY email, purpose
+                   ORDER BY issued_at DESC, token_hash DESC
+               ) AS rn
+        FROM auth.magic_links
+        WHERE consumed_at IS NULL
+    )
+    UPDATE auth.magic_links m
+       SET consumed_at = NOW()
+      FROM ranked r
+     WHERE m.token_hash = r.token_hash
+       AND r.rn > 1",
+    "CREATE UNIQUE INDEX IF NOT EXISTS auth_magic_links_active_email_purpose_uniq
+        ON auth.magic_links (email, purpose) WHERE consumed_at IS NULL",
 
     // 5.4b magic-link cross-device completions — when the redeeming device's
     // `__Host-zsidp_magic_csrf` cookie doesn't match the requesting device's
@@ -126,6 +142,22 @@ const STATEMENTS: &[&str] = &[
         consumed_at TIMESTAMPTZ
     )",
     "CREATE INDEX IF NOT EXISTS auth_email_verifications_user_active_idx
+        ON auth.email_verifications (user_id) WHERE consumed_at IS NULL",
+    "WITH ranked AS (
+        SELECT token_hash,
+               ROW_NUMBER() OVER (
+                   PARTITION BY user_id
+                   ORDER BY issued_at DESC, token_hash DESC
+               ) AS rn
+        FROM auth.email_verifications
+        WHERE consumed_at IS NULL
+    )
+    UPDATE auth.email_verifications v
+       SET consumed_at = NOW()
+      FROM ranked r
+     WHERE v.token_hash = r.token_hash
+       AND r.rn > 1",
+    "CREATE UNIQUE INDEX IF NOT EXISTS auth_email_verifications_active_user_uniq
         ON auth.email_verifications (user_id) WHERE consumed_at IS NULL",
 
     // 5.6 email suppressions

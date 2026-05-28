@@ -33,6 +33,7 @@ async fn migrations_apply_cleanly() {
     assert_queryable(&client, "control.authz_decisions").await;
     assert_user_delete_cascades_session_state(&client).await;
     assert_hot_path_indexes(&client).await;
+    assert_one_active_token_indexes(&client).await;
 
     let owner_email = format!("authz-migration-owner-{}@zeroship.test", Uuid::new_v4().simple());
     let actor_email = format!("authz-migration-actor-{}@zeroship.test", Uuid::new_v4().simple());
@@ -121,6 +122,33 @@ async fn migrations_apply_cleanly() {
         .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
         .await
         .expect("cleanup users");
+}
+
+async fn assert_one_active_token_indexes(client: &compio_postgres::Client) {
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_magic_links_active_email_purpose_uniq",
+        &[
+            "unique index",
+            "auth.magic_links",
+            "email, purpose",
+            "where (consumed_at is null)",
+        ],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_email_verifications_active_user_uniq",
+        &[
+            "unique index",
+            "auth.email_verifications",
+            "user_id",
+            "where (consumed_at is null)",
+        ],
+    )
+    .await;
 }
 
 async fn assert_hot_path_indexes(client: &compio_postgres::Client) {
