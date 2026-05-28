@@ -64,36 +64,61 @@ pub struct RedeemedToken {
 ///
 /// [`AuthError::Db`] on PG failure.
 pub async fn issue(db: &Client, user_id: Uuid, email: &str) -> Result<IssuedToken> {
-    // 1. Invalidate any previously unconsumed tokens for this user so
-    //    only the most recent token can be redeemed.
-    db.execute(
-        "UPDATE auth.email_verifications SET consumed_at = NOW() \
-         WHERE user_id = $1 AND consumed_at IS NULL",
-        &[&user_id],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("verification supersede previous: {e}")))?;
-
-    // 2. Generate token.
+    // 1. Generate token.
     let mut token_bytes = [0u8; TOKEN_LEN_BYTES];
     rand::thread_rng().fill_bytes(&mut token_bytes);
     let raw = URL_SAFE_NO_PAD.encode(token_bytes);
     let token_hash = sha256(&raw);
 
-    // 3. Insert the new row. `email` is CITEXT — cast at the bind site.
-    db.execute(
-        "INSERT INTO auth.email_verifications \
-            (token_hash, user_id, email, expires_at) \
-         VALUES ($1, $2, $3::citext, NOW() + ($4::text || ' hours')::interval)",
-        &[
-            &token_hash.as_slice(),
-            &user_id,
-            &email,
-            &TTL_HOURS.to_string(),
-        ],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("verification insert: {e}")))?;
+    db.execute("BEGIN", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("verification issue begin: {e}")))?;
+
+    let issued = async {
+        db.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(lower($1::text))::bigint)",
+            &[&email],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("verification issue advisory lock: {e}")))?;
+
+        // 2. Invalidate any previously unconsumed tokens for this user
+        //    so only the most recent token can be redeemed.
+        db.execute(
+            "UPDATE auth.email_verifications SET consumed_at = NOW() \
+             WHERE user_id = $1 AND consumed_at IS NULL",
+            &[&user_id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("verification supersede previous: {e}")))?;
+
+        // 3. Insert the new row. `email` is CITEXT — cast at the bind site.
+        db.execute(
+            "INSERT INTO auth.email_verifications \
+                (token_hash, user_id, email, expires_at) \
+             VALUES ($1, $2, $3::citext, NOW() + ($4::text || ' hours')::interval)",
+            &[
+                &token_hash.as_slice(),
+                &user_id,
+                &email,
+                &TTL_HOURS.to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("verification insert: {e}")))?;
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = issued {
+        let _ = db.execute("ROLLBACK", &[]).await;
+        return Err(e);
+    }
+
+    db.execute("COMMIT", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("verification issue commit: {e}")))?;
 
     Ok(IssuedToken { raw })
 }

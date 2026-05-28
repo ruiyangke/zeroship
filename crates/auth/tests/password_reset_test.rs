@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use clap::Parser;
-use compio_postgres::{connect, NoTls};
+use compio_postgres::{connect, Client, NoTls};
 use ntex::http::header::SET_COOKIE;
 use ntex::web::{self, test};
 use serde::Deserialize;
@@ -81,6 +81,59 @@ async fn pg() -> Option<compio_postgres::Client> {
     .detach();
     migrations::migrate(&client).await.expect("migrate");
     Some(client)
+}
+
+async fn pg_connect(dsn: &str) -> Client {
+    let (client, connection) = connect(dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("password_reset test pg connection error: {e}");
+        }
+    })
+    .detach();
+    client
+}
+
+async fn install_magic_links_insert_delay(client: &Client) {
+    client
+        .execute(
+            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_magic_link_insert() \
+             RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 PERFORM pg_sleep(0.2); \
+                 RETURN NEW; \
+             END \
+             $$",
+            &[],
+        )
+        .await
+        .expect("create insert delay function");
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            &[],
+        )
+        .await
+        .expect("drop stale insert delay trigger");
+    client
+        .execute(
+            "CREATE TRIGGER test_sleep_before_magic_link_insert \
+             BEFORE INSERT ON auth.magic_links \
+             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_magic_link_insert()",
+            &[],
+        )
+        .await
+        .expect("create insert delay trigger");
+}
+
+async fn drop_magic_links_insert_delay(client: &Client) {
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            &[],
+        )
+        .await
+        .ok();
 }
 
 #[compio::test]
@@ -269,6 +322,70 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     .await
     .ok();
     pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn concurrent_issue_leaves_one_active_reset_token() {
+    let dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(dsn) => dsn,
+        Err(_) => {
+            eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+            return;
+        }
+    };
+    let Some(client) = pg().await else {
+        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!(
+        "reset-concurrent-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    install_magic_links_insert_delay(&client).await;
+
+    let client_a = pg_connect(&dsn).await;
+    let client_b = pg_connect(&dsn).await;
+    let email_a = email.clone();
+    let email_b = email.clone();
+    let issue_a =
+        compio::runtime::spawn(async move { password_reset::issue(&client_a, &email_a).await });
+    let issue_b =
+        compio::runtime::spawn(async move { password_reset::issue(&client_b, &email_b).await });
+
+    issue_a.await.expect("join issue A").expect("issue A");
+    issue_b.await.expect("join issue B").expect("issue B");
+
+    drop_magic_links_insert_delay(&client).await;
+
+    let active_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM auth.magic_links \
+             WHERE email = $1::citext AND purpose = 'reset' AND consumed_at IS NULL",
+            &[&email],
+        )
+        .await
+        .expect("count active reset links")
+        .get(0);
+    assert_eq!(
+        active_count, 1,
+        "concurrent issue must leave exactly one active reset token"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
         .await
         .ok();
 }

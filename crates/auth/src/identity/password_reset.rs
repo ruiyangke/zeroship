@@ -78,18 +78,7 @@ pub struct RedeemedToken {
 ///
 /// Returns [`AuthError::Db`] on PG failure.
 pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
-    // 1. Invalidate any previously unconsumed reset tokens for this
-    //    email. Scoped to `purpose = 'reset'` so a pending magic-link
-    //    login on the same address is left alone.
-    db.execute(
-        "UPDATE auth.magic_links SET consumed_at = NOW() \
-         WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
-        &[&email, &PURPOSE],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("password_reset supersede previous: {e}")))?;
-
-    // 2. Generate the token.
+    // 1. Generate the token.
     let mut token_bytes = [0u8; TOKEN_LEN_BYTES];
     rand::thread_rng().fill_bytes(&mut token_bytes);
     let raw = URL_SAFE_NO_PAD.encode(token_bytes);
@@ -101,21 +90,57 @@ pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
     // entropy from elsewhere.
     let csrf_nonce_sentinel = "reset-no-csrf-nonce";
 
-    // 3. Insert the new row.
-    db.execute(
-        "INSERT INTO auth.magic_links \
-            (token_hash, email, csrf_nonce, purpose, expires_at) \
-         VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
-        &[
-            &token_hash.as_slice(),
-            &email,
-            &csrf_nonce_sentinel,
-            &PURPOSE,
-            &TTL_MINUTES.to_string(),
-        ],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("password_reset insert: {e}")))?;
+    db.execute("BEGIN", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset issue begin: {e}")))?;
+
+    let issued = async {
+        db.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(lower($1::text))::bigint)",
+            &[&email],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset issue advisory lock: {e}")))?;
+
+        // 2. Invalidate any previously unconsumed reset tokens for this
+        //    email. Scoped to `purpose = 'reset'` so a pending magic-link
+        //    login on the same address is left alone.
+        db.execute(
+            "UPDATE auth.magic_links SET consumed_at = NOW() \
+             WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
+            &[&email, &PURPOSE],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset supersede previous: {e}")))?;
+
+        // 3. Insert the new row.
+        db.execute(
+            "INSERT INTO auth.magic_links \
+                (token_hash, email, csrf_nonce, purpose, expires_at) \
+             VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
+            &[
+                &token_hash.as_slice(),
+                &email,
+                &csrf_nonce_sentinel,
+                &PURPOSE,
+                &TTL_MINUTES.to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset insert: {e}")))?;
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = issued {
+        let _ = db.execute("ROLLBACK", &[]).await;
+        return Err(e);
+    }
+
+    db.execute("COMMIT", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset issue commit: {e}")))?;
 
     Ok(IssuedToken { raw })
 }

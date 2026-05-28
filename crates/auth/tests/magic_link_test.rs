@@ -4,7 +4,7 @@
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row that test inserted.
 
-use compio_postgres::{connect, NoTls};
+use compio_postgres::{connect, Client, NoTls};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -28,10 +28,117 @@ async fn pg() -> Option<compio_postgres::Client> {
     Some(client)
 }
 
+async fn pg_connect(dsn: &str) -> Client {
+    let (client, connection) = connect(dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("magic_link test pg connection error: {e}");
+        }
+    })
+    .detach();
+    client
+}
+
+async fn install_magic_links_insert_delay(client: &Client) {
+    client
+        .execute(
+            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_magic_link_insert() \
+             RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 PERFORM pg_sleep(0.2); \
+                 RETURN NEW; \
+             END \
+             $$",
+            &[],
+        )
+        .await
+        .expect("create insert delay function");
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            &[],
+        )
+        .await
+        .expect("drop stale insert delay trigger");
+    client
+        .execute(
+            "CREATE TRIGGER test_sleep_before_magic_link_insert \
+             BEFORE INSERT ON auth.magic_links \
+             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_magic_link_insert()",
+            &[],
+        )
+        .await
+        .expect("create insert delay trigger");
+}
+
+async fn drop_magic_links_insert_delay(client: &Client) {
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON auth.magic_links",
+            &[],
+        )
+        .await
+        .ok();
+}
+
 fn sha256(s: &str) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     h.finalize().into()
+}
+
+#[compio::test]
+async fn concurrent_issue_leaves_one_active_token() {
+    let dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(dsn) => dsn,
+        Err(_) => {
+            eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+            return;
+        }
+    };
+    let Some(client) = pg().await else {
+        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!("magic-concurrent-{}@example.test", Uuid::new_v4().simple());
+    install_magic_links_insert_delay(&client).await;
+
+    let client_a = pg_connect(&dsn).await;
+    let client_b = pg_connect(&dsn).await;
+    let email_a = email.clone();
+    let email_b = email.clone();
+    let issue_a =
+        compio::runtime::spawn(async move { magic_link::issue(&client_a, &email_a, "login").await });
+    let issue_b =
+        compio::runtime::spawn(async move { magic_link::issue(&client_b, &email_b, "login").await });
+
+    issue_a.await.expect("join issue A").expect("issue A");
+    issue_b.await.expect("join issue B").expect("issue B");
+
+    drop_magic_links_insert_delay(&client).await;
+
+    let active_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM auth.magic_links \
+             WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
+            &[&email, &"login"],
+        )
+        .await
+        .expect("count active magic links")
+        .get(0);
+    assert_eq!(
+        active_count, 1,
+        "concurrent issue must leave exactly one active magic-link token"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .ok();
 }
 
 #[compio::test]

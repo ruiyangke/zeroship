@@ -82,9 +82,10 @@ pub enum RedeemError {
 ///    `consumed_at = NOW()` (one-active-per-email invariant).
 /// 2. A fresh row is inserted with `expires_at = NOW() + 15 min`.
 ///
-/// Both writes happen in the same DB session; PG's per-statement
-/// atomicity is enough — there's no cross-row constraint we need a
-/// transaction to enforce.
+/// Both writes happen in one transaction while holding a transaction-
+/// scoped advisory lock keyed by email. Without that lock, two
+/// concurrent issuers can both supersede before either insert is visible
+/// and leave two active tokens.
 ///
 /// # Errors
 ///
@@ -102,31 +103,56 @@ pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedTo
     let csrf_nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
     let token_hash = sha256(&raw);
 
-    // 2. Invalidate any previously unconsumed tokens for this email so
-    //    only the most recent token can be redeemed.
-    conn.execute(
-        "UPDATE auth.magic_links SET consumed_at = NOW() \
-         WHERE email = $1::citext AND consumed_at IS NULL",
-        &[&email],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("magic_link supersede previous: {e}")))?;
+    conn.execute("BEGIN", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_link issue begin: {e}")))?;
 
-    // 3. Insert the new row.
-    conn.execute(
-        "INSERT INTO auth.magic_links \
-            (token_hash, email, csrf_nonce, purpose, expires_at) \
-         VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
-        &[
-            &token_hash.as_slice(),
-            &email,
-            &csrf_nonce,
-            &purpose,
-            &TTL_MINUTES.to_string(),
-        ],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("magic_link insert: {e}")))?;
+    let issued = async {
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(lower($1::text))::bigint)",
+            &[&email],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_link issue advisory lock: {e}")))?;
+
+        // 2. Invalidate any previously unconsumed tokens for this email
+        //    so only the most recent token can be redeemed.
+        conn.execute(
+            "UPDATE auth.magic_links SET consumed_at = NOW() \
+             WHERE email = $1::citext AND consumed_at IS NULL",
+            &[&email],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_link supersede previous: {e}")))?;
+
+        // 3. Insert the new row.
+        conn.execute(
+            "INSERT INTO auth.magic_links \
+                (token_hash, email, csrf_nonce, purpose, expires_at) \
+             VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
+            &[
+                &token_hash.as_slice(),
+                &email,
+                &csrf_nonce,
+                &purpose,
+                &TTL_MINUTES.to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_link insert: {e}")))?;
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = issued {
+        let _ = conn.execute("ROLLBACK", &[]).await;
+        return Err(e);
+    }
+
+    conn.execute("COMMIT", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_link issue commit: {e}")))?;
 
     Ok(IssuedToken { raw, csrf_nonce })
 }
