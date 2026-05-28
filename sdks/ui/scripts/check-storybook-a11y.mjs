@@ -303,6 +303,19 @@ const stories = [
   "components-contextmenu--with-disabled-item",
   "components-contextmenu--custom-anchor",
   "components-contextmenu--rtl",
+  // Slice 13: Tabs. 12 stories.
+  "components-tabs--basic",
+  "components-tabs--all-variants",
+  "components-tabs--all-sizes",
+  "components-tabs--vertical",
+  "components-tabs--with-icons",
+  "components-tabs--with-badges",
+  "components-tabs--many-tabs",
+  "components-tabs--disabled-tab",
+  "components-tabs--controlled-value",
+  "components-tabs--with-animated-indicator",
+  "components-tabs--lazy-mount-panel",
+  "components-tabs--rtl",
 ];
 
 async function launchBrowser() {

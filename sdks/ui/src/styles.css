@@ -38,6 +38,7 @@
 @import "./components/OtpField/OtpField.css";
 @import "./components/Meter/Meter.css";
 @import "./components/Progress/Progress.css";
+@import "./components/Tabs/Tabs.css";
 
 *,
 *::before,

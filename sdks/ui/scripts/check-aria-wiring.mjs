@@ -2890,6 +2890,283 @@ await open("components-contextmenu--basic-right-click-area");
   await page.waitForTimeout(200);
 }
 
+/* ─── 67. Tabs roles: tablist + tab + tabpanel + aria-labelledby ───── *
+ *
+ * Slice 13. Tabs anatomy must expose the canonical ARIA tab pattern:
+ *   - The List element carries `role="tablist"`.
+ *   - Each Tab element carries `role="tab"`.
+ *   - Each Panel element carries `role="tabpanel"` AND
+ *     `aria-labelledby` referencing the matching Tab's id.
+ *
+ * Verify the wiring on the Basic story so the active tab + its panel
+ * pair light up the contract end-to-end. */
+await open("components-tabs--basic");
+{
+  const root = page.locator('[data-testid="tabs-basic"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const list = root.locator('[role="tablist"]');
+  const tabs = root.locator('[role="tab"]');
+  const tabCount = await tabs.count();
+  const listExists = (await list.count()) === 1;
+
+  const overviewTab = page.locator('[data-testid="tabs-basic-tab-overview"]');
+  const overviewTabId = await overviewTab.getAttribute("id");
+  const overviewPanel = page.locator(
+    '[data-testid="tabs-basic-panel-overview"]',
+  );
+  const overviewPanelRole = await overviewPanel.getAttribute("role");
+  const overviewPanelLabelledBy = await overviewPanel.getAttribute(
+    "aria-labelledby",
+  );
+
+  const ok =
+    listExists &&
+    tabCount === 3 &&
+    overviewPanelRole === "tabpanel" &&
+    Boolean(overviewTabId) &&
+    overviewPanelLabelledBy === overviewTabId;
+  report(
+    "Tabs roles: tablist + tab + tabpanel; Panel.aria-labelledby refs Tab id",
+    ok,
+    `list=${listExists} tabs=${tabCount} role=${overviewPanelRole} labelledBy=${overviewPanelLabelledBy} tabId=${overviewTabId}`,
+  );
+}
+
+/* ─── 68. Tabs Tab click switches the active panel ────────────────── *
+ *
+ * Clicking a non-active Tab must:
+ *   - Flip `aria-selected="true"` onto the clicked Tab AND off the
+ *     previously-active Tab (the canonical ARIA signal).
+ *   - Reveal the corresponding Panel (it becomes visible — `hidden`
+ *     attribute drops).
+ *   - Hide the previously-active Panel (the `hidden` attribute
+ *     appears, or the panel disappears entirely when lazy-mounted). */
+await open("components-tabs--basic");
+{
+  const overviewTab = page.locator('[data-testid="tabs-basic-tab-overview"]');
+  const usageTab = page.locator('[data-testid="tabs-basic-tab-usage"]');
+  const overviewPanel = page.locator(
+    '[data-testid="tabs-basic-panel-overview"]',
+  );
+  const usagePanel = page.locator('[data-testid="tabs-basic-panel-usage"]');
+  await overviewTab.waitFor({ state: "visible", timeout: 5000 });
+
+  const overviewSelectedBefore =
+    (await overviewTab.getAttribute("aria-selected")) === "true";
+  const usageSelectedBefore =
+    (await usageTab.getAttribute("aria-selected")) === "true";
+  await usageTab.click();
+  await page.waitForTimeout(50);
+  const overviewSelectedAfter =
+    (await overviewTab.getAttribute("aria-selected")) === "true";
+  const usageSelectedAfter =
+    (await usageTab.getAttribute("aria-selected")) === "true";
+  // After the click, the usage panel is visible; overview panel is hidden.
+  const usagePanelVisible = await usagePanel.isVisible();
+  const overviewPanelHidden = !(await overviewPanel.isVisible());
+
+  const ok =
+    overviewSelectedBefore === true &&
+    usageSelectedBefore === false &&
+    overviewSelectedAfter === false &&
+    usageSelectedAfter === true &&
+    usagePanelVisible &&
+    overviewPanelHidden;
+  report(
+    "Tabs Tab click flips aria-selected and swaps the visible panel",
+    ok,
+    `aria-selected: overview ${overviewSelectedBefore}→${overviewSelectedAfter}, usage ${usageSelectedBefore}→${usageSelectedAfter}`,
+  );
+}
+
+/* ─── 69. Tabs ArrowRight rovers focus + activates ────────────────── *
+ *
+ * Base UI's default Tabs.List enables instant activation on arrow
+ * navigation when `activateOnFocus` is on; with the default off, the
+ * arrow only ROVES focus and the consumer presses Enter/Space to
+ * activate. Both shapes are valid per WAI-ARIA APG; verify the focus-
+ * rove case here so the keyboard contract is observable.
+ *
+ * We focus the first tab, press ArrowRight, and assert focus moved
+ * to the second tab. Then press Enter and assert the second tab
+ * becomes selected. */
+await open("components-tabs--basic");
+{
+  const overviewTab = page.locator('[data-testid="tabs-basic-tab-overview"]');
+  const usageTab = page.locator('[data-testid="tabs-basic-tab-usage"]');
+  await overviewTab.waitFor({ state: "visible", timeout: 5000 });
+  await overviewTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(30);
+  const usageFocused = await usageTab.evaluate(
+    (el) => el === document.activeElement,
+  );
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(50);
+  const usageSelected =
+    (await usageTab.getAttribute("aria-selected")) === "true";
+  const ok = usageFocused && usageSelected;
+  report(
+    "Tabs ArrowRight roves focus to next Tab; Enter activates it",
+    ok,
+    `focused=${usageFocused} aria-selected=${usageSelected}`,
+  );
+}
+
+/* ─── 70. Tabs lazyMount removes inactive Panels from the DOM ─────── *
+ *
+ * `lazyMount={true}` flips Base UI's `keepMounted` default to false.
+ * Verify the contract — at first paint, the dormant + hidden panels
+ * must NOT be in the DOM (count 0); clicking their tab must mount
+ * them (count 1). */
+await open("components-tabs--lazy-mount-panel");
+{
+  const activeTab = page.locator(
+    '[data-testid="tabs-lazy-mount"] [role="tab"]',
+    { hasText: "Active" },
+  );
+  await activeTab.waitFor({ state: "visible", timeout: 5000 });
+  const dormantPanel = page.locator('[data-testid="tabs-lazy-panel-dormant"]');
+  const hiddenPanel = page.locator('[data-testid="tabs-lazy-panel-hidden"]');
+  const activePanel = page.locator('[data-testid="tabs-lazy-panel-active"]');
+
+  const dormantBefore = await dormantPanel.count();
+  const hiddenBefore = await hiddenPanel.count();
+  const activeBefore = await activePanel.count();
+
+  // Click the dormant tab — its panel must mount.
+  const dormantTab = page.locator(
+    '[data-testid="tabs-lazy-mount"] [role="tab"]',
+    { hasText: "Dormant" },
+  );
+  await dormantTab.click();
+  await page.waitForTimeout(50);
+  const dormantAfter = await dormantPanel.count();
+  const activeAfter = await activePanel.count();
+
+  const ok =
+    activeBefore === 1 &&
+    dormantBefore === 0 &&
+    hiddenBefore === 0 &&
+    dormantAfter === 1 &&
+    activeAfter === 0;
+  report(
+    "Tabs lazyMount=true keeps inactive Panels out of the DOM until selected",
+    ok,
+    `dormant=${dormantBefore}→${dormantAfter} hidden=${hiddenBefore} active=${activeBefore}→${activeAfter}`,
+  );
+}
+
+/* ─── 71. Tabs Indicator emits Base UI's active-tab CSS vars ──────── *
+ *
+ * The default-variant Indicator reads its position from the CSS
+ * custom properties Base UI emits on the indicator element:
+ * `--active-tab-left` and `--active-tab-width`. Without those vars
+ * (or with them set to 0) the underline collapses to a hairline at
+ * the rail origin — a real visual regression. Verify the inline
+ * style stamps the vars with non-empty `px` values. */
+await open("components-tabs--with-animated-indicator");
+{
+  const indicator = page.locator('[data-testid="tabs-animated-indicator"]');
+  await indicator.waitFor({ state: "visible", timeout: 5000 });
+  const styleAttr = (await indicator.getAttribute("style")) ?? "";
+  const hasLeft = /--active-tab-left:\s*\d+(\.\d+)?px/.test(styleAttr);
+  const hasWidth = /--active-tab-width:\s*\d+(\.\d+)?px/.test(styleAttr);
+  // The width MUST be > 0 — a zero-width indicator means Base UI
+  // couldn't measure the active tab and the underline is invisible.
+  const widthMatch = styleAttr.match(/--active-tab-width:\s*(\d+(?:\.\d+)?)px/);
+  const widthPx = widthMatch ? parseFloat(widthMatch[1]) : 0;
+  const ok = hasLeft && hasWidth && widthPx > 0;
+  report(
+    "Tabs.Indicator stamps --active-tab-left / --active-tab-width on the span",
+    ok,
+    `style="${styleAttr}" widthPx=${widthPx}`,
+  );
+}
+
+/* ─── 72. Tabs disabled Tab is unactivatable + skipped by clicks ──── *
+ *
+ * Clicking a disabled Tab must NOT change selection. We assert the
+ * previously-selected Tab keeps its `aria-selected="true"` after the
+ * disabled Tab is clicked, and the disabled Tab still reads as
+ * aria-disabled / un-selected. */
+await open("components-tabs--disabled-tab");
+{
+  const disabledTab = page.locator('[data-testid="tabs-disabled-tab"]');
+  await disabledTab.waitFor({ state: "visible", timeout: 5000 });
+  const firstTab = page.locator(
+    '[data-testid="tabs-disabled"] [role="tab"]',
+    { hasText: "Active" },
+  );
+  const selectedBefore =
+    (await firstTab.getAttribute("aria-selected")) === "true";
+  // `force: true` so Playwright bypasses the actionability guard on the
+  // disabled button; we're verifying the application-level guard.
+  await disabledTab.click({ force: true });
+  await page.waitForTimeout(50);
+  const selectedAfter =
+    (await firstTab.getAttribute("aria-selected")) === "true";
+  const disabledSelected =
+    (await disabledTab.getAttribute("aria-selected")) === "true";
+  const disabledAttr = await disabledTab.getAttribute("data-disabled");
+  const ok =
+    selectedBefore === true &&
+    selectedAfter === true &&
+    disabledSelected === false &&
+    disabledAttr !== null;
+  report(
+    "Tabs clicking a disabled Tab does not change selection",
+    ok,
+    `firstSelected=${selectedBefore}→${selectedAfter} disabledSelected=${disabledSelected} data-disabled=${disabledAttr}`,
+  );
+}
+
+/* ─── 73. Tabs vertical orientation stamps aria-orientation ───────── *
+ *
+ * Base UI mirrors the root's orientation onto the tablist as
+ * `aria-orientation="vertical"`. Screen readers depend on this signal
+ * to announce arrow-key direction correctly (Up/Down vs Left/Right). */
+await open("components-tabs--vertical");
+{
+  const root = page.locator('[data-testid="tabs-vertical"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const orientation = await root.getAttribute("data-orientation");
+  const list = root.locator('[role="tablist"]');
+  const listOrientation = await list.getAttribute("aria-orientation");
+  const ok = orientation === "vertical" && listOrientation === "vertical";
+  report(
+    "Tabs vertical: root data-orientation + tablist aria-orientation = vertical",
+    ok,
+    `root=${orientation} tablist=${listOrientation}`,
+  );
+}
+
+/* ─── 74. Tabs controlled value reflects external state change ────── *
+ *
+ * Controlled mode: clicking a Tab fires `onValueChange`; the consumer
+ * routes that through React state and feeds the next value back via
+ * `value`. Verify the round-trip by reading the live readout that
+ * mirrors the controlled state. */
+await open("components-tabs--controlled-value");
+{
+  const readout = page.locator('[data-testid="tabs-controlled-readout"]');
+  await readout.waitFor({ state: "visible", timeout: 5000 });
+  const before = (await readout.innerText()).trim();
+  const thirdTab = page.locator(
+    '[data-testid="tabs-controlled"] [role="tab"]',
+    { hasText: "Three" },
+  );
+  await thirdTab.click();
+  await page.waitForTimeout(50);
+  const after = (await readout.innerText()).trim();
+  const ok = before === "Selected: two" && after === "Selected: three";
+  report(
+    "Tabs controlled onValueChange round-trips through external state",
+    ok,
+    `readout: "${before}" → "${after}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
