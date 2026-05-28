@@ -226,6 +226,21 @@ const STATEMENTS: &[&str] = &[
         PRIMARY KEY (app_id, user_id)
     )",
     "CREATE INDEX IF NOT EXISTS app_members_user_idx ON control.app_members (user_id)",
+    "CREATE TABLE IF NOT EXISTS apps (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL UNIQUE,
+        plan_id TEXT NOT NULL DEFAULT 'free',
+        deploy_hash TEXT,
+        api_key TEXT NOT NULL,
+        api_key_hash TEXT NOT NULL DEFAULT '',
+        env_version BIGINT NOT NULL DEFAULT 0,
+        suspended BOOLEAN NOT NULL DEFAULT FALSE,
+        audit_locked BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )",
+    "ALTER TABLE apps ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE apps ADD COLUMN IF NOT EXISTS audit_locked BOOLEAN NOT NULL DEFAULT FALSE",
     "CREATE TABLE IF NOT EXISTS control.permission_tokens (
         id           UUID PRIMARY KEY,
         owner_id     UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,

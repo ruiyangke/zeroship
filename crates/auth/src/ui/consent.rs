@@ -13,8 +13,9 @@ use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use zeroship_authz::{self as authz, AuthzContext, AuthzDecision, Resource, Scope};
+use zeroship_authz::{self as authz, AuthzContext, Resource, Scope};
 
 use crate::config::AuthConfig;
 use crate::csrf;
@@ -385,6 +386,7 @@ async fn grantor_can_grant_requested_scopes(
         .map_err(|e| format!("consent subject is not a UUID: {e}"))?;
     let policies = authz::load_platform_policies()
         .map_err(|e| format!("load platform policies: {e}"))?;
+    let now = now_unix()?;
 
     for scope in scopes {
         let ctx = AuthzContext {
@@ -393,19 +395,30 @@ async fn grantor_can_grant_requested_scopes(
             token_policy: None,
             action: scope.action(),
             resource: Resource::Any,
+            now,
             request_ip: None,
             mfa_verified: false,
             mfa_age_seconds: None,
             request_id: None,
         };
-        match authz::enforce(db, &policies, &ctx).await {
-            Ok(AuthzDecision::Allow) => {}
-            Ok(AuthzDecision::Deny) => return Ok(false),
+        match authz::is_authorized_anywhere(db, &policies, &ctx).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
             Err(e) => return Err(format!("authorize {}: {e}", scope.as_str())),
         }
     }
 
     Ok(true)
+}
+
+fn now_unix() -> Result<i64, String> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| format!("clock: {err}"))?
+            .as_secs(),
+    )
+    .map_err(|err| format!("clock overflow: {err}"))
 }
 
 struct ClientDisplay {

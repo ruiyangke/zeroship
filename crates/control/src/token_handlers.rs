@@ -13,7 +13,9 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_authz::{self as authz, AuthzContext, AuthzDecision, Effect, Policy};
+use zeroship_authz::{
+    self as authz, AuthzContext, AuthzDecision, Condition, Effect, EntityCache, Policy, Resource,
+};
 
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
@@ -345,6 +347,7 @@ pub async fn delete_token(
     let Some(row) = rows.first() else {
         return web::HttpResponse::NotFound().json(&json!({"error": "token_not_found"}));
     };
+    EntityCache::invalidate(guard.principal_id);
     let revoked_at: DateTime<Utc> = row.get("revoked_at");
     web::HttpResponse::Ok().json(&DeleteTokenResponse {
         id: token_id.to_string(),
@@ -366,8 +369,18 @@ async fn validate_grant_subset(
     state: &AppState,
     policy: &Policy,
 ) -> Result<(), web::HttpResponse> {
+    validate_policy_shape(policy)?;
+
+    let now = now_unix().map_err(|err| {
+        tracing::error!(error = %err, "control: PAT grant validation clock failed");
+        web::HttpResponse::InternalServerError().json(&json!({"error": "authz_error"}))
+    })?;
+
     let mut pairs = 0usize;
     for statement in &policy.statements {
+        // Deny statements only narrow the wrapper policy. The subset check
+        // validates every Allow pair because those are the only statements
+        // that can grant authority beyond what the principal already has.
         if statement.effect != Effect::Allow {
             continue;
         }
@@ -387,15 +400,25 @@ async fn validate_grant_subset(
                     token_policy: None,
                     action: *action,
                     resource: resource.clone(),
+                    now,
                     request_ip: guard.request_ip,
                     mfa_verified: guard.mfa_verified,
                     mfa_age_seconds: guard.mfa_age_seconds,
                     request_id: None,
                 };
 
-                match authz::enforce(&state.auth_pg, &state.static_policies, &ctx).await {
-                    Ok(AuthzDecision::Allow) => {}
-                    Ok(AuthzDecision::Deny) => {
+                let authorized = if matches!(resource, Resource::Any) {
+                    authz::is_authorized_anywhere(&state.auth_pg, &state.static_policies, &ctx)
+                        .await
+                } else {
+                    authz::enforce(&state.auth_pg, &state.static_policies, &ctx)
+                        .await
+                        .map(|decision| decision == AuthzDecision::Allow)
+                };
+
+                match authorized {
+                    Ok(true) => {}
+                    Ok(false) => {
                         return Err(web::HttpResponse::BadRequest().json(&json!({
                             "error": "excess_permissions",
                             "message": "you can't grant a permission you don't have",
@@ -409,6 +432,41 @@ async fn validate_grant_subset(
                             .json(&json!({"error": "authz_error"})));
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_shape(policy: &Policy) -> Result<(), web::HttpResponse> {
+    for statement in &policy.statements {
+        if statement.actions.is_empty() {
+            return Err(web::HttpResponse::BadRequest().json(&json!({
+                "error": "empty_policy_statement",
+                "message": "policy statements must include at least one action",
+            })));
+        }
+        if statement.resources.is_empty() {
+            return Err(web::HttpResponse::BadRequest().json(&json!({
+                "error": "empty_policy_statement",
+                "message": "policy statements must include at least one resource",
+            })));
+        }
+        for condition in &statement.conditions {
+            if matches!(condition, Condition::RequireMfa | Condition::MfaWithin { .. }) {
+                return Err(web::HttpResponse::BadRequest().json(&json!({
+                    "error": "unsupported_policy_condition",
+                    "message": "MFA policy conditions are not yet enforced by control-plane sessions",
+                })));
+            }
+        }
+        for resource in &statement.resources {
+            if let Err(message) = resource.validate_ids() {
+                return Err(web::HttpResponse::BadRequest().json(&json!({
+                    "error": "invalid_resource_id",
+                    "message": message,
+                    "resource": resource,
+                })));
             }
         }
     }

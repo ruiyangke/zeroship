@@ -378,6 +378,26 @@ async fn user_without_scope_action_gets_decline_screen() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn app_owner_can_grant_app_scoped_scope() {
+    let app = ConsentTestApp::boot(&["apps:deploy"], None, Some("owner"), false).await;
+
+    let resp = app.get_consent().await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.contains("form=\"consent-accept\""),
+        "app owner should be able to grant app deploy scope: {body}"
+    );
+    assert!(
+        !body.contains("you cannot grant"),
+        "owner grant screen should not render denial copy: {body}"
+    );
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn allow_button_puts_to_hydra_accept() {
     let app = ConsentTestApp::boot(&["apps:deploy"], Some("admin"), None, false).await;
     let get_resp = app.get_consent().await;

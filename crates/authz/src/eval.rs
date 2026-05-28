@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use cedar_policy::{Context, Decision, EntityUid, PolicySet, Request, RestrictedExpression};
+use cedar_policy::{Context, Decision, EntityUid, PolicySet, Request, Response, RestrictedExpression};
 use compio_postgres::Client;
 use serde_json::Value;
 use uuid::Uuid;
@@ -23,6 +23,7 @@ pub struct AuthzContext<'a> {
     pub token_policy: Option<Policy>,
     pub action: Action,
     pub resource: Resource,
+    pub now: i64,
     pub request_ip: Option<IpAddr>,
     pub mfa_verified: bool,
     pub mfa_age_seconds: Option<u32>,
@@ -46,7 +47,8 @@ pub async fn enforce(
         let owner_decision =
             cedar_policy::Authorizer::new().is_authorized(&owner_req, static_policies, &entities);
         if owner_decision.decision() != Decision::Allow {
-            audit_decision(pg, ctx, AuthzDecision::Deny).await;
+            let matched_policies = matched_policy_ids(&owner_decision);
+            audit_decision(pg, ctx, AuthzDecision::Deny, &matched_policies).await;
             return Ok(AuthzDecision::Deny);
         }
     }
@@ -61,14 +63,73 @@ pub async fn enforce(
 
     let req = build_request(ctx)?;
     let decision = cedar_policy::Authorizer::new().is_authorized(&req, &final_policies, &entities);
+    let matched_policies = matched_policy_ids(&decision);
 
     let decision = if decision.decision() == Decision::Allow {
         AuthzDecision::Allow
     } else {
         AuthzDecision::Deny
     };
-    audit_decision(pg, ctx, decision).await;
+    audit_decision(pg, ctx, decision, &matched_policies).await;
     Ok(decision)
+}
+
+/// Return true when the principal can perform `ctx.action` on any resource
+/// they currently control: platform-wide `Resource::Any` first, then each app
+/// membership resource. This is used for grant/consent checks where the user is
+/// delegating an action vocabulary, not authorizing one concrete app request.
+pub async fn is_authorized_anywhere(
+    pg: &Client,
+    static_policies: &PolicySet,
+    ctx: &AuthzContext<'_>,
+) -> Result<bool, AuthzError> {
+    let mut resources = vec![Resource::Any];
+    resources.extend(load_principal_app_resources(pg, ctx.principal_id).await?);
+
+    for resource in resources {
+        let probe = AuthzContext {
+            principal_id: ctx.principal_id,
+            token_id: None,
+            token_policy: None,
+            action: ctx.action,
+            resource,
+            now: ctx.now,
+            request_ip: ctx.request_ip,
+            mfa_verified: ctx.mfa_verified,
+            mfa_age_seconds: ctx.mfa_age_seconds,
+            request_id: ctx.request_id,
+        };
+        if enforce(pg, static_policies, &probe).await? == AuthzDecision::Allow {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn load_principal_app_resources(
+    pg: &Client,
+    principal_id: Uuid,
+) -> Result<Vec<Resource>, AuthzError> {
+    let rows = pg
+        .query(
+            "SELECT DISTINCT app_id FROM control.app_members WHERE user_id = $1",
+            &[&principal_id],
+        )
+        .await
+        .map_err(|err| AuthzError::Db(format!("load app grant resources: {err}")))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let resource = Resource::App {
+                id: row.get("app_id"),
+            };
+            resource
+                .validate_ids()
+                .map_err(|message| AuthzError::Validation(message.to_owned()))?;
+            Ok(resource)
+        })
+        .collect()
 }
 
 fn policy_set_from_policy(policy: &Policy) -> Result<PolicySet, AuthzError> {
@@ -109,8 +170,14 @@ fn build_context(ctx: &AuthzContext<'_>) -> Result<Context, AuthzError> {
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "0.0.0.0".to_owned());
     let mfa_age_seconds = ctx.mfa_age_seconds.unwrap_or(u32::MAX);
+    let now_minute_utc = utc_minute_of_day(ctx.now);
 
     let pairs = HashMap::from([
+        ("now".to_owned(), restricted(&ctx.now.to_string())?),
+        (
+            "now_minute_utc".to_owned(),
+            restricted(&now_minute_utc.to_string())?,
+        ),
         (
             "request_ip".to_owned(),
             restricted(&format!("ip({})", cedar_string(&request_ip)))?,
@@ -132,6 +199,10 @@ fn restricted(source: &str) -> Result<RestrictedExpression, AuthzError> {
         .map_err(|err| AuthzError::CedarRequest(err.to_string()))
 }
 
+fn utc_minute_of_day(now: i64) -> i64 {
+    now.rem_euclid(86_400) / 60
+}
+
 fn resource_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {
     match resource {
         Resource::App { id } => uid("App", id),
@@ -140,7 +211,20 @@ fn resource_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {
     }
 }
 
-async fn audit_decision(pg: &Client, ctx: &AuthzContext<'_>, decision: AuthzDecision) {
+fn matched_policy_ids(response: &Response) -> Vec<String> {
+    response
+        .diagnostics()
+        .reason()
+        .map(|policy_id| policy_id.to_string())
+        .collect()
+}
+
+async fn audit_decision(
+    pg: &Client,
+    ctx: &AuthzContext<'_>,
+    decision: AuthzDecision,
+    matched_policies: &[String],
+) {
     let (resource_type, resource_id) = audit_resource(&ctx.resource);
     let decision = match decision {
         AuthzDecision::Allow => "allow",
@@ -150,8 +234,8 @@ async fn audit_decision(pg: &Client, ctx: &AuthzContext<'_>, decision: AuthzDeci
     if let Err(err) = pg
         .execute(
             "INSERT INTO control.authz_decisions \
-                (user_id, token_id, action, resource_type, resource_id, decision, request_ip, request_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                (user_id, token_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             &[
                 &ctx.principal_id,
                 &ctx.token_id,
@@ -159,6 +243,7 @@ async fn audit_decision(pg: &Client, ctx: &AuthzContext<'_>, decision: AuthzDeci
                 &resource_type,
                 &resource_id,
                 &decision,
+                &matched_policies,
                 &request_ip,
                 &ctx.request_id,
             ],

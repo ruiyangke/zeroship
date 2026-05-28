@@ -103,6 +103,8 @@ impl Registry {
                 api_key TEXT NOT NULL,
                 api_key_hash TEXT NOT NULL DEFAULT '',
                 env_version BIGINT NOT NULL DEFAULT 0,
+                suspended BOOLEAN NOT NULL DEFAULT FALSE,
+                audit_locked BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
@@ -124,6 +126,18 @@ impl Registry {
         // falls back to its legacy dispatch in that case.
         conn.execute(
             "ALTER TABLE apps ADD COLUMN IF NOT EXISTS manifest_json TEXT",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS suspended BOOLEAN NOT NULL DEFAULT FALSE",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS audit_locked BOOLEAN NOT NULL DEFAULT FALSE",
             &[],
         )
         .await

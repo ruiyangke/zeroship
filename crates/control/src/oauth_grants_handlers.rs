@@ -7,7 +7,7 @@ use ntex::web;
 use ntex::web::types::{Path, State};
 use serde::Serialize;
 use serde_json::json;
-use zeroship_authz::{Action, Resource};
+use zeroship_authz::{Action, EntityCache, Resource};
 
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
@@ -114,6 +114,7 @@ pub async fn revoke_grant(
     if deleted == 0 {
         return web::HttpResponse::NotFound().json(&json!({"error": "oauth_grant_not_found"}));
     }
+    EntityCache::invalidate(authz.principal_id);
 
     if let Err(err) = hydra_revoke_consent_sessions(
         &state.hydra_admin_url,

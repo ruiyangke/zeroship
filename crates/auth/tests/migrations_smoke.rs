@@ -31,12 +31,14 @@ async fn migrations_apply_cleanly() {
     assert_queryable(&client, "control.permission_tokens").await;
     assert_queryable(&client, "control.platform_policies").await;
     assert_queryable(&client, "control.authz_decisions").await;
+    assert_queryable(&client, "apps").await;
 
     let owner_email = format!("authz-migration-owner-{}@zeroship.test", Uuid::new_v4().simple());
     let actor_email = format!("authz-migration-actor-{}@zeroship.test", Uuid::new_v4().simple());
     let owner_id = insert_user(&client, &owner_email, "Authz Migration Owner").await;
     let actor_id = insert_user(&client, &actor_email, "Authz Migration Actor").await;
-    let app_id = format!("app_{}", Uuid::new_v4().simple());
+    let app_uuid = Uuid::new_v4();
+    let app_id = app_uuid.to_string();
     let token_id = Uuid::new_v4();
     let policy_id = format!("authz-migration-{}", Uuid::new_v4().simple());
     let request_id = format!("req_{}", Uuid::new_v4().simple());
@@ -48,6 +50,14 @@ async fn migrations_apply_cleanly() {
         )
         .await
         .expect("insert platform role");
+    client
+        .execute(
+            "INSERT INTO apps (id, name, api_key, api_key_hash, suspended, audit_locked)
+             VALUES ($1, $2, 'test-api-key', 'test-api-key-hash', TRUE, TRUE)",
+            &[&app_uuid, &format!("authz-migration-app-{}", Uuid::new_v4().simple())],
+        )
+        .await
+        .expect("insert app with authz flags");
     client
         .execute(
             "INSERT INTO control.app_members (app_id, user_id, role, added_by)
@@ -115,6 +125,10 @@ async fn migrations_apply_cleanly() {
         .execute("DELETE FROM control.platform_policies WHERE id = $1", &[&policy_id])
         .await
         .expect("cleanup platform policy");
+    client
+        .execute("DELETE FROM apps WHERE id = $1", &[&app_uuid])
+        .await
+        .expect("cleanup app");
     client
         .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
         .await

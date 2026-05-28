@@ -2,8 +2,8 @@ use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
 use uuid::Uuid;
 use zeroship_authz::{
-    enforce, load_platform_policies, policy_hash, Action, AuthzContext, AuthzDecision, Effect,
-    Policy, Resource, Statement,
+    enforce, is_authorized_anywhere, load_platform_policies, policy_hash, Action, AuthzContext,
+    AuthzDecision, Condition, Effect, EntityCache, Policy, Resource, Statement,
 };
 
 #[test]
@@ -93,6 +93,128 @@ fn no_token_uses_owner_policies_only() {
 }
 
 #[test]
+fn audit_locked_app_denies_owner_writes() {
+    run_db_test(|pg| async move {
+        let fixture =
+            Fixture::new_registered_app(&pg, "audit-locked", "owner", false, true).await;
+
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+            .await
+            .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Deny);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn suspended_app_denies_owner_writes() {
+    run_db_test(|pg| async move {
+        let fixture = Fixture::new_registered_app(&pg, "suspended", "owner", true, false).await;
+
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+            .await
+            .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Deny);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn app_owner_is_authorized_anywhere_for_owned_app_action() {
+    run_db_test(|pg| async move {
+        let fixture =
+            Fixture::new_registered_app(&pg, "owner-anywhere", "owner", false, false).await;
+        let policies = load_platform_policies().unwrap();
+        let ctx = AuthzContext {
+            principal_id: fixture.user_id,
+            token_id: None,
+            token_policy: None,
+            action: Action::AppsDeploy,
+            resource: Resource::Any,
+            now: 12 * 60 * 60,
+            request_ip: None,
+            mfa_verified: false,
+            mfa_age_seconds: None,
+            request_id: None,
+        };
+
+        assert!(
+            is_authorized_anywhere(&pg, &policies, &ctx).await.unwrap(),
+            "app owner should be allowed to grant apps:deploy somewhere"
+        );
+
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn time_window_policy_enforces_utc_hours() {
+    run_db_test(|pg| async move {
+        let fixture =
+            Fixture::new_registered_app(&pg, "time-window", "owner", false, false).await;
+        let token_policy = Policy {
+            name: "business hours".to_owned(),
+            statements: vec![Statement {
+                effect: Effect::Allow,
+                actions: vec![Action::AppsRead],
+                resources: vec![fixture.app()],
+                conditions: vec![Condition::TimeWindow {
+                    start: "09:00".to_owned(),
+                    end: "17:00".to_owned(),
+                    tz: "UTC".to_owned(),
+                }],
+            }],
+        };
+        let policies = load_platform_policies().unwrap();
+
+        let denied = enforce(
+            &pg,
+            &policies,
+            &fixture.ctx_with_policy(Action::AppsRead, 3 * 60 * 60, token_policy.clone()),
+        )
+        .await
+        .unwrap();
+        let allowed = enforce(
+            &pg,
+            &policies,
+            &fixture.ctx_with_policy(Action::AppsRead, 12 * 60 * 60, token_policy),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(denied, AuthzDecision::Deny);
+        assert_eq!(allowed, AuthzDecision::Allow);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn entity_cache_invalidation_refreshes_platform_role() {
+    run_db_test(|pg| async move {
+        let fixture = Fixture::new(&pg, "cache-invalidate", None, None).await;
+        let policies = load_platform_policies().unwrap();
+
+        let denied = enforce(&pg, &policies, &fixture.ctx(None)).await.unwrap();
+        assert_eq!(denied, AuthzDecision::Deny);
+
+        pg.execute(
+            "INSERT INTO platform.roles (user_id, role) VALUES ($1, 'admin')",
+            &[&fixture.user_id],
+        )
+        .await
+        .expect("insert platform role");
+        EntityCache::invalidate(fixture.user_id);
+
+        let allowed = enforce(&pg, &policies, &fixture.ctx(None)).await.unwrap();
+        assert_eq!(allowed, AuthzDecision::Allow);
+
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
 fn audit_decision_recorded() {
     run_db_test(|pg| async move {
         let fixture = Fixture::new(&pg, "audit", Some("admin"), None).await;
@@ -104,7 +226,7 @@ fn audit_decision_recorded() {
 
         let rows = pg
             .query(
-                "SELECT action, resource_type, resource_id, decision \
+                "SELECT action, resource_type, resource_id, decision, matched_policies \
              FROM control.authz_decisions \
              WHERE user_id = $1 AND action = $2 AND resource_type = 'app' AND resource_id = $3 \
              ORDER BY occurred_at DESC \
@@ -125,6 +247,11 @@ fn audit_decision_recorded() {
             Some(fixture.app_id.clone())
         );
         assert_eq!(row.get::<_, String>("decision"), "allow");
+        let matched_policies: Vec<String> = row.get("matched_policies");
+        assert!(
+            !matched_policies.is_empty(),
+            "audit row should record Cedar matched policy ids"
+        );
 
         fixture.cleanup(&pg).await;
     });
@@ -162,6 +289,7 @@ async fn pg(dsn: &str) -> Client {
 struct Fixture {
     user_id: Uuid,
     app_id: String,
+    app_db_id: Option<Uuid>,
     token_ids: Vec<Uuid>,
 }
 
@@ -204,6 +332,55 @@ impl Fixture {
         Self {
             user_id,
             app_id,
+            app_db_id: None,
+            token_ids: Vec::new(),
+        }
+    }
+
+    async fn new_registered_app(
+        pg: &Client,
+        label: &str,
+        app_role: &str,
+        suspended: bool,
+        audit_locked: bool,
+    ) -> Self {
+        let user_id = Uuid::new_v4();
+        let app_db_id = Uuid::new_v4();
+        let app_id = app_db_id.to_string();
+        let email = format!("{label}-{user_id}@example.com");
+        let app_name = format!("authz-{label}-{}", Uuid::new_v4().simple());
+
+        pg.execute(
+            "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            &[&user_id, &email, &label],
+        )
+        .await
+        .expect("insert user");
+        pg.execute(
+            "INSERT INTO apps (id, name, api_key, api_key_hash, suspended, audit_locked) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &app_db_id,
+                &app_name,
+                &"test-api-key",
+                &"test-api-key-hash",
+                &suspended,
+                &audit_locked,
+            ],
+        )
+        .await
+        .expect("insert app");
+        pg.execute(
+            "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
+            &[&app_id, &user_id, &app_role],
+        )
+        .await
+        .expect("insert app member");
+
+        Self {
+            user_id,
+            app_id,
+            app_db_id: Some(app_db_id),
             token_ids: Vec::new(),
         }
     }
@@ -237,6 +414,22 @@ impl Fixture {
             token_policy: None,
             action: Action::AppsDeploy,
             resource: self.app(),
+            now: 12 * 60 * 60,
+            request_ip: None,
+            mfa_verified: false,
+            mfa_age_seconds: None,
+            request_id: None,
+        }
+    }
+
+    fn ctx_with_policy(&self, action: Action, now: i64, policy: Policy) -> AuthzContext<'_> {
+        AuthzContext {
+            principal_id: self.user_id,
+            token_id: None,
+            token_policy: Some(policy),
+            action,
+            resource: self.app(),
+            now,
             request_ip: None,
             mfa_verified: false,
             mfa_age_seconds: None,
@@ -265,6 +458,11 @@ impl Fixture {
         let _ = pg
             .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
             .await;
+        if let Some(app_db_id) = self.app_db_id {
+            let _ = pg
+                .execute("DELETE FROM apps WHERE id = $1", &[&app_db_id])
+                .await;
+        }
         let _ = pg
             .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
             .await;
