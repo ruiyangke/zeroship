@@ -152,6 +152,16 @@ const STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_app_idx ON auth.gateway_sessions (app_id, user_id)",
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_idle_idx ON auth.gateway_sessions (idle_expires_at) WHERE revoked_at IS NULL",
 
+    // 5.9b DPoP proof jti replay cache — shared by all gateway
+    // processes so a proof replayed onto a sibling node is rejected
+    // during the verifier freshness window.
+    "CREATE TABLE IF NOT EXISTS auth.dpop_jti (
+        jti         TEXT PRIMARY KEY,
+        inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )",
+    "CREATE INDEX IF NOT EXISTS auth_dpop_jti_inserted_idx
+        ON auth.dpop_jti (inserted_at)",
+
     // 5.10 console sessions — per-origin `__Host-zs_console_session`
     // cookies validated by the control plane (the OIDC RP for the
     // creator dashboard at `console.zeroship.ai`). Shape mirrors

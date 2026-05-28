@@ -39,7 +39,7 @@ rand = "0.8"
 # `DecodePrivateKey` trait used by `crates/gateway/src/signing.rs`.
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 # Phase 3 U4 — per-origin app session store (`auth.gateway_sessions`).
-compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
