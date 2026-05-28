@@ -2,8 +2,8 @@
 //! AES-256-GCM using a key derived from the control-plane master key.
 //!
 //! Wire format for secrets in Postgres: the `app_secrets.ciphertext`
-//! BYTEA column holds `nonce(12) || ciphertext || tag(16)` exactly as
-//! produced by `zeroship_core::crypto::encrypt`.
+//! BYTEA column holds `aad_version(1) || nonce(12) || ciphertext ||
+//! tag(16)` exactly as produced by `zeroship_core::crypto::encrypt`.
 
 use uuid::Uuid;
 use zeroship_core::crypto::{self, CryptoError};
@@ -60,6 +60,7 @@ impl From<CryptoError> for EnvError {
 /// service-account blobs) while blocking DoS vectors that would push
 /// megabytes of ciphertext through the env-fetch pipe per app.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;
+const APP_SECRET_AAD_PREFIX: &[u8] = b"zs:control:app_secret:v1\0";
 
 /// Valid env key: uppercase ASCII letter then uppercase letters/digits/underscores.
 /// Matches the CF Workers + Unix-env convention.
@@ -73,6 +74,15 @@ fn valid_key(k: &str) -> bool {
     }
     k.bytes()
         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn app_secret_aad(app_id: Uuid, key_name: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(APP_SECRET_AAD_PREFIX.len() + 16 + 1 + key_name.len());
+    aad.extend_from_slice(APP_SECRET_AAD_PREFIX);
+    aad.extend_from_slice(app_id.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(key_name.as_bytes());
+    aad
 }
 
 pub struct EnvStore {
@@ -266,7 +276,8 @@ impl EnvStore {
         if value.len() > MAX_VALUE_BYTES {
             return Err(EnvError::TooLarge(value.len()));
         }
-        let ct = crypto::encrypt(&self.primary_key, value.as_bytes())?;
+        let aad = app_secret_aad(app_id, key);
+        let ct = crypto::encrypt(&self.primary_key, &aad, value.as_bytes())?;
         let conn = self
             .registry
             .conn()
@@ -350,7 +361,8 @@ impl EnvStore {
         for r in rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
-            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
+            let aad = app_secret_aad(app_id, &k);
+            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)?;
             // Strict UTF-8 — `from_utf8_lossy` would silently replace
             // invalid bytes with U+FFFD and hand the creator a mangled
             // secret. Treat any non-UTF-8 in plaintext as corruption.
@@ -494,7 +506,8 @@ impl EnvStore {
         for r in secret_rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
-            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
+            let aad = app_secret_aad(app_id, &k);
+            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)?;
             let s = String::from_utf8(plain).map_err(|_| EnvError::Crypto(CryptoError::Decrypt))?;
             secrets.insert(k, serde_json::Value::String(s));
         }
@@ -551,16 +564,17 @@ impl EnvStore {
         for r in rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
+            let aad = app_secret_aad(app_id, &k);
 
             // Already-on-primary check: if primary alone decrypts, skip
             // re-encryption (avoids churn on already-current ciphertexts).
-            if crypto::decrypt_with_keys(&primary_only, &ct).is_ok() {
+            if crypto::decrypt_with_keys(&primary_only, &aad, &ct).is_ok() {
                 continue;
             }
 
             // Otherwise: decrypt under any known key, re-encrypt with primary.
-            let plain = Zeroizing::new(crypto::decrypt_with_keys(&all_keys, &ct)?);
-            let new_ct = crypto::encrypt(&self.primary_key, &plain)?;
+            let plain = Zeroizing::new(crypto::decrypt_with_keys(&all_keys, &aad, &ct)?);
+            let new_ct = crypto::encrypt(&self.primary_key, &aad, &plain)?;
             conn.execute(
                 "UPDATE app_secrets SET ciphertext = $1, updated_at = NOW()
                  WHERE app_id = $2 AND key_name = $3",

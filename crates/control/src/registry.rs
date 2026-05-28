@@ -200,6 +200,41 @@ impl Registry {
         .await
         .map_err(|e| format!("migration: {e}"))?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS control_migrations (
+                key TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        let secret_aad_migration = "app_secrets_aad_v1";
+        let rows = conn
+            .query(
+                "SELECT 1 FROM control_migrations WHERE key = $1",
+                &[&secret_aad_migration],
+            )
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
+        if rows.is_empty() {
+            // Pre-launch compatibility stance: old app-secret blobs did
+            // not authenticate `(app_id, key_name)`. Registry migrations
+            // do not receive the master key, so the only safe in-place
+            // migration is to wipe dev/test secrets and require re-entry.
+            conn.execute("DELETE FROM app_secrets", &[])
+                .await
+                .map_err(|e| format!("migration: {e}"))?;
+            conn.execute(
+                "INSERT INTO control_migrations (key) VALUES ($1)
+                 ON CONFLICT (key) DO NOTHING",
+                &[&secret_aad_migration],
+            )
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
+        }
+
         // Per-app opt-in list: secret names the creator has explicitly
         // allowed to surface in `process.env` for libraries (e.g.
         // LangChain) that defensively read `process.env.OPENAI_API_KEY`.

@@ -19,6 +19,17 @@ async fn create_test_app(registry: &Registry) -> Uuid {
     rec.id
 }
 
+async fn pg_connect(dsn: &str) -> compio_postgres::Client {
+    let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
+}
+
 #[compio::test]
 async fn var_crud_roundtrip() {
     let Some(url) = db_url() else {
@@ -169,6 +180,59 @@ async fn wrong_master_key_fails_decrypt() {
     assert!(matches!(err, zeroship_control::env_store::EnvError::Crypto(_)));
 
     registry.delete_app(&app).await.ok();
+}
+
+#[compio::test]
+async fn ciphertext_transplant_fails_across_app_and_key() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let app_a = create_test_app(&registry).await;
+    let app_b = create_test_app(&registry).await;
+    let client = pg_connect(&url).await;
+
+    store.set_secret(app_a, "STRIPE_KEY", "sk_live_victim").await.unwrap();
+
+    client
+        .execute(
+            "INSERT INTO app_secrets(app_id, key_name, ciphertext)
+             SELECT $1, $2, ciphertext
+             FROM app_secrets
+             WHERE app_id = $3 AND key_name = $4
+             ON CONFLICT (app_id, key_name) DO UPDATE
+             SET ciphertext = EXCLUDED.ciphertext",
+            &[&app_b, &"STRIPE_KEY", &app_a, &"STRIPE_KEY"],
+        )
+        .await
+        .expect("transplant across app");
+
+    let err = store.merged_env(app_b).await.unwrap_err();
+    assert!(
+        matches!(err, zeroship_control::env_store::EnvError::Crypto(_)),
+        "cross-app ciphertext transplant must fail, got {err:?}"
+    );
+
+    client
+        .execute(
+            "INSERT INTO app_secrets(app_id, key_name, ciphertext)
+             SELECT $1, $2, ciphertext
+             FROM app_secrets
+             WHERE app_id = $3 AND key_name = $4
+             ON CONFLICT (app_id, key_name) DO UPDATE
+             SET ciphertext = EXCLUDED.ciphertext",
+            &[&app_a, &"COPIED_SECRET", &app_a, &"STRIPE_KEY"],
+        )
+        .await
+        .expect("transplant across key");
+
+    let err = store.merged_env(app_a).await.unwrap_err();
+    assert!(
+        matches!(err, zeroship_control::env_store::EnvError::Crypto(_)),
+        "cross-key ciphertext transplant must fail, got {err:?}"
+    );
+
+    registry.delete_app(&app_a).await.ok();
+    registry.delete_app(&app_b).await.ok();
 }
 
 #[compio::test]
