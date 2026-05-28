@@ -69,6 +69,7 @@ import {
   useFieldDisabledContext,
   useFieldVisualSize,
 } from "../Field";
+import { useFieldsetDisabledContext } from "../Fieldset";
 import { classnames } from "../_classnames";
 import { SelectionRow } from "../_selection-row";
 
@@ -137,12 +138,17 @@ function RadioGroupInner<T = string>(
   }: RadioGroupProps<T>,
   ref: React.ForwardedRef<HTMLDivElement>,
 ) {
-  // Cascade size + disabled from the enclosing Field if not set on
-  // the group directly. Same shape Input / Checkbox / Switch use.
+  // Cascade size + disabled from the enclosing Field / Fieldset if
+  // not set on the group directly. Same shape Input / Checkbox /
+  // Switch use. The Fieldset signal is a separate boolean context
+  // because the visible chip is a non-native Base UI part.
   const fieldSize = useFieldVisualSize();
   const fieldDisabled = useFieldDisabledContext();
+  const fieldsetDisabled = useFieldsetDisabledContext();
   const size = sizeProp ?? fieldSize;
-  const disabled = disabledProp ?? fieldDisabled;
+  // OR the two booleans rather than ??-chain — `??` would short-
+  // circuit on a legitimate `false` from the inner Field.
+  const disabled = disabledProp ?? (fieldDisabled || fieldsetDisabled);
 
   return (
     <RadioGroupContext.Provider value={{ size, disabled }}>
@@ -229,14 +235,21 @@ function RadioInner<T = string>(
   ref: React.ForwardedRef<HTMLSpanElement>,
 ) {
   // Group context wins over field context for size — a group is a
-  // tighter scope. Explicit prop still beats both.
+  // tighter scope. Explicit prop still beats both. A wrapping
+  // Fieldset is the outermost fallback for disabled.
   const fieldSize = useFieldVisualSize();
   const fieldDisabled = useFieldDisabledContext();
+  const fieldsetDisabled = useFieldsetDisabledContext();
   const fieldCtx = useFieldContext();
   const groupCtx = useRadioGroupContext();
 
   const size: RadioSize = sizeProp ?? groupCtx?.size ?? fieldSize ?? "md";
-  const disabled = disabledProp ?? groupCtx?.disabled ?? fieldDisabled;
+  // The ??-chain handles RadioGroup correctly (`groupCtx?.disabled`
+  // is `boolean | undefined`), but the two boolean context values
+  // need OR so a `false` from Field doesn't shadow a `true` from a
+  // wrapping Fieldset.
+  const disabled =
+    disabledProp ?? groupCtx?.disabled ?? (fieldDisabled || fieldsetDisabled);
   const required = requiredProp ?? fieldCtx?.required ?? false;
 
   // Dev-mode usage check: a Radio outside a RadioGroup is almost

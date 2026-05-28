@@ -1,5 +1,13 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { Button, Field, Fieldset, Form, Input } from "../components";
+import {
+  Button,
+  Checkbox,
+  Field,
+  Fieldset,
+  Form,
+  Input,
+  Switch,
+} from "../components";
 
 const meta: Meta<typeof Fieldset> = {
   title: "Components/Fieldset",
@@ -34,9 +42,9 @@ export const BasicWithLegend: Story = {
         style={{ maxWidth: "26rem", width: "100%" }}
       >
         <Fieldset.Legend>Mailing address</Fieldset.Legend>
-        <Field>
+        <Field name="street">
           <Field.Label>Street</Field.Label>
-          <Input name="street" data-testid="fieldset-basic-street" />
+          <Input data-testid="fieldset-basic-street" />
         </Field>
       </Fieldset>
     </div>
@@ -55,9 +63,9 @@ export const AllSizes: Story = {
           style={{ maxWidth: "20rem", width: "100%" }}
         >
           <Fieldset.Legend>Size {size}</Fieldset.Legend>
-          <Field size={size}>
+          <Field name={`name-${size}`} size={size}>
             <Field.Label>Name</Field.Label>
-            <Input name={`name-${size}`} />
+            <Input />
           </Field>
         </Fieldset>
       ))}
@@ -81,17 +89,17 @@ export const NestedFields: Story = {
     <div className="zs-story-row" role="group" aria-label="Fieldset nested fields">
       <Fieldset style={{ maxWidth: "26rem", width: "100%" }}>
         <Fieldset.Legend>Shipping address</Fieldset.Legend>
-        <Field>
+        <Field name="street">
           <Field.Label>Street</Field.Label>
-          <Input name="street" />
+          <Input />
         </Field>
-        <Field>
+        <Field name="city">
           <Field.Label>City</Field.Label>
-          <Input name="city" />
+          <Input />
         </Field>
-        <Field>
+        <Field name="postal">
           <Field.Label>Postal code</Field.Label>
-          <Input name="postal" inputMode="numeric" />
+          <Input inputMode="numeric" />
         </Field>
       </Fieldset>
     </div>
@@ -107,9 +115,11 @@ export const DisabledCascade: Story = {
         story:
           "Native `<fieldset disabled>` cascades the disabled state to " +
           "every interactive descendant at the browser layer — no " +
-          "JavaScript wiring needed. The aria-wiring assertion verifies " +
-          "the cascade reaches a nested Input via the `:disabled` " +
-          "pseudo.",
+          "JavaScript wiring needed. Custom controls (Checkbox / Switch / " +
+          "Radio / Toggle) consume a `FieldsetDisabledContext` since their " +
+          "visible roots are non-native Base UI parts that don't pick up " +
+          "the native cascade. Aria-wiring assertions verify the cascade " +
+          "reaches both a nested Input AND a nested Checkbox.",
       },
     },
   },
@@ -121,19 +131,28 @@ export const DisabledCascade: Story = {
         style={{ maxWidth: "26rem", width: "100%" }}
       >
         <Fieldset.Legend>Locked</Fieldset.Legend>
-        <Field>
+        <Field name="email">
           <Field.Label>Email</Field.Label>
           <Input
             type="email"
-            name="email"
             defaultValue="locked@example.com"
             data-testid="fieldset-disabled-email"
           />
         </Field>
-        <Field>
+        <Field name="phone">
           <Field.Label>Phone</Field.Label>
-          <Input name="phone" defaultValue="+1 555 0100" />
+          <Input defaultValue="+1 555 0100" />
         </Field>
+        <Checkbox
+          name="newsletter"
+          label="Subscribe to newsletter"
+          data-testid="fieldset-disabled-checkbox"
+        />
+        <Switch
+          name="notifications"
+          label="Notifications"
+          data-testid="fieldset-disabled-switch"
+        />
         <Button type="button" variant="tinted">
           Locked button
         </Button>
@@ -163,17 +182,17 @@ export const WithFormIntegration: Story = {
     >
       <Fieldset>
         <Fieldset.Legend>Account</Fieldset.Legend>
-        <Field required>
+        <Field name="email" required>
           <Field.Label>
             Email <Field.Required />
           </Field.Label>
-          <Input type="email" name="email" required />
+          <Input type="email" required />
         </Field>
-        <Field required>
+        <Field name="password" required>
           <Field.Label>
             Password <Field.Required />
           </Field.Label>
-          <Input type="password" name="password" required minLength={8} />
+          <Input type="password" required minLength={8} />
           <Field.Error match="tooShort">
             Use at least 8 characters.
           </Field.Error>
@@ -181,9 +200,9 @@ export const WithFormIntegration: Story = {
       </Fieldset>
       <Fieldset>
         <Fieldset.Legend>Profile</Fieldset.Legend>
-        <Field>
+        <Field name="display">
           <Field.Label>Display name</Field.Label>
-          <Input name="display" />
+          <Input />
         </Field>
       </Fieldset>
       <Button type="submit" variant="filled">
@@ -211,9 +230,9 @@ export const NestedFieldset: Story = {
     <div className="zs-story-row" role="group" aria-label="Nested fieldset">
       <Fieldset style={{ maxWidth: "30rem", width: "100%" }}>
         <Fieldset.Legend>Payment method</Fieldset.Legend>
-        <Field>
+        <Field name="cardholder">
           <Field.Label>Cardholder name</Field.Label>
-          <Input name="cardholder" />
+          <Input />
         </Field>
         <Fieldset
           size="sm"
@@ -223,13 +242,13 @@ export const NestedFieldset: Story = {
           }}
         >
           <Fieldset.Legend>Card details</Fieldset.Legend>
-          <Field>
+          <Field name="card-number">
             <Field.Label>Card number</Field.Label>
-            <Input name="card-number" inputMode="numeric" />
+            <Input inputMode="numeric" />
           </Field>
-          <Field>
+          <Field name="expiry">
             <Field.Label>Expiry</Field.Label>
-            <Input name="expiry" placeholder="MM / YY" />
+            <Input placeholder="MM / YY" />
           </Field>
         </Fieldset>
       </Fieldset>
@@ -255,13 +274,13 @@ export const CustomLegendPosition: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Custom legend position">
       <Fieldset style={{ maxWidth: "26rem", width: "100%" }}>
-        <Field>
+        <Field name="email">
           <Field.Label>Email</Field.Label>
-          <Input type="email" name="email" />
+          <Input type="email" />
         </Field>
-        <Field>
+        <Field name="phone">
           <Field.Label>Phone</Field.Label>
-          <Input name="phone" />
+          <Input />
         </Field>
         <Fieldset.Legend
           style={{
@@ -295,13 +314,13 @@ export const RTL: Story = {
     <div dir="rtl" className="zs-story-row" role="group" aria-label="RTL fieldset">
       <Fieldset style={{ maxWidth: "26rem", width: "100%" }}>
         <Fieldset.Legend>פרטי התקשרות</Fieldset.Legend>
-        <Field>
+        <Field name="name-rtl">
           <Field.Label>שם מלא</Field.Label>
-          <Input name="name-rtl" />
+          <Input />
         </Field>
-        <Field>
+        <Field name="email-rtl">
           <Field.Label>דוא״ל</Field.Label>
-          <Input type="email" name="email-rtl" />
+          <Input type="email" />
         </Field>
       </Fieldset>
     </div>

@@ -66,6 +66,7 @@ import {
   useFieldDisabledContext,
   useFieldVisualSize,
 } from "../Field";
+import { useFieldsetDisabledContext } from "../Fieldset";
 import { classnames } from "../_classnames";
 import { SelectionRow } from "../_selection-row";
 
@@ -177,14 +178,23 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
     ref,
   ) {
     // Cascade: explicit prop wins; otherwise read the Field context;
-    // otherwise fall to the canonical default. Hooks are called
-    // unconditionally so React's call-order invariant holds even when
-    // the explicit prop is set on one render and absent on the next.
+    // otherwise fall back to a wrapping Fieldset; otherwise the
+    // canonical default. Hooks are called unconditionally so React's
+    // call-order invariant holds even when the explicit prop is set
+    // on one render and absent on the next. The Fieldset signal is a
+    // separate context (`FieldsetDisabledContext`) because the visible
+    // chip is a non-native `<span>` Base UI part and doesn't pick up
+    // the native `<fieldset disabled>` cascade.
     const fieldSize = useFieldVisualSize();
     const fieldDisabled = useFieldDisabledContext();
+    const fieldsetDisabled = useFieldsetDisabledContext();
     const fieldCtx = useFieldContext();
     const size: CheckboxSize = sizeProp ?? fieldSize ?? "md";
-    const disabled = disabledProp ?? fieldDisabled;
+    // Both context hooks return `boolean` (default `false`), so we
+    // OR them rather than ??-chain — `??` would short-circuit on a
+    // legitimate `false` from the inner Field and never consult the
+    // outer Fieldset.
+    const disabled = disabledProp ?? (fieldDisabled || fieldsetDisabled);
     const required = requiredProp ?? fieldCtx?.required ?? false;
 
     const chipClassName = classnames(
