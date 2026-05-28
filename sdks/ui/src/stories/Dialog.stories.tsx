@@ -367,7 +367,7 @@ export const CloseAsChild: Story = {
               <Dialog.Close asChild>
                 <button
                   type="button"
-                  className="zs-button zs-button--gray zs-button--md"
+                  className="zs-button zs-button--gray zs-button--medium"
                   data-testid="dialog-close-aschild-target"
                 >
                   Done

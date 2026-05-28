@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { useState } from "react";
-import { AlertDialog, Button } from "../components";
+import { AlertDialog, Button, Input } from "../components";
 
 const meta: Meta<typeof AlertDialog> = {
   title: "Components/AlertDialog",
@@ -163,21 +163,11 @@ export const WithBody: Story = {
               </AlertDialog.Description>
             </AlertDialog.Header>
             <AlertDialog.Body>
-              <input
+              <Input
                 type="text"
                 aria-label="Type project name"
                 placeholder="my-app"
                 data-testid="alertdialog-confirm-input"
-                style={{
-                  inlineSize: "100%",
-                  blockSize: "var(--zs-control-h-md)",
-                  paddingInline: "var(--zs-control-px-md)",
-                  borderRadius: "var(--zs-control-radius-md)",
-                  border: "1px solid var(--zs-input-border)",
-                  background: "var(--zs-input-bg)",
-                  color: "var(--zs-input-ink)",
-                  fontFamily: "var(--zs-font-system)",
-                }}
               />
             </AlertDialog.Body>
             <AlertDialog.Footer>
@@ -449,7 +439,7 @@ function CancelAsChildStory() {
               <AlertDialog.Cancel asChild>
                 <button
                   type="button"
-                  className="zs-button zs-button--gray zs-button--md"
+                  className="zs-button zs-button--gray zs-button--medium"
                   data-testid="alertdialog-cancel-aschild-target"
                   onClick={() => setClicked("child-onclick-ran")}
                 >

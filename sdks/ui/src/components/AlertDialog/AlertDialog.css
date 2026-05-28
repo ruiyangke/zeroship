@@ -12,11 +12,31 @@
  *                  destructive action LAST).
  */
 
+/* ─── Backdrop ─────────────────────────────────────────────────────────── */
+/* AlertDialog backdrop intentionally bypasses the Crystal Dialog
+ * backdrop-filter gate (visual-polish item 6). Alerts demand harder
+ * focus than Dialogs — the background should feel structurally
+ * unavailable — so the material blur is always applied regardless of
+ * theme. Lands AFTER `.zs-dialog-backdrop` in the cascade (this file
+ * is imported after Dialog.css in styles.css), so equal specificity
+ * resolves in favor of the alert rule. */
+.zs-alertdialog-backdrop {
+  background-color: var(--zs-scrim);
+  backdrop-filter: var(--zs-material-thick);
+  -webkit-backdrop-filter: var(--zs-material-thick);
+}
+
 /* ─── Popup ────────────────────────────────────────────────────────────── */
 .zs-alertdialog-popup {
   /* Default to the small size + tighter radius + alert padding. */
   max-inline-size: var(--zs-dialog-max-width-sm);
   border-radius: var(--zs-dialog-radius-alert);
+  /* Compact alerts deserve a lighter elevation than full Dialog sheets
+   * (visual-polish item 7). --zs-shadow-dialog is tuned for larger
+   * modal surfaces; --zs-shadow-4 keeps the popup readable as elevated
+   * without giving a one- or two-button alert more visual mass than
+   * its content warrants. */
+  box-shadow: var(--zs-shadow-4);
 }
 .zs-alertdialog-popup[data-size="md"] {
   max-inline-size: var(--zs-dialog-max-width-md);
@@ -31,9 +51,24 @@
   padding-block-end: var(--zs-space-2);
 }
 
-/* ─── Body (tighter padding) ───────────────────────────────────────────── */
+/* ─── Body (tighter padding + alert type scale) ────────────────────────── */
+/* AlertDialog body inherits the regular Dialog body size, which
+ * reads too loud in compact alert prose — visual-polish item 8.
+ * Drop to subheadline so body text harmonizes with the alert
+ * description size. Embedded form controls (Input, native input/
+ * textarea/select) opt back out to body so a confirm-name field
+ * keeps its own control typography rather than shrinking with the
+ * surrounding prose. */
 .zs-alertdialog__body {
   padding-inline: var(--zs-dialog-padding-alert);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+.zs-alertdialog__body :where(.zs-input, input, textarea, select) {
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: var(--zs-input-ink);
 }
 
 /* ─── Footer (grid; adapts to button count) ────────────────────────────── */

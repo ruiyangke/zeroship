@@ -171,8 +171,21 @@
                  0 0.25rem 0.5rem oklch(0 0 0 / 0.06);
   --zs-shadow-4: 0 1rem 2rem oklch(0 0 0 / 0.12),
                  0 0.5rem 1rem oklch(0 0 0 / 0.08);
-  --zs-shadow-dialog: 0 1.5rem 4rem oklch(0 0 0 / 0.35),
-                      0 0.5rem 1.5rem oklch(0 0 0 / 0.18);
+  /* Dialog elevation — two layered drops plus an outer hairline
+     (visual-polish item 3). Label-based opacity replaces the earlier
+     35% black drop so the popup reads as a defined sheet on glass
+     instead of a heavy dark bloom. The inner hairline (third stack)
+     substitutes for the bigger shadow's bloom — gives the popup a
+     defined edge without the dark glow. Inline `0 0 0 0.0625rem` ring
+     used (rather than the Card's `--zs-card-surface-edge` token, which
+     is an `inset` hairline tuned for surface-on-surface delineation;
+     the dialog popup needs an OUTER ring against the scrim instead). */
+  --zs-shadow-dialog:
+    0 var(--zs-space-6) var(--zs-space-10)
+      color-mix(in oklch, var(--zs-label) 24%, transparent),
+    0 var(--zs-space-2) var(--zs-space-6)
+      color-mix(in oklch, var(--zs-label) 12%, transparent),
+    0 0 0 0.0625rem color-mix(in oklch, var(--zs-label) 6%, transparent);
 
   /* ─── Card sizing */
   --zs-card-radius-sm: var(--zs-radius-4);     /* 10 */
@@ -205,6 +218,15 @@
   --zs-dialog-max-width-lg: 45rem;                    /* 720 */
   --zs-dialog-padding: var(--zs-space-6);             /* 24 */
   --zs-dialog-padding-alert: var(--zs-space-5);       /* 20 */
+  /* Per-size dialog padding (visual-polish item 4). The popup resolves
+     `--zs-dialog-padding-current` from these per size; header/body/footer
+     all read the current value so narrow dialogs feel tighter and large
+     dialogs gain a stronger sheet rhythm. `md` matches the legacy
+     `--zs-dialog-padding` exactly so the default size is byte-identical
+     before/after the rollout. */
+  --zs-dialog-padding-sm: var(--zs-space-5);          /* 20 */
+  --zs-dialog-padding-md: var(--zs-space-6);          /* 24 — default */
+  --zs-dialog-padding-lg: var(--zs-space-7);          /* 32 */
 
   /* Modal z-stack token consumed by Dialog/AlertDialog backdrops. */
   --zs-z-modal: 50;
@@ -307,10 +329,23 @@
   --zs-material-regular: blur(1.5rem) saturate(1.25);
   --zs-backdrop: oklch(0.5 0.05 275 / 0.3);
 
-  /* Scrim for the standard Dialog backdrop (40% black overlay). */
-  --zs-scrim: color-mix(in oklch, black 40%, transparent);
-  /* Material tint for the glass Dialog backdrop (translucent surface). */
-  --zs-material-tint: color-mix(in oklch, var(--zs-surface) 80%, transparent);
+  /* Scrim for the standard Dialog backdrop (visual-polish item 2).
+     Label-based dim at 30% replaces the earlier 40% black mix so the
+     Crystal mesh keeps its cool character through the scrim instead
+     of collapsing into a flat gray-violet field. The dimming still
+     suppresses the app, but reads as light glass rather than a
+     generic dimmer.
+
+     Contingency (item 2 of the visual-polish brief): if axe flags any
+     story for color-contrast after this drop, push to 35% — still
+     label-based but slightly darker. Verified clean at 30% on the
+     67-story sweep at the time of the change. */
+  --zs-scrim: color-mix(in oklch, var(--zs-label) 30%, transparent);
+  /* Material tint for the glass Dialog backdrop (translucent surface).
+     Uses --zs-surface-overlay (the Crystal panel overlay) at 78% so
+     the material backdrop carries a touch more depth than the plain
+     surface mix it replaced (visual-polish item 2). */
+  --zs-material-tint: color-mix(in oklch, var(--zs-surface-overlay) 78%, transparent);
 
   /* ─── Card hover tint (review-fix item 2).
      Translucent label overlay layered ON TOP of the opaque card surface.

@@ -59,6 +59,12 @@
 
 /* ─── Popup ────────────────────────────────────────────────────────────── */
 .zs-dialog-popup {
+  /* Per-size padding (visual-polish item 4). Defaults to the `md`
+   * padding so header/body/footer match the legacy single-token
+   * resolution byte-for-byte; `sm` and `lg` overrides below shift
+   * `--zs-dialog-padding-current` so narrow dialogs feel tighter and
+   * large dialogs gain a stronger sheet rhythm. */
+  --zs-dialog-padding-current: var(--zs-dialog-padding-md);
   /* Popup positions itself — Base UI's DOM puts Backdrop and Popup as
    * siblings, so we center the Popup directly on the viewport.
    *
@@ -112,9 +118,11 @@
 /* sizes */
 .zs-dialog-popup[data-size="sm"] {
   max-inline-size: var(--zs-dialog-max-width-sm);
+  --zs-dialog-padding-current: var(--zs-dialog-padding-sm);
 }
 .zs-dialog-popup[data-size="lg"] {
   max-inline-size: var(--zs-dialog-max-width-lg);
+  --zs-dialog-padding-current: var(--zs-dialog-padding-lg);
 }
 .zs-dialog-popup[data-size="full"] {
   /* Full takeover — anchor to the inset edges instead of centering.
@@ -139,36 +147,45 @@
 }
 /* Safe-area-aware padding on the inner layout sections when size=full
  * (review-fix item 12). Apply to Header (top inset), Body (sides), and
- * Footer (bottom inset) so content clears notches and the home bar. */
+ * Footer (bottom inset) so content clears notches and the home bar.
+ * Composes against `--zs-dialog-padding-current` (visual-polish item 4)
+ * so the safe-area max() still resolves against the right per-size base
+ * even when size=full inherits a custom padding. */
 .zs-dialog-popup[data-size="full"] .zs-dialog__header {
-  padding-block-start: max(var(--zs-dialog-padding), env(safe-area-inset-top));
+  padding-block-start: max(
+    var(--zs-dialog-padding-current),
+    env(safe-area-inset-top)
+  );
   padding-inline-start: max(
-    var(--zs-dialog-padding),
+    var(--zs-dialog-padding-current),
     env(safe-area-inset-left)
   );
   padding-inline-end: max(
-    var(--zs-dialog-padding),
+    var(--zs-dialog-padding-current),
     env(safe-area-inset-right)
   );
 }
 .zs-dialog-popup[data-size="full"] .zs-dialog__body {
   padding-inline-start: max(
-    var(--zs-dialog-padding),
+    var(--zs-dialog-padding-current),
     env(safe-area-inset-left)
   );
   padding-inline-end: max(
-    var(--zs-dialog-padding),
+    var(--zs-dialog-padding-current),
     env(safe-area-inset-right)
   );
 }
 .zs-dialog-popup[data-size="full"] .zs-dialog__footer {
-  padding-block-end: max(var(--zs-dialog-padding), env(safe-area-inset-bottom));
+  padding-block-end: max(
+    var(--zs-dialog-padding-current),
+    env(safe-area-inset-bottom)
+  );
   padding-inline-start: max(
-    var(--zs-dialog-padding),
+    var(--zs-dialog-padding-current),
     env(safe-area-inset-left)
   );
   padding-inline-end: max(
-    var(--zs-dialog-padding),
+    var(--zs-dialog-padding-current),
     env(safe-area-inset-right)
   );
 }
@@ -224,7 +241,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--zs-space-3);
-  padding: var(--zs-dialog-padding);
+  padding: var(--zs-dialog-padding-current);
   padding-block-end: var(--zs-space-3);
 }
 .zs-dialog__header-content {
@@ -306,7 +323,7 @@
 
 /* ─── Body / Footer ────────────────────────────────────────────────────── */
 .zs-dialog__body {
-  padding-inline: var(--zs-dialog-padding);
+  padding-inline: var(--zs-dialog-padding-current);
   padding-block: 0;
   flex: 1;
   min-block-size: 0;
@@ -333,14 +350,37 @@
   /* Allow wrapping so a footer with many buttons or a long-label
    * cluster doesn't overflow its dialog (review-fix item 8). With
    * justify-content: flex-end the wrapped buttons still trail the
-   * row, and row-gap keeps the wrapped rows visually grouped. */
+   * row, and row-gap keeps the wrapped rows visually grouped.
+   *
+   * Gap bumped from --zs-space-2 → --zs-space-3 (visual-polish item 5)
+   * so action buttons breathe; row-gap stays tight (--zs-space-2) so a
+   * wrapped row reads as part of the same cluster, not a new row. */
   flex-wrap: wrap;
-  gap: var(--zs-space-2);
+  gap: var(--zs-space-3);
   row-gap: var(--zs-space-2);
   align-items: center;
   justify-content: flex-end;
-  padding: var(--zs-dialog-padding);
+  padding: var(--zs-dialog-padding-current);
   padding-block-start: var(--zs-space-4);
+}
+
+/* sm + 3+ buttons — make the wrap intentional instead of accidental
+ * (visual-polish item 5). Two neutral actions sit 50/50 on the first
+ * row; the primary (filled) action spans the full width on the second
+ * row. Larger sizes (md/lg) have room for a single trailing-aligned
+ * row, so the policy only fires for `sm`. */
+.zs-dialog-popup[data-size="sm"] .zs-dialog__footer:has(> :nth-child(3)) {
+  justify-content: stretch;
+}
+.zs-dialog-popup[data-size="sm"]
+  .zs-dialog__footer:has(> :nth-child(3))
+  > * {
+  flex: 1 1 calc((100% - var(--zs-space-3)) / 2);
+}
+.zs-dialog-popup[data-size="sm"]
+  .zs-dialog__footer:has(> :nth-child(3))
+  > .zs-button--filled {
+  flex-basis: 100%;
 }
 
 /* ─── Viewport (Base UI positioning / scroll boundary) ───────────────── */
