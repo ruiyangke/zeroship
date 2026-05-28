@@ -17,6 +17,7 @@ use zeroship_authz::{
     self as authz, AuthzContext, AuthzDecision, Condition, Effect, EntityCache, Policy, Resource,
 };
 
+use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
 
@@ -276,11 +277,30 @@ pub async fn create_token(
         )
         .await
     {
-        Ok(_) => web::HttpResponse::Ok().json(&CreateTokenResponse {
-            id: token_id.to_string(),
-            token,
-            expires_at,
-        }),
+        Ok(_) => {
+            if let Err(resp) = auth_audit::emit_guard_event(
+                &state,
+                &guard,
+                "pat_mint",
+                None,
+                json!({
+                    "token_id": token_id.to_string(),
+                    "name": name,
+                    "expires_at": expires_at.to_rfc3339(),
+                    "policy_hash": policy_hash,
+                }),
+            )
+            .await
+            {
+                return resp;
+            }
+
+            web::HttpResponse::Ok().json(&CreateTokenResponse {
+                id: token_id.to_string(),
+                token,
+                expires_at,
+            })
+        }
         Err(err) => {
             tracing::error!(error = %err, "control: PAT insert failed");
             web::HttpResponse::InternalServerError().json(&json!({"error": "pat_insert_failed"}))
@@ -362,6 +382,21 @@ pub async fn delete_token(
     };
     EntityCache::invalidate(guard.principal_id);
     let revoked_at: DateTime<Utc> = row.get("revoked_at");
+    if let Err(resp) = auth_audit::emit_guard_event(
+        &state,
+        &guard,
+        "pat_revoke",
+        None,
+        json!({
+            "token_id": token_id.to_string(),
+            "revoked_at": revoked_at.to_rfc3339(),
+        }),
+    )
+    .await
+    {
+        return resp;
+    }
+
     web::HttpResponse::Ok().json(&DeleteTokenResponse {
         id: token_id.to_string(),
         revoked_at,

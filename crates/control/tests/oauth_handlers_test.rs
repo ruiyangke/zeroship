@@ -372,6 +372,25 @@ async fn count_client(state: &AppState, client_id: &str) -> i64 {
     rows[0].get("n")
 }
 
+async fn audit_event_count(
+    state: &AppState,
+    user_id: Uuid,
+    event_type: &str,
+    client_id: &str,
+) -> i64 {
+    let rows = state
+        .auth_pg
+        .query(
+            "SELECT COUNT(*)::BIGINT AS n \
+             FROM auth.audit_events \
+             WHERE user_id = $1 AND event_type = $2 AND client_id = $3",
+            &[&user_id, &event_type, &client_id],
+        )
+        .await
+        .expect("count audit events");
+    rows[0].get("n")
+}
+
 async fn persisted_skip_consent(state: &AppState, client_id: &str) -> bool {
     let rows = state
         .auth_pg
@@ -464,6 +483,10 @@ async fn admin_can_register_oauth_client_proxies_to_hydra() {
     assert_eq!(body["client_secret_show_once"], true);
     assert_eq!(body["scopes"], json!(["apps:read", "apps:deploy", "env:read"]));
     assert_eq!(count_client(&fx.state, &client_id).await, 1);
+    assert_eq!(
+        audit_event_count(&fx.state, pat.user_id, "oauth_client_create", &client_id).await,
+        1
+    );
 
     let requests = fx.hydra.requests();
     assert_eq!(requests.len(), 1);
@@ -679,6 +702,10 @@ async fn delete_removes_from_hydra_and_local() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        audit_event_count(&fx.state, pat.user_id, "oauth_client_create", &client_id).await,
+        1
+    );
 
     let req = test::TestRequest::delete()
         .uri(&format!("/admin/oauth-clients/{client_id}"))
@@ -692,6 +719,10 @@ async fn delete_removes_from_hydra_and_local() {
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].method, "DELETE");
     assert_eq!(requests[1].path, format!("/admin/clients/{client_id}"));
+    assert_eq!(
+        audit_event_count(&fx.state, pat.user_id, "oauth_client_delete", &client_id).await,
+        1
+    );
 
     pat.cleanup(&fx.state).await;
 }

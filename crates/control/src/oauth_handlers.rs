@@ -11,6 +11,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{Action, Resource, Scope};
 
+use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
 use crate::trusted_clients;
 use crate::AppState;
@@ -138,6 +139,24 @@ pub async fn create_oauth_client(
             return resp;
         }
     };
+    if let Err(resp) = auth_audit::emit_guard_event(
+        &state,
+        &authz,
+        "oauth_client_create",
+        Some(&persisted.client_id),
+        json!({
+            "client_id": &persisted.client_id,
+            "client_name": &persisted.client_name,
+            "redirect_uris": &persisted.redirect_uris,
+            "scopes": &persisted.scopes,
+            "skip_consent": persisted.skip_consent,
+            "hydra_client_id": &persisted.hydra_client_id,
+        }),
+    )
+    .await
+    {
+        return resp;
+    }
 
     web::HttpResponse::Created().json(&CreateOauthClientResponse {
         client: persisted,
@@ -207,7 +226,23 @@ pub async fn delete_oauth_client(
         )
         .await
     {
-        Ok(_) => web::HttpResponse::Ok().json(&DeleteOauthClientResponse { deleted: true }),
+        Ok(_) => {
+            if let Err(resp) = auth_audit::emit_guard_event(
+                &state,
+                &authz,
+                "oauth_client_delete",
+                Some(&client_id),
+                json!({
+                    "client_id": client_id,
+                }),
+            )
+            .await
+            {
+                return resp;
+            }
+
+            web::HttpResponse::Ok().json(&DeleteOauthClientResponse { deleted: true })
+        }
         Err(err) => {
             tracing::error!(error = %err, client_id = %client_id, "control: oauth client delete failed");
             db_error()

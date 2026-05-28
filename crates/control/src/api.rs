@@ -9,6 +9,7 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
+use zeroship_auth::audit::{self as auth_audit, AuditEvent};
 use zeroship_authz::{Action, Resource};
 
 use crate::authz_guard::AuthzGuard;
@@ -552,6 +553,24 @@ pub async fn auth_callback(
             return render_callback_error(state.insecure_dev, "session create failed");
         }
     };
+    let user_id = Uuid::parse_str(&claims.sub).ok();
+    let ev = AuditEvent {
+        event_type: "console_session_create",
+        outcome: "success",
+        user_id: user_id.as_ref(),
+        client_id: Some("console.zeroship.ai"),
+        auth_method: Some("oidc"),
+        detail: serde_json::json!({
+            "session_id": session.id.to_string(),
+            "issuer": claims.iss,
+            "email_verified": claims.email_verified,
+        }),
+        ..AuditEvent::from_request(&req)
+    };
+    if let Err(err) = auth_audit::emit_strict(pg, &ev).await {
+        tracing::error!(error = %err, "control: console session audit insert failed");
+        return render_callback_error(state.insecure_dev, "session create failed");
+    }
 
     // 5. 302 back to the original path, set console-session cookie,
     //    clear the stash cookie. Two `Set-Cookie` headers on one

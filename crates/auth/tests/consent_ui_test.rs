@@ -313,6 +313,21 @@ impl ConsentTestApp {
             last_used_at: row.get("last_used_at"),
         }
     }
+
+    #[allow(clippy::future_not_send)]
+    async fn audit_event_count(&self, event_type: &str) -> i64 {
+        let rows = self
+            .pg
+            .query(
+                "SELECT COUNT(*)::BIGINT AS n \
+                 FROM auth.audit_events \
+                 WHERE user_id = $1 AND client_id = $2 AND event_type = $3",
+                &[&self.user_id, &self.client_id, &event_type],
+            )
+            .await
+            .expect("count audit events");
+        rows[0].get("n")
+    }
 }
 
 #[derive(Debug)]
@@ -411,6 +426,7 @@ async fn allow_button_puts_to_hydra_accept() {
     assert_eq!(records.len(), 1, "expected one hydra accept call");
     assert_eq!(records[0].challenge, CHALLENGE);
     assert_eq!(records[0].body["grant_scope"], json!(["apps:deploy"]));
+    assert_eq!(app.audit_event_count("consent_accept").await, 1);
 
     app.cleanup().await;
 }
@@ -430,6 +446,7 @@ async fn deny_button_puts_to_hydra_reject() {
     assert_eq!(records.len(), 1, "expected one hydra reject call");
     assert_eq!(records[0].challenge, CHALLENGE);
     assert_eq!(records[0].body["error"], "access_denied");
+    assert_eq!(app.audit_event_count("consent_deny").await, 1);
 
     app.cleanup().await;
 }

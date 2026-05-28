@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::json;
 use zeroship_authz::{Action, EntityCache, Resource};
 
+use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
 
@@ -137,6 +138,20 @@ pub async fn revoke_grant(
         );
         return web::HttpResponse::InternalServerError()
             .json(&json!({"error": "hydra_oauth_grant_revoke_failed"}));
+    }
+
+    if let Err(resp) = auth_audit::emit_guard_event(
+        &state,
+        &authz,
+        "oauth_grant_revoke",
+        Some(&client_id),
+        json!({
+            "client_id": &client_id,
+        }),
+    )
+    .await
+    {
+        return resp;
     }
 
     web::HttpResponse::NoContent().finish()
