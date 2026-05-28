@@ -5,6 +5,7 @@
 //! removes every row that test inserted.
 
 use compio_postgres::{connect, NoTls};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_auth::identity::magic_link;
@@ -24,6 +25,12 @@ async fn pg() -> Option<compio_postgres::Client> {
     .detach();
     migrations::migrate(&client).await.expect("migrate");
     Some(client)
+}
+
+fn sha256(s: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    h.finalize().into()
 }
 
 #[compio::test]
@@ -84,6 +91,62 @@ async fn second_redeem_returns_none() {
     assert!(
         second.is_none(),
         "second redeem must return None (single-use)"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!("magic-reset-purpose-{}@example.test", Uuid::new_v4().simple());
+    let raw_token = format!("reset-token-{}", Uuid::new_v4().simple());
+    let token_hash = sha256(&raw_token);
+    let csrf_nonce = "reset-no-csrf-nonce";
+    let purpose = "reset";
+
+    client
+        .execute(
+            "INSERT INTO auth.magic_links \
+                (token_hash, email, csrf_nonce, purpose, expires_at) \
+             VALUES ($1, $2::citext, $3, $4, NOW() + INTERVAL '60 minutes')",
+            &[&token_hash.as_slice(), &email, &csrf_nonce, &purpose],
+        )
+        .await
+        .expect("insert reset-purpose row");
+
+    let attempt = magic_link::redeem(&client, &raw_token)
+        .await
+        .expect("redeem reset-purpose row via magic login");
+    assert!(
+        attempt.is_none(),
+        "reset-purpose row must not redeem through magic-link login"
+    );
+
+    let rows = client
+        .query(
+            "SELECT consumed_at IS NULL AS still_unconsumed \
+             FROM auth.magic_links \
+             WHERE token_hash = $1 AND email = $2::citext AND purpose = $3",
+            &[&token_hash.as_slice(), &email, &purpose],
+        )
+        .await
+        .expect("load reset-purpose row after rejected redeem");
+    assert_eq!(rows.len(), 1, "test row must still exist");
+    let still_unconsumed: bool = rows[0].get("still_unconsumed");
+    assert!(
+        still_unconsumed,
+        "rejected reset-purpose row must remain unconsumed"
     );
 
     client
