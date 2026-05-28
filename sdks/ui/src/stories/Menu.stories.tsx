@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Button, Menu } from "../components";
 
 const meta: Meta<typeof Menu> = {
@@ -477,27 +478,85 @@ export const Rtl: Story = {
     },
   },
   render: () => (
-    <div
-      className="zs-story-row"
-      role="group"
-      aria-label="RTL menu"
-      dir="rtl"
-      lang="ar"
-    >
+    // DirectionProvider seeds Base UI's DirectionContext so the
+    // Floating UI positioner resolves `inline-start` / `inline-end`
+    // against the RTL axis. A bare `dir="rtl"` div is invisible to
+    // Base UI — the portal renders elsewhere in the tree and the
+    // attribute doesn't propagate.
+    <DirectionProvider direction="rtl">
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="RTL menu"
+        dir="rtl"
+        lang="ar"
+      >
+        <Menu>
+          <Menu.Trigger
+            render={<Button data-testid="menu-rtl-trigger">إجراءات</Button>}
+          />
+          <Menu.Portal>
+            <Menu.Popup data-testid="menu-rtl-popup">
+              <Menu.Item>فتح</Menu.Item>
+              <Menu.Item>إعادة تسمية…</Menu.Item>
+              <Menu.Submenu
+                trigger="مشاركة مع…"
+                data-testid="menu-rtl-submenu"
+              >
+                <Menu.Item>البريد الإلكتروني</Menu.Item>
+                <Menu.Item>نسخ الرابط</Menu.Item>
+              </Menu.Submenu>
+              <Menu.Separator />
+              <Menu.Item>حذف</Menu.Item>
+            </Menu.Popup>
+          </Menu.Portal>
+        </Menu>
+      </div>
+    </DirectionProvider>
+  ),
+};
+
+/* ─── 13. WithLinkItemAsChild ───────────────────────────────────────── *
+ *
+ * LinkItem renders an `<a>` natively. `asChild` defers row layout to
+ * the caller's element so a router `<Link>` (Next.js / TanStack /
+ * React Router) renders in its place. Slot owns ref composition — we
+ * don't pre-merge the child ref here (Slice 11 review-fix #7). */
+export const WithLinkItemAsChild: Story = {
+  name: "LinkItem asChild (custom router link)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "LinkItem renders an `<a>` natively. `asChild` defers the " +
+          "rendered element to a caller-provided child (e.g. a router " +
+          "Link). Slot fans the ref out without double-composition.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="LinkItem asChild menu">
       <Menu>
         <Menu.Trigger
-          render={<Button data-testid="menu-rtl-trigger">إجراءات</Button>}
+          render={<Button data-testid="menu-link-trigger">Help</Button>}
         />
         <Menu.Portal>
-          <Menu.Popup data-testid="menu-rtl-popup">
-            <Menu.Item>فتح</Menu.Item>
-            <Menu.Item>إعادة تسمية…</Menu.Item>
-            <Menu.Submenu trigger="مشاركة مع…">
-              <Menu.Item>البريد الإلكتروني</Menu.Item>
-              <Menu.Item>نسخ الرابط</Menu.Item>
-            </Menu.Submenu>
-            <Menu.Separator />
-            <Menu.Item>حذف</Menu.Item>
+          <Menu.Popup data-testid="menu-link-popup">
+            <Menu.Item>Documentation</Menu.Item>
+            <Menu.LinkItem
+              href="https://example.com/docs"
+              data-testid="menu-link-native"
+            >
+              Read docs
+            </Menu.LinkItem>
+            <Menu.LinkItem asChild>
+              <a
+                href="https://example.com/support"
+                data-testid="menu-link-aschild"
+              >
+                Contact support
+              </a>
+            </Menu.LinkItem>
           </Menu.Popup>
         </Menu.Portal>
       </Menu>

@@ -140,6 +140,13 @@
   .zs-menu-item {
     transition: none;
   }
+  /* CheckboxItem + RadioItem indicator glyphs have their own opacity
+   * transition (fade-in when [data-checked] flips). Suppress it under
+   * reduced motion so the indicator snaps instead of fading — same
+   * contract as the popup enter/leave above. */
+  .zs-menu-item__indicator-glyph {
+    transition: none;
+  }
 }
 
 /* ─── Arrow ────────────────────────────────────────────────────────── *
@@ -441,5 +448,19 @@
   }
   .zs-menu-submenu-trigger__chevron {
     color: CanvasText;
+  }
+
+  /* Shortcut tail mirror — the popup sets `forced-color-adjust: none`
+   * which inherits, so the per-state oklch token rules above paint
+   * through high-contrast mode unless explicitly re-mapped here.
+   * Equal specificity to the base highlight/disabled selectors. */
+  .zs-menu-item__shortcut {
+    color: GrayText;
+  }
+  .zs-menu-item[data-highlighted]:not([data-disabled]) .zs-menu-item__shortcut {
+    color: HighlightText;
+  }
+  .zs-menu-item[data-disabled] .zs-menu-item__shortcut {
+    color: GrayText;
   }
 }

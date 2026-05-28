@@ -75,15 +75,26 @@ import {
   isValidElement,
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
-  type ReactElement,
   type ReactNode,
   type Ref,
 } from "react";
 import { Menu as BaseMenu } from "@base-ui/react/menu";
-import { Slot, composeRefs, getElementRef } from "../_slot";
+import { Slot, composeRefs } from "../_slot";
 import { composeBaseClass } from "../_classnames";
 
-export type MenuSide = "top" | "right" | "bottom" | "left";
+/* Physical sides + logical (RTL-flipping) sides. Base UI's Positioner
+ * accepts both — `inline-start` / `inline-end` flip with `dir="rtl"`,
+ * which keeps Submenu anchoring on the correct visual side without
+ * leaking direction state into consumers. The chevron tail is mirrored
+ * separately by `[dir="rtl"]` CSS so it still points TOWARD the
+ * anchored popup. */
+export type MenuSide =
+  | "top"
+  | "right"
+  | "bottom"
+  | "left"
+  | "inline-start"
+  | "inline-end";
 export type MenuAlign = "start" | "center" | "end";
 
 /* ─── Root ─────────────────────────────────────────────────────────── */
@@ -279,13 +290,26 @@ export interface MenuItemProps extends BaseItemProps {
 }
 
 const MenuItem = forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
-  { className, children, shortcut, ...rest },
+  { className, children, shortcut, label, ...rest },
   ref,
 ) {
+  // Base UI's typeahead falls back to the item's `textContent` when
+  // `label` is omitted. The `shortcut` span is aria-hidden but still
+  // contributes to textContent, so typing "V" would land on
+  // "Paste⌘V". When `children` is a plain string AND a shortcut is
+  // set, project the string into `label` so typeahead matches just
+  // the label text. Consumer-supplied `label` wins. */
+  const autoLabel =
+    label === undefined &&
+    shortcut !== undefined &&
+    typeof children === "string"
+      ? children
+      : label;
   return (
     <BaseMenu.Item
       ref={ref as Ref<HTMLDivElement>}
       className={composeBaseClass("zs-menu-item", className)}
+      label={autoLabel}
       {...rest}
     >
       <span className="zs-menu-item__indicator" aria-hidden="true" />
@@ -376,11 +400,24 @@ export interface MenuCheckboxItemProps extends BaseCheckboxItemProps {
 }
 
 const MenuCheckboxItem = forwardRef<HTMLElement, MenuCheckboxItemProps>(
-  function MenuCheckboxItem({ className, children, shortcut, ...rest }, ref) {
+  function MenuCheckboxItem(
+    { className, children, shortcut, label, ...rest },
+    ref,
+  ) {
+    // Same typeahead-leak guard as MenuItem: project a string child
+    // into `label` when a shortcut is set, so Base UI's text
+    // navigation matches the row label and not the shortcut span. */
+    const autoLabel =
+      label === undefined &&
+      shortcut !== undefined &&
+      typeof children === "string"
+        ? children
+        : label;
     return (
       <BaseMenu.CheckboxItem
         ref={ref as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-menu-item zs-menu-checkbox-item", className)}
+        label={autoLabel}
         {...rest}
       >
         <span className="zs-menu-item__indicator" aria-hidden="true">
@@ -451,11 +488,22 @@ export interface MenuRadioItemProps extends BaseRadioItemProps {
 }
 
 const MenuRadioItem = forwardRef<HTMLElement, MenuRadioItemProps>(
-  function MenuRadioItem({ className, children, shortcut, ...rest }, ref) {
+  function MenuRadioItem(
+    { className, children, shortcut, label, ...rest },
+    ref,
+  ) {
+    // Same typeahead-leak guard as MenuItem; see MenuItem block. */
+    const autoLabel =
+      label === undefined &&
+      shortcut !== undefined &&
+      typeof children === "string"
+        ? children
+        : label;
     return (
       <BaseMenu.RadioItem
         ref={ref as Ref<HTMLDivElement>}
         className={composeBaseClass("zs-menu-item zs-menu-radio-item", className)}
+        label={autoLabel}
         {...rest}
       >
         <span className="zs-menu-item__indicator" aria-hidden="true">
@@ -505,7 +553,7 @@ export interface MenuLinkItemProps extends BaseLinkItemProps {
 
 const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
   function MenuLinkItem(
-    { asChild = false, className, children, shortcut, ...rest },
+    { asChild = false, className, children, shortcut, label, ...rest },
     ref,
   ) {
     if (
@@ -521,11 +569,23 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
       );
     }
 
+    // Same typeahead-leak guard as MenuItem: project a string child
+    // into `label` when a shortcut is set. Skipped under `asChild`
+    // (the caller's element owns its own text content). */
+    const autoLabel =
+      !asChild &&
+      label === undefined &&
+      shortcut !== undefined &&
+      typeof children === "string"
+        ? children
+        : label;
+
     return (
       <BaseMenu.LinkItem
         {...rest}
         ref={ref as Ref<HTMLAnchorElement>}
         className={composeBaseClass("zs-menu-item zs-menu-link-item", className)}
+        label={autoLabel}
         render={(linkProps) => {
           const linkPropsRef = (linkProps as { ref?: Ref<unknown> }).ref;
 
@@ -534,17 +594,17 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
             // can't safely inject the indicator/text/shortcut spans
             // around an arbitrary router <Link>. The caller owns the
             // grid lanes (or absorbs the column collapse).
+            //
+            // Slot composes the child's own ref via
+            // `composeRefs(ourRef, getElementRef(child))` internally,
+            // so we MUST NOT pre-merge the child ref here — a
+            // double-compose would invoke the child ref twice on
+            // every mount. Mirrors Dialog.Close (3a64a726). */
             if (!isValidElement(children)) return <></>;
-            const child = children as ReactElement;
-            const childRef = getElementRef<unknown>(child);
             return (
               <Slot
                 {...linkProps}
-                ref={composeRefs(
-                  ref as Ref<unknown>,
-                  linkPropsRef,
-                  childRef,
-                )}
+                ref={composeRefs(ref as Ref<unknown>, linkPropsRef)}
               >
                 {children}
               </Slot>
@@ -596,7 +656,9 @@ export interface MenuSubmenuProps
   trigger: ReactNode;
   /** The nested menu items. */
   children?: ReactNode;
-  /** Which side to anchor the submenu on. Default `right`. */
+  /** Which side to anchor the submenu on. Default `inline-end`
+   *  (visual right in LTR, visual left in RTL). Use a physical side
+   *  (`right`/`left`) to opt out of the direction-aware default. */
   side?: MenuSide;
   /** Alignment along the chosen side. Default `start`. */
   align?: MenuAlign;
@@ -613,7 +675,7 @@ export interface MenuSubmenuProps
 function MenuSubmenu({
   trigger,
   children,
-  side = "right",
+  side = "inline-end",
   align = "start",
   sideOffset = 2,
   triggerClassName,
