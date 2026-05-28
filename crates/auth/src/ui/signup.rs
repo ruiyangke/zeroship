@@ -134,7 +134,7 @@ pub async fn post(
         }
         Err(e) => {
             tracing::error!(error = %e, bucket = %signup_ip_key, "signup rate-limit consume failed");
-            return render_error_page("internal error", Some("rate limit"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     }
 
