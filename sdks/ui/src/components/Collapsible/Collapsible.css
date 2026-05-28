@@ -10,9 +10,15 @@
  *         └─ .zs-collapsible-panel-inner — padding lives here
  *
  * Panel animates `block-size: 0 ↔ var(--collapsible-panel-height)` —
- * Base UI emits the natural height on the panel element when measuring.
- * `prefers-reduced-motion: reduce` flattens the animation; the chevron
- * rotation also drops in reduced motion.
+ * Base UI emits the natural height on the panel element while
+ * measuring AND tags the element with `data-open` / `data-closed`
+ * plus the transient `data-starting-style` / `data-ending-style`
+ * attributes during the open / close transition. Our CSS base-pins
+ * block-size at `0`, lifts to the measured height while `data-open`
+ * is present, and pins back to `0` during the starting / ending
+ * style frames so the transition runs in BOTH directions (snap-shut
+ * otherwise). `prefers-reduced-motion: reduce` flattens the animation;
+ * the chevron rotation also drops in reduced motion.
  *
  * Logical properties everywhere. Chevron sits at `inset-inline-end`
  * (via flex `justify-content`) so RTL flips it automatically.
@@ -108,22 +114,30 @@
 }
 
 /* Base UI sets `data-panel-open` on the Trigger while the Panel is open. */
-.zs-collapsible-trigger[data-panel-open] .zs-collapsible-trigger-chevron,
-.zs-collapsible-trigger[data-state="open"] .zs-collapsible-trigger-chevron {
+.zs-collapsible-trigger[data-panel-open] .zs-collapsible-trigger-chevron {
   transform: rotate(0.5turn);
 }
 
-/* ─── panel ─────────────────────────────────────────────────────────── */
+/* ─── panel ─────────────────────────────────────────────────────────── *
+ *
+ * Pin block-size to the Base UI-emitted `--collapsible-panel-height`
+ * custom property (px during transition windows, `auto` while fully
+ * open), then override to `0` only during the `data-starting-style`
+ * and `data-ending-style` frames. CSS does not interpolate from
+ * `auto`, so reading the var directly during the close window keeps
+ * the start value pinned at the measured px — the close transition
+ * runs in reverse instead of snap-shutting. */
 .zs-collapsible-panel {
   overflow: hidden;
-  block-size: var(--collapsible-panel-height, 0);
+  block-size: var(--collapsible-panel-height);
   transition: block-size var(--zs-motion-base) var(--zs-motion-ease);
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
 }
 
-.zs-collapsible-panel[data-state="closed"] {
+.zs-collapsible-panel[data-starting-style],
+.zs-collapsible-panel[data-ending-style] {
   block-size: 0;
 }
 
@@ -141,23 +155,46 @@
   }
 }
 
-/* ─── forced colors ─────────────────────────────────────────────────── */
+/* ─── forced colors ─────────────────────────────────────────────────── *
+ *
+ * Mirror the base hover/active selector specificity inside the
+ * forced-colors gate so the token `color-mix(...)` background in the
+ * base layer doesn't win the cascade over the system-color base rule
+ * (same pattern Toggle applied in Slice 5). */
 @media (forced-colors: active) {
   .zs-collapsible-trigger {
     forced-color-adjust: none;
     color: CanvasText;
     background-color: Canvas;
   }
+  @media (hover: hover) {
+    .zs-collapsible-trigger:not([data-disabled]):hover {
+      color: CanvasText;
+      background-color: Canvas;
+    }
+  }
+  .zs-collapsible-trigger:not([data-disabled]):active {
+    color: CanvasText;
+    background-color: Canvas;
+  }
   .zs-collapsible-trigger[data-disabled] {
     color: GrayText;
   }
-  .zs-collapsible-trigger[data-panel-open],
-  .zs-collapsible-trigger[data-state="open"] {
+  .zs-collapsible-trigger[data-panel-open] {
     color: HighlightText;
     background-color: Highlight;
   }
-  .zs-collapsible-trigger[data-panel-open] .zs-collapsible-trigger-chevron,
-  .zs-collapsible-trigger[data-state="open"] .zs-collapsible-trigger-chevron {
+  @media (hover: hover) {
+    .zs-collapsible-trigger[data-panel-open]:not([data-disabled]):hover {
+      color: HighlightText;
+      background-color: Highlight;
+    }
+  }
+  .zs-collapsible-trigger[data-panel-open]:not([data-disabled]):active {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+  .zs-collapsible-trigger[data-panel-open] .zs-collapsible-trigger-chevron {
     color: HighlightText;
   }
   .zs-collapsible-trigger:focus-visible {

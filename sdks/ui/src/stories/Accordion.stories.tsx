@@ -460,6 +460,131 @@ export const RTL: Story = {
   },
 };
 
+/* ─── 9a. RegressionTransitions — fix #1 regression baseline ───────── *
+ *
+ * Dedicated to the fix #1 regression check: the panel close-transition
+ * runs a real `block-size` interpolation rather than a snap. This story
+ * deliberately ships WITHOUT a `play()` so Storybook's autoplay does
+ * not race the aria-wiring script's interactions and leave the
+ * accordion in a post-play state. The story preopens `shipping` so
+ * the closing transition is one click away. */
+export const RegressionTransitions: Story = {
+  name: "Regression — transitions (fix #1)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression baseline for the Slice 14 fix #1 panel-transition " +
+          "check. No play() — the aria-wiring script drives the click " +
+          "itself and samples mid-transition block-size.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Regression transitions"
+    >
+      <Accordion
+        type="single"
+        collapsible
+        defaultValue="shipping"
+        data-testid="accordion-regression-transitions"
+      >
+        {renderItems("accordion-regression-transitions")}
+      </Accordion>
+    </div>
+  ),
+};
+
+/* ─── 9b. RegressionNonCollapsible — fix #2 regression baseline ──── *
+ *
+ * Default `collapsible: false` (omitted) in `type="single"`. The
+ * aria-wiring script clicks `shipping` to open and clicks again to
+ * verify the open Trigger STAYS open (RadioGroup semantics). No
+ * play() — see fix #1 baseline above. */
+export const RegressionNonCollapsible: Story = {
+  name: "Regression — collapsible=false (fix #2)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression baseline for the Slice 14 fix #2 non-collapsible " +
+          "single-mode check. No play() — the aria-wiring script clicks " +
+          "the same Trigger twice and asserts the second click is a no-op.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Regression non-collapsible"
+    >
+      <Accordion
+        type="single"
+        data-testid="accordion-regression-noncollapsible"
+      >
+        {renderItems("accordion-regression-noncollapsible")}
+      </Accordion>
+    </div>
+  ),
+};
+
+/* ─── 9c. RegressionControlled — fix #4 regression baseline ──────── *
+ *
+ * Controlled single accordion that initializes with `returns` open.
+ * No play() — the aria-wiring script drives a full open/close/reopen
+ * cycle and verifies the external readout (`Open: <value>`) stays in
+ * lockstep with `aria-expanded`. Pre-fix, `value === undefined`
+ * silently exited controlled mode and the readout desynced. */
+export const RegressionControlled: Story = {
+  name: "Regression — controlled value cycle (fix #4)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression baseline for the Slice 14 fix #4 controlled-value " +
+          "check. No play() — the aria-wiring script open/close/reopens " +
+          "and asserts the readout matches state on every step.",
+      },
+    },
+  },
+  render: function Render() {
+    const [value, setValue] = useState<string | undefined>("returns");
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Regression controlled"
+        style={{ flexDirection: "column", alignItems: "stretch" }}
+      >
+        <Accordion
+          type="single"
+          collapsible
+          value={value}
+          onValueChange={setValue}
+          data-testid="accordion-regression-controlled"
+        >
+          {renderItems("accordion-regression-controlled")}
+        </Accordion>
+        <output
+          aria-live="polite"
+          data-testid="accordion-regression-controlled-readout"
+          style={{
+            marginBlockStart: "var(--zs-space-3)",
+            fontSize: "var(--zs-text-caption-1-size)",
+            color: "var(--zs-label-secondary)",
+          }}
+        >
+          Open: {value ?? "(none)"}
+        </output>
+      </div>
+    );
+  },
+};
+
 /* ─── 9. RichContent — panels with structured content ──────────────── */
 export const RichContent: Story = {
   name: "Rich content",

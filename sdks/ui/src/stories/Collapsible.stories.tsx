@@ -166,6 +166,48 @@ export const Disabled: Story = {
   },
 };
 
+/* ─── 3a. RegressionTransitions — fix #1 regression baseline ──────── *
+ *
+ * Dedicated to the fix #1 regression check on Collapsible. No play()
+ * — Storybook autoplay does not race the aria-wiring script. The
+ * story renders closed; the script clicks once to open (measures the
+ * settled open height), then clicks again to close and samples the
+ * in-flight block-size. */
+export const RegressionTransitions: Story = {
+  name: "Regression — transitions (fix #1)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression baseline for the Slice 14 Collapsible fix #1 " +
+          "panel-transition check. No play() — the aria-wiring script " +
+          "drives the click itself and samples mid-transition block-size.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Regression transitions"
+    >
+      <Collapsible data-testid="collapsible-regression-transitions">
+        <Collapsible.Trigger
+          data-testid="collapsible-regression-transitions-trigger"
+        >
+          Show advanced options
+        </Collapsible.Trigger>
+        <Collapsible.Panel
+          data-testid="collapsible-regression-transitions-panel"
+        >
+          Advanced options reveal here. Use them when the defaults do not
+          fit your deployment.
+        </Collapsible.Panel>
+      </Collapsible>
+    </div>
+  ),
+};
+
 /* ─── 4. InsideCard — Collapsible sits inside a Card ───────────────── */
 export const InsideCard: Story = {
   name: "Inside Card",
