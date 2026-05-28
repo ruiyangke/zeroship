@@ -72,6 +72,9 @@ askama = "0.12"
 [dev-dependencies]
 jsonwebtoken = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+# `tests/load_test.rs` uses `futures::future::join_all` to drive N parallel
+# /login requests on the single-threaded ntex test runtime. Workspace pin.
+futures = { workspace = true }
 
 [lints]
 workspace = true
