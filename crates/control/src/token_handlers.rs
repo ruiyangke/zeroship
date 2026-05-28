@@ -21,6 +21,7 @@ use crate::AppState;
 const MAX_EXPIRES_IN_DAYS: u16 = 365;
 const DEFAULT_EXPIRES_IN_DAYS: u16 = 365;
 const MAX_GRANT_PAIRS: usize = 10_000;
+const MAX_PAT_NAME_CHARS: usize = 200;
 const PAT_AUDIENCE: &str = "control.zeroship.ai";
 const PAT_ISSUER: &str = "https://api.zeroship.ai";
 
@@ -222,6 +223,14 @@ pub async fn create_token(
         }));
     }
 
+    let name = body.name.trim();
+    if !valid_pat_name(name) {
+        return web::HttpResponse::BadRequest().json(&json!({
+            "error": "invalid_token_name",
+            "message": "name must be 1-200 characters",
+        }));
+    }
+
     if let Err(resp) = validate_grant_subset(&guard, &state, &body.policies).await {
         return resp;
     }
@@ -253,7 +262,7 @@ pub async fn create_token(
             &[
                 &token_id,
                 &guard.principal_id,
-                &body.name,
+                &name,
                 &policies_json,
                 &policy_hash,
                 &expires_at,
@@ -415,6 +424,10 @@ async fn validate_grant_subset(
     Ok(())
 }
 
+fn valid_pat_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.chars().count() <= MAX_PAT_NAME_CHARS
+}
+
 fn now_unix() -> Result<i64, String> {
     i64::try_from(
         SystemTime::now()
@@ -448,5 +461,14 @@ mod tests {
             first.kid, second.kid,
             "dev_insecure PAT issuers must not share one constant signing key"
         );
+    }
+
+    #[test]
+    fn pat_name_is_bounded() {
+        assert!(valid_pat_name("CI deploy"));
+        assert!(valid_pat_name(&"A".repeat(200)));
+        assert!(!valid_pat_name(""));
+        assert!(!valid_pat_name("   "));
+        assert!(!valid_pat_name(&"A".repeat(201)));
     }
 }
