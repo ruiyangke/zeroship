@@ -17,6 +17,8 @@ use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::DevicePage;
 
+const MAX_USER_CODE_BYTES: usize = 32;
+
 #[derive(Debug, Deserialize)]
 pub struct DeviceForm {
     pub user_code: String,
@@ -46,6 +48,9 @@ pub async fn post(
             Some("enter the code shown on your device"),
             StatusCode::BAD_REQUEST,
         );
+    }
+    if !valid_user_code(user_code) {
+        return render_form("", Some("invalid or expired code"), StatusCode::BAD_REQUEST);
     }
 
     let verified = match verify_user_code(&cfg.hydra_public, user_code).await {
@@ -207,4 +212,21 @@ fn render_form(user_code: &str, error: Option<&str>, status: StatusCode) -> Http
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
+}
+
+fn valid_user_code(user_code: &str) -> bool {
+    !user_code.is_empty() && user_code.len() <= MAX_USER_CODE_BYTES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_user_code_is_bounded() {
+        assert!(valid_user_code("ABCD-EFGH"));
+        assert!(valid_user_code(&"A".repeat(32)));
+        assert!(!valid_user_code(""));
+        assert!(!valid_user_code(&"A".repeat(33)));
+    }
 }
