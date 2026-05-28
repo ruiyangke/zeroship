@@ -5,7 +5,8 @@
 //! reset token (single-use), Argon2-hashes the new password on a
 //! `spawn_blocking` worker (the event loop stays free), updates
 //! `auth.users.password_hash`, emits a `password_changed` audit event,
-//! and redirects to `/login`.
+//! revokes every existing session, consumes outstanding reset tokens, and
+//! redirects to `/login`.
 //!
 //! Note: GET does not "peek" at the token. Token validity is checked
 //! only at POST time, at the moment of redemption. The form might
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
+use crate::error::{AuthError, Result};
 use crate::identity::{password, password_reset};
 use crate::store::users;
 use crate::ui::ResetPage;
@@ -53,8 +55,8 @@ pub async fn get(query: Query<ResetQuery>, cfg: State<Arc<AuthConfig>>) -> HttpR
 }
 
 /// `/reset` POST — validate token + length, atomically redeem the
-/// reset token, hash the new password, update the user, audit,
-/// redirect to `/login`.
+/// reset token, hash the new password, update the user, audit, revoke
+/// existing sessions, consume pending reset tokens, and redirect to `/login`.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
@@ -139,32 +141,150 @@ pub async fn post(
         }
     };
 
-    // 6. Persist the new hash.
-    if let Err(e) = users::update_password_hash(db.as_ref(), user.id, &phc).await {
-        tracing::error!(error = %e, user_id = %user.id, "password_reset update failed");
-        return render_form(&cfg, &form.token, Some("internal error"));
-    }
+    // 6. Persist the new hash, audit, revoke existing sessions, and consume
+    //    outstanding reset tokens in one transaction. The reset token itself
+    //    was already consumed by the atomic redeem above.
+    let revoked = match complete_password_reset(db.as_ref(), user.id, &redeemed.email, &phc).await {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::error!(error = %e, user_id = %user.id, "password_reset completion failed");
+            return render_form(&cfg, &form.token, Some("internal error"));
+        }
+    };
 
-    // 7. Audit `password_changed` success.
-    audit::emit(
-        db.as_ref(),
-        &AuditEvent {
-            event_type: "password_changed",
-            outcome: "success",
-            user_id: Some(&user.id),
-            auth_method: Some("password_reset"),
-            ..Default::default()
-        },
-    )
-    .await;
+    tracing::info!(
+        user_id = %user.id,
+        idp_sessions = revoked.idp_sessions,
+        gateway_sessions = revoked.gateway_sessions,
+        console_sessions = revoked.console_sessions,
+        reset_tokens = revoked.reset_tokens,
+        "password_reset revoked sessions and stale tokens"
+    );
 
-    // 8. Redirect to /login. The user signs in fresh with the new
+    // 7. Redirect to /login. The user signs in fresh with the new
     //    credential — we intentionally don't auto-mint a session here
     //    (a reset link clicked from a different browser shouldn't
     //    silently log you in on that other browser).
     let mut resp = HttpResponse::Found();
     resp.header(LOCATION, HeaderValue::from_static("/login"));
     resp.finish()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResetRevocationCounts {
+    idp_sessions: u64,
+    gateway_sessions: u64,
+    console_sessions: u64,
+    reset_tokens: u64,
+}
+
+async fn complete_password_reset(
+    conn: &compio_postgres::Client,
+    user_id: uuid::Uuid,
+    email: &str,
+    phc: &str,
+) -> Result<ResetRevocationCounts> {
+    conn.execute("BEGIN", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset begin: {e}")))?;
+
+    let result = complete_password_reset_tx(conn, user_id, email, phc).await;
+    match result {
+        Ok(counts) => {
+            conn.execute("COMMIT", &[])
+                .await
+                .map_err(|e| AuthError::Db(format!("password_reset commit: {e}")))?;
+            Ok(counts)
+        }
+        Err(e) => {
+            if let Err(rollback_err) = conn.execute("ROLLBACK", &[]).await {
+                tracing::error!(error = %rollback_err, "password_reset rollback failed");
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn complete_password_reset_tx(
+    conn: &compio_postgres::Client,
+    user_id: uuid::Uuid,
+    email: &str,
+    phc: &str,
+) -> Result<ResetRevocationCounts> {
+    users::update_password_hash(conn, user_id, phc).await?;
+
+    audit::emit_strict(
+        conn,
+        &AuditEvent {
+            event_type: "password_changed",
+            outcome: "success",
+            user_id: Some(&user_id),
+            auth_method: Some("password_reset"),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    let idp_sessions = conn
+        .execute("DELETE FROM auth.sessions WHERE user_id = $1", &[&user_id])
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset delete auth.sessions: {e}")))?;
+
+    let user_id_text = user_id.to_string();
+    let gateway_sessions = conn
+        .execute(
+            "DELETE FROM auth.gateway_sessions WHERE user_id = $1",
+            &[&user_id_text],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset delete gateway_sessions: {e}")))?;
+
+    let console_sessions = conn
+        .execute(
+            "DELETE FROM auth.console_sessions WHERE user_id = $1",
+            &[&user_id_text],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset delete console_sessions: {e}")))?;
+
+    let reset_tokens = conn
+        .execute(
+            "UPDATE auth.magic_links \
+             SET consumed_at = NOW() \
+             WHERE email = $1::citext \
+               AND purpose = 'reset' \
+               AND consumed_at IS NULL",
+            &[&email],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset consume reset tokens: {e}")))?;
+
+    let counts = ResetRevocationCounts {
+        idp_sessions,
+        gateway_sessions,
+        console_sessions,
+        reset_tokens,
+    };
+
+    audit::emit_strict(
+        conn,
+        &AuditEvent {
+            event_type: "sessions_revoked_after_password_reset",
+            outcome: "success",
+            user_id: Some(&user_id),
+            auth_method: Some("password_reset"),
+            detail: serde_json::json!({
+                "idp_sessions": counts.idp_sessions,
+                "gateway_sessions": counts.gateway_sessions,
+                "console_sessions": counts.console_sessions,
+                "reset_tokens": counts.reset_tokens,
+            }),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    Ok(counts)
 }
 
 fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpResponse {
