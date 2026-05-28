@@ -103,7 +103,7 @@ async function oauthCallback(request: Request): Promise<Response> {
 
   try {
     const tokenResponse = await exchangeCode({ code, pkceVerifier: verifier });
-    const userId = subjectFromAccessToken(tokenResponse.access_token);
+    const userId = await subjectFromAccessToken(tokenResponse.access_token);
     if (!userId) throw new Error("access token missing subject");
 
     await saveTokens(userId, storedTokensFromResponse(tokenResponse));

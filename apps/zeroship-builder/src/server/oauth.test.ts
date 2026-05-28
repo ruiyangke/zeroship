@@ -2,16 +2,21 @@
 
 import crypto from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import {
   buildAuthorizationUrl,
   exchangeCode,
   generatePkce,
   refreshAccessToken,
+  subjectFromAccessToken,
 } from "./oauth";
 
 const ENV_KEYS = [
   "HYDRA_AUTHORIZE_URL",
   "HYDRA_TOKEN_URL",
+  "HYDRA_JWKS_URL",
+  "HYDRA_ISSUER",
+  "BUILDER_ACCESS_TOKEN_AUDIENCE",
   "BUILDER_CLIENT_ID",
   "BUILDER_CLIENT_SECRET",
   "BUILDER_REDIRECT_URI",
@@ -23,6 +28,7 @@ describe("oauth", () => {
   beforeEach(() => {
     process.env.HYDRA_AUTHORIZE_URL = "https://auth.test/oauth2/auth";
     process.env.HYDRA_TOKEN_URL = "https://auth.test/oauth2/token";
+    process.env.HYDRA_JWKS_URL = "https://auth.test/.well-known/jwks.json";
     process.env.BUILDER_CLIENT_ID = "zeroship-builder-test";
     process.env.BUILDER_CLIENT_SECRET = "client-secret";
     process.env.BUILDER_REDIRECT_URI = "https://builder.test/auth/callback";
@@ -128,5 +134,42 @@ describe("oauth", () => {
     expect(body.get("grant_type")).toBe("refresh_token");
     expect(body.get("refresh_token")).toBe("refresh-one");
     expect(body.get("client_id")).toBe("zeroship-builder-test");
+  });
+
+  it("subjectFromAccessToken rejects a forged jwt body with invalid signature", async () => {
+    process.env.HYDRA_JWKS_URL = "https://auth.test/.well-known/jwks-invalid.json";
+    const { publicKey } = await generateKeyPair("RS256", { extractable: true });
+    const jwk = await exportJWK(publicKey);
+    const fetchMock = vi.fn(async () => Response.json({
+      keys: [{ ...jwk, kid: "builder-test-key", alg: "RS256", use: "sig" }],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const header = Buffer.from(
+      JSON.stringify({ alg: "RS256", kid: "builder-test-key", typ: "JWT" }),
+      "utf8",
+    ).toString("base64url");
+    const payload = Buffer.from(JSON.stringify({ sub: "attacker" }), "utf8").toString("base64url");
+    const forged = `${header}.${payload}.not-a-valid-signature`;
+
+    await expect(subjectFromAccessToken(forged)).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("subjectFromAccessToken returns sub after jwks verification", async () => {
+    process.env.HYDRA_JWKS_URL = "https://auth.test/.well-known/jwks-valid.json";
+    const { publicKey, privateKey } = await generateKeyPair("RS256", { extractable: true });
+    const jwk = await exportJWK(publicKey);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      keys: [{ ...jwk, kid: "builder-valid-key", alg: "RS256", use: "sig" }],
+    })));
+
+    const token = await new SignJWT({ sub: "usr_builder_verified" })
+      .setProtectedHeader({ alg: "RS256", kid: "builder-valid-key" })
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+
+    await expect(subjectFromAccessToken(token)).resolves.toBe("usr_builder_verified");
   });
 });
