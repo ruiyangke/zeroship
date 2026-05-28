@@ -104,3 +104,24 @@ Scope note: `crates/auth/src/store/env_store.rs` does not exist in this worktree
 - High-entropy email tokens: magic link, password reset, and email verification tokens use 32 random bytes and store SHA-256 digests only. `rand::thread_rng()` is a CSPRNG in the pinned `rand` line; switching these to `OsRng` would improve explicitness but was not counted as a finding.
 - PAT and wrapper JWTs: `alg` is pinned to EdDSA in `Validation`, `typ` is checked, `kid` is pre-checked, and issuer/audience validation is configured.
 - DPoP proof verification: symmetric/`none` algorithms are excluded, `typ`, `htm`, `htu`, `iat`, and `ath` are checked, and JWK thumbprints use required members only.
+
+## Status
+
+- H1 fixed in `0628f90b`: app-secret AES-GCM now requires AAD, ciphertexts carry an AAD-version byte, EnvStore binds ciphertexts to `(app_id, key_name)`, and the pre-AAD secret table is wiped by a one-time control migration.
+- M1 fixed in `b8a13c4a` plus compile fix `51ba5a34`: non-dev control startup rejects master and legacy master keys that do not decode to at least 32 bytes of hex or base64url material.
+- M2 fixed in `02bee6da`: JWK retirement tracks per-key `created_at` in `auth.jwk_key_state` and retires keys by their own age instead of the latest rotation timestamp.
+- M3 fixed in `9be93c34`: gateway startup rejects missing, default, or short stash signing keys unless `INSECURE_DEV=true`.
+- L1 fixed in `79f94be0`: SES-SNS webhook verification accepts SignatureVersion 2 using RSA-SHA256 while keeping v1 support.
+- L2 fixed in `b88ecd8c`: sandbox HTTP and preview-WS bearer checks compare fixed-size SHA-256 digests instead of raw token bytes.
+
+Verification:
+- `cargo test -p zeroship-core crypto --lib`
+- `cargo test -p zeroship-control --bin zeroship-control master_key`
+- `cargo test -p zeroship-auth jwk_rotation --lib`
+- `cargo test -p zeroship-auth --test sns_test`
+- `cargo test -p zeroship-gateway --bin zeroship-gate gateway_stash_key`
+- `cargo test -p zeroship-sandbox auth::tests::constant_time_bearer_eq_correctness --lib`
+
+Environment-blocked:
+- `CONTROL_TEST_DB=postgres://postgres:zeroship@localhost:5441/zeroship cargo test -p zeroship-control --test env_store ciphertext_transplant_fails_across_app_and_key` compiled but failed before test body because this sandbox cannot create a compio/io_uring runtime (`Operation not permitted`).
+- `cargo test -p zeroship-auth --test jwk_rotation_test` compiled but failed before env-gated skips for the same compio/io_uring runtime permission error.
