@@ -16,8 +16,13 @@
  *     arrow-focus" vs the default "Enter/Space to activate".
  *
  *   - Tabs.Tab: a real `<button type="button">` carrying role=tab.
- *     `value` keys the tab to its panel. Disabled tabs are skipped by
- *     roving navigation.
+ *     `value` keys the tab to its panel. Disabled tabs are still
+ *     ROVING-FOCUSABLE (Base UI hardcodes `disabledIndices: []` in its
+ *     composite roving controller, so arrow keys land on a disabled
+ *     tab as a focus stop) but cannot be ACTIVATED — Enter / Space /
+ *     click on a disabled tab is a no-op (`aria-selected` does not
+ *     flip; the panel does not swap). See Guarantee 10 for the
+ *     verifiable contract.
  *
  *   - Tabs.Panel: role=tabpanel, auto-labelled by the matching Tab's id
  *     (Base UI wires `aria-labelledby` from its internal id registry).
@@ -46,11 +51,17 @@
  *
  *   2. Horizontal + vertical orientation. Vertical groups stack the
  *      list to the side of the panels; the indicator translates
- *      vertically. Logical properties keep RTL automatic.
+ *      vertically. The horizontal indicator anchors via physical
+ *      `left:` so Base UI's physical `--active-tab-left` pixel value
+ *      tracks the active tab in BOTH LTR and RTL. Logical properties
+ *      handle the rail surface (gap, padding, border edges) so
+ *      everything else flips automatically.
  *
- *   3. The Tab button is NEVER `submit` — `type="button"` is stamped so
- *      a Tabs row inside a Form doesn't accidentally submit it. Same
- *      defense Toggle applies (Toggle is not a form control either).
+ *   3. The Tab button is NEVER `submit` — `type="button"` is stamped
+ *      unconditionally so a Tabs row inside a Form cannot accidentally
+ *      submit it. The `type` prop is omitted from `TabsTabProps`
+ *      entirely so a caller can't override the stamp. Same defense
+ *      Toggle applies (Toggle is not a form control either).
  *
  *   4. Lazy mount: `lazyMount={true}` flips Base UI's `keepMounted`
  *      default to `false`. Consumers who need preserved state across
@@ -66,11 +77,29 @@
  *      Tab inherits it. Per-Tab variant overrides aren't supported —
  *      mixed variants inside one list read incoherent.
  *
- *   7. No `Tabs.Indicator` re-export from the package root is necessary —
- *      it ships on the `Tabs` namespace as `Tabs.Indicator`. Same
- *      shape Toggle.Group uses.
+ *   7. The public API is the `Tabs` namespace ONLY — `Tabs.List`,
+ *      `Tabs.Tab`, `Tabs.Panel`, `Tabs.Indicator`. No bare
+ *      `TabsList`/`TabsTab`/... exports; one obvious path per the
+ *      AI-friendly API guidelines.
  *
  *   8. `prefers-reduced-motion`: CSS suppresses the indicator transition.
+ *
+ *   9. Tab values are STRING-KEYED. We don't carry a `<Value extends
+ *      string>` generic on the root + children because Base UI types
+ *      `TabsTab.Value` as `any`, so a generic narrowing on our shell
+ *      would be decorative — the controlled value callback would still
+ *      arrive as `any` from Base UI. Consumers pick whatever string
+ *      keys they like ("overview", "billing", "1", ...) and read them
+ *      back as strings.
+ *
+ *  10. Disabled-tab keyboard contract: a disabled Tab remains in the
+ *      roving order (Base UI's composite controller hardcodes
+ *      `disabledIndices: []`), so ArrowRight CAN focus it. The tab
+ *      cannot be ACTIVATED — Enter/Space/click on a focused disabled
+ *      tab does not flip `aria-selected` and does not swap the panel.
+ *      If a future Base UI release exposes a "skip disabled" knob, we
+ *      should flip the contract to "disabled tabs are skipped by
+ *      roving" — until then, the honest behavior is documented here.
  */
 import {
   createContext,
@@ -115,7 +144,7 @@ function useTabsContext(): TabsContextValue {
 
 type BaseTabsRootProps = ComponentPropsWithRef<typeof BaseTabs.Root>;
 
-export interface TabsProps<Value extends string = string>
+export interface TabsProps
   extends Omit<BaseTabsRootProps, "render" | "className"> {
   /**
    * Visual variant — `default` paints an underline indicator under the
@@ -135,6 +164,15 @@ export interface TabsProps<Value extends string = string>
    */
   size?: TabsSize;
   /**
+   * Layout orientation. `horizontal` lays the tablist row above the
+   * panels; `vertical` lays the tablist as a column beside the panels
+   * and rotates the indicator. Drives `aria-orientation` on the
+   * tablist so screen readers announce the correct arrow-key axis.
+   *
+   * @default "horizontal"
+   */
+  orientation?: TabsOrientation;
+  /**
    * Lazy-mount panel content. When `true`, only the active Panel
    * renders to the DOM; switching unmounts the previous and mounts the
    * next. Default `false` matches Base UI's `keepMounted: true` so all
@@ -153,8 +191,8 @@ export interface TabsProps<Value extends string = string>
   children?: ReactNode;
 }
 
-function TabsRootInner<Value extends string = string>(
-  props: TabsProps<Value>,
+function TabsRootInner(
+  props: TabsProps,
   ref: React.ForwardedRef<HTMLDivElement>,
 ) {
   const {
@@ -198,7 +236,26 @@ const LazyMountContext = createContext<boolean>(false);
 
 type BaseTabsListProps = ComponentPropsWithRef<typeof BaseTabs.List>;
 
-export interface TabsListProps extends Omit<BaseTabsListProps, "render" | "className"> {
+export interface TabsListProps
+  extends Omit<BaseTabsListProps, "render" | "className" | "activateOnFocus" | "loopFocus"> {
+  /**
+   * When `true`, focusing a Tab via arrow-key navigation activates it
+   * immediately (selects the tab and shows its panel). When `false`
+   * (the default), arrow keys only ROVE focus; the consumer presses
+   * Enter or Space to activate. Both shapes are valid per WAI-ARIA
+   * APG; pick `true` for "swap on focus" UX (typically for read-only
+   * dashboards) and leave `false` for two-step activation.
+   *
+   * @default false
+   */
+  activateOnFocus?: boolean;
+  /**
+   * Loop arrow-key focus from the last tab back to the first (and
+   * vice versa). When `false`, ArrowRight on the last tab is a no-op.
+   *
+   * @default true
+   */
+  loopFocus?: boolean;
   /** Optional class hook on the list container. */
   className?: string;
 }
@@ -225,34 +282,40 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
     />
   );
 });
-(TabsList as React.FC).displayName = "Tabs.List";
+(TabsList as { displayName?: string }).displayName = "Tabs.List";
 
 /* ─── Tabs.Tab ──────────────────────────────────────────────────────── */
 
 type BaseTabsTabProps = ComponentPropsWithRef<typeof BaseTabs.Tab>;
 
-export interface TabsTabProps<Value extends string = string>
-  extends Omit<BaseTabsTabProps, "render" | "className" | "value"> {
+export interface TabsTabProps
+  extends Omit<BaseTabsTabProps, "render" | "className" | "value" | "type"> {
   /**
    * The value keying this Tab to its Panel. Required — there is no
    * implicit index-based wiring; Panels reference Tabs by `value`.
+   * Values are string-keyed; see Guarantee 9 in the header comment.
    */
-  value: Value;
+  value: string;
+  /**
+   * Whether the Tab is disabled. A disabled Tab cannot be ACTIVATED —
+   * click and Enter/Space are no-ops, `aria-selected` does not flip,
+   * and the panel does not swap. It IS still in the roving-tab order
+   * (Base UI hardcodes `disabledIndices: []`), so ArrowLeft / Right
+   * can park focus on it; the focus stop is announced but no
+   * activation can follow. See Guarantee 10 in the header comment.
+   *
+   * @default false
+   */
+  disabled?: boolean;
   /** Optional size override. Inherits root context when omitted. */
   size?: TabsSize;
   /** Optional class hook on the tab button. */
   className?: string;
 }
 
-const TabsTab = forwardRef(function TabsTab<Value extends string = string>(
-  {
-    value,
-    size: sizeProp,
-    className,
-    type,
-    ...rest
-  }: TabsTabProps<Value>,
-  ref: React.ForwardedRef<HTMLButtonElement>,
+const TabsTab = forwardRef<HTMLButtonElement, TabsTabProps>(function TabsTab(
+  { value, size: sizeProp, className, ...rest },
+  ref,
 ) {
   const ctx = useTabsContext();
   // Explicit prop wins over root context. Mirrors the Toggle / Radio /
@@ -263,10 +326,11 @@ const TabsTab = forwardRef(function TabsTab<Value extends string = string>(
       {...rest}
       ref={ref}
       value={value}
-      // Stamp type="button" defensively so a Tabs row inside a Form
-      // doesn't accidentally submit. Consumer-supplied `type` still wins
-      // (e.g. for an asChild `<a>` swap a future revision might offer).
-      type={type ?? "button"}
+      // Stamp type="button" UNCONDITIONALLY so a Tabs row inside a Form
+      // cannot accidentally submit it. `type` is omitted from
+      // TabsTabProps so a caller can't override the stamp by spreading
+      // a `type="submit"` through `...rest`.
+      type="button"
       className={classnames(
         "zs-tabs-tab",
         `zs-tabs-tab--${ctx.variant}`,
@@ -279,19 +343,20 @@ const TabsTab = forwardRef(function TabsTab<Value extends string = string>(
       data-orientation={ctx.orientation}
     />
   );
-}) as <Value extends string = string>(
-  props: TabsTabProps<Value> & { ref?: React.Ref<HTMLButtonElement> },
-) => React.JSX.Element;
+});
 (TabsTab as { displayName?: string }).displayName = "Tabs.Tab";
 
 /* ─── Tabs.Panel ────────────────────────────────────────────────────── */
 
 type BaseTabsPanelProps = ComponentPropsWithRef<typeof BaseTabs.Panel>;
 
-export interface TabsPanelProps<Value extends string = string>
+export interface TabsPanelProps
   extends Omit<BaseTabsPanelProps, "render" | "className" | "value" | "keepMounted"> {
-  /** The value of the Tab this Panel pairs with. Required. */
-  value: Value;
+  /**
+   * The value of the Tab this Panel pairs with. Required. String-keyed
+   * (see Guarantee 9 in the header comment).
+   */
+  value: string;
   /**
    * Per-Panel override of the root's `lazyMount`. Most consumers leave
    * this off and let the root decide; a one-off expensive Panel inside
@@ -303,9 +368,9 @@ export interface TabsPanelProps<Value extends string = string>
   className?: string;
 }
 
-const TabsPanel = forwardRef(function TabsPanel<Value extends string = string>(
-  { value, keepMounted, className, ...rest }: TabsPanelProps<Value>,
-  ref: React.ForwardedRef<HTMLDivElement>,
+const TabsPanel = forwardRef<HTMLDivElement, TabsPanelProps>(function TabsPanel(
+  { value, keepMounted, className, ...rest },
+  ref,
 ) {
   const ctx = useTabsContext();
   const lazyRoot = useContext(LazyMountContext);
@@ -330,9 +395,7 @@ const TabsPanel = forwardRef(function TabsPanel<Value extends string = string>(
       data-orientation={ctx.orientation}
     />
   );
-}) as <Value extends string = string>(
-  props: TabsPanelProps<Value> & { ref?: React.Ref<HTMLDivElement> },
-) => React.JSX.Element;
+});
 (TabsPanel as { displayName?: string }).displayName = "Tabs.Panel";
 
 /* ─── Tabs.Indicator ────────────────────────────────────────────────── */
@@ -366,27 +429,27 @@ const TabsIndicator = forwardRef<HTMLSpanElement, TabsIndicatorProps>(
     );
   },
 );
-(TabsIndicator as React.FC).displayName = "Tabs.Indicator";
+(TabsIndicator as { displayName?: string }).displayName = "Tabs.Indicator";
 
-/* ─── Compose the public namespace ──────────────────────────────────── */
+/* ─── Compose the public namespace ──────────────────────────────────── *
+ *
+ * Public API surface = the `Tabs` namespace only (Guarantee 7). The
+ * subpart components are not exported as bare symbols — `Tabs.List`,
+ * `Tabs.Tab`, `Tabs.Panel`, `Tabs.Indicator` is the one obvious path. */
 
-const ForwardedTabs = forwardRef(TabsRootInner) as unknown as (<
-  Value extends string = string,
->(
-  props: TabsProps<Value> & { ref?: React.Ref<HTMLDivElement> },
-) => React.JSX.Element) & {
-  List: typeof TabsList;
-  Tab: typeof TabsTab;
-  Panel: typeof TabsPanel;
-  Indicator: typeof TabsIndicator;
-  displayName?: string;
-};
+const ForwardedTabs = forwardRef<HTMLDivElement, TabsProps>(TabsRootInner) as
+  React.ForwardRefExoticComponent<TabsProps & React.RefAttributes<HTMLDivElement>>
+  & {
+    List: typeof TabsList;
+    Tab: typeof TabsTab;
+    Panel: typeof TabsPanel;
+    Indicator: typeof TabsIndicator;
+  };
 
-(ForwardedTabs as { displayName?: string }).displayName = "Tabs";
+ForwardedTabs.displayName = "Tabs";
 ForwardedTabs.List = TabsList;
 ForwardedTabs.Tab = TabsTab;
 ForwardedTabs.Panel = TabsPanel;
 ForwardedTabs.Indicator = TabsIndicator;
 
 export const Tabs = ForwardedTabs;
-export { TabsList, TabsTab, TabsPanel, TabsIndicator };

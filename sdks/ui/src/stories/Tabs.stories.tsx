@@ -407,9 +407,13 @@ export const DisabledTab: Story = {
     docs: {
       description: {
         story:
-          "A single Tab disabled mid-row. Roving navigation skips the " +
-          "disabled tab; the visual treatment reads inactive but the " +
-          "slot still occupies its layout space.",
+          "A single Tab disabled mid-row. The visual treatment reads " +
+          "inactive and the slot still occupies its layout space. The " +
+          "tab is NOT activatable (click / Enter / Space are no-ops; " +
+          "`aria-selected` does not flip), but it IS still a focus " +
+          "stop in the roving order — Base UI's composite controller " +
+          "hardcodes `disabledIndices: []`, so ArrowRight CAN park " +
+          "focus on it. See Tabs Guarantee 10 for the contract.",
       },
     },
   },
@@ -456,6 +460,9 @@ export const ControlledValue: Story = {
       >
         <Tabs
           value={value}
+          // Base UI types `TabsTab.Value` as `any | null`, so we coerce
+          // through `String(...)` to the consumer's chosen string-key
+          // domain (Guarantee 9 in Tabs.tsx).
           onValueChange={(next) => setValue(String(next))}
           data-testid="tabs-controlled"
         >
@@ -575,9 +582,13 @@ export const RTL: Story = {
       description: {
         story:
           "Tabs in RTL — the list flips automatically because every " +
-          "edge / inset / margin uses logical properties. The " +
-          "indicator's `inset-inline-start` resolves to the right edge " +
-          "of the active tab; vertical orientation mirrors symmetrically.",
+          "edge / inset / margin on the rail uses logical properties. " +
+          "The horizontal indicator anchors via physical `left:` " +
+          "(direction-agnostic by construction) so it tracks the active " +
+          "tab in both LTR and RTL — Base UI's `--active-tab-left` is a " +
+          "physical pixel value, and feeding it into a logical " +
+          "`inset-inline-start` would mirror it away from the tab. " +
+          "Vertical orientation mirrors symmetrically.",
       },
     },
   },
