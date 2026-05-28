@@ -56,6 +56,8 @@ pub const ABSOLUTE_HOURS: i64 = 12;
 ///
 /// [`GatewayError::Db`] on PG failure or empty return.
 pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession> {
+    let user_id = Uuid::parse_str(params.user_id)
+        .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid user_id: {e}")))?;
     let rows = conn
         .query(
             "INSERT INTO auth.gateway_sessions \
@@ -67,7 +69,7 @@ pub async fn create(conn: &Client, params: &NewSession<'_>) -> Result<AppSession
              RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
                        email_verified, idle_expires_at, abs_expires_at",
             &[
-                &params.user_id,
+                &user_id,
                 &params.app_id,
                 &params.email,
                 &params.name,
@@ -154,6 +156,9 @@ pub async fn revoke(conn: &Client, id: Uuid) -> Result<()> {
 ///
 /// [`GatewayError::Db`] on PG failure.
 pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
+    let user_id = Uuid::parse_str(user_id).map_err(|e| {
+        GatewayError::Db(format!("gateway_sessions revoke_all_for_user: invalid user_id: {e}"))
+    })?;
     let affected = conn
         .execute(
             "UPDATE auth.gateway_sessions SET revoked_at = NOW() \
@@ -166,9 +171,10 @@ pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
 }
 
 fn row_to_session(row: &compio_postgres::Row) -> AppSession {
+    let user_id: Uuid = row.get("user_id");
     AppSession {
         id: row.get("id"),
-        user_id: row.get("user_id"),
+        user_id: user_id.to_string(),
         app_id: row.get("app_id"),
         email: row.try_get("email").ok(),
         name: row.try_get("name").ok(),

@@ -231,11 +231,10 @@ async fn complete_password_reset_tx(
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete auth.sessions: {e}")))?;
 
-    let user_id_text = user_id.to_string();
     let gateway_sessions = conn
         .execute(
             "DELETE FROM auth.gateway_sessions WHERE user_id = $1",
-            &[&user_id_text],
+            &[&user_id],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete gateway_sessions: {e}")))?;
@@ -243,7 +242,7 @@ async fn complete_password_reset_tx(
     let console_sessions = conn
         .execute(
             "DELETE FROM auth.console_sessions WHERE user_id = $1",
-            &[&user_id_text],
+            &[&user_id],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete console_sessions: {e}")))?;

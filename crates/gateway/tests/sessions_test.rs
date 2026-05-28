@@ -35,12 +35,13 @@ async fn create_validate_revoke_roundtrip() {
 
     // Random ids — keeps the test repeatable on a shared DB.
     let app_id = format!("app-{}", Uuid::new_v4().simple());
-    let user_id = format!("usr_{}", Uuid::new_v4().simple());
+    let user_id = insert_user(&client, "gateway-session").await;
+    let user_id_text = user_id.to_string();
 
     let session = create(
         &client,
         &NewSession {
-            user_id: &user_id,
+            user_id: &user_id_text,
             app_id: &app_id,
             email: Some("test@zeroship.test"),
             name: Some("Test User"),
@@ -51,7 +52,7 @@ async fn create_validate_revoke_roundtrip() {
     .await
     .expect("create");
 
-    assert_eq!(session.user_id, user_id);
+    assert_eq!(session.user_id, user_id_text);
     assert_eq!(session.app_id, app_id);
     assert_eq!(session.email.as_deref(), Some("test@zeroship.test"));
     assert_eq!(session.name.as_deref(), Some("Test User"));
@@ -102,4 +103,22 @@ async fn create_validate_revoke_roundtrip() {
         )
         .await
         .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .await
+        .ok();
+}
+
+async fn insert_user(client: &compio_postgres::Client, label: &str) -> Uuid {
+    let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
+    let rows = client
+        .query(
+            "INSERT INTO auth.users (email, name, email_verified_at)
+             VALUES ($1, $2, NOW())
+             RETURNING id",
+            &[&email, &label],
+        )
+        .await
+        .expect("insert user");
+    rows[0].get("id")
 }

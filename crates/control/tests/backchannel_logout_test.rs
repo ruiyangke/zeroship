@@ -70,7 +70,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     // console session for the same sub. There's only one console
     // origin so unlike gateway_sessions there's no per-app dimension;
     // we still want at least two rows to verify the count.
-    let target_user = format!("usr_{}", Uuid::new_v4().simple());
+    let target_user_id = insert_user(&client, "console-bcl-target").await;
+    let target_user = target_user_id.to_string();
     let target_email = format!("alice-{}@zeroship.test", Uuid::new_v4().simple());
 
     let s_a = create(&client, &claims_for(&target_user, &target_email))
@@ -81,7 +82,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
         .expect("create s_b");
 
     // One session for an unrelated user — must NOT be touched.
-    let other_user = format!("usr_{}", Uuid::new_v4().simple());
+    let other_user_id = insert_user(&client, "console-bcl-other").await;
+    let other_user = other_user_id.to_string();
     let other_email = format!("bob-{}@zeroship.test", Uuid::new_v4().simple());
     let s_other = create(&client, &claims_for(&other_user, &other_email))
         .await
@@ -148,4 +150,24 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
             .await
             .ok();
     }
+    for id in [target_user_id, other_user_id] {
+        client
+            .execute("DELETE FROM auth.users WHERE id = $1", &[&id])
+            .await
+            .ok();
+    }
+}
+
+async fn insert_user(client: &compio_postgres::Client, label: &str) -> Uuid {
+    let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
+    let rows = client
+        .query(
+            "INSERT INTO auth.users (email, name, email_verified_at)
+             VALUES ($1, $2, NOW())
+             RETURNING id",
+            &[&email, &label],
+        )
+        .await
+        .expect("insert user");
+    rows[0].get("id")
 }

@@ -66,7 +66,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
 
     // Two sessions for the same user at two different apps — the BCL
     // handler revokes ACROSS apps for the same sub.
-    let target_user = format!("usr_{}", Uuid::new_v4().simple());
+    let target_user_id = insert_user(&client, "gateway-bcl-target").await;
+    let target_user = target_user_id.to_string();
     let app_a = format!("app-a-{}", Uuid::new_v4().simple());
     let app_b = format!("app-b-{}", Uuid::new_v4().simple());
 
@@ -99,7 +100,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     .expect("create s_b");
 
     // One session for an unrelated user — must NOT be touched.
-    let other_user = format!("usr_{}", Uuid::new_v4().simple());
+    let other_user_id = insert_user(&client, "gateway-bcl-other").await;
+    let other_user = other_user_id.to_string();
     let s_other = create(
         &client,
         &NewSession {
@@ -169,6 +171,12 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     for id in [s_a.id, s_b.id, s_other.id] {
         client
             .execute("DELETE FROM auth.gateway_sessions WHERE id = $1", &[&id])
+            .await
+            .ok();
+    }
+    for id in [target_user_id, other_user_id] {
+        client
+            .execute("DELETE FROM auth.users WHERE id = $1", &[&id])
             .await
             .ok();
     }
@@ -350,6 +358,20 @@ async fn audit_count(client: &Client, jti: &str) -> i64 {
     row.get("count")
 }
 
+async fn insert_user(client: &Client, label: &str) -> Uuid {
+    let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
+    let rows = client
+        .query(
+            "INSERT INTO auth.users (email, name, email_verified_at)
+             VALUES ($1, $2, NOW())
+             RETURNING id",
+            &[&email, &label],
+        )
+        .await
+        .expect("insert user");
+    rows[0].get("id")
+}
+
 #[ntex::test]
 async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
@@ -383,7 +405,8 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
     let issuer = format!("{auth_base}/");
 
-    let target_user = format!("usr_{}", Uuid::new_v4().simple());
+    let target_user_id = insert_user(&db, "gateway-bcl-handler").await;
+    let target_user = target_user_id.to_string();
     let app_id = format!("app-bcl-{}", Uuid::new_v4().simple());
     let session = create(
         &db,
@@ -457,6 +480,9 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     .await
     .ok();
     db.execute("DELETE FROM auth.gateway_sessions WHERE id = $1", &[&session.id])
+        .await
+        .ok();
+    db.execute("DELETE FROM auth.users WHERE id = $1", &[&target_user_id])
         .await
         .ok();
 }

@@ -31,6 +31,7 @@ async fn migrations_apply_cleanly() {
     assert_queryable(&client, "control.permission_tokens").await;
     assert_queryable(&client, "control.platform_policies").await;
     assert_queryable(&client, "control.authz_decisions").await;
+    assert_user_delete_cascades_session_state(&client).await;
 
     let owner_email = format!("authz-migration-owner-{}@zeroship.test", Uuid::new_v4().simple());
     let actor_email = format!("authz-migration-actor-{}@zeroship.test", Uuid::new_v4().simple());
@@ -119,6 +120,59 @@ async fn migrations_apply_cleanly() {
         .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
         .await
         .expect("cleanup users");
+}
+
+async fn assert_user_delete_cascades_session_state(client: &compio_postgres::Client) {
+    let email = format!("auth-session-cascade-{}@zeroship.test", Uuid::new_v4().simple());
+    let user_id = insert_user(client, &email, "Auth Session Cascade").await;
+
+    client
+        .execute(
+            "INSERT INTO auth.sessions (user_id, auth_method, amr, idle_expires_at, abs_expires_at)
+             VALUES ($1, 'password', ARRAY['pwd'], NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id],
+        )
+        .await
+        .expect("insert auth session");
+    client
+        .execute(
+            "INSERT INTO auth.gateway_sessions
+                (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at)
+             VALUES ($1, $2, $3::citext, 'Cascade User', TRUE, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id, &"app-cascade-test", &email],
+        )
+        .await
+        .expect("insert gateway session");
+    client
+        .execute(
+            "INSERT INTO auth.console_sessions
+                (user_id, email, name, email_verified, idle_expires_at, abs_expires_at)
+             VALUES ($1, $2::citext, 'Cascade User', TRUE, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id, &email],
+        )
+        .await
+        .expect("insert console session");
+
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .await
+        .expect("delete user should cascade session state");
+
+    for table in [
+        "auth.sessions",
+        "auth.gateway_sessions",
+        "auth.console_sessions",
+    ] {
+        let rows = client
+            .query(
+                &format!("SELECT COUNT(*)::BIGINT AS n FROM {table} WHERE user_id = $1"),
+                &[&user_id],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("count {table}: {e}"));
+        let count: i64 = rows[0].get("n");
+        assert_eq!(count, 0, "{table} rows should cascade on user delete");
+    }
 }
 
 async fn assert_table_exists(client: &compio_postgres::Client, table: &str) {

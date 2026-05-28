@@ -54,6 +54,9 @@ pub const ABSOLUTE_HOURS: i64 = 12;
 ///
 /// [`ConsoleSessionError::Db`] on PG failure or empty return.
 pub async fn create(conn: &Client, claims: &TokenClaims) -> Result<ConsoleSession> {
+    let user_id = Uuid::parse_str(&claims.sub).map_err(|e| {
+        ConsoleSessionError::Db(format!("console_sessions create: invalid user_id: {e}"))
+    })?;
     let email: Option<&str> = claims.email.as_deref();
     let name: Option<&str> = claims.name.as_deref();
     let avatar_url: Option<&str> = claims.picture.as_deref();
@@ -70,7 +73,7 @@ pub async fn create(conn: &Client, claims: &TokenClaims) -> Result<ConsoleSessio
              RETURNING id, user_id, email::text AS email, name, avatar_url, \
                        email_verified, idle_expires_at, abs_expires_at",
             &[
-                &claims.sub,
+                &user_id,
                 &email,
                 &name,
                 &avatar_url,
@@ -153,6 +156,9 @@ pub async fn revoke(conn: &Client, id: Uuid) -> Result<()> {
 ///
 /// [`ConsoleSessionError::Db`] on PG failure.
 pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
+    let user_id = Uuid::parse_str(user_id).map_err(|e| {
+        ConsoleSessionError::Db(format!("console_sessions revoke_all_for_user: invalid user_id: {e}"))
+    })?;
     let affected = conn
         .execute(
             "UPDATE auth.console_sessions SET revoked_at = NOW() \
@@ -165,9 +171,10 @@ pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
 }
 
 fn row_to_session(row: &compio_postgres::Row) -> ConsoleSession {
+    let user_id: Uuid = row.get("user_id");
     ConsoleSession {
         id: row.get("id"),
-        user_id: row.get("user_id"),
+        user_id: user_id.to_string(),
         email: row.try_get("email").ok(),
         name: row.try_get("name").ok(),
         avatar_url: row.try_get("avatar_url").ok(),

@@ -40,7 +40,7 @@ const STATEMENTS: &[&str] = &[
     // 5.3 sessions (our IdP login session)
     "CREATE TABLE IF NOT EXISTS auth.sessions (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id         UUID NOT NULL REFERENCES auth.users(id),
+        user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
         auth_method     TEXT NOT NULL,
         amr             TEXT[] NOT NULL,
         acr             TEXT,
@@ -49,6 +49,29 @@ const STATEMENTS: &[&str] = &[
         abs_expires_at  TIMESTAMPTZ NOT NULL,
         revoked_at      TIMESTAMPTZ
     )",
+    "DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = 'auth.sessions'::regclass
+              AND conname = 'auth_sessions_user_id_fkey'
+              AND confdeltype <> 'c'
+        ) THEN
+            ALTER TABLE auth.sessions DROP CONSTRAINT auth_sessions_user_id_fkey;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = 'auth.sessions'::regclass
+              AND conname = 'auth_sessions_user_id_fkey'
+        ) THEN
+            ALTER TABLE auth.sessions
+                ADD CONSTRAINT auth_sessions_user_id_fkey
+                FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+        END IF;
+    END;
+    $$",
 
     // 5.4 magic links
     "CREATE TABLE IF NOT EXISTS auth.magic_links (
@@ -138,7 +161,7 @@ const STATEMENTS: &[&str] = &[
     // browser session per end user. Proposal §9.2.
     "CREATE TABLE IF NOT EXISTS auth.gateway_sessions (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id         TEXT NOT NULL,
+        user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
         app_id          TEXT NOT NULL,
         email           CITEXT,
         name            TEXT,
@@ -149,6 +172,35 @@ const STATEMENTS: &[&str] = &[
         abs_expires_at  TIMESTAMPTZ NOT NULL,
         revoked_at      TIMESTAMPTZ
     )",
+    "DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'auth'
+              AND table_name = 'gateway_sessions'
+              AND column_name = 'user_id'
+              AND data_type <> 'uuid'
+        ) THEN
+            DELETE FROM auth.gateway_sessions
+             WHERE user_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+            ALTER TABLE auth.gateway_sessions
+                ALTER COLUMN user_id TYPE UUID USING user_id::uuid;
+        END IF;
+        DELETE FROM auth.gateway_sessions s
+         WHERE NOT EXISTS (SELECT 1 FROM auth.users u WHERE u.id = s.user_id);
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = 'auth.gateway_sessions'::regclass
+              AND conname = 'auth_gateway_sessions_user_id_fkey'
+        ) THEN
+            ALTER TABLE auth.gateway_sessions
+                ADD CONSTRAINT auth_gateway_sessions_user_id_fkey
+                FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+        END IF;
+    END;
+    $$",
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_app_idx ON auth.gateway_sessions (app_id, user_id)",
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_idle_idx ON auth.gateway_sessions (idle_expires_at) WHERE revoked_at IS NULL",
 
@@ -169,7 +221,7 @@ const STATEMENTS: &[&str] = &[
     // ever one console origin. Proposal §2.3 + §9.2.
     "CREATE TABLE IF NOT EXISTS auth.console_sessions (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id         TEXT NOT NULL,
+        user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
         email           CITEXT,
         name            TEXT,
         avatar_url      TEXT,
@@ -179,6 +231,35 @@ const STATEMENTS: &[&str] = &[
         abs_expires_at  TIMESTAMPTZ NOT NULL,
         revoked_at      TIMESTAMPTZ
     )",
+    "DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'auth'
+              AND table_name = 'console_sessions'
+              AND column_name = 'user_id'
+              AND data_type <> 'uuid'
+        ) THEN
+            DELETE FROM auth.console_sessions
+             WHERE user_id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+            ALTER TABLE auth.console_sessions
+                ALTER COLUMN user_id TYPE UUID USING user_id::uuid;
+        END IF;
+        DELETE FROM auth.console_sessions s
+         WHERE NOT EXISTS (SELECT 1 FROM auth.users u WHERE u.id = s.user_id);
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = 'auth.console_sessions'::regclass
+              AND conname = 'auth_console_sessions_user_id_fkey'
+        ) THEN
+            ALTER TABLE auth.console_sessions
+                ADD CONSTRAINT auth_console_sessions_user_id_fkey
+                FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+        END IF;
+    END;
+    $$",
     "CREATE INDEX IF NOT EXISTS auth_console_sessions_user_idx ON auth.console_sessions (user_id)",
     "CREATE INDEX IF NOT EXISTS auth_console_sessions_idle_idx ON auth.console_sessions (idle_expires_at) WHERE revoked_at IS NULL",
 
