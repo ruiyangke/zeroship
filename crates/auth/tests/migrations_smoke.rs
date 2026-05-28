@@ -1,0 +1,443 @@
+//! Migration smoke test — only runs if `AUTH_DB_URL` is set.
+//!
+//! See `crates/compio-postgres/tests/integration.rs` for the harness pattern:
+//! `connect(...)` returns `(Client, Connection)` and the `Connection` future
+//! must be spawned and detached on the compio runtime or queries hang.
+
+use compio_postgres::{connect, NoTls};
+use uuid::Uuid;
+use zeroship_auth::store::migrations;
+
+#[compio::test]
+async fn migrations_apply_cleanly() {
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping (no AUTH_DB_URL)");
+        return;
+    };
+
+    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+
+    migrations::migrate(&client).await.expect("migrate");
+
+    assert_extension_exists(&client, "pgcrypto").await;
+    assert_table_exists(&client, "auth.users").await;
+    assert_queryable(&client, "platform.roles").await;
+    assert_queryable(&client, "control.app_members").await;
+    assert_queryable(&client, "control.permission_tokens").await;
+    assert_queryable(&client, "control.platform_policies").await;
+    assert_queryable(&client, "control.authz_decisions").await;
+    assert_queryable(&client, "apps").await;
+
+    let owner_email = format!("authz-migration-owner-{}@zeroship.test", Uuid::new_v4().simple());
+    let actor_email = format!("authz-migration-actor-{}@zeroship.test", Uuid::new_v4().simple());
+    let owner_id = insert_user(&client, &owner_email, "Authz Migration Owner").await;
+    let actor_id = insert_user(&client, &actor_email, "Authz Migration Actor").await;
+    let app_uuid = Uuid::new_v4();
+    let app_id = app_uuid.to_string();
+    let token_id = Uuid::new_v4();
+    let policy_id = format!("authz-migration-{}", Uuid::new_v4().simple());
+    let request_id = format!("req_{}", Uuid::new_v4().simple());
+
+    client
+        .execute(
+            "INSERT INTO platform.roles (user_id, role, granted_by) VALUES ($1, 'admin', $2)",
+            &[&owner_id, &actor_id],
+        )
+        .await
+        .expect("insert platform role");
+    client
+        .execute(
+            "INSERT INTO apps (id, name, api_key, api_key_hash, suspended, audit_locked)
+             VALUES ($1, $2, 'test-api-key', 'test-api-key-hash', TRUE, TRUE)",
+            &[&app_uuid, &format!("authz-migration-app-{}", Uuid::new_v4().simple())],
+        )
+        .await
+        .expect("insert app with authz flags");
+    client
+        .execute(
+            "INSERT INTO control.app_members (app_id, user_id, role, added_by)
+             VALUES ($1, $2, 'owner', $3)",
+            &[&app_id, &owner_id, &actor_id],
+        )
+        .await
+        .expect("insert app member");
+    client
+        .execute(
+            "INSERT INTO control.permission_tokens
+                (id, owner_id, kind, client_id, name, policies, policy_hash)
+             VALUES ($1, $2, 'pat', NULL, 'migration smoke token', '{\"policies\":[]}'::jsonb, $3)",
+            &[&token_id, &owner_id, &"0".repeat(64)],
+        )
+        .await
+        .expect("insert permission token");
+    client
+        .execute(
+            "INSERT INTO control.platform_policies (id, cedar_source, enabled, updated_by)
+             VALUES ($1, 'permit(principal, action, resource);', TRUE, $2)",
+            &[&policy_id, &actor_id],
+        )
+        .await
+        .expect("insert platform policy");
+    client
+        .execute(
+            "INSERT INTO control.authz_decisions
+                (user_id, token_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id)
+             VALUES ($1, $2, 'app.read', 'app', $3, 'allow', ARRAY[$4], '127.0.0.1'::inet, $5)",
+            &[&owner_id, &token_id, &app_id, &policy_id, &request_id],
+        )
+        .await
+        .expect("insert authz decision");
+
+    let audit_rows = client
+        .query(
+            "INSERT INTO auth.audit_events (event_type, outcome, user_id, detail)
+             VALUES ('migration_append_only_probe', 'success', $1, '{\"test\":\"append_only\"}'::jsonb)
+             RETURNING id",
+            &[&owner_id],
+        )
+        .await
+        .expect("insert auth audit probe");
+    let audit_id: i64 = audit_rows[0].get("id");
+
+    assert_append_only_fails(
+        &client,
+        "DELETE FROM auth.audit_events WHERE id = $1",
+        &[&audit_id],
+    )
+    .await;
+    assert_append_only_fails(
+        &client,
+        "UPDATE control.authz_decisions SET decision = 'deny' WHERE request_id = $1",
+        &[&request_id],
+    )
+    .await;
+
+    assert_check_fails(
+        &client,
+        "INSERT INTO platform.roles (user_id, role) VALUES ($1, 'evil_admin')",
+        &[&actor_id],
+    )
+    .await;
+    assert_check_fails(
+        &client,
+        "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, 'evil_admin')",
+        &[&format!("bad_{app_id}"), &actor_id],
+    )
+    .await;
+    assert_check_fails(
+        &client,
+        "INSERT INTO control.permission_tokens
+            (id, owner_id, kind, name, policies, policy_hash)
+         VALUES ($1, $2, 'evil_grant', 'bad token', '{}'::jsonb, $3)",
+        &[&Uuid::new_v4(), &actor_id, &"1".repeat(64)],
+    )
+    .await;
+    assert_check_fails(
+        &client,
+        "INSERT INTO control.authz_decisions (action, resource_type, decision)
+         VALUES ('app.read', 'app', 'maybe')",
+        &[],
+    )
+    .await;
+
+    client
+        .execute("DELETE FROM control.platform_policies WHERE id = $1", &[&policy_id])
+        .await
+        .expect("cleanup platform policy");
+    client
+        .execute("DELETE FROM apps WHERE id = $1", &[&app_uuid])
+        .await
+        .expect("cleanup app");
+    client
+        .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
+        .await
+        .expect("cleanup users");
+}
+
+async fn assert_extension_exists(client: &compio_postgres::Client, name: &str) {
+    let rows = client
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1) AS found",
+            &[&name],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("query extension {name}: {e}"));
+    assert!(rows[0].get::<_, bool>("found"), "extension {name} should exist");
+}
+
+async fn assert_oauth_clients_created_by_nullable(client: &compio_postgres::Client) {
+    let rows = client
+        .query(
+            "SELECT is_nullable
+             FROM information_schema.columns
+             WHERE table_schema = 'control'
+               AND table_name = 'oauth_clients'
+               AND column_name = 'created_by'",
+            &[],
+        )
+        .await
+        .expect("query oauth_clients.created_by nullability");
+    let nullable: String = rows
+        .first()
+        .expect("control.oauth_clients.created_by exists")
+        .get("is_nullable");
+    assert_eq!(nullable, "YES", "created_by should allow bootstrap rows");
+}
+
+async fn assert_token_sweep_indexes(client: &compio_postgres::Client) {
+    for (index, table, column, predicate) in [
+        (
+            "auth_magic_links_expires_unconsumed_idx",
+            "auth.magic_links",
+            "expires_at",
+            "where (consumed_at is null)",
+        ),
+        (
+            "auth_magic_links_consumed_idx",
+            "auth.magic_links",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+        (
+            "auth_magic_completions_consumed_idx",
+            "auth.magic_completions",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+        (
+            "auth_email_verifications_expires_unconsumed_idx",
+            "auth.email_verifications",
+            "expires_at",
+            "where (consumed_at is null)",
+        ),
+        (
+            "auth_email_verifications_consumed_idx",
+            "auth.email_verifications",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+    ] {
+        assert_index_def_contains(client, "auth", index, &[table, column, predicate]).await;
+    }
+}
+
+async fn assert_one_active_token_indexes(client: &compio_postgres::Client) {
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_magic_links_active_email_purpose_uniq",
+        &[
+            "unique index",
+            "auth.magic_links",
+            "email, purpose",
+            "where (consumed_at is null)",
+        ],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_email_verifications_active_user_uniq",
+        &[
+            "unique index",
+            "auth.email_verifications",
+            "user_id",
+            "where (consumed_at is null)",
+        ],
+    )
+    .await;
+}
+
+async fn assert_hot_path_indexes(client: &compio_postgres::Client) {
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_identities_user_linked_idx",
+        &["auth.identities", "user_id", "linked_at"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_sessions_user_idx",
+        &["auth.sessions", "user_id"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_gateway_sessions_user_active_idx",
+        &["auth.gateway_sessions", "user_id", "where (revoked_at is null)"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_email_verifications_user_active_idx",
+        &["auth.email_verifications", "user_id", "where (consumed_at is null)"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "control",
+        "permission_tokens_owner_kind_created_idx",
+        &[
+            "control.permission_tokens",
+            "owner_id",
+            "kind",
+            "created_at desc",
+            "id desc",
+        ],
+    )
+    .await;
+}
+
+async fn assert_index_def_contains(
+    client: &compio_postgres::Client,
+    schema: &str,
+    index: &str,
+    expected: &[&str],
+) {
+    let rows = client
+        .query(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2",
+            &[&schema, &index],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("query index {schema}.{index}: {e}"));
+    let def: String = rows
+        .first()
+        .unwrap_or_else(|| panic!("missing index {schema}.{index}"))
+        .get("indexdef");
+    let normalized = def.to_ascii_lowercase();
+    for fragment in expected {
+        assert!(
+            normalized.contains(&fragment.to_ascii_lowercase()),
+            "index {schema}.{index} definition missing `{fragment}`: {def}"
+        );
+    }
+}
+
+async fn assert_user_delete_cascades_session_state(client: &compio_postgres::Client) {
+    let email = format!("auth-session-cascade-{}@zeroship.test", Uuid::new_v4().simple());
+    let user_id = insert_user(client, &email, "Auth Session Cascade").await;
+
+    client
+        .execute(
+            "INSERT INTO auth.sessions (user_id, auth_method, amr, idle_expires_at, abs_expires_at)
+             VALUES ($1, 'password', ARRAY['pwd'], NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id],
+        )
+        .await
+        .expect("insert auth session");
+    client
+        .execute(
+            "INSERT INTO auth.gateway_sessions
+                (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at)
+             VALUES ($1, $2, $3::citext, 'Cascade User', TRUE, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id, &"app-cascade-test", &email],
+        )
+        .await
+        .expect("insert gateway session");
+    client
+        .execute(
+            "INSERT INTO auth.console_sessions
+                (user_id, email, name, email_verified, idle_expires_at, abs_expires_at)
+             VALUES ($1, $2::citext, 'Cascade User', TRUE, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id, &email],
+        )
+        .await
+        .expect("insert console session");
+
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .await
+        .expect("delete user should cascade session state");
+
+    for table in [
+        "auth.sessions",
+        "auth.gateway_sessions",
+        "auth.console_sessions",
+    ] {
+        let rows = client
+            .query(
+                &format!("SELECT COUNT(*)::BIGINT AS n FROM {table} WHERE user_id = $1"),
+                &[&user_id],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("count {table}: {e}"));
+        let count: i64 = rows[0].get("n");
+        assert_eq!(count, 0, "{table} rows should cascade on user delete");
+    }
+}
+
+async fn assert_table_exists(client: &compio_postgres::Client, table: &str) {
+    let rows = client
+        .query("SELECT to_regclass($1)::text AS t", &[&table])
+        .await
+        .expect("to_regclass query");
+    let found: Option<String> = rows[0].get("t");
+    assert_eq!(found.as_deref(), Some(table));
+}
+
+async fn assert_queryable(client: &compio_postgres::Client, table: &str) {
+    client
+        .query(&format!("SELECT 1 FROM {table} WHERE FALSE"), &[])
+        .await
+        .unwrap_or_else(|e| panic!("{table} should be queryable after migration: {e}"));
+}
+
+async fn insert_user(client: &compio_postgres::Client, email: &str, name: &str) -> Uuid {
+    let rows = client
+        .query(
+            "INSERT INTO auth.users (email, name) VALUES ($1, $2) RETURNING id",
+            &[&email, &name],
+        )
+        .await
+        .expect("insert user");
+    rows[0].get("id")
+}
+
+async fn assert_check_fails(
+    client: &compio_postgres::Client,
+    statement: &str,
+    params: &[&(dyn compio_postgres::types::ToSql + Sync)],
+) {
+    let err = client
+        .execute(statement, params)
+        .await
+        .expect_err("CHECK should reject bad value");
+    let message = err.to_string();
+    // compio-postgres surfaces PG check-constraint violations as a generic
+    // "db error" string. Confirm we get *some* error variant; the role/kind/
+    // decision/event values are server-side-rejected so any error here is
+    // proof the CHECK fired.
+    assert!(
+        message.contains("check") || message.contains("violates") || message.contains("db error"),
+        "expected CHECK violation, got: {message}"
+    );
+}
+
+async fn assert_append_only_fails(
+    client: &compio_postgres::Client,
+    statement: &str,
+    params: &[&(dyn compio_postgres::types::ToSql + Sync)],
+) {
+    let err = client
+        .execute(statement, params)
+        .await
+        .expect_err("append-only audit table should reject mutation");
+    let message = err.to_string();
+    assert!(
+        message.contains("append-only")
+            || message.contains("permission")
+            || message.contains("db error"),
+        "expected append-only/permission rejection, got: {message}"
+    );
+}

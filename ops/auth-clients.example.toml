@@ -1,0 +1,45 @@
+# Declarative OIDC client config. The auth service reconciles this against
+# hydra's admin API at every boot (upsert; never deletes).
+
+[[client]]
+client_id = "console.zeroship.ai"
+client_name = "zeroship Console"
+client_secret = "dev-secret-rotate-me"
+redirect_uris = ["https://console.zeroship.ai/auth/callback", "http://localhost:5173/auth/callback"]
+post_logout_redirect_uris = ["https://console.zeroship.ai/", "http://localhost:5173/"]
+# OIDC Back-Channel Logout 1.0 — hydra POSTs here when a console user
+# signs out; the control plane verifies the logout_token and revokes
+# the user's console sessions (Phase 7 U2).
+backchannel_logout_uri = "https://console.zeroship.ai/oidc/backchannel-logout"
+scope = "openid offline_access email profile"
+access_token_strategy = "jwt"
+id_token_signed_response_alg = "EdDSA"
+audience = ["https://api.zeroship.ai"]
+first_party = true
+
+[[client]]
+client_id = "zeroship-cli"
+client_name = "zeroship CLI"
+client_secret = ""
+grant_types = ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
+response_types = []
+redirect_uris = []
+scope = "openid offline_access apps:deploy apps:read"
+token_endpoint_auth_method = "none"
+first_party = true
+
+[[client]]
+client_id = "gateway"
+client_name = "zeroship Gateway (hosted apps)"
+client_secret = "dev-secret-rotate-me-too"
+# redirect_uris grow per-deployed-app — control plane appends on each deploy
+redirect_uris = []
+# OIDC Back-Channel Logout 1.0 — hydra POSTs here when a user signs out;
+# the gateway verifies the logout_token and revokes the user's app sessions.
+# One stable URL services every hosted creator-app subdomain.
+backchannel_logout_uri = "https://api.zeroship.ai/oidc/backchannel-logout"
+scope = "openid offline_access email profile"
+access_token_strategy = "jwt"
+id_token_signed_response_alg = "EdDSA"
+audience = ["https://api.zeroship.ai"]
+first_party = true

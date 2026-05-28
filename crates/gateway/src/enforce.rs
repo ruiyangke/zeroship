@@ -139,7 +139,7 @@ pub struct PerRuleKey {
     pub rule_idx: u32,
     /// Bucket discriminator derived from `RateLimitPer`:
     /// * `Ip` → request's client IP string
-    /// * `Session` → `__zs_session` cookie value (or fallback IP)
+    /// * `Session` → `__Host-zs_app_session` cookie value (or fallback IP)
     /// * `App` → constant `"app"` (single bucket shared by all clients)
     pub bucket: String,
 }
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn per_rule_per_session_separates_buckets() {
-        // Different `__zs_session` values → independent buckets even
+        // Different `__Host-zs_app_session` values → independent buckets even
         // when the request comes from the same machine.
         let reg = PerRuleRateLimitRegistry::new();
         let app = Uuid::nil();

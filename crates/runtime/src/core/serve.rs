@@ -1297,6 +1297,45 @@ fn create_reuseport_listener(port: u16) -> std::net::TcpListener {
     socket.into()
 }
 
+const ACCEPT_ERROR_BASE_BACKOFF: Duration = Duration::from_millis(10);
+const ACCEPT_ERROR_MAX_BACKOFF: Duration = Duration::from_millis(250);
+
+fn accept_error_backoff(consecutive_errors: u32) -> Duration {
+    let shift = consecutive_errors.saturating_sub(1).min(5);
+    let multiplier = 1_u32 << shift;
+    ACCEPT_ERROR_BASE_BACKOFF
+        .saturating_mul(multiplier)
+        .min(ACCEPT_ERROR_MAX_BACKOFF)
+}
+
+async fn accept_loop(listener: TcpListener, runtime: Runtime) {
+    let mut consecutive_errors = 0_u32;
+    loop {
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                consecutive_errors = 0;
+                let rt = runtime.clone();
+                compio::runtime::spawn(async move {
+                    crate::panic_util::guard("handle_connection", handle_connection(stream, rt))
+                        .await;
+                })
+                .detach();
+            }
+            Err(err) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                let backoff = accept_error_backoff(consecutive_errors);
+                tracing::warn!(
+                    error = %err,
+                    consecutive_errors,
+                    backoff_ms = backoff.as_millis(),
+                    "runtime accept error"
+                );
+                compio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
 // ===========================================================================
 // Single-worker entry point
 // ===========================================================================
@@ -1350,13 +1389,7 @@ fn run_single_worker(
             runtime.start_pump();
 
             // Accept loop
-            loop {
-                let (stream, _addr) = listener.accept().await.unwrap();
-                let rt = runtime.clone();
-                compio::runtime::spawn(async move {
-                    crate::panic_util::guard("handle_connection", handle_connection(stream, rt)).await;
-                }).detach();
-            }
+            crate::panic_util::guard("runtime_accept_loop", accept_loop(listener, runtime)).await;
         });
 }
 
@@ -1393,6 +1426,14 @@ mod chunked_decode_tests {
     fn decodes_multi_chunk_body() {
         let input = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         assert_complete(decode_chunked_body(input, 1024), b"hello world");
+    }
+
+    #[test]
+    fn accept_error_backoff_is_small_and_bounded() {
+        assert_eq!(accept_error_backoff(1), Duration::from_millis(10));
+        assert_eq!(accept_error_backoff(2), Duration::from_millis(20));
+        assert_eq!(accept_error_backoff(6), Duration::from_millis(250));
+        assert_eq!(accept_error_backoff(u32::MAX), Duration::from_millis(250));
     }
 
     #[test]

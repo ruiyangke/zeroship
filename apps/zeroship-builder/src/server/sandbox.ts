@@ -17,6 +17,7 @@ import {
   ensureSandboxPreviewServer,
   getOrCreateSandboxFor,
 } from "./internal/sandbox-backend";
+import { UpstreamServiceError } from "./internal/upstream-error";
 
 // The controller's `/sandboxes/:id/*` routes verify ownership via a
 // `?user_id=<id>` query string and 404 on mismatch. Builder's backend
@@ -36,10 +37,16 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   return h;
 }
 
-async function jsonOrThrow<T>(res: Response, op: string): Promise<T> {
+export async function jsonOrThrow<T>(res: Response, op: string): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`sandbox ${op} → ${res.status}: ${body}`);
+    throw new UpstreamServiceError({
+      service: "sandbox",
+      operation: op,
+      status: res.status,
+      body,
+      publicMessage: "sandbox request failed",
+    });
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -98,7 +105,13 @@ export const readSandboxFile = action(async (
     { headers: authHeaders() },
   );
   if (!res.ok) {
-    throw new Error(`read ${input.path} → ${res.status}: ${await res.text()}`);
+    throw new UpstreamServiceError({
+      service: "sandbox",
+      operation: "read file",
+      status: res.status,
+      body: await res.text(),
+      publicMessage: "file read failed",
+    });
   }
   return res.text();
 }, { id: "sandbox.files.read", input: readSandboxFileInputSchema, maxInputBytes: 8_192 });

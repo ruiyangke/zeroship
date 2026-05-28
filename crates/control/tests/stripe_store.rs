@@ -2,13 +2,23 @@
 //!
 //! Set `CONTROL_TEST_DB` to run; tests silently skip otherwise.
 
+use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
-use zeroship_control::{Registry, StripeStore};
 use zeroship_control::stripe_store::StripeError;
+use zeroship_control::{Registry, StripeStore};
 
 fn db_url() -> Option<String> { std::env::var("CONTROL_TEST_DB").ok() }
 
 fn fresh_creator_id() -> Uuid { Uuid::new_v4() }
+
+async fn pg(db_url: &str) -> compio_postgres::Client {
+    let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
+}
 
 #[compio::test]
 async fn link_account_roundtrip() {
@@ -299,6 +309,31 @@ async fn payload_hash_mismatch_rejects_duplicate() {
 }
 
 #[compio::test]
+async fn payout_ledger_check_constraints_reject_impossible_rows() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = fresh_creator_id();
+    store.link_account(creator, "acct_checkConstraints").await.unwrap();
+
+    let pg = pg(&url).await;
+    let bad = pg
+        .execute(
+            "INSERT INTO control.payouts
+                (creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at)
+             VALUES ($1, $2, 'invoice.paid', 100, 500, -400, 'usd', NOW())",
+            &[&creator, &format!("evt_bad_{}", Uuid::new_v4())],
+        )
+        .await;
+    assert!(
+        bad.is_err(),
+        "control.payouts CHECK constraints must reject impossible ledger rows"
+    );
+
+    store.unlink_account(creator).await.ok();
+}
+
+#[compio::test]
 async fn unlink_is_soft_delete_payouts_preserved() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
@@ -354,6 +389,37 @@ async fn same_account_link_is_idempotent_no_history_pollution() {
     assert_eq!(h.len(), 1, "same-account relinks must not append history");
     assert_eq!(h[0].stripe_account_id, "acct_idempotentLink123");
     assert!(h[0].unlinked_at.is_none());
+}
+
+#[compio::test]
+async fn creator_history_allows_only_one_open_row_per_creator() {
+    let Some(url) = db_url() else { return; };
+    Registry::new(&url).await.expect("registry");
+    let pg = pg(&url).await;
+    let creator = fresh_creator_id();
+
+    pg.execute(
+        "INSERT INTO control.creator_account_history (creator_id, stripe_account_id)
+         VALUES ($1, 'acct_openHistoryA12')",
+        &[&creator],
+    )
+    .await
+    .expect("insert first open history row");
+    let duplicate = pg
+        .execute(
+            "INSERT INTO control.creator_account_history (creator_id, stripe_account_id)
+             VALUES ($1, 'acct_openHistoryB34')",
+            &[&creator],
+        )
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "schema must reject a second open creator_account_history row"
+    );
+
+    pg.execute("DELETE FROM control.creator_account_history WHERE creator_id = $1", &[&creator])
+        .await
+        .ok();
 }
 
 #[compio::test]

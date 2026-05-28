@@ -14,14 +14,18 @@ use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, auth_service, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    api, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+
+mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    std::env::var("CONTROL_TEST_DB")
+        .or_else(|_| std::env::var("PG_TEST_URL"))
+        .ok()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -53,22 +57,33 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
     let registry = Registry::new(db_url).await.expect("registry");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false).expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
-    let auth = auth_service::AuthService::new(db_url, "test-jwt-secret-please-ignore")
-        .await
-        .expect("auth service");
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let vfs: Arc<dyn BundleStore + Send + Sync> = Arc::new(
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
+    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
+        "http://localhost:4444",
+        "console.zeroship.ai",
+        "test-oidc-secret".to_string(),
+        b"test-stash-key".to_vec(),
+    ));
+    let (auth_pg_client, auth_pg_conn) =
+        compio_postgres::connect(db_url, compio_postgres::NoTls)
+            .await
+            .expect("auth-pg connect");
+    compio::runtime::spawn(async move {
+        let _ = auth_pg_conn.run().await;
+    })
+    .detach();
+    let auth_pg = Arc::new(auth_pg_client);
+
     Fixture {
         state: Arc::new(AppState {
             registry,
             env_store,
             stripe_store,
-            auth,
-            google_oauth: None,
             vfs,
             blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
@@ -81,6 +96,20 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             insecure_dev: false,
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
+            oidc_rp,
+            auth_pg,
+            auth_db_url: db_url.to_string(),
+            hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+            expected_oauth_audience: "control.zeroship.ai".to_string(),
+            static_policies: zeroship_authz::load_platform_policies()
+                .expect("bundled authz policies parse"),
+            pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
+            hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
+                "http://127.0.0.1:9",
+            )),
+            logout_jti_cache: Arc::new(
+                zeroship_core::logout_token::LogoutJtiCache::default(),
+            ),
         }),
         blob_root,
         deploy_tmp_dir,
@@ -121,7 +150,15 @@ async fn app_logs_route_proxies_worker_lines() {
 
     let response = control
         .get(format!("/api/apps/{app_id}/logs"))
-        .header("authorization", format!("Bearer {TEST_MASTER_KEY}"))
+        .send()
+        .await
+        .expect("unauthenticated control response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let pat = common::authz_fixture::admin_pat(&fixture.state).await;
+    let response = control
+        .get(format!("/api/apps/{app_id}/logs"))
+        .header("authorization", pat.bearer())
         .send()
         .await
         .expect("control response");
@@ -131,4 +168,5 @@ async fn app_logs_route_proxies_worker_lines() {
     let lines: Vec<String> = serde_json::from_slice(&body).expect("logs json");
     eprintln!("[app_logs_http_test] captured logs: {lines:?}");
     assert_eq!(lines, vec![format!("b2-control-route-log {app_id}")]);
+    pat.cleanup(&fixture.state).await;
 }

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}zeroship{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="auth-shell">
+    <header>
+      <h1>zeroship</h1>
+    </header>
+    <section>
+      {% block body %}{% endblock %}
+    </section>
+  </main>
+</body>
+</html>

@@ -5,8 +5,9 @@
 //! code 1:1, which a critic flagged as a drift hazard.
 
 use ntex::web::{self, HttpRequest};
+use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 
-use crate::rate_limit::RateLimiter;
+use crate::rate_limit::Quota;
 
 /// Resolve the source IP for audit + rate-limit purposes.
 ///
@@ -41,23 +42,109 @@ pub fn source_ip(req: &HttpRequest, trust_proxy: bool) -> Option<String> {
     req.peer_addr().map(|a| a.ip().to_string())
 }
 
-/// Token-bucket gate. Returns `Some(429)` if the IP is over quota,
-/// `None` to let the request proceed. Uses `source_ip` so the
+/// DB-backed token-bucket gate. Returns `Some(429)` if the IP is over
+/// quota, `Some(503)` if the shared rate-limit store is unavailable,
+/// and `None` to let the request proceed. Uses `source_ip` so the
 /// rate-limit "client identity" matches the audit-log identity.
-pub fn rate_limit(
+pub async fn rate_limit(
     req: &HttpRequest,
-    limiter: &RateLimiter,
+    db: &compio_postgres::Client,
+    namespace: &str,
+    quota: Quota,
     trust_proxy: bool,
 ) -> Option<web::HttpResponse> {
     let Some(ip_str) = source_ip(req, trust_proxy) else { return None };
-    let Ok(ip) = ip_str.parse() else { return None };
-    if limiter.check(ip) {
-        None
-    } else {
-        Some(
+    if ip_str.parse::<std::net::IpAddr>().is_err() {
+        return None;
+    }
+    let key = format!("control:{namespace}:ip:{ip_str}");
+    let bucket = Bucket {
+        capacity: quota.capacity,
+        refill_per_sec: quota.refill_per_sec,
+    };
+    match ratelimit::consume_or_throttle(db, &key, bucket).await {
+        Ok(RateLimitDecision::Allowed) => None,
+        Ok(RateLimitDecision::Throttled(limited)) => Some(
             web::HttpResponse::TooManyRequests()
-                .header("retry-after", "1")
+                .header("retry-after", retry_after_header(limited.retry_after_secs))
                 .json(&serde_json::json!({"error": "rate limited"})),
-        )
+        ),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                bucket_key = %key,
+                "control: shared rate-limit consume failed"
+            );
+            Some(
+                web::HttpResponse::ServiceUnavailable()
+                    .header("retry-after", "1")
+                    .json(&serde_json::json!({"error": "rate limit unavailable"})),
+            )
+        }
+    }
+}
+
+fn retry_after_header(secs: f64) -> String {
+    if secs.is_finite() {
+        format!("{:.0}", secs.ceil().max(1.0).min(3600.0))
+    } else {
+        "60".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use ntex::http::StatusCode;
+    use ntex::web::test::TestRequest;
+    use uuid::Uuid;
+
+    use super::*;
+
+    async fn pg() -> Option<compio_postgres::Client> {
+        let db_url = std::env::var("AUTH_DB_URL")
+            .or_else(|_| std::env::var("PG_TEST_URL"))
+            .ok()?;
+        let (client, conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("pg connect");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        zeroship_auth::store::migrations::migrate(&client)
+            .await
+            .expect("auth migrations");
+        Some(client)
+    }
+
+    #[compio::test]
+    async fn db_backed_rate_limit_throttles_across_calls() {
+        let Some(pg) = pg().await else {
+            eprintln!("[http_util::tests] AUTH_DB_URL/PG_TEST_URL not set - skipping");
+            return;
+        };
+        let namespace = format!("http-util-test-{}", Uuid::new_v4().simple());
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 90));
+        let key = format!("control:{namespace}:ip:{ip}");
+        pg.execute("DELETE FROM auth.rate_limits WHERE bucket_key = $1", &[&key])
+            .await
+            .expect("cleanup rate-limit bucket");
+
+        let req = TestRequest::default()
+            .peer_addr(SocketAddr::new(ip, 12345))
+            .to_http_request();
+        let quota = Quota::per_minute(1, 1);
+
+        assert!(rate_limit(&req, &pg, &namespace, quota, false).await.is_none());
+        let resp = rate_limit(&req, &pg, &namespace, quota, false)
+            .await
+            .expect("second call throttled");
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        pg.execute("DELETE FROM auth.rate_limits WHERE bucket_key = $1", &[&key])
+            .await
+            .expect("cleanup rate-limit bucket");
     }
 }

@@ -1,64 +1,60 @@
-mod auth;
-mod blob_cache;
-mod compiled;
-mod dispatch;
-mod enforce;
-mod idempotency;
-mod proxy;
-mod router;
-mod sync;
-mod user_auth;
+//! `zeroship-gate` binary entry point. Thin shell over the
+//! [`zeroship_gateway`] library: parse flags, build [`GateState`],
+//! register routes, run.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntex::web;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_gateway::{
+    backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
+    signing, sync, wrapper_token, GateConfig, GateState,
+};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[allow(missing_debug_implementations)]
-pub struct GateConfig {
-    pub control_url: String,
-    pub control_key: String,
-    pub worker_urls: Vec<String>,
-    pub poll_interval_secs: u64,
-    pub auth_secret: String,
-    /// Shared secret between gateway and workers. Used to bearer-auth the
-    /// `/dispatch` endpoints and HMAC-sign the `ZeroShip-User` header so
-    /// workers can verify forwarded identity was not forged by an attacker
-    /// with direct network access. Empty disables both checks (dev only).
-    pub worker_key: String,
+const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
+
+fn dev_insecure_enabled(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--dev-insecure")
+        || std::env::var("ZEROSHIP_DEV_INSECURE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        || arg_or_env(args, "--insecure-dev", "INSECURE_DEV", "false").eq_ignore_ascii_case("true")
 }
 
-#[allow(missing_debug_implementations)]
-pub struct GateState {
-    pub config: GateConfig,
-    pub routes: sync::RouteCache,
-    pub hash_ring: proxy::HashRing,
-    pub rate_limiters: enforce::RateLimitRegistry,
-    /// Per-rule rate limits declared in `Action::Worker.rate_limit`.
-    /// Layered on top of the global per-app `rate_limiters` — runs
-    /// FIRST in the request path so a rule that's already saturated
-    /// short-circuits without the global bucket lookup.
-    pub per_rule_rate_limits: enforce::PerRuleRateLimitRegistry,
-    pub concurrency: enforce::ConcurrencyRegistry,
-    /// Content-addressed blob store. The gateway fetches asset bytes
-    /// here directly instead of round-tripping through the control
-    /// plane.
-    pub blob_store: Arc<dyn BlobStore>,
-    /// In-memory LRU cache in front of `blob_store`.
-    pub blob_cache: blob_cache::BlobCache,
-    /// On-disk LRU cache underneath `blob_cache`. Large blobs that
-    /// do not fit in memory land here, and `serve_static_hit` mmaps
-    /// them on serve so the userspace → kernel copy goes away.
-    pub disk_cache: blob_cache::DiskBlobCache,
-    /// KV-backed dedupe table for idempotent RPC mutations. The
-    /// gateway consults this before forwarding `idempotent: true`
-    /// mutations to the worker; on a hit it returns the stored
-    /// response without touching V8.
-    pub idempotency_store: std::sync::Arc<dyn idempotency::IdempotencyStore>,
+fn validate_gateway_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev || !value.is_empty() {
+        return Ok(());
+    }
+    Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
+}
+
+fn validate_gateway_stash_key(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev {
+        return Ok(());
+    }
+    if value.is_empty() {
+        return Err(
+            "STASH_SIGNING_KEY is required outside INSECURE_DEV=true; set a strong (>=32 byte) value"
+                .to_string(),
+        );
+    }
+    if value == DEV_STASH_SIGNING_KEY {
+        return Err(
+            "STASH_SIGNING_KEY is the dev default; refusing to boot without INSECURE_DEV=true"
+                .to_string(),
+        );
+    }
+    if value.len() < 32 {
+        return Err(format!(
+            "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
+            value.len()
+        ));
+    }
+    Ok(())
 }
 
 #[ntex::main]
@@ -82,12 +78,101 @@ async fn main() -> std::io::Result<()> {
         "BLOB_CACHE_DISK_ROOT",
         "./blob-cache",
     );
+    let hydra_public = arg_or_env(&args, "--hydra-public", "HYDRA_PUBLIC", "http://hydra:4444");
+    let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "http://auth:9092");
+    let pg_dsn = arg_or_env(&args, "--db", "DATABASE_URL", "");
+    let oidc_client_secret = arg_or_env(
+        &args,
+        "--gateway-oidc-secret",
+        "GATEWAY_OIDC_SECRET",
+        "dev-secret-rotate-me-too",
+    );
+    let stash_signing_key = arg_or_env(
+        &args,
+        "--stash-signing-key",
+        "STASH_SIGNING_KEY",
+        "",
+    );
+    let insecure_dev = dev_insecure_enabled(&args);
+    let trust_proxy =
+        args.iter().any(|a| a == "--trust-proxy")
+            || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
+    let signing_key_path = arg_or_env(
+        &args,
+        "--signing-key-file",
+        "GATEWAY_SIGNING_KEY_FILE",
+        "",
+    );
+    let public_url = arg_or_env(
+        &args,
+        "--gateway-public-url",
+        "GATEWAY_PUBLIC_URL",
+        "https://api.zeroship.ai",
+    );
+
+    if let Err(message) = validate_gateway_control_key(&control_key, insecure_dev) {
+        tracing::error!(error = %message, "gateway: refusing to start without control key");
+        std::process::exit(1);
+    }
+
+    if let Err(message) = validate_gateway_stash_key(&stash_signing_key, insecure_dev) {
+        tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
+        std::process::exit(1);
+    }
+    let stash_signing_key = if stash_signing_key.is_empty() {
+        DEV_STASH_SIGNING_KEY.to_string()
+    } else {
+        stash_signing_key
+    };
 
     if worker_key.is_empty() {
         tracing::warn!(
             "WORKER_KEY not set — worker endpoints are unauthenticated"
         );
     }
+
+    // Phase 8 U1 — load the gateway's wrapper-token signing key. The
+    // flag is optional: when empty, the boot succeeds but DPoP-exchange
+    // endpoints (added in U2/U3) will 503. We log a clear warning so
+    // operators don't get a surprise during DPoP rollout.
+    let signing_key: Option<Arc<ed25519_dalek::SigningKey>> = if signing_key_path.is_empty() {
+        tracing::warn!(
+            "GATEWAY_SIGNING_KEY_FILE not set — DPoP token-exchange endpoints will 503"
+        );
+        None
+    } else {
+        let key = signing::load_from_path(std::path::Path::new(&signing_key_path))
+            .expect("gateway: load signing key");
+        let kid = signing::jwk_thumbprint(&key);
+        tracing::info!(
+            path = %signing_key_path,
+            kid = %kid,
+            "gateway signing key loaded"
+        );
+        Some(Arc::new(key))
+    };
+
+    // Phase 8 U3 — wrapper-token issuer. One-to-one with `signing_key`:
+    // both Some, or both None. Built once at boot so the per-request
+    // /__zs/auth/dpop-exchange path doesn't pay for PKCS#8 encoding +
+    // thumbprinting on every request.
+    let wrapper_issuer: Option<Arc<wrapper_token::Issuer>> = signing_key.as_ref().map(|sk| {
+        let issuer = wrapper_token::Issuer::new(sk.as_ref(), public_url.clone())
+            .expect("wrapper_token::Issuer construction");
+        Arc::new(issuer)
+    });
+
+    // Phase 8 U4 — wrapper-token verifier. Built from the PUBLIC half
+    // of the same signing key in lockstep with `wrapper_issuer` (both
+    // Some, or both None). The dispatch path consults this to detect
+    // wrapper-bound DPoP requests; raw-hydra DPoP requests fall through
+    // to the P7-U5 introspection path. Cheap to construct (no PKCS#8
+    // encoding — `DecodingKey::from_ed_der` accepts the raw 32-byte
+    // public key), so we just build it eagerly at boot.
+    let wrapper_verifier: Option<Arc<wrapper_token::Verifier>> = signing_key.as_ref().map(|sk| {
+        let public = sk.verifying_key();
+        Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))
+    });
 
     let blob_cache_bytes: usize = blob_cache_mem_mb
         .parse::<usize>()
@@ -134,6 +219,47 @@ async fn main() -> std::io::Result<()> {
 
     let hash_ring = proxy::HashRing::new(worker_urls.clone(), max_per_worker);
 
+    // Postgres client for the per-origin session store. The binary
+    // accepts an empty DSN (`--db ""`) for dev / smoke modes that don't
+    // exercise the OIDC RP path; downstream handlers gracefully return
+    // 401 when `db` is None instead of panicking.
+    let db: Option<Arc<compio_postgres::Client>> = if pg_dsn.is_empty() {
+        tracing::warn!(
+            "DATABASE_URL not set — gateway session validation disabled (all auth-gated requests will 401)"
+        );
+        None
+    } else {
+        let (pg_client, pg_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
+            .await
+            .expect("gateway: pg connect");
+        compio::runtime::spawn(async move {
+            if let Err(e) = pg_conn.run().await {
+                tracing::error!(error = %e, "gateway/pg connection ended");
+            }
+        })
+        .detach();
+        Some(Arc::new(pg_client))
+    };
+
+    // OIDC RP — services every `{app}.zeroship.ai` host. The
+    // `client_id` matches the entry registered in
+    // `ops/auth-clients.example.toml`; `redirect_uri` is per-app and
+    // built at the dispatch site.
+    let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
+        &auth_public,
+        "gateway",
+        oidc_client_secret,
+        stash_signing_key.into_bytes(),
+    ));
+
+    let dpop_jti_cache = db
+        .as_ref()
+        .map(|client| {
+            let pg = zeroship_core::dpop::PgJtiCache::new(client.clone());
+            zeroship_core::dpop::TieredJtiCache::with_pg(pg)
+        })
+        .unwrap_or_else(zeroship_core::dpop::TieredJtiCache::default);
+
     let state = Arc::new(GateState {
         config: GateConfig {
             control_url,
@@ -142,6 +268,11 @@ async fn main() -> std::io::Result<()> {
             poll_interval_secs: poll_interval.parse().unwrap_or(5),
             auth_secret,
             worker_key,
+            hydra_public,
+            auth_public,
+            insecure_dev,
+            trust_proxy,
+            public_url,
         },
         routes: sync::RouteCache::new(),
         hash_ring,
@@ -152,6 +283,13 @@ async fn main() -> std::io::Result<()> {
         blob_cache: blob_cache::BlobCache::new(blob_cache_bytes),
         disk_cache,
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
+        oidc_rp,
+        db,
+        dpop_jti_cache: Arc::new(dpop_jti_cache),
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        signing_key,
+        wrapper_issuer,
+        wrapper_verifier,
     });
 
     sync::start_sync(state.clone());
@@ -172,6 +310,24 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
+            // Phase 8 U3 — DPoP token exchange. Registered BEFORE
+            // the subdomain catch-all so the path lands on the
+            // dedicated handler rather than being dispatched as a
+            // creator-app route. `cache-control: no-store` is set on
+            // every response so intermediaries don't keep wrapper
+            // tokens around.
+            .service(
+                web::resource("/__zs/auth/dpop-exchange")
+                    .route(web::post().to(dpop_exchange::handle)),
+            )
+            // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
+            // at the gateway-host level (not per-app) because the
+            // URI is stable across every `backchannel_logout_uri`
+            // entry in `ops/auth-clients.example.toml`. Must be
+            // mounted BEFORE the subdomain catch-all below — ntex's
+            // path routing is registration-order-sensitive for
+            // overlapping patterns.
+            .configure(backchannel_logout::configure)
             // Subdomain catch-all — must be last (lowest priority)
             .service(
                 web::resource("/{tail}*")
@@ -190,4 +346,55 @@ fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> Stri
         }
     }
     std::env::var(env_key).unwrap_or_else(|_| default.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_stash_key_rejects_missing_in_non_dev() {
+        let err = validate_gateway_stash_key("", false).unwrap_err();
+        assert!(err.contains("required"), "{err}");
+    }
+
+    #[test]
+    fn gateway_control_key_rejects_missing_in_non_dev() {
+        let err = validate_gateway_control_key("", false).unwrap_err();
+        assert!(err.contains("CONTROL_KEY"), "{err}");
+    }
+
+    #[test]
+    fn gateway_control_key_accepts_nonempty_in_non_dev() {
+        assert!(validate_gateway_control_key("secret", false).is_ok());
+    }
+
+    #[test]
+    fn gateway_control_key_allows_missing_in_insecure_dev() {
+        assert!(validate_gateway_control_key("", true).is_ok());
+    }
+
+    #[test]
+    fn gateway_stash_key_rejects_dev_default_in_non_dev() {
+        let err = validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, false).unwrap_err();
+        assert!(err.contains("dev default"), "{err}");
+    }
+
+    #[test]
+    fn gateway_stash_key_rejects_short_in_non_dev() {
+        let err = validate_gateway_stash_key("short", false).unwrap_err();
+        assert!(err.contains("too short"), "{err}");
+    }
+
+    #[test]
+    fn gateway_stash_key_accepts_strong_in_non_dev() {
+        let key = "0123456789abcdef0123456789abcdef";
+        assert!(validate_gateway_stash_key(key, false).is_ok());
+    }
+
+    #[test]
+    fn gateway_stash_key_allows_dev_default_in_insecure_dev() {
+        assert!(validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
+        assert!(validate_gateway_stash_key("", true).is_ok());
+    }
 }

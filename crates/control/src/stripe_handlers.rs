@@ -1,6 +1,6 @@
 //! HTTP handlers for Stripe Connect onboarding + webhook ingest.
 //!
-//! Public (master-key auth):
+//! User-facing (AuthzGuard):
 //!   POST   /api/creators/:id/stripe/onboard    → return onboarding URL
 //!   POST   /api/creators/:id/stripe/callback   → link acct_xxx
 //!   GET    /api/creators/:id/earnings          → totals + recent payouts
@@ -17,8 +17,10 @@ use ntex::web::{self, types::{Path, State}};
 use serde::Deserialize;
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroship_authz::{Action as AuthzAction, Resource};
 
 use crate::audit::{self, Action, AuditEntry};
+use crate::authz_guard::AuthzGuard;
 use crate::http_util;
 use crate::AppState;
 use crate::stripe_store::{self, StripeError};
@@ -27,12 +29,20 @@ fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
     http_util::source_ip(req, state.trust_proxy)
 }
 
-fn rate_limit(
+async fn rate_limit(
     req: &web::HttpRequest,
     limiter: &crate::RateLimiter,
+    namespace: &str,
     state: &AppState,
 ) -> Option<web::HttpResponse> {
-    http_util::rate_limit(req, limiter, state.trust_proxy)
+    http_util::rate_limit(
+        req,
+        state.auth_pg.as_ref(),
+        namespace,
+        limiter.quota(),
+        state.trust_proxy,
+    )
+    .await
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -73,10 +83,13 @@ fn bad_creator_id() -> web::HttpResponse { err_json(400, "bad creator_id") }
 pub async fn onboard(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     // Placeholder — real impl goes to api.stripe.com/v1/account_links.
@@ -97,11 +110,14 @@ pub struct CallbackBody {
 pub async fn callback(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     body: web::types::Json<CallbackBody>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.link_account(creator_id, &body.stripe_account_id).await {
@@ -110,7 +126,8 @@ pub async fn callback(
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 creator_id: Some(creator_id),
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::LinkAccount,
                 resource: Some(&body.stripe_account_id),
                 source_ip: ip.as_deref(),
@@ -125,10 +142,13 @@ pub async fn callback(
 pub async fn earnings(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingRead, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     let totals = match state.stripe_store.total_earnings(creator_id).await {
@@ -163,10 +183,13 @@ pub async fn earnings(
 pub async fn unlink(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.unlink_account(creator_id).await {
@@ -175,7 +198,8 @@ pub async fn unlink(
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 creator_id: Some(creator_id),
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::UnlinkAccount,
                 resource: None,
                 source_ip: ip.as_deref(),
@@ -298,6 +322,8 @@ struct StripeEventData {
 #[derive(Deserialize, Debug)]
 struct StripeObject {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     amount_paid: Option<i64>,
     #[serde(default)]
     application_fee_amount: Option<i64>,
@@ -359,9 +385,11 @@ pub async fn webhook(
     body: Bytes,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    // Internal endpoint, no user authz: Stripe authenticates with the
+    // webhook signature and this route has no user principal.
     // Rate limit FIRST — body cap second. Cheap-to-reject things go
     // before expensive ones (parsing 256 KiB, HMAC, DB write).
-    if let Some(r) = rate_limit(&req, &state.webhook_limiter, &state) {
+    if let Some(r) = rate_limit(&req, &state.webhook_limiter, "webhook", &state).await {
         return r;
     }
     if body.len() > MAX_WEBHOOK_BODY_BYTES {
@@ -400,7 +428,10 @@ pub async fn webhook(
 
     let event: StripeEvent = match serde_json::from_slice(raw) {
         Ok(e) => e,
-        Err(e) => return err_json(400, format!("invalid json: {e}")),
+        Err(e) => {
+            tracing::debug!(error = %e, "stripe: invalid webhook json");
+            return err_json(400, invalid_json_message());
+        }
     };
 
     // Only invoice.paid moves money on the platform v1.
@@ -452,16 +483,50 @@ pub async fn webhook(
         )
         .await
     {
-        Ok(rec) => web::HttpResponse::Ok().json(&serde_json::json!({
-            "status": "recorded",
-            "id": rec.id.to_string(),
-            "net_amount": rec.net_amount,
-        })),
+        Ok(rec) => {
+            let ip = source_ip(&req, &state);
+            let detail = serde_json::json!({
+                "creator_id": creator_id.to_string(),
+                "amount_cents": rec.gross_amount,
+                "platform_fee_cents": rec.platform_fee,
+                "net_amount_cents": rec.net_amount,
+                "currency": &rec.currency,
+                "stripe_event_id": &rec.event_id,
+                "stripe_event_type": &rec.event_type,
+                "stripe_object_id": obj.id.as_deref(),
+                "stripe_payout_id": obj.id.as_deref().unwrap_or(rec.event_id.as_str()),
+                "payout_id": rec.id.to_string(),
+            });
+            audit::log_with_detail(
+                &state.registry,
+                AuditEntry {
+                    app_id: None,
+                    creator_id: Some(creator_id),
+                    actor_user_id: None,
+                    actor_token_id: None,
+                    action: Action::RecordPayout,
+                    resource: Some(&event.id),
+                    source_ip: ip.as_deref(),
+                },
+                &detail,
+            )
+            .await;
+
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "status": "recorded",
+                "id": rec.id.to_string(),
+                "net_amount": rec.net_amount,
+            }))
+        }
         Err(StripeError::Duplicate) => {
             web::HttpResponse::Ok().json(&serde_json::json!({"status": "duplicate"}))
         }
         Err(e) => stripe_err_response(e),
     }
+}
+
+fn invalid_json_message() -> &'static str {
+    "invalid json"
 }
 
 fn sanitize_event_id(s: &str) -> String {
@@ -574,5 +639,10 @@ mod verification_tests {
             CROSS_BODY, &header, CROSS_SECRET, CROSS_TIMESTAMP, 300,
         );
         assert_eq!(result.unwrap(), CROSS_TIMESTAMP);
+    }
+
+    #[test]
+    fn invalid_json_message_is_constant() {
+        assert_eq!(invalid_json_message(), "invalid json");
     }
 }

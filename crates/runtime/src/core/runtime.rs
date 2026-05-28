@@ -303,6 +303,21 @@ impl Runtime {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::FetchOutcome {
+        self.call_fetch_handler_with_user(method, url, headers, body, env, ctx, None)
+    }
+
+    /// Variant of [`Runtime::call_fetch_handler`] used by the worker once it
+    /// has verified the gateway-issued `ZeroShip-User` envelope.
+    pub fn call_fetch_handler_with_user(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+        user_json: Option<String>,
+    ) -> crate::FetchOutcome {
         self.inner.borrow_mut().call_fetch_handler(
             self.modules.as_slice(),
             method,
@@ -311,6 +326,7 @@ impl Runtime {
             body,
             env,
             ctx,
+            user_json,
         )
     }
 
@@ -1395,6 +1411,7 @@ impl RuntimeInner {
         body: &str,
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
+        user_json: Option<String>,
     ) -> crate::FetchOutcome {
         // Reset the idle-GC clock — every request entry is "activity".
         self.last_request_ts.set(Instant::now());
@@ -1449,6 +1466,10 @@ impl RuntimeInner {
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
+
+        if user_json.is_some() {
+            crate::auth::set_request_user(&self.state, request_id, user_json);
+        }
 
         let wall_start = Instant::now();
 
@@ -1708,7 +1729,13 @@ impl RuntimeInner {
             return crate::FetchOutcome::Response {
                 status: 503,
                 headers: vec![("content-type".into(), "application/json".into())],
-                body: r#"{"message":"CPU time limit exceeded","name":"Error"}"#.into(),
+                body: crate::dispatch::build_error_body(
+                    503,
+                    request_id,
+                    "CPU time limit exceeded",
+                    "Error",
+                    crate::dispatch::ErrorExtras::default(),
+                ),
                 logs: vec![],
             };
         }
@@ -1720,7 +1747,15 @@ impl RuntimeInner {
                 self.clear_executing_request();
                 self.build_fetch_outcome(request_id, info, cpu_elapsed)
             }
-            Ok(DispatchResult::ErrorValue { message, name, stack, status, code, details_json, retryable }) => {
+            Ok(DispatchResult::ErrorValue {
+                message,
+                name,
+                stack,
+                status,
+                code,
+                details_json,
+                retryable,
+            }) => {
                 // Handler threw (or returned a rejected promise). Honor
                 // `err.status` so `throw new HttpError(404)` yields 404,
                 // not the previous hardcoded 500. Forward any structured-
@@ -1736,7 +1771,9 @@ impl RuntimeInner {
                 crate::FetchOutcome::Response {
                     status,
                     headers: vec![("content-type".into(), "application/json".into())],
-                    body: crate::dispatch::build_error_body(&message, &name, extras),
+                    body: crate::dispatch::build_error_body(
+                        status, request_id, &message, &name, extras,
+                    ),
                     logs: vec![],
                 }
             }
@@ -1749,7 +1786,13 @@ impl RuntimeInner {
                 crate::FetchOutcome::Response {
                     status: 500,
                     headers: vec![("content-type".into(), "application/json".into())],
-                    body: crate::dispatch::build_error_body(&msg, "Error", crate::dispatch::ErrorExtras::default()),
+                    body: crate::dispatch::build_error_body(
+                        500,
+                        request_id,
+                        &msg,
+                        "Error",
+                        crate::dispatch::ErrorExtras::default(),
+                    ),
                     logs: vec![],
                 }
             }
@@ -2662,7 +2705,7 @@ fn collect_settled_promises(
             let req = pending_requests.remove(&id)?;
             let result = match req.origin {
                 PendingOrigin::Fetch => http::extract_settled_result(scope, &req.promise),
-                PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise),
+                PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
             };
             Some((id, req, result))
         })
@@ -2676,6 +2719,7 @@ fn collect_settled_promises(
 fn settle_rpc_promise(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
+    request_id: u64,
 ) -> SettledResult {
     let local = v8::Local::new(scope, promise);
     match local.state() {
@@ -2722,7 +2766,15 @@ fn settle_rpc_promise(
         v8::PromiseState::Rejected => {
             let exc = local.result(scope);
             match crate::dispatch::v8_exception_to_error_value(scope, exc) {
-                DispatchResult::ErrorValue { message, name, stack, status, code, details_json, retryable } => {
+                DispatchResult::ErrorValue {
+                    message,
+                    name,
+                    stack,
+                    status,
+                    code,
+                    details_json,
+                    retryable,
+                } => {
                     let extras = crate::dispatch::ErrorExtras {
                         stack: stack.as_deref(),
                         code: code.as_deref(),
@@ -2732,7 +2784,9 @@ fn settle_rpc_promise(
                     SettledResult::Http(Ok(http::ResponseInfo::Complete {
                         status,
                         headers: vec![("content-type".into(), "application/json".into())],
-                        body: crate::dispatch::build_error_body(&message, &name, extras),
+                        body: crate::dispatch::build_error_body(
+                            status, request_id, &message, &name, extras,
+                        ),
                     }))
                 }
                 _ => SettledResult::Http(Err("rpc rejected".to_string())),

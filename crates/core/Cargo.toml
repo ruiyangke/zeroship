@@ -12,16 +12,39 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
+# PKCE verifier generation (shared with gateway OIDC RP + auth tests).
+rand = "0.8"
+base64 = { workspace = true }
 thiserror = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
 zeroship-bundle = { workspace = true }
+# OIDC verifier — JWKS cache + ID-token verification used by both
+# gateway (P3-U3) and control plane (P3-U7) as OIDC RPs.
+jsonwebtoken = { workspace = true }
+parking_lot = "0.12"
+cyper = { workspace = true }
+http = { workspace = true }
+lru = { workspace = true }
+url = { workspace = true }
+compio-postgres = { workspace = true }
 # Observability — tracing subscriber init shared across all binaries.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-log = { workspace = true }
 tracing-logfmt = { workspace = true }
 tracing-bunyan-formatter = { workspace = true }
+
+[dev-dependencies]
+# Core tests include local ntex/compio HTTP servers. The polling fallback
+# keeps them runnable in sandboxes that block io_uring; production builds use
+# the normal workspace compio dependency above the dev-dependency boundary.
+compio = { workspace = true, features = ["polling"] }
+ntex = { workspace = true }
+# Phase 7 U1 — sign synthetic BCL `logout_token` JWTs in the
+# `logout_token` verifier's unit tests. PKCS#8 encoding is needed
+# because `jsonwebtoken::EncodingKey::from_ed_der` takes the DER form.
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 
 [lints]
 workspace = true

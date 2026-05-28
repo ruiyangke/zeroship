@@ -36,16 +36,20 @@ use zeroship_bundle::{
     ManifestMetadata, WorkerCode,
 };
 use zeroship_control::{
-    api, auth_service, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    api, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+
+mod common;
 
 // ---------------------------------------------------------------------------
 // Test gating
 // ---------------------------------------------------------------------------
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    std::env::var("CONTROL_TEST_DB")
+        .or_else(|_| std::env::var("PG_TEST_URL"))
+        .ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -207,28 +211,35 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     );
 
     let registry = Registry::new(db_url).await.expect("registry");
-    // EnvStore demands a non-empty master key unless insecure_dev=true;
-    // we pass insecure_dev=true so AppState construction is hermetic
-    // (the test exercises check_admin_auth via the master-key bearer
-    // path, NOT via insecure_dev — see request building below).
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
         .expect("env store");
     let stripe_store = StripeStore::new(registry.clone());
-    let auth = auth_service::AuthService::new(db_url, "test-jwt-secret-please-ignore")
-        .await
-        .expect("auth service");
 
     let blob_store: Arc<dyn BlobStore> = blob_store_concrete.clone();
     let vfs: Arc<dyn BundleStore + Send + Sync> = Arc::new(
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
+    let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
+        "http://localhost:4444",
+        "console.zeroship.ai",
+        "test-oidc-secret".to_string(),
+        b"test-stash-key".to_vec(),
+    ));
+    let (auth_pg_client, auth_pg_conn) =
+        compio_postgres::connect(db_url, compio_postgres::NoTls)
+            .await
+            .expect("auth-pg connect");
+    compio::runtime::spawn(async move {
+        let _ = auth_pg_conn.run().await;
+    })
+    .detach();
+    let auth_pg = Arc::new(auth_pg_client);
+
     let state = Arc::new(AppState {
         registry,
         env_store,
         stripe_store,
-        auth,
-        google_oauth: None,
         vfs,
         blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
@@ -238,12 +249,21 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
-        // IMPORTANT: insecure_dev=false so check_admin_auth actually
-        // runs the master-key/session path. Tests that want the auth
-        // gate to *fail* simply omit the bearer header.
         insecure_dev: false,
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
+        oidc_rp,
+        auth_pg,
+        auth_db_url: db_url.to_string(),
+        hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+        expected_oauth_audience: "control.zeroship.ai".to_string(),
+        static_policies: zeroship_authz::load_platform_policies()
+            .expect("bundled authz policies parse"),
+        pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
+        hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
+            "http://127.0.0.1:9",
+        )),
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
     Fixture {
@@ -309,9 +329,10 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     )
     .await;
 
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", format!("Bearer {TEST_MASTER_KEY}"))
+        .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
         .to_request();
@@ -360,6 +381,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     // Cleanup: drop the app row so reruns under the same DB don't
     // collect noise.
     let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
 }
 
 #[compio::test]
@@ -386,9 +408,10 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     )
     .await;
 
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", format!("Bearer {TEST_MASTER_KEY}"))
+        .header("authorization", pat.bearer())
         .header("content-type", "application/octet-stream")
         .set_payload(body)
         .to_request();
@@ -405,6 +428,7 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
         dir_is_empty(&fx.deploy_tmp_dir),
         "deploy_tmp_dir must be empty on 415 (body should not stream)",
     );
+    pat.cleanup(&fx.state).await;
 }
 
 #[compio::test]
@@ -448,10 +472,10 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
         "no bearer must not stream body to tmp",
     );
 
-    // Wrong bearer should also reject — same status.
+    // Invalid PAT bearer should also reject — same status.
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", "Bearer not-the-master-key")
+        .header("authorization", "Bearer not-a-valid-pat")
         .header("content-type", "application/x-zship")
         .set_payload(body)
         .to_request();
@@ -509,9 +533,10 @@ async fn deploy_manifest_not_first_returns_400() {
     )
     .await;
 
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", format!("Bearer {TEST_MASTER_KEY}"))
+        .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
         .to_request();
@@ -537,4 +562,5 @@ async fn deploy_manifest_not_first_returns_400() {
     );
 
     let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
 }

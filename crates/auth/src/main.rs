@@ -1,186 +1,143 @@
-//! zeroship-auth — auth service binary.
-
-mod handlers;
-pub mod oauth;
-mod queries;
-mod service;
-
-use std::sync::Arc;
-
-use ntex::web;
-
-use oauth::ProviderRegistry;
-use service::AuthService;
+//! zeroship-auth — the `OIDC` `IdP` login UI + identity flows + hydra admin client.
+//!
+//! Companion process: `oryd/hydra` (OIDC kernel). See docs/proposals/auth-server.md.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// Shared application state injected into every handler.
-#[allow(missing_debug_implementations)]
-pub struct AppState {
-    pub auth: AuthService,
-    pub oauth: ProviderRegistry,
-}
+use std::sync::Arc;
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
+use clap::Parser;
+use compio_postgres::{connect, NoTls};
+use zeroship_core::oidc_verify::JwksCache;
 
-/// Parse a simple `--flag value` pair from the argument list.
-fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> String {
-    for pair in args.windows(2) {
-        if pair[0] == flag {
-            return pair[1].clone();
-        }
-    }
-    env_or(env_key, default)
-}
+use zeroship_auth::bootstrap;
+use zeroship_auth::config::{validate_stash_key, AuthConfig};
+use zeroship_auth::cron;
+use zeroship_auth::error::AuthError;
+use zeroship_auth::hydra_client::HydraAdmin;
+use zeroship_auth::mailer::{
+    Mailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
+};
+use zeroship_auth::server;
+use zeroship_auth::startup_validation::validate_hydra_admin_url;
+use zeroship_auth::store;
 
 #[ntex::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     zeroship_core::observability::init_tracing("info,zeroship_auth=debug");
 
-    let args: Vec<String> = std::env::args().collect();
+    let cfg = AuthConfig::parse();
+    tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
-    let port = arg_or_env(&args, "--port", "PORT", "9091");
-    let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "postgres://localhost/zeroship");
-
-    // JWT signing secret — defaults to a random value for development.
-    let jwt_secret = arg_or_env(
-        &args,
-        "--auth-secret",
-        "AUTH_SECRET",
-        &uuid::Uuid::new_v4().to_string(),
-    );
-
-    let auth = AuthService::new(&db_url, &jwt_secret);
-
-    // --- OAuth providers (enabled by env vars) ---
-    // OIDC providers (Google, Apple) perform async discovery at startup.
-    let service_url = arg_or_env(&args, "--url", "SERVICE_URL", &format!("http://localhost:{port}"));
-    let mut oauth_registry = ProviderRegistry::new();
-
-    if let (Ok(client_id), Ok(client_secret)) = (
-        std::env::var("GOOGLE_CLIENT_ID"),
-        std::env::var("GOOGLE_CLIENT_SECRET"),
-    ) {
-        let redirect_uri = format!("{service_url}/auth/callback/google");
-        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        match oauth::google::build(config).await {
-            Ok(provider) => {
-                oauth_registry.register(provider);
-                tracing::info!(provider = "google", "oauth provider enabled (OIDC discovery OK)");
-            }
-            Err(e) => {
-                tracing::error!(provider = "google", error = %e, "oauth provider build failed");
-            }
-        }
+    if let Err(message) = validate_stash_key(&cfg) {
+        tracing::error!("{message}");
+        std::process::exit(1);
+    }
+    if let Err(message) = validate_hydra_admin_url(&cfg) {
+        tracing::error!("{message}");
+        std::process::exit(1);
     }
 
-    if let (Ok(client_id), Ok(client_secret)) = (
-        std::env::var("GITHUB_CLIENT_ID"),
-        std::env::var("GITHUB_CLIENT_SECRET"),
-    ) {
-        let redirect_uri = format!("{service_url}/auth/callback/github");
-        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        match oauth::github::build(config).await {
-            Ok(provider) => {
-                oauth_registry.register(provider);
-                tracing::info!(provider = "github", "oauth provider enabled");
-            }
-            Err(e) => {
-                tracing::error!(provider = "github", error = %e, "oauth provider build failed");
-            }
-        }
+    // OAuth provider credentials are optional. We log a warning per disabled
+    // provider so it's obvious during boot which federation arms aren't wired
+    // up. Actual route gating happens in U2.2 (Google) + U3.2 (GitHub).
+    if cfg.google_client_id.is_none() {
+        tracing::warn!(
+            "Google OAuth disabled — set AUTH_GOOGLE_CLIENT_ID + AUTH_GOOGLE_CLIENT_SECRET to enable"
+        );
+    }
+    if cfg.github_client_id.is_none() {
+        tracing::warn!(
+            "GitHub OAuth disabled — set AUTH_GITHUB_CLIENT_ID + AUTH_GITHUB_CLIENT_SECRET to enable"
+        );
     }
 
-    if let (Ok(client_id), Ok(client_secret)) = (
-        std::env::var("APPLE_CLIENT_ID"),
-        std::env::var("APPLE_CLIENT_SECRET"),
-    ) {
-        let redirect_uri = format!("{service_url}/auth/callback/apple");
-        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        match oauth::apple::build(config).await {
-            Ok(provider) => {
-                oauth_registry.register(provider);
-                tracing::info!(provider = "apple", "oauth provider enabled (OIDC discovery OK)");
-            }
-            Err(e) => {
-                tracing::error!(provider = "apple", error = %e, "oauth provider build failed");
-            }
+    // 1. Open PG.
+    let (client, connection) = connect(&cfg.db_url, NoTls).await?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            tracing::error!(error = %e, "auth/pg connection error");
         }
-    }
-
-    if let (Ok(client_id), Ok(client_secret)) = (
-        std::env::var("META_CLIENT_ID"),
-        std::env::var("META_CLIENT_SECRET"),
-    ) {
-        let redirect_uri = format!("{service_url}/auth/callback/meta");
-        let config = oauth::OAuthConfig { client_id, client_secret, redirect_uri };
-        match oauth::meta::build(config).await {
-            Ok(provider) => {
-                oauth_registry.register(provider);
-                tracing::info!(provider = "meta", "oauth provider enabled");
-            }
-            Err(e) => {
-                tracing::error!(provider = "meta", error = %e, "oauth provider build failed");
-            }
-        }
-    }
-
-    let state = Arc::new(AppState { auth, oauth: oauth_registry });
-
-    let bind_addr = format!("0.0.0.0:{port}");
-    tracing::info!(bind = %bind_addr, "zeroship-auth listening");
-
-    web::server(async move || {
-        web::App::new()
-            .state(state.clone())
-            // --- Auth ---
-            .service(
-                web::resource("/auth/register")
-                    .route(web::post().to(handlers::register)),
-            )
-            .service(
-                web::resource("/auth/login")
-                    .route(web::post().to(handlers::login)),
-            )
-            .service(
-                web::resource("/auth/userinfo")
-                    .route(web::get().to(handlers::userinfo)),
-            )
-            .service(
-                web::resource("/auth/consent")
-                    .route(web::post().to(handlers::consent)),
-            )
-            .service(
-                web::resource("/auth/logout")
-                    .route(web::post().to(handlers::logout)),
-            )
-            .service(
-                web::resource("/auth/authorize")
-                    .route(web::get().to(handlers::authorize)),
-            )
-            // --- OAuth ---
-            .service(
-                web::resource("/auth/{provider}")
-                    .route(web::get().to(handlers::oauth_start)),
-            )
-            .service(
-                web::resource("/auth/callback/{provider}")
-                    .route(web::get().to(handlers::oauth_callback)),
-            )
-            // --- Health ---
-            .service(
-                web::resource("/health")
-                    .route(web::get().to(health)),
-            )
     })
-    .bind(&bind_addr)?
-    .run()
-    .await
+    .detach();
+
+    // 2. Run migrations.
+    store::migrations::migrate(&client).await?;
+    tracing::info!("auth.* migrations applied");
+
+    // 3. Bootstrap: keys + client reconciliation.
+    let admin = HydraAdmin::new(&cfg.hydra_admin);
+    bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
+    tracing::info!("bootstrap complete");
+
+    // 4. Build the Google JWKS cache. Only constructed when Google OAuth
+    //    is wired up — the cache eagerly does nothing (lazy refresh on
+    //    first verify), so we don't burn a startup roundtrip on Google.
+    let google_jwks = if cfg.google_client_id.is_some() {
+        Some(Arc::new(JwksCache::new(&cfg.google_jwks_url)))
+    } else {
+        None
+    };
+
+    // 5. Build the mailer driver. `--mailer=stdout` is the dev default;
+    //    `smtp` and `resend` are the production drivers. Missing creds
+    //    for the selected driver is a fatal config error — we'd rather
+    //    fail loudly at boot than silently swallow magic-link / reset
+    //    mails at request time.
+    let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
+    tracing::info!(driver = %cfg.mailer, "mailer ready");
+
+    // 6. Spawn in-process cron tasks. Detached on
+    //    the compio runtime — survives across server worker restarts.
+    //    Spawned BEFORE `server::run` so the loop is live as soon as
+    //    the listener is bound. `Arc<Client>` is shared with the server
+    //    so both drive I/O through the single compio-postgres connection.
+    let cfg = Arc::new(cfg);
+    let db = Arc::new(client);
+    cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
+    tracing::info!("cron tasks spawned");
+
+    // 7. Serve. `Arc`s keep the PG client + config alive across the
+    //    server worker tasks AND the detached cron tasks; on shutdown
+    //    the last `Arc` drop unblocks the background connection driver.
+    server::run(cfg, admin, db, google_jwks, mailer).await?;
+    Ok(())
 }
 
-async fn health() -> web::HttpResponse {
-    web::HttpResponse::Ok().json(&serde_json::json!({"status":"ok"}))
+/// Translate `--mailer` + per-driver flags into a concrete
+/// `Arc<dyn Mailer>`. Returns [`AuthError::Config`] when the selected
+/// driver's required credentials aren't set, so the startup error
+/// names exactly which env var is missing.
+fn build_mailer(cfg: &AuthConfig) -> Result<Arc<dyn Mailer>, AuthError> {
+    match cfg.mailer.as_str() {
+        "stdout" => Ok(Arc::new(StdoutMailer)),
+        "smtp" => {
+            let host = cfg.smtp_host.clone().ok_or_else(|| {
+                AuthError::Config(
+                    "AUTH_SMTP_HOST is required when --mailer=smtp".into(),
+                )
+            })?;
+            let driver = SmtpMailer::new(&SmtpConfig {
+                host,
+                port: cfg.smtp_port,
+                username: cfg.smtp_username.clone(),
+                password: cfg.smtp_password.clone(),
+                use_starttls: cfg.smtp_starttls,
+            })
+            .map_err(|e| AuthError::Config(format!("smtp mailer: {e}")))?;
+            Ok(Arc::new(driver))
+        }
+        "resend" => {
+            let api_key = cfg.resend_api_key.clone().ok_or_else(|| {
+                AuthError::Config(
+                    "AUTH_RESEND_API_KEY is required when --mailer=resend".into(),
+                )
+            })?;
+            Ok(Arc::new(ResendMailer::new(ResendConfig { api_key })))
+        }
+        other => Err(AuthError::Config(format!(
+            "unknown mailer: {other:?}; use stdout|smtp|resend"
+        ))),
+    }
 }

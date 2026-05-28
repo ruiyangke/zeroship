@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Link your account · zeroship{% endblock %}
+{% block body %}
+<h2>Link your {{ provider }} account</h2>
+<p>An account already exists for <strong>{{ existing_email }}</strong>. Sign in with your zeroship password to link your {{ provider }} account to it.</p>
+{% if let Some(err) = error %}
+  <div class="error">{{ err }}</div>
+{% endif %}
+<form method="POST" action="/link">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <label>Password
+    <input type="password" name="password" autocomplete="current-password" required autofocus>
+  </label>
+  <button type="submit">Link account</button>
+</form>
+<p><a href="/login">Cancel and sign in instead</a></p>
+{% endblock %}

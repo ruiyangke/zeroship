@@ -9,18 +9,29 @@ use std::sync::Arc;
 use ntex::web::{self, types::{Json, Path, State}};
 use serde::Deserialize;
 use uuid::Uuid;
+use zeroship_authz::{Action as AuthzAction, Resource};
 
 use crate::audit::{self, Action, AuditEntry};
+use crate::authz_guard::AuthzGuard;
 use crate::http_util;
 use crate::AppState;
 use crate::env_store::EnvError;
+
+pub const ENV_MUTATION_PAYLOAD_BYTES: usize = 80 * 1024;
 
 fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
     http_util::source_ip(req, state.trust_proxy)
 }
 
-fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
-    http_util::rate_limit(req, &state.admin_limiter, state.trust_proxy)
+async fn admin_rate_limit(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+    http_util::rate_limit(
+        req,
+        state.auth_pg.as_ref(),
+        "admin",
+        state.admin_limiter.quota(),
+        state.trust_proxy,
+    )
+    .await
 }
 
 fn bad_uuid() -> web::HttpResponse {
@@ -60,11 +71,17 @@ pub struct SetKv {
 pub async fn list_vars(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::EnvRead, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.list_vars(id).await {
         Ok(rows) => {
             let items: Vec<_> = rows
@@ -80,19 +97,26 @@ pub async fn list_vars(
 pub async fn set_var(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     body: Json<SetKv>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::EnvWrite, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.set_var(id, &body.key, &body.value).await {
         Ok(()) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::SetVar,
                 resource: Some(&body.key),
                 source_ip: ip.as_deref(),
@@ -106,19 +130,26 @@ pub async fn set_var(
 pub async fn delete_var(
     req: web::HttpRequest,
     path: Path<(String, String)>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::EnvWrite, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.delete_var(id, &key).await {
         Ok(true) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::DeleteVar,
                 resource: Some(&key),
                 source_ip: ip.as_deref(),
@@ -137,11 +168,17 @@ pub async fn delete_var(
 pub async fn list_secrets(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::SecretsRead, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.list_secret_names(id).await {
         Ok(names) => web::HttpResponse::Ok().json(&serde_json::json!({"secrets": names})),
         Err(e) => env_err_response(e),
@@ -151,19 +188,26 @@ pub async fn list_secrets(
 pub async fn set_secret(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     body: Json<SetKv>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.set_secret(id, &body.key, &body.value).await {
         Ok(()) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::SetSecret,
                 resource: Some(&body.key),
                 source_ip: ip.as_deref(),
@@ -184,11 +228,17 @@ pub async fn set_secret(
 pub async fn list_expose(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::SecretsRead, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.list_expose(id).await {
         Ok(keys) => web::HttpResponse::Ok().json(&serde_json::json!({"expose": keys})),
         Err(e) => env_err_response(e),
@@ -216,12 +266,18 @@ pub struct SetExposeBody {
 pub async fn set_expose(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     body: Json<SetExposeBody>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.set_expose(id, &body.keys).await {
         Ok(applied) => {
             // Audit: log the new list (joined with commas) as the
@@ -233,7 +289,8 @@ pub async fn set_expose(
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::SetEnvExpose,
                 resource: Some(&resource),
                 source_ip: ip.as_deref(),
@@ -254,18 +311,25 @@ pub async fn set_expose(
 pub async fn list_audit(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     query: web::types::Query<AuditQuery>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let Ok(id) = Uuid::parse_str(&path) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::AppsRead, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     let limit = query.limit.unwrap_or(50);
     match audit::recent_for_app(&state.registry, id, limit).await {
         Ok(rows) => web::HttpResponse::Ok().json(&serde_json::json!({
             "audit": rows.iter().map(|r| serde_json::json!({
                 "id": r.id.to_string(),
-                "actor": r.actor,
+                "actor_user_id": r.actor_user_id.map(|id| id.to_string()),
+                "actor_token_id": r.actor_token_id.map(|id| id.to_string()),
                 "action": r.action,
                 "resource": r.resource,
                 "source_ip": r.source_ip,
@@ -290,19 +354,26 @@ pub struct AuditQuery {
 pub async fn delete_secret(
     req: web::HttpRequest,
     path: Path<(String, String)>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
-    if let Some(r) = admin_rate_limit(&req, &state) { return r; }
+    if let Some(r) = admin_rate_limit(&req, &state).await { return r; }
     let (id_s, key) = path.into_inner();
     let Ok(id) = Uuid::parse_str(&id_s) else { return bad_uuid(); };
+    if let Err(resp) = authz
+        .require(AuthzAction::SecretsWrite, Resource::App { id: id.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.env_store.delete_secret(id, &key).await {
         Ok(true) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::DeleteSecret,
                 resource: Some(&key),
                 source_ip: ip.as_deref(),
@@ -311,5 +382,15 @@ pub async fn delete_secret(
         }
         Ok(false) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"})),
         Err(e) => env_err_response(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_mutation_payload_cap_matches_rejected_body_budget() {
+        assert_eq!(ENV_MUTATION_PAYLOAD_BYTES, 80 * 1024);
     }
 }

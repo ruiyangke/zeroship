@@ -5,20 +5,28 @@
 //! (`src/main.rs`) is a thin wrapper around these modules.
 
 pub mod api;
+pub mod admin_handlers;
 pub mod audit;
-pub mod auth_handlers;
-pub mod auth_service;
+pub mod auth_audit;
+pub mod authz_guard;
+pub mod backchannel_logout;
+pub mod bootstrap_builder;
+pub mod console_sessions;
 pub mod deploy;
 pub mod env_handlers;
 pub mod env_store;
 pub mod http_util;
 pub mod internal;
 pub mod metering;
-pub mod oauth;
+pub mod oidc_rp;
+pub mod oauth_grants_handlers;
+pub mod oauth_handlers;
 pub mod rate_limit;
 pub mod registry;
 pub mod stripe_handlers;
 pub mod stripe_store;
+pub mod token_handlers;
+pub mod trusted_clients;
 
 use std::sync::Arc;
 
@@ -74,9 +82,6 @@ pub struct AppState {
     pub registry: Registry,
     pub env_store: EnvStore,
     pub stripe_store: StripeStore,
-    pub auth: auth_service::AuthService,
-    /// Optional Google OAuth config — `Some` enables /auth/google/* routes.
-    pub google_oauth: Option<oauth::GoogleConfig>,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
     /// Content-addressed blob store. Backs `.zship` ingestion. The
     /// gateway reads asset bytes from its own `BlobStore` instance,
@@ -119,4 +124,41 @@ pub struct AppState {
     /// type. Files are unlinked immediately after ingest (success or
     /// failure).
     pub deploy_tmp_dir: std::path::PathBuf,
+    /// OIDC relying-party for `console.zeroship.ai`. Drives the
+    /// authorize-redirect → callback → session-mint flow on the
+    /// creator dashboard (proposal §2.3). Mandatory now that U8 has
+    /// retired the legacy `auth_service` / `auth_handlers` chain —
+    /// the OIDC RP is the only console-auth surface.
+    pub oidc_rp: Arc<oidc_rp::ConsoleOidcRp>,
+    /// Postgres client pointed at the `auth` schema, used by
+    /// `console_sessions::{create,validate,revoke}`. Distinct from the
+    /// `registry` PG client (which talks to the control schema)
+    /// because in multi-DB deployments the auth tables may live in a
+    /// separate cluster. Mandatory post-U8.
+    pub auth_pg: Arc<compio_postgres::Client>,
+    /// Connection URL for the auth/control auth schema. Used only for
+    /// short-lived dedicated sessions that need session-scoped advisory locks.
+    pub auth_db_url: String,
+    /// Hydra admin API base URL. Control uses this for admin-owned OAuth
+    /// client registration/deletion; Hydra remains the source of truth for
+    /// generated client secrets.
+    pub hydra_admin_url: String,
+    /// Expected audience for OAuth access tokens accepted by the control
+    /// plane's bearer-token introspection path.
+    pub expected_oauth_audience: String,
+    /// Static Cedar policy bundle for control-plane authorization.
+    /// Parsed once at boot; per-token policies are loaded by the authz
+    /// evaluator only when a token-bearing request needs them.
+    pub static_policies: zeroship_authz::PolicySet,
+    /// Ed25519 issuer/verifier for first-party Personal Access Tokens.
+    /// Control uses the same key material as the gateway's
+    /// `--signing-key-file` wrapper-token issuer for P9 v1.
+    pub pat_issuer: Arc<token_handlers::PatIssuer>,
+    /// Hydra admin introspection client for third-party OAuth bearer
+    /// access tokens. Used only after local PAT verification fails.
+    pub hydra_introspector: Arc<zeroship_core::hydra::HydraIntrospector>,
+    /// In-process replay cache for OIDC Back-Channel Logout
+    /// `logout_token.jti` claims. Replays are answered with 200 for
+    /// webhook idempotency but do not run session revocation again.
+    pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
 }

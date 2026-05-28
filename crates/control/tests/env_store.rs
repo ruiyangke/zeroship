@@ -6,6 +6,7 @@
 //!
 //! Each test uses a unique app row so parallel runs don't collide.
 
+use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
@@ -17,6 +18,17 @@ async fn create_test_app(registry: &Registry) -> Uuid {
     let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let rec = registry.create_app(&name, "free").await.expect("create_app");
     rec.id
+}
+
+async fn pg_connect(dsn: &str) -> compio_postgres::Client {
+    let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
+        .await
+        .expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
 }
 
 #[compio::test]
@@ -172,6 +184,59 @@ async fn wrong_master_key_fails_decrypt() {
 }
 
 #[compio::test]
+async fn ciphertext_transplant_fails_across_app_and_key() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = EnvStore::new(registry.clone(), "dev-master-key", false).expect("store");
+    let app_a = create_test_app(&registry).await;
+    let app_b = create_test_app(&registry).await;
+    let client = pg_connect(&url).await;
+
+    store.set_secret(app_a, "STRIPE_KEY", "sk_live_victim").await.unwrap();
+
+    client
+        .execute(
+            "INSERT INTO app_secrets(app_id, key_name, ciphertext)
+             SELECT $1, $2, ciphertext
+             FROM app_secrets
+             WHERE app_id = $3 AND key_name = $4
+             ON CONFLICT (app_id, key_name) DO UPDATE
+             SET ciphertext = EXCLUDED.ciphertext",
+            &[&app_b, &"STRIPE_KEY", &app_a, &"STRIPE_KEY"],
+        )
+        .await
+        .expect("transplant across app");
+
+    let err = store.merged_env(app_b).await.unwrap_err();
+    assert!(
+        matches!(err, zeroship_control::env_store::EnvError::Crypto(_)),
+        "cross-app ciphertext transplant must fail, got {err:?}"
+    );
+
+    client
+        .execute(
+            "INSERT INTO app_secrets(app_id, key_name, ciphertext)
+             SELECT $1, $2, ciphertext
+             FROM app_secrets
+             WHERE app_id = $3 AND key_name = $4
+             ON CONFLICT (app_id, key_name) DO UPDATE
+             SET ciphertext = EXCLUDED.ciphertext",
+            &[&app_a, &"COPIED_SECRET", &app_a, &"STRIPE_KEY"],
+        )
+        .await
+        .expect("transplant across key");
+
+    let err = store.merged_env(app_a).await.unwrap_err();
+    assert!(
+        matches!(err, zeroship_control::env_store::EnvError::Crypto(_)),
+        "cross-key ciphertext transplant must fail, got {err:?}"
+    );
+
+    registry.delete_app(&app_a).await.ok();
+    registry.delete_app(&app_b).await.ok();
+}
+
+#[compio::test]
 async fn delete_cascades_from_app() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
@@ -272,11 +337,15 @@ async fn audit_log_roundtrip() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let app = create_test_app(&registry).await;
+    let first_actor = Uuid::new_v4();
+    let second_actor = Uuid::new_v4();
+    let token_id = Uuid::new_v4();
 
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
         creator_id: None,
-        actor: "admin",
+        actor_user_id: Some(first_actor),
+        actor_token_id: Some(token_id),
         action: Action::SetSecret,
         resource: Some("STRIPE_KEY"),
         source_ip: Some("203.0.113.7"),
@@ -284,7 +353,8 @@ async fn audit_log_roundtrip() {
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
         creator_id: None,
-        actor: "admin",
+        actor_user_id: Some(second_actor),
+        actor_token_id: None,
         action: Action::DeleteSecret,
         resource: Some("STRIPE_KEY"),
         source_ip: None,
@@ -298,7 +368,51 @@ async fn audit_log_roundtrip() {
     assert_eq!(rows[0].source_ip, None);
     assert_eq!(rows[1].action, "set_secret");
     assert_eq!(rows[1].source_ip.as_deref(), Some("203.0.113.7"));
-    assert_eq!(rows[0].actor, "admin");
+    assert_eq!(rows[0].actor_user_id, Some(second_actor));
+    assert_eq!(rows[0].actor_token_id, None);
+    assert_eq!(rows[1].actor_user_id, Some(first_actor));
+    assert_eq!(rows[1].actor_token_id, Some(token_id));
+
+    registry.delete_app(&app).await.ok();
+}
+
+#[compio::test]
+async fn app_audit_is_append_only() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let app = create_test_app(&registry).await;
+
+    audit::log(&registry, AuditEntry {
+        app_id: Some(app),
+        creator_id: None,
+        actor_user_id: Some(Uuid::new_v4()),
+        actor_token_id: None,
+        action: Action::SetVar,
+        resource: Some("APPEND_ONLY_PROBE"),
+        source_ip: None,
+    }).await;
+
+    let conn = raw_conn(&url).await;
+    let rows = conn
+        .query(
+            "SELECT id FROM app_audit WHERE app_id = $1 AND resource = 'APPEND_ONLY_PROBE'",
+            &[&app],
+        )
+        .await
+        .expect("select audit row");
+    let audit_id: Uuid = rows[0].get("id");
+
+    let err = conn
+        .execute("DELETE FROM app_audit WHERE id = $1", &[&audit_id])
+        .await
+        .expect_err("app_audit should reject delete");
+    let message = err.to_string();
+    assert!(
+        message.contains("append-only")
+            || message.contains("permission")
+            || message.contains("db error"),
+        "expected append-only/permission rejection, got: {message}"
+    );
 
     registry.delete_app(&app).await.ok();
 }

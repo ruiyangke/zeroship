@@ -11,7 +11,13 @@ path = "src/main.rs"
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
-compio-postgres = { workspace = true }
+zeroship-authz = { workspace = true }
+# Builder OAuth bootstrap reuses auth/control migrations for
+# `control.oauth_clients` in dev-mode startup.
+zeroship-auth = { workspace = true }
+# `with-chrono-0_4` so the console_sessions store can pull
+# `TIMESTAMPTZ` columns into `chrono::DateTime<Utc>` directly.
+compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
 compio = { workspace = true }
 memmap2 = { workspace = true }
 ntex = { workspace = true }
@@ -29,16 +35,25 @@ zeroize = "1"
 # (B: AsRef<[u8]>) so the helper compiles against ntex's `Bytes` from
 # the request payload. We need `futures::Stream` in the public signature.
 futures = { workspace = true }
-# Auth
-bcrypt = { workspace = true }
-jsonwebtoken = { workspace = true }
+# Auth — OIDC RP only post-U8. PKCE / state RNG + the legacy bcrypt
+# password hasher + JWT cookie minter (which all lived under
+# `auth_service` / `auth_handlers` / `oauth.rs`) were retired alongside
+# those modules. The OIDC RP gets its CSRF + verifier bytes from
+# `zeroship-core` and its JWKS verify path from `zeroship-core`'s
+# `oidc_verify` module.
 base64 = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
+jsonwebtoken = { workspace = true }
+rand = "0.8"
 cyper = { workspace = true }
 url = { workspace = true }
 http = { workspace = true }
-# RNG for OAuth state / PKCE — small, no async runtime dep.
-rand = "0.8"
 tracing = { workspace = true }
+# Phase 3 U7 — control plane OIDC RP module + console session store.
+# `hmac` is already present above (used by the legacy stripe webhook
+# verifier); reuse it here for the stash cookie HMAC envelope.
+thiserror = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and
@@ -50,6 +65,5 @@ zstd = { workspace = true }
 # inputs. The production helper is generic over `B: AsRef<[u8]>` so
 # `bytes` itself isn't a runtime dep.
 bytes = { workspace = true }
-
 [lints]
 workspace = true

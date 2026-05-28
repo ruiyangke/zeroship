@@ -1,7 +1,7 @@
 //! Per-app secrets + vars store. Secrets are encrypted at rest with
 //! AES-256-GCM using a key derived from the control-plane master key.
 //!
-//! Wire format for secrets in Postgres: the `app_secrets.ciphertext`
+//! Wire format for secrets in Postgres: the `control.app_secrets.ciphertext`
 //! BYTEA column holds `nonce(12) || ciphertext || tag(16)` exactly as
 //! produced by `zeroship_core::crypto::encrypt`.
 
@@ -60,6 +60,7 @@ impl From<CryptoError> for EnvError {
 /// service-account blobs) while blocking DoS vectors that would push
 /// megabytes of ciphertext through the env-fetch pipe per app.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;
+const APP_SECRET_AAD_PREFIX: &[u8] = b"zs:control:app_secret:v1\0";
 
 /// Valid env key: uppercase ASCII letter then uppercase letters/digits/underscores.
 /// Matches the CF Workers + Unix-env convention.
@@ -73,6 +74,15 @@ fn valid_key(k: &str) -> bool {
     }
     k.bytes()
         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn app_secret_aad(app_id: Uuid, key_name: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(APP_SECRET_AAD_PREFIX.len() + 16 + 1 + key_name.len());
+    aad.extend_from_slice(APP_SECRET_AAD_PREFIX);
+    aad.extend_from_slice(app_id.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(key_name.as_bytes());
+    aad
 }
 
 pub struct EnvStore {
@@ -155,7 +165,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT ciphertext FROM app_secrets WHERE app_id = $1 AND key_name = $2",
+                "SELECT ciphertext FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
                 &[&app_id, &key_name],
             )
             .await
@@ -175,7 +185,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name, value FROM app_vars WHERE app_id = $1 ORDER BY key_name",
+                "SELECT key_name, value FROM control.app_vars WHERE app_id = $1 ORDER BY key_name",
                 &[&app_id],
             )
             .await
@@ -200,7 +210,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         conn.execute(
-            "INSERT INTO app_vars(app_id, key_name, value) VALUES($1, $2, $3)
+            "INSERT INTO control.app_vars(app_id, key_name, value) VALUES($1, $2, $3)
              ON CONFLICT (app_id, key_name) DO UPDATE
                 SET value = EXCLUDED.value, updated_at = NOW()",
             &[&app_id, &key, &value],
@@ -219,7 +229,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "DELETE FROM app_vars WHERE app_id = $1 AND key_name = $2",
+                "DELETE FROM control.app_vars WHERE app_id = $1 AND key_name = $2",
                 &[&app_id, &key],
             )
             .await
@@ -251,7 +261,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name FROM app_secrets WHERE app_id = $1 ORDER BY key_name",
+                "SELECT key_name FROM control.app_secrets WHERE app_id = $1 ORDER BY key_name",
                 &[&app_id],
             )
             .await
@@ -266,14 +276,15 @@ impl EnvStore {
         if value.len() > MAX_VALUE_BYTES {
             return Err(EnvError::TooLarge(value.len()));
         }
-        let ct = crypto::encrypt(&self.primary_key, value.as_bytes())?;
+        let aad = app_secret_aad(app_id, key);
+        let ct = crypto::encrypt(&self.primary_key, &aad, value.as_bytes())?;
         let conn = self
             .registry
             .conn()
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         conn.execute(
-            "INSERT INTO app_secrets(app_id, key_name, ciphertext) VALUES($1, $2, $3)
+            "INSERT INTO control.app_secrets(app_id, key_name, ciphertext) VALUES($1, $2, $3)
              ON CONFLICT (app_id, key_name) DO UPDATE
                 SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()",
             &[&app_id, &key, &ct],
@@ -292,7 +303,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "DELETE FROM app_secrets WHERE app_id = $1 AND key_name = $2",
+                "DELETE FROM control.app_secrets WHERE app_id = $1 AND key_name = $2",
                 &[&app_id, &key],
             )
             .await
@@ -322,7 +333,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let exists = conn
-            .query("SELECT 1 FROM apps WHERE id = $1", &[&app_id])
+            .query("SELECT 1 FROM control.apps WHERE id = $1", &[&app_id])
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         if exists.is_empty() {
@@ -335,7 +346,7 @@ impl EnvStore {
         }
         let rows = conn
             .query(
-                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                "SELECT key_name, ciphertext FROM control.app_secrets WHERE app_id = $1",
                 &[&app_id],
             )
             .await
@@ -350,7 +361,8 @@ impl EnvStore {
         for r in rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
-            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
+            let aad = app_secret_aad(app_id, &k);
+            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)?;
             // Strict UTF-8 — `from_utf8_lossy` would silently replace
             // invalid bytes with U+FFFD and hand the creator a mangled
             // secret. Treat any non-UTF-8 in plaintext as corruption.
@@ -375,7 +387,7 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name FROM app_env_expose WHERE app_id = $1 ORDER BY key_name",
+                "SELECT key_name FROM control.app_env_expose WHERE app_id = $1 ORDER BY key_name",
                 &[&app_id],
             )
             .await
@@ -415,14 +427,14 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         tx.execute(
-            "DELETE FROM app_env_expose WHERE app_id = $1",
+            "DELETE FROM control.app_env_expose WHERE app_id = $1",
             &[&app_id],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
         for name in &sorted {
             tx.execute(
-                "INSERT INTO app_env_expose(app_id, key_name) VALUES($1, $2)
+                "INSERT INTO control.app_env_expose(app_id, key_name) VALUES($1, $2)
                  ON CONFLICT (app_id, key_name) DO NOTHING",
                 &[&app_id, &name],
             )
@@ -464,7 +476,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let exists = conn
-            .query("SELECT 1 FROM apps WHERE id = $1", &[&app_id])
+            .query("SELECT 1 FROM control.apps WHERE id = $1", &[&app_id])
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         if exists.is_empty() {
@@ -481,7 +493,7 @@ impl EnvStore {
         // (primary first, then any rotation-grace previous keys).
         let secret_rows = conn
             .query(
-                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                "SELECT key_name, ciphertext FROM control.app_secrets WHERE app_id = $1",
                 &[&app_id],
             )
             .await
@@ -494,7 +506,8 @@ impl EnvStore {
         for r in secret_rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
-            let plain = crypto::decrypt_with_keys(&keys, &ct)?;
+            let aad = app_secret_aad(app_id, &k);
+            let plain = crypto::decrypt_with_keys(&keys, &aad, &ct)?;
             let s = String::from_utf8(plain).map_err(|_| EnvError::Crypto(CryptoError::Decrypt))?;
             secrets.insert(k, serde_json::Value::String(s));
         }
@@ -524,7 +537,7 @@ impl EnvStore {
         let conn = self.registry.conn().await.map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT key_name, ciphertext FROM app_secrets WHERE app_id = $1",
+                "SELECT key_name, ciphertext FROM control.app_secrets WHERE app_id = $1",
                 &[&app_id],
             )
             .await
@@ -551,18 +564,19 @@ impl EnvStore {
         for r in rows.iter() {
             let k: String = r.get("key_name");
             let ct: Vec<u8> = r.get("ciphertext");
+            let aad = app_secret_aad(app_id, &k);
 
             // Already-on-primary check: if primary alone decrypts, skip
             // re-encryption (avoids churn on already-current ciphertexts).
-            if crypto::decrypt_with_keys(&primary_only, &ct).is_ok() {
+            if crypto::decrypt_with_keys(&primary_only, &aad, &ct).is_ok() {
                 continue;
             }
 
             // Otherwise: decrypt under any known key, re-encrypt with primary.
-            let plain = Zeroizing::new(crypto::decrypt_with_keys(&all_keys, &ct)?);
-            let new_ct = crypto::encrypt(&self.primary_key, &plain)?;
+            let plain = Zeroizing::new(crypto::decrypt_with_keys(&all_keys, &aad, &ct)?);
+            let new_ct = crypto::encrypt(&self.primary_key, &aad, &plain)?;
             conn.execute(
-                "UPDATE app_secrets SET ciphertext = $1, updated_at = NOW()
+                "UPDATE control.app_secrets SET ciphertext = $1, updated_at = NOW()
                  WHERE app_id = $2 AND key_name = $3",
                 &[&new_ct, &app_id, &k],
             )

@@ -1,0 +1,9 @@
+Hi {{ name }},
+
+Click the link below to verify your email and activate your zeroship account.
+The link expires in {{ expires_in }}.
+
+{{ link }}
+
+If you didn't sign up for zeroship, you can ignore this email — no action
+is needed.

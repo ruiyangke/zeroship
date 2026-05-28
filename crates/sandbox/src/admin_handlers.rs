@@ -321,9 +321,10 @@ fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse 
 pub(crate) fn err_safe(
     status: u16,
     code: &'static str,
-    public_msg: &'static str,
+    public_msg: impl Into<String>,
     raw: impl std::fmt::Display,
 ) -> HttpResponse {
+    let public_msg = public_msg.into();
     if status >= 500 {
         tracing::error!(
             status,

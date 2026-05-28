@@ -28,7 +28,9 @@ use zeroship_control::deploy::{self, IngestError};
 // ---------------------------------------------------------------------------
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    std::env::var("CONTROL_TEST_DB")
+        .or_else(|_| std::env::var("PG_TEST_URL"))
+        .ok()
 }
 
 fn tmpdir() -> PathBuf {
@@ -372,28 +374,4 @@ async fn deploy_dedup_internal() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
-}
-
-// ---------------------------------------------------------------------------
-// Master-key auth
-// ---------------------------------------------------------------------------
-
-/// 401 contract for bad master keys. The auth check itself lives in
-/// `api::check_admin_auth` (pub(crate)) — we exercise the underlying
-/// `validate_control_key` helper here, which is what the deploy
-/// handler ultimately defers to. End-to-end coverage of the 401 wire
-/// behavior lives in `tests/e2e_platform.sh`.
-#[test]
-fn deploy_rejects_invalid_master_key() {
-    let configured = "real-master-key-deadbeef";
-    // Wrong bearer → reject.
-    assert!(!zeroship_core::auth::validate_control_key(
-        "wrong-key",
-        configured,
-    ));
-    // Right bearer → accept.
-    assert!(zeroship_core::auth::validate_control_key(
-        configured,
-        configured,
-    ));
 }

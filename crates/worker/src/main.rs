@@ -15,6 +15,20 @@ use crate::sync::{SharedEnvs, SharedVersions};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+fn dev_insecure_enabled(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--dev-insecure")
+        || std::env::var("ZEROSHIP_DEV_INSECURE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+}
+
+fn validate_worker_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev || !value.is_empty() {
+        return Ok(());
+    }
+    Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
+}
+
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
     pub control_url: String,
@@ -60,6 +74,7 @@ async fn main() -> std::io::Result<()> {
     );
     let control_url = arg_or_env(&args, "--control", "CONTROL_URL", "http://localhost:9090");
     let control_key = arg_or_env(&args, "--control-key", "CONTROL_KEY", "");
+    let insecure_dev = dev_insecure_enabled(&args);
     let max_isolates = arg_or_env(&args, "--max-isolates", "MAX_ISOLATES", "200");
     let poll_interval = arg_or_env(&args, "--poll-interval", "POLL_INTERVAL", "5");
     let db_url = arg_or_env(&args, "--db", "DATABASE_URL", "");
@@ -72,6 +87,11 @@ async fn main() -> std::io::Result<()> {
     // (--bind 0.0.0.0) after ensuring WORKER_KEY is set; without the shared
     // secret, any network-reachable caller can impersonate users and run code.
     let bind_host = arg_or_env(&args, "--bind", "WORKER_BIND", "127.0.0.1");
+
+    if let Err(message) = validate_worker_control_key(&control_key, insecure_dev) {
+        tracing::error!(error = %message, "worker: refusing to start without control key");
+        std::process::exit(1);
+    }
 
     if worker_key.is_empty() {
         if bind_host == "127.0.0.1" || bind_host == "::1" || bind_host == "localhost" {
@@ -200,4 +220,25 @@ fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> Stri
         }
     }
     std::env::var(env_key).unwrap_or_else(|_| default.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_control_key_rejects_missing_in_non_dev() {
+        let err = validate_worker_control_key("", false).unwrap_err();
+        assert!(err.contains("CONTROL_KEY"), "{err}");
+    }
+
+    #[test]
+    fn worker_control_key_accepts_nonempty_in_non_dev() {
+        assert!(validate_worker_control_key("secret", false).is_ok());
+    }
+
+    #[test]
+    fn worker_control_key_allows_missing_in_insecure_dev() {
+        assert!(validate_worker_control_key("", true).is_ok());
+    }
 }

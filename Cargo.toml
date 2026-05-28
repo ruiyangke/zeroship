@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "crates/authz"]
 resolver = "3"
 exclude = [
     "crates/platform",
@@ -41,7 +41,11 @@ url = "2"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+toml = "0.8"
 indexmap = { version = "2", features = ["serde"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
 
 # Crypto
 sha2 = "0.10"
@@ -172,6 +176,8 @@ zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
+zeroship-auth = { path = "crates/auth" }
+zeroship-authz = { path = "crates/authz" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

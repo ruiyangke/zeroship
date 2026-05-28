@@ -29,9 +29,29 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
+cyper = { workspace = true }
+http = { workspace = true }
+rand = "0.8"
+# Phase 8 U1 — gateway-issued wrapper-token signing key. PKCS#8
+# PEM/DER loader for an Ed25519 private key (`openssl genpkey
+# -algorithm ed25519`). The `pkcs8` + `pem` features pull in the
+# `DecodePrivateKey` trait used by `crates/gateway/src/signing.rs`.
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+# Phase 3 U4 — per-origin app session store (`auth.gateway_sessions`).
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+# Phase 3 U4 smoke test runs `zeroship_auth::store::migrations::migrate`
+# against a live PG to guarantee the `auth.gateway_sessions` table
+# exists before the CRUD round-trip. NOT a runtime dep — the gateway
+# bin never imports `zeroship-auth`.
+zeroship-auth = { workspace = true }
+# Phase 8 U1 — signing-key loader round-trip tests write a PKCS#8
+# PEM/DER fixture to a tmpdir and call `signing::load_from_path`.
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

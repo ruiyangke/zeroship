@@ -5,11 +5,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
+use ntex::http::StatusCode;
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
+use zeroship_auth::audit::{self as auth_audit, AuditEvent};
+use zeroship_authz::{Action, Resource};
 
+use crate::authz_guard::AuthzGuard;
 use crate::deploy::{self, IngestError};
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -35,43 +39,6 @@ pub struct SetPlanBody {
 }
 
 // ---------------------------------------------------------------------------
-// Admin auth — require master key on all mutating endpoints
-// ---------------------------------------------------------------------------
-
-pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
-    // Dev-insecure opt-in: skip auth entirely. Production startup
-    // (main.rs) refuses to boot with empty master_key unless this flag
-    // is on. No implicit bypass.
-    if state.insecure_dev {
-        return None;
-    }
-
-    // Authenticated dashboard sessions count as admin. Cookie is
-    // httpOnly, signed JWT — set by /auth/login or /auth/google/callback.
-    if crate::auth_handlers::validate_session(req, state).is_some() {
-        return None;
-    }
-
-    // Fallback: master-key Bearer header — for tooling (CLI, agents).
-    let header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let token = zeroship_core::auth::extract_bearer(header);
-    match token {
-        Some(key) if zeroship_core::auth::validate_control_key(key, state.master_key.expose_secret()) => None,
-        _ => {
-            tracing::warn!(method = %req.method(), path = %req.path(), "control: auth rejected");
-            Some(
-                web::HttpResponse::Unauthorized()
-                    .json(&serde_json::json!({"error":"unauthorized"})),
-            )
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Error → HttpResponse
 // ---------------------------------------------------------------------------
 
@@ -86,9 +53,29 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
         RegistryError::InvalidInput(msg) => {
             web::HttpResponse::BadRequest().json(&serde_json::json!({ "error": msg }))
         }
-        RegistryError::Database(msg) => web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({ "error": msg })),
+        RegistryError::Database(msg) => {
+            infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "registry database error",
+                msg,
+            )
+        }
     }
+}
+
+fn infrastructure_error_response(
+    status: StatusCode,
+    context: &'static str,
+    detail: impl std::fmt::Display,
+) -> web::HttpResponse {
+    let request_id = Uuid::new_v4();
+    tracing::error!(
+        request_id = %request_id,
+        context,
+        error = %detail,
+        "control-plane infrastructure error"
+    );
+    web::HttpResponse::build(status).json(&serde_json::json!({"error": "internal error"}))
 }
 
 // ---------------------------------------------------------------------------
@@ -96,11 +83,13 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 // ---------------------------------------------------------------------------
 
 pub async fn create_app(
-    req: web::HttpRequest,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
     body: Json<CreateAppBody>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+    if let Err(resp) = authz.require(Action::AppsWrite, Resource::Any, &state).await {
+        return resp;
+    }
     match state.registry.create_app(&body.name, &body.plan_id).await {
         Ok(record) => {
             // Include api_key in the create response (it's skipped from normal serialization)
@@ -113,10 +102,12 @@ pub async fn create_app(
 }
 
 pub async fn list_apps(
-    req: web::HttpRequest,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+    if let Err(resp) = authz.require(Action::AppsRead, Resource::Any, &state).await {
+        return resp;
+    }
     match state.registry.list_apps().await {
         Ok(apps) => web::HttpResponse::Ok().json(&apps),
         Err(e) => error_response(e),
@@ -124,9 +115,9 @@ pub async fn list_apps(
 }
 
 pub async fn get_app(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
@@ -135,20 +126,14 @@ pub async fn get_app(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
-    // Admin auth surfaces the app's api_key in the response (the same
-    // bearer-master-key gate that allows create/delete). Anonymous reads
-    // get the public AppRecord without the secret.
-    let is_admin = check_admin_auth(&req, &state).is_none();
+    if let Err(resp) = authz
+        .require(Action::AppsRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.registry.get_app(&uid).await {
-        Ok(Some(record)) => {
-            if is_admin {
-                let mut json = serde_json::to_value(&record).unwrap();
-                json["api_key"] = serde_json::Value::String(record.api_key.clone());
-                web::HttpResponse::Ok().json(&json)
-            } else {
-                web::HttpResponse::Ok().json(&record)
-            }
-        }
+        Ok(Some(record)) => web::HttpResponse::Ok().json(&record),
         Ok(None) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
@@ -156,8 +141,11 @@ pub async fn get_app(
     }
 }
 
-pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: Path<String>) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+pub async fn delete_app(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -165,14 +153,23 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::AppsDelete, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     // Delete from VFS first (ignore NotFound — bundle may not exist yet).
     let app_id_str = uid.to_string();
     if let Err(e) = state.vfs.delete(&app_id_str) {
         match e {
             zeroship_bundle::VfsError::NotFound(_) => { /* ok */ }
             other => {
-                return web::HttpResponse::InternalServerError()
-                    .json(&serde_json::json!({"error": other.to_string()}));
+                return infrastructure_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "delete app bundle",
+                    other,
+                );
             }
         }
     }
@@ -192,14 +189,13 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
 /// algorithm.
 pub async fn deploy(
     req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
     mut body: web::types::Payload,
 ) -> web::HttpResponse {
-    // Auth + uuid + content-type rejections happen BEFORE any body byte
-    // is consumed — so an unauthenticated/malformed caller can't tie up
-    // tmp file slots without first satisfying these gates.
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+    // Authz + uuid + content-type rejections happen BEFORE any body byte
+    // is consumed, so rejected callers cannot tie up tmp file slots.
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -207,6 +203,12 @@ pub async fn deploy(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::AppsDeploy, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
 
     // Hard cut: only `application/x-zship` is accepted. The legacy
     // raw `.appbundle` and `application/javascript` paths are gone.
@@ -256,10 +258,11 @@ pub async fn deploy(
             }));
         }
         Err(e) => {
-            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: streaming to tmp failed");
-            return web::HttpResponse::InternalServerError().json(&serde_json::json!({
-                "error": "deploy temp storage unavailable",
-            }));
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy stream to tmp failed",
+                format_args!("{e}; path={}", tmp_path.display()),
+            );
         }
     }
 
@@ -270,10 +273,12 @@ pub async fn deploy(
     let file = match std::fs::File::open(&tmp_path) {
         Ok(f) => f,
         Err(e) => {
-            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: tmp re-open failed");
             let _ = compio::fs::remove_file(&tmp_path).await;
-            return web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error":"deploy temp readback failed"}));
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy tmp re-open failed",
+                format_args!("{e}; path={}", tmp_path.display()),
+            );
         }
     };
     // SAFETY: tmp file is owned by this handler, written exclusively by
@@ -283,11 +288,13 @@ pub async fn deploy(
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(m) => m,
         Err(e) => {
-            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: mmap failed");
             drop(file);
             let _ = compio::fs::remove_file(&tmp_path).await;
-            return web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error":"deploy temp mmap failed"}));
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy mmap failed",
+                format_args!("{e}; path={}", tmp_path.display()),
+            );
         }
     };
 
@@ -348,25 +355,29 @@ fn ingest_error_to_response(e: IngestError) -> web::HttpResponse {
                 "error": "unsupported content type",
                 "detail": "expected application/x-zship",
             })),
-        IngestError::BlobStoreUnavailable(detail) => web::HttpResponse::ServiceUnavailable()
-            .json(&serde_json::json!({
-                "error": "blob store unavailable",
-                "detail": detail,
-            })),
-        IngestError::Internal(detail) => web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({"error": "internal", "detail": detail})),
+        IngestError::BlobStoreUnavailable(detail) => {
+            infrastructure_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "deploy blob store unavailable",
+                detail,
+            )
+        }
+        IngestError::Internal(detail) => {
+            infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy ingest internal error",
+                detail,
+            )
+        }
     }
 }
 
 pub async fn set_plan(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
     body: Json<SetPlanBody>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) {
-        return resp;
-    }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -374,6 +385,12 @@ pub async fn set_plan(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.registry.set_plan(&uid, &body.plan_id).await {
         Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
         Ok(false) => {
@@ -383,7 +400,11 @@ pub async fn set_plan(
     }
 }
 
-pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::HttpResponse {
+pub async fn get_usage(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -391,6 +412,12 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.registry.get_usage(&uid).await {
         Ok(usage) => web::HttpResponse::Ok().json(&usage),
         Err(e) => error_response(e),
@@ -398,11 +425,10 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
 }
 
 pub async fn get_app_logs(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -410,6 +436,12 @@ pub async fn get_app_logs(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::DeploymentsRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
 
     let mut lines = Vec::new();
     let mut errors = Vec::new();
@@ -429,10 +461,11 @@ pub async fn get_app_logs(
     }
 
     if lines.is_empty() && !errors.is_empty() && errors.len() == state.worker_urls.len() {
-        return web::HttpResponse::BadGateway().json(&serde_json::json!({
-            "error": "worker logs unavailable",
-            "details": errors,
-        }));
+        return infrastructure_error_response(
+            StatusCode::BAD_GATEWAY,
+            "worker logs unavailable",
+            errors.join(" | "),
+        );
     }
 
     web::HttpResponse::Ok().json(&lines)
@@ -475,6 +508,402 @@ async fn fetch_worker_logs(
 
     serde_json::from_slice::<Vec<String>>(&bytes)
         .map_err(|e| format!("parse logs JSON: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// /auth/callback — control plane OIDC RP callback (P3-U7 / U8)
+// ---------------------------------------------------------------------------
+//
+// `console.zeroship.ai` is registered with hydra as a first-party OIDC
+// client (`skip_consent=true`). The control plane is the relying party:
+// it owns the authorize redirect, the stash cookie, and the callback
+// code exchange. This is the canonical (and only) console-auth surface
+// since U8 retired the legacy `/auth/login`, `/auth/register`,
+// `/auth/userinfo`, `/auth/consent`, `/auth/authorize`, and
+// `/auth/google/*` handlers along with `auth_service`.
+
+/// Handle `GET /auth/callback?code=…&state=…` on `console.zeroship.ai`.
+///
+/// Reads the signed `__Host-zs_console_stash` cookie, exchanges the
+/// code with hydra via `ConsoleOidcRp::finish_callback`, persists a
+/// row in `auth.console_sessions`, sets `__Host-zs_console_session`,
+/// clears the stash cookie, and 302s back to the original path the
+/// user was trying to reach when the dance started.
+pub async fn auth_callback(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    let oidc_rp = &state.oidc_rp;
+    let pg = state.auth_pg.as_ref();
+
+    // 1. Parse query (code + state). Hydra may also send `error=...`
+    //    for user-denied consent; surface it directly.
+    let query_str = req.uri().query().unwrap_or("");
+    let mut code: Option<String> = None;
+    let mut state_param: Option<String> = None;
+    let mut oauth_error: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query_str.as_bytes()) {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state_param = Some(v.into_owned()),
+            "error" => oauth_error = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    if let Some(e) = oauth_error {
+        return render_callback_error(state.insecure_dev, &format!("oauth error: {e}"));
+    }
+    let (Some(code), Some(state_param)) = (code, state_param) else {
+        return render_callback_error(
+            state.insecure_dev,
+            "missing code or state query parameter",
+        );
+    };
+
+    // 2. Read the signed stash cookie.
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(stash) = crate::oidc_rp::parse_console_stash_cookie(cookie_header, state.insecure_dev) else {
+        return render_callback_error(state.insecure_dev, "missing stash cookie");
+    };
+
+    // 3. Exchange the code with hydra + verify the ID token.
+    let (claims, original_path) = match oidc_rp
+        .finish_callback(&code, &state_param, &stash)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "control: oidc callback failed");
+            return render_callback_error(
+                state.insecure_dev,
+                oidc_callback_public_error(&e),
+            );
+        }
+    };
+
+    // 4. Create a per-origin console session row.
+    let session = match crate::console_sessions::create(pg, &claims).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "control: console session create failed");
+            return render_callback_error(state.insecure_dev, "session create failed");
+        }
+    };
+    let user_id = Uuid::parse_str(&claims.sub).ok();
+    let ev = AuditEvent {
+        event_type: "console_session_create",
+        outcome: "success",
+        user_id: user_id.as_ref(),
+        client_id: Some("console.zeroship.ai"),
+        auth_method: Some("oidc"),
+        detail: serde_json::json!({
+            "session_id": session.id.to_string(),
+            "issuer": claims.iss,
+            "email_verified": claims.email_verified,
+        }),
+        ..AuditEvent::from_request(&req)
+    };
+    if let Err(err) = auth_audit::emit_strict(pg, &ev).await {
+        tracing::error!(error = %err, "control: console session audit insert failed");
+        return render_callback_error(state.insecure_dev, "session create failed");
+    }
+
+    // 5. 302 back to the original path, set console-session cookie,
+    //    clear the stash cookie. Two `Set-Cookie` headers on one
+    //    response is valid per RFC 6265 §3.
+    let mut builder = web::HttpResponse::Found();
+    builder.header("location", sanitize_oidc_original_path(&original_path));
+    builder.header(
+        "set-cookie",
+        crate::oidc_rp::set_console_session_cookie(&session.id, state.insecure_dev),
+    );
+    builder.header(
+        "set-cookie",
+        crate::oidc_rp::clear_console_stash_cookie(state.insecure_dev),
+    );
+    builder.finish()
+}
+
+/// Render the failed-callback page. Generic on purpose — leaking the
+/// hydra error string to the user would help an attacker probe. The
+/// structured error is already in the control log at warn / error.
+fn render_callback_error(_insecure_dev: bool, msg: &str) -> web::HttpResponse {
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Sign-in failed</title>\
+        <h1>Sign-in failed</h1><p>{}</p>\
+        <p><a href=\"/\">Back to dashboard</a></p>",
+        html_escape(msg),
+    );
+    web::HttpResponse::BadRequest()
+        .content_type("text/html; charset=utf-8")
+        .body(body)
+}
+
+fn oidc_callback_public_error(e: &crate::oidc_rp::OidcRpError) -> &'static str {
+    match e {
+        crate::oidc_rp::OidcRpError::StashInvalid
+        | crate::oidc_rp::OidcRpError::StateMismatch
+        | crate::oidc_rp::OidcRpError::TokenExchange(_)
+        | crate::oidc_rp::OidcRpError::VerifyIdToken(_) => "sign-in could not be completed",
+    }
+}
+
+/// Minimal HTML-escape — enough to make the rendered error page safe
+/// when the upstream message contains user input.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Validate the `__Host-zs_console_session` cookie and return either
+/// the live session or an `Err(HttpResponse)` the caller must return
+/// directly. On miss / expired:
+///   - "wants HTML" (no `Accept` containing `application/json`,
+///     `text/event-stream`, or `application/x-zship`) → 302 to
+///     `/oauth2/auth` (kicks off the dance, original path stashed).
+///   - everything else → 401 JSON envelope.
+///
+/// On success: returns the [`ConsoleSession`] with `idle_expires_at`
+/// already slid forward by `console_sessions::validate`.
+///
+/// `state.insecure_dev = true` builds an `http://` redirect_uri;
+/// production always uses `https://`. The redirect target is computed
+/// from the request's `Host` header.
+///
+/// # Errors
+///
+/// Returns `Err(HttpResponse)` whenever the caller should send a
+/// non-2xx response (missing cookie, validate miss, infrastructure not
+/// configured). The error variant is always a fully-formed response —
+/// never propagated up the stack as a real `Err`.
+pub async fn require_console_session(
+    req: &web::HttpRequest,
+    state: &AppState,
+) -> std::result::Result<crate::console_sessions::ConsoleSession, web::HttpResponse> {
+    let cookie_header = req
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(id) = crate::oidc_rp::parse_console_session_cookie(cookie_header, state.insecure_dev) else {
+        return Err(reject_response(req, state));
+    };
+
+    let pg = state.auth_pg.as_ref();
+    match crate::console_sessions::validate(pg, id).await {
+        Ok(Some(session)) => Ok(session),
+        Ok(None) => Err(reject_response(req, state)),
+        Err(e) => {
+            tracing::error!(error = %e, "control: console_sessions::validate failed");
+            Err(web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error": "session validate failed"})))
+        }
+    }
+}
+
+/// 302 → hydra (HTML clients) or 401 JSON (API clients).
+fn reject_response(req: &web::HttpRequest, state: &AppState) -> web::HttpResponse {
+    if wants_html(req) {
+        start_oidc_redirect(req, state)
+    } else {
+        reject_unauth_response()
+    }
+}
+
+fn reject_unauth_response() -> web::HttpResponse {
+    web::HttpResponse::Unauthorized()
+        .json(&serde_json::json!({"error": "unauthenticated"}))
+}
+
+/// True when the request looks like an HTML/browser navigation.
+/// Anything that prefers JSON/SSE/zship is an API call and gets a
+/// 401, not a 302.
+fn wants_html(req: &web::HttpRequest) -> bool {
+    let accept = req
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    !accept.contains("application/json")
+        && !accept.contains("text/event-stream")
+        && !accept.contains("application/x-zship")
+}
+
+/// Build the 302 → hydra redirect that kicks off the OIDC dance.
+/// Stash cookie carries the PKCE verifier + state + original_path so
+/// the callback can resume.
+fn start_oidc_redirect(req: &web::HttpRequest, state: &AppState) -> web::HttpResponse {
+    let oidc_rp = &state.oidc_rp;
+    let original_path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let original_path = sanitize_oidc_original_path(&original_path);
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let scheme = if state.insecure_dev { "http" } else { "https" };
+    let redirect_uri = format!("{scheme}://{host}/auth/callback");
+
+    let (auth_url, stash) =
+        oidc_rp.build_authorize_redirect(&original_path, &redirect_uri);
+
+    let mut builder = web::HttpResponse::Found();
+    builder.header("location", auth_url);
+    builder.header(
+        "set-cookie",
+        crate::oidc_rp::set_console_stash_cookie(&stash, state.insecure_dev),
+    );
+    builder.finish()
+}
+
+fn sanitize_oidc_original_path(path: &str) -> String {
+    if is_safe_oidc_original_path(path) {
+        path.to_string()
+    } else {
+        "/".to_string()
+    }
+}
+
+fn is_safe_oidc_original_path(path: &str) -> bool {
+    if path == "/" {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'/' {
+        return false;
+    }
+
+    if !matches!(
+        bytes[1],
+        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'
+    ) {
+        return false;
+    }
+
+    let first_segment_end = path[1..]
+        .find('/')
+        .map(|idx| idx + 1)
+        .unwrap_or(path.len());
+    !path[1..first_segment_end].contains(':')
+}
+
+#[cfg(test)]
+mod console_auth_tests {
+    //! Standalone tests for the `require_console_session` helper.
+    //!
+    //! Constructing a full `AppState` here would require a live PG,
+    //! so we exercise the cookie-parsing / `wants_html` / `reject`
+    //! branches via the leaf helpers. The full integration is covered
+    //! by `console_sessions_test.rs` which runs against a real PG.
+
+    use super::*;
+    use ntex::http::header::{self, HeaderValue};
+    use ntex::http::Method;
+    use ntex::web::test::TestRequest;
+
+    #[test]
+    fn wants_html_returns_true_for_browser_accept() {
+        let req = TestRequest::default()
+            .header(
+                header::ACCEPT,
+                HeaderValue::from_static(
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
+            )
+            .method(Method::GET)
+            .to_http_request();
+        assert!(wants_html(&req));
+    }
+
+    #[test]
+    fn wants_html_returns_false_for_json_accept() {
+        let req = TestRequest::default()
+            .header(
+                header::ACCEPT,
+                HeaderValue::from_static("application/json"),
+            )
+            .method(Method::GET)
+            .to_http_request();
+        assert!(!wants_html(&req));
+    }
+
+    #[test]
+    fn wants_html_returns_false_for_sse_accept() {
+        let req = TestRequest::default()
+            .header(
+                header::ACCEPT,
+                HeaderValue::from_static("text/event-stream"),
+            )
+            .method(Method::GET)
+            .to_http_request();
+        assert!(!wants_html(&req));
+    }
+
+    #[test]
+    fn wants_html_returns_true_for_missing_accept() {
+        // Browsers always set Accept; missing-Accept is unusual but the
+        // safe default is "treat as HTML" so curl users still get a
+        // redirect they can follow.
+        let req = TestRequest::default().method(Method::GET).to_http_request();
+        assert!(wants_html(&req));
+    }
+
+    #[test]
+    fn reject_unauth_response_is_401_json() {
+        let resp = reject_unauth_response();
+        assert_eq!(resp.status().as_u16(), 401);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("application/json"), "want JSON, got {ct}");
+    }
+
+    #[test]
+    fn oidc_original_path_rejects_protocol_relative_redirects() {
+        assert_eq!(sanitize_oidc_original_path("//evil.com/path"), "/");
+        assert_eq!(sanitize_oidc_original_path("/\\evil.com/path"), "/");
+        assert_eq!(sanitize_oidc_original_path("/foo:bar/baz"), "/");
+        assert_eq!(sanitize_oidc_original_path("https://evil.com/path"), "/");
+    }
+
+    #[test]
+    fn oidc_original_path_keeps_origin_relative_paths() {
+        assert_eq!(sanitize_oidc_original_path("/"), "/");
+        assert_eq!(
+            sanitize_oidc_original_path("/dashboard?welcome=true"),
+            "/dashboard?welcome=true"
+        );
+        assert_eq!(
+            sanitize_oidc_original_path("/_zs/auth/callback"),
+            "/_zs/auth/callback"
+        );
+    }
+
+    #[test]
+    fn oidc_callback_token_exchange_error_is_generic() {
+        let err = crate::oidc_rp::OidcRpError::TokenExchange(
+            "HTTP 500: hydra says postgres://internal".into(),
+        );
+        assert_eq!(
+            oidc_callback_public_error(&err),
+            "sign-in could not be completed",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +1016,61 @@ where
     }
     drop(file);
     Ok(written)
+}
+
+#[cfg(test)]
+mod error_response_tests {
+    use super::*;
+    use ntex::http::StatusCode;
+    use ntex::util::{stream_recv, BytesMut};
+
+    async fn body_json(mut resp: web::HttpResponse) -> serde_json::Value {
+        let mut body = resp.take_body();
+        let mut buf = BytesMut::new();
+        while let Some(item) = stream_recv(&mut body).await {
+            buf.extend_from_slice(&item.expect("body chunk"));
+        }
+        serde_json::from_slice(&buf).expect("body is JSON")
+    }
+
+    #[compio::test]
+    async fn registry_database_error_response_is_sanitized() {
+        let resp = error_response(RegistryError::Database(
+            "db connect failed: postgres://internal/schema".into(),
+        ));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+    }
+
+    #[compio::test]
+    async fn ingest_infrastructure_error_response_is_sanitized() {
+        let resp = ingest_error_to_response(IngestError::BlobStoreUnavailable(
+            "put_blob_stream(abc): /var/private/blob path".into(),
+        ));
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+
+        let resp = ingest_error_to_response(IngestError::Internal(
+            "put_manifest: postgres://internal".into(),
+        ));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+    }
+
+    #[compio::test]
+    async fn worker_logs_infrastructure_error_response_is_sanitized() {
+        let resp = infrastructure_error_response(
+            StatusCode::BAD_GATEWAY,
+            "worker logs unavailable",
+            "http://worker.internal:8080 HTTP 500: secret body",
+        );
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-import { test, describe, beforeEach, afterEach } from "node:test";
+import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
 
@@ -6,12 +6,18 @@ import { env } from "zeroship";
 // stub (sdks/zeroship-stub) `env` is mutable, so tests inject a fake
 // plugin by assigning `env.auth = { getUser, requireUser }` before
 // calling into the SDK.
+//
+// There is intentionally no browser-fallback path to exercise:
+// post-Phase-3, the gateway HMAC-signs the user into the `ZeroShip-User`
+// header and the runtime exposes the parsed identity via env.auth. The
+// previous `window.__zs_user` fallback was deleted.
 
 const mockUser = {
   id: "usr_0Bk3Np4qR5sT7uV8wYz1A",
   email: "alice@example.com",
   name: "Alice Smith",
   avatar: null,
+  emailVerified: true,
 };
 
 function setEnvAuth(ns: Record<string, unknown> | null): void {
@@ -22,10 +28,9 @@ function setEnvAuth(ns: Record<string, unknown> | null): void {
   }
 }
 
-describe("auth — server context (env.auth plugin)", () => {
+describe("auth — env.auth plugin populated", () => {
   beforeEach(() => {
     setEnvAuth(null);
-    delete (globalThis as any).window;
   });
 
   test("getUser returns user from env.auth", async () => {
@@ -89,105 +94,46 @@ describe("auth — server context (env.auth plugin)", () => {
   });
 });
 
-describe("auth — client context (window global)", () => {
+describe("auth — env.auth absent (no plugin registered)", () => {
   beforeEach(() => {
     setEnvAuth(null);
   });
-  afterEach(() => {
-    delete (globalThis as any).window;
-  });
 
-  test("getUser reads window.__zs_user", async () => {
-    (globalThis as any).window = { __zs_user: mockUser };
-    const { auth } = await import("../src/index.js");
-
-    const user = auth.getUser();
-    assert.equal(user?.id, "usr_0Bk3Np4qR5sT7uV8wYz1A");
-    assert.equal(user?.email, "alice@example.com");
-  });
-
-  test("getUser returns null when window.__zs_user is null", async () => {
-    (globalThis as any).window = { __zs_user: null };
+  test("getUser returns null", async () => {
     const { auth } = await import("../src/index.js");
 
     assert.equal(auth.getUser(), null);
     assert.equal(auth.isLoggedIn(), false);
   });
 
-  test("requireUser throws in client when not authenticated", async () => {
-    (globalThis as any).window = { __zs_user: null };
+  test("requireUser throws", async () => {
     const { auth } = await import("../src/index.js");
 
     assert.throws(() => auth.requireUser(), /Authentication required/);
   });
 });
 
-describe("auth — no context (SSR / build time / pre-AuthPlugin)", () => {
+describe("auth.signOut", () => {
   beforeEach(() => {
     setEnvAuth(null);
-    delete (globalThis as any).window;
   });
 
-  test("getUser returns null when neither env.auth nor window exists", async () => {
+  test("returns a 302 to /__zs/auth/signout", async () => {
     const { auth } = await import("../src/index.js");
 
-    assert.equal(auth.getUser(), null);
-    assert.equal(auth.isLoggedIn(), false);
+    const res = auth.signOut();
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.get("location"), "/__zs/auth/signout");
   });
 
-  test("requireUser throws when neither context exists", async () => {
+  test("encodes returnTo when provided", async () => {
     const { auth } = await import("../src/index.js");
 
-    assert.throws(() => auth.requireUser(), /Authentication required/);
-  });
-});
-
-describe("auth — User type shape", () => {
-  beforeEach(() => {
-    delete (globalThis as any).window;
-  });
-
-  test("user has all expected fields", async () => {
-    setEnvAuth({
-      getUser: () => ({
-        id: "usr_test",
-        email: "a@b.com",
-        name: "Test",
-        avatar: "https://img.com/a.jpg",
-      }),
-      requireUser: () => ({
-        id: "usr_test",
-        email: "a@b.com",
-        name: "Test",
-        avatar: "https://img.com/a.jpg",
-      }),
-    });
-    const { auth } = await import("../src/index.js");
-
-    const user = auth.getUser()!;
-    assert.equal(typeof user.id, "string");
-    assert.equal(typeof user.email, "string");
-    assert.equal(typeof user.name, "string");
-    assert.equal(typeof user.avatar, "string");
-  });
-
-  test("avatar can be null", async () => {
-    setEnvAuth({
-      getUser: () => ({
-        id: "usr_test",
-        email: "a@b.com",
-        name: "Test",
-        avatar: null,
-      }),
-      requireUser: () => ({
-        id: "usr_test",
-        email: "a@b.com",
-        name: "Test",
-        avatar: null,
-      }),
-    });
-    const { auth } = await import("../src/index.js");
-
-    assert.equal(auth.getUser()!.avatar, null);
+    const res = auth.signOut("/dashboard?tab=home");
+    assert.equal(res.status, 302);
+    assert.equal(
+      res.headers.get("location"),
+      "/__zs/auth/signout?return=%2Fdashboard%3Ftab%3Dhome",
+    );
   });
 });

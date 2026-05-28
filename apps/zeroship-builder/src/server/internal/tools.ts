@@ -27,18 +27,17 @@
 import { tool } from "@langchain/core/tools";
 import { interrupt } from "@langchain/langgraph";
 import { z } from "zod";
-import { createControlClient } from "@zeroship/control";
-import { currentHeaders } from "@zeroship/server";
 
 // Schema is shared with the wizard runtime — see `survey-wire.ts` for
 // why and the cross-runtime contract.
-import { surveyInputSchema } from "./survey-wire";
-import { CONTROL_URL, OPENAI_API_KEY } from "./env";
-import { REVIEWER_PROMPT } from "./prompts";
+import { surveyInputSchema } from "./survey-wire.js";
+import { OPENAI_API_KEY } from "./env.js";
+import { REVIEWER_PROMPT } from "./prompts.js";
 import {
   reviewerResponseSchema,
   type ReviewerResponse,
-} from "./reviewer";
+} from "./reviewer.js";
+import { getControlClient } from "../control-client.js";
 
 interface ToolExecuteResponse {
   output: string;
@@ -61,18 +60,6 @@ export interface CreateDeployToolOptions {
   backend: DeploySandboxBackend;
   appId?: string | null;
   apiKey?: string;
-}
-
-interface AppRecordForDeploy {
-  id: string;
-  name: string;
-  deploy_hash: string | null;
-}
-
-interface DeployResponse {
-  deploy_hash: string;
-  blobs_uploaded?: number;
-  blobs_deduped?: number;
 }
 
 const deployInputSchema = z.object({
@@ -170,6 +157,7 @@ export function createDeployTool(options: CreateDeployToolOptions) {
         );
       }
 
+      const control = getControlClient();
       const snapshot = await collectReviewSnapshot(backend);
       const review = await runReviewerGate({
         apiKey: reviewerApiKey,
@@ -199,8 +187,8 @@ export function createDeployTool(options: CreateDeployToolOptions) {
       }
 
       const artifact = await downloadArtifact(backend, DEPLOY_ARTIFACT_PATH);
-      const appRecord = await fetchAppRecord(appId).catch(() => null);
-      const deploy = await postZshipDeploy(appId, artifact);
+      const appRecord = await control.getApp(appId).catch(() => null);
+      const deploy = await control.deploy(appId, artifact);
       const name = appRecord?.name ?? appId;
 
       return JSON.stringify({
@@ -284,32 +272,6 @@ async function downloadArtifact(
     );
   }
   return artifact.content;
-}
-
-async function fetchAppRecord(appId: string): Promise<AppRecordForDeploy> {
-  return controlClient().apps.get(appId);
-}
-
-async function postZshipDeploy(
-  appId: string,
-  artifact: Uint8Array,
-): Promise<DeployResponse> {
-  return controlClient().apps.deploy(appId, artifact);
-}
-
-function controlClient() {
-  return createControlClient({
-    baseUrl: CONTROL_URL(),
-    cookie: requestCookie,
-  });
-}
-
-function requestCookie(): string | null {
-  try {
-    return currentHeaders().get("cookie") ?? null;
-  } catch {
-    return null;
-  }
 }
 
 function capText(value: string, max: number): string {

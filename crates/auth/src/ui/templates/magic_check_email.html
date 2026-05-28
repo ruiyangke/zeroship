@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Check your email · zeroship{% endblock %}
+{% block body %}
+<h2>Check your email</h2>
+<p>We sent a sign-in link to <strong>{{ email }}</strong>. Click the link in your email to continue.</p>
+
+<details class="magic-cross-device">
+  <summary>Clicked the link on a different device?</summary>
+  <p>If you opened the link on your phone (or any device other than this one), you'll see a 6-digit code. Type it here to continue signing in on this device.</p>
+  <form method="POST" action="/magic/complete">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="csrf_nonce" value="{{ csrf_nonce }}">
+    <input type="hidden" name="login_challenge" value="{{ login_challenge }}">
+    <label>6-digit code
+      <input name="code" pattern="[0-9]{6}" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required>
+    </label>
+    <button type="submit">Sign in</button>
+  </form>
+</details>
+
+<p><a href="/login?login_challenge={{ login_challenge }}">Back to sign in</a></p>
+{% endblock %}
