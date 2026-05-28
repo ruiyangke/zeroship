@@ -32,6 +32,7 @@ async fn migrations_apply_cleanly() {
     assert_queryable(&client, "control.platform_policies").await;
     assert_queryable(&client, "control.authz_decisions").await;
     assert_user_delete_cascades_session_state(&client).await;
+    assert_hot_path_indexes(&client).await;
 
     let owner_email = format!("authz-migration-owner-{}@zeroship.test", Uuid::new_v4().simple());
     let actor_email = format!("authz-migration-actor-{}@zeroship.test", Uuid::new_v4().simple());
@@ -120,6 +121,76 @@ async fn migrations_apply_cleanly() {
         .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
         .await
         .expect("cleanup users");
+}
+
+async fn assert_hot_path_indexes(client: &compio_postgres::Client) {
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_identities_user_linked_idx",
+        &["auth.identities", "user_id", "linked_at"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_sessions_user_idx",
+        &["auth.sessions", "user_id"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_gateway_sessions_user_active_idx",
+        &["auth.gateway_sessions", "user_id", "where (revoked_at is null)"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_email_verifications_user_active_idx",
+        &["auth.email_verifications", "user_id", "where (consumed_at is null)"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "control",
+        "permission_tokens_owner_kind_created_idx",
+        &[
+            "control.permission_tokens",
+            "owner_id",
+            "kind",
+            "created_at desc",
+            "id desc",
+        ],
+    )
+    .await;
+}
+
+async fn assert_index_def_contains(
+    client: &compio_postgres::Client,
+    schema: &str,
+    index: &str,
+    expected: &[&str],
+) {
+    let rows = client
+        .query(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2",
+            &[&schema, &index],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("query index {schema}.{index}: {e}"));
+    let def: String = rows
+        .first()
+        .unwrap_or_else(|| panic!("missing index {schema}.{index}"))
+        .get("indexdef");
+    let normalized = def.to_ascii_lowercase();
+    for fragment in expected {
+        assert!(
+            normalized.contains(&fragment.to_ascii_lowercase()),
+            "index {schema}.{index} definition missing `{fragment}`: {def}"
+        );
+    }
 }
 
 async fn assert_user_delete_cascades_session_state(client: &compio_postgres::Client) {

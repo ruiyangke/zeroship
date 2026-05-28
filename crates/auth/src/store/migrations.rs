@@ -36,6 +36,8 @@ const STATEMENTS: &[&str] = &[
         linked_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (provider, subject)
     )",
+    "CREATE INDEX IF NOT EXISTS auth_identities_user_linked_idx
+        ON auth.identities (user_id, linked_at)",
 
     // 5.3 sessions (our IdP login session)
     "CREATE TABLE IF NOT EXISTS auth.sessions (
@@ -72,6 +74,7 @@ const STATEMENTS: &[&str] = &[
         END IF;
     END;
     $$",
+    "CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth.sessions (user_id)",
 
     // 5.4 magic links
     "CREATE TABLE IF NOT EXISTS auth.magic_links (
@@ -122,6 +125,8 @@ const STATEMENTS: &[&str] = &[
         expires_at  TIMESTAMPTZ NOT NULL,
         consumed_at TIMESTAMPTZ
     )",
+    "CREATE INDEX IF NOT EXISTS auth_email_verifications_user_active_idx
+        ON auth.email_verifications (user_id) WHERE consumed_at IS NULL",
 
     // 5.6 email suppressions
     "CREATE TABLE IF NOT EXISTS auth.email_suppressions (
@@ -202,6 +207,8 @@ const STATEMENTS: &[&str] = &[
     END;
     $$",
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_app_idx ON auth.gateway_sessions (app_id, user_id)",
+    "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_user_active_idx
+        ON auth.gateway_sessions (user_id) WHERE revoked_at IS NULL",
     "CREATE INDEX IF NOT EXISTS auth_gateway_sessions_idle_idx ON auth.gateway_sessions (idle_expires_at) WHERE revoked_at IS NULL",
 
     // 5.9b DPoP proof jti replay cache — shared by all gateway
@@ -308,6 +315,8 @@ const STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS permission_tokens_owner_active_idx
         ON control.permission_tokens (owner_id) WHERE revoked_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS permission_tokens_owner_kind_created_idx
+        ON control.permission_tokens (owner_id, kind, created_at DESC, id DESC)",
     "CREATE INDEX IF NOT EXISTS permission_tokens_policies_gin_idx
         ON control.permission_tokens USING GIN (policies)",
     "CREATE TABLE IF NOT EXISTS control.platform_policies (
