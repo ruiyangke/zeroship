@@ -1,0 +1,316 @@
+/*
+ * PreviewCard — hover-anchored rich preview surface.
+ *
+ * Anatomy:
+ *   .zs-preview-card-backdrop      optional scrim layer (opt-in only).
+ *   .zs-preview-card-positioner    Base UI's Floating UI anchored layer
+ *     └─ .zs-preview-card-popup    opaque sheet with --zs-shadow-popover
+ *           ├─ .zs-preview-card-arrow      optional 16×8 SVG triangle
+ *           └─ children                    free composition (img, h*, p, …)
+ *
+ * Base UI emits `data-starting-style` / `data-ending-style` on Popup
+ * (and Backdrop, when present) during open/close transitions — we hook
+ * visible state off those so motion is declarative and reduced-motion
+ * respectful.
+ *
+ * Glass-surface invariant: the Popup declares an opaque `background-
+ * color` (--zs-surface-raised) so axe-core's color-contrast walk
+ * terminates inside the popup. The optional `backdrop-filter` (gated by
+ * --zs-dialog-backdrop-filter, falling back to --zs-material-regular)
+ * gives themes a frosted look when the surface is translucent —
+ * augmentation only, never the sole visual signal.
+ *
+ * Forced-colors mirror (Slice-5/6/7 lesson): every painting selector
+ * (background / color / box-shadow / border / filter) is re-emitted
+ * inside `@media (forced-colors: active)` at equal specificity so the
+ * system palette wins over the oklch token mixes.
+ *
+ * The state selectors that DON'T paint — `[data-starting-style]`,
+ * `[data-ending-style]`, `[data-side="..."]` — set only motion-related
+ * properties (opacity, transform, transform-origin, transition). They
+ * carry no token colors, so forced-colors does not need a mirror;
+ * `@media (prefers-reduced-motion: reduce)` is the relevant guardrail
+ * and is wired below at equal specificity.
+ *
+ * RTL: layout-affecting axes use logical properties (`inline-size`,
+ * `padding-inline`, `padding-block`, `margin-block`). Floating UI
+ * handles the side anchoring physically — the wrapper translates
+ * `inline-start` / `inline-end` to `left` / `right` based on document
+ * direction so the public API stays logical.
+ */
+
+/* ─── Trigger ──────────────────────────────────────────────────────── *
+ *
+ * The default Base UI trigger renders an `<a>`. We don't repaint it —
+ * the link inherits the consumer's styling — but we offer the class
+ * hook as a stable selector for hover affordances. */
+.zs-preview-card-trigger {
+  /* Focus ring participates in the global focus model rather than the
+   * link's own browser default. Inline-styled because no token currently
+   * captures the "focus on hovered surface" shape; the focus ring tokens
+   * are sized for buttons / form controls. */
+  border-radius: var(--zs-radius-1);
+}
+.zs-preview-card-trigger:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* ─── Backdrop (opt-in) ────────────────────────────────────────────── */
+.zs-preview-card-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--zs-z-modal);
+  background-color: var(--zs-scrim);
+  opacity: 1;
+  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-preview-card-backdrop[data-starting-style],
+.zs-preview-card-backdrop[data-ending-style] {
+  opacity: 0;
+}
+
+/* ─── Positioner ───────────────────────────────────────────────────── *
+ *
+ * Base UI's Positioner is the Floating UI anchored layer — we don't
+ * paint it; it carries Floating UI's transform / x / y inline styles.
+ * Stack above modal sheets with a small bump above --zs-z-modal so a
+ * preview card floats over a dialog if both happen to mount. */
+.zs-preview-card-positioner {
+  z-index: calc(var(--zs-z-modal) + 15);
+  outline: none;
+}
+
+/* ─── Popup ────────────────────────────────────────────────────────── */
+.zs-preview-card-popup {
+  /* Glass-surface invariant: opaque background-color + optional
+   * backdrop-filter augmentation. Themes that swap --zs-surface-raised
+   * to translucent get the frosted look automatically; opaque themes
+   * stay solid. */
+  background-color: var(--zs-surface-raised);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
+
+  /* Logical sizing so RTL flows naturally. */
+  min-inline-size: 16rem;
+  /* Default (md). Per-size overrides below resolve via data-size. */
+  max-inline-size: 22rem;
+
+  padding-block: var(--zs-space-4);
+  padding-inline: var(--zs-space-4);
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+
+  border-radius: var(--zs-radius-3);
+  /* Popover-class elevation + hairline edge so the popup reads as a
+   * defined sheet without a scrim. The inner box-shadow simulates the
+   * hairline at the surface edge the brief asks for. */
+  box-shadow:
+    var(--zs-shadow-popover),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+
+  /* The arrow's drop-shadow extends past the popup rect; keep it
+   * visible. */
+  overflow: visible;
+
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
+
+  /* Explicit baseline so the open/close transition origin is portable
+   * across reduced-motion + animation library overrides. */
+  opacity: 1;
+  outline: none;
+  isolation: isolate;
+
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* Per-size max-inline-size presets. Sizes match the brief: sm 16rem,
+ * md 22rem (default), lg 28rem. Logical so RTL is correct. */
+.zs-preview-card-popup[data-size="sm"] {
+  max-inline-size: 16rem;
+}
+.zs-preview-card-popup[data-size="md"] {
+  max-inline-size: 22rem;
+}
+.zs-preview-card-popup[data-size="lg"] {
+  max-inline-size: 28rem;
+}
+
+/* Default styling for common children — these are presentational only,
+ * and every property is composable via the consumer's own class. */
+.zs-preview-card-popup img {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+  border-radius: var(--zs-radius-2);
+  /* Drop the bottom of the image flush against the title gap above. */
+  margin-block-end: var(--zs-space-1);
+}
+.zs-preview-card-popup h1,
+.zs-preview-card-popup h2,
+.zs-preview-card-popup h3,
+.zs-preview-card-popup h4,
+.zs-preview-card-popup h5,
+.zs-preview-card-popup h6 {
+  margin: 0;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+  letter-spacing: var(--zs-text-headline-tracking);
+  color: var(--zs-label);
+}
+.zs-preview-card-popup p {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── enter / leave transitions ────────────────────────────────────── *
+ *
+ * The transform-origin reflects the anchored side so the popup grows
+ * out of the trigger edge, not its own centre. Base UI sets `data-side`
+ * on the popup automatically. The starting / ending state is a slight
+ * `translateY` based on side plus a `scale(0.96)` — opacity 0→1 carries
+ * the fade. */
+.zs-preview-card-popup[data-side="top"] {
+  transform-origin: bottom center;
+}
+.zs-preview-card-popup[data-side="bottom"] {
+  transform-origin: top center;
+}
+.zs-preview-card-popup[data-side="left"] {
+  transform-origin: center right;
+}
+.zs-preview-card-popup[data-side="right"] {
+  transform-origin: center left;
+}
+.zs-preview-card-popup[data-starting-style],
+.zs-preview-card-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}
+.zs-preview-card-popup[data-side="top"][data-starting-style],
+.zs-preview-card-popup[data-side="top"][data-ending-style] {
+  transform: scale(0.96) translateY(var(--zs-space-half));
+}
+.zs-preview-card-popup[data-side="bottom"][data-starting-style],
+.zs-preview-card-popup[data-side="bottom"][data-ending-style] {
+  transform: scale(0.96) translateY(calc(-1 * var(--zs-space-half)));
+}
+
+/* Reduced-motion mirror at equal specificity — every state selector
+ * with a transition above is matched here so the high-priority media
+ * wins. Opacity-only fade keeps the entrance perceptible without
+ * movement; transform is suppressed entirely. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-preview-card-popup,
+  .zs-preview-card-popup[data-starting-style],
+  .zs-preview-card-popup[data-ending-style],
+  .zs-preview-card-popup[data-side="top"][data-starting-style],
+  .zs-preview-card-popup[data-side="top"][data-ending-style],
+  .zs-preview-card-popup[data-side="bottom"][data-starting-style],
+  .zs-preview-card-popup[data-side="bottom"][data-ending-style] {
+    transition: none;
+    transform: none;
+  }
+  .zs-preview-card-backdrop {
+    transition: none;
+  }
+}
+
+/* ─── Arrow ────────────────────────────────────────────────────────── *
+ *
+ * Base UI 1.5 positions the arrow wrapper and stamps `data-side` on it,
+ * but does NOT rotate the wrapper itself. The inner SVG is a fixed
+ * downward-pointing 16×8 triangle (path `M 0,0 L 8,8 L 16,0 Z`), so we
+ * rotate it explicitly per anchored side:
+ *   top    → 0°    (popup above trigger, apex down toward trigger)
+ *   bottom → 180°  (popup below trigger, apex up   toward trigger)
+ *   right  → 90°   (popup right of trigger, apex left  toward trigger)
+ *   left   → 270°  (popup left  of trigger, apex right toward trigger)
+ *
+ * `color` paints the SVG `fill` via `currentColor`, so the arrow
+ * always picks up the popup's themed surface color. */
+.zs-preview-card-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1rem;
+  block-size: 0.5rem;
+  color: var(--zs-surface-raised);
+  /* Sit behind the popup chrome so the rectangle of the arrow wrapper
+   * doesn't paint over the popup body. `isolation: isolate` on
+   * .zs-preview-card-popup establishes the stacking context. */
+  z-index: -1;
+  filter: drop-shadow(
+    0 var(--zs-selection-hairline) var(--zs-space-half)
+      color-mix(in oklch, var(--zs-label) 24%, transparent)
+  );
+}
+.zs-preview-card-arrow > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+.zs-preview-card-arrow[data-side="top"] > svg {
+  transform: rotate(0deg);
+}
+.zs-preview-card-arrow[data-side="right"] > svg {
+  transform: rotate(90deg);
+}
+.zs-preview-card-arrow[data-side="bottom"] > svg {
+  transform: rotate(180deg);
+}
+.zs-preview-card-arrow[data-side="left"] > svg {
+  transform: rotate(270deg);
+}
+
+/* ─── forced-colors mirror ─────────────────────────────────────────── *
+ *
+ * Mirror every painted selector at equal specificity so the system
+ * palette wins over the oklch token mixes. backdrop-filter is dropped
+ * entirely — the high-contrast mode does not honor it and the
+ * fall-through would paint a translucent panel against the system
+ * Canvas, which collapses to invisible. */
+@media (forced-colors: active) {
+  .zs-preview-card-popup {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    forced-color-adjust: none;
+  }
+  .zs-preview-card-popup h1,
+  .zs-preview-card-popup h2,
+  .zs-preview-card-popup h3,
+  .zs-preview-card-popup h4,
+  .zs-preview-card-popup h5,
+  .zs-preview-card-popup h6 {
+    color: CanvasText;
+  }
+  .zs-preview-card-popup p {
+    color: CanvasText;
+  }
+  .zs-preview-card-backdrop {
+    background-color: color-mix(in oklch, CanvasText 40%, transparent);
+  }
+  .zs-preview-card-arrow {
+    color: Canvas;
+    filter: none;
+  }
+  .zs-preview-card-trigger:focus-visible {
+    outline-color: Highlight;
+  }
+}
