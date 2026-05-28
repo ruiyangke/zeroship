@@ -56,7 +56,7 @@ async fn google_federation_creates_new_user() {
     // 1. Boot the mock Google provider on a random port. The mock will
     //    return this canned identity through both `/token` (as ID-token
     //    claims) and `/.well-known/jwks.json` (with a matching key).
-    let test_email = format!("e2e-google-{}@zeroship.test", Uuid::new_v4().simple());
+    let test_email = format!("e2e-google-{}@gmail.com", Uuid::new_v4().simple());
     let mock_user = MockUser {
         subject: format!("google-sub-{}", Uuid::new_v4().simple()),
         email: test_email.clone(),
@@ -295,9 +295,7 @@ async fn google_federation_creates_new_user() {
     assert_eq!(user_name, "E2E Google User", "user.name copied from mock");
     assert!(
         email_verified_at.is_some(),
-        "email_verified_at should be set — provider was trusted (consumer/gmail-equivalent OR hd; \
-         this mock uses no @gmail.com address but provider_trusted_for_email policy is enforced \
-         by the linker — see notes)"
+        "email_verified_at should be set because @gmail.com is trusted when Google verifies it"
     );
 
     let identity_rows = pg
@@ -332,6 +330,212 @@ async fn google_federation_creates_new_user() {
     pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
         .await
         .ok();
+    compio::time::sleep(Duration::from_millis(50)).await;
+    drop(srv);
+    drop(mock);
+}
+
+#[ntex::test]
+async fn google_federation_rejects_untrusted_domain_without_hd() {
+    let (Ok(db_url), Ok(hydra_admin_url)) = (
+        std::env::var("AUTH_DB_URL"),
+        std::env::var("AUTH_HYDRA_ADMIN"),
+    ) else {
+        eprintln!("[e2e_google untrusted] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        return;
+    };
+    let hydra_public = std::env::var("AUTH_HYDRA_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
+
+    let test_email = format!(
+        "e2e-google-untrusted-{}@example.test",
+        Uuid::new_v4().simple()
+    );
+    let mock_user = MockUser {
+        subject: format!("google-sub-{}", Uuid::new_v4().simple()),
+        email: test_email.clone(),
+        email_verified: true,
+        name: Some("E2E Untrusted Google User".into()),
+        picture: Some("https://lh3.googleusercontent.com/test.png".into()),
+        login: None,
+        additional_emails: Vec::new(),
+    };
+    let mock = MockProvider::start(ProviderMode::Google, mock_user.clone()).await;
+    eprintln!("[e2e_google untrusted] mock provider at {}", mock.base);
+
+    let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+        .await
+        .expect("connect pg");
+    compio::runtime::spawn(async move {
+        if let Err(e) = pg_connection.run().await {
+            eprintln!("[e2e_google untrusted] pg connection driver: {e}");
+        }
+    })
+    .detach();
+    migrations::migrate(&pg_client).await.expect("migrate");
+    let pg = Arc::new(pg_client);
+
+    let admin = HydraAdmin::new(&hydra_admin_url);
+    let test_client_id = format!("e2e-google-untrusted-{}", Uuid::new_v4().simple());
+    let test_redirect = "http://127.0.0.1:9999/cb";
+    admin
+        .create_client(&OAuth2Client {
+            client_id: test_client_id.clone(),
+            client_name: Some("e2e google untrusted test".into()),
+            client_secret: Some("e2e-google-secret".into()),
+            grant_types: vec!["authorization_code".into()],
+            response_types: vec!["code".into()],
+            redirect_uris: vec![test_redirect.into()],
+            post_logout_redirect_uris: vec![],
+            scope: "openid".into(),
+            token_endpoint_auth_method: "client_secret_post".into(),
+            subject_type: "public".into(),
+            access_token_strategy: None,
+            id_token_signed_response_alg: Some("EdDSA".into()),
+            audience: vec![],
+            skip_consent: true,
+            require_consent: false,
+            require_logout_consent: false,
+            frontchannel_logout_uri: None,
+            backchannel_logout_uri: None,
+        })
+        .await
+        .expect("create test client");
+
+    let mut cfg_inner = test_auth_config(&db_url, &hydra_admin_url, &hydra_public);
+    cfg_inner.google_client_id = Some("mock-google-client".into());
+    cfg_inner.google_client_secret = Some("mock-google-secret".into());
+    cfg_inner.google_redirect_uri = "http://placeholder/oauth/google/callback".to_string();
+    cfg_inner.google_auth_url = mock.google_auth_url();
+    cfg_inner.google_token_url = mock.google_token_url();
+    cfg_inner.google_jwks_url = mock.google_jwks_url();
+    cfg_inner.google_issuer = mock.google_issuer();
+    let cfg = Arc::new(cfg_inner);
+    let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
+
+    let admin_state = admin.clone();
+    let cfg_state = cfg.clone();
+    let db_state = pg.clone();
+    let jwks_state = google_jwks.clone();
+    let srv = web::test::server(move || {
+        let admin_state = admin_state.clone();
+        let cfg_state = cfg_state.clone();
+        let db_state = db_state.clone();
+        let jwks_state = jwks_state.clone();
+        async move {
+            web::App::new()
+                .state(admin_state)
+                .state(cfg_state)
+                .state(db_state)
+                .state(jwks_state)
+                .middleware(SecurityHeaders)
+                .configure(server::configure(true, false))
+        }
+    })
+    .await;
+    let auth_base = srv.url("").trim_end_matches('/').to_string();
+
+    let http = cyper::Client::new();
+    let mut jar = CookieJar::default();
+    let auth_url = {
+        let q = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("client_id", &test_client_id)
+            .append_pair("response_type", "code")
+            .append_pair("scope", "openid")
+            .append_pair("redirect_uri", test_redirect)
+            .append_pair("state", &format!("st-{}", Uuid::new_v4().simple()))
+            .append_pair("nonce", &format!("nc-{}", Uuid::new_v4().simple()))
+            .append_pair(
+                "code_challenge",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )
+            .append_pair("code_challenge_method", "S256")
+            .finish();
+        format!("{hydra_public}/oauth2/auth?{q}")
+    };
+    let resp = http
+        .request(http::Method::GET, &auth_url)
+        .expect("build /oauth2/auth")
+        .send()
+        .await
+        .expect("send /oauth2/auth");
+    assert_redirect(&resp, "hydra /oauth2/auth → /login");
+    jar.absorb(&resp);
+    let login_loc = location(&resp);
+    let login_challenge =
+        extract_query_param(&login_loc, "login_challenge").expect("login_challenge");
+
+    let start_url = format!("{auth_base}/oauth/google/start?login_challenge={login_challenge}");
+    let resp = http
+        .request(http::Method::GET, &start_url)
+        .expect("build /oauth/google/start")
+        .send()
+        .await
+        .expect("send /oauth/google/start");
+    assert_eq!(resp.status().as_u16(), 302);
+    let mock_authorize_loc = location(&resp);
+    let stash_cookie = read_set_cookie(&resp, "zsidp_google_stash")
+        .expect("zsidp_google_stash on /oauth/google/start");
+
+    let resp = http
+        .request(http::Method::GET, &mock_authorize_loc)
+        .expect("build mock /authorize")
+        .send()
+        .await
+        .expect("send mock /authorize");
+    assert_eq!(resp.status().as_u16(), 302);
+    let callback_url = location(&resp);
+    let callback_with_local = callback_url.replace(
+        "http://placeholder/oauth/google/callback",
+        &format!("{auth_base}/oauth/google/callback"),
+    );
+
+    jar.set("zsidp_google_stash", &stash_cookie);
+    let resp = http
+        .request(http::Method::GET, &callback_with_local)
+        .expect("build /oauth/google/callback")
+        .header("cookie", jar.header())
+        .expect("cookie header")
+        .send()
+        .await
+        .expect("send /oauth/google/callback");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "untrusted Google domain without hd must fail closed, not accept hydra login"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.to_lowercase().contains("internal error") || body.to_lowercase().contains("link"),
+        "error page should not continue OAuth login: body={body}"
+    );
+
+    let user_rows = pg
+        .query(
+            "SELECT id, email_verified_at FROM auth.users WHERE email = $1::citext",
+            &[&test_email.as_str()],
+        )
+        .await
+        .expect("user select");
+    assert!(
+        user_rows.is_empty(),
+        "untrusted Google domain must not auto-create a user row"
+    );
+
+    let identity_rows = pg
+        .query(
+            "SELECT user_id FROM auth.identities WHERE provider = $1 AND subject = $2",
+            &[&"google", &mock_user.subject.as_str()],
+        )
+        .await
+        .expect("identity select");
+    assert!(
+        identity_rows.is_empty(),
+        "untrusted Google domain must not create an identity row"
+    );
+
+    admin.delete_client(&test_client_id).await.ok();
     compio::time::sleep(Duration::from_millis(50)).await;
     drop(srv);
     drop(mock);
