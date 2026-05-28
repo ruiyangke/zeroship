@@ -24,6 +24,7 @@ pub mod registry;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod token_handlers;
+pub mod trusted_clients;
 
 use std::sync::Arc;
 

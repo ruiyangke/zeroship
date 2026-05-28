@@ -12,6 +12,7 @@ use uuid::Uuid;
 use zeroship_authz::{Action, Resource, Scope};
 
 use crate::authz_guard::AuthzGuard;
+use crate::trusted_clients;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -26,7 +27,6 @@ pub struct CreateOauthClientBody {
     pub response_types: Vec<String>,
     pub scope: String,
     pub token_endpoint_auth_method: String,
-    pub skip_consent: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +102,7 @@ pub async fn create_oauth_client(
     if let Err(resp) = ensure_client_absent(&state, &body.client_id).await {
         return resp;
     }
+    let skip_consent = trusted_clients::is_trusted(&body.client_id);
 
     let hydra_body = HydraCreateClientRequest {
         client_id: &body.client_id,
@@ -114,7 +115,7 @@ pub async fn create_oauth_client(
         scope: &body.scope,
         token_endpoint_auth_method: &body.token_endpoint_auth_method,
         subject_type: "public",
-        skip_consent: body.skip_consent,
+        skip_consent,
     };
 
     let hydra = match hydra_create_client(&state.hydra_admin_url, &hydra_body).await {
@@ -122,7 +123,15 @@ pub async fn create_oauth_client(
         Err(err) => return hydra_error_response("create", &body.client_id, err),
     };
 
-    let persisted = match insert_oauth_client(&state, &body, &scopes, authz.principal_id).await {
+    let persisted = insert_oauth_client(
+        &state,
+        &body,
+        &scopes,
+        authz.principal_id,
+        skip_consent,
+    )
+    .await;
+    let persisted = match persisted {
         Ok(row) => row,
         Err(resp) => {
             let _ = hydra_delete_client(&state.hydra_admin_url, &body.client_id).await;
@@ -320,6 +329,7 @@ async fn insert_oauth_client(
     body: &CreateOauthClientBody,
     scopes: &[String],
     created_by: Uuid,
+    skip_consent: bool,
 ) -> Result<OauthClientRow, web::HttpResponse> {
     let redirect_uris: Vec<&str> = body.redirect_uris.iter().map(String::as_str).collect();
     let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
@@ -339,7 +349,7 @@ async fn insert_oauth_client(
                 &body.logo_uri,
                 &redirect_uris,
                 &scopes,
-                &body.skip_consent,
+                &skip_consent,
                 &created_by,
             ],
         )

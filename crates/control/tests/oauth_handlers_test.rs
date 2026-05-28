@@ -355,8 +355,7 @@ fn client_body(client_id: &str) -> Value {
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "scope": "apps:read apps:deploy env:read",
-        "token_endpoint_auth_method": "client_secret_basic",
-        "skip_consent": false
+        "token_endpoint_auth_method": "client_secret_basic"
     })
 }
 
@@ -370,6 +369,18 @@ async fn count_client(state: &AppState, client_id: &str) -> i64 {
         .await
         .expect("count oauth client");
     rows[0].get("n")
+}
+
+async fn persisted_skip_consent(state: &AppState, client_id: &str) -> bool {
+    let rows = state
+        .auth_pg
+        .query(
+            "SELECT skip_consent FROM control.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .expect("select oauth client skip_consent");
+    rows[0].get("skip_consent")
 }
 
 macro_rules! init_control {
@@ -475,6 +486,68 @@ async fn admin_can_register_oauth_client_proxies_to_hydra() {
     assert_eq!(hydra_body["token_endpoint_auth_method"], "client_secret_basic");
     assert_eq!(hydra_body["skip_consent"], false);
     assert!(hydra_body.get("require_consent").is_none());
+
+    fx.cleanup_clients(&[client_id]).await;
+    pat.cleanup(&fx.state).await;
+}
+
+#[compio::test]
+async fn skip_consent_is_derived_from_whitelist_not_body() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "trusted-client").await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let app = init_control!(fx);
+    let client_id = "zeroship-builder".to_string();
+    fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
+
+    let req = test::TestRequest::post()
+        .uri("/admin/oauth-clients")
+        .header("authorization", pat.bearer())
+        .set_json(&client_body(&client_id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(persisted_skip_consent(&fx.state, &client_id).await);
+    let requests = fx.hydra.requests();
+    assert_eq!(requests.len(), 1);
+    let hydra_body = requests[0].body.as_ref().expect("hydra body");
+    assert_eq!(hydra_body["client_id"].as_str(), Some(client_id.as_str()));
+    assert_eq!(hydra_body["skip_consent"], true);
+
+    fx.cleanup_clients(&[client_id]).await;
+    pat.cleanup(&fx.state).await;
+}
+
+#[compio::test]
+async fn arbitrary_client_gets_skip_consent_false() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "untrusted-client").await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let app = init_control!(fx);
+    let client_id = "acme-ci".to_string();
+    fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
+
+    let req = test::TestRequest::post()
+        .uri("/admin/oauth-clients")
+        .header("authorization", pat.bearer())
+        .set_json(&client_body(&client_id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert!(!persisted_skip_consent(&fx.state, &client_id).await);
+    let requests = fx.hydra.requests();
+    assert_eq!(requests.len(), 1);
+    let hydra_body = requests[0].body.as_ref().expect("hydra body");
+    assert_eq!(hydra_body["client_id"].as_str(), Some(client_id.as_str()));
+    assert_eq!(hydra_body["skip_consent"], false);
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
