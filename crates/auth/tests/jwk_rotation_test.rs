@@ -9,12 +9,32 @@
 //! being set; absent either, the tests print `skip` and pass.
 
 use compio_postgres::{connect, NoTls};
+use std::sync::Mutex;
 use zeroship_auth::cron::jwk_rotation;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::store::migrations;
 
+// Both tests in this file mutate the same `auth.cron_state` rows
+// (`hydra.openid.id-token`, `hydra.jwt.access-token`) and the same
+// live hydra JWKS sets. When cargo's test runner schedules them in
+// parallel, one test's `DELETE FROM auth.cron_state` clobbers the
+// other's setup — flaky.
+//
+// We serialize the two via a file-local mutex. `#[serial_test::serial]`
+// would be cleaner but doesn't compose with `#[compio::test]` (the
+// compio attribute consumes the inner `async fn` and emits a sync
+// `#[test]` wrapper, leaving no obvious place for the `serial_test`
+// macro to splice in). A plain `Mutex<()>` guard at the top of each
+// test body achieves the same effect without coupling to macro order.
+//
+// Other test files are unaffected — they target different DB rows
+// / hydra sets and remain parallel-safe with this file.
+static JWK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[compio::test]
 async fn rotation_first_tick_records_baseline_no_action() {
+    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
         eprintln!("skip: AUTH_DB_URL unset");
         return;
@@ -93,6 +113,8 @@ async fn rotation_first_tick_records_baseline_no_action() {
 
 #[compio::test]
 async fn rotation_due_prepends_new_keys() {
+    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
         eprintln!("skip: AUTH_DB_URL unset");
         return;
