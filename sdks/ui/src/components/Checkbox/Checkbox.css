@@ -1,0 +1,295 @@
+/*
+ * Checkbox — selection primitive (independent boolean).
+ *
+ * Anatomy:
+ *   .zs-checkbox                  — focusable surface (Base UI's <span>)
+ *     ├─ .zs-checkbox__indicator  — checkmark / minus glyph (SVG)
+ *     └─ hidden <input>           — Base UI renders this beside the chip
+ *
+ * Modifier classes (one of each axis):
+ *   size:     --sm | --md | --lg
+ *   variant:  --default | --tinted
+ *
+ * State surface (driven by data-* attributes Base UI emits):
+ *   data-checked | data-indeterminate | data-disabled | data-readonly
+ *
+ * Design guarantees encoded here:
+ *
+ *   1. Current state must be OBVIOUS at a glance. Five visual states
+ *      (unchecked / checked / indeterminate / disabled / focused) are
+ *      distinguishable without color alone — shape + fill + ring carry
+ *      the signal so a colorblind user reads the same state a sighted
+ *      user does.
+ *
+ *   2. Checked is the SYSTEM accent — we don't recolor it by default.
+ *      Overriding via --zs-checkbox-fill-checked is the consumer's
+ *      escape hatch; the default keeps the system-control affordance.
+ *
+ *   3. Hit target ≥ 1.75rem no matter how small the visible chip is.
+ *      The whole row (chip + label) is the click surface; the chip
+ *      visually scales with `size` but the wrapping <label> stays
+ *      tappable on coarse pointers (44pt minimum via min-block-size).
+ *
+ * Layout discipline:
+ *   - 0.0625rem hairline via box-shadow inset (no `border:`) so state
+ *     changes don't shift the row.
+ *   - Logical properties (margin-inline-*, inset-inline-*) so RTL flips
+ *     for free.
+ *   - opaque background-color on every visible element so the glass
+ *     surface composes correctly under axe contrast walks.
+ */
+
+/* ─── component-local tokens (consumer override hooks) ──────────────── */
+.zs-checkbox {
+  /* Visual chip sizes — smaller than the control row but proportional. */
+  --zs-checkbox-size-sm: 1rem;       /* 16 */
+  --zs-checkbox-size-md: 1.125rem;   /* 18 — default */
+  --zs-checkbox-size-lg: 1.25rem;    /* 20 */
+
+  /* Default palette: accent fill when checked, label-mix border when
+     unchecked. Override --zs-checkbox-fill-checked to recolor (rare). */
+  --zs-checkbox-bg: var(--zs-input-bg);
+  --zs-checkbox-bg-hover: var(--zs-input-bg-hover);
+  --zs-checkbox-border: var(--zs-input-border);
+  --zs-checkbox-border-hover: var(--zs-input-border-hover);
+  --zs-checkbox-fill-checked: var(--zs-accent);
+  --zs-checkbox-ink-checked: var(--zs-accent-ink);
+  --zs-checkbox-border-checked: var(--zs-accent);
+
+  /* Tinted variant softens the unchecked surface so it reads as
+     "secondary affordance" on loud parents. */
+  --zs-checkbox-bg-tinted: var(--zs-fill-tertiary);
+  --zs-checkbox-bg-tinted-hover: var(--zs-fill-secondary);
+}
+
+/* ─── the wrapping focusable row (.zs-checkbox-field) ──────────────── *
+ *
+ * Wraps the chip + Base UI's hidden <input>. The native <label> sits
+ * outside in the consumer's Field, so the row stays a simple inline
+ * cluster. Min-block-size grows on coarse pointers so a finger lands
+ * inside the row even when the chip itself is 1rem.
+ */
+.zs-checkbox-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  min-block-size: 1.75rem;          /* 28 — keeps a comfortable click box */
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  cursor: pointer;
+}
+@media (pointer: coarse) {
+  .zs-checkbox-field {
+    min-block-size: var(--zs-hit-min);
+  }
+}
+.zs-checkbox-field[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── the visible chip (.zs-checkbox) ──────────────────────────────── */
+.zs-checkbox {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--zs-checkbox-size-md);
+  block-size: var(--zs-checkbox-size-md);
+  border-radius: var(--zs-radius-1);
+  background-color: var(--zs-checkbox-bg);
+  color: var(--zs-checkbox-ink-checked);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-checkbox-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+  /* Keyboard focus lives on the hidden <input> Base UI manages; the
+     chip mirrors via :has() so the visual ring tracks the actual
+     focus. Older browsers without :has() still get a working
+     checkbox via the underlying input; the ring just won't paint. */
+  cursor: pointer;
+}
+
+/* Strip any UA outline on the hidden input — the chip carries the ring. */
+.zs-checkbox-field > input {
+  /* hidden input visuals: Base UI already positions it absolutely; we
+     ensure no UA chrome leaks through if a future Base UI version
+     changes that. */
+  outline: none;
+}
+
+/* ─── sizes ─────────────────────────────────────────────────────────── */
+.zs-checkbox--sm {
+  inline-size: var(--zs-checkbox-size-sm);
+  block-size: var(--zs-checkbox-size-sm);
+}
+.zs-checkbox--lg {
+  inline-size: var(--zs-checkbox-size-lg);
+  block-size: var(--zs-checkbox-size-lg);
+  border-radius: var(--zs-radius-2);
+}
+
+/* ─── variants ──────────────────────────────────────────────────────── */
+.zs-checkbox--tinted {
+  background-color: var(--zs-checkbox-bg-tinted);
+  box-shadow:
+    inset 0 0 0 0.0625rem transparent,
+    0 0 0 0 transparent;
+}
+
+/* ─── hover (hover-capable pointers only) ──────────────────────────── */
+@media (hover: hover) {
+  .zs-checkbox-field:not([data-disabled]):hover .zs-checkbox:not([data-checked]):not([data-indeterminate]) {
+    background-color: var(--zs-checkbox-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-checkbox-border-hover),
+      0 0 0 0 transparent;
+  }
+  .zs-checkbox-field:not([data-disabled]):hover .zs-checkbox--tinted:not([data-checked]):not([data-indeterminate]) {
+    background-color: var(--zs-checkbox-bg-tinted-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem transparent,
+      0 0 0 0 transparent;
+  }
+}
+
+/* ─── checked + indeterminate share the accent fill ─────────────────── */
+.zs-checkbox[data-checked],
+.zs-checkbox[data-indeterminate] {
+  background-color: var(--zs-checkbox-fill-checked);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-checkbox-border-checked),
+    0 0 0 0 transparent;
+}
+
+/* ─── focus ring on the chip when the hidden input is :focus-visible ─ */
+.zs-checkbox-field:has(> input:focus-visible) .zs-checkbox {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-checkbox-border-checked),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+}
+.zs-checkbox-field:has(> input:focus-visible) .zs-checkbox:not([data-checked]):not([data-indeterminate]) {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-checkbox-border),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+}
+
+/* ─── disabled ──────────────────────────────────────────────────────── */
+.zs-checkbox[data-disabled] {
+  background-color: var(--zs-input-bg-disabled);
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-checkbox-border),
+    0 0 0 0 transparent;
+}
+.zs-checkbox[data-disabled][data-checked],
+.zs-checkbox[data-disabled][data-indeterminate] {
+  background-color: var(--zs-fill-secondary);
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── readonly — distinct from disabled: the chip looks live but the
+   row stops accepting toggle clicks (the underlying input handles
+   that). Same surface as default unchecked plus a softer cursor. */
+.zs-checkbox[data-readonly] {
+  cursor: default;
+}
+
+/* ─── the indicator glyph ───────────────────────────────────────────── */
+.zs-checkbox__indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+  block-size: 100%;
+  color: currentColor;
+  /* Reduced-motion users get an instant swap; everyone else gets a
+     subtle fade so the glyph doesn't pop. */
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-checkbox:not([data-checked]):not([data-indeterminate]) .zs-checkbox__indicator {
+  opacity: 0;
+}
+.zs-checkbox[data-checked] .zs-checkbox__indicator,
+.zs-checkbox[data-indeterminate] .zs-checkbox__indicator {
+  opacity: 1;
+}
+.zs-checkbox__indicator svg {
+  inline-size: 75%;       /* 0.75em of the chip — same proportion across sizes */
+  block-size: 75%;
+  display: block;
+}
+
+/* The checkmark and the indeterminate bar are two distinct paths so
+   the visual signal isn't carried by color alone — shape changes too. */
+.zs-checkbox__indicator-check {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;        /* SVG viewBox unit, not CSS px */
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.zs-checkbox__indicator-minus {
+  fill: currentColor;
+}
+
+/* ─── label slot — pairs naturally with Field.Label, but we also
+   support a same-row label via consumer markup. ────────────────────── */
+.zs-checkbox-field__text {
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: inherit;
+  user-select: none;
+}
+
+/* ─── reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-checkbox,
+  .zs-checkbox__indicator {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors / Windows High Contrast ─────────────────────────── *
+ *
+ * Forced-colors strips most color but preserves system semantic tokens
+ * (Canvas, CanvasText, Highlight, GrayText). Reach for those so the
+ * chip stays legible and the checked state stays announced visually.
+ */
+@media (forced-colors: active) {
+  .zs-checkbox {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+    forced-color-adjust: none;
+  }
+  .zs-checkbox[data-checked],
+  .zs-checkbox[data-indeterminate] {
+    background-color: Highlight;
+    color: HighlightText;
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0 transparent;
+  }
+  .zs-checkbox-field:has(> input:focus-visible) .zs-checkbox {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-checkbox[data-disabled] {
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-checkbox-field[data-disabled] {
+    color: GrayText;
+  }
+}

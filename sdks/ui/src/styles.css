@@ -19,6 +19,9 @@
 @import "./components/Card/Card.css";
 @import "./components/Dialog/Dialog.css";
 @import "./components/AlertDialog/AlertDialog.css";
+@import "./components/Checkbox/Checkbox.css";
+@import "./components/Switch/Switch.css";
+@import "./components/Radio/Radio.css";
 
 *,
 *::before,

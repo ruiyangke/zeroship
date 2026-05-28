@@ -1,4 +1,9 @@
-export { Field, useFieldContext } from "./Field";
+export {
+  Field,
+  useFieldContext,
+  useFieldVisualSize,
+  useFieldDisabledContext,
+} from "./Field";
 export type {
   FieldProps,
   FieldOrientation,

@@ -1,0 +1,250 @@
+/*
+ * Radio + RadioGroup — mutually-exclusive choice primitive.
+ *
+ * Anatomy:
+ *   .zs-radio-group           — Base UI's <div> with the group context
+ *     ├─ .zs-radio-field      — focusable row (label + chip + hidden input)
+ *     │   ├─ .zs-radio        — visible chip (Base UI's <span>)
+ *     │   │   └─ .zs-radio__indicator — inner dot (Base UI Indicator)
+ *     │   └─ hidden <input>
+ *     └─ … repeated …
+ *
+ * Modifier classes:
+ *   group orientation: --vertical | --horizontal
+ *   size:              --sm | --md | --lg
+ *
+ * State surface (driven by data-* Base UI emits):
+ *   data-checked | data-disabled | data-readonly
+ *
+ * Design guarantees:
+ *
+ *   1. Radio is for MUTUALLY EXCLUSIVE options — pick exactly one.
+ *      Two to five options is the comfortable range; beyond that a
+ *      Select is the better surface (later slice).
+ *
+ *   2. Keyboard roving lives in Base UI's RadioGroup — Arrow keys
+ *      move focus AND selection between siblings. We don't override
+ *      it; we just verify the wiring in the aria-wiring assertions.
+ *
+ *   3. Five visual states (unchecked / checked / disabled-unchecked
+ *      / disabled-checked / focused). The CHECKED state paints both
+ *      the chip's ring AND a centered dot — two signals (ring + dot)
+ *      so a colorblind user reads checked vs unchecked from shape,
+ *      not from hue.
+ *
+ *   4. Hit target ≥ 1.75rem (fine), ≥ 2.75rem (coarse). The wrapping
+ *      <label> when used inline is the click surface.
+ *
+ *   5. RTL: the chip stays on the inline-start of its row; the dot
+ *      stays centered inside the chip. Logical properties carry the
+ *      flip without per-direction CSS.
+ */
+
+/* ─── component-local tokens ────────────────────────────────────────── */
+.zs-radio {
+  --zs-radio-size-sm: 1rem;       /* 16 */
+  --zs-radio-size-md: 1.125rem;   /* 18 */
+  --zs-radio-size-lg: 1.25rem;    /* 20 */
+
+  --zs-radio-bg: var(--zs-input-bg);
+  --zs-radio-bg-hover: var(--zs-input-bg-hover);
+  --zs-radio-border: var(--zs-input-border);
+  --zs-radio-border-hover: var(--zs-input-border-hover);
+  --zs-radio-fill-checked: var(--zs-accent);
+  --zs-radio-border-checked: var(--zs-accent);
+  --zs-radio-dot: var(--zs-accent-ink);
+}
+
+/* ─── group container ───────────────────────────────────────────────── */
+.zs-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  min-inline-size: 0;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+.zs-radio-group--horizontal {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--zs-space-4);
+  align-items: center;
+}
+
+/* ─── focusable row ─────────────────────────────────────────────────── */
+.zs-radio-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  min-block-size: 1.75rem;
+  cursor: pointer;
+}
+@media (pointer: coarse) {
+  .zs-radio-field {
+    min-block-size: var(--zs-hit-min);
+  }
+}
+.zs-radio-field[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── the chip ──────────────────────────────────────────────────────── */
+.zs-radio {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--zs-radio-size-md);
+  block-size: var(--zs-radio-size-md);
+  border-radius: var(--zs-radius-full);
+  background-color: var(--zs-radio-bg);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-radio-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+  cursor: pointer;
+}
+
+/* ─── sizes ─────────────────────────────────────────────────────────── */
+.zs-radio--sm {
+  inline-size: var(--zs-radio-size-sm);
+  block-size: var(--zs-radio-size-sm);
+}
+.zs-radio--lg {
+  inline-size: var(--zs-radio-size-lg);
+  block-size: var(--zs-radio-size-lg);
+}
+
+/* ─── hover ─────────────────────────────────────────────────────────── */
+@media (hover: hover) {
+  .zs-radio-field:not([data-disabled]):hover .zs-radio:not([data-checked]) {
+    background-color: var(--zs-radio-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-radio-border-hover),
+      0 0 0 0 transparent;
+  }
+}
+
+/* ─── checked: thicker accent ring + inner dot ──────────────────────── */
+.zs-radio[data-checked] {
+  background-color: var(--zs-radio-bg);
+  box-shadow:
+    inset 0 0 0 0.125rem var(--zs-radio-border-checked),
+    0 0 0 0 transparent;
+}
+
+/* ─── focus ring on the chip when the hidden input is :focus-visible ─ */
+.zs-radio-field:has(> input:focus-visible) .zs-radio {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-radio-border),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+}
+.zs-radio-field:has(> input:focus-visible) .zs-radio[data-checked] {
+  box-shadow:
+    inset 0 0 0 0.125rem var(--zs-radio-border-checked),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+}
+
+/* ─── disabled ──────────────────────────────────────────────────────── */
+.zs-radio[data-disabled] {
+  background-color: var(--zs-input-bg-disabled);
+  cursor: not-allowed;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-radio-border),
+    0 0 0 0 transparent;
+}
+.zs-radio[data-disabled][data-checked] {
+  box-shadow:
+    inset 0 0 0 0.125rem var(--zs-fill-secondary),
+    0 0 0 0 transparent;
+}
+
+/* ─── readonly ──────────────────────────────────────────────────────── */
+.zs-radio[data-readonly] {
+  cursor: default;
+}
+
+/* ─── the inner dot ─────────────────────────────────────────────────── *
+ *
+ * Rendered by Base UI's RadioIndicator. The dot is a single sized
+ * span; CSS draws it via `background-color`. Reduced-motion users
+ * get an instant on/off; everyone else gets a tiny scale-in.
+ */
+.zs-radio__indicator {
+  display: inline-block;
+  inline-size: 50%;
+  block-size: 50%;
+  border-radius: var(--zs-radius-full);
+  background-color: var(--zs-radio-fill-checked);
+  transform-origin: center;
+  scale: 0;
+  transition:
+    scale var(--zs-motion-fast) var(--zs-motion-ease),
+    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-radio[data-checked] .zs-radio__indicator {
+  scale: 1;
+}
+.zs-radio[data-disabled] .zs-radio__indicator {
+  background-color: var(--zs-fill-secondary);
+}
+
+/* ─── label slot ────────────────────────────────────────────────────── */
+.zs-radio-field__text {
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: inherit;
+  user-select: none;
+}
+
+/* ─── reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-radio,
+  .zs-radio__indicator {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ─────────────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-radio {
+    background-color: Canvas;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+    forced-color-adjust: none;
+  }
+  .zs-radio[data-checked] {
+    box-shadow:
+      inset 0 0 0 0.125rem Highlight,
+      0 0 0 0 transparent;
+  }
+  .zs-radio__indicator {
+    background-color: Highlight;
+  }
+  .zs-radio-field:has(> input:focus-visible) .zs-radio {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-radio[data-disabled] {
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-radio[data-disabled][data-checked] {
+    box-shadow:
+      inset 0 0 0 0.125rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-radio[data-disabled] .zs-radio__indicator {
+    background-color: GrayText;
+  }
+  .zs-radio-field[data-disabled] {
+    color: GrayText;
+  }
+}

@@ -656,6 +656,201 @@ await open("components-dialog--sizes");
   report("Dialog focus restore on close", restored);
 }
 
+/* ─── 18. Checkbox WithLabel — clicking label toggles the chip (slice 4) ── */
+await open("components-checkbox--with-label");
+{
+  const chip = page.locator('[data-testid="checkbox-with-label"]');
+  await chip.waitFor({ state: "attached", timeout: 5000 });
+  // The Field.Label is the labelled element — Base UI auto-wires htmlFor
+  // to the hidden input the CheckboxRoot emits. Click the label and the
+  // hidden input's `checked` should flip.
+  const label = page.getByText("Subscribe to product emails");
+  await label.waitFor({ state: "visible", timeout: 5000 });
+  await label.click();
+  await page.waitForTimeout(100);
+  // Locate the hidden <input> Base UI ships next to the chip. The chip
+  // itself is a <button> with `data-testid` — the input lives as its
+  // sibling inside the field row.
+  const isChecked = await page.evaluate(() => {
+    const chip = document.querySelector('[data-testid="checkbox-with-label"]');
+    if (!chip) return false;
+    const parent = chip.parentElement;
+    if (!parent) return false;
+    const input = parent.querySelector("input[type=\"checkbox\"]");
+    return input instanceof HTMLInputElement ? input.checked : false;
+  });
+  report("Checkbox WithLabel — label click toggles", isChecked, `checked=${isChecked}`);
+}
+
+/* ─── 19. Checkbox WithDescription — aria-describedby refs description ── */
+await open("components-checkbox--with-description");
+{
+  const chip = page.locator('[data-testid="checkbox-with-description"]');
+  await chip.waitFor({ state: "attached", timeout: 5000 });
+  const describedBy = await page.evaluate(() => {
+    const chip = document.querySelector('[data-testid="checkbox-with-description"]');
+    if (!chip) return null;
+    const parent = chip.parentElement;
+    if (!parent) return null;
+    const input = parent.querySelector("input[type=\"checkbox\"]");
+    return input ? input.getAttribute("aria-describedby") : null;
+  });
+  const ids = (describedBy ?? "").split(/\s+/).filter(Boolean);
+  // Verify each referenced id maps to a real element whose text matches
+  // the Field.Description content — that confirms the wiring is real and
+  // not a stale id sitting on the input.
+  let descriptionMatched = false;
+  for (const id of ids) {
+    const text = await page
+      .locator(`[id="${id}"]`)
+      .first()
+      .innerText()
+      .catch(() => "");
+    if (text.includes("at most one update per week")) {
+      descriptionMatched = true;
+      break;
+    }
+  }
+  report(
+    "Checkbox WithDescription — aria-describedby refs Field.Description",
+    ids.length > 0 && descriptionMatched,
+    `aria-describedby="${describedBy}" (ids=${ids.length}, matched=${descriptionMatched})`,
+  );
+}
+
+/* ─── 20. Checkbox Required — submit empty + aria-invalid + Field.Error ── */
+await open("components-checkbox--required");
+{
+  const submit = page.locator('[data-testid="checkbox-required-submit"]');
+  await submit.waitFor({ state: "visible", timeout: 5000 });
+  await submit.click();
+  // Native form submission of an unchecked required input fires
+  // `valueMissing`; Base UI Field flips `aria-invalid` on the input
+  // and renders the Field.Error subtree. Allow the validity event to
+  // settle before reading the DOM.
+  await page.waitForTimeout(300);
+  const ariaInvalid = await page.evaluate(() => {
+    const chip = document.querySelector('[data-testid="checkbox-required"]');
+    if (!chip) return null;
+    const parent = chip.parentElement;
+    if (!parent) return null;
+    const input = parent.querySelector("input[type=\"checkbox\"]");
+    return input ? input.getAttribute("aria-invalid") : null;
+  });
+  const errorText = await page
+    .getByText("You must agree before continuing.")
+    .first()
+    .innerText()
+    .catch(() => "");
+  const ok = ariaInvalid === "true" && errorText.length > 0;
+  report(
+    "Checkbox Required — aria-invalid + Field.Error after submit",
+    ok,
+    `aria-invalid=${ariaInvalid} errorText="${errorText}"`,
+  );
+}
+
+/* ─── 21. Switch ImmediateEffect — status flips within 100ms ─────────── */
+await open("components-switch--immediate-effect");
+{
+  const sw = page.locator('[data-testid="switch-immediate"]');
+  await sw.waitFor({ state: "attached", timeout: 5000 });
+  const status = page.locator('[data-testid="switch-immediate-status"]');
+  const before = (await status.innerText()).trim();
+  // Click the chip's host (the <button> Base UI renders). The hidden
+  // input flips on the same React render so the status line should
+  // update on the next microtask — well under 100ms.
+  const clickAt = Date.now();
+  await sw.click();
+  let elapsed = 0;
+  let after = before;
+  while (elapsed < 200) {
+    after = (await status.innerText()).trim();
+    if (after !== before) break;
+    await page.waitForTimeout(10);
+    elapsed = Date.now() - clickAt;
+  }
+  const ok = after !== before && elapsed <= 100;
+  report(
+    "Switch ImmediateEffect — status flips within 100ms",
+    ok,
+    `before="${before}" after="${after}" elapsed=${elapsed}ms`,
+  );
+}
+
+/* ─── 22. RadioGroup TwoOptions — ArrowDown rovers selection ─────────── */
+await open("components-radio--two-options");
+{
+  const first = page.locator('[data-testid="radio-two-email"]');
+  await first.waitFor({ state: "visible", timeout: 5000 });
+  // The default-selected radio in the story is "email" — focus it,
+  // then press ArrowDown. Base UI's RadioGroup roving moves focus AND
+  // selection to the next radio in sequence ("sms"). Verify the
+  // second radio's hidden input is now checked.
+  await first.focus();
+  await page.waitForTimeout(50);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(150);
+  const smsChecked = await page.evaluate(() => {
+    const chip = document.querySelector('[data-testid="radio-two-sms"]');
+    if (!chip) return null;
+    const parent = chip.parentElement;
+    if (!parent) return null;
+    const input = parent.querySelector("input[type=\"radio\"]");
+    return input instanceof HTMLInputElement ? input.checked : null;
+  });
+  const focusInSms = await page.evaluate(() => {
+    const chip = document.querySelector('[data-testid="radio-two-sms"]');
+    if (!chip) return false;
+    const ae = document.activeElement;
+    if (!ae) return false;
+    return chip === ae || chip.contains(ae) || (chip.parentElement?.contains(ae) ?? false);
+  });
+  const ok = smsChecked === true && focusInSms === true;
+  report(
+    "RadioGroup TwoOptions — ArrowDown rovers focus+selection",
+    ok,
+    `smsChecked=${smsChecked} focusInSms=${focusInSms}`,
+  );
+}
+
+/* ─── 23. RadioGroup Required — submit empty + aria-invalid + Field.Error ── */
+await open("components-radio--required");
+{
+  const submit = page.locator('[data-testid="radio-required-submit"]');
+  await submit.waitFor({ state: "visible", timeout: 5000 });
+  await submit.click();
+  await page.waitForTimeout(300);
+  // Base UI emits a hidden <input> for the group that carries the
+  // aggregate `valueMissing`. We assert against any of the group's
+  // radio inputs OR the group's hidden submission input — whichever
+  // Base UI uses to ship the validation.
+  const ariaInvalid = await page.evaluate(() => {
+    const group = document.querySelector('[data-testid="radio-required-group"]');
+    if (!group) return null;
+    // The hidden form input lives inside the group as a direct
+    // descendant <input>. If multiple <input>s exist (one per radio),
+    // any with aria-invalid="true" is the canonical signal.
+    const inputs = group.querySelectorAll("input");
+    for (const input of Array.from(inputs)) {
+      if (input.getAttribute("aria-invalid") === "true") return "true";
+    }
+    // Fall back to the group element's own aria-invalid.
+    return group.getAttribute("aria-invalid");
+  });
+  const errorText = await page
+    .getByText("Pick one to continue.")
+    .first()
+    .innerText()
+    .catch(() => "");
+  const ok = ariaInvalid === "true" && errorText.length > 0;
+  report(
+    "RadioGroup Required — aria-invalid + Field.Error after submit",
+    ok,
+    `aria-invalid=${ariaInvalid} errorText="${errorText}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

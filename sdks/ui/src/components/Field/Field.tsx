@@ -103,11 +103,38 @@ const FieldContext = createContext<FieldContextValue | null>(null);
 
 /**
  * Read the Field context. Returns `null` when used outside of a Field
- * (so combined-shorthand consumers don't crash). Internal to the
- * package — not exported from the public surface.
+ * (so combined-shorthand consumers don't crash).
+ *
+ * Two narrowed hooks accompany it — `useFieldVisualSize` and
+ * `useFieldDisabledContext` — that read JUST the slot every
+ * selection primitive (Checkbox / Switch / Radio) actually needs.
+ * Surfacing them avoids ad-hoc destructures across components and
+ * keeps the cascade rule ("explicit prop wins, then context, then
+ * default") expressed in one place.
  */
 export function useFieldContext(): FieldContextValue | null {
   return useContext(FieldContext);
+}
+
+/**
+ * Visual-size slot of the Field context. Returns the size cascaded
+ * from the enclosing Field, or `undefined` when used outside one
+ * (so each component can apply its own default). Mirrors the shape
+ * the brief calls out — selection primitives consume this without
+ * needing to know about the rest of the context.
+ */
+export function useFieldVisualSize(): FieldSize | undefined {
+  return useContext(FieldContext)?.size;
+}
+
+/**
+ * Disabled slot of the Field context. Returns `true` when the
+ * enclosing Field is `disabled`, `false` otherwise (including the
+ * outside-of-Field case). Selection primitives compose this with
+ * an explicit `disabled` prop — `prop ?? context ?? false`.
+ */
+export function useFieldDisabledContext(): boolean {
+  return useContext(FieldContext)?.disabled ?? false;
 }
 
 /* ─── styled wrappers around Base UI parts ───────────────────────────── */

@@ -94,6 +94,35 @@ const stories = [
   // exercise dev-warn paths:
   //   components-alertdialog--three-buttons-destructive-misplaced
   //   components-alertdialog--destructive-without-cancel-warns
+  // Slice 4: Checkbox / Switch / Radio (selection primitives).
+  "components-checkbox--all-states",
+  "components-checkbox--all-sizes",
+  "components-checkbox--all-variants",
+  "components-checkbox--with-label",
+  "components-checkbox--with-description",
+  "components-checkbox--required",
+  "components-checkbox--indeterminate-parent",
+  "components-checkbox--inside-form",
+  "components-checkbox--disabled",
+  "components-checkbox--rtl",
+  "components-switch--all-states",
+  "components-switch--all-sizes",
+  "components-switch--with-label",
+  "components-switch--with-description",
+  "components-switch--immediate-effect",
+  "components-switch--inside-form",
+  "components-switch--disabled",
+  "components-switch--rtl",
+  "components-radio--two-options",
+  "components-radio--five-options",
+  "components-radio--horizontal",
+  "components-radio--all-sizes",
+  "components-radio--with-label",
+  "components-radio--with-description",
+  "components-radio--required",
+  "components-radio--disabled",
+  "components-radio--disabled-item",
+  "components-radio--rtl",
 ];
 
 if (themes.length === 0 || stories.length === 0) {

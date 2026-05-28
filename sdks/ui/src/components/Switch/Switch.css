@@ -1,0 +1,280 @@
+/*
+ * Switch — binary state primitive (on / off, immediate effect).
+ *
+ * Anatomy:
+ *   .zs-switch-field          — focusable row (label + track + hidden input)
+ *     ├─ .zs-switch           — track (Base UI's <span> for SwitchRoot)
+ *     │   └─ .zs-switch__thumb — sliding pip (Base UI's <span> for Thumb)
+ *     └─ hidden <input>       — form submission + AT semantics
+ *
+ * Modifier classes (one of each axis):
+ *   size: --sm | --md | --lg
+ *
+ * State surface (driven by data-* Base UI emits):
+ *   data-checked | data-disabled | data-readonly
+ *
+ * Design guarantees:
+ *
+ *   1. Switch = BINARY only. No tri-state. On / off. If a setting can
+ *      be neither (or both), it's not a switch — it's a Checkbox row
+ *      or a Select.
+ *
+ *   2. IMMEDIATE effect. Switches are settings-style — flipping a
+ *      switch should change something on the same frame the user
+ *      releases the click. Don't queue switch changes behind a
+ *      Submit button; if the change needs confirmation, use a
+ *      Checkbox inside a form instead.
+ *
+ *   3. Five visual states (off / on / disabled-off / disabled-on /
+ *      focused). Track color + thumb position carry the state — a
+ *      colorblind user reads "on" from the THUMB being inline-end,
+ *      not from the green vs. gray track. Shape signal, not color
+ *      signal.
+ *
+ *   4. RTL: the thumb slides toward the inline-end side when checked.
+ *      Logical properties + `inset-inline-start` keep the direction
+ *      correct without per-direction CSS variables. Verified by the
+ *      RTL story capture.
+ */
+
+/* ─── component-local tokens ────────────────────────────────────────── */
+.zs-switch {
+  /* Track sizes — width slightly more than 2x the thumb so the slide
+     reads as a deliberate trip, not a snap. */
+  --zs-switch-track-w-sm: 1.5rem;     /* 24 */
+  --zs-switch-track-w-md: 2rem;       /* 32 — default */
+  --zs-switch-track-w-lg: 2.5rem;     /* 40 */
+  --zs-switch-track-h-sm: 0.875rem;   /* 14 */
+  --zs-switch-track-h-md: 1.125rem;   /* 18 */
+  --zs-switch-track-h-lg: 1.375rem;   /* 22 */
+
+  --zs-switch-thumb-sm: 0.625rem;     /* 10 */
+  --zs-switch-thumb-md: 0.875rem;     /* 14 */
+  --zs-switch-thumb-lg: 1.125rem;     /* 18 */
+
+  --zs-switch-inset: 0.125rem;        /* 2 — thumb inset from track edge */
+
+  --zs-switch-track-bg: var(--zs-fill-secondary);
+  --zs-switch-track-bg-hover: var(--zs-fill);
+  --zs-switch-track-bg-checked: var(--zs-accent);
+  --zs-switch-track-bg-checked-hover: var(--zs-accent-hover);
+  --zs-switch-thumb-bg: var(--zs-accent-ink);
+  --zs-switch-thumb-shadow:
+    0 0.0625rem 0.125rem oklch(0 0 0 / 0.18),
+    0 0 0 0.0625rem oklch(0 0 0 / 0.04);
+}
+
+/* ─── focusable row ─────────────────────────────────────────────────── */
+.zs-switch-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  min-block-size: 1.75rem;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  cursor: pointer;
+}
+@media (pointer: coarse) {
+  .zs-switch-field {
+    min-block-size: var(--zs-hit-min);
+  }
+}
+.zs-switch-field[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── track ─────────────────────────────────────────────────────────── */
+.zs-switch {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  inline-size: var(--zs-switch-track-w-md);
+  block-size: var(--zs-switch-track-h-md);
+  border-radius: var(--zs-radius-full);
+  background-color: var(--zs-switch-track-bg);
+  /* No border — the contrast comes from track fill vs thumb fill. The
+     glass-surface invariant is satisfied by the OPAQUE background-color
+     above; a translucent fill on its own would let the page paint
+     through and axe would emit an incomplete. */
+  box-shadow: inset 0 0 0 0.0625rem var(--zs-fill-tertiary);
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+  cursor: pointer;
+  /* Hide whatever children Base UI renders for the hidden input —
+     the track's only visible content is the thumb. */
+  vertical-align: middle;
+}
+
+.zs-switch--sm {
+  inline-size: var(--zs-switch-track-w-sm);
+  block-size: var(--zs-switch-track-h-sm);
+}
+.zs-switch--lg {
+  inline-size: var(--zs-switch-track-w-lg);
+  block-size: var(--zs-switch-track-h-lg);
+}
+
+/* ─── hover ─────────────────────────────────────────────────────────── */
+@media (hover: hover) {
+  .zs-switch-field:not([data-disabled]):hover .zs-switch:not([data-checked]) {
+    background-color: var(--zs-switch-track-bg-hover);
+  }
+  .zs-switch-field:not([data-disabled]):hover .zs-switch[data-checked] {
+    background-color: var(--zs-switch-track-bg-checked-hover);
+  }
+}
+
+/* ─── checked ───────────────────────────────────────────────────────── */
+.zs-switch[data-checked] {
+  background-color: var(--zs-switch-track-bg-checked);
+  box-shadow: inset 0 0 0 0.0625rem transparent;
+}
+
+/* ─── focus ring on the track when the hidden input is :focus-visible ─ */
+.zs-switch-field:has(> input:focus-visible) .zs-switch {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-accent),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+}
+
+/* ─── disabled ──────────────────────────────────────────────────────── */
+.zs-switch[data-disabled] {
+  background-color: var(--zs-fill-tertiary);
+  box-shadow: inset 0 0 0 0.0625rem var(--zs-fill-tertiary);
+  cursor: not-allowed;
+}
+.zs-switch[data-disabled][data-checked] {
+  background-color: color-mix(in oklch, var(--zs-accent) 45%, transparent);
+}
+
+/* ─── readonly ──────────────────────────────────────────────────────── */
+.zs-switch[data-readonly] {
+  cursor: default;
+}
+
+/* ─── thumb ─────────────────────────────────────────────────────────── *
+ *
+ * Positioned absolutely so its translation can animate without the
+ * track resizing. `inset-inline-start` + `translate` compose with
+ * `dir="rtl"` automatically — when the document's direction flips,
+ * the thumb's resting position flips with it. The checked-state
+ * translate moves the thumb by (track-width − thumb-size − 2·inset).
+ *
+ * Reduced-motion users get an instant move; everyone else gets a
+ * gentle ease.
+ */
+.zs-switch__thumb {
+  position: absolute;
+  inset-block-start: var(--zs-switch-inset);
+  inset-inline-start: var(--zs-switch-inset);
+  inline-size: var(--zs-switch-thumb-md);
+  block-size: var(--zs-switch-thumb-md);
+  border-radius: var(--zs-radius-full);
+  background-color: var(--zs-switch-thumb-bg);
+  box-shadow: var(--zs-switch-thumb-shadow);
+  transition:
+    translate var(--zs-motion-fast) var(--zs-motion-ease),
+    inline-size var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-switch--sm .zs-switch__thumb {
+  inline-size: var(--zs-switch-thumb-sm);
+  block-size: var(--zs-switch-thumb-sm);
+}
+.zs-switch--lg .zs-switch__thumb {
+  inline-size: var(--zs-switch-thumb-lg);
+  block-size: var(--zs-switch-thumb-lg);
+}
+
+/*
+ * The translation amount: track width − thumb size − 2 × inset, applied
+ * along the INLINE axis. CSS `translate` on a logical axis isn't a
+ * thing yet, so we set the value once via `--zs-switch-thumb-offset`
+ * and let two direction-conditional rules apply the correct sign —
+ * LTR moves positive (toward the end / right), RTL moves negative
+ * (toward the end / left).
+ */
+.zs-switch[data-checked] .zs-switch__thumb {
+  /* md track: 2rem − 0.875rem − 2·0.125rem = 0.875rem */
+  --zs-switch-thumb-offset: calc(
+    var(--zs-switch-track-w-md) - var(--zs-switch-thumb-md) - (2 * var(--zs-switch-inset))
+  );
+  translate: var(--zs-switch-thumb-offset) 0;
+}
+.zs-switch--sm[data-checked] .zs-switch__thumb {
+  --zs-switch-thumb-offset: calc(
+    var(--zs-switch-track-w-sm) - var(--zs-switch-thumb-sm) - (2 * var(--zs-switch-inset))
+  );
+  translate: var(--zs-switch-thumb-offset) 0;
+}
+.zs-switch--lg[data-checked] .zs-switch__thumb {
+  --zs-switch-thumb-offset: calc(
+    var(--zs-switch-track-w-lg) - var(--zs-switch-thumb-lg) - (2 * var(--zs-switch-inset))
+  );
+  translate: var(--zs-switch-thumb-offset) 0;
+}
+
+/*
+ * RTL: flip the sign of the translate so the thumb still moves toward
+ * the inline-end edge (visually left in RTL contexts). Two rules
+ * because CSS `translate`'s X is physical, not logical — Base UI
+ * doesn't track direction itself, so the inline-end semantic lives
+ * here in the stylesheet.
+ */
+[dir="rtl"] .zs-switch[data-checked] .zs-switch__thumb,
+.zs-switch[dir="rtl"][data-checked] .zs-switch__thumb {
+  translate: calc(-1 * var(--zs-switch-thumb-offset)) 0;
+}
+
+/* ─── label slot ────────────────────────────────────────────────────── */
+.zs-switch-field__text {
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: inherit;
+  user-select: none;
+}
+
+/* ─── reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-switch,
+  .zs-switch__thumb {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ─────────────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-switch {
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-switch[data-checked] {
+    background-color: Highlight;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  .zs-switch__thumb {
+    background-color: CanvasText;
+    box-shadow: none;
+  }
+  .zs-switch[data-checked] .zs-switch__thumb {
+    background-color: HighlightText;
+  }
+  .zs-switch-field:has(> input:focus-visible) .zs-switch {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-switch[data-disabled] {
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-switch[data-disabled] .zs-switch__thumb {
+    background-color: GrayText;
+  }
+  .zs-switch-field[data-disabled] {
+    color: GrayText;
+  }
+}
