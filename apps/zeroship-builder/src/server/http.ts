@@ -1,6 +1,5 @@
 "use server";
 
-import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
 import {
   buildAuthorizationUrl,
@@ -16,11 +15,15 @@ import {
   storedTokensFromResponse,
 } from "./oauth-store.js";
 import { previewFetch } from "./preview-proxy.js";
+import {
+  BUILDER_USER_COOKIE,
+  signUserCookie,
+  verifyUserCookie,
+} from "./session.js";
 
 const STATE_COOKIE = "__zs_builder_oauth_state";
 const PKCE_COOKIE = "__zs_builder_oauth_pkce";
 const RETURN_COOKIE = "__zs_builder_oauth_return";
-const USER_COOKIE = "__zs_builder_oauth_user";
 const TRANSIENT_MAX_AGE_SECONDS = 10 * 60;
 
 export async function builderFetch(
@@ -104,7 +107,7 @@ async function oauthCallback(request: Request): Promise<Response> {
     if (!userId) throw new Error("access token missing subject");
 
     await saveTokens(userId, storedTokensFromResponse(tokenResponse));
-    setCookie(res.headers, request, USER_COOKIE, signUserCookie(userId), {
+    setCookie(res.headers, request, BUILDER_USER_COOKIE, signUserCookie(userId), {
       maxAge: 90 * 24 * 60 * 60,
       path: "/",
     });
@@ -118,7 +121,7 @@ async function oauthCallback(request: Request): Promise<Response> {
 
 async function oauthLogout(request: Request): Promise<Response> {
   const cookies = parseCookies(request.headers.get("cookie") ?? "");
-  const userId = verifyUserCookie(cookies.get(USER_COOKIE) ?? "");
+  const userId = verifyUserCookie(cookies.get(BUILDER_USER_COOKIE) ?? "");
 
   if (userId) {
     const tokens = await loadTokens(userId);
@@ -132,7 +135,7 @@ async function oauthLogout(request: Request): Promise<Response> {
   }
 
   const headers = new Headers();
-  clearCookie(headers, request, USER_COOKIE, "/");
+  clearCookie(headers, request, BUILDER_USER_COOKIE, "/");
   return new Response(null, { status: 204, headers });
 }
 
@@ -219,53 +222,4 @@ function isSecure(request: Request): boolean {
   const url = new URL(request.url);
   return url.protocol === "https:" ||
     request.headers.get("x-forwarded-proto")?.toLowerCase() === "https";
-}
-
-function signUserCookie(userId: string): string {
-  const sig = crypto
-    .createHmac("sha256", cookieSecret())
-    .update(userId)
-    .digest("base64url");
-  return `${Buffer.from(userId, "utf8").toString("base64url")}.${sig}`;
-}
-
-function verifyUserCookie(value: string): string | null {
-  const [encodedUserId, sig] = value.split(".");
-  if (!encodedUserId || !sig) return null;
-
-  try {
-    const userId = Buffer.from(encodedUserId, "base64url").toString("utf8");
-    const expected = crypto
-      .createHmac("sha256", cookieSecret())
-      .update(userId)
-      .digest("base64url");
-    const a = Buffer.from(sig, "utf8");
-    const b = Buffer.from(expected, "utf8");
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-    return userId;
-  } catch {
-    return null;
-  }
-}
-
-function cookieSecret(): string {
-  const secret = readEnv(
-    "BUILDER_COOKIE_SECRET",
-    readEnv("BUILDER_TOKEN_ENCRYPTION_KEY", ""),
-  );
-  if (!secret) throw new Error("BUILDER_TOKEN_ENCRYPTION_KEY is required");
-  return secret;
-}
-
-function readEnv(key: string, fallback: string): string {
-  const proc = (globalThis as {
-    process?: { env?: Record<string, string | undefined> };
-  }).process;
-  const fromProcess = proc?.env?.[key];
-  if (typeof fromProcess === "string" && fromProcess.length > 0) return fromProcess;
-
-  const fromRuntime = (globalThis as { env?: Record<string, string | undefined> }).env?.[key];
-  if (typeof fromRuntime === "string" && fromRuntime.length > 0) return fromRuntime;
-
-  return fallback;
 }
