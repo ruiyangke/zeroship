@@ -151,7 +151,7 @@ async fn insert_oauth_client(
         "INSERT INTO control.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, false, $5, $1)",
+         VALUES ($1, $2, NULL, NULL, $3, $4, true, $5, $1)",
         &[
             &BUILDER_CLIENT_ID,
             &BUILDER_CLIENT_NAME,
@@ -247,7 +247,7 @@ async fn create_hydra_client(
         scope: &scope,
         token_endpoint_auth_method: "client_secret_basic",
         subject_type: "public",
-        skip_consent: false,
+        skip_consent: true,
     };
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|err| BuilderClientBootstrapError::Encode(err.to_string()))?;

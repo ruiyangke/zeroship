@@ -212,7 +212,7 @@ async fn bootstrap_inserts_builder_client_first_run() {
             "deployments:rollback",
         ]
     );
-    assert!(!rows[0].get::<_, bool>("skip_consent"));
+    assert!(rows[0].get::<_, bool>("skip_consent"));
     assert!(rows[0].get::<_, Option<Uuid>>("created_by").is_none());
     assert_eq!(rows[0].get::<_, String>("hydra_client_id"), BUILDER_CLIENT_ID);
 
@@ -239,7 +239,7 @@ async fn bootstrap_inserts_builder_client_first_run() {
         requests[0].body["token_endpoint_auth_method"],
         "client_secret_basic"
     );
-    assert_eq!(requests[0].body["skip_consent"], false);
+    assert_eq!(requests[0].body["skip_consent"], true);
     assert_eq!(requests[0].body["client_secret"], secret);
 
     cleanup_builder_client(&pg).await;
