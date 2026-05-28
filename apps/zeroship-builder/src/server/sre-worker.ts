@@ -34,8 +34,8 @@
 import { action } from "@zeroship/rpc/server";
 import { z } from "zod";
 
-import { SRE_PROMPT } from "./internal/prompts.js";
-import { getAppLogs } from "./apps.js";
+import { SRE_PROMPT } from "./internal/prompts";
+import { getAppLogs } from "./apps";
 
 // ─── finding shape ───────────────────────────────────────────────
 //
@@ -78,6 +78,10 @@ export type SREMonitorResult = z.infer<typeof sreMonitorResponseSchema>;
 export interface SREMonitorInput {
   appId: string;
 }
+
+const sreMonitorInputSchema = z.object({
+  appId: z.string().min(1).max(256),
+}).strict();
 
 /**
  * Run an SRE monitor pass over the given app's recent logs + perf.
@@ -150,7 +154,7 @@ export const sreMonitor = action(async (
   ]);
 
   return result;
-}, { id: "sre.monitor" });
+}, { id: "sre.monitor", input: sreMonitorInputSchema, maxInputBytes: 4_096 });
 
 // --- helpers --------------------------------------------------------
 

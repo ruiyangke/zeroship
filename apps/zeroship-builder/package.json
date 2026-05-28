@@ -17,6 +17,7 @@
     "@ai-sdk/openai": "^3.0.55",
     "@ai-sdk/react": "^3.0.174",
     "ai": "^6.0.172",
+    "@zeroship/control": "workspace:*",
     "@zeroship/kv": "workspace:*",
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
@@ -48,7 +49,6 @@
     "react-markdown": "^9.0.0",
     "react-router-dom": "catalog:",
     "remark-gfm": "^4.0.0",
-    "shiki": "^1.0.0",
     "tailwind-merge": "catalog:",
     "tailwindcss": "catalog:",
     "zod": "catalog:"

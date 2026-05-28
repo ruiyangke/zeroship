@@ -153,7 +153,7 @@ export function SettingsCanvas({ appId, app }: SettingsCanvasProps) {
             <p className="font-serif text-[13.5px] text-ink-soft leading-[1.55] mb-4">
               {isArchived
                 ? "It's hidden from the default Home view but everything's intact. Restore to bring it back."
-                : "Hide it from the default Home view. Code, data, and deploys stay put. You can restore it later."}
+                : "Hide it from the default Home view. Code, settings, and deploys stay put. You can restore it later."}
             </p>
             {isArchived ? (
               <GhostButton

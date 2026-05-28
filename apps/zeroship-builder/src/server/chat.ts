@@ -61,13 +61,14 @@
 // wrapping needed.
 
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage } from "ai";
-import { stream as rpcStream } from "@zeroship/rpc/server";
-import { critic } from "./internal/critic.js";
-import { reviewer } from "./internal/reviewer.js";
-import { pm } from "./internal/pm.js";
-import { sre } from "./internal/sre.js";
-import { BUILDER_SYSTEM } from "./internal/prompts.js";
-import { askSurveyTool, createDeployTool } from "./internal/tools.js";
+import { streamResponse } from "@zeroship/rpc/server";
+import { z } from "zod";
+import { critic } from "./internal/critic";
+import { reviewer } from "./internal/reviewer";
+import { pm } from "./internal/pm";
+import { sre } from "./internal/sre";
+import { BUILDER_SYSTEM } from "./internal/prompts";
+import { askSurveyTool, createDeployTool } from "./internal/tools";
 
 export interface BuilderTurnInput {
   messages?: UIMessage[];
@@ -89,7 +90,7 @@ export interface BuilderTurnInput {
    * `new Command({ resume: value })` into the same thread instead of
    * replaying the message history.
    */
-  resume?: { token: string; value: unknown };
+  resume?: { token: string; value?: unknown };
   /**
    * Project id this chat surface is scoped to. Distinct from `id`
    * (the chat thread): one project may host multiple threads but the
@@ -99,6 +100,18 @@ export interface BuilderTurnInput {
    */
   appId?: string;
 }
+
+const builderTurnInputSchema = z.object({
+  messages: z.array(z.custom<UIMessage>((value) => value !== null && typeof value === "object")).optional(),
+  id: z.string().min(1).max(256).optional(),
+  resume: z.object({
+    token: z.string().min(1).max(512),
+    value: z.unknown(),
+  }).strict().optional(),
+  appId: z.string().min(1).max(256).optional(),
+}).strict().refine((input) => input.resume || (input.messages?.length ?? 0) > 0, {
+  message: "chat input requires messages or resume",
+});
 
 /**
  * Mode passed to `buildTranslatedStream`:
@@ -657,8 +670,8 @@ function extractTextDelta(event: {
 // Marked as `stream` for the RPC capability frame: the handler returns an
 // AI-SDK SSE Response, but it is still a long-lived streaming endpoint and
 // must be allowed to call external APIs and sandbox-controller fetch paths.
-export const chat = rpcStream(
-  (async (input: BuilderTurnInput): Promise<Response> => {
+export const chat = streamResponse(
+  async (input: BuilderTurnInput): Promise<Response> => {
     const ac = new AbortController();
     const stream = await buildTranslatedStream(input, ac.signal);
 
@@ -694,6 +707,11 @@ export const chat = rpcStream(
       statusText: baseResponse.statusText,
       headers: baseResponse.headers,
     });
-  }) as unknown as (input: BuilderTurnInput) => AsyncIterable<never>,
-  { id: "chat", lazy: true },
-) as unknown as (input: BuilderTurnInput) => Promise<Response>;
+  },
+  {
+    id: "chat",
+    lazy: true,
+    input: builderTurnInputSchema,
+    maxInputBytes: 262_144,
+  },
+);

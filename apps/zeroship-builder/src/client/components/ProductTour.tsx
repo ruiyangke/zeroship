@@ -42,7 +42,7 @@ const STEPS: ReadonlyArray<Step> = [
     testid: "canvas-pills",
     side: "bottom",
     title: "The canvases",
-    body: "These pills swap what you see in the main pane: Preview, Files, Logs, Env, Plan, Health, Settings. One project, many lenses.",
+    body: "These pills swap what you see in the main pane. Preview stays first; ops adds logs, env, and settings; code adds files.",
   },
   {
     testid: "topbar-url",
@@ -53,8 +53,8 @@ const STEPS: ReadonlyArray<Step> = [
   {
     testid: "canvas-pills",
     side: "bottom",
-    title: "Plan & Health",
-    body: "Plan is your AI PM — milestones, issues, what's next. Health is your SRE — uptime, perf, incidents. Try those pills next.",
+    title: "Control the depth",
+    body: "Start in Maker when you just want the result. Add ops for runtime evidence, then add code when you need the files.",
   },
 ];
 
@@ -93,15 +93,13 @@ export function ProductTour({ open, onClose }: ProductTourProps) {
   );
 
   const next = useCallback(() => {
-    setStep((s) => {
-      if (s >= STEPS.length - 1) {
-        complete("finished");
-        return 0;
-      }
-      track("onboarding.tour_step", { step: s + 1 });
-      return s + 1;
-    });
-  }, [complete]);
+    if (step >= STEPS.length - 1) {
+      complete("finished");
+      return;
+    }
+    track("onboarding.tour_step", { step: step + 1 });
+    setStep(step + 1);
+  }, [complete, step]);
 
   const prev = useCallback(() => {
     setStep((s) => Math.max(0, s - 1));

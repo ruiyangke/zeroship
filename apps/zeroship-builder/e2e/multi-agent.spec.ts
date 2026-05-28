@@ -10,7 +10,7 @@ import { test, expect } from "@playwright/test";
 // Gating mirrors critic-loop.spec.ts:
 //   - OPENAI_API_KEY required.
 //   - Sandbox controller reachable (Builder's tools route through it).
-//   - Control plane is NOT required — uses the workspace catchall route.
+//   - Control plane is NOT required — uses the dev-only workspace shell.
 //
 // These tests assert ONLY that the cards render (visible + correct
 // testid). The structured payload's content is non-deterministic
@@ -22,7 +22,7 @@ const HAS_KEY = !!process.env.OPENAI_API_KEY;
 // turn — budget similar to critic-loop.spec.
 const STEP_TIMEOUT = 90_000;
 
-const SHELL_PATH = "/__catchall_for_test";
+const SHELL_PATH = "/__test/workspace";
 
 async function probe(url: string): Promise<boolean> {
   try {

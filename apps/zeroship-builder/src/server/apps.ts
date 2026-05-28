@@ -1,13 +1,20 @@
 "use server";
 // Apps server functions — proxies to control plane's /api/apps/*.
 //
-// Cookie session covers admin auth (control plane's `check_admin_auth`
-// accepts session cookie OR Bearer master-key); we forward both.
+// Browser-facing RPCs forward the caller's cookie to the control plane.
+// They deliberately do not attach CONTROL_KEY; master-key operations
+// belong in server-internal tools, not arbitrary dashboard RPC calls.
 
 import { action, mutation } from "@zeroship/rpc/server";
-import { CONTROL_URL, CONTROL_KEY } from "./internal/env";
-import { getRequest } from "./internal/request-context";
-import { persistGet, persistSet } from "./internal/persist.js";
+import {
+  createControlClient,
+  type AppRecord as ControlAppRecord,
+  type EnvVar,
+} from "@zeroship/control";
+import { currentHeaders, currentUser } from "@zeroship/server";
+import { z } from "zod";
+import { CONTROL_URL } from "./internal/env";
+import { persistGet, persistSet } from "./internal/persist";
 
 // ─── archive: KV-backed stub ─────────────────────────────────────
 //
@@ -17,77 +24,98 @@ import { persistGet, persistSet } from "./internal/persist.js";
 // module reloads and vanishes on hard worker restart. Production should
 // replace this with a real `archived_at` column.
 //
-// Scoping: per current user. The dev synthetic user is a single id
-// (`usr_dev`), so the dashboard always reads the same list during dev.
-// In prod the `getRequest()` cookie carries the session and the
-// auth-cookie hash gates per-user reads — mirror that here when the
-// real auth wire is on.
-const ARCHIVE_KEY = "archive-set:usr_dev";
+// Scoping: per current runtime user. In local dev we keep a deterministic
+// fallback because the vite dev runtime can run without gateway-injected
+// auth. Production must never collapse into a shared archive key.
+const DEV_ARCHIVE_KEY = "archive-set:usr_dev";
 
 async function loadArchive(): Promise<Set<string>> {
-  const list = await persistGet<string[] | null>(ARCHIVE_KEY, null);
+  const list = await persistGet<string[] | null>(archiveKey(), null);
   return new Set(list ?? []);
 }
 
 async function saveArchive(set: Set<string>): Promise<void> {
-  await persistSet(ARCHIVE_KEY, [...set]);
+  await persistSet(archiveKey(), [...set]);
 }
 
-export interface AppRecord {
-  id: string;
-  name: string;
-  plan_id: string;
-  deploy_hash: string | null;
-  api_key: string;
-  created_at: string;
-  updated_at: string;
+export interface AppRecord extends ControlAppRecord {
   server_js?: string;
   /** Soft-delete flag from the temporary archive store. */
   archived?: boolean;
 }
 
-async function proxy<T>(
-  path: string,
-  init: { method?: string; body?: BodyInit; contentType?: string } = {},
-): Promise<T> {
-  const cookie = getRequest()?.headers.get("cookie") ?? "";
-  const headers: Record<string, string> = {
-    "content-type": init.contentType ?? "application/json",
-    "authorization": `Bearer ${CONTROL_KEY()}`,
-  };
-  if (cookie) headers["cookie"] = cookie;
+export type { EnvVar };
 
-  const res = await fetch(`${CONTROL_URL()}${path}`, {
-    method: init.method ?? "GET",
-    headers,
-    body: init.body,
+function controlClient() {
+  return createControlClient({
+    baseUrl: CONTROL_URL(),
+    cookie: requestCookie,
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-  if (res.status === 204) return undefined as T;
-  const ct = res.headers.get("content-type") ?? "";
-  if (!ct.includes("json")) return (await res.text()) as unknown as T;
-  return (await res.json()) as T;
 }
+
+function requestCookie(): string | null {
+  try {
+    return currentHeaders().get("cookie") ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function archiveKey(): string {
+  const user = readCurrentUserId();
+  if (user) return `archive-set:${user}`;
+  if (isLocalDevRuntime()) return DEV_ARCHIVE_KEY;
+  throw new Error("archive requires an authenticated user");
+}
+
+function readCurrentUserId(): string | null {
+  try {
+    const user = currentUser() as { id?: unknown } | null;
+    return typeof user?.id === "string" && user.id ? user.id : null;
+  } catch {
+    return null;
+  }
+}
+
+function isLocalDevRuntime(): boolean {
+  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+  return proc?.env?.NODE_ENV !== "production";
+}
+
+const appIdSchema = z.string().min(1).max(256);
+const keySchema = z.string().min(1).max(256);
+const appIdInputSchema = z.object({ appId: appIdSchema }).strict();
+const createAppInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  plan_id: z.string().min(1).max(64).optional(),
+}).strict();
+const updatePlanInputSchema = z.object({
+  appId: appIdSchema,
+  plan_id: z.string().min(1).max(64),
+}).strict();
+const keyInputSchema = z.object({
+  appId: appIdSchema,
+  key: keySchema,
+}).strict();
+const keyValueInputSchema = keyInputSchema.extend({
+  value: z.string().max(64 * 1024),
+}).strict();
 
 export const listApps = action(async (): Promise<AppRecord[]> => {
   const [apps, archive] = await Promise.all([
-    proxy<AppRecord[]>("/api/apps"),
+    controlClient().apps.list(),
     loadArchive(),
   ]);
   return apps.map((a) => ({ ...a, archived: archive.has(a.id) }));
-}, { id: "apps.listApps" });
+}, { id: "apps.list", maxInputBytes: 1_024 });
 
 export const getApp = action(async (id: string): Promise<AppRecord> => {
   const [app, archive] = await Promise.all([
-    proxy<AppRecord>(`/api/apps/${encodeURIComponent(id)}`),
+    controlClient().apps.get(id),
     loadArchive(),
   ]);
   return { ...app, archived: archive.has(app.id) };
-}, { id: "apps.getApp" });
+}, { id: "apps.get", input: appIdSchema, maxInputBytes: 4_096 });
 
 /**
  * Soft-delete an app. Tracked in KV per-user (see ARCHIVE_KEY above)
@@ -102,7 +130,7 @@ export const archiveApp = mutation(async (
   archive.add(input.appId);
   await saveArchive(archive);
   return { archived: true };
-}, { id: "apps.archiveApp" });
+}, { id: "apps.archive", input: appIdInputSchema, maxInputBytes: 4_096 });
 
 export const unarchiveApp = mutation(async (
   input: { appId: string },
@@ -111,7 +139,7 @@ export const unarchiveApp = mutation(async (
   archive.delete(input.appId);
   await saveArchive(archive);
   return { archived: false };
-}, { id: "apps.unarchiveApp" });
+}, { id: "apps.unarchive", input: appIdInputSchema, maxInputBytes: 4_096 });
 
 /**
  * Single-input wire — the vite-plugin RPC stub forwards `args[0]` only,
@@ -127,84 +155,62 @@ export const createApp = action(async (input: {
 }): Promise<AppRecord> => {
   const name = input?.name;
   const plan_id = input?.plan_id ?? "free";
-  return proxy("/api/apps", {
-    method: "POST",
-    body: JSON.stringify({ name, plan_id }),
-  });
-}, { id: "apps.createApp" });
+  return controlClient().apps.create({ name, plan_id });
+}, { id: "apps.create", input: createAppInputSchema, maxInputBytes: 16_384 });
 
 export const deleteApp = action(async (id: string): Promise<{ deleted: boolean }> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}`, { method: "DELETE" });
-}, { id: "apps.deleteApp" });
-
-export const deployApp = action(async (
-  input: { appId: string; code: string },
-): Promise<{ deploy_hash: string }> => {
-  return proxy(`/api/apps/${encodeURIComponent(input.appId)}/deploy`, {
-    method: "POST",
-    body: input.code,
-    contentType: "application/javascript",
-  });
-}, { id: "apps.deployApp" });
+  return controlClient().apps.delete(id);
+}, { id: "apps.delete", input: appIdSchema, maxInputBytes: 4_096 });
 
 export const updatePlan = action(async (
   input: { appId: string; plan_id: string },
 ): Promise<{ updated: boolean }> => {
-  return proxy(`/api/apps/${encodeURIComponent(input.appId)}/plan`, {
-    method: "PUT",
-    body: JSON.stringify({ plan_id: input.plan_id }),
-  });
-}, { id: "apps.updatePlan" });
+  return controlClient().apps.setPlan(input.appId, { plan_id: input.plan_id });
+}, { id: "apps.plan.update", input: updatePlanInputSchema, maxInputBytes: 8_192 });
 
 export const getAppLogs = action(async (id: string): Promise<string[]> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/logs`);
-}, { id: "apps.getAppLogs" });
+  return controlClient().apps.logs(id);
+}, { id: "apps.logs", input: appIdSchema, maxInputBytes: 4_096 });
 
 // ─── env vars + secrets ─────────────────────────────────────────
 
-export interface EnvVar { key: string; value: string }
-
 export const listVars = action(async (id: string): Promise<{ vars: EnvVar[] }> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/vars`);
-}, { id: "apps.listVars" });
+  return controlClient().env.listVars(id);
+}, { id: "apps.vars.list", input: appIdSchema, maxInputBytes: 4_096 });
 
 export const setVar = action(async (
   input: { appId: string; key: string; value: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/vars`, {
-    method: "POST",
-    body: JSON.stringify({ key: input.key, value: input.value }),
+  await controlClient().env.setVar(input.appId, {
+    key: input.key,
+    value: input.value,
   });
-}, { id: "apps.setVar" });
+}, { id: "apps.vars.set", input: keyValueInputSchema, maxInputBytes: 131_072 });
 
 export const deleteVar = action(async (
   input: { appId: string; key: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/vars/${encodeURIComponent(input.key)}`, {
-    method: "DELETE",
-  });
-}, { id: "apps.deleteVar" });
+  await controlClient().env.deleteVar(input.appId, input.key);
+}, { id: "apps.vars.delete", input: keyInputSchema, maxInputBytes: 8_192 });
 
 export const listSecrets = action(async (id: string): Promise<{ secrets: string[] }> => {
-  return proxy(`/api/apps/${encodeURIComponent(id)}/secrets`);
-}, { id: "apps.listSecrets" });
+  return controlClient().env.listSecrets(id);
+}, { id: "apps.secrets.list", input: appIdSchema, maxInputBytes: 4_096 });
 
 export const setSecret = action(async (
   input: { appId: string; key: string; value: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/secrets`, {
-    method: "POST",
-    body: JSON.stringify({ key: input.key, value: input.value }),
+  await controlClient().env.setSecret(input.appId, {
+    key: input.key,
+    value: input.value,
   });
-}, { id: "apps.setSecret" });
+}, { id: "apps.secrets.set", input: keyValueInputSchema, maxInputBytes: 131_072 });
 
 export const deleteSecret = action(async (
   input: { appId: string; key: string },
 ): Promise<void> => {
-  await proxy(`/api/apps/${encodeURIComponent(input.appId)}/secrets/${encodeURIComponent(input.key)}`, {
-    method: "DELETE",
-  });
-}, { id: "apps.deleteSecret" });
+  await controlClient().env.deleteSecret(input.appId, input.key);
+}, { id: "apps.secrets.delete", input: keyInputSchema, maxInputBytes: 8_192 });
 
 // `appPreviewUrl` moved to `src/client/lib/preview-url.ts` — it's a
 // pure URL-builder that the iframe consumes synchronously, so it must

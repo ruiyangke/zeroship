@@ -32,26 +32,27 @@ test.describe("RPC wire capability wrappers", () => {
   test("query procedure round-trips over /_zs/v1/<id>", async ({ request }) => {
     // Pre-migration this returned 404 because plain `export async function`
     // declarations were no longer registered as RPC procedures.
-    const result = await rpcPost<{ tables: Array<{ name: string }> }>(
+    const result = await rpcPost<{ overall: string; dimensions: Array<{ key: string }> }>(
       request,
-      "agents.listTables",
+      "agents.quality.get",
       { appId: "rpc-wire-regression" },
     );
 
-    expect(result.tables.map((t) => t.name)).toContain("users");
+    expect(result.overall).toMatch(/^[A-F]/);
+    expect(result.dimensions.map((d) => d.key)).toContain("correctness");
   });
 
   test("control-plane proxy action round-trips over /_zs/v1/<id>", async ({ request }) => {
     const controlUp = await probe(`${CONTROL_URL}/health`);
     test.skip(
       !controlUp,
-      `control plane unreachable at ${CONTROL_URL}; start it to exercise apps.listApps`,
+      `control plane unreachable at ${CONTROL_URL}; start it to exercise apps.list`,
     );
 
     // This endpoint must be `action`: it calls fetch() to proxy to the
     // control plane. If it is migrated as query/mutation, the runtime
     // capability gate rejects the fetch before the control request leaves.
-    const apps = await rpcPost<unknown[]>(request, "apps.listApps", null);
+    const apps = await rpcPost<unknown[]>(request, "apps.list", null);
     expect(Array.isArray(apps)).toBe(true);
   });
 });

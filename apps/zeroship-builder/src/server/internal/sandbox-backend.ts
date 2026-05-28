@@ -36,8 +36,7 @@ import {
   typedIdFromUuid,
 } from "@zeroship/server/typed-id";
 
-import { SANDBOX_URL, SANDBOX_TOKEN } from "./env.js";
-import { userinfo } from "../auth.js";
+import { SANDBOX_URL, SANDBOX_TOKEN } from "./env";
 
 // ─── controller wire shapes (mirrors crates/sandbox/src/handlers.rs) ──
 
@@ -158,16 +157,6 @@ async function resolveSandboxUserId(explicit?: string): Promise<string> {
   if (platformUserId) {
     const typed = typedUserIdOrNull(platformUserId);
     if (typed) return typed;
-  }
-
-  try {
-    const auth = await userinfo();
-    if (auth?.user?.id) {
-      const typed = typedUserIdOrNull(auth.user.id);
-      if (typed) return typed;
-    }
-  } catch (err) {
-    if (!isLocalDevRuntime()) throw err;
   }
 
   if (isLocalDevRuntime()) {

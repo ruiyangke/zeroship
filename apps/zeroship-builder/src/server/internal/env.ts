@@ -8,7 +8,6 @@
 
 declare const env: {
   CONTROL_URL?: string;
-  CONTROL_KEY?: string;
   SANDBOX_URL?: string;
   SANDBOX_TOKEN?: string;
   OPENAI_API_KEY?: string;
@@ -29,8 +28,6 @@ function readEnv(key: string, fallback: string): string {
 }
 
 export const CONTROL_URL  = () => readEnv("CONTROL_URL",  "http://localhost:9090");
-
-export const CONTROL_KEY  = () => readEnv("CONTROL_KEY",  "dev-master-key");
 
 export const SANDBOX_URL  = () => readEnv("SANDBOX_URL",  "http://localhost:9091");
 

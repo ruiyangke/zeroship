@@ -14,7 +14,16 @@ import tailwindcss from "@tailwindcss/vite";
 import { zeroship } from "@zeroship/vite-plugin";
 
 const devServerPort = Number(process.env.ZEROSHIP_BUILDER_API_PORT ?? "3002");
+const controlUrl = process.env.CONTROL_URL ?? "http://localhost:9090";
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), zeroship({ devServerPort })],
+  server: {
+    proxy: {
+      "/auth": {
+        target: controlUrl,
+        changeOrigin: true,
+      },
+    },
+  },
 });

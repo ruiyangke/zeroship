@@ -36,8 +36,8 @@ imports get rewritten by the plugin into chunked RPCs over the wire.
 
 | Module | Purpose |
 |---|---|
-| `src/server/auth.ts` | Proxies to control plane's `/auth/*` with cookie passthrough. Handles register / login / logout / userinfo. |
-| `src/server/apps.ts` | Proxies to control plane's `/api/apps/*` for app CRUD, deploys, env vars, secrets, logs, plan switching. |
+| `src/client/api/auth.ts` | Calls same-origin `/auth/*` directly so login / signup / logout can receive control-plane `Set-Cookie` headers in the browser; `src/server/preview-proxy.ts` proxies those raw fetches in deployed apps. |
+| `src/server/apps.ts` | Cookie-forwarding RPC proxy to control plane `/api/apps/*` for app CRUD, env vars, secrets, logs, plan switching. It does not attach `CONTROL_KEY` to browser-callable RPCs. |
 | `src/server/sandbox.ts` | Proxies to `zeroship-sandbox` for file ops + shell exec inside the per-project Docker container. Holds the sandbox token (browser never sees it). |
 | `src/server/chat.ts` | Builder agent — deepagents + LangGraph in V8 (~691 LOC). Translates the LangChain event stream into AI SDK v6 UI Message Stream Protocol on the wire. Marked `lazy: true` so the heavy graph only loads on first call. |
 | `src/server/wizard.ts` | Pre-coding clarification flow — plain LangGraph (no deepagents, no sandbox) in V8 (~495 LOC). Loops surveys against the LLM until it emits a terminal `data-brief` chunk. Also `lazy: true`. |
@@ -53,9 +53,9 @@ apps/zeroship-builder/
 └── src/
     ├── server.ts           (entry — re-exports every server fn)
     ├── server/
-    │   ├── auth.ts
+    │   ├── config.ts       (resource auth/rate-limit policy)
     │   ├── apps.ts
-    │   ├── agents.ts        (issues + quality + data/media canvas stubs)
+    │   ├── agents.ts        (issue + quality read model)
     │   ├── sandbox.ts
     │   ├── chat.ts          (Builder — deepagents + LangGraph, lazy)
     │   ├── wizard.ts        (clarification — plain LangGraph, lazy)
@@ -63,7 +63,6 @@ apps/zeroship-builder/
     │   ├── sre-worker.ts    (SRE monitor RPC)
     │   └── internal/
     │       ├── env.ts
-    │       ├── request-context.ts
     │       ├── critic.ts       (Critic SubAgent)
     │       ├── reviewer.ts     (Reviewer SubAgent)
     │       ├── pm.ts           (PM SubAgent)
@@ -100,7 +99,6 @@ heavy LangGraph / deepagents code only loads on the first call to
 | Var | What | Default in dev |
 |---|---|---|
 | `CONTROL_URL` | control plane base URL | `http://localhost:9090` |
-| `CONTROL_KEY` | control plane Bearer token | `dev-master-key` |
 | `SANDBOX_URL` | sandbox service URL | `http://localhost:9091` |
 | `SANDBOX_TOKEN` | sandbox bearer token | `test` |
 | `OPENAI_API_KEY` | OpenAI API key | (required for chat) |
@@ -136,7 +134,7 @@ the gateway. Set the env vars + `OPENAI_API_KEY` secret first.
    for the standalone dashboard if anyone wants them, but the
    first-class builder is V8-clean.
 3. **Server functions are real.** ~13 KB of compiled server code
-   handles auth, apps CRUD, sandbox file ops, and a full agent
+   handles apps CRUD, sandbox file ops, and a full agent
    loop. The `"use server"` transform is doing what it advertises.
 
 ## Differences vs. `web/dashboard/`
@@ -144,7 +142,7 @@ the gateway. Set the env vars + `OPENAI_API_KEY` secret first.
 | | dashboard | builder |
 |---|---|---|
 | runtime | Node + Vite dev / static SPA | zeroship V8 fetch handler |
-| auth surface | calls `/auth/*` directly | server functions proxy `/auth/*` |
+| auth surface | calls `/auth/*` directly | calls `/auth/*` directly |
 | agent | separate Bun service (deepagents/LangGraph) | inline server fn (vanilla OpenAI loop) |
 | sandbox | calls `/agent/*` proxy | server functions proxy sandbox HTTP |
 | deploy | static files served by anything | `zeroship deploy` |

@@ -3,43 +3,29 @@ import { Pill } from "../components/Pill";
 const ALL_PILLS = [
   "preview",
   "files",
-  "data",
-  "media",
   "logs",
   "env",
-  "plan",
-  "health",
   "settings",
 ] as const;
 
 export type CanvasPillId = (typeof ALL_PILLS)[number];
 
 /**
- * Three tiers per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §1.5 / §3.2. Each progressively reveals more
- * canvases. The tier is set at the workspace level and persisted in
- * localStorage. Plain progressive disclosure — Maker is the default,
- * +Data adds the database-shaped surfaces, +Code unlocks everything
- * (including Files for those who want to read the source).
+ * Three tiers per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §1.5 / §3.2.
+ * Maker is intentionally small: preview + chat is the creator-facing
+ * product. The other tiers expose advanced evidence surfaces only when
+ * the user asks for them.
  */
-export type CanvasTier = "maker" | "data" | "code";
+export type CanvasTier = "maker" | "ops" | "code";
 
 const MAKER_PILLS: readonly CanvasPillId[] = [
   "preview",
-  "logs",
-  "env",
-  "plan",
-  "health",
-  "settings",
 ] as const;
 
-const PLUS_DATA_PILLS: readonly CanvasPillId[] = [
+const PLUS_OPS_PILLS: readonly CanvasPillId[] = [
   "preview",
-  "data",
-  "media",
   "logs",
   "env",
-  "plan",
-  "health",
   "settings",
 ] as const;
 
@@ -52,7 +38,7 @@ const PLUS_CODE_PILLS: readonly CanvasPillId[] = ALL_PILLS;
  */
 export function pillsForTier(tier: CanvasTier): readonly CanvasPillId[] {
   if (tier === "code") return PLUS_CODE_PILLS;
-  if (tier === "data") return PLUS_DATA_PILLS;
+  if (tier === "ops") return PLUS_OPS_PILLS;
   return MAKER_PILLS;
 }
 
@@ -65,14 +51,12 @@ export interface CanvasPillsProps {
    */
   visible?: readonly CanvasPillId[];
   /**
-   * Tier — drives the pill list when `visible` isn't supplied. Default
-   * "code" preserves the pre-tier behaviour (every pill always shown)
-   * for callers that haven't opted in to tier filtering yet.
+   * Tier — drives the pill list when `visible` isn't supplied.
    */
   tier?: CanvasTier;
 }
 
-export function CanvasPills({ active, onChange, visible, tier = "code" }: CanvasPillsProps) {
+export function CanvasPills({ active, onChange, visible, tier = "maker" }: CanvasPillsProps) {
   const pills = visible ?? pillsForTier(tier);
   return (
     <div data-testid="canvas-pills" className="flex items-center gap-1.5">

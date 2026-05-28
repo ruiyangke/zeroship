@@ -75,11 +75,11 @@
 // section).
 
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage, type UIMessageStreamWriter } from "ai";
-import { stream as rpcStream } from "@zeroship/rpc/server";
+import { streamResponse } from "@zeroship/rpc/server";
 import { z } from "zod";
 
-import { emitDataSurvey, surveyInputSchema, type SurveyInput } from "./internal/survey-wire.js";
-import { WIZARD_SYSTEM } from "./internal/prompts.js";
+import { emitDataSurvey, surveyInputSchema, type SurveyInput } from "./internal/survey-wire";
+import { WIZARD_SYSTEM } from "./internal/prompts";
 
 // --- Wire input ---------------------------------------------------------
 
@@ -102,7 +102,7 @@ export interface WizardTurnInput {
    * Resume payload — present iff client is answering a SurveyCard.
    * Same shape as Builder's chat resume.
    */
-  resume?: { token: string; value: unknown };
+  resume?: { token: string; value?: unknown };
   /**
    * Optional message history (for parity with `useChat`'s default
    * body shape). The wizard ignores this — its own state lives in
@@ -111,6 +111,18 @@ export interface WizardTurnInput {
    */
   messages?: UIMessage[];
 }
+
+const wizardTurnInputSchema = z.object({
+  idea: z.string().min(1).max(4_000).optional(),
+  id: z.string().min(1).max(256).optional(),
+  resume: z.object({
+    token: z.string().min(1).max(512),
+    value: z.unknown(),
+  }).strict().optional(),
+  messages: z.array(z.custom<UIMessage>((value) => value !== null && typeof value === "object")).optional(),
+}).strict().refine((input) => input.idea || input.resume, {
+  message: "wizard input requires idea or resume",
+});
 
 // --- Brief shape (output) -----------------------------------------------
 
@@ -454,11 +466,11 @@ function stringifyAnswer(value: unknown): string {
 
 // --- RPC handler --------------------------------------------------------
 
-export const wizard = rpcStream(
-  (async (input: WizardTurnInput): Promise<Response> => {
-  // Same AbortController-on-stream-cancel pattern as chat.ts. The
-  // kernel RPC fast path doesn't expose request.signal, so we mint
-  // our own and abort when the response body is cancelled.
+export const wizard = streamResponse(
+  async (input: WizardTurnInput): Promise<Response> => {
+    // Same AbortController-on-stream-cancel pattern as chat.ts. The
+    // kernel RPC fast path doesn't expose request.signal, so we mint
+    // our own and abort when the response body is cancelled.
     const ac = new AbortController();
     const stream = await buildWizardStream(input, ac.signal);
 
@@ -489,6 +501,11 @@ export const wizard = rpcStream(
       statusText: baseResponse.statusText,
       headers: baseResponse.headers,
     });
-  }) as unknown as (input: WizardTurnInput) => AsyncIterable<never>,
-  { id: "wizard", lazy: true },
-) as unknown as (input: WizardTurnInput) => Promise<Response>;
+  },
+  {
+    id: "wizard",
+    lazy: true,
+    input: wizardTurnInputSchema,
+    maxInputBytes: 65_536,
+  },
+);

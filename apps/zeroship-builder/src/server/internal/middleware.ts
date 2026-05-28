@@ -72,11 +72,11 @@ import { waitUntil } from "zeroship";
 // emit helper is shared with the wizard runtime (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b /
 // §8.2.7). The wizard calls it directly from its node body; Builder
 // goes through this middleware. Same chunk shape on the wire.
-import { emitDataSurvey, type SurveyInput } from "./survey-wire.js";
+import { emitDataSurvey, type SurveyInput } from "./survey-wire";
 // Quality-scoreboard updater. Lives in `agent-writes.ts`
 // (underscore-prefixed) so it stays out of the public RPC surface —
 // only the server middleware writes here.
-import { setQualityFromCritic } from "./agent-writes.js";
+import { setQualityFromCritic } from "./agent-writes";
 
 /**
  * Build a middleware bound to a specific v6 stream writer. The middleware
@@ -214,8 +214,8 @@ export async function dataPartMiddleware(
               // to the LLM as a ToolMessage so Builder can react.
             }
             // Persist the Critic-graded scorecard into the per-app KV
-            // slot so HealthCanvas reflects the live grades on its
-            // next refetch. Fire-and-forget via
+            // slot so downstream agent context reflects live grades.
+            // Fire-and-forget via
             // waitUntil() so the SSE stream isn't held open by the KV
             // round-trip — the user-visible part is the chat receipt
             // already emitted above.

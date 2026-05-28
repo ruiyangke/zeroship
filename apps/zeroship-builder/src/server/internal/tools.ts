@@ -27,16 +27,18 @@
 import { tool } from "@langchain/core/tools";
 import { interrupt } from "@langchain/langgraph";
 import { z } from "zod";
+import { createControlClient } from "@zeroship/control";
+import { currentHeaders } from "@zeroship/server";
 
 // Schema is shared with the wizard runtime — see `survey-wire.ts` for
 // why and the cross-runtime contract.
-import { surveyInputSchema } from "./survey-wire.js";
-import { CONTROL_KEY, CONTROL_URL, OPENAI_API_KEY } from "./env.js";
-import { REVIEWER_PROMPT } from "./prompts.js";
+import { surveyInputSchema } from "./survey-wire";
+import { CONTROL_URL, OPENAI_API_KEY } from "./env";
+import { REVIEWER_PROMPT } from "./prompts";
 import {
   reviewerResponseSchema,
   type ReviewerResponse,
-} from "./reviewer.js";
+} from "./reviewer";
 
 interface ToolExecuteResponse {
   output: string;
@@ -285,36 +287,29 @@ async function downloadArtifact(
 }
 
 async function fetchAppRecord(appId: string): Promise<AppRecordForDeploy> {
-  const res = await fetch(`${CONTROL_URL()}/api/apps/${encodeURIComponent(appId)}`, {
-    headers: {
-      authorization: `Bearer ${CONTROL_KEY()}`,
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`get app failed (${res.status}): ${body}`);
-  }
-  return (await res.json()) as AppRecordForDeploy;
+  return controlClient().apps.get(appId);
 }
 
 async function postZshipDeploy(
   appId: string,
   artifact: Uint8Array,
 ): Promise<DeployResponse> {
-  const res = await fetch(`${CONTROL_URL()}/api/apps/${encodeURIComponent(appId)}/deploy`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${CONTROL_KEY()}`,
-      "content-type": "application/x-zship",
-    },
-    body: new Blob([artifact as BlobPart]),
-  });
+  return controlClient().apps.deploy(appId, artifact);
+}
 
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`deploy failed (${res.status}): ${text}`);
+function controlClient() {
+  return createControlClient({
+    baseUrl: CONTROL_URL(),
+    cookie: requestCookie,
+  });
+}
+
+function requestCookie(): string | null {
+  try {
+    return currentHeaders().get("cookie") ?? null;
+  } catch {
+    return null;
   }
-  return JSON.parse(text) as DeployResponse;
 }
 
 function capText(value: string, max: number): string {

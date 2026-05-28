@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getApp } from "../api";
 import { TopBar } from "./TopBar";
@@ -9,10 +9,6 @@ import { FilesCanvas } from "./canvases/FilesCanvas";
 import { LogsCanvas } from "./canvases/LogsCanvas";
 import { EnvCanvas } from "./canvases/EnvCanvas";
 import { SettingsCanvas } from "./canvases/SettingsCanvas";
-import { PlanCanvas } from "./canvases/PlanCanvas";
-import { HealthCanvas } from "./canvases/HealthCanvas";
-import { DataCanvas } from "./canvases/DataCanvas";
-import { MediaCanvas } from "./canvases/MediaCanvas";
 import { ChatRail } from "./chat/ChatRail";
 import { briefSchema, type Brief } from "../types/chat";
 import { LiveBanner } from "../components/LiveBanner";
@@ -28,14 +24,8 @@ const TIER_KEY = "zeroship_canvas_tier";
 
 function readTier(): CanvasTier {
   const v = lsGet(TIER_KEY);
-  if (v === "maker" || v === "data" || v === "code") return v;
-  // Default = "code" so brand-new users see every pill on first visit.
-  // Spec §1.5 frames Maker as the canonical default; we ship the toggle
-  // here and let the user opt down. Switching the default to "maker"
-  // would also work — when the test suite gains explicit tier setup
-  // we can revisit. For now "show everything until the user says
-  // otherwise" is the safer default.
-  return "code";
+  if (v === "maker" || v === "ops" || v === "code") return v;
+  return "maker";
 }
 
 export interface WorkspaceShellProps {
@@ -43,9 +33,9 @@ export interface WorkspaceShellProps {
    *  but tests / embeds may want to mount the shell directly with a
    *  fixed appId. */
   appId?: string;
-  /** Override for tests / catch-all route. When the URL has no
+  /** Override for tests / embeds. When the URL has no
    *  `:appId` and no override is supplied, the shell renders an
-   *  "untitled" placeholder so the catch-all stays useful. */
+   *  "untitled" placeholder. */
   projectName?: string;
 }
 
@@ -69,9 +59,13 @@ function consumePendingBrief(): Brief | null {
 }
 
 export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp }: WorkspaceShellProps) {
-  const params = useParams<{ appId: string }>();
+  const params = useParams<{ appId: string; "*": string }>();
+  const navigate = useNavigate();
   const appId = appIdProp ?? params.appId;
-  const [active, setActive] = useState<CanvasPillId>("preview");
+  const routeRest = params["*"] ?? "";
+  const routeActive = canvasFromRouteRest(routeRest);
+  const hasInvalidCanvasPath = routeRest !== "" && routeActive === null;
+  const [active, setActiveState] = useState<CanvasPillId>(() => routeActive ?? "preview");
   const [tier, setTierState] = useState<CanvasTier>(() => readTier());
   const [tourOpen, setTourOpen] = useState(false);
   const [showLiveBanner, setShowLiveBanner] = useState(false);
@@ -100,6 +94,18 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   // anyway, but defence-in-depth).
   const seedBrief = useMemo(() => (appId ? consumePendingBrief() : null), [appId]);
 
+  useEffect(() => {
+    setActiveState(routeActive ?? "preview");
+    const requiredTier = routeActive ? tierForCanvas(routeActive) : null;
+    if (requiredTier === "code" && tier !== "code") {
+      setTierState("code");
+      lsSet(TIER_KEY, "code");
+    } else if (requiredTier === "ops" && tier === "maker") {
+      setTierState("ops");
+      lsSet(TIER_KEY, "ops");
+    }
+  }, [routeActive, routeRest, tier]);
+
   const appQuery = useQuery({
     queryKey: ["app", appId],
     queryFn: () => getApp(appId!),
@@ -122,9 +128,8 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
     track("project.first_deploy", { app_id: appId });
   }, [appId, appQuery.data]);
 
-  // Loading / error gates only fire when we have an appId. The
-  // catch-all route (no appId) bypasses them and renders the legacy
-  // "untitled" shell so existing tests keep passing.
+  // Loading / error gates only fire when we have an appId. Test embeds
+  // without an appId bypass them and render the local shell.
   if (appId && appQuery.isLoading) {
     return (
       <div className="h-screen flex items-center justify-center bg-paper">
@@ -156,6 +161,32 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   }
 
   const projectName = appQuery.data?.name ?? projectNameProp ?? "untitled";
+
+  if (hasInvalidCanvasPath) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-paper p-6">
+        <div className="text-center max-w-md">
+          <h1 className="font-serif italic text-2xl text-ink mb-2">Canvas not found</h1>
+          <p className="font-serif text-ink-soft mb-4">
+            That workspace view does not exist.
+          </p>
+          <button
+            type="button"
+            onClick={() => setActive("preview")}
+            className="font-serif italic text-tomato hover:opacity-80 bg-transparent border-0 cursor-pointer"
+          >
+            Back to preview
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function setActive(next: CanvasPillId) {
+    setActiveState(next);
+    if (!appId) return;
+    navigate(`/p/${encodeURIComponent(appId)}/${next}`, { replace: false });
+  }
 
   return (
     <div className="h-screen flex flex-col bg-paper">
@@ -227,10 +258,8 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
             />
           )}
           {/* Each canvas is wrapped in its own ErrorBoundary so a render
-              crash in one pane does not blank the whole workspace. The
-              Data and Media surfaces still sit on temporary in-memory
-              backends, so keeping the failure domain small matters.
-              The catch-all at the bottom keeps each pill clickable
+              crash in one pane does not blank the whole workspace.
+              The fallback at the bottom keeps each pill clickable
               when an appId is not available. */}
           {active === "preview" && (
             <ErrorBoundary label="the preview"><PreviewCanvas appId={appId} /></ErrorBoundary>
@@ -238,27 +267,11 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
           {active === "files" && appId && (
             <ErrorBoundary label="the files canvas"><FilesCanvas appId={appId} /></ErrorBoundary>
           )}
-          {active === "data" && appId && (
-            <ErrorBoundary label="the data canvas"><DataCanvas appId={appId} /></ErrorBoundary>
-          )}
-          {active === "media" && appId && (
-            <ErrorBoundary label="the media canvas"><MediaCanvas appId={appId} /></ErrorBoundary>
-          )}
           {active === "logs" && appId && (
             <ErrorBoundary label="the logs canvas"><LogsCanvas appId={appId} /></ErrorBoundary>
           )}
           {active === "env" && appId && (
             <ErrorBoundary label="the env canvas"><EnvCanvas appId={appId} /></ErrorBoundary>
-          )}
-          {active === "plan" && appId && (
-            <ErrorBoundary label="the plan canvas">
-              <PlanCanvas appId={appId} app={appQuery.data} />
-            </ErrorBoundary>
-          )}
-          {active === "health" && appId && (
-            <ErrorBoundary label="the health canvas">
-              <HealthCanvas appId={appId} app={appQuery.data} />
-            </ErrorBoundary>
           )}
           {active === "settings" && appId && (
             <ErrorBoundary label="settings">
@@ -324,15 +337,32 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
   );
 }
 
+function canvasFromRouteRest(rest: string): CanvasPillId | null {
+  if (!rest || rest.includes("/")) return null;
+  if (
+    rest === "preview" ||
+    rest === "files" ||
+    rest === "logs" ||
+    rest === "env" ||
+    rest === "settings"
+  ) {
+    return rest;
+  }
+  return null;
+}
+
+function tierForCanvas(id: CanvasPillId): CanvasTier {
+  if (id === "files") return "code";
+  if (id === "logs" || id === "env" || id === "settings") return "ops";
+  return "maker";
+}
+
 /**
  * Tier toggle — tiny editorial chip that flips the visible pill set
- * between Maker / +Data / +Code. Spec §1.5 frames this as "a tiny
- * + data / + code link" tucked next to the pills; we render it
- * exactly that way.
+ * between Maker / Ops / Code.
  *
- * Click cycles forward (maker → data → code → maker). The label shows
- * the NEXT tier so the affordance is "click to add data" rather than
- * "click to be on data".
+ * Click cycles forward (maker → ops → code → maker). The label shows
+ * the next tier.
  */
 function TierToggle({
   tier,
@@ -342,9 +372,9 @@ function TierToggle({
   onChange: (next: CanvasTier) => void;
 }) {
   const next: CanvasTier =
-    tier === "maker" ? "data" : tier === "data" ? "code" : "maker";
+    tier === "maker" ? "ops" : tier === "ops" ? "code" : "maker";
   const label =
-    next === "data" ? "+ data" : next === "code" ? "+ code" : "− maker";
+    next === "ops" ? "+ ops" : next === "code" ? "+ code" : "− maker";
   return (
     <button
       type="button"

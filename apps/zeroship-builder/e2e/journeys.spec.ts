@@ -152,16 +152,15 @@ test.describe("Journeys — onboarding chain", () => {
   });
 });
 
-test.describe("Journeys — workspace catch-all + ProductTour", () => {
-  test("catch-all route mounts WorkspaceShell with default project name", async ({ page }) => {
+test.describe("Journeys — workspace dev shell + ProductTour", () => {
+  test("unknown route renders NotFound instead of an empty workspace", async ({ page }) => {
     await page.goto("/__no_project_here");
-    // The shell renders without an appId — canvas-area still mounts.
-    await expect(page.getByTestId("canvas-area")).toBeVisible();
-    await expect(page.getByTestId("canvas-pills")).toBeVisible();
+    await expect(page.getByTestId("not-found-page")).toBeVisible();
+    await expect(page.getByTestId("canvas-area")).toHaveCount(0);
   });
 
   test("topbar ?-button opens ProductTour, Skip closes it", async ({ page }) => {
-    await page.goto("/__catchall_for_test");
+    await page.goto("/__test/workspace");
     await expect(page.getByTestId("canvas-area")).toBeVisible();
     await page.getByTestId("topbar-tour").click();
     await expect(page.getByTestId("product-tour")).toBeVisible();
@@ -171,7 +170,7 @@ test.describe("Journeys — workspace catch-all + ProductTour", () => {
   });
 
   test("ProductTour Next walks 4 steps then Got it closes", async ({ page }) => {
-    await page.goto("/__catchall_for_test");
+    await page.goto("/__test/workspace");
     await page.getByTestId("topbar-tour").click();
     await expect(page.getByTestId("product-tour-card")).toContainText("step 1 of 4");
     await page.getByTestId("product-tour-next").click();
@@ -188,7 +187,7 @@ test.describe("Journeys — workspace catch-all + ProductTour", () => {
   });
 
   test("ProductTour backdrop click counts as Skip", async ({ page }) => {
-    await page.goto("/__catchall_for_test");
+    await page.goto("/__test/workspace");
     await page.getByTestId("topbar-tour").click();
     await expect(page.getByTestId("product-tour")).toBeVisible();
     // Click the backdrop (outside the card) at top-left corner.
