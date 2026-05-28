@@ -12,7 +12,7 @@ use compio_postgres::{connect, NoTls};
 use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
-use zeroship_auth::config::AuthConfig;
+use zeroship_auth::config::{validate_stash_key, AuthConfig};
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::hydra_client::HydraAdmin;
@@ -29,6 +29,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = AuthConfig::parse();
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
+    if let Err(message) = validate_stash_key(&cfg) {
+        tracing::error!("{message}");
+        std::process::exit(1);
+    }
+
     // OAuth provider credentials are optional. We log a warning per disabled
     // provider so it's obvious during boot which federation arms aren't wired
     // up. Actual route gating happens in U2.2 (Google) + U3.2 (GitHub).
@@ -40,14 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg.github_client_id.is_none() {
         tracing::warn!(
             "GitHub OAuth disabled — set AUTH_GITHUB_CLIENT_ID + AUTH_GITHUB_CLIENT_SECRET to enable"
-        );
-    }
-
-    // Loud warning when the stash signing key still has its dev default —
-    // production deployments MUST override AUTH_STASH_SIGNING_KEY.
-    if cfg.stash_signing_key.starts_with("dev-only-") {
-        tracing::warn!(
-            "AUTH_STASH_SIGNING_KEY is using the dev default — set a strong (≥32-byte) value before serving real traffic"
         );
     }
 
