@@ -136,11 +136,10 @@ struct DpopBody {
 
 /// Verify a DPoP proof JWT.
 ///
-/// `expected_method` and `expected_uri` are the HTTP method (any case;
-/// compared case-insensitively) and the canonical request URI of the
-/// request the proof accompanies — both should already have
-/// query/fragment stripped at the caller, but [`htu_matches`] re-strips
-/// defensively.
+/// `expected_method` and `expected_uri` are the exact HTTP method and
+/// the canonical request URI of the request the proof accompanies —
+/// both should already have query/fragment stripped at the caller, but
+/// [`htu_matches`] re-strips defensively.
 ///
 /// When `access_token` is `Some(t)`, the proof's `ath` claim must equal
 /// `base64url(SHA-256(t))`. When it's `None`, `ath` is ignored (the
@@ -210,10 +209,11 @@ pub fn verify(
         decode(proof, &decoding, &validation).map_err(|e| DpopError::BadSignature(e.to_string()))?;
     let body = data.claims;
 
-    // 8. htm — compare case-insensitively (RFC 9449 §4.3 says it
-    //    "SHOULD" be uppercase, but we don't want to reject for case
-    //    differences when the underlying semantics match).
-    if !body.htm.eq_ignore_ascii_case(expected_method) {
+    // 8. htm — compare exactly. RFC 9449 §4.2 says the proof's method
+    //    SHOULD match the HTTP method value; method strings are
+    //    conventionally uppercase, so "post" must not validate as
+    //    "POST".
+    if body.htm != expected_method {
         return Err(DpopError::HtmMismatch {
             expected: expected_method.to_string(),
             got: body.htm,
@@ -564,17 +564,36 @@ mod tests {
     }
 
     #[test]
-    fn htm_compares_case_insensitively() {
-        // Per RFC 9449 §4.3, htm SHOULD be uppercase; we accept any
-        // case so an upstream that sends "Post" against a "POST"
-        // method still validates.
+    fn htm_compares_exactly_uppercase() {
+        let now = 1_700_000_000_i64;
+        let sk = test_key();
+        let (jwt, _) = sign_ed25519(&sk, &happy_claims(now));
+        verify(&jwt, "POST", "https://api.zeroship.ai/v1/resource", None, now)
+            .expect("exact uppercase htm should match");
+    }
+
+    #[test]
+    fn htm_rejects_lowercase() {
         let now = 1_700_000_000_i64;
         let sk = test_key();
         let mut claims = happy_claims(now);
         claims["htm"] = json!("post");
         let (jwt, _) = sign_ed25519(&sk, &claims);
-        verify(&jwt, "POST", "https://api.zeroship.ai/v1/resource", None, now)
-            .expect("case-insensitive htm should match");
+        let err = verify(&jwt, "POST", "https://api.zeroship.ai/v1/resource", None, now)
+            .expect_err("must reject lowercase htm");
+        assert!(matches!(err, DpopError::HtmMismatch { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn htm_rejects_mixed_case() {
+        let now = 1_700_000_000_i64;
+        let sk = test_key();
+        let mut claims = happy_claims(now);
+        claims["htm"] = json!("Post");
+        let (jwt, _) = sign_ed25519(&sk, &claims);
+        let err = verify(&jwt, "POST", "https://api.zeroship.ai/v1/resource", None, now)
+            .expect_err("must reject mixed-case htm");
+        assert!(matches!(err, DpopError::HtmMismatch { .. }), "got: {err:?}");
     }
 
     #[test]
