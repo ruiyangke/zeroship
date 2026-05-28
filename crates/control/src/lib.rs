@@ -5,6 +5,7 @@
 //! (`src/main.rs`) is a thin wrapper around these modules.
 
 pub mod api;
+pub mod admin_handlers;
 pub mod audit;
 pub mod authz_guard;
 pub mod backchannel_logout;

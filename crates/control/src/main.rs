@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, backchannel_logout, env_handlers, internal, oidc_rp, stripe_handlers,
+    admin_handlers, api, backchannel_logout, env_handlers, internal, oidc_rp, stripe_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -293,6 +293,7 @@ async fn main() -> std::io::Result<()> {
     web::server(async move || {
         web::App::new()
             .state(state.clone())
+            .configure(admin_handlers::configure)
             // --- Admin API ---
             .service(
                 web::resource("/api/apps")
