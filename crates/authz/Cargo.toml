@@ -5,8 +5,11 @@ edition = "2021"
 description = "Authorization wrapper policy types for the zeroship platform"
 
 [dependencies]
+cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }
+hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true
