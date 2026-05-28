@@ -44,6 +44,7 @@
 @import "./components/NavigationMenu/NavigationMenu.css";
 @import "./components/Accordion/Accordion.css";
 @import "./components/Collapsible/Collapsible.css";
+@import "./components/Toast/Toast.css";
 
 *,
 *::before,
