@@ -3357,6 +3357,165 @@ await open("components-navigationmenu--keyboard-nav");
   );
 }
 
+/* ─── 82. Slice 14: Accordion single — Trigger toggles Panel; only one
+ *                   Panel open at a time
+ *
+ * Brief assertion 1: clicking a Trigger toggles its Panel's visibility
+ * and flips `aria-expanded`. In single mode, opening a second Item
+ * closes the previously-open Item. */
+await open("components-accordion--basic");
+{
+  const shipping = page.locator(
+    '[data-testid="accordion-basic-trigger-shipping"]',
+  );
+  const returns = page.locator(
+    '[data-testid="accordion-basic-trigger-returns"]',
+  );
+  const panelShipping = page.locator(
+    '[data-testid="accordion-basic-panel-shipping"]',
+  );
+  const panelReturns = page.locator(
+    '[data-testid="accordion-basic-panel-returns"]',
+  );
+  await shipping.waitFor({ state: "visible", timeout: 5000 });
+  const initialShippingExpanded = await shipping.getAttribute(
+    "aria-expanded",
+  );
+  await shipping.click();
+  await page.waitForTimeout(300);
+  const openShippingExpanded = await shipping.getAttribute("aria-expanded");
+  const shippingPanelVisible = await panelShipping
+    .isVisible()
+    .catch(() => false);
+  await returns.click();
+  await page.waitForTimeout(300);
+  const returnsExpanded = await returns.getAttribute("aria-expanded");
+  const shippingExpandedAfter = await shipping.getAttribute("aria-expanded");
+  const returnsPanelVisible = await panelReturns
+    .isVisible()
+    .catch(() => false);
+  const ok =
+    initialShippingExpanded === "false" &&
+    openShippingExpanded === "true" &&
+    shippingPanelVisible &&
+    returnsExpanded === "true" &&
+    shippingExpandedAfter === "false" &&
+    returnsPanelVisible;
+  report(
+    "Accordion single — Trigger toggles Panel + only one open at a time",
+    ok,
+    `shipping ${initialShippingExpanded}→${openShippingExpanded}, then ${shippingExpandedAfter}; returns ${returnsExpanded}; panels visible: shipping=${shippingPanelVisible}, returns=${returnsPanelVisible}`,
+  );
+}
+
+/* ─── 83. Slice 14: Accordion multiple — multiple panels open at once
+ *
+ * Brief assertion 2: in `multiple` mode, opening a second Trigger does
+ * NOT close the first — both Panels are simultaneously visible. */
+await open("components-accordion--multiple-open");
+{
+  // Story preopens `shipping` and `warranty` via defaultValue.
+  const shipping = page.locator(
+    '[data-testid="accordion-multiple-trigger-shipping"]',
+  );
+  const returns = page.locator(
+    '[data-testid="accordion-multiple-trigger-returns"]',
+  );
+  const warranty = page.locator(
+    '[data-testid="accordion-multiple-trigger-warranty"]',
+  );
+  await shipping.waitFor({ state: "visible", timeout: 5000 });
+  const shippingExpanded = await shipping.getAttribute("aria-expanded");
+  const warrantyExpanded = await warranty.getAttribute("aria-expanded");
+  // Open the third panel (returns) — shipping + warranty stay open.
+  await returns.click();
+  await page.waitForTimeout(300);
+  const returnsExpanded = await returns.getAttribute("aria-expanded");
+  const shippingStillOpen = await shipping.getAttribute("aria-expanded");
+  const warrantyStillOpen = await warranty.getAttribute("aria-expanded");
+  const ok =
+    shippingExpanded === "true" &&
+    warrantyExpanded === "true" &&
+    returnsExpanded === "true" &&
+    shippingStillOpen === "true" &&
+    warrantyStillOpen === "true";
+  report(
+    "Accordion multiple — opening another Trigger keeps existing Panels open",
+    ok,
+    `initial shipping=${shippingExpanded} warranty=${warrantyExpanded}; after click returns=${returnsExpanded} shipping=${shippingStillOpen} warranty=${warrantyStillOpen}`,
+  );
+}
+
+/* ─── 84. Slice 14: Collapsible — aria-expanded flips + Panel toggles
+ *
+ * Brief assertion 3: clicking the Trigger flips `aria-expanded` from
+ * `false` to `true` (and back); the Panel's visibility toggles in
+ * lockstep (Base UI sets `hidden` while closed). */
+await open("components-collapsible--basic");
+{
+  const trigger = page.locator('[data-testid="collapsible-basic-trigger"]');
+  const panel = page.locator('[data-testid="collapsible-basic-panel"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const expandedInitial = await trigger.getAttribute("aria-expanded");
+  const hiddenInitial = await panel
+    .evaluate((el) => el.hasAttribute("hidden") || !el.offsetParent)
+    .catch(() => true);
+  await trigger.click();
+  await page.waitForTimeout(300);
+  const expandedOpen = await trigger.getAttribute("aria-expanded");
+  const panelVisibleOpen = await panel.isVisible().catch(() => false);
+  await trigger.click();
+  await page.waitForTimeout(300);
+  const expandedClosed = await trigger.getAttribute("aria-expanded");
+  const hiddenAfter = await panel
+    .evaluate((el) => el.hasAttribute("hidden") || !el.offsetParent)
+    .catch(() => true);
+  const ok =
+    expandedInitial === "false" &&
+    hiddenInitial === true &&
+    expandedOpen === "true" &&
+    panelVisibleOpen &&
+    expandedClosed === "false" &&
+    hiddenAfter === true;
+  report(
+    "Collapsible — aria-expanded flips + Panel hidden attribute toggles",
+    ok,
+    `expanded: ${expandedInitial} → ${expandedOpen} → ${expandedClosed}; panel hidden: ${hiddenInitial} → visible=${panelVisibleOpen} → ${hiddenAfter}`,
+  );
+}
+
+/* ─── 85. Slice 14: Accordion — ArrowDown moves roving focus across
+ *                   Triggers in the vertical default
+ *
+ * Brief assertion 4: focusing the first Trigger and pressing ArrowDown
+ * moves focus to the next Trigger in the stack. Base UI's roving
+ * composite drives this. */
+await open("components-accordion--basic");
+{
+  const first = page.locator(
+    '[data-testid="accordion-basic-trigger-shipping"]',
+  );
+  const second = page.locator(
+    '[data-testid="accordion-basic-trigger-returns"]',
+  );
+  await first.waitFor({ state: "visible", timeout: 5000 });
+  await first.focus();
+  const firstFocused = await first.evaluate(
+    (el) => el === document.activeElement,
+  );
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(80);
+  const secondFocused = await second.evaluate(
+    (el) => el === document.activeElement,
+  );
+  const ok = firstFocused && secondFocused;
+  report(
+    "Accordion — ArrowDown moves roving focus to next Trigger",
+    ok,
+    `firstFocused=${firstFocused} secondFocused=${secondFocused}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

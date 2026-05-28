@@ -282,3 +282,31 @@ export type {
   NavMenuArrowProps,
   NavMenuIconProps,
 } from "./NavigationMenu";
+
+export {
+  Accordion,
+  AccordionItem,
+  AccordionHeader,
+  AccordionTrigger,
+  AccordionPanel,
+} from "./Accordion";
+export type {
+  AccordionRootProps,
+  AccordionItemProps,
+  AccordionHeaderProps,
+  AccordionTriggerProps,
+  AccordionPanelProps,
+  AccordionOrientation,
+} from "./Accordion";
+
+export {
+  Collapsible,
+  CollapsibleRoot,
+  CollapsibleTrigger,
+  CollapsiblePanel,
+} from "./Collapsible";
+export type {
+  CollapsibleRootProps,
+  CollapsibleTriggerProps,
+  CollapsiblePanelProps,
+} from "./Collapsible";

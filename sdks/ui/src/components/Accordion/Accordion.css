@@ -1,0 +1,286 @@
+/*
+ * Accordion — Root + Item + Header + Trigger + Panel.
+ *
+ * Anatomy:
+ *   .zs-accordion                    — root container; data-orientation
+ *     ├─ .zs-accordion-item          — Item wrapper (separator paint)
+ *     │   ├─ .zs-accordion-header    — <h3> wrapper around the trigger
+ *     │   │   └─ .zs-accordion-trigger
+ *     │   │       ├─ .zs-accordion-trigger-label
+ *     │   │       └─ .zs-accordion-trigger-chevron
+ *     │   └─ .zs-accordion-panel     — Panel; height-animated container
+ *     │       └─ .zs-accordion-panel-inner — content padding lives here
+ *
+ * The Panel uses Base UI's `--accordion-panel-height` custom property
+ * (emitted on `[data-state="open"]` panels) to animate from `0` to the
+ * measured natural block-size. `prefers-reduced-motion` flattens the
+ * animation; the chevron rotation also drops in reduced motion so the
+ * open-state cue arrives instantly without movement.
+ *
+ * Logical properties everywhere — the chevron lives at `inset-inline-end`
+ * so RTL flips it automatically without a manual mirror. Horizontal
+ * orientation rotates the separators from block-end to inline-end.
+ */
+
+/* ─── component-local tokens ────────────────────────────────────────── */
+.zs-accordion {
+  /* Item separator hairline — same family Slice 4 uses for selection
+     edges; sits between rows so the stack reads as a discrete list
+     without competing with the trigger labels for ink. */
+  --zs-accordion-separator: var(--zs-separator);
+
+  /* Trigger row rhythm — matches Button/Tabs control-h-md so an
+     accordion inside a content sheet sits in the same rhythm as nearby
+     surfaces. */
+  --zs-accordion-trigger-pad-block: var(--zs-space-3);   /* 12 */
+  --zs-accordion-trigger-pad-inline: var(--zs-space-4);  /* 16 */
+  --zs-accordion-trigger-gap: var(--zs-space-3);         /* 12 */
+
+  /* Panel inner padding — leaves room for one prose paragraph or a
+     small form without feeling cramped; matches Card content rhythm. */
+  --zs-accordion-panel-pad-block: var(--zs-space-3);
+  --zs-accordion-panel-pad-inline: var(--zs-space-4);
+
+  /* Chevron diameter — sits in the optical sweet spot for a 1rem label. */
+  --zs-accordion-chevron-size: 0.75rem;                   /* 12 */
+}
+
+/* ─── root ──────────────────────────────────────────────────────────── */
+.zs-accordion {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+
+.zs-accordion--horizontal {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+/* ─── item ──────────────────────────────────────────────────────────── *
+ *
+ * Each item paints a separator on its trailing block edge so the stack
+ * reads as a list. The last item has its separator suppressed via the
+ * `:last-child` selector — keeping the hairline off the bottom edge of
+ * the surface (the host card / sheet draws its own bottom rule).
+ *
+ * Horizontal orientation rotates the separator to the trailing inline
+ * edge instead. */
+.zs-accordion-item {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  border-block-end: var(--zs-selection-hairline) solid
+    var(--zs-accordion-separator);
+}
+.zs-accordion-item:last-of-type {
+  border-block-end: 0;
+}
+
+.zs-accordion-item--horizontal {
+  border-block-end: 0;
+  border-inline-end: var(--zs-selection-hairline) solid
+    var(--zs-accordion-separator);
+}
+.zs-accordion-item--horizontal:last-of-type {
+  border-inline-end: 0;
+}
+
+/* ─── header ────────────────────────────────────────────────────────── *
+ *
+ * Base UI renders an <h3> by default; we strip the user-agent margin and
+ * default font-weight so the heading sits flush — the Trigger inside
+ * paints the actual visual weight. */
+.zs-accordion-header {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+/* ─── trigger ───────────────────────────────────────────────────────── *
+ *
+ * The full-width row a consumer clicks. Visually the trigger reads like
+ * a heading — left-aligned label, trailing chevron — but it's a button
+ * so the focus ring + keyboard interactions work natively. */
+.zs-accordion-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--zs-accordion-trigger-gap);
+  inline-size: 100%;
+  padding-block: var(--zs-accordion-trigger-pad-block);
+  padding-inline: var(--zs-accordion-trigger-pad-inline);
+  border: 0;
+  background-color: transparent;
+  color: var(--zs-label);
+  font-family: inherit;
+  font-size: var(--zs-text-body-size);
+  font-weight: 600;
+  line-height: var(--zs-text-body-line);
+  text-align: start;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-accordion-trigger-label {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+/* Hover — quiet fill that signals tappability without competing with
+   the focus ring. Disabled triggers do NOT receive the hover treatment. */
+@media (hover: hover) {
+  .zs-accordion-trigger:not([data-disabled]):hover {
+    background-color: color-mix(in oklch, var(--zs-fill) 50%, transparent);
+  }
+}
+
+.zs-accordion-trigger:not([data-disabled]):active {
+  background-color: color-mix(in oklch, var(--zs-fill) 80%, transparent);
+}
+
+/* Focus ring uses outline so it escapes any clipped surfaces. Same rule
+   Tabs/Toggle use. */
+.zs-accordion-trigger:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: calc(var(--zs-focus-ring-offset) * -1);
+  /* Pull the outline INSIDE the trigger box so it doesn't overlap with
+     the next item's separator. */
+}
+
+/* Disabled — quiet. Cursor changes to not-allowed; ink fades. */
+.zs-accordion-trigger[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-quaternary);
+}
+
+/* ─── chevron ───────────────────────────────────────────────────────── *
+ *
+ * Trailing glyph that rotates 180° on open. Base UI sets
+ * `data-state="open"` on the trigger when its Item is expanded; we read
+ * that and flip the rotation. `prefers-reduced-motion` drops the
+ * transition (the flip still happens, just instantly). */
+.zs-accordion-trigger-chevron {
+  flex: 0 0 auto;
+  inline-size: var(--zs-accordion-chevron-size);
+  block-size: var(--zs-accordion-chevron-size);
+  color: var(--zs-label-secondary);
+  transform-origin: 50% 50%;
+  transition: transform var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-accordion-trigger[data-panel-open] .zs-accordion-trigger-chevron,
+.zs-accordion-trigger[data-state="open"] .zs-accordion-trigger-chevron {
+  transform: rotate(0.5turn);
+}
+
+/* Horizontal orientation — the chevron rotates 90° at rest so it points
+   inline-end, then to inline-start when open. Logical-properties keep
+   RTL automatic via the inset model on the parent. */
+.zs-accordion-trigger--horizontal .zs-accordion-trigger-chevron {
+  transform: rotate(-0.25turn);
+}
+.zs-accordion-trigger--horizontal[data-panel-open]
+  .zs-accordion-trigger-chevron,
+.zs-accordion-trigger--horizontal[data-state="open"]
+  .zs-accordion-trigger-chevron {
+  transform: rotate(0.25turn);
+}
+
+/* ─── panel ─────────────────────────────────────────────────────────── *
+ *
+ * The Panel animates `block-size: 0 ↔ var(--accordion-panel-height)`.
+ * Base UI emits the natural block-size as a CSS custom property on the
+ * panel element while it's measured; closed panels collapse to 0 with
+ * overflow hidden. The inner wrapper carries the padding so the 0-height
+ * state stays clean (padding on the outer would create a visible step
+ * at the end of the transition). */
+.zs-accordion-panel {
+  overflow: hidden;
+  block-size: var(--accordion-panel-height, 0);
+  transition: block-size var(--zs-motion-base) var(--zs-motion-ease);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+
+/* Base UI sets `data-starting-style` while opening from 0 — leave the
+   transition alone so the open animation runs to the measured height.
+   The closing animation runs in reverse via the same transition. */
+
+.zs-accordion-panel[data-state="closed"] {
+  block-size: 0;
+}
+
+.zs-accordion-panel-inner {
+  padding-block: var(--zs-accordion-panel-pad-block);
+  padding-inline: var(--zs-accordion-panel-pad-inline);
+}
+
+/* Horizontal orientation — the panel animates inline-size instead of
+   block-size. Base UI emits `--accordion-panel-width` for horizontal
+   roots. */
+.zs-accordion-panel--horizontal {
+  block-size: auto;
+  inline-size: var(--accordion-panel-width, 0);
+  transition: inline-size var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-accordion-panel--horizontal[data-state="closed"] {
+  inline-size: 0;
+}
+
+/* ─── reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-accordion-trigger,
+  .zs-accordion-trigger-chevron,
+  .zs-accordion-panel,
+  .zs-accordion-panel--horizontal {
+    transition: none;
+  }
+}
+
+/* ─── forced colors ─────────────────────────────────────────────────── *
+ *
+ * Map the open-row and focus affordances to system colors so high-
+ * contrast users can still see which row is current. */
+@media (forced-colors: active) {
+  .zs-accordion-item {
+    border-color: CanvasText;
+  }
+  .zs-accordion-item--horizontal {
+    border-color: CanvasText;
+  }
+  .zs-accordion-trigger {
+    forced-color-adjust: none;
+    color: CanvasText;
+    background-color: Canvas;
+  }
+  .zs-accordion-trigger[data-disabled] {
+    color: GrayText;
+  }
+  .zs-accordion-trigger[data-panel-open],
+  .zs-accordion-trigger[data-state="open"] {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+  .zs-accordion-trigger[data-panel-open] .zs-accordion-trigger-chevron,
+  .zs-accordion-trigger[data-state="open"] .zs-accordion-trigger-chevron {
+    color: HighlightText;
+  }
+  .zs-accordion-trigger:focus-visible {
+    outline-color: Highlight;
+  }
+  .zs-accordion-panel {
+    color: CanvasText;
+    background-color: Canvas;
+  }
+}

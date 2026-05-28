@@ -1,0 +1,170 @@
+/*
+ * Collapsible — Root + Trigger + Panel.
+ *
+ * Anatomy:
+ *   .zs-collapsible                  — root container
+ *     ├─ .zs-collapsible-trigger     — button row with chevron
+ *     │   ├─ .zs-collapsible-trigger-label
+ *     │   └─ .zs-collapsible-trigger-chevron
+ *     └─ .zs-collapsible-panel       — Panel; height-animated container
+ *         └─ .zs-collapsible-panel-inner — padding lives here
+ *
+ * Panel animates `block-size: 0 ↔ var(--collapsible-panel-height)` —
+ * Base UI emits the natural height on the panel element when measuring.
+ * `prefers-reduced-motion: reduce` flattens the animation; the chevron
+ * rotation also drops in reduced motion.
+ *
+ * Logical properties everywhere. Chevron sits at `inset-inline-end`
+ * (via flex `justify-content`) so RTL flips it automatically.
+ */
+
+/* ─── component-local tokens ────────────────────────────────────────── */
+.zs-collapsible {
+  /* Trigger row rhythm — mirrors Accordion (slice 14 sibling) so a
+     Collapsible alongside an Accordion in the same surface reads at the
+     same beat. */
+  --zs-collapsible-trigger-pad-block: var(--zs-space-3);   /* 12 */
+  --zs-collapsible-trigger-pad-inline: var(--zs-space-4);  /* 16 */
+  --zs-collapsible-trigger-gap: var(--zs-space-3);         /* 12 */
+
+  /* Panel inner padding — matches Accordion panel content. */
+  --zs-collapsible-panel-pad-block: var(--zs-space-3);
+  --zs-collapsible-panel-pad-inline: var(--zs-space-4);
+
+  /* Chevron diameter — same optical sweet spot as Accordion. */
+  --zs-collapsible-chevron-size: 0.75rem;                  /* 12 */
+}
+
+/* ─── root ──────────────────────────────────────────────────────────── */
+.zs-collapsible {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+
+/* ─── trigger ───────────────────────────────────────────────────────── */
+.zs-collapsible-trigger {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--zs-collapsible-trigger-gap);
+  inline-size: 100%;
+  padding-block: var(--zs-collapsible-trigger-pad-block);
+  padding-inline: var(--zs-collapsible-trigger-pad-inline);
+  border: 0;
+  background-color: transparent;
+  color: var(--zs-label);
+  font-family: inherit;
+  font-size: var(--zs-text-body-size);
+  font-weight: 600;
+  line-height: var(--zs-text-body-line);
+  text-align: start;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-collapsible-trigger-label {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+}
+
+@media (hover: hover) {
+  .zs-collapsible-trigger:not([data-disabled]):hover {
+    background-color: color-mix(in oklch, var(--zs-fill) 50%, transparent);
+  }
+}
+
+.zs-collapsible-trigger:not([data-disabled]):active {
+  background-color: color-mix(in oklch, var(--zs-fill) 80%, transparent);
+}
+
+.zs-collapsible-trigger:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: calc(var(--zs-focus-ring-offset) * -1);
+}
+
+.zs-collapsible-trigger[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-quaternary);
+}
+
+/* ─── chevron ───────────────────────────────────────────────────────── */
+.zs-collapsible-trigger-chevron {
+  flex: 0 0 auto;
+  inline-size: var(--zs-collapsible-chevron-size);
+  block-size: var(--zs-collapsible-chevron-size);
+  color: var(--zs-label-secondary);
+  transform-origin: 50% 50%;
+  transition: transform var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Base UI sets `data-panel-open` on the Trigger while the Panel is open. */
+.zs-collapsible-trigger[data-panel-open] .zs-collapsible-trigger-chevron,
+.zs-collapsible-trigger[data-state="open"] .zs-collapsible-trigger-chevron {
+  transform: rotate(0.5turn);
+}
+
+/* ─── panel ─────────────────────────────────────────────────────────── */
+.zs-collapsible-panel {
+  overflow: hidden;
+  block-size: var(--collapsible-panel-height, 0);
+  transition: block-size var(--zs-motion-base) var(--zs-motion-ease);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+
+.zs-collapsible-panel[data-state="closed"] {
+  block-size: 0;
+}
+
+.zs-collapsible-panel-inner {
+  padding-block: var(--zs-collapsible-panel-pad-block);
+  padding-inline: var(--zs-collapsible-panel-pad-inline);
+}
+
+/* ─── reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-collapsible-trigger,
+  .zs-collapsible-trigger-chevron,
+  .zs-collapsible-panel {
+    transition: none;
+  }
+}
+
+/* ─── forced colors ─────────────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-collapsible-trigger {
+    forced-color-adjust: none;
+    color: CanvasText;
+    background-color: Canvas;
+  }
+  .zs-collapsible-trigger[data-disabled] {
+    color: GrayText;
+  }
+  .zs-collapsible-trigger[data-panel-open],
+  .zs-collapsible-trigger[data-state="open"] {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+  .zs-collapsible-trigger[data-panel-open] .zs-collapsible-trigger-chevron,
+  .zs-collapsible-trigger[data-state="open"] .zs-collapsible-trigger-chevron {
+    color: HighlightText;
+  }
+  .zs-collapsible-trigger:focus-visible {
+    outline-color: Highlight;
+  }
+  .zs-collapsible-panel {
+    color: CanvasText;
+    background-color: Canvas;
+  }
+}
