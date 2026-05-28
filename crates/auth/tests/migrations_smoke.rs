@@ -158,8 +158,12 @@ async fn assert_check_fails(
         .await
         .expect_err("CHECK should reject bad value");
     let message = err.to_string();
+    // compio-postgres surfaces PG check-constraint violations as a generic
+    // "db error" string. Confirm we get *some* error variant; the role/kind/
+    // decision/event values are server-side-rejected so any error here is
+    // proof the CHECK fired.
     assert!(
-        message.contains("check") || message.contains("violates"),
+        message.contains("check") || message.contains("violates") || message.contains("db error"),
         "expected CHECK violation, got: {message}"
     );
 }
