@@ -389,6 +389,17 @@ const stories = [
   "components-drawer--nested",
   "components-drawer--rtl",
   "components-drawer--close-as-child",
+  // Slice 19: PreviewCard. 8 stories — hover-anchored rich preview
+  // surface. Triggers render visible `<a>` / `<button>` so axe doesn't
+  // need the popup mounted to validate the resting state.
+  "components-previewcard--basic",
+  "components-previewcard--user-handle",
+  "components-previewcard--link-preview",
+  "components-previewcard--long-content",
+  "components-previewcard--as-child",
+  "components-previewcard--with-arrow",
+  "components-previewcard--placement-side",
+  "components-previewcard--rtl",
 ];
 
 async function launchBrowser() {

@@ -4353,6 +4353,108 @@ await openStoryAndTrigger(
   );
 }
 
+/* ─── 87. Slice 19: PreviewCard hover → open → leave → close ───────── *
+ *
+ * Hover delay default is 600ms on Base UI; the Basic story uses
+ * `delay={50}` so the test runner doesn't sit on the full intent
+ * window. We wait 400ms after pointer-enter for the popup to mount,
+ * then move the cursor off the trigger and wait 400ms past the
+ * 200ms close grace window for the popup to unmount.
+ */
+await open("components-previewcard--basic");
+{
+  const trigger = page.locator(
+    '[data-testid="previewcard-basic-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.hover();
+  const popup = page.locator('[data-testid="previewcard-basic-popup"]');
+  let appeared = false;
+  try {
+    await popup.waitFor({ state: "visible", timeout: 2000 });
+    appeared = true;
+  } catch {
+    appeared = false;
+  }
+  // Move cursor to the top-left to fire pointer-leave on the trigger
+  // (the popup is portaled — pointer leave on the trigger triggers
+  // the close-delay grace window).
+  await page.mouse.move(2, 2);
+  let disappeared = false;
+  try {
+    await popup.waitFor({ state: "hidden", timeout: 2000 });
+    disappeared = true;
+  } catch {
+    disappeared =
+      (await popup.count()) === 0 ||
+      !(await popup.first().isVisible().catch(() => false));
+  }
+  report(
+    "PreviewCard hover → open → leave → close",
+    appeared && disappeared,
+    `appeared=${appeared}, disappeared=${disappeared}`,
+  );
+}
+
+/* ─── 88. Slice 19: PreviewCard keyboard focus opens (no hover) ───── *
+ *
+ * Base UI opens PreviewCard on Trigger focus the same way it opens
+ * Tooltip. We assert the popup appears under focus alone — no hover
+ * — so keyboard users get the same affordance as mouse users.
+ */
+await open("components-previewcard--basic");
+{
+  const trigger = page.locator(
+    '[data-testid="previewcard-basic-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.focus();
+  const popup = page.locator('[data-testid="previewcard-basic-popup"]');
+  let focused = false;
+  try {
+    await popup.waitFor({ state: "visible", timeout: 2000 });
+    focused = true;
+  } catch {
+    focused = false;
+  }
+  report(
+    "PreviewCard keyboard focus opens (no hover)",
+    focused,
+    `focused-open=${focused}`,
+  );
+}
+
+/* ─── 89. Slice 19: PreviewCard asChild renders consumer <a> ──────── *
+ *
+ * The AsChild story routes through the shared Slot helper. The
+ * rendered trigger must be the consumer's `<a>` (not a Base UI
+ * default `<a>` *wrapping* it), the consumer's href must survive the
+ * forwarded handlers, AND hovering it must still open the preview.
+ */
+await open("components-previewcard--as-child");
+{
+  const trigger = page.locator(
+    '[data-testid="previewcard-aschild-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const tag = await trigger.evaluate((node) => node.tagName.toLowerCase());
+  const href = await trigger.getAttribute("href");
+  await trigger.hover();
+  const popup = page.locator('[data-testid="previewcard-aschild-popup"]');
+  let opened = false;
+  try {
+    await popup.waitFor({ state: "visible", timeout: 2000 });
+    opened = true;
+  } catch {
+    opened = false;
+  }
+  report(
+    "PreviewCard asChild renders consumer <a> and still opens on hover",
+    tag === "a" && href === "https://example.com/post/42" && opened,
+    `tag=${tag}, href=${href}, opened=${opened}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

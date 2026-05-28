@@ -185,6 +185,21 @@ export type {
   PopoverComponent,
 } from "./Popover";
 
+export { PreviewCard, createPreviewCardHandle } from "./PreviewCard";
+export type {
+  PreviewCardProps,
+  PreviewCardSide,
+  PreviewCardAlign,
+  PreviewCardSize,
+  PreviewCardTriggerProps,
+  PreviewCardPortalProps,
+  PreviewCardBackdropProps,
+  PreviewCardPositionerProps,
+  PreviewCardPopupProps,
+  PreviewCardArrowProps,
+  PreviewCardComponent,
+} from "./PreviewCard";
+
 export { Tooltip, createTooltipHandle } from "./Tooltip";
 export type {
   TooltipProps,

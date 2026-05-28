@@ -30,6 +30,7 @@
 @import "./components/NumberField/NumberField.css";
 @import "./components/Slider/Slider.css";
 @import "./components/Popover/Popover.css";
+@import "./components/PreviewCard/PreviewCard.css";
 @import "./components/Tooltip/Tooltip.css";
 @import "./components/Menu/Menu.css";
 @import "./components/ContextMenu/ContextMenu.css";
