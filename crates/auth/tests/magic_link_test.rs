@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use zeroship_auth::identity::magic_link;
 use zeroship_auth::store::migrations;
+use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 
 // `compio_postgres::Client` is `!Send` — the futures inherit that
 // structurally. The lint is informational, not actionable here.
@@ -222,6 +223,79 @@ async fn new_issue_supersedes_previous_unconsumed() {
         .execute(
             "DELETE FROM auth.magic_links WHERE email = $1::citext",
             &[&email],
+        )
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn magic_completion_invalidates_after_five_wrong_codes() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let csrf_nonce = format!("completion-attempts-{}", Uuid::new_v4().simple());
+    let email = format!("magic-complete-{}@example.test", Uuid::new_v4().simple());
+    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
+    let code = "123456";
+
+    client
+        .execute(
+            "INSERT INTO auth.magic_completions \
+                (csrf_nonce, code, email, login_challenge, expires_at) \
+             VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
+            &[&csrf_nonce, &code, &email, &login_challenge],
+        )
+        .await
+        .expect("insert completion row");
+
+    for i in 1..=4 {
+        let err = completions_store::consume(&client, &csrf_nonce, "000000")
+            .await
+            .expect_err("wrong code must fail before invalidation");
+        assert!(
+            matches!(err, ConsumeError::WrongCode),
+            "wrong attempt {i} should return WrongCode, got {err:?}"
+        );
+    }
+
+    let err = completions_store::consume(&client, &csrf_nonce, "000000")
+        .await
+        .expect_err("fifth wrong code must fail and invalidate");
+    assert!(
+        matches!(err, ConsumeError::WrongCode),
+        "fifth wrong attempt should return WrongCode, got {err:?}"
+    );
+
+    let rows = client
+        .query(
+            "SELECT consumed_at IS NOT NULL AS consumed \
+             FROM auth.magic_completions \
+             WHERE csrf_nonce = $1",
+            &[&csrf_nonce],
+        )
+        .await
+        .expect("load completion row");
+    assert_eq!(rows.len(), 1, "completion row should still exist");
+    let consumed: bool = rows[0].get("consumed");
+    assert!(
+        consumed,
+        "fifth wrong completion attempt must invalidate the row"
+    );
+
+    let err = completions_store::consume(&client, &csrf_nonce, code)
+        .await
+        .expect_err("correct code must not redeem after invalidation");
+    assert!(
+        matches!(err, ConsumeError::WrongCode),
+        "correct code after invalidation should return WrongCode, got {err:?}"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
+            &[&csrf_nonce],
         )
         .await
         .ok();
