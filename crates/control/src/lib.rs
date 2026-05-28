@@ -7,6 +7,7 @@
 pub mod api;
 pub mod admin_handlers;
 pub mod audit;
+pub mod auth_audit;
 pub mod authz_guard;
 pub mod backchannel_logout;
 pub mod bootstrap_builder;

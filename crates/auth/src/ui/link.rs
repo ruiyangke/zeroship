@@ -38,8 +38,8 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
-use crate::identity::eligibility;
 use crate::identity::email as email_validation;
+use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
@@ -176,7 +176,7 @@ pub async fn post(
                 user_id: Some(&pending.user_id),
                 auth_method: Some(&pending.provider),
                 detail: json!({ "reason": "login_challenge_invalid" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -203,7 +203,7 @@ pub async fn post(
                         "reason": "rate_limited",
                         "bucket": link_attempt_key,
                     }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -272,7 +272,7 @@ pub async fn post(
                     "reason": "account_ineligible",
                     "email": pending.email,
                 }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -303,7 +303,7 @@ pub async fn post(
                     "reason": "invalid_password",
                     "email": pending.email,
                 }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -331,7 +331,7 @@ pub async fn post(
                     "reason": "account_ineligible",
                     "email": pending.email,
                 }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -419,7 +419,7 @@ pub async fn post(
                 "subject": pending.subject,
                 "email": pending.email,
             }),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;

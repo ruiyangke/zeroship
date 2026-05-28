@@ -87,7 +87,7 @@ pub async fn post_redeem(
                     event_type: "verification_redeemed",
                     outcome: "failure",
                     detail: serde_json::json!({ "reason": "invalid_or_expired" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -105,7 +105,7 @@ pub async fn post_redeem(
             event_type: "verification_redeemed",
             outcome: "success",
             user_id: Some(&redeemed.user_id),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;

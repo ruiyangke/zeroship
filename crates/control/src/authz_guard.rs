@@ -18,6 +18,7 @@ pub struct AuthzGuard {
     pub mfa_verified: bool,
     pub mfa_age_seconds: Option<u32>,
     pub request_ip: Option<IpAddr>,
+    pub request_id: String,
 }
 
 impl FromRequest<web::DefaultError> for AuthzGuard {
@@ -29,12 +30,15 @@ impl FromRequest<web::DefaultError> for AuthzGuard {
             .ok_or_else(|| web::error::ErrorInternalServerError("missing app state"))?;
         let request_ip = http_util::source_ip(req, state.trust_proxy)
             .and_then(|ip| ip.parse::<IpAddr>().ok());
+        let request_id = request_id(req);
 
-        if let Some(guard) = guard_from_bearer(req, state, request_ip).await? {
+        if let Some(guard) =
+            guard_from_bearer(req, state, request_ip, request_id.clone()).await?
+        {
             return Ok(guard);
         }
 
-        guard_from_session(req, state, request_ip).await
+        guard_from_session(req, state, request_ip, request_id).await
     }
 }
 
@@ -71,7 +75,7 @@ impl AuthzGuard {
             request_ip: self.request_ip,
             mfa_verified: self.mfa_verified,
             mfa_age_seconds: self.mfa_age_seconds,
-            request_id: None,
+            request_id: Some(self.request_id.as_str()),
         };
 
         match authz::enforce(&state.auth_pg, &state.static_policies, &ctx).await {
@@ -89,6 +93,7 @@ async fn guard_from_session(
     req: &HttpRequest,
     state: &AppState,
     request_ip: Option<IpAddr>,
+    request_id: String,
 ) -> Result<AuthzGuard, web::Error> {
     let session = crate::api::require_console_session(req, state)
         .await
@@ -103,6 +108,7 @@ async fn guard_from_session(
         mfa_verified: false,
         mfa_age_seconds: None,
         request_ip,
+        request_id,
     })
 }
 
@@ -110,6 +116,7 @@ async fn guard_from_bearer(
     req: &HttpRequest,
     state: &AppState,
     request_ip: Option<IpAddr>,
+    request_id: String,
 ) -> Result<Option<AuthzGuard>, web::Error> {
     let header = req
         .headers()
@@ -126,7 +133,7 @@ async fn guard_from_bearer(
                 error = %err,
                 "control: bearer was not a valid PAT; trying OAuth introspection"
             );
-            return oauth_guard_from_bearer(raw, state, request_ip).await;
+            return oauth_guard_from_bearer(raw, state, request_ip, request_id).await;
         }
     };
     let token_id = Uuid::parse_str(&claims.jti)
@@ -174,7 +181,18 @@ async fn guard_from_bearer(
         mfa_verified: false,
         mfa_age_seconds: None,
         request_ip,
+        request_id,
     }))
+}
+
+fn request_id(req: &HttpRequest) -> String {
+    req.headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
 fn now_unix() -> Result<i64, String> {
@@ -191,6 +209,7 @@ async fn oauth_guard_from_bearer(
     token: &str,
     state: &AppState,
     request_ip: Option<IpAddr>,
+    request_id: String,
 ) -> Result<Option<AuthzGuard>, web::Error> {
     let result = state
         .hydra_introspector
@@ -229,6 +248,7 @@ async fn oauth_guard_from_bearer(
         mfa_verified: false,
         mfa_age_seconds: None,
         request_ip,
+        request_id,
     }))
 }
 

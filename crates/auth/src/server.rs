@@ -7,7 +7,7 @@ use ntex::web;
 use zeroship_core::oidc_verify::JwksCache;
 
 use crate::config::AuthConfig;
-use crate::headers::SecurityHeaders;
+use crate::headers::{RequestContextMiddleware, SecurityHeaders};
 use crate::hydra_client::HydraAdmin;
 use crate::mailer::Mailer;
 use crate::ui;
@@ -236,6 +236,7 @@ pub async fn run(
             .state(cfg.clone())
             .state(db.clone())
             .state(mailer.clone())
+            .middleware(RequestContextMiddleware)
             .middleware(SecurityHeaders);
         if let Some(jwks) = google_jwks.clone() {
             app = app.state(jwks);

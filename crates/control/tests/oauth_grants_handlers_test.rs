@@ -391,6 +391,25 @@ async fn count_grant(state: &AppState, user_id: Uuid, client_id: &str) -> i64 {
     rows[0].get("n")
 }
 
+async fn audit_event_count(
+    state: &AppState,
+    user_id: Uuid,
+    event_type: &str,
+    client_id: &str,
+) -> i64 {
+    let rows = state
+        .auth_pg
+        .query(
+            "SELECT COUNT(*)::BIGINT AS n \
+             FROM auth.audit_events \
+             WHERE user_id = $1 AND event_type = $2 AND client_id = $3",
+            &[&user_id, &event_type, &client_id],
+        )
+        .await
+        .expect("count audit events");
+    rows[0].get("n")
+}
+
 macro_rules! init_control {
     ($fx:expr) => {{
         test::init_service(
@@ -522,6 +541,10 @@ async fn revoke_removes_grant_row() {
 
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert_eq!(count_grant(&fx.state, pat.user_id, &client_id).await, 0);
+    assert_eq!(
+        audit_event_count(&fx.state, pat.user_id, "oauth_grant_revoke", &client_id).await,
+        1
+    );
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;

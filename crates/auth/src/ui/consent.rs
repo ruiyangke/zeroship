@@ -18,6 +18,7 @@ use uuid::Uuid;
 use zeroship_authz::{self as authz, AuthzContext, Resource, Scope};
 
 use crate::advisory_lock::{oauth_grant_lock_key, with_advisory_lock};
+use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::AuthError;
@@ -253,16 +254,20 @@ pub async fn post_consent_deny(
     form: ntex::web::types::Form<ConsentDecisionForm>,
     admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     if !csrf_valid(&req, &form, &cfg) {
         return render_error_forbidden(PublicErrorMessage::InvalidRequest);
     }
 
     let challenge = form.consent_challenge.as_str();
-    if let Err(e) = admin.get_consent(challenge).await {
-        tracing::warn!(error = %e, challenge = %challenge, "POST /consent/deny: get_consent failed");
-        return render_error(PublicErrorMessage::InvalidRequest);
-    }
+    let info = match admin.get_consent(challenge).await {
+        Ok(info) => info,
+        Err(e) => {
+            tracing::warn!(error = %e, challenge = %challenge, "POST /consent/deny: get_consent failed");
+            return render_error(PublicErrorMessage::InvalidRequest);
+        }
+    };
 
     let reject = RejectRequest {
         error: "access_denied".into(),
@@ -270,7 +275,25 @@ pub async fn post_consent_deny(
         status_code: Some(403),
     };
     match admin.reject_consent(challenge, &reject).await {
-        Ok(resp) => redirect(&resp.redirect_to),
+        Ok(resp) => {
+            let subject = consent_subject_uuid(&info).ok();
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "consent_deny",
+                    outcome: "success",
+                    user_id: subject.as_ref(),
+                    client_id: Some(&info.client.client_id),
+                    auth_method: Some("consent"),
+                    detail: json!({
+                        "requested_scopes": sort_dedup_scopes(&info.requested_scope),
+                    }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            redirect(&resp.redirect_to)
+        }
         Err(e) => {
             tracing::error!(error = %e, "reject_consent failed");
             render_error(PublicErrorMessage::ContactSupport)

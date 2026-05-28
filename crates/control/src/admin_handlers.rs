@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_auth::audit::{self as auth_audit, AuditEvent};
 use zeroship_authz::{Action, EntityCache, PolicySet, Resource};
 
+use crate::auth_audit as control_auth_audit;
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
 
@@ -602,22 +604,22 @@ async fn audit_event(
     let user_agent = req
         .headers()
         .get("user-agent")
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
 
-    if let Err(err) = state
-        .auth_pg
-        .execute(
-            "INSERT INTO auth.audit_events \
-                (event_type, outcome, user_id, ip, user_agent, auth_method, detail) \
-             VALUES ($1, 'success', $2, $3, $4, 'console_session', $5)",
-            &[
-                &event_type,
-                &guard.principal_id,
-                &guard.request_ip,
-                &user_agent,
-                &detail,
-            ],
-        )
+    let ev = AuditEvent {
+        event_type,
+        outcome: "success",
+        user_id: Some(&guard.principal_id),
+        request_id: Some(guard.request_id.clone()),
+        ip: guard.request_ip,
+        user_agent,
+        auth_method: Some(control_auth_audit::auth_method(guard)),
+        detail,
+        ..Default::default()
+    };
+
+    if let Err(err) = auth_audit::emit_strict(&state.auth_pg, &ev)
         .await
     {
         tracing::error!(error = %err, event_type, "control: platform admin audit insert failed");

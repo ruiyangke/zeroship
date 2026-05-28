@@ -246,6 +246,20 @@ fn deploy_policy() -> Value {
     })
 }
 
+async fn audit_event_count(state: &AppState, user_id: Uuid, event_type: &str) -> i64 {
+    let rows = state
+        .auth_pg
+        .query(
+            "SELECT COUNT(*)::BIGINT AS n \
+             FROM auth.audit_events \
+             WHERE user_id = $1 AND event_type = $2",
+            &[&user_id, &event_type],
+        )
+        .await
+        .expect("count audit events");
+    rows[0].get("n")
+}
+
 macro_rules! create_pat {
     ($app:expr, $cookie:expr, $name:expr) => {{
         let body = json!({
@@ -301,6 +315,10 @@ async fn create_pat_with_valid_policy_returns_jwt() {
     let now = chrono::Utc::now().timestamp();
     assert!(exp > now + 89 * 86_400, "exp should be about 90 days out");
     assert!(exp <= now + 91 * 86_400, "exp should be about 90 days out");
+    assert_eq!(
+        audit_event_count(&fx.state, fx.user_id, "pat_mint").await,
+        1
+    );
 
     fx.cleanup().await;
 }
@@ -579,6 +597,10 @@ async fn delete_pat_marks_revoked() {
         .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
         .expect("revoked token listed");
     assert!(entry.get("revoked_at").and_then(Value::as_str).is_some());
+    assert_eq!(
+        audit_event_count(&fx.state, fx.user_id, "pat_revoke").await,
+        1
+    );
 
     fx.cleanup().await;
 }

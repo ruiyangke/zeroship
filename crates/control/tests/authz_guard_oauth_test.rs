@@ -375,13 +375,35 @@ async fn oauth_token_with_apps_read_can_list_apps() {
         return;
     };
     let app = init_control!(fx);
+    let request_id = format!("req_h4_{}", Uuid::new_v4().simple());
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
         .header("authorization", bearer())
+        .header("x-request-id", request_id.as_str())
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
+    let rows = fx
+        .state
+        .auth_pg
+        .query(
+            "SELECT request_id \
+             FROM control.authz_decisions \
+             WHERE user_id = $1 AND action = 'apps:read' \
+             ORDER BY occurred_at DESC \
+             LIMIT 1",
+            &[&user_id],
+        )
+        .await
+        .expect("select authz decision");
+    assert_eq!(
+        rows.first()
+            .map(|row| row.get::<_, Option<String>>("request_id"))
+            .flatten()
+            .as_deref(),
+        Some(request_id.as_str())
+    );
 
     fx.cleanup().await;
 }

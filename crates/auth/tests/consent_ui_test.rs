@@ -427,6 +427,7 @@ async fn allow_button_puts_to_hydra_accept() {
     assert_eq!(records.len(), 1, "expected one hydra accept call");
     assert_eq!(records[0].challenge, CHALLENGE);
     assert_eq!(records[0].body["grant_scope"], json!(["apps:deploy"]));
+    assert_eq!(app.audit_event_count("consent_accept").await, 1);
 
     app.cleanup().await;
 }
@@ -446,6 +447,7 @@ async fn deny_button_puts_to_hydra_reject() {
     assert_eq!(records.len(), 1, "expected one hydra reject call");
     assert_eq!(records[0].challenge, CHALLENGE);
     assert_eq!(records[0].body["error"], "access_denied");
+    assert_eq!(app.audit_event_count("consent_deny").await, 1);
 
     app.cleanup().await;
 }

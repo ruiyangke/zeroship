@@ -13,8 +13,9 @@ use common::{assert_redirect, location, test_auth_config};
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
+use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
-use zeroship_auth::store::migrations;
+use zeroship_auth::store::{migrations, sessions as session_store, users};
 
 #[derive(Debug, serde::Deserialize)]
 struct DeviceAuthorizationResponse {
@@ -28,7 +29,13 @@ struct DeviceAuthorizationResponse {
 }
 
 #[allow(clippy::future_not_send)]
-async fn boot() -> Option<(ntex::web::test::TestServer, String, HydraAdmin, String)> {
+async fn boot() -> Option<(
+    ntex::web::test::TestServer,
+    String,
+    HydraAdmin,
+    String,
+    Arc<compio_postgres::Client>,
+)> {
     let (Ok(db_url), Ok(hydra_admin_url)) = (
         std::env::var("AUTH_DB_URL"),
         std::env::var("AUTH_HYDRA_ADMIN"),
@@ -73,13 +80,13 @@ async fn boot() -> Option<(ntex::web::test::TestServer, String, HydraAdmin, Stri
     .await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-    Some((srv, auth_base, admin, hydra_public))
+    Some((srv, auth_base, admin, hydra_public, pg))
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_route_renders_and_rejects_bad_input() {
-    let Some((srv, auth_base, _admin, _hydra_public)) = boot().await else {
+    let Some((srv, auth_base, _admin, _hydra_public, _pg)) = boot().await else {
         return;
     };
     let http = cyper::Client::new();
@@ -125,7 +132,7 @@ async fn device_route_renders_and_rejects_bad_input() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_user_code_redirects_anonymous_browser_to_login() {
-    let Some((srv, auth_base, admin, hydra_public)) = boot().await else {
+    let Some((srv, auth_base, admin, hydra_public, pg)) = boot().await else {
         return;
     };
     let http = cyper::Client::new();
@@ -208,6 +215,57 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     assert_redirect(&resp, "POST /device valid user_code");
     assert_eq!(location(&resp), "/login");
 
+    let email = format!("device-grant-{client_id}@zeroship.test");
+    let user = users::create(&pg, &email, "Device Grant User", None)
+        .await
+        .expect("create device grant user");
+    let session = session_store::create(
+        &pg,
+        &session_store::CreateSession {
+            user_id: user.id,
+            auth_method: "password",
+            amr: vec!["pwd".into()],
+            acr: None,
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    .expect("create local auth session");
+    let post_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("user_code", &authz.user_code)
+        .finish();
+    let resp = http
+        .request(http::Method::POST, format!("{auth_base}/device"))
+        .expect("build signed-in POST /device")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header("cookie", session_cookie::set_cookie(&session.id, false))
+        .expect("cookie")
+        .body(post_body)
+        .send()
+        .await
+        .expect("send signed-in POST /device");
+    assert_redirect(&resp, "POST /device signed-in valid user_code");
+    assert_ne!(location(&resp), "/login");
+
+    let rows = pg
+        .query(
+            "SELECT COUNT(*)::BIGINT AS n \
+             FROM auth.audit_events \
+             WHERE user_id = $1 AND event_type = 'device_grant'",
+            &[&user.id],
+        )
+        .await
+        .expect("count device grant audit rows");
+    assert_eq!(rows[0].get::<_, i64>("n"), 1);
+
     let _ = admin.delete_client(&client_id).await;
+    let _ = pg
+        .execute("DELETE FROM auth.sessions WHERE id = $1", &[&session.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await;
     drop(srv);
 }

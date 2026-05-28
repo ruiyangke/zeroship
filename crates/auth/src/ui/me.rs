@@ -171,7 +171,7 @@ pub async fn unlink(
                 user_id: Some(&user.id),
                 auth_method: Some(&provider),
                 detail: json!({ "reason": "would_orphan_account" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -195,7 +195,7 @@ pub async fn unlink(
             user_id: Some(&user.id),
             auth_method: Some(&provider),
             detail: json!({ "provider": provider }),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;

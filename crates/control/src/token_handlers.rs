@@ -17,6 +17,7 @@ use zeroship_authz::{
     self as authz, AuthzContext, AuthzDecision, Condition, Effect, EntityCache, Policy, Resource,
 };
 
+use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
 
@@ -209,6 +210,10 @@ fn reject_insecure_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn valid_pat_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.chars().count() <= MAX_PAT_NAME_CHARS
+}
+
 pub async fn create_token(
     guard: AuthzGuard,
     state: State<Arc<AppState>>,
@@ -276,11 +281,30 @@ pub async fn create_token(
         )
         .await
     {
-        Ok(_) => web::HttpResponse::Ok().json(&CreateTokenResponse {
-            id: token_id.to_string(),
-            token,
-            expires_at,
-        }),
+        Ok(_) => {
+            if let Err(resp) = auth_audit::emit_guard_event(
+                &state,
+                &guard,
+                "pat_mint",
+                None,
+                json!({
+                    "token_id": token_id.to_string(),
+                    "name": name,
+                    "expires_at": expires_at.to_rfc3339(),
+                    "policy_hash": policy_hash,
+                }),
+            )
+            .await
+            {
+                return resp;
+            }
+
+            web::HttpResponse::Ok().json(&CreateTokenResponse {
+                id: token_id.to_string(),
+                token,
+                expires_at,
+            })
+        }
         Err(err) => {
             tracing::error!(error = %err, "control: PAT insert failed");
             web::HttpResponse::InternalServerError().json(&json!({"error": "pat_insert_failed"}))
@@ -362,6 +386,21 @@ pub async fn delete_token(
     };
     EntityCache::invalidate(guard.principal_id);
     let revoked_at: DateTime<Utc> = row.get("revoked_at");
+    if let Err(resp) = auth_audit::emit_guard_event(
+        &state,
+        &guard,
+        "pat_revoke",
+        None,
+        json!({
+            "token_id": token_id.to_string(),
+            "revoked_at": revoked_at.to_rfc3339(),
+        }),
+    )
+    .await
+    {
+        return resp;
+    }
+
     web::HttpResponse::Ok().json(&DeleteTokenResponse {
         id: token_id.to_string(),
         revoked_at,
@@ -417,7 +456,7 @@ async fn validate_grant_subset(
                     request_ip: guard.request_ip,
                     mfa_verified: guard.mfa_verified,
                     mfa_age_seconds: guard.mfa_age_seconds,
-                    request_id: None,
+                    request_id: Some(guard.request_id.as_str()),
                 };
 
                 let authorized = if matches!(resource, Resource::Any) {

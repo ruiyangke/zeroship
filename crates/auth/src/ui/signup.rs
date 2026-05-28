@@ -140,7 +140,7 @@ pub async fn post(
                     event_type: "signup_throttled",
                     outcome: "failure",
                     detail: serde_json::json!({ "bucket": "signup_per_ip" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -188,7 +188,7 @@ pub async fn post(
                         "reason": "users_create_failed",
                         "db_code": e.db_code(),
                     }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -257,7 +257,7 @@ pub async fn post(
                         event_type: "verification_issued",
                         outcome: "success",
                         user_id: Some(&user.id),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;

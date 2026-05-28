@@ -135,6 +135,48 @@ const STATEMENTS: &[&str] = &[
         auth_method TEXT,
         detail      JSONB
     )",
+    "CREATE OR REPLACE FUNCTION auth.audit_events_block_tamper()
+     RETURNS trigger AS $$
+     BEGIN
+         RAISE EXCEPTION 'auth.audit_events is append-only'
+             USING ERRCODE = 'insufficient_privilege';
+     END
+     $$ LANGUAGE plpgsql",
+    "DROP TRIGGER IF EXISTS audit_events_block_update ON auth.audit_events",
+    "CREATE TRIGGER audit_events_block_update
+        BEFORE UPDATE ON auth.audit_events
+        FOR EACH ROW EXECUTE FUNCTION auth.audit_events_block_tamper()",
+    "DROP TRIGGER IF EXISTS audit_events_block_delete ON auth.audit_events",
+    "CREATE TRIGGER audit_events_block_delete
+        BEFORE DELETE ON auth.audit_events
+        FOR EACH ROW EXECUTE FUNCTION auth.audit_events_block_tamper()",
+    "DROP TRIGGER IF EXISTS audit_events_block_truncate ON auth.audit_events",
+    "CREATE TRIGGER audit_events_block_truncate
+        BEFORE TRUNCATE ON auth.audit_events
+        FOR EACH STATEMENT EXECUTE FUNCTION auth.audit_events_block_tamper()",
+    "REVOKE UPDATE, DELETE, TRUNCATE ON TABLE auth.audit_events FROM PUBLIC",
+    "DO $$
+     DECLARE
+         role_name TEXT;
+     BEGIN
+         FOREACH role_name IN ARRAY ARRAY[
+             'zeroship_auth',
+             'zeroship_control',
+             'zeroship_gateway',
+             'zeroship_worker',
+             'zeroship_app',
+             'auth',
+             'control'
+         ] LOOP
+             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                 EXECUTE format(
+                     'REVOKE UPDATE, DELETE, TRUNCATE ON TABLE auth.audit_events FROM %I',
+                     role_name
+                 );
+             END IF;
+         END LOOP;
+     END
+     $$",
     "CREATE INDEX IF NOT EXISTS auth_audit_user_idx  ON auth.audit_events (user_id, occurred_at)",
     "CREATE INDEX IF NOT EXISTS auth_audit_event_idx ON auth.audit_events (event_type, occurred_at)",
 
@@ -281,6 +323,48 @@ const STATEMENTS: &[&str] = &[
         request_ip       INET,
         request_id       TEXT
     )",
+    "CREATE OR REPLACE FUNCTION control.authz_decisions_block_tamper()
+     RETURNS trigger AS $$
+     BEGIN
+         RAISE EXCEPTION 'control.authz_decisions is append-only'
+             USING ERRCODE = 'insufficient_privilege';
+     END
+     $$ LANGUAGE plpgsql",
+    "DROP TRIGGER IF EXISTS authz_decisions_block_update ON control.authz_decisions",
+    "CREATE TRIGGER authz_decisions_block_update
+        BEFORE UPDATE ON control.authz_decisions
+        FOR EACH ROW EXECUTE FUNCTION control.authz_decisions_block_tamper()",
+    "DROP TRIGGER IF EXISTS authz_decisions_block_delete ON control.authz_decisions",
+    "CREATE TRIGGER authz_decisions_block_delete
+        BEFORE DELETE ON control.authz_decisions
+        FOR EACH ROW EXECUTE FUNCTION control.authz_decisions_block_tamper()",
+    "DROP TRIGGER IF EXISTS authz_decisions_block_truncate ON control.authz_decisions",
+    "CREATE TRIGGER authz_decisions_block_truncate
+        BEFORE TRUNCATE ON control.authz_decisions
+        FOR EACH STATEMENT EXECUTE FUNCTION control.authz_decisions_block_tamper()",
+    "REVOKE UPDATE, DELETE, TRUNCATE ON TABLE control.authz_decisions FROM PUBLIC",
+    "DO $$
+     DECLARE
+         role_name TEXT;
+     BEGIN
+         FOREACH role_name IN ARRAY ARRAY[
+             'zeroship_auth',
+             'zeroship_control',
+             'zeroship_gateway',
+             'zeroship_worker',
+             'zeroship_app',
+             'auth',
+             'control'
+         ] LOOP
+             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                 EXECUTE format(
+                     'REVOKE UPDATE, DELETE, TRUNCATE ON TABLE control.authz_decisions FROM %I',
+                     role_name
+                 );
+             END IF;
+         END LOOP;
+     END
+     $$",
     "CREATE INDEX IF NOT EXISTS authz_decisions_occurred_idx
         ON control.authz_decisions (occurred_at DESC)",
     "CREATE INDEX IF NOT EXISTS authz_decisions_user_idx

@@ -50,8 +50,8 @@ use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
-use crate::identity::eligibility;
 use crate::identity::email as email_validation;
+use crate::identity::eligibility;
 use crate::identity::magic_link;
 use crate::mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
 use crate::mailer::{Address, Mailer};
@@ -198,7 +198,7 @@ pub async fn start(
                         outcome: "failure",
                         auth_method: Some("magic"),
                         detail: json!({ "reason": "rate_limited", "bucket": key }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -274,7 +274,11 @@ pub async fn start(
             vec!["magic-link".into(), "login".into()],
         );
         if let Err(e) = mailer.send(db.as_ref(), email_msg).await {
-            tracing::warn!(error = %e, email = %email_norm, "magic_link email send failed");
+            tracing::warn!(
+                error = %e,
+                email_domain = %email_domain(&email_norm),
+                "magic_link email send failed"
+            );
         }
 
         audit::emit(
@@ -286,7 +290,7 @@ pub async fn start(
                 detail: json!({
                     "email_domain": email_norm.split('@').nth(1).unwrap_or("")
                 }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -439,7 +443,7 @@ pub async fn verify_redeem(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "invalid_or_expired" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -453,7 +457,7 @@ pub async fn verify_redeem(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "consume_in_flight" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -467,7 +471,7 @@ pub async fn verify_redeem(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "already_consumed" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -493,7 +497,7 @@ pub async fn verify_redeem(
                 outcome: "failure",
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "unexpected_purpose" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -537,7 +541,7 @@ pub async fn verify_redeem(
                 user_id: Some(&user_id),
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "account_ineligible" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -553,6 +557,7 @@ pub async fn verify_redeem(
             &redeemed.reserved_at,
             user_id,
             &form.login_challenge,
+            &req,
         )
         .await
     } else {
@@ -564,6 +569,7 @@ pub async fn verify_redeem(
             &redeemed.email,
             &redeemed.csrf_nonce,
             &form.login_challenge,
+            &req,
         )
         .await
     }
@@ -592,6 +598,7 @@ async fn same_device_finish(
     reserved_at: &chrono::DateTime<chrono::Utc>,
     user_id: Uuid,
     login_challenge: &str,
+    req: &HttpRequest,
 ) -> HttpResponse {
     let session = match sessions::create(
         db,
@@ -663,7 +670,7 @@ async fn same_device_finish(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;
@@ -694,6 +701,7 @@ async fn cross_device_show_code(
     email: &str,
     csrf_nonce: &str,
     login_challenge: &str,
+    req: &HttpRequest,
 ) -> HttpResponse {
     let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
     // 5-minute window — short, since the user is actively typing.
@@ -726,7 +734,7 @@ async fn cross_device_show_code(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;
@@ -794,7 +802,7 @@ pub async fn complete(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "rate_limited", "bucket": rate_key }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -822,7 +830,7 @@ pub async fn complete(
                         outcome: "failure",
                         auth_method: Some("magic"),
                         detail: json!({ "reason": "code_invalid_or_expired" }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -840,7 +848,7 @@ pub async fn complete(
                         outcome: "failure",
                         auth_method: Some("magic"),
                         detail: json!({ "reason": "consume_in_flight" }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -859,7 +867,7 @@ pub async fn complete(
                 outcome: "failure",
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "login_challenge_mismatch" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -912,7 +920,7 @@ pub async fn complete(
                 user_id: Some(&user_id),
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "account_ineligible" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -1004,7 +1012,7 @@ pub async fn complete(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;
@@ -1303,6 +1311,10 @@ fn user_agent_str(h: Option<&HeaderValue>) -> String {
         .unwrap_or_else(|| "Unknown device".to_string())
 }
 
+fn email_domain(email: &str) -> &str {
+    email.split_once('@').map(|(_, domain)| domain).unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,5 +1332,11 @@ mod tests {
     fn user_agent_str_uses_unknown_for_empty_values() {
         let header = HeaderValue::from_static("");
         assert_eq!(user_agent_str(Some(&header)), "Unknown device");
+    }
+
+    #[test]
+    fn email_domain_omits_local_part() {
+        assert_eq!(email_domain("victim@example.com"), "example.com");
+        assert_eq!(email_domain("not-an-email"), "");
     }
 }

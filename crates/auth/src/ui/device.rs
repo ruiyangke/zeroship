@@ -9,7 +9,9 @@ use ntex::http::header::{HeaderValue, COOKIE, LOCATION};
 use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
+use serde_json::json;
 
+use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::hydra_client::types::AcceptDeviceUserCodeRequest;
 use crate::hydra_client::HydraAdmin;
@@ -109,7 +111,23 @@ pub async fn post(
         user_code: Some(user_code.to_string()),
     };
     match admin.accept_device_user_code(&device_challenge, &accept).await {
-        Ok(resp) => redirect(&resp.redirect_to),
+        Ok(resp) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "device_grant",
+                    outcome: "success",
+                    user_id: Some(&session.user_id),
+                    auth_method: Some("device"),
+                    detail: json!({
+                        "session_id": session.id.to_string(),
+                    }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            redirect(&resp.redirect_to)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "accept device user code failed");
             render_form(user_code, Some("invalid or expired code"), StatusCode::BAD_REQUEST)

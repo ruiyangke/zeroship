@@ -110,7 +110,7 @@ pub async fn post(
     // 4. Atomically consume the reset token with the password update,
     //    then audit, revoke existing sessions, and consume outstanding
     //    email tokens in one transaction.
-    let completed = match complete_password_reset(db.as_ref(), &form.token, &phc).await {
+    let completed = match complete_password_reset(db.as_ref(), &form.token, &phc, &req).await {
         Ok(Some(completed)) => completed,
         Ok(None) => {
             audit::emit(
@@ -120,7 +120,7 @@ pub async fn post(
                     outcome: "failure",
                     auth_method: Some("password_reset"),
                     detail: serde_json::json!({ "reason": "token_invalid_or_expired" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -158,7 +158,7 @@ pub async fn post(
                 user_id: Some(&completed.user_id),
                 auth_method: Some("password_reset"),
                 detail: serde_json::json!({ "error": e.to_string() }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -193,12 +193,13 @@ async fn complete_password_reset(
     conn: &compio_postgres::Client,
     raw_token: &str,
     phc: &str,
+    req: &HttpRequest,
 ) -> Result<Option<ResetCompletion>> {
     conn.execute("BEGIN", &[])
         .await
         .map_err(|e| AuthError::Db(format!("password_reset begin: {e}")))?;
 
-    let result = complete_password_reset_tx(conn, raw_token, phc).await;
+    let result = complete_password_reset_tx(conn, raw_token, phc, req).await;
     match result {
         Ok(Some(completed)) => {
             conn.execute("COMMIT", &[])
@@ -225,6 +226,7 @@ async fn complete_password_reset_tx(
     conn: &compio_postgres::Client,
     raw_token: &str,
     phc: &str,
+    req: &HttpRequest,
 ) -> Result<Option<ResetCompletion>> {
     let Some(completed) = password_reset::complete(conn, raw_token, phc).await? else {
         return Ok(None);
@@ -237,7 +239,7 @@ async fn complete_password_reset_tx(
             outcome: "success",
             user_id: Some(&completed.user_id),
             auth_method: Some("password_reset"),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await?;
@@ -307,7 +309,7 @@ async fn complete_password_reset_tx(
                 "magic_tokens": counts.magic_tokens,
                 "magic_completions": counts.magic_completions,
             }),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await?;
