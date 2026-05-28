@@ -192,15 +192,16 @@ impl Issuer {
         // (utf-8) bytes and base64url-encode.
         let wraps = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(Sha256::digest(hydra_token.as_bytes()));
+        let sub = introspection
+            .sub
+            .as_deref()
+            .filter(|sub| !sub.is_empty())
+            .ok_or_else(|| GatewayError::Internal("missing oauth sub".into()))?;
 
         let claims = WrapperClaims {
             iss: self.iss.clone(),
             aud: aud.to_string(),
-            // hydra omits `sub` for client-credentials grants — the
-            // empty default keeps the JWT valid; downstream callers
-            // that need `sub` (user-bound flows) check it on the way
-            // in.
-            sub: introspection.sub.clone().unwrap_or_default(),
+            sub: sub.to_string(),
             exp: now + 3600,
             iat: now,
             jti: uuid::Uuid::new_v4().to_string(),
@@ -378,6 +379,32 @@ mod tests {
         assert_eq!(claims.cnf.jkt, "test-jkt");
         assert_eq!(claims.aud, "myapp.zeroship.ai");
         assert_eq!(claims.client_id, "gateway");
+    }
+
+    #[test]
+    fn issue_rejects_missing_oauth_sub() {
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let issuer = Issuer::new(&signing, "https://api.zeroship.ai".into()).expect("issuer");
+        let mut intro = make_introspection();
+        intro.sub = None;
+
+        let err = issuer
+            .issue("myapp.zeroship.ai", &intro, "test-jkt", "hydra-token")
+            .expect_err("missing oauth sub must not issue a wrapper");
+        assert_eq!(err.to_string(), "internal: missing oauth sub");
+    }
+
+    #[test]
+    fn issue_rejects_empty_oauth_sub() {
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let issuer = Issuer::new(&signing, "https://api.zeroship.ai".into()).expect("issuer");
+        let mut intro = make_introspection();
+        intro.sub = Some(String::new());
+
+        let err = issuer
+            .issue("myapp.zeroship.ai", &intro, "test-jkt", "hydra-token")
+            .expect_err("empty oauth sub must not issue a wrapper");
+        assert_eq!(err.to_string(), "internal: missing oauth sub");
     }
 
     #[test]

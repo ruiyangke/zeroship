@@ -269,6 +269,10 @@ async fn resolve_dpop_user_header(
                     );
                     return None;
                 }
+                if claims.sub.is_empty() {
+                    tracing::warn!("DPoP wrapper token missing sub — rejecting");
+                    return None;
+                }
                 let owned = build_worker_user_from_wrapper(&claims);
                 let user: oidc_rp::WorkerUser<'_> = (&owned).into();
                 return Some(oidc_rp::encode_user_header(
@@ -310,6 +314,10 @@ async fn resolve_dpop_user_header(
             return None;
         }
     };
+    if !matches!(info.sub.as_deref(), Some(sub) if !sub.is_empty()) {
+        tracing::warn!("DPoP introspection response missing sub");
+        return None;
+    }
 
     // 7. Build the `ZeroShip-User` header from the introspection result.
     let owned = build_worker_user_from_introspection(&info);
@@ -594,7 +602,7 @@ mod tests {
         let claims = WrapperClaims {
             iss: "https://api.zeroship.ai".into(),
             aud: "myapp.zeroship.ai".into(),
-            sub: String::new(), // client-credentials grants omit sub
+            sub: "usr_test".into(),
             exp: 0,
             iat: 0,
             jti: "j".into(),
@@ -607,7 +615,7 @@ mod tests {
             wraps: "w".into(),
         };
         let owned = build_worker_user_from_wrapper(&claims);
-        assert_eq!(owned.id, "");
+        assert_eq!(owned.id, "usr_test");
         assert_eq!(owned.email, "");
         assert_eq!(owned.name, "");
         assert!(!owned.email_verified);
@@ -908,6 +916,53 @@ mod tests {
             .expect("issue wrapper")
     }
 
+    fn sign_wrapper_claims(
+        signing: &ed25519_dalek::SigningKey,
+        mut claims: crate::wrapper_token::WrapperClaims,
+    ) -> String {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        claims.iss = "https://api.zeroship.ai".into();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some("at+jwt".into());
+        header.kid = Some(crate::signing::jwk_thumbprint(signing));
+        let der = signing.to_pkcs8_der().expect("pkcs8");
+        let key = EncodingKey::from_ed_der(der.as_bytes());
+        encode(&header, &claims, &key).expect("sign wrapper claims")
+    }
+
+    fn wrapper_claims(
+        sub: impl Into<String>,
+        proof_jkt: &str,
+        aud: &str,
+    ) -> crate::wrapper_token::WrapperClaims {
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        crate::wrapper_token::WrapperClaims {
+            iss: "https://api.zeroship.ai".into(),
+            aud: aud.into(),
+            sub: sub.into(),
+            exp: now + 3600,
+            iat: now,
+            jti: Uuid::new_v4().to_string(),
+            cnf: crate::wrapper_token::Cnf {
+                jkt: proof_jkt.into(),
+            },
+            scope: "openid".into(),
+            client_id: "gateway".into(),
+            email: Some("test@example.com".into()),
+            email_verified: Some(true),
+            name: Some("Test".into()),
+            wraps: "hydra-token-shadow".into(),
+        }
+    }
+
     #[compio::test]
     async fn resolve_dpop_accepts_wrapper_when_jkt_matches() {
         // Happy path: client signs the DPoP proof with key A, wrapper
@@ -940,6 +995,41 @@ mod tests {
         let request_id = Uuid::new_v4();
         let header = resolve_dpop_user_header(&req, &state, &request_id).await;
         assert!(header.is_some(), "wrapper path must accept matched jkt");
+    }
+
+    #[compio::test]
+    async fn resolve_dpop_rejects_wrapper_with_empty_sub() {
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing.clone());
+
+        let jkt = client_jkt(&client_key);
+        let aud = "myapp.zeroship.ai";
+        let wrapper = sign_wrapper_claims(&gateway_signing, wrapper_claims("", &jkt, aud));
+
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{aud}/api/me");
+        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
+            .header("dpop", proof)
+            .to_http_request();
+
+        let request_id = Uuid::new_v4();
+        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
+        assert!(
+            header.is_none(),
+            "wrapper path must reject tokens with an empty sub"
+        );
     }
 
     #[compio::test]
