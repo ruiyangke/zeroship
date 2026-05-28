@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{
-    self as authz, AuthzContext, AuthzDecision, Effect, EntityCache, Policy, Resource,
+    self as authz, AuthzContext, AuthzDecision, Condition, Effect, EntityCache, Policy, Resource,
 };
 
 use crate::authz_guard::AuthzGuard;
@@ -451,6 +451,14 @@ fn validate_policy_shape(policy: &Policy) -> Result<(), web::HttpResponse> {
                 "error": "empty_policy_statement",
                 "message": "policy statements must include at least one resource",
             })));
+        }
+        for condition in &statement.conditions {
+            if matches!(condition, Condition::RequireMfa | Condition::MfaWithin { .. }) {
+                return Err(web::HttpResponse::BadRequest().json(&json!({
+                    "error": "unsupported_policy_condition",
+                    "message": "MFA policy conditions are not yet enforced by control-plane sessions",
+                })));
+            }
         }
         for resource in &statement.resources {
             if let Err(message) = resource.validate_ids() {
