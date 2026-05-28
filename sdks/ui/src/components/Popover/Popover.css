@@ -21,10 +21,17 @@
  * --zs-dialog-backdrop-filter, falling back to --zs-material-regular)
  * gives themes a frosted look when --zs-surface is translucent.
  *
- * Forced-colors mirror (Slice-5/6/7 lesson): every state selector below
- * gets re-emitted inside `@media (forced-colors: active)` at equal or
- * higher specificity, so the system palette wins over the oklch token
- * tints.
+ * Forced-colors mirror (Slice-5/6/7 lesson): every state selector that
+ * paints (background / color / box-shadow / border / filter) gets re-
+ * emitted inside `@media (forced-colors: active)` at equal or higher
+ * specificity so the system palette wins over the oklch token tints.
+ *
+ * The state selectors below that DON'T paint — `[data-starting-style]`,
+ * `[data-ending-style]`, `[data-side="..."]` — set only motion-related
+ * properties (`opacity`, `transform`, `transform-origin`, `transition`).
+ * They carry no token colors, so forced-colors does not need a mirror;
+ * `@media (prefers-reduced-motion: reduce)` is the relevant guardrail
+ * and is already in place below.
  *
  * RTL: layout-affecting axes use logical properties (`inline-size`,
  * `padding-inline`, `padding-block`). Floating UI handles the side
@@ -145,10 +152,14 @@
 
 /* ─── Arrow ────────────────────────────────────────────────────────── *
  *
- * Base UI rotates the wrapping div per side automatically; the inner
- * SVG is a fixed 16×8 downward triangle. `color` paints the SVG `fill`
- * via `currentColor`, so the arrow always picks up the popup's themed
- * surface color. */
+ * Base UI 1.5 positions the arrow wrapper and stamps `data-side` on it,
+ * but it does NOT rotate the wrapper itself. The inner SVG is a fixed
+ * downward-pointing 16×8 triangle (path `M 0,0 L 8,8 L 16,0 Z`), so we
+ * rotate it explicitly per anchored side: 0° points up (side="top"),
+ * 180° points down (side="bottom"), and ±90° for the lateral sides.
+ *
+ * `color` paints the SVG `fill` via `currentColor`, so the arrow always
+ * picks up the popup's themed surface color. */
 .zs-popover-arrow {
   display: inline-flex;
   align-items: center;
@@ -166,6 +177,25 @@
   display: block;
   inline-size: 100%;
   block-size: 100%;
+}
+/* Side-specific rotation — the glyph is a downward-pointing triangle.
+ * Rotating it per anchored side keeps the apex pointed at the trigger:
+ *   top    → 0°    (popup above, apex down toward trigger)
+ *   bottom → 180°  (popup below, apex up   toward trigger)
+ *   right  → 90°   (popup right of trigger, apex left  toward trigger)
+ *   left   → 270°  (popup left  of trigger, apex right toward trigger)
+ * Base UI 1.5 sets `data-side` but does NOT rotate the wrapper itself. */
+.zs-popover-arrow[data-side="top"] > svg {
+  transform: rotate(0deg);
+}
+.zs-popover-arrow[data-side="right"] > svg {
+  transform: rotate(90deg);
+}
+.zs-popover-arrow[data-side="bottom"] > svg {
+  transform: rotate(180deg);
+}
+.zs-popover-arrow[data-side="left"] > svg {
+  transform: rotate(270deg);
 }
 
 /* ─── forced-colors mirror ─────────────────────────────────────────── *

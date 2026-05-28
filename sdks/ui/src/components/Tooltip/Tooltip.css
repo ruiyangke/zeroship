@@ -17,8 +17,13 @@
  * color-contrast walk terminates inside the popup. No backdrop-filter
  * — the tooltip is a chip, not a sheet.
  *
- * Forced-colors mirror: every painted selector is re-emitted inside
- * `@media (forced-colors: active)` at equal specificity.
+ * Forced-colors mirror: every PAINTING selector (background / color /
+ * box-shadow / filter) is re-emitted inside `@media (forced-colors:
+ * active)` at equal specificity. The `data-starting-style`,
+ * `data-ending-style`, and `data-side="..."` selectors set only
+ * motion/opacity/transform and carry no token colors, so they don't
+ * need a forced-colors mirror; `prefers-reduced-motion: reduce` is the
+ * relevant guardrail and is already wired below.
  *
  * RTL: layout-affecting padding uses `padding-inline` / `padding-block`.
  * Base UI flips `start` / `end` alignment under `direction: rtl`.
@@ -90,9 +95,16 @@
 
 /* ─── Arrow ─────────────────────────────────────────────────────────── *
  *
- * Base UI rotates the wrapping div per side; SVG triangle inside paints
- * with `currentColor`, which we pin to the popup's --zs-label fill so
- * arrow + popup read as one shape. */
+ * Base UI 1.5 positions the arrow and stamps `data-side` on the wrapper
+ * but does NOT rotate the wrapper itself. The inner SVG is a fixed
+ * downward-pointing triangle (path `M 0,0 L 8,8 L 16,0 Z`), so we
+ * rotate it per anchored side to keep the apex pointed at the trigger:
+ *   top    → 0°    (popup above, apex down toward trigger)
+ *   bottom → 180°  (popup below, apex up   toward trigger)
+ *   right  → 90°   (popup right of trigger, apex left  toward trigger)
+ *   left   → 270°  (popup left  of trigger, apex right toward trigger)
+ * `currentColor` is pinned to the popup's --zs-label fill so arrow +
+ * popup read as one shape. */
 .zs-tooltip-arrow {
   display: inline-flex;
   align-items: center;
@@ -105,6 +117,18 @@
   display: block;
   inline-size: 100%;
   block-size: 100%;
+}
+.zs-tooltip-arrow[data-side="top"] > svg {
+  transform: rotate(0deg);
+}
+.zs-tooltip-arrow[data-side="right"] > svg {
+  transform: rotate(90deg);
+}
+.zs-tooltip-arrow[data-side="bottom"] > svg {
+  transform: rotate(180deg);
+}
+.zs-tooltip-arrow[data-side="left"] > svg {
+  transform: rotate(270deg);
 }
 
 /* ─── forced-colors mirror ─────────────────────────────────────────── *
