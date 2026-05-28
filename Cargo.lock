@@ -6465,6 +6465,7 @@ dependencies = [
  "url",
  "uuid",
  "x509-parser",
+ "zeroship-authz",
  "zeroship-core",
 ]
 

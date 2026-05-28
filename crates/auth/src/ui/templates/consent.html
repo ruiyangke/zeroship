@@ -1,26 +1,40 @@
 {% extends "base.html" %}
 {% block title %}Authorize {{ client_name }} · zeroship{% endblock %}
 {% block body %}
+{% if let Some(logo) = client_logo_uri %}
+  <img class="client-logo" src="{{ logo }}" alt="">
+{% endif %}
 <h2>Authorize {{ client_name }}</h2>
 <p class="subtle">{{ client_id }}</p>
-{% if let Some(err) = error %}
+{% if let Some(err) = grant_error %}
   <div class="error">{{ err }}</div>
 {% endif %}
 <p>This app is asking for permission to:</p>
 <ul class="scopes">
   {% for s in scopes %}
-    <li>{{ s }}</li>
+    <li>
+      <span>{{ s.label }}</span>
+      {% if s.unrecognized %}
+        <small class="scope-tag">(unrecognized)</small>
+      {% endif %}
+    </li>
   {% endfor %}
 </ul>
-<form method="POST" action="/consent">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <input type="hidden" name="consent_challenge" value="{{ challenge }}">
-  <label class="checkbox">
-    <input type="checkbox" name="remember"> Remember this choice for 30 days
-  </label>
+{% if can_grant %}
+  <form id="consent-accept" method="POST" action="/consent/accept">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+    <label class="checkbox">
+      <input type="checkbox" name="remember"> Remember this choice for 30 days
+    </label>
+  </form>
+  <form id="consent-deny" method="POST" action="/consent/deny">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+  </form>
   <div class="buttons">
-    <button type="submit" name="decision" value="allow" class="primary">Allow</button>
-    <button type="submit" name="decision" value="deny">Deny</button>
+    <button type="submit" form="consent-accept" class="primary">Allow</button>
+    <button type="submit" form="consent-deny">Deny</button>
   </div>
-</form>
+{% endif %}
 {% endblock %}
