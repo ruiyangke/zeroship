@@ -3,7 +3,7 @@ use std::future::Future;
 use uuid::Uuid;
 use zeroship_authz::{
     enforce, is_authorized_anywhere, load_platform_policies, policy_hash, Action, AuthzContext,
-    AuthzDecision, Effect, Policy, Resource, Statement,
+    AuthzDecision, Condition, Effect, Policy, Resource, Statement,
 };
 
 #[test]
@@ -133,6 +133,7 @@ fn app_owner_is_authorized_anywhere_for_owned_app_action() {
             token_policy: None,
             action: Action::AppsDeploy,
             resource: Resource::Any,
+            now: 12 * 60 * 60,
             request_ip: None,
             mfa_verified: false,
             mfa_age_seconds: None,
@@ -144,6 +145,47 @@ fn app_owner_is_authorized_anywhere_for_owned_app_action() {
             "app owner should be allowed to grant apps:deploy somewhere"
         );
 
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn time_window_policy_enforces_utc_hours() {
+    run_db_test(|pg| async move {
+        let fixture =
+            Fixture::new_registered_app(&pg, "time-window", "owner", false, false).await;
+        let token_policy = Policy {
+            name: "business hours".to_owned(),
+            statements: vec![Statement {
+                effect: Effect::Allow,
+                actions: vec![Action::AppsRead],
+                resources: vec![fixture.app()],
+                conditions: vec![Condition::TimeWindow {
+                    start: "09:00".to_owned(),
+                    end: "17:00".to_owned(),
+                    tz: "UTC".to_owned(),
+                }],
+            }],
+        };
+        let policies = load_platform_policies().unwrap();
+
+        let denied = enforce(
+            &pg,
+            &policies,
+            &fixture.ctx_with_policy(Action::AppsRead, 3 * 60 * 60, token_policy.clone()),
+        )
+        .await
+        .unwrap();
+        let allowed = enforce(
+            &pg,
+            &policies,
+            &fixture.ctx_with_policy(Action::AppsRead, 12 * 60 * 60, token_policy),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(denied, AuthzDecision::Deny);
+        assert_eq!(allowed, AuthzDecision::Allow);
         fixture.cleanup(&pg).await;
     });
 }
@@ -343,6 +385,22 @@ impl Fixture {
             token_policy: None,
             action: Action::AppsDeploy,
             resource: self.app(),
+            now: 12 * 60 * 60,
+            request_ip: None,
+            mfa_verified: false,
+            mfa_age_seconds: None,
+            request_id: None,
+        }
+    }
+
+    fn ctx_with_policy(&self, action: Action, now: i64, policy: Policy) -> AuthzContext<'_> {
+        AuthzContext {
+            principal_id: self.user_id,
+            token_id: None,
+            token_policy: Some(policy),
+            action,
+            resource: self.app(),
+            now,
             request_ip: None,
             mfa_verified: false,
             mfa_age_seconds: None,

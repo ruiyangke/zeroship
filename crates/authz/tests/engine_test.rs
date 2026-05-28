@@ -106,6 +106,33 @@ fn mfa_within_lowers_with_seconds_value() {
 }
 
 #[test]
+fn time_window_lowers_to_utc_minute_predicate() {
+    let policy = Policy {
+        name: "test".to_owned(),
+        statements: vec![Statement {
+            effect: Effect::Allow,
+            actions: vec![Action::AppsRead],
+            resources: vec![Resource::App {
+                id: "blog".to_owned(),
+            }],
+            conditions: vec![Condition::TimeWindow {
+                start: "09:00".to_owned(),
+                end: "17:00".to_owned(),
+                tz: "UTC".to_owned(),
+            }],
+        }],
+    };
+
+    let source = lower(&policy);
+
+    assert!(source.contains(
+        "(context.now_minute_utc >= 540 && context.now_minute_utc < 1020)"
+    ));
+    assert!(!source.contains("lowers to true"));
+    PolicySet::from_str(&source).expect("lowered policy should parse as Cedar");
+}
+
+#[test]
 fn policy_hash_is_stable_and_unique() {
     let policy = json!({
         "name": "test",

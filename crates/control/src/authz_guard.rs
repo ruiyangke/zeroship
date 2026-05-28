@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ntex::http::Payload;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
@@ -50,6 +51,15 @@ impl AuthzGuard {
                 "message": message,
             })));
         }
+        let now = match now_unix() {
+            Ok(now) => now,
+            Err(err) => {
+                tracing::error!(error = %err, "control: authz clock failed");
+                return Err(HttpResponse::InternalServerError().json(&json!({
+                    "error": "authz_error",
+                })));
+            }
+        };
 
         let ctx = AuthzContext {
             principal_id: self.principal_id,
@@ -57,6 +67,7 @@ impl AuthzGuard {
             token_policy: self.token_policy.clone(),
             action,
             resource,
+            now,
             request_ip: self.request_ip,
             mfa_verified: self.mfa_verified,
             mfa_age_seconds: self.mfa_age_seconds,
@@ -164,6 +175,16 @@ async fn guard_from_bearer(
         mfa_age_seconds: None,
         request_ip,
     }))
+}
+
+fn now_unix() -> Result<i64, String> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| format!("clock: {err}"))?
+            .as_secs(),
+    )
+    .map_err(|err| format!("clock overflow: {err}"))
 }
 
 async fn oauth_guard_from_bearer(

@@ -368,6 +368,11 @@ async fn validate_grant_subset(
 ) -> Result<(), web::HttpResponse> {
     validate_policy_resources(policy)?;
 
+    let now = now_unix().map_err(|err| {
+        tracing::error!(error = %err, "control: PAT grant validation clock failed");
+        web::HttpResponse::InternalServerError().json(&json!({"error": "authz_error"}))
+    })?;
+
     let mut pairs = 0usize;
     for statement in &policy.statements {
         if statement.effect != Effect::Allow {
@@ -389,6 +394,7 @@ async fn validate_grant_subset(
                     token_policy: None,
                     action: *action,
                     resource: resource.clone(),
+                    now,
                     request_ip: guard.request_ip,
                     mfa_verified: guard.mfa_verified,
                     mfa_age_seconds: guard.mfa_age_seconds,

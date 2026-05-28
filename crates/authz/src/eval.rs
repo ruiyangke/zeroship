@@ -23,6 +23,7 @@ pub struct AuthzContext<'a> {
     pub token_policy: Option<Policy>,
     pub action: Action,
     pub resource: Resource,
+    pub now: i64,
     pub request_ip: Option<IpAddr>,
     pub mfa_verified: bool,
     pub mfa_age_seconds: Option<u32>,
@@ -90,6 +91,7 @@ pub async fn is_authorized_anywhere(
             token_policy: None,
             action: ctx.action,
             resource,
+            now: ctx.now,
             request_ip: ctx.request_ip,
             mfa_verified: ctx.mfa_verified,
             mfa_age_seconds: ctx.mfa_age_seconds,
@@ -166,8 +168,14 @@ fn build_context(ctx: &AuthzContext<'_>) -> Result<Context, AuthzError> {
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "0.0.0.0".to_owned());
     let mfa_age_seconds = ctx.mfa_age_seconds.unwrap_or(u32::MAX);
+    let now_minute_utc = utc_minute_of_day(ctx.now);
 
     let pairs = HashMap::from([
+        ("now".to_owned(), restricted(&ctx.now.to_string())?),
+        (
+            "now_minute_utc".to_owned(),
+            restricted(&now_minute_utc.to_string())?,
+        ),
         (
             "request_ip".to_owned(),
             restricted(&format!("ip({})", cedar_string(&request_ip)))?,
@@ -187,6 +195,10 @@ fn build_context(ctx: &AuthzContext<'_>) -> Result<Context, AuthzError> {
 fn restricted(source: &str) -> Result<RestrictedExpression, AuthzError> {
     RestrictedExpression::from_str(source)
         .map_err(|err| AuthzError::CedarRequest(err.to_string()))
+}
+
+fn utc_minute_of_day(now: i64) -> i64 {
+    now.rem_euclid(86_400) / 60
 }
 
 fn resource_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {

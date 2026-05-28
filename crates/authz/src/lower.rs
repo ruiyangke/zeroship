@@ -14,8 +14,6 @@ pub fn lower(policy: &Policy) -> String {
     .expect("writing to String is infallible");
 
     for (index, statement) in policy.statements.iter().enumerate() {
-        append_time_window_todos(&mut source, statement);
-
         let effect = match statement.effect {
             Effect::Allow => "permit",
             Effect::Deny => "forbid",
@@ -137,25 +135,47 @@ fn lower_condition(condition: &Condition) -> String {
                 .collect::<Vec<_>>()
                 .join(" || ")
         }
-        Condition::TimeWindow { .. } => "true".to_owned(),
+        Condition::TimeWindow { start, end, tz } => lower_time_window(start, end, tz),
         Condition::RequireMfa => "context.mfa_verified == true".to_owned(),
         Condition::MfaWithin { seconds } => format!("context.mfa_age_seconds <= {seconds}"),
     }
 }
 
-fn append_time_window_todos(source: &mut String, statement: &Statement) {
-    for condition in &statement.conditions {
-        if let Condition::TimeWindow { start, end, tz } = condition {
-            let start = sanitize_cedar_comment_fragment(start);
-            let end = sanitize_cedar_comment_fragment(end);
-            let tz = sanitize_cedar_comment_fragment(tz);
-            writeln!(
-                source,
-                "// TODO(authz): TimeWindow(start={start}, end={end}, tz={tz}) lowers to true in P9-U2; wire context.now/local-time comparison before enforcing it."
-            )
-            .expect("writing to String is infallible");
-        }
+fn lower_time_window(start: &str, end: &str, tz: &str) -> String {
+    if tz != "UTC" {
+        return "false".to_owned();
     }
+
+    let Some(start_minute) = parse_minute_of_day(start) else {
+        return "false".to_owned();
+    };
+    let Some(end_minute) = parse_minute_of_day(end) else {
+        return "false".to_owned();
+    };
+
+    match start_minute.cmp(&end_minute) {
+        std::cmp::Ordering::Less => {
+            format!(
+                "(context.now_minute_utc >= {start_minute} && context.now_minute_utc < {end_minute})"
+            )
+        }
+        std::cmp::Ordering::Greater => {
+            format!(
+                "(context.now_minute_utc >= {start_minute} || context.now_minute_utc < {end_minute})"
+            )
+        }
+        std::cmp::Ordering::Equal => "false".to_owned(),
+    }
+}
+
+fn parse_minute_of_day(value: &str) -> Option<u32> {
+    let (hour, minute) = value.split_once(':')?;
+    let hour = hour.parse::<u32>().ok()?;
+    let minute = minute.parse::<u32>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(hour * 60 + minute)
 }
 
 fn sanitize_cedar_comment_fragment(value: &str) -> String {
