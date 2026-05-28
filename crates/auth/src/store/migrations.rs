@@ -249,6 +249,16 @@ const STATEMENTS: &[&str] = &[
         hydra_client_id      TEXT NOT NULL
     )",
     "ALTER TABLE control.oauth_clients ALTER COLUMN created_by DROP NOT NULL",
+    "CREATE TABLE IF NOT EXISTS control.oauth_grants (
+        user_id          UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+        client_id        TEXT NOT NULL REFERENCES control.oauth_clients(client_id) ON DELETE CASCADE,
+        granted_scopes   TEXT[] NOT NULL,
+        granted_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_used_at     TIMESTAMPTZ,
+        PRIMARY KEY (user_id, client_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS oauth_grants_user_idx ON control.oauth_grants (user_id)",
     "CREATE TABLE IF NOT EXISTS control.authz_decisions (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         occurred_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
