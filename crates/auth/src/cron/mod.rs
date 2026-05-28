@@ -6,8 +6,9 @@
 //! `--cron-tick-secs` for staging environments) and coordinate via
 //! `auth.cron_state` rows when they need durable "last-ran" tracking.
 //!
-//! P6-U1 ships `jwk_rotation`. P6-U2 will add `audit_retention` here.
+//! P6-U1 ships `jwk_rotation`; P6-U2 adds `audit_retention`.
 
+pub mod audit_retention;
 pub mod jwk_rotation;
 
 use std::sync::Arc;
@@ -25,10 +26,17 @@ pub fn spawn_all(
     db: Arc<compio_postgres::Client>,
     cfg: Arc<AuthConfig>,
 ) {
+    let db_jwk = db.clone();
+    let cfg_jwk = cfg.clone();
     compio::runtime::spawn(async move {
-        jwk_rotation::run(admin, db, cfg).await;
+        jwk_rotation::run(admin, db_jwk, cfg_jwk).await;
     })
     .detach();
 
-    // P6-U2 adds audit_retention here.
+    let db_audit = db;
+    let cfg_audit = cfg;
+    compio::runtime::spawn(async move {
+        audit_retention::run(db_audit, cfg_audit).await;
+    })
+    .detach();
 }

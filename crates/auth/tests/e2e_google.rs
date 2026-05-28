@@ -170,6 +170,7 @@ async fn google_federation_creates_new_user() {
         jwk_rotation_days: 90,
         jwk_retain_days: 31,
         cron_tick_secs: 86400,
+        audit_retention_check_secs: 3600,
     });
     let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
 

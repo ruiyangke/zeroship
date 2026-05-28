@@ -247,6 +247,18 @@ pub struct AuthConfig {
     /// behaviour change is observable inside a single test run.
     #[arg(long, env = "AUTH_CRON_TICK_SECS", default_value = "86400")]
     pub cron_tick_secs: u64,
+
+    /// Audit-retention sweeper tick interval in seconds. Default 3600
+    /// (hourly). The sweep itself is cheap (one indexed DELETE per
+    /// bucket) so hourly cadence keeps the table close to its hot-tier
+    /// shape without making the sweeper hot. Operators can drop this
+    /// for tests; production should leave the default.
+    #[arg(
+        long,
+        env = "AUTH_AUDIT_RETENTION_CHECK_SECS",
+        default_value = "3600"
+    )]
+    pub audit_retention_check_secs: u64,
 }
 
 impl AuthConfig {

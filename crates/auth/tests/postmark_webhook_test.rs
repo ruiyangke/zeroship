@@ -64,6 +64,7 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
         jwk_rotation_days: 90,
         jwk_retain_days: 31,
         cron_tick_secs: 86400,
+        audit_retention_check_secs: 3600,
     }
 }
 
