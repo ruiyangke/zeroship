@@ -12,9 +12,11 @@
 //! `iat` (sanity bound — not in future, not too old), and optionally
 //! `nonce`.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -44,6 +46,18 @@ pub enum OidcError {
 
     #[error("nonce mismatch")]
     NonceMismatch,
+
+    #[error("at_hash present but no access token was provided")]
+    AtHashInputMissing,
+
+    #[error("at_hash mismatch")]
+    AtHashMismatch,
+
+    #[error("c_hash present but no authorization code was provided")]
+    CHashInputMissing,
+
+    #[error("c_hash mismatch")]
+    CHashMismatch,
 }
 
 pub type Result<T> = std::result::Result<T, OidcError>;
@@ -274,6 +288,10 @@ pub struct TokenClaims {
     #[serde(default)]
     pub nonce: Option<String>,
     #[serde(default)]
+    pub at_hash: Option<String>,
+    #[serde(default)]
+    pub c_hash: Option<String>,
+    #[serde(default)]
     pub email: Option<String>,
     #[serde(default)]
     pub email_verified: Option<bool>,
@@ -311,6 +329,8 @@ pub async fn verify_id_token(
     expected_iss: &str,
     expected_aud: &str,
     expected_nonce: Option<&str>,
+    expected_at_hash_input: Option<&str>,
+    expected_c_hash_input: Option<&str>,
 ) -> Result<TokenClaims> {
     let header = decode_header(token).map_err(|e| OidcError::DecodeHeader(e.to_string()))?;
     let kid = header
@@ -358,13 +378,63 @@ pub async fn verify_id_token(
             _ => return Err(OidcError::NonceMismatch),
         }
     }
+    if let Some(at_hash) = claims.at_hash.as_deref() {
+        let input = expected_at_hash_input.ok_or(OidcError::AtHashInputMissing)?;
+        let expected = oidc_token_hash(alg, input.as_bytes());
+        if !constant_time_eq(at_hash.as_bytes(), expected.as_bytes()) {
+            return Err(OidcError::AtHashMismatch);
+        }
+    }
+    if let Some(c_hash) = claims.c_hash.as_deref() {
+        let input = expected_c_hash_input.ok_or(OidcError::CHashInputMissing)?;
+        let expected = oidc_token_hash(alg, input.as_bytes());
+        if !constant_time_eq(c_hash.as_bytes(), expected.as_bytes()) {
+            return Err(OidcError::CHashMismatch);
+        }
+    }
 
     Ok(claims)
+}
+
+fn oidc_token_hash(alg: Algorithm, input: &[u8]) -> String {
+    match alg {
+        Algorithm::RS256 | Algorithm::ES256 | Algorithm::PS256 | Algorithm::HS256 => {
+            let digest = Sha256::digest(input);
+            URL_SAFE_NO_PAD.encode(&digest[..16])
+        }
+        Algorithm::RS384 | Algorithm::ES384 | Algorithm::PS384 | Algorithm::HS384 => {
+            let digest = Sha384::digest(input);
+            URL_SAFE_NO_PAD.encode(&digest[..24])
+        }
+        Algorithm::RS512 | Algorithm::PS512 | Algorithm::HS512 => {
+            let digest = Sha512::digest(input);
+            URL_SAFE_NO_PAD.encode(&digest[..32])
+        }
+        Algorithm::EdDSA => {
+            let digest = Sha512::digest(input);
+            URL_SAFE_NO_PAD.encode(&digest[..32])
+        }
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let len_diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    let mut diff = len_diff;
+    for i in 0..max_len {
+        let l = left.get(i).copied().unwrap_or(0);
+        let r = right.get(i).copied().unwrap_or(0);
+        diff |= usize::from(l ^ r);
+    }
+    diff == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use ed25519_dalek::SigningKey;
+    use jsonwebtoken::{encode, EncodingKey, Header};
     use serde_json::json;
 
     #[test]
@@ -430,5 +500,94 @@ mod tests {
         };
         assert!(is_empty);
         assert!(no_fetched_at);
+    }
+
+    struct TestKey {
+        encoding: EncodingKey,
+        kid: String,
+    }
+
+    fn make_key() -> (TestKey, JwksCache) {
+        let sk = SigningKey::from_bytes(&[11u8; 32]);
+        let pkcs8 = sk.to_pkcs8_der().expect("encode pkcs8");
+        let encoding = EncodingKey::from_ed_der(pkcs8.as_bytes());
+        let pub_b64 = URL_SAFE_NO_PAD.encode(sk.verifying_key().to_bytes());
+        let decoding = DecodingKey::from_ed_components(&pub_b64).expect("decode key");
+
+        let kid = "oidc-test-kid".to_string();
+        let cache = JwksCache::for_test(vec![CachedKey {
+            kid: kid.clone(),
+            alg: Algorithm::EdDSA,
+            decoding,
+        }]);
+        (TestKey { encoding, kid }, cache)
+    }
+
+    fn sign(key: &TestKey, claims: &serde_json::Value) -> String {
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(key.kid.clone());
+        encode(&header, claims, &key.encoding).expect("encode jwt")
+    }
+
+    fn now_secs() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap()
+    }
+
+    fn poll_ready<T>(future: impl std::future::Future<Output = T>) -> T {
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(&waker);
+        let mut future = pin!(future);
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly performed async IO"),
+        }
+    }
+
+    #[test]
+    fn verifies_at_hash_and_rejects_mismatch() {
+        let (key, cache) = make_key();
+        let access_token = "access-token-under-test";
+        let claims = json!({
+            "sub": "usr_alice",
+            "iss": "https://auth.zeroship.ai/",
+            "aud": "gateway",
+            "exp": now_secs() + 300,
+            "iat": now_secs(),
+            "nonce": "nonce-123",
+            "at_hash": oidc_token_hash(Algorithm::EdDSA, access_token.as_bytes()),
+        });
+        let token = sign(&key, &claims);
+
+        poll_ready(verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            Some(access_token),
+            None,
+        ))
+        .expect("matching at_hash verifies");
+
+        let err = poll_ready(verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            Some("wrong-access-token"),
+            None,
+        ))
+        .expect_err("wrong access token must reject at_hash");
+        assert!(matches!(err, OidcError::AtHashMismatch), "got: {err:?}");
     }
 }
