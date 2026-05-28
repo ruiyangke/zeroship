@@ -38,6 +38,7 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
+use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
 use crate::sessions::login as session_cookie;
@@ -174,7 +175,8 @@ pub async fn post(
         .as_ref()
         .and_then(|u| {
             let locked = u.locked_until.is_some_and(|t| t > now);
-            if locked || u.password_hash.is_none() || u.id != pending.user_id {
+            let disabled = u.disabled_at.is_some();
+            if locked || disabled || u.password_hash.is_none() || u.id != pending.user_id {
                 None
             } else {
                 u.password_hash.clone()
@@ -191,8 +193,37 @@ pub async fn post(
     .unwrap_or(false);
 
     // Re-evaluate the "real user" predicate (mirror the dummy-hash arm).
+    let ineligible_user = user.as_ref().filter(|u| {
+        u.id == pending.user_id
+            && (u.locked_until.is_some_and(|t| t > now) || u.disabled_at.is_some())
+    });
+    if let Some(u) = ineligible_user {
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_link_failed",
+                outcome: "failure",
+                user_id: Some(&u.id),
+                auth_method: Some(&pending.provider),
+                detail: json!({
+                    "reason": "account_ineligible",
+                    "email": pending.email,
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_link_error(
+            &form.token,
+            &pending,
+            &cfg,
+            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+        );
+    }
+
     let real_user = user.as_ref().filter(|u| {
         u.locked_until.is_none_or(|t| t <= now)
+            && u.disabled_at.is_none()
             && u.password_hash.is_some()
             && u.id == pending.user_id
     });
@@ -220,6 +251,34 @@ pub async fn post(
             "invalid password",
         );
     };
+
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), u.id).await {
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %u.id, "link eligibility check failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_link_failed",
+                outcome: "failure",
+                user_id: Some(&u.id),
+                auth_method: Some(&pending.provider),
+                detail: json!({
+                    "reason": "account_ineligible",
+                    "email": pending.email,
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_link_error(
+            &form.token,
+            &pending,
+            &cfg,
+            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+        );
+    }
 
     // 5a. Create the identity row.
     if let Err(e) = identities::link(

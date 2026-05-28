@@ -47,6 +47,7 @@ use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
+use crate::identity::eligibility;
 use crate::identity::magic_link;
 use crate::mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
 use crate::mailer::{Address, Mailer};
@@ -450,6 +451,31 @@ pub async fn verify(
         }
     };
 
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
+        if let Err(clear_err) =
+            magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash).await
+        {
+            tracing::warn!(error = %clear_err, "magic_link clear pending after eligibility failure failed");
+        }
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %user_id, "magic verify eligibility check failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "magic_redeem",
+                outcome: "failure",
+                user_id: Some(&user_id),
+                auth_method: Some("magic"),
+                detail: json!({ "reason": "account_ineligible" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_page(PublicErrorMessage::AccountTemporarilyLocked);
+    }
+
     if same_device {
         same_device_finish(
             db.as_ref(),
@@ -768,6 +794,31 @@ pub async fn complete(
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
+
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
+        if let Err(clear_err) =
+            completions_store::clear_consume_pending(db.as_ref(), &form.csrf_nonce).await
+        {
+            tracing::warn!(error = %clear_err, "magic_completions clear pending after eligibility failure failed");
+        }
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %user_id, "magic complete eligibility check failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "magic_complete",
+                outcome: "failure",
+                user_id: Some(&user_id),
+                auth_method: Some("magic"),
+                detail: json!({ "reason": "account_ineligible" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_page(PublicErrorMessage::AccountTemporarilyLocked);
+    }
 
     // 6. Mint session + accept_login + 302 — mirrors same-device path.
     let session = match sessions::create(

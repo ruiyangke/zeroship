@@ -23,6 +23,7 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::types::{AcceptLoginRequest, RejectRequest};
 use crate::hydra_client::HydraAdmin;
+use crate::identity::eligibility::{self, LoginIneligible};
 use crate::identity::password;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
@@ -59,18 +60,29 @@ pub async fn get(
 
     // Skip path: hydra already knows the subject.
     if info.skip {
-        let eligible = match users::find_by_id(db.as_ref(), &info.subject).await {
-            Ok(Some(user)) => {
-                let locked = user.locked_until.is_some_and(|t| t > chrono::Utc::now());
-                !locked && user.disabled_at.is_none()
-            }
-            Ok(None) => false,
-            Err(e) => {
-                tracing::error!(error = %e, subject = %info.subject, "skip-login user lookup failed");
+        let subject_uuid = uuid::Uuid::parse_str(&info.subject).ok();
+        let eligible = match subject_uuid {
+            Some(subject_id) => eligibility::check_user_eligible(db.as_ref(), subject_id).await,
+            None => Err(LoginIneligible::NotFound),
+        };
+        if let Err(e) = eligible {
+            if !e.is_account_state() {
+                tracing::error!(error = %e, subject = %info.subject, "skip-login eligibility check failed");
                 return render_error(PublicErrorMessage::ContactSupport);
             }
-        };
-        if !eligible {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "login_failure",
+                    outcome: "failure",
+                    user_id: subject_uuid.as_ref(),
+                    client_id: Some(&info.client.client_id),
+                    auth_method: Some("hydra_skip"),
+                    detail: json!({ "reason": "account_ineligible" }),
+                    ..Default::default()
+                },
+            )
+            .await;
             let reject = RejectRequest {
                 error: "access_denied".into(),
                 error_description: Some("account temporarily locked".into()),
@@ -280,7 +292,8 @@ pub async fn post(
         .as_ref()
         .and_then(|u| {
             let locked = u.locked_until.is_some_and(|t| t > now);
-            if locked || u.password_hash.is_none() {
+            let disabled = u.disabled_at.is_some();
+            if locked || disabled || u.password_hash.is_none() {
                 None
             } else {
                 u.password_hash.clone()
@@ -298,8 +311,36 @@ pub async fn post(
     .unwrap_or(false);
 
     // Re-evaluate the "real user" predicate (mirror the dummy-hash arm).
+    let ineligible_user = user.as_ref().filter(|u| {
+        u.locked_until.is_some_and(|t| t > now) || u.disabled_at.is_some()
+    });
+    if let Some(u) = ineligible_user {
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "login_failure",
+                outcome: "failure",
+                user_id: Some(&u.id),
+                client_id: Some(&client_id),
+                auth_method: Some("pwd"),
+                detail: json!({ "reason": "account_ineligible" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_login_error(
+            &challenge,
+            &client_name,
+            &cfg,
+            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+            403,
+        );
+    }
+
     let real_user = user.as_ref().filter(|u| {
-        u.locked_until.is_none_or(|t| t <= now) && u.password_hash.is_some()
+        u.locked_until.is_none_or(|t| t <= now)
+            && u.disabled_at.is_none()
+            && u.password_hash.is_some()
     });
 
     let Some(u) = real_user else {
@@ -344,6 +385,33 @@ pub async fn post(
             &cfg,
             "invalid email or password",
             401,
+        );
+    }
+
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), u.id).await {
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %u.id, "password login eligibility check failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "login_failure",
+                outcome: "failure",
+                user_id: Some(&u.id),
+                client_id: Some(&client_id),
+                auth_method: Some("pwd"),
+                detail: json!({ "reason": "account_ineligible" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_login_error(
+            &challenge,
+            &client_name,
+            &cfg,
+            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+            403,
         );
     }
 

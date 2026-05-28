@@ -32,6 +32,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
+use crate::identity::eligibility;
 use crate::identity::linker::{self, LinkOutcome, ResolvedProfile};
 use crate::identity::oauth::github::{self, GitHubIdentity};
 use crate::sessions::login as session_cookie;
@@ -284,6 +285,26 @@ pub async fn callback(
             return resp.finish();
         }
     };
+
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %user_id, "github callback eligibility check failed");
+            return render_error_clearing(PublicErrorMessage::ContactSupport, &cfg);
+        }
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_callback_failure",
+                outcome: "failure",
+                user_id: Some(&user_id),
+                auth_method: Some(PROVIDER),
+                detail: json!({ "reason": "account_ineligible" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_clearing(PublicErrorMessage::AccountTemporarilyLocked, &cfg);
+    }
 
     // Best-effort: bump last_login_at on the user row.
     if let Err(e) = users::touch_last_login(db.as_ref(), user_id).await {
