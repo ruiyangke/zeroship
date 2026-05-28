@@ -8,10 +8,12 @@
 //!   token in the email body and sets the nonce in a cookie at the
 //!   requesting device).
 //!
-//! - **Redeem**: SHA-256 the raw token, atomically `UPDATE … RETURNING`
-//!   the login row by `(token_hash, purpose='login')` with the predicates
-//!   `consumed_at IS NULL` AND `expires_at > NOW()`. Single-use is
-//!   enforced at the database layer — the UPDATE only matches once.
+//! - **Redeem**: SHA-256 the raw token, atomically mark the login row
+//!   `consumed_pending_at = NOW()` by `(token_hash, purpose='login')`
+//!   with the predicates `consumed_at IS NULL` AND `expires_at > NOW()`.
+//!   The UI finalizes `consumed_at` only after the downstream login handoff
+//!   succeeds; if it fails, the pending flag is cleared so the link can be
+//!   retried.
 //!
 //! - **TTL**: 15 minutes. The shorter window limits the attack surface
 //!   of a leaked email link far more than the user-experience cost of
@@ -60,9 +62,16 @@ pub struct IssuedToken {
 /// identifying fields.
 #[derive(Debug, Clone)]
 pub struct RedeemedLoginToken {
+    pub token_hash: [u8; 32],
     pub email: String,
     pub csrf_nonce: String,
     pub purpose: String,
+}
+
+#[derive(Debug)]
+pub enum RedeemError {
+    InFlight,
+    Store(AuthError),
 }
 
 /// Issue a fresh magic-link token for `email` + `purpose`.
@@ -122,39 +131,103 @@ pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedTo
     Ok(IssuedToken { raw, csrf_nonce })
 }
 
-/// Atomically redeem a login-purpose magic-link token. Returns
-/// `Ok(Some(_))` on a successful one-shot consume, `Ok(None)` if the
-/// token doesn't match any unconsumed, unexpired `purpose = 'login'`
-/// row.
+/// Begin redeeming a login-purpose magic-link token. Returns
+/// `Ok(Some(_))` when the token is reserved for this request, `Ok(None)`
+/// if the token doesn't match any unconsumed, unexpired
+/// `purpose = 'login'` row, and `Err(RedeemError::InFlight)` if another
+/// request reserved the same token in the last 60 seconds.
 ///
 /// Implementation: single `UPDATE … RETURNING` keyed by
 /// `(token_hash, purpose)`. The purpose predicate prevents password-
 /// reset rows from being repurposed as login sessions. `PostgreSQL`
-/// guarantees only one concurrent caller observes the row in the
-/// unconsumed state — race-free single-use.
+/// guarantees only one concurrent caller can reserve the row at a time;
+/// stale pending reservations older than 60 seconds can be retried.
 ///
 /// # Errors
 ///
 /// [`AuthError::Db`] on PG failure.
-pub async fn redeem(conn: &Client, raw_token: &str) -> Result<Option<RedeemedLoginToken>> {
+pub async fn redeem_pending(
+    conn: &Client,
+    raw_token: &str,
+) -> std::result::Result<Option<RedeemedLoginToken>, RedeemError> {
     let token_hash = sha256(raw_token);
     let rows = conn
         .query(
-            "UPDATE auth.magic_links SET consumed_at = NOW() \
+            "UPDATE auth.magic_links SET consumed_pending_at = NOW() \
              WHERE token_hash = $1 \
                AND purpose = $2 \
                AND consumed_at IS NULL \
+               AND (consumed_pending_at IS NULL \
+                    OR consumed_pending_at <= NOW() - INTERVAL '60 seconds') \
                AND expires_at > NOW() \
              RETURNING email::text, csrf_nonce, purpose",
             &[&token_hash.as_slice(), &LOGIN_PURPOSE],
         )
         .await
-        .map_err(|e| AuthError::Db(format!("magic_link redeem: {e}")))?;
-    Ok(rows.first().map(|row| RedeemedLoginToken {
-        email: row.get("email"),
-        csrf_nonce: row.get("csrf_nonce"),
-        purpose: row.get("purpose"),
-    }))
+        .map_err(|e| RedeemError::Store(AuthError::Db(format!("magic_link redeem: {e}"))))?;
+    if let Some(row) = rows.first() {
+        return Ok(Some(RedeemedLoginToken {
+            token_hash,
+            email: row.get("email"),
+            csrf_nonce: row.get("csrf_nonce"),
+            purpose: row.get("purpose"),
+        }));
+    }
+
+    let in_flight = conn
+        .query(
+            "SELECT TRUE AS in_flight \
+             FROM auth.magic_links \
+             WHERE token_hash = $1 \
+               AND purpose = $2 \
+               AND consumed_at IS NULL \
+               AND consumed_pending_at > NOW() - INTERVAL '60 seconds' \
+               AND expires_at > NOW()",
+            &[&token_hash.as_slice(), &LOGIN_PURPOSE],
+        )
+        .await
+        .map_err(|e| {
+            RedeemError::Store(AuthError::Db(format!("magic_link redeem in-flight: {e}")))
+        })?;
+    if in_flight.first().is_some() {
+        return Err(RedeemError::InFlight);
+    }
+
+    Ok(None)
+}
+
+/// Finalize a pending magic-link consume after the UI has completed the
+/// downstream login handoff.
+pub async fn finalize_consume(conn: &Client, token_hash: &[u8]) -> Result<bool> {
+    let updated = conn
+        .execute(
+            "UPDATE auth.magic_links \
+             SET consumed_at = NOW() \
+             WHERE token_hash = $1 \
+               AND consumed_pending_at IS NOT NULL \
+               AND consumed_at IS NULL",
+            &[&token_hash],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_link finalize consume: {e}")))?;
+    Ok(updated > 0)
+}
+
+/// Clear a pending magic-link consume so the same link can be retried
+/// after a downstream login handoff failure.
+pub async fn clear_consume_pending(conn: &Client, token_hash: &[u8]) -> Result<bool> {
+    let updated = conn
+        .execute(
+            "UPDATE auth.magic_links \
+             SET consumed_pending_at = NULL \
+             WHERE token_hash = $1 \
+               AND consumed_pending_at IS NOT NULL \
+               AND consumed_at IS NULL",
+            &[&token_hash],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("magic_link clear consume pending: {e}")))?;
+    Ok(updated > 0)
 }
 
 fn sha256(s: &str) -> [u8; 32] {
