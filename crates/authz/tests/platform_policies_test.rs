@@ -19,7 +19,7 @@ fn all_static_policies_parse_cleanly() {
 fn admin_role_permits_any_action() {
     let policies = load_platform_policies().expect("static policies should parse");
     let request = request("admin_user", "billing:write", APP_ID);
-    let entities = entities("admin_user", "admin", false);
+    let entities = entities("admin_user", "admin", false, false);
 
     let decision = Authorizer::new()
         .is_authorized(&request, &policies, &entities)
@@ -32,7 +32,7 @@ fn admin_role_permits_any_action() {
 fn non_admin_user_does_not_get_admin_powers() {
     let policies = load_platform_policies().expect("static policies should parse");
     let request = request("readonly_user", "apps:write", APP_ID);
-    let entities = entities("readonly_user", "readonly", false);
+    let entities = entities("readonly_user", "readonly", false, false);
 
     let decision = Authorizer::new()
         .is_authorized(&request, &policies, &entities)
@@ -45,7 +45,20 @@ fn non_admin_user_does_not_get_admin_powers() {
 fn suspended_app_denies_writes() {
     let policies = load_platform_policies().expect("static policies should parse");
     let request = request("admin_user", "apps:deploy", APP_ID);
-    let entities = entities("admin_user", "admin", true);
+    let entities = entities("admin_user", "admin", true, false);
+
+    let decision = Authorizer::new()
+        .is_authorized(&request, &policies, &entities)
+        .decision();
+
+    assert_eq!(decision, Decision::Deny);
+}
+
+#[test]
+fn audit_locked_app_denies_writes() {
+    let policies = load_platform_policies().expect("static policies should parse");
+    let request = request("admin_user", "apps:deploy", APP_ID);
+    let entities = entities("admin_user", "admin", false, true);
 
     let decision = Authorizer::new()
         .is_authorized(&request, &policies, &entities)
@@ -65,7 +78,7 @@ fn request(principal_id: &str, action: &str, app_id: &str) -> Request {
     .expect("request should be valid")
 }
 
-fn entities(user_id: &str, platform_role: &str, suspended: bool) -> Entities {
+fn entities(user_id: &str, platform_role: &str, suspended: bool, audit_locked: bool) -> Entities {
     Entities::from_json_value(
         json!([
             {
@@ -77,7 +90,7 @@ fn entities(user_id: &str, platform_role: &str, suspended: bool) -> Entities {
                 "uid": { "type": "App", "id": APP_ID },
                 "attrs": {
                     "suspended": suspended,
-                    "audit_locked": false
+                    "audit_locked": audit_locked
                 },
                 "parents": []
             }

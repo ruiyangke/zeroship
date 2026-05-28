@@ -93,6 +93,35 @@ fn no_token_uses_owner_policies_only() {
 }
 
 #[test]
+fn audit_locked_app_denies_owner_writes() {
+    run_db_test(|pg| async move {
+        let fixture =
+            Fixture::new_registered_app(&pg, "audit-locked", "owner", false, true).await;
+
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+            .await
+            .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Deny);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn suspended_app_denies_owner_writes() {
+    run_db_test(|pg| async move {
+        let fixture = Fixture::new_registered_app(&pg, "suspended", "owner", true, false).await;
+
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+            .await
+            .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Deny);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
 fn audit_decision_recorded() {
     run_db_test(|pg| async move {
         let fixture = Fixture::new(&pg, "audit", Some("admin"), None).await;
@@ -162,6 +191,7 @@ async fn pg(dsn: &str) -> Client {
 struct Fixture {
     user_id: Uuid,
     app_id: String,
+    app_db_id: Option<Uuid>,
     token_ids: Vec<Uuid>,
 }
 
@@ -204,6 +234,55 @@ impl Fixture {
         Self {
             user_id,
             app_id,
+            app_db_id: None,
+            token_ids: Vec::new(),
+        }
+    }
+
+    async fn new_registered_app(
+        pg: &Client,
+        label: &str,
+        app_role: &str,
+        suspended: bool,
+        audit_locked: bool,
+    ) -> Self {
+        let user_id = Uuid::new_v4();
+        let app_db_id = Uuid::new_v4();
+        let app_id = app_db_id.to_string();
+        let email = format!("{label}-{user_id}@example.com");
+        let app_name = format!("authz-{label}-{}", Uuid::new_v4().simple());
+
+        pg.execute(
+            "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            &[&user_id, &email, &label],
+        )
+        .await
+        .expect("insert user");
+        pg.execute(
+            "INSERT INTO apps (id, name, api_key, api_key_hash, suspended, audit_locked) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &app_db_id,
+                &app_name,
+                &"test-api-key",
+                &"test-api-key-hash",
+                &suspended,
+                &audit_locked,
+            ],
+        )
+        .await
+        .expect("insert app");
+        pg.execute(
+            "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
+            &[&app_id, &user_id, &app_role],
+        )
+        .await
+        .expect("insert app member");
+
+        Self {
+            user_id,
+            app_id,
+            app_db_id: Some(app_db_id),
             token_ids: Vec::new(),
         }
     }
@@ -265,6 +344,11 @@ impl Fixture {
         let _ = pg
             .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
             .await;
+        if let Some(app_db_id) = self.app_db_id {
+            let _ = pg
+                .execute("DELETE FROM apps WHERE id = $1", &[&app_db_id])
+                .await;
+        }
         let _ = pg
             .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
             .await;

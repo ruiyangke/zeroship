@@ -40,6 +40,12 @@ struct Memberships {
     viewer: Vec<String>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct AppFlags {
+    suspended: bool,
+    audit_locked: bool,
+}
+
 /// Assemble Cedar entities for a principal/resource authorization request.
 ///
 /// The store contains the principal `User`, all app membership targets, the
@@ -76,8 +82,8 @@ pub async fn assemble_entities(
     entities.push(user_entity(principal_id, &user, &memberships)?);
 
     for app_id in app_ids {
-        let suspended = load_app_suspended(pg, &app_id).await.unwrap_or(false);
-        entities.push(app_entity(&app_id, suspended)?);
+        let flags = load_app_flags(pg, &app_id).await?;
+        entities.push(app_entity(&app_id, flags)?);
     }
 
     if let Resource::Org { id } = &resource {
@@ -149,24 +155,19 @@ async fn load_memberships(pg: &Client, principal_id: Uuid) -> Result<Memberships
     Ok(memberships)
 }
 
-async fn load_app_suspended(pg: &Client, app_id: &str) -> Result<bool, AuthzError> {
-    for table in ["control.apps", "apps"] {
-        let sql = format!("SELECT COALESCE(suspended, false) AS suspended FROM {table} WHERE id::text = $1");
-        match pg.query(&sql, &[&app_id]).await {
-            Ok(rows) => return Ok(rows.first().map(|row| row.get("suspended")).unwrap_or(false)),
-            Err(err) if missing_relation_or_column(&err) => continue,
-            Err(err) => return Err(AuthzError::Db(format!("load app entity: {err}"))),
-        }
-    }
-    Ok(false)
-}
+async fn load_app_flags(pg: &Client, app_id: &str) -> Result<AppFlags, AuthzError> {
+    let rows = pg
+        .query(
+            "SELECT suspended, audit_locked FROM apps WHERE id::text = $1",
+            &[&app_id],
+        )
+        .await
+        .map_err(|err| AuthzError::Db(format!("load app entity: {err}")))?;
 
-fn missing_relation_or_column(err: &compio_postgres::Error) -> bool {
-    let text = err.to_string();
-    text.contains("does not exist")
-        || text.contains("undefined_column")
-        || text.contains("42P01")
-        || text.contains("42703")
+    Ok(rows.first().map_or_else(AppFlags::default, |row| AppFlags {
+        suspended: row.get("suspended"),
+        audit_locked: row.get("audit_locked"),
+    }))
 }
 
 fn user_entity(
@@ -204,8 +205,14 @@ fn user_entity(
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }
 
-fn app_entity(app_id: &str, suspended: bool) -> Result<Entity, AuthzError> {
-    let attrs = HashMap::from([("suspended".to_owned(), restricted_bool(suspended)?)]);
+fn app_entity(app_id: &str, flags: AppFlags) -> Result<Entity, AuthzError> {
+    let attrs = HashMap::from([
+        ("suspended".to_owned(), restricted_bool(flags.suspended)?),
+        (
+            "audit_locked".to_owned(),
+            restricted_bool(flags.audit_locked)?,
+        ),
+    ]);
     Entity::new(uid("App", app_id)?, attrs, HashSet::new())
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }

@@ -37,6 +37,16 @@ pub struct PlatformPolicyBody {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AuditLockBody {
+    audit_locked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SuspensionBody {
+    suspended: bool,
+}
+
 #[derive(Serialize)]
 struct PlatformPolicySummary {
     id: String,
@@ -45,6 +55,18 @@ struct PlatformPolicySummary {
     updated_by: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cedar_source: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AppAuditLockResponse {
+    id: Uuid,
+    audit_locked: bool,
+}
+
+#[derive(Serialize)]
+struct AppSuspensionResponse {
+    id: Uuid,
+    suspended: bool,
 }
 
 pub async fn grant_platform_role(
@@ -180,6 +202,122 @@ pub async fn get_platform_role(
         Ok(role) => web::HttpResponse::Ok().json(&RoleResponse { role }),
         Err(resp) => resp,
     }
+}
+
+pub async fn set_app_audit_lock(
+    req: web::HttpRequest,
+    guard: AuthzGuard,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+    body: Json<AuditLockBody>,
+) -> web::HttpResponse {
+    if let Err(resp) = require_platform_admin(&guard, &state).await {
+        return resp;
+    }
+
+    let app_id = match parse_app_uuid(&app_id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let rows = match state
+        .auth_pg
+        .query(
+            "UPDATE apps SET audit_locked = $1, updated_at = NOW() \
+             WHERE id = $2 \
+             RETURNING audit_locked",
+            &[&body.audit_locked, &app_id],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::error!(error = %err, app_id = %app_id, "control: app audit lock update failed");
+            return db_error();
+        }
+    };
+    let Some(row) = rows.first() else {
+        return web::HttpResponse::NotFound().json(&json!({"error": "app not found"}));
+    };
+
+    if let Err(resp) = audit_event(
+        &req,
+        &state,
+        &guard,
+        "app_audit_lock_updated",
+        json!({
+            "actor": guard.principal_id,
+            "app_id": app_id,
+            "audit_locked": body.audit_locked,
+        }),
+    )
+    .await
+    {
+        return resp;
+    }
+
+    web::HttpResponse::Ok().json(&AppAuditLockResponse {
+        id: app_id,
+        audit_locked: row.get("audit_locked"),
+    })
+}
+
+pub async fn set_app_suspension(
+    req: web::HttpRequest,
+    guard: AuthzGuard,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+    body: Json<SuspensionBody>,
+) -> web::HttpResponse {
+    if let Err(resp) = require_platform_admin(&guard, &state).await {
+        return resp;
+    }
+
+    let app_id = match parse_app_uuid(&app_id) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    let rows = match state
+        .auth_pg
+        .query(
+            "UPDATE apps SET suspended = $1, updated_at = NOW() \
+             WHERE id = $2 \
+             RETURNING suspended",
+            &[&body.suspended, &app_id],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::error!(error = %err, app_id = %app_id, "control: app suspension update failed");
+            return db_error();
+        }
+    };
+    let Some(row) = rows.first() else {
+        return web::HttpResponse::NotFound().json(&json!({"error": "app not found"}));
+    };
+
+    if let Err(resp) = audit_event(
+        &req,
+        &state,
+        &guard,
+        "app_suspension_updated",
+        json!({
+            "actor": guard.principal_id,
+            "app_id": app_id,
+            "suspended": body.suspended,
+        }),
+    )
+    .await
+    {
+        return resp;
+    }
+
+    web::HttpResponse::Ok().json(&AppSuspensionResponse {
+        id: app_id,
+        suspended: row.get("suspended"),
+    })
 }
 
 pub async fn upsert_platform_policy(
@@ -330,6 +468,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::get().to(get_platform_role)),
     )
     .service(
+        web::resource("/admin/apps/{app_id}/audit-lock")
+            .route(web::post().to(set_app_audit_lock)),
+    )
+    .service(
+        web::resource("/admin/apps/{app_id}/suspend")
+            .route(web::post().to(set_app_suspension)),
+    )
+    .service(
         web::resource("/admin/platform-policies")
             .route(web::get().to(list_platform_policies)),
     )
@@ -368,6 +514,11 @@ async fn require_admin_or_support(
 fn parse_uuid(raw: &str) -> Result<Uuid, web::HttpResponse> {
     Uuid::parse_str(raw)
         .map_err(|_| web::HttpResponse::BadRequest().json(&json!({"error": "invalid user id"})))
+}
+
+fn parse_app_uuid(raw: &str) -> Result<Uuid, web::HttpResponse> {
+    Uuid::parse_str(raw)
+        .map_err(|_| web::HttpResponse::BadRequest().json(&json!({"error": "invalid app id"})))
 }
 
 fn validate_role(role: &str) -> Option<&'static str> {
