@@ -1,5 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { Autocomplete, Field } from "../components";
+import { useEffect, useRef } from "react";
+import { Form } from "@base-ui/react/form";
+import { Autocomplete, Button, Field } from "../components";
 
 const meta: Meta<typeof Autocomplete> = {
   title: "Components/Autocomplete",
@@ -259,7 +261,7 @@ export const LongList: Story = {
       description: {
         story:
           "50 suggestion candidates. Typing narrows them; the popup caps " +
-          "at min(50vh, 28rem) and scrolls.",
+          "at min(50dvb, 24rem) and scrolls.",
       },
     },
   },
@@ -285,7 +287,124 @@ export const LongList: Story = {
   },
 };
 
-/* ─── 9. AriaPropagation ────────────────────────────────────────────── *
+/* ─── 9. Required ───────────────────────────────────────────────────── */
+export const Required: Story = {
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`<Field required>` cascades to the autocomplete. Submitting " +
+          "empty fires `valueMissing`; Field.Error appears below.",
+      },
+    },
+  },
+  render: function RequiredRender() {
+    return (
+      <div className="zs-story-row" role="group" aria-label="Required autocomplete">
+        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+          <Form onSubmit={(e) => e.preventDefault()}>
+            <Field required>
+              <Field.Label>
+                Email <Field.Required />
+              </Field.Label>
+              <Autocomplete
+                name="email"
+                placeholder="email@example.com"
+                items={EMAIL_DOMAINS}
+                data-testid="autocomplete-required"
+              >
+                {(d: string) => (
+                  <Autocomplete.Item key={d} value={d}>
+                    {d}
+                  </Autocomplete.Item>
+                )}
+              </Autocomplete>
+              <Field.Error match="valueMissing">
+                Enter an email address.
+              </Field.Error>
+            </Field>
+            <div style={{ marginTop: "0.75rem" }}>
+              <Button type="submit" data-testid="autocomplete-required-submit">
+                Submit
+              </Button>
+            </div>
+          </Form>
+        </div>
+      </div>
+    );
+  },
+};
+
+/* ─── 9b. Required + Field.Error — POST-SUBMIT VISUAL EVIDENCE ─────── */
+export const RequiredInvalid: Story = {
+  name: "Required — post-submit (invalid)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Companion to `Required` that auto-submits on mount so the " +
+          "capture lands in the validation-failed state. Red error text " +
+          "appears below the autocomplete. The Form's onSubmit " +
+          "preventDefault's so nothing navigates.",
+      },
+    },
+  },
+  render: function RequiredInvalidRender() {
+    const submitRef = useRef<HTMLElement>(null);
+    useEffect(() => {
+      const id = requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          submitRef.current?.click();
+        });
+      });
+      return () => cancelAnimationFrame(id);
+    }, []);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Required autocomplete (invalid)">
+        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+          <Form
+            onSubmit={(e) => {
+              e.preventDefault();
+            }}
+            data-testid="autocomplete-required-invalid-form"
+          >
+            <Field required>
+              <Field.Label>
+                Email <Field.Required />
+              </Field.Label>
+              <Autocomplete
+                name="email"
+                placeholder="email@example.com"
+                items={EMAIL_DOMAINS}
+                data-testid="autocomplete-required-invalid"
+              >
+                {(d: string) => (
+                  <Autocomplete.Item key={d} value={d}>
+                    {d}
+                  </Autocomplete.Item>
+                )}
+              </Autocomplete>
+              <Field.Error match="valueMissing">
+                Enter an email address.
+              </Field.Error>
+            </Field>
+            <div style={{ marginTop: "0.75rem" }}>
+              <Button
+                ref={submitRef}
+                type="submit"
+                data-testid="autocomplete-required-invalid-submit"
+              >
+                Submit
+              </Button>
+            </div>
+          </Form>
+        </div>
+      </div>
+    );
+  },
+};
+
+/* ─── 10. AriaPropagation ───────────────────────────────────────────── *
  *
  * Slice-6 review-fix regression mirror: aria-* on `<Autocomplete>` must
  * propagate to the focusable `<input>`, not the `<div role="group">`

@@ -26,6 +26,13 @@
   white-space: nowrap;
 }
 
+.zs-autocomplete-popup {
+  max-block-size: min(50dvb, 24rem);
+  box-shadow:
+    var(--zs-shadow-dialog),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+}
+
 /* Forced-colors mirror — the autocomplete-specific override needs to
  * stay equal-specificity with the Combobox forced-colors rule that
  * paints items. Without re-emitting, the bare `.zs-combobox-item`

@@ -11,7 +11,7 @@ import { mkdir, writeFile, stat, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
-import { chromium } from "@playwright/test";
+import { chromium, webkit } from "@playwright/test";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const staticDir = join(packageRoot, "storybook-static");
@@ -30,11 +30,25 @@ const stories = [
   { id: "components-select--disabled", open: false },
   { id: "components-select--with-label", open: false },
   { id: "components-select--required", open: false },
+  { id: "components-select--required-invalid", open: false },
   { id: "components-select--long-list", open: true, trigger: '[data-testid="select-long-list"]' },
   { id: "components-select--align-start-center-end", open: false },
   { id: "components-select--placement", open: false },
   { id: "components-select--rtl", open: false },
 ];
+
+async function launchBrowser() {
+  try {
+    return await chromium.launch();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/sandbox_host_linux|crashpad/.test(message)) {
+      throw error;
+    }
+    console.warn("Chromium launch failed in this sandbox; falling back to WebKit.");
+    return webkit.launch();
+  }
+}
 
 const mimeMap = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -97,7 +111,7 @@ const { server, url: baseUrl } = await startStaticServer();
 let browser;
 let context;
 try {
-  browser = await chromium.launch();
+  browser = await launchBrowser();
   context = await browser.newContext({
     deviceScaleFactor: 2,
     viewport: { width: 1100, height: 760 },

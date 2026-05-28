@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Form } from "@base-ui/react/form";
 import { Button, Field, Select } from "../components";
 
 const meta: Meta<typeof Select> = {
@@ -334,6 +335,72 @@ export const Required: Story = {
   },
 };
 
+/* ─── 8b. Required + Field.Error — POST-SUBMIT VISUAL EVIDENCE ─────── */
+export const RequiredInvalid: Story = {
+  name: "Required — post-submit (invalid)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Companion to `Required` that auto-submits on mount so the " +
+          "capture lands in the validation-failed state. Red error text " +
+          "appears below the select trigger. The Form's onSubmit " +
+          "preventDefault's so nothing navigates.",
+      },
+    },
+  },
+  render: function RequiredInvalidRender() {
+    const submitRef = useRef<HTMLElement>(null);
+    useEffect(() => {
+      const id = requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          submitRef.current?.click();
+        });
+      });
+      return () => cancelAnimationFrame(id);
+    }, []);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Required select (invalid)">
+        <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+          <Form
+            onSubmit={(e) => {
+              e.preventDefault();
+            }}
+            data-testid="select-required-invalid-form"
+          >
+            <Field required>
+              <Field.Label>
+                Favorite fruit <Field.Required />
+              </Field.Label>
+              <Select
+                name="fruit"
+                placeholder="Pick one"
+                data-testid="select-required-invalid"
+              >
+                {FRUITS.map((f) => (
+                  <Select.Item key={f} value={f}>
+                    {f.charAt(0).toUpperCase() + f.slice(1)}
+                  </Select.Item>
+                ))}
+              </Select>
+              <Field.Error match="valueMissing">Pick a fruit.</Field.Error>
+            </Field>
+            <div style={{ marginTop: "0.75rem" }}>
+              <Button
+                ref={submitRef}
+                type="submit"
+                data-testid="select-required-invalid-submit"
+              >
+                Submit
+              </Button>
+            </div>
+          </Form>
+        </div>
+      </div>
+    );
+  },
+};
+
 /* ─── 9. LongList ───────────────────────────────────────────────────── */
 export const LongList: Story = {
   name: "Long list",
@@ -342,7 +409,7 @@ export const LongList: Story = {
       description: {
         story:
           "50 options exercise the popup's scroll-area and keyboard " +
-          "roving. The popup caps at `min(50vh, 28rem)` and overflows " +
+          "roving. The popup caps at `min(50dvb, 24rem)` and overflows " +
           "vertically; arrow keys scroll into view.",
       },
     },

@@ -19,7 +19,7 @@
  *
  * Prints pass/fail per assertion; exits non-zero if any failed.
  */
-import { chromium } from "@playwright/test";
+import { chromium, webkit } from "@playwright/test";
 
 const baseUrl = process.env.STORYBOOK_URL;
 if (!baseUrl) throw new Error("Set STORYBOOK_URL.");
@@ -30,7 +30,20 @@ if (!baseUrl) throw new Error("Set STORYBOOK_URL.");
  * so CI doesn't silently drift). */
 const devUrl = process.env.STORYBOOK_DEV_URL;
 
-const browser = await chromium.launch();
+async function launchBrowser() {
+  try {
+    return await chromium.launch();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/sandbox_host_linux|crashpad/.test(message)) {
+      throw error;
+    }
+    console.warn("Chromium launch failed in this sandbox; falling back to WebKit.");
+    return webkit.launch();
+  }
+}
+
+const browser = await launchBrowser();
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
 const page = await ctx.newPage();
 
@@ -1579,15 +1592,12 @@ await open("components-combobox--multiple");
   const input = page.locator('[data-testid="combobox-multiple"] input');
   await input.waitFor({ state: "visible", timeout: 5000 });
   await input.click();
+  // Story initializes value=["apple","orange"] — chips render on mount.
+  // Avoid clicking options[0]/[1] (they ARE apple/orange and would deselect).
   await page
-    .locator('[role="option"]')
+    .locator('[data-testid="combobox-multiple"] .zs-combobox-chip')
     .first()
     .waitFor({ state: "visible", timeout: 5000 });
-  // Click the first two options to materialise chips.
-  await page.locator('[role="option"]').nth(0).click();
-  await page.waitForTimeout(50);
-  await page.locator('[role="option"]').nth(1).click();
-  await page.waitForTimeout(150);
   const chipValueAttrs = await page
     .locator('[data-testid="combobox-multiple"] .zs-combobox-chip')
     .evaluateAll((els) =>

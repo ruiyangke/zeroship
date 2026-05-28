@@ -1,4 +1,4 @@
-import { chromium } from "@playwright/test";
+import { chromium, webkit } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
 const baseUrl = process.env.STORYBOOK_URL;
@@ -159,6 +159,8 @@ const stories = [
   "components-toggle--forced-colors-hover",
   "components-toggle--role-toolbar-lock",
   // Slice 6: Select / Combobox / Autocomplete.
+  // Count is 154, not the brief's 153: Autocomplete needed a new
+  // Required baseline story plus its RequiredInvalid companion.
   "components-select--basic",
   "components-select--with-groups",
   "components-select--all-sizes",
@@ -167,6 +169,7 @@ const stories = [
   "components-select--disabled",
   "components-select--with-label",
   "components-select--required",
+  "components-select--required-invalid",
   "components-select--long-list",
   "components-select--align-start-center-end",
   "components-select--placement",
@@ -178,6 +181,7 @@ const stories = [
   "components-combobox--empty",
   "components-combobox--with-label",
   "components-combobox--required",
+  "components-combobox--required-invalid",
   "components-combobox--long-list",
   "components-combobox--disabled",
   "components-combobox--rtl",
@@ -190,15 +194,30 @@ const stories = [
   "components-autocomplete--rtl",
   "components-autocomplete--with-description",
   "components-autocomplete--long-list",
+  "components-autocomplete--required",
+  "components-autocomplete--required-invalid",
   "components-autocomplete--aria-propagation",
 ];
+
+async function launchBrowser() {
+  try {
+    return await chromium.launch();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/sandbox_host_linux|crashpad/.test(message)) {
+      throw error;
+    }
+    console.warn("Chromium launch failed in this sandbox; falling back to WebKit.");
+    return webkit.launch();
+  }
+}
 
 if (themes.length === 0 || stories.length === 0) {
   console.log("A11y check skipped — no themes or stories registered yet (rebuild in progress).");
   process.exit(0);
 }
 
-const browser = await chromium.launch();
+const browser = await launchBrowser();
 const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
 const page = await context.newPage();
 const failures = [];

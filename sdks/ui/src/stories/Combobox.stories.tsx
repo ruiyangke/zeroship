@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Form } from "@base-ui/react/form";
 import { Button, Combobox, Field } from "../components";
 
 const meta: Meta<typeof Combobox> = {
@@ -78,7 +79,7 @@ export const Multiple: Story = {
     },
   },
   render: function MultipleRender() {
-    const [value, setValue] = useState<string[]>([]);
+    const [value, setValue] = useState<string[]>(["apple", "orange"]);
     return (
       <div className="zs-story-row" role="group" aria-label="Multiple">
         <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
@@ -319,6 +320,68 @@ export const Required: Story = {
   },
 };
 
+/* ─── 7b. Required + Field.Error — POST-SUBMIT VISUAL EVIDENCE ─────── */
+export const RequiredInvalid: Story = {
+  name: "Required — post-submit (invalid)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Companion to `Required` that auto-submits on mount so the " +
+          "capture lands in the validation-failed state. Red error text " +
+          "appears below the combobox. The Form's onSubmit " +
+          "preventDefault's so nothing navigates.",
+      },
+    },
+  },
+  render: function RequiredInvalidRender() {
+    const submitRef = useRef<HTMLElement>(null);
+    useEffect(() => {
+      const id = requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          submitRef.current?.click();
+        });
+      });
+      return () => cancelAnimationFrame(id);
+    }, []);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Required combobox (invalid)">
+        <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+          <Form onSubmit={(e) => e.preventDefault()} data-testid="combobox-required-invalid-form">
+            <Field required>
+              <Field.Label>
+                Favorite fruit <Field.Required />
+              </Field.Label>
+              <Combobox
+                name="fruit"
+                placeholder="Type"
+                items={FRUITS as unknown as string[]}
+                data-testid="combobox-required-invalid"
+              >
+                {(item: string) => (
+                  <Combobox.Item key={item} value={item}>
+                    {item.charAt(0).toUpperCase() + item.slice(1)}
+                  </Combobox.Item>
+                )}
+              </Combobox>
+              <Field.Error match="valueMissing">Pick a fruit.</Field.Error>
+            </Field>
+            <div style={{ marginTop: "0.75rem" }}>
+              <Button
+                ref={submitRef}
+                type="submit"
+                data-testid="combobox-required-invalid-submit"
+              >
+                Submit
+              </Button>
+            </div>
+          </Form>
+        </div>
+      </div>
+    );
+  },
+};
+
 /* ─── 8. LongList ───────────────────────────────────────────────────── */
 export const LongList: Story = {
   name: "Long list",
@@ -327,7 +390,7 @@ export const LongList: Story = {
       description: {
         story:
           "100 items — type to filter narrows the visible set quickly. " +
-          "The popup caps at min(50vh, 28rem) and scrolls.",
+          "The popup caps at min(50dvb, 24rem) and scrolls.",
       },
     },
   },

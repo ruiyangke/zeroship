@@ -3,7 +3,7 @@ import { mkdir, writeFile, stat, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
-import { chromium } from "@playwright/test";
+import { chromium, webkit } from "@playwright/test";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const staticDir = join(packageRoot, "storybook-static");
@@ -13,7 +13,12 @@ const outDir = process.env.THEME_EVIDENCE_DIR
 
 const themes = [{ label: "Crystal", value: "crystal" }];
 const stories = [
-  { id: "components-autocomplete--basic", open: false },
+  {
+    id: "components-autocomplete--basic",
+    open: true,
+    trigger: '[data-testid="autocomplete-basic"] input',
+    inputText: "gmail",
+  },
   { id: "components-autocomplete--all-sizes", open: false },
   { id: "components-autocomplete--with-label", open: false },
   { id: "components-autocomplete--empty", open: false },
@@ -21,7 +26,22 @@ const stories = [
   { id: "components-autocomplete--rtl", open: false },
   { id: "components-autocomplete--with-description", open: false },
   { id: "components-autocomplete--long-list", open: false },
+  { id: "components-autocomplete--required", open: false },
+  { id: "components-autocomplete--required-invalid", open: false },
 ];
+
+async function launchBrowser() {
+  try {
+    return await chromium.launch();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/sandbox_host_linux|crashpad/.test(message)) {
+      throw error;
+    }
+    console.warn("Chromium launch failed in this sandbox; falling back to WebKit.");
+    return webkit.launch();
+  }
+}
 
 const mimeMap = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -84,7 +104,7 @@ const { server, url: baseUrl } = await startStaticServer();
 let browser;
 let context;
 try {
-  browser = await chromium.launch();
+  browser = await launchBrowser();
   // deviceScaleFactor=1 — see capture-combobox-evidence for rationale.
   context = await browser.newContext({
     deviceScaleFactor: 1,
@@ -104,7 +124,17 @@ try {
         .locator(".zs-combobox-input-group, .zs-combobox-popup")
         .first()
         .waitFor({ state: "visible", timeout: 5000 });
-      await page.waitForTimeout(200);
+      if (story.open && story.trigger) {
+        const t = page.locator(story.trigger).first();
+        await t.waitFor({ state: "visible", timeout: 5000 });
+        await t.click();
+        if (story.inputText) {
+          await t.fill(story.inputText);
+        }
+        await page.waitForTimeout(300);
+      } else {
+        await page.waitForTimeout(200);
+      }
       const file = join(outDir, `${theme.value}-autocomplete-${story.id}.png`);
       await page.screenshot({ path: file, fullPage: true });
       evidence.push({ theme: theme.value, storyId: story.id, screenshot: file });

@@ -150,10 +150,16 @@
   justify-content: center;
   margin-inline-start: var(--zs-space-1);
   color: var(--zs-label-secondary);
+  transition: transform var(--zs-motion-fast) var(--zs-motion-ease);
 }
 .zs-combobox-input-group__icon > svg {
   inline-size: 1em;
   block-size: 1em;
+}
+/* Autocomplete shares this same InputGroup host + icon class, so the
+ * single shared popup-open selector rotates both components. */
+.zs-combobox-input-group[data-popup-open] .zs-combobox-input-group__icon {
+  transform: rotate(180deg);
 }
 
 /* ─── chips rail (multi-mode) ──────────────────────────────────────── */
@@ -227,13 +233,15 @@
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
   border-radius: var(--zs-radius-5);
-  box-shadow: var(--zs-shadow-dialog);
+  box-shadow:
+    var(--zs-shadow-dialog),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(
     --zs-dialog-backdrop-filter,
     var(--zs-material-regular)
   );
-  max-block-size: min(50vh, 28rem);
+  max-block-size: min(50dvb, 24rem);
   min-inline-size: var(--anchor-width, 16rem);
   overflow: hidden;
   outline: none;
@@ -264,9 +272,9 @@
 .zs-combobox-item {
   position: relative;
   display: grid;
-  grid-template-columns: 1.25rem 1fr;
+  grid-template-columns: var(--zs-space-4) 1fr;
   align-items: center;
-  gap: var(--zs-space-2);
+  gap: var(--zs-space-1);
   padding-block: var(--zs-space-1);
   padding-inline: var(--zs-space-2);
   min-block-size: 1.75rem;
@@ -294,8 +302,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: 1.25rem;
-  block-size: 1.25rem;
+  inline-size: var(--zs-space-4);
+  block-size: var(--zs-space-4);
   color: var(--zs-accent);
   opacity: 0;
 }
@@ -342,6 +350,7 @@
 /* ─── reduced motion ───────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .zs-combobox-input-group,
+  .zs-combobox-input-group__icon,
   .zs-combobox-item {
     transition: none;
   }
