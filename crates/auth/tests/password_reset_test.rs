@@ -564,6 +564,74 @@ async fn issue_then_redeem_roundtrip() {
 }
 
 #[compio::test]
+async fn complete_rolls_back_token_consume_with_transaction() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!(
+        "reset-rollback-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    let old_hash = password::hash("old reset password phrase")
+        .expect("hash old password");
+    users::update_password_hash(&client, user.id, &old_hash)
+        .await
+        .expect("set old password");
+    let issued = password_reset::issue(&client, &email)
+        .await
+        .expect("issue reset token");
+    let new_hash = password::hash("new reset password phrase")
+        .expect("hash new password");
+
+    client.execute("BEGIN", &[]).await.expect("begin");
+    let completed = password_reset::complete(&client, &issued.raw, &new_hash)
+        .await
+        .expect("complete reset")
+        .expect("token should complete inside transaction");
+    assert_eq!(completed.user_id, user.id);
+    client.execute("ROLLBACK", &[]).await.expect("rollback");
+
+    let row = client
+        .query_one(
+            "SELECT ml.consumed_at IS NULL AS token_unconsumed, \
+                    u.password_hash = $2 AS password_unchanged \
+             FROM auth.magic_links ml \
+             JOIN auth.users u ON u.email = ml.email \
+             WHERE ml.email = $1::citext AND ml.purpose = 'reset'",
+            &[&email, &old_hash],
+        )
+        .await
+        .expect("load reset state");
+    let token_unconsumed: bool = row.get("token_unconsumed");
+    let password_unchanged: bool = row.get("password_unchanged");
+    assert!(
+        token_unconsumed,
+        "rolled-back password reset must leave token unconsumed"
+    );
+    assert!(
+        password_unchanged,
+        "rolled-back password reset must leave password hash unchanged"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+}
+
+#[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
     let Some(client) = pg().await else {
         eprintln!("skipping password_reset_test (no AUTH_DB_URL)");

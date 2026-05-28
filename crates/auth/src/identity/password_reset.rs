@@ -7,10 +7,10 @@
 //!   the raw token to the caller, which embeds it in the `/reset?token=`
 //!   email link.
 //!
-//! - **Redeem**: SHA-256 the raw token, atomically `UPDATE … RETURNING`
-//!   the row by `(token_hash, purpose='reset')` with the predicates
-//!   `consumed_at IS NULL` AND `expires_at > NOW()`. Single-use is
-//!   enforced at the database layer.
+//! - **Complete**: SHA-256 the raw token, atomically update the user's
+//!   password hash and consume the reset row by `(token_hash,
+//!   purpose='reset')` with the predicates `consumed_at IS NULL` AND
+//!   `expires_at > NOW()`. Single-use is enforced at the database layer.
 //!
 //! - **TTL**: 60 minutes. Longer than a magic-link's 15-minute window
 //!   (resetting a password is a deliberate flow the user may pick back
@@ -62,6 +62,13 @@ pub struct IssuedToken {
 /// Result of a successful [`redeem`] — the row's identifying fields.
 #[derive(Debug, Clone)]
 pub struct RedeemedToken {
+    pub email: String,
+}
+
+/// Result of a successful [`complete`] — the row's linked user.
+#[derive(Debug, Clone)]
+pub struct CompletedReset {
+    pub user_id: uuid::Uuid,
     pub email: String,
 }
 
@@ -171,6 +178,60 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
         .await
         .map_err(|e| AuthError::Db(format!("password_reset redeem: {e}")))?;
     Ok(rows.first().map(|r| RedeemedToken {
+        email: r.get("email"),
+    }))
+}
+
+/// Atomically redeem a password-reset token and update the linked user's
+/// password hash. Returns `Ok(Some(_))` on success, `Ok(None)` if the
+/// token is invalid or expired.
+///
+/// The user update and token consume are one SQL statement. If the user
+/// update fails, PostgreSQL rolls back the token consume as part of that
+/// same statement.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Db`] on PG failure.
+pub async fn complete(
+    db: &Client,
+    raw_token: &str,
+    password_hash: &str,
+) -> Result<Option<CompletedReset>> {
+    let token_hash = sha256(raw_token);
+    let rows = db
+        .query(
+            "WITH candidate AS ( \
+                 SELECT u.id AS user_id, u.email::text AS email \
+                 FROM auth.magic_links ml \
+                 JOIN auth.users u ON u.email = ml.email \
+                 WHERE ml.token_hash = $1 \
+                   AND ml.purpose = $2 \
+                   AND ml.consumed_at IS NULL \
+                   AND ml.expires_at > NOW() \
+             ), updated_user AS ( \
+                 UPDATE auth.users u \
+                 SET password_hash = $3, updated_at = NOW() \
+                 FROM candidate c \
+                 WHERE u.id = c.user_id \
+                 RETURNING u.id, c.email \
+             ), consumed AS ( \
+                 UPDATE auth.magic_links ml \
+                 SET consumed_at = NOW() \
+                 FROM updated_user u \
+                 WHERE ml.token_hash = $1 \
+                   AND ml.purpose = $2 \
+                   AND ml.email = u.email::citext \
+                   AND ml.consumed_at IS NULL \
+                 RETURNING u.id AS user_id, u.email AS email \
+             ) \
+             SELECT user_id, email FROM consumed",
+            &[&token_hash.as_slice(), &PURPOSE, &password_hash],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset complete: {e}")))?;
+    Ok(rows.first().map(|r| CompletedReset {
+        user_id: r.get("user_id"),
         email: r.get("email"),
     }))
 }

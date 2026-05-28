@@ -3,10 +3,10 @@
 //!
 //! Per proposal §8.3 (Phase 5). The token is issued by [`crate::ui::signup`]
 //! on a successful signup and emailed to the user. Clicking the link in
-//! the email lands here; we atomically consume the row via
-//! [`crate::identity::verification::redeem`], stamp the user's
-//! `email_verified_at`, emit an audit event, and render a confirmation
-//! page.
+//! the email lands here; we atomically stamp the user's
+//! `email_verified_at` and consume the row via
+//! [`crate::identity::verification::redeem_and_mark_verified`], emit an
+//! audit event, and render a confirmation page.
 //!
 //! No session is minted here — verification is decoupled from sign-in.
 //! The success page links back to `/login` so the user can continue.
@@ -36,8 +36,8 @@ pub async fn get(
     query: ntex::web::types::Query<VerifyQuery>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    // 1. Redeem atomically.
-    let redeemed = match verification::redeem(db.as_ref(), &query.token).await {
+    // 1. Redeem atomically with the user verification update.
+    let redeemed = match verification::redeem_and_mark_verified(db.as_ref(), &query.token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             audit::emit(
@@ -57,22 +57,6 @@ pub async fn get(
             return render_error(PublicErrorMessage::ContactSupport);
         }
     };
-
-    // 2. Stamp `email_verified_at` on the user. Guarded by
-    //    `email_verified_at IS NULL` so a duplicate redeem (e.g. user
-    //    re-issues then redeems the original after the new one already
-    //    verified) doesn't bump the timestamp — first verification wins.
-    if let Err(e) = db
-        .execute(
-            "UPDATE auth.users SET email_verified_at = NOW(), updated_at = NOW() \
-             WHERE id = $1 AND email_verified_at IS NULL",
-            &[&redeemed.user_id],
-        )
-        .await
-    {
-        tracing::error!(error = %e, user_id = %redeemed.user_id, "set email_verified_at failed");
-        return render_error(PublicErrorMessage::ContactSupport);
-    }
 
     audit::emit(
         db.as_ref(),

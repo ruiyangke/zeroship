@@ -31,7 +31,6 @@ use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::hydra_client::HydraAdmin;
 use crate::identity::{password, password_reset};
-use crate::store::users;
 use crate::ui::ResetPage;
 
 #[derive(Debug, Deserialize)]
@@ -90,43 +89,7 @@ pub async fn post(
         );
     }
 
-    // 3. Atomic single-use redeem.
-    let redeemed = match password_reset::redeem(db.as_ref(), &form.token).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "password_changed",
-                    outcome: "failure",
-                    auth_method: Some("password_reset"),
-                    detail: serde_json::json!({ "reason": "token_invalid_or_expired" }),
-                    ..Default::default()
-                },
-            )
-            .await;
-            return render_form(&cfg, &form.token, Some("reset link invalid or expired"));
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "password_reset redeem db error");
-            return render_form(&cfg, &form.token, Some("internal error"));
-        }
-    };
-
-    // 4. Look up the user by the email recovered from the token.
-    let user = match users::find_by_email(db.as_ref(), &redeemed.email).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            tracing::warn!(email = %redeemed.email, "password_reset: redeemed token but user not found");
-            return render_form(&cfg, &form.token, Some("user not found"));
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "password_reset users::find_by_email failed");
-            return render_form(&cfg, &form.token, Some("internal error"));
-        }
-    };
-
-    // 5. Hash on spawn_blocking — Argon2id is CPU-bound and synchronous;
+    // 3. Hash on spawn_blocking — Argon2id is CPU-bound and synchronous;
     //    parking the ntex event loop is a non-starter (same constraint as
     //    /login and /signup).
     let password_clone = form.password.clone();
@@ -143,19 +106,34 @@ pub async fn post(
         }
     };
 
-    // 6. Persist the new hash, audit, revoke existing sessions, and consume
-    //    outstanding email tokens in one transaction. The reset token itself
-    //    was already consumed by the atomic redeem above.
-    let revoked = match complete_password_reset(db.as_ref(), user.id, &redeemed.email, &phc).await {
-        Ok(counts) => counts,
+    // 4. Atomically consume the reset token with the password update,
+    //    then audit, revoke existing sessions, and consume outstanding
+    //    email tokens in one transaction.
+    let completed = match complete_password_reset(db.as_ref(), &form.token, &phc).await {
+        Ok(Some(completed)) => completed,
+        Ok(None) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "password_changed",
+                    outcome: "failure",
+                    auth_method: Some("password_reset"),
+                    detail: serde_json::json!({ "reason": "token_invalid_or_expired" }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return render_form(&cfg, &form.token, Some("reset link invalid or expired"));
+        }
         Err(e) => {
-            tracing::error!(error = %e, user_id = %user.id, "password_reset completion failed");
+            tracing::error!(error = %e, "password_reset completion failed");
             return render_form(&cfg, &form.token, Some("internal error"));
         }
     };
+    let revoked = completed.counts;
 
     tracing::info!(
-        user_id = %user.id,
+        user_id = %completed.user_id,
         idp_sessions = revoked.idp_sessions,
         gateway_sessions = revoked.gateway_sessions,
         console_sessions = revoked.console_sessions,
@@ -164,11 +142,11 @@ pub async fn post(
         "password_reset revoked sessions and stale tokens"
     );
 
-    let subject = user.id.to_string();
+    let subject = completed.user_id.to_string();
     if let Err(e) = admin.delete_login_sessions(&subject).await {
         tracing::warn!(
             error = %e,
-            user_id = %user.id,
+            user_id = %completed.user_id,
             "password_reset hydra login-session revocation failed"
         );
         audit::emit(
@@ -176,7 +154,7 @@ pub async fn post(
             &AuditEvent {
                 event_type: "hydra_login_sessions_revoked_after_password_reset",
                 outcome: "failure",
-                user_id: Some(&user.id),
+                user_id: Some(&completed.user_id),
                 auth_method: Some("password_reset"),
                 detail: serde_json::json!({ "error": e.to_string() }),
                 ..Default::default()
@@ -203,23 +181,35 @@ struct ResetRevocationCounts {
     magic_completions: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResetCompletion {
+    user_id: uuid::Uuid,
+    email: String,
+    counts: ResetRevocationCounts,
+}
+
 async fn complete_password_reset(
     conn: &compio_postgres::Client,
-    user_id: uuid::Uuid,
-    email: &str,
+    raw_token: &str,
     phc: &str,
-) -> Result<ResetRevocationCounts> {
+) -> Result<Option<ResetCompletion>> {
     conn.execute("BEGIN", &[])
         .await
         .map_err(|e| AuthError::Db(format!("password_reset begin: {e}")))?;
 
-    let result = complete_password_reset_tx(conn, user_id, email, phc).await;
+    let result = complete_password_reset_tx(conn, raw_token, phc).await;
     match result {
-        Ok(counts) => {
+        Ok(Some(completed)) => {
             conn.execute("COMMIT", &[])
                 .await
                 .map_err(|e| AuthError::Db(format!("password_reset commit: {e}")))?;
-            Ok(counts)
+            Ok(Some(completed))
+        }
+        Ok(None) => {
+            if let Err(rollback_err) = conn.execute("ROLLBACK", &[]).await {
+                tracing::error!(error = %rollback_err, "password_reset rollback after invalid token failed");
+            }
+            Ok(None)
         }
         Err(e) => {
             if let Err(rollback_err) = conn.execute("ROLLBACK", &[]).await {
@@ -232,18 +222,19 @@ async fn complete_password_reset(
 
 async fn complete_password_reset_tx(
     conn: &compio_postgres::Client,
-    user_id: uuid::Uuid,
-    email: &str,
+    raw_token: &str,
     phc: &str,
-) -> Result<ResetRevocationCounts> {
-    users::update_password_hash(conn, user_id, phc).await?;
+) -> Result<Option<ResetCompletion>> {
+    let Some(completed) = password_reset::complete(conn, raw_token, phc).await? else {
+        return Ok(None);
+    };
 
     audit::emit_strict(
         conn,
         &AuditEvent {
             event_type: "password_changed",
             outcome: "success",
-            user_id: Some(&user_id),
+            user_id: Some(&completed.user_id),
             auth_method: Some("password_reset"),
             ..Default::default()
         },
@@ -251,11 +242,14 @@ async fn complete_password_reset_tx(
     .await?;
 
     let idp_sessions = conn
-        .execute("DELETE FROM auth.sessions WHERE user_id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM auth.sessions WHERE user_id = $1",
+            &[&completed.user_id],
+        )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete auth.sessions: {e}")))?;
 
-    let user_id_text = user_id.to_string();
+    let user_id_text = completed.user_id.to_string();
     let gateway_sessions = conn
         .execute(
             "DELETE FROM auth.gateway_sessions WHERE user_id = $1",
@@ -278,7 +272,7 @@ async fn complete_password_reset_tx(
              SET consumed_at = NOW() \
              WHERE email = $1::citext \
                AND consumed_at IS NULL",
-            &[&email],
+            &[&completed.email],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset consume magic links: {e}")))?;
@@ -286,7 +280,7 @@ async fn complete_password_reset_tx(
     let magic_completions = conn
         .execute(
             "DELETE FROM auth.magic_completions WHERE email = $1::citext",
-            &[&email],
+            &[&completed.email],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete magic_completions: {e}")))?;
@@ -304,7 +298,7 @@ async fn complete_password_reset_tx(
         &AuditEvent {
             event_type: "sessions_revoked_after_password_reset",
             outcome: "success",
-            user_id: Some(&user_id),
+            user_id: Some(&completed.user_id),
             auth_method: Some("password_reset"),
             detail: serde_json::json!({
                 "idp_sessions": counts.idp_sessions,
@@ -318,7 +312,11 @@ async fn complete_password_reset_tx(
     )
     .await?;
 
-    Ok(counts)
+    Ok(Some(ResetCompletion {
+        user_id: completed.user_id,
+        email: completed.email,
+        counts,
+    }))
 }
 
 fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpResponse {

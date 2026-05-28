@@ -197,6 +197,67 @@ async fn issue_then_redeem_roundtrip() {
 }
 
 #[compio::test]
+async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping verification_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!(
+        "verify-rollback-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    let issued = verification::issue(&client, user.id, &email)
+        .await
+        .expect("issue");
+
+    client.execute("BEGIN", &[]).await.expect("begin");
+    let redeemed = verification::redeem_and_mark_verified(&client, &issued.raw)
+        .await
+        .expect("redeem and mark verified")
+        .expect("token should redeem inside transaction");
+    assert_eq!(redeemed.user_id, user.id);
+    client.execute("ROLLBACK", &[]).await.expect("rollback");
+
+    let row = client
+        .query_one(
+            "SELECT ev.consumed_at IS NULL AS token_unconsumed, \
+                    u.email_verified_at IS NULL AS user_unverified \
+             FROM auth.email_verifications ev \
+             JOIN auth.users u ON u.id = ev.user_id \
+             WHERE ev.user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("load verification state");
+    let token_unconsumed: bool = row.get("token_unconsumed");
+    let user_unverified: bool = row.get("user_unverified");
+    assert!(
+        token_unconsumed,
+        "rolled-back verification must leave token unconsumed"
+    );
+    assert!(
+        user_unverified,
+        "rolled-back verification must leave user unverified"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+}
+
+#[compio::test]
 async fn new_issue_supersedes_previous() {
     let Some(client) = pg().await else {
         eprintln!("skipping verification_test (no AUTH_DB_URL)");

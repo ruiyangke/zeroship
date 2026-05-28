@@ -6,9 +6,9 @@
 //!   in `auth.email_verifications` keyed to `(user_id, email)`. Return
 //!   the raw token to the caller (embedded in the `/verify?token=` link).
 //!
-//! - **Redeem**: SHA-256 the raw token, atomically `UPDATE … RETURNING`
-//!   keyed by `token_hash` with the predicates `consumed_at IS NULL` AND
-//!   `expires_at > NOW()`. Single-use is enforced at the database layer.
+//! - **Redeem**: SHA-256 the raw token, atomically mark the user verified
+//!   and consume the token in one statement. Single-use is enforced at
+//!   the database layer.
 //!
 //! - **TTL**: 24 hours. Longer than the magic-link's 15-minute window —
 //!   verification is a low-frequency, one-shot operation users may not
@@ -143,6 +143,58 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
         )
         .await
         .map_err(|e| AuthError::Db(format!("verification redeem: {e}")))?;
+    Ok(rows.first().map(|r| RedeemedToken {
+        user_id: r.get("user_id"),
+        email: r.get("email"),
+    }))
+}
+
+/// Atomically redeem a verification token and mark the linked user
+/// verified. Returns `Ok(Some(_))` on success, `Ok(None)` if the token is
+/// invalid or expired.
+///
+/// The user update and token consume are one SQL statement. If the user
+/// update fails, PostgreSQL rolls back the token consume as part of that
+/// same statement.
+///
+/// # Errors
+///
+/// [`AuthError::Db`] on PG failure.
+pub async fn redeem_and_mark_verified(
+    db: &Client,
+    raw_token: &str,
+) -> Result<Option<RedeemedToken>> {
+    let token_hash = sha256(raw_token);
+    let rows = db
+        .query(
+            "WITH candidate AS ( \
+                 SELECT ev.user_id, ev.email::text AS email \
+                 FROM auth.email_verifications ev \
+                 JOIN auth.users u ON u.id = ev.user_id \
+                 WHERE ev.token_hash = $1 \
+                   AND ev.consumed_at IS NULL \
+                   AND ev.expires_at > NOW() \
+             ), updated_user AS ( \
+                 UPDATE auth.users u \
+                 SET email_verified_at = COALESCE(u.email_verified_at, NOW()), \
+                     updated_at = NOW() \
+                 FROM candidate c \
+                 WHERE u.id = c.user_id \
+                 RETURNING u.id, c.email \
+             ), consumed AS ( \
+                 UPDATE auth.email_verifications ev \
+                 SET consumed_at = NOW() \
+                 FROM updated_user u \
+                 WHERE ev.token_hash = $1 \
+                   AND ev.user_id = u.id \
+                   AND ev.consumed_at IS NULL \
+                 RETURNING u.id AS user_id, u.email AS email \
+             ) \
+             SELECT user_id, email FROM consumed",
+            &[&token_hash.as_slice()],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("verification redeem and mark verified: {e}")))?;
     Ok(rows.first().map(|r| RedeemedToken {
         user_id: r.get("user_id"),
         email: r.get("email"),
