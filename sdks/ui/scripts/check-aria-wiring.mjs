@@ -2106,11 +2106,11 @@ await page.emulateMedia({ forcedColors: "none" });
 
 /* ─── 61. Coarse-pointer hit-target — NumberField stepper ───────────── *
  *
- * Apple HIG floor: 44 device-units ≈ --zs-hit-min 2.75rem. The 1rem
- * root font-size means 2.75rem = 44px. Assert the rendered stepper
- * button's bounding rect is ≥ 44px on BOTH axes — pre-fix only
- * inline-size grew, leaving block-size at 2rem (32px) or 2.5rem (40px)
- * which a finger couldn't reliably hit.
+ * Coarse-pointer touch-target floor: 44 device-units ≈ --zs-hit-min
+ * 2.75rem. The 1rem root font-size means 2.75rem = 44px. Assert the
+ * rendered stepper button's bounding rect is ≥ 44px on BOTH axes —
+ * pre-fix only inline-size grew, leaving block-size at 2rem (32px) or
+ * 2.5rem (40px) which a finger couldn't reliably hit.
  *
  * Playwright's `emulateMedia` API doesn't expose `pointer: coarse`, and
  * the CDP `Emulation.setEmulatedMedia` feature list doesn't include
@@ -2119,9 +2119,10 @@ await page.emulateMedia({ forcedColors: "none" });
  * out of the @media gate), and measure. The assertion proves the
  * RULE'S CONTENT — when the coarse-pointer @media triggers in a real
  * browser, the same declarations apply. This is the most direct
- * regression for "the coarse-pointer rule's geometry meets the HIG
- * floor", separating that concern from the orthogonal "does
- * Chromium's emulator support this query feature". */
+ * regression for "the coarse-pointer rule's geometry meets the
+ * coarse-pointer touch-target floor", separating that concern from
+ * the orthogonal "does Chromium's emulator support this query
+ * feature". */
 async function injectCoarsePointerOverride() {
   await page.addStyleTag({
     content: `
@@ -4477,6 +4478,137 @@ await open("components-scrollarea--hover-only");
       `resting=${restingOpacity}, hovered=${hoveredOpacity}`,
     );
   }
+}
+
+/* ─── 87. Slice 15 review-fix item 4: Drawer.Close asChild full Slot
+ *        contract — wrapper {...rest} forwards + child onClick + wrapper
+ *        onClick + close ALL compose ─────────────────────────────────── *
+ *
+ * Pre-fix: the asChild Slot path only spread `closeProps`, dropping the
+ * wrapper's `...rest` (className, data-*, aria-*, style, disabled).
+ * The wrapper's own `onClick` (caller-passed to <Drawer.Close>) and the
+ * child's `onClick` were not both composed with Base UI's close handler.
+ *
+ * This block exercises the same CloseAsChild story expanded to track a
+ * status side-effect that flips ONLY if the wrapper's onClick fires
+ * AFTER the child's (proving both composed in order: child → wrapper →
+ * close). The class hook and `data-side-effect` attribute on the
+ * wrapper must appear on the rendered child via Slot — mirrors
+ * AlertDialog.Cancel asChild coverage style at block 9e.
+ */
+await openStoryAndTrigger(
+  "components-drawer--close-as-child",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-close-aschild-content"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  const customClose = page.locator(
+    '[data-testid="drawer-close-aschild-target"]',
+  );
+  await customClose.waitFor({ state: "visible", timeout: 5000 });
+  const tag = await customClose.evaluate((el) => el.tagName);
+  const hasWrapperClass = await customClose.evaluate((el) =>
+    el.classList.contains("zs-drawer-close-aschild-extra"),
+  );
+  const sideEffectAttr = await customClose.getAttribute("data-side-effect");
+  const statusBefore = (
+    await page
+      .locator('[data-testid="drawer-close-aschild-status"]')
+      .innerText()
+  ).trim();
+  await customClose.click();
+  await page.waitForTimeout(500);
+  const contentHidden =
+    (await content.count()) === 0 ||
+    !(await content.first().isVisible().catch(() => false));
+  const statusAfter = (
+    await page
+      .locator('[data-testid="drawer-close-aschild-status"]')
+      .innerText()
+  ).trim();
+  // status === "both-handlers-ran" proves child onClick fired FIRST
+  // (set "child-onclick-ran") and the wrapper onClick ran AFTER (saw
+  // that state and upgraded to "both-handlers-ran"). The close
+  // composed last because contentHidden is also true.
+  const bothComposed = statusAfter.includes("both-handlers-ran");
+  const ok =
+    tag === "BUTTON" &&
+    hasWrapperClass &&
+    sideEffectAttr === "wrapper-rest-forwarded" &&
+    contentHidden &&
+    bothComposed;
+  report(
+    "Drawer.Close asChild Slot composes (className + data-*, child+wrapper onClick, close)",
+    ok,
+    `tag=${tag} class=${hasWrapperClass} data-side-effect="${sideEffectAttr}" hidden=${contentHidden} statusBefore="${statusBefore}" statusAfter="${statusAfter}"`,
+  );
+}
+
+/* ─── 88. Slice 15 review-fix item 1 (RTL slide direction): the start-
+ *        side panel under RTL must slide IN from the RIGHT edge, not
+ *        the left ─────────────────────────────────────────────────────── *
+ *
+ * Pre-fix Drawer.css only mirrored translateX under a
+ * `[dir="rtl"] .zs-drawer-content` ancestor selector. The RTL story
+ * portals into document.body (LTR) and stamps `dir="rtl"` on the
+ * Content itself, so the ancestor selector missed and the closed
+ * panel still translated translateX(-100%) — sliding from the LEFT
+ * edge even though `inset-inline-start` had pinned it to the RIGHT.
+ *
+ * We assert the closed-state translateX value mid-transition by
+ * forcing `data-starting-style` onto the content (peeled out of Base
+ * UI's transition lifecycle, same trick as block 61's CSS injection):
+ * the computed transform's matrix.e component must be POSITIVE
+ * (sliding off-screen to the right) — pre-fix it was negative.
+ */
+await openStoryAndTrigger(
+  "components-drawer--rtl",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-rtl-content"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  // Force the closed-state transform by stamping data-starting-style
+  // back on the open Content. The CSS rules at Drawer.css
+  // `[dir="rtl"] .zs-drawer-content[data-side="start"]...` and the new
+  // self-selector mirror BOTH should now match.
+  const translateX = await content.evaluate((el) => {
+    // Stamp data-starting-style to activate the closed-state translate
+    // rule. Also disable the CSS transition with an inline override:
+    // when the transition is live, the COMPUTED transform reflects the
+    // mid-animation interpolation, not the rule's resolved target. We
+    // need the rule's target, so we suspend the transition and force a
+    // layout flush before reading the value.
+    el.setAttribute("data-starting-style", "");
+    el.style.setProperty("transition", "none", "important");
+    // eslint-disable-next-line no-unused-expressions
+    void el.offsetWidth;
+    const t = getComputedStyle(el).transform;
+    el.style.removeProperty("transition");
+    el.removeAttribute("data-starting-style");
+    if (t === "none" || !t) return 0;
+    // matrix(a, b, c, d, tx, ty) — tx is index 4 in the parsed array.
+    const m = /matrix\(([^)]+)\)/.exec(t);
+    if (m) {
+      const parts = m[1].split(",").map((s) => Number.parseFloat(s.trim()));
+      return Number.isFinite(parts[4]) ? parts[4] : 0;
+    }
+    const m3 = /matrix3d\(([^)]+)\)/.exec(t);
+    if (m3) {
+      const parts = m3[1].split(",").map((s) => Number.parseFloat(s.trim()));
+      return Number.isFinite(parts[12]) ? parts[12] : 0;
+    }
+    return 0;
+  });
+  // Positive tx = the panel is off-screen to the RIGHT (slides IN from
+  // right edge, where inset-inline-start pinned it under RTL).
+  const ok = translateX > 0;
+  report(
+    "Drawer RTL side='start' slides FROM the right edge (translateX > 0)",
+    ok,
+    `translateX=${translateX}px`,
+  );
 }
 
 await ctx.close();

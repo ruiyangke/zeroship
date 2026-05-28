@@ -51,6 +51,10 @@ const stories = [
     triggers: ['[data-testid="drawer-trigger-md"]'],
   },
   {
+    id: "components-drawer--sizes-vertical",
+    triggers: ['[data-testid="drawer-trigger-top-sm"]'],
+  },
+  {
     id: "components-drawer--controlled",
     triggers: ['[data-testid="drawer-trigger"]'],
   },

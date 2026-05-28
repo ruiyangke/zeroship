@@ -377,12 +377,13 @@ const stories = [
   "components-toast--position-bottom",
   "components-toast--swipe-to-dismiss",
   "components-toast--rtl",
-  // Slice 15: Drawer — 11 stories.
+  // Slice 15: Drawer — 12 stories (review-fix 8 added SizesVertical).
   "components-drawer--basic",
   "components-drawer--left-side",
   "components-drawer--top",
   "components-drawer--bottom",
   "components-drawer--sizes",
+  "components-drawer--sizes-vertical",
   "components-drawer--controlled",
   "components-drawer--with-form",
   "components-drawer--with-long-content",
