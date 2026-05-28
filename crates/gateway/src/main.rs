@@ -15,6 +15,33 @@ use zeroship_gateway::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
+
+fn validate_gateway_stash_key(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev {
+        return Ok(());
+    }
+    if value.is_empty() {
+        return Err(
+            "STASH_SIGNING_KEY is required outside INSECURE_DEV=true; set a strong (>=32 byte) value"
+                .to_string(),
+        );
+    }
+    if value == DEV_STASH_SIGNING_KEY {
+        return Err(
+            "STASH_SIGNING_KEY is the dev default; refusing to boot without INSECURE_DEV=true"
+                .to_string(),
+        );
+    }
+    if value.len() < 32 {
+        return Err(format!(
+            "STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes",
+            value.len()
+        ));
+    }
+    Ok(())
+}
+
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     zeroship_core::observability::init_tracing("info,zeroship_gateway=debug");
@@ -49,7 +76,7 @@ async fn main() -> std::io::Result<()> {
         &args,
         "--stash-signing-key",
         "STASH_SIGNING_KEY",
-        "dev-stash-key-please-rotate",
+        "",
     );
     let insecure_dev = arg_or_env(&args, "--insecure-dev", "INSECURE_DEV", "false")
         .eq_ignore_ascii_case("true");
@@ -65,6 +92,16 @@ async fn main() -> std::io::Result<()> {
         "GATEWAY_PUBLIC_URL",
         "https://api.zeroship.ai",
     );
+
+    if let Err(message) = validate_gateway_stash_key(&stash_signing_key, insecure_dev) {
+        tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
+        std::process::exit(1);
+    }
+    let stash_signing_key = if stash_signing_key.is_empty() {
+        DEV_STASH_SIGNING_KEY.to_string()
+    } else {
+        stash_signing_key
+    };
 
     if worker_key.is_empty() {
         tracing::warn!(
@@ -286,4 +323,39 @@ fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> Stri
         }
     }
     std::env::var(env_key).unwrap_or_else(|_| default.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_stash_key_rejects_missing_in_non_dev() {
+        let err = validate_gateway_stash_key("", false).unwrap_err();
+        assert!(err.contains("required"), "{err}");
+    }
+
+    #[test]
+    fn gateway_stash_key_rejects_dev_default_in_non_dev() {
+        let err = validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, false).unwrap_err();
+        assert!(err.contains("dev default"), "{err}");
+    }
+
+    #[test]
+    fn gateway_stash_key_rejects_short_in_non_dev() {
+        let err = validate_gateway_stash_key("short", false).unwrap_err();
+        assert!(err.contains("too short"), "{err}");
+    }
+
+    #[test]
+    fn gateway_stash_key_accepts_strong_in_non_dev() {
+        let key = "0123456789abcdef0123456789abcdef";
+        assert!(validate_gateway_stash_key(key, false).is_ok());
+    }
+
+    #[test]
+    fn gateway_stash_key_allows_dev_default_in_insecure_dev() {
+        assert!(validate_gateway_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
+        assert!(validate_gateway_stash_key("", true).is_ok());
+    }
 }

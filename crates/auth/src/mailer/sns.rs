@@ -6,10 +6,10 @@
 //! payload was actually issued by AWS (and not by an attacker probing the
 //! suppression list).
 //!
-//! ## Algorithm (SNS signature v1)
+//! ## Algorithm (SNS signature v1/v2)
 //!
-//! 1. Validate `SignatureVersion == "1"`. v2 (SHA-256) exists but the
-//!    default v1 is RSA-SHA1; we only support v1 today.
+//! 1. Validate `SignatureVersion` is `1` (RSA-SHA1 legacy) or `2`
+//!    (RSA-SHA256).
 //! 2. Validate `SigningCertURL` host is `sns.<region>.amazonaws.com`
 //!    (anti-SSRF — see [`is_valid_sns_cert_url`]). Reject anything else,
 //!    even other AWS hosts.
@@ -22,13 +22,15 @@
 //!      `Message`, `MessageId`, `SubscribeURL`, `Timestamp`, `Token`, `TopicArn`, `Type`
 //! 4. Fetch the signing cert PEM from `SigningCertURL` (cyper, anti-SSRF
 //!    already enforced). Extract its `SubjectPublicKeyInfo` DER.
-//! 5. Base64-decode `Signature`. RSA-SHA1 verify against the canonical
-//!    string using the cert's public key.
+//! 5. Base64-decode `Signature`. Verify against the canonical string
+//!    using the cert's public key and the algorithm selected by
+//!    `SignatureVersion`.
 //!
 //! Reference: <https://docs.aws.amazon.com/sns/latest/dg/sns-verify-signature-of-message.html>
 
 use aws_lc_rs::signature::{
-    UnparsedPublicKey, RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY,
+    self, UnparsedPublicKey, RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY,
+    RSA_PKCS1_2048_8192_SHA256,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
@@ -209,7 +211,7 @@ fn push_field(out: &mut String, key: &str, value: &str) {
 /// Verify the SNS envelope signature.
 ///
 /// Steps: fetch the signing cert PEM → parse it → extract the
-/// `SubjectPublicKeyInfo` DER → RSA-SHA1 verify against the canonical
+/// `SubjectPublicKeyInfo` DER → RSA verify against the canonical
 /// string-to-sign. Pre-conditions (signature version + cert URL host)
 /// are validated by the handler before this is called.
 ///
@@ -232,23 +234,31 @@ pub async fn verify(env: &SnsEnvelope) -> Result<(), SnsError> {
 ///
 /// # Errors
 ///
-/// [`SnsError`] on PEM/X.509 parse failure, non-RSA key, base64 decode
-/// failure on the `Signature` field, or signature rejection.
+/// [`SnsError`] on unsupported signature version, PEM/X.509 parse
+/// failure, non-RSA key, base64 decode failure on the `Signature`
+/// field, or signature rejection.
 pub fn verify_with_cert(env: &SnsEnvelope, cert_pem: &str) -> Result<(), SnsError> {
     let spki_der = spki_from_pem(cert_pem)?;
     let sig_bytes = STANDARD
         .decode(env.signature.as_bytes())
         .map_err(|e| SnsError(format!("base64 decode Signature: {e}")))?;
     let canon = canonical_string(env);
+    let (algorithm, label): (&dyn signature::VerificationAlgorithm, &str) =
+        match env.signature_version.as_str() {
+            "1" => (&RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY, "RSA-SHA1"),
+            "2" => (&RSA_PKCS1_2048_8192_SHA256, "RSA-SHA256"),
+            other => {
+                return Err(SnsError(format!(
+                    "unsupported SignatureVersion {other}; expected 1 or 2"
+                )));
+            }
+        };
     // aws-lc-rs accepts both RFC 8017 (RSAPublicKey: modulus+exponent)
     // and RFC 5280 (SPKI) inputs for RSA verification; we feed SPKI
     // straight from the cert.
-    let pk = UnparsedPublicKey::new(
-        &RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY,
-        spki_der,
-    );
+    let pk = UnparsedPublicKey::new(algorithm, spki_der);
     pk.verify(canon.as_bytes(), &sig_bytes)
-        .map_err(|_| SnsError("RSA-SHA1 verify rejected signature".into()))?;
+        .map_err(|_| SnsError(format!("{label} verify rejected signature")))?;
     Ok(())
 }
 

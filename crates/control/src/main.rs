@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
@@ -36,6 +37,46 @@ fn flag_or_env(args: &[String], flag: &str, env_key: &str) -> bool {
             .unwrap_or(false)
 }
 
+fn decoded_master_key_len(value: &str) -> Option<usize> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.len() % 2 == 0 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(bytes) = hex::decode(trimmed) {
+            if bytes.len() >= 32 {
+                return Some(bytes.len());
+            }
+        }
+    }
+
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(trimmed))
+        .ok()
+        .map(|bytes| bytes.len())
+}
+
+fn validate_master_key_material(
+    label: &str,
+    value: &str,
+    insecure_dev: bool,
+) -> Result<(), String> {
+    if insecure_dev {
+        return Ok(());
+    }
+    match decoded_master_key_len(value) {
+        Some(n) if n >= 32 => Ok(()),
+        Some(n) => Err(format!(
+            "{label} decodes to {n} bytes; minimum is 32 random bytes"
+        )),
+        None => Err(format!(
+            "{label} must be hex or base64url encoded and decode to at least 32 random bytes"
+        )),
+    }
+}
+
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
     zeroship_core::observability::init_tracing("info,zeroship_control=debug");
@@ -61,6 +102,11 @@ async fn main() -> std::io::Result<()> {
     let insecure_dev =
         args.iter().any(|a| a == "--dev-insecure")
             || std::env::var("ZEROSHIP_DEV_INSECURE").map(|v| v == "1").unwrap_or(false);
+    let legacy_keys: Vec<&str> = legacy_master_keys_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     // Default: do NOT trust X-Forwarded-For. Operators behind a real
     // load balancer opt in explicitly via --trust-proxy; everyone else
     // gets the safe behavior (peer_addr only, no spoof surface).
@@ -126,9 +172,15 @@ async fn main() -> std::io::Result<()> {
 
     if !insecure_dev {
         let mut missing = Vec::new();
-        if master_key.is_empty() { missing.push("--master-key / MASTER_KEY"); }
-        if control_key.is_empty() { missing.push("--control-key / CONTROL_KEY"); }
-        if signing_key_file.is_empty() { missing.push("--signing-key-file / SIGNING_KEY_FILE"); }
+        if master_key.is_empty() {
+            missing.push("--master-key / MASTER_KEY");
+        }
+        if control_key.is_empty() {
+            missing.push("--control-key / CONTROL_KEY");
+        }
+        if signing_key_file.is_empty() {
+            missing.push("--signing-key-file / SIGNING_KEY_FILE");
+        }
         if !missing.is_empty() {
             tracing::error!(
                 missing = %missing.join(", "),
@@ -137,6 +189,21 @@ async fn main() -> std::io::Result<()> {
                  without them — NEVER in production."
             );
             std::process::exit(1);
+        }
+        if let Err(message) = validate_master_key_material("MASTER_KEY", &master_key, insecure_dev)
+        {
+            tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
+            std::process::exit(1);
+        }
+        for (idx, legacy_key) in legacy_keys.iter().enumerate() {
+            let label = format!("LEGACY_MASTER_KEYS[{idx}]");
+            if let Err(message) = validate_master_key_material(&label, legacy_key, insecure_dev) {
+                tracing::error!(
+                    error = %message,
+                    "control: refusing to start with weak legacy master key"
+                );
+                std::process::exit(1);
+            }
         }
         if stripe_webhook_secret.is_empty() {
             // Not fatal — operators may run a control plane without
@@ -189,11 +256,6 @@ async fn main() -> std::io::Result<()> {
             .expect("failed to initialise blob store"),
     );
 
-    let legacy_keys: Vec<&str> = legacy_master_keys_raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
     if !legacy_keys.is_empty() {
         tracing::info!(
             legacy_keys = legacy_keys.len(),
@@ -531,4 +593,43 @@ async fn main() -> std::io::Result<()> {
     .bind(&bind_addr)?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_key_rejects_dictionary_string_in_non_dev() {
+        let err = validate_master_key_material(
+            "MASTER_KEY",
+            "correct horse battery staple",
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("hex or base64url"), "{err}");
+    }
+
+    #[test]
+    fn master_key_rejects_short_decoded_material_in_non_dev() {
+        let err = validate_master_key_material("MASTER_KEY", "YWJj", false).unwrap_err();
+        assert!(err.contains("3 bytes"), "{err}");
+    }
+
+    #[test]
+    fn master_key_accepts_32_byte_hex_in_non_dev() {
+        let key = "00".repeat(32);
+        assert!(validate_master_key_material("MASTER_KEY", &key, false).is_ok());
+    }
+
+    #[test]
+    fn master_key_accepts_32_byte_base64url_in_non_dev() {
+        let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]);
+        assert!(validate_master_key_material("MASTER_KEY", &key, false).is_ok());
+    }
+
+    #[test]
+    fn master_key_allows_dev_shortcut_in_insecure_dev() {
+        assert!(validate_master_key_material("MASTER_KEY", "password", true).is_ok());
+    }
 }

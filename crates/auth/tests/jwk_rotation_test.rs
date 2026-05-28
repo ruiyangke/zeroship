@@ -47,6 +47,23 @@ async fn pg_connect(dsn: &str) -> Client {
     client
 }
 
+async fn clear_jwk_state(client: &Client) {
+    client
+        .execute(
+            "DELETE FROM auth.jwk_key_state WHERE set_name LIKE 'hydra.%'",
+            &[],
+        )
+        .await
+        .ok();
+    client
+        .execute(
+            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
+            &[],
+        )
+        .await
+        .ok();
+}
+
 #[compio::test]
 async fn rotation_first_tick_records_baseline_no_action() {
     let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -65,13 +82,7 @@ async fn rotation_first_tick_records_baseline_no_action() {
 
     // Ensure no prior cron_state for these sets so we exercise the
     // first-observation branch.
-    client
-        .execute(
-            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
-            &[],
-        )
-        .await
-        .ok();
+    clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);
 
@@ -114,13 +125,7 @@ async fn rotation_first_tick_records_baseline_no_action() {
     );
 
     // Cleanup so re-runs in the same DB are deterministic.
-    client
-        .execute(
-            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
-            &[],
-        )
-        .await
-        .ok();
+    clear_jwk_state(&client).await;
 }
 
 #[compio::test]
@@ -138,6 +143,7 @@ async fn rotation_due_prepends_new_keys() {
 
     let client = pg_connect(&dsn).await;
     migrations::migrate(&client).await.expect("migrate");
+    clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);
 
@@ -193,13 +199,7 @@ async fn rotation_due_prepends_new_keys() {
     // integration hydra below the bootstrap minimum mid-test. The
     // retire-stale-keys path is exercised by the unit-level
     // threshold tests; the live path's behaviour is the same code.
-    client
-        .execute(
-            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
-            &[],
-        )
-        .await
-        .ok();
+    clear_jwk_state(&client).await;
 }
 
 #[compio::test]
@@ -217,6 +217,7 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
 
     let client = pg_connect(&dsn).await;
     migrations::migrate(&client).await.expect("migrate");
+    clear_jwk_state(&client).await;
 
     let id_token_set = "hydra.openid.id-token";
     let access_set = "hydra.jwt.access-token";
@@ -273,13 +274,7 @@ async fn concurrent_rotation_ticks_create_one_key_batch() {
         "two concurrent ticks must serialize: one id-token batch only"
     );
 
-    client
-        .execute(
-            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
-            &[],
-        )
-        .await
-        .ok();
+    clear_jwk_state(&client).await;
 }
 
 #[compio::test]
@@ -297,6 +292,7 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
 
     let client = pg_connect(&dsn).await;
     migrations::migrate(&client).await.expect("migrate");
+    clear_jwk_state(&client).await;
 
     let admin = HydraAdmin::new(&admin_url);
     let access_set = "hydra.jwt.access-token";

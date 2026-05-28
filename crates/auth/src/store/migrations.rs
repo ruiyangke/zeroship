@@ -336,6 +336,14 @@ const STATEMENTS: &[&str] = &[
         last_rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         notes           TEXT
     )",
+    "CREATE TABLE IF NOT EXISTS auth.jwk_key_state (
+        set_name   TEXT NOT NULL,
+        kid        TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (set_name, kid)
+    )",
+    "CREATE INDEX IF NOT EXISTS auth_jwk_key_state_created_idx
+        ON auth.jwk_key_state (set_name, created_at)",
 
     // P9-U5 authorization storage — platform RBAC, creator app
     // memberships, per-token policies, operator platform policies, and

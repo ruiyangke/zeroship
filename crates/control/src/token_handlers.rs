@@ -78,6 +78,10 @@ pub struct PatIssuer {
     kid: String,
 }
 
+fn valid_pat_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.chars().count() <= MAX_PAT_NAME_CHARS
+}
+
 impl std::fmt::Debug for PatIssuer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PatIssuer")

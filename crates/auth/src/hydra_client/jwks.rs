@@ -24,7 +24,23 @@ impl HydraAdmin {
     /// decode errors.
     pub async fn create_jwk(&self, set: &str, alg: &str) -> Result<JsonWebKeySet> {
         let kid = format!("kid_{}", uuid::Uuid::new_v4().simple());
-        let body = CreateJsonWebKeySetRequest { alg: alg.to_string(), use_: "sig".into(), kid };
+        self.create_jwk_with_kid(set, alg, &kid).await
+    }
+
+    /// # Errors
+    /// [`AuthError::Hydra`] for transport failures, non-2xx responses, or
+    /// decode errors.
+    pub async fn create_jwk_with_kid(
+        &self,
+        set: &str,
+        alg: &str,
+        kid: &str,
+    ) -> Result<JsonWebKeySet> {
+        let body = CreateJsonWebKeySetRequest {
+            alg: alg.to_string(),
+            use_: "sig".into(),
+            kid: kid.to_string(),
+        };
         self.post(&format!("/admin/keys/{set}"), &body).await
     }
 

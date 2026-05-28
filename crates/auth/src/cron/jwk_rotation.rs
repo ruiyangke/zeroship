@@ -2,14 +2,13 @@
 //!
 //! Daily check; if either key set's `last_rotated_at` is older than
 //! `jwk_rotation_days`, prepend new keys (which become the active
-//! signers per hydra's list-based store). Old keys whose set was last
-//! rotated more than `rotation_days + retain_days` ago are retired
-//! (deleted from JWKS).
+//! signers per hydra's list-based store). Old keys whose own tracked
+//! `created_at` is older than `rotation_days + retain_days` are
+//! retired (deleted from JWKS).
 //!
 //! Single source of truth for "when did we last rotate set X" is the
-//! `auth.cron_state` row keyed by the set name. We never inspect key
-//! `kid`s or hydra-internal timestamps — operationally simpler and the
-//! one decision we control.
+//! `auth.cron_state` row keyed by the set name. Per-key retirement age
+//! lives in `auth.jwk_key_state`, keyed by `(set_name, kid)`.
 //!
 //! Companion: [`super::audit_retention`] sweeps `auth.audit_events` on a
 //! separate ticker (different cadence, different table — kept in their
@@ -113,8 +112,9 @@ async fn process_set(
 ) -> Result<()> {
     let lock_key = jwk_set_lock_key(set);
     with_advisory_lock(db, lock_key, || async {
-        retire_stale_keys(admin, db, set, algs, rotation_days, retain_days).await?;
-        rotate_set_if_due(admin, db, set, algs, rotation_days).await
+        sync_tracked_keys(admin, db, set).await?;
+        rotate_set_if_due(admin, db, set, algs, rotation_days).await?;
+        retire_stale_keys(admin, db, set, algs, rotation_days, retain_days).await
     })
     .await
 }
@@ -153,6 +153,75 @@ async fn record_rotated_now(db: &Client, set: &str) -> Result<()> {
     Ok(())
 }
 
+async fn record_key_created_now(db: &Client, set: &str, kid: &str) -> Result<()> {
+    db.execute(
+        "INSERT INTO auth.jwk_key_state (set_name, kid, created_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (set_name, kid) DO UPDATE SET created_at = NOW()",
+        &[&set, &kid],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("jwk_key_state upsert: {e}")))?;
+    Ok(())
+}
+
+async fn sync_tracked_keys(admin: &HydraAdmin, db: &Client, set: &str) -> Result<()> {
+    let Some(jwks) = admin.get_jwks(set).await? else {
+        db.execute(
+            "DELETE FROM auth.jwk_key_state WHERE set_name = $1",
+            &[&set],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("jwk_key_state prune missing set: {e}")))?;
+        return Ok(());
+    };
+
+    let kids: Vec<String> = jwks
+        .keys
+        .iter()
+        .filter_map(jwk_kid)
+        .map(str::to_owned)
+        .collect();
+
+    for kid in &kids {
+        db.execute(
+            "INSERT INTO auth.jwk_key_state (set_name, kid, created_at)
+             VALUES (
+                $1,
+                $2,
+                COALESCE(
+                    (SELECT last_rotated_at FROM auth.cron_state WHERE key = $1),
+                    NOW()
+                )
+             )
+             ON CONFLICT (set_name, kid) DO NOTHING",
+            &[&set, &kid],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("jwk_key_state sync insert: {e}")))?;
+    }
+
+    if kids.is_empty() {
+        db.execute(
+            "DELETE FROM auth.jwk_key_state WHERE set_name = $1",
+            &[&set],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("jwk_key_state prune empty set: {e}")))?;
+    } else {
+        let kid_refs: Vec<&str> = kids.iter().map(String::as_str).collect();
+        db.execute(
+            "DELETE FROM auth.jwk_key_state
+             WHERE set_name = $1 AND NOT (kid = ANY($2))",
+            &[&set, &kid_refs],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("jwk_key_state prune stale rows: {e}")))?;
+    }
+
+    Ok(())
+}
+
 /// Rotate `set` if its last-rotated record is `>= rotation_days` old.
 /// First-ever observation plants a baseline at `NOW()` (i.e. no rotation
 /// this tick — we don't know how old the bootstrap-time keys are, so
@@ -181,20 +250,30 @@ async fn rotate_set_if_due(
     }
     tracing::info!(set, rotation_days, "jwk_rotation: prepending new keys");
     for alg in algs {
-        if let Err(e) = admin.create_jwk(set, alg).await {
+        let kid = format!("kid_{}", uuid::Uuid::new_v4().simple());
+        if let Err(e) = admin.create_jwk_with_kid(set, alg, &kid).await {
             tracing::error!(error = %e, set, alg, "create_jwk failed during rotation");
             return Err(AuthError::Hydra(format!("create_jwk {set} {alg}: {e}")));
         }
+        record_key_created_now(db, set, &kid).await?;
     }
     record_rotated_now(db, set).await?;
     tracing::info!(set, "jwk_rotation: completed");
     Ok(())
 }
 
-/// Retire keys older than the rotation+retain window. Hydra returns
-/// keys in insertion order (newest first per the "prepend" semantics
-/// of `create_jwk`); we keep the most recent `algs.len()` keys and
-/// delete the rest.
+fn jwk_kid(key: &serde_json::Value) -> Option<&str> {
+    key.get("kid").and_then(serde_json::Value::as_str)
+}
+
+fn retirement_threshold_days(rotation_days: i64, retain_days: i64) -> i64 {
+    rotation_days + retain_days
+}
+
+/// Retire keys whose own tracked creation time is older than the
+/// rotation+retain window. We still keep at least the current generation
+/// (`algs.len()` keys) even if timestamps are corrupt or cron was down
+/// for longer than the whole retention window.
 async fn retire_stale_keys(
     admin: &HydraAdmin,
     db: &Client,
@@ -203,41 +282,47 @@ async fn retire_stale_keys(
     rotation_days: i64,
     retain_days: i64,
 ) -> Result<()> {
-    // No rotation record yet → nothing to retire.
-    let Some(days_since) = days_since_rotation(db, set).await? else {
-        return Ok(());
-    };
-    // Old keys can be retired once we're past rotation_days + retain_days
-    // since the most recent rotation (gives any access tokens signed
-    // by an outgoing key time to expire).
-    if days_since < rotation_days + retain_days {
-        return Ok(());
-    }
     let Some(jwks) = admin.get_jwks(set).await? else {
         return Ok(());
     };
     let keep_n = algs.len();
-    if jwks.keys.len() <= keep_n {
+    let excess = jwks.keys.len().saturating_sub(keep_n);
+    if excess == 0 {
         return Ok(());
     }
-    let to_retire: Vec<String> = jwks
-        .keys
-        .iter()
-        .skip(keep_n)
-        .filter_map(|k| {
-            k.get("kid")
-                .and_then(serde_json::Value::as_str)
-                .map(String::from)
-        })
-        .collect();
+    let threshold = retirement_threshold_days(rotation_days, retain_days).to_string();
+    let limit = i64::try_from(excess).unwrap_or(i64::MAX);
+    let rows = db
+        .query(
+            "SELECT kid
+             FROM auth.jwk_key_state
+             WHERE set_name = $1
+               AND created_at <= NOW() - ($2::text || ' days')::interval
+             ORDER BY created_at ASC
+             LIMIT $3",
+            &[&set, &threshold, &limit],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("jwk_key_state retirement read: {e}")))?;
+    let to_retire: Vec<String> = rows.iter().map(|r| r.get("kid")).collect();
     for kid in to_retire {
         tracing::info!(set, kid = %kid, "jwk_rotation: retiring stale key");
-        if let Err(e) = admin.delete_jwk(set, &kid).await {
-            // Don't bubble — retirement is best-effort. Next tick will
-            // try again. This keeps a single stuck key from blocking
-            // every other rotation/retirement on this tick.
-            tracing::warn!(error = %e, set, kid = %kid,
-                "delete_jwk failed; will retry next cycle");
+        match admin.delete_jwk(set, &kid).await {
+            Ok(()) => {
+                db.execute(
+                    "DELETE FROM auth.jwk_key_state WHERE set_name = $1 AND kid = $2",
+                    &[&set, &kid],
+                )
+                .await
+                .map_err(|e| AuthError::Db(format!("jwk_key_state delete: {e}")))?;
+            }
+            Err(e) => {
+                // Don't bubble — retirement is best-effort. Next tick will
+                // try again. This keeps a single stuck key from blocking
+                // every other rotation/retirement on this tick.
+                tracing::warn!(error = %e, set, kid = %kid,
+                    "delete_jwk failed; will retry next cycle");
+            }
         }
     }
     Ok(())
@@ -245,6 +330,8 @@ async fn retire_stale_keys(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // Pure threshold sanity — guard against off-by-one drift on the two
     // boundary conditions the cron leans on.
 
@@ -259,8 +346,30 @@ mod tests {
     fn retire_threshold() {
         let rotation_days: i64 = 90;
         let retain_days: i64 = 31;
-        let threshold = rotation_days + retain_days;
+        let threshold = retirement_threshold_days(rotation_days, retain_days);
         assert!(120_i64 < threshold, "120d < 121 — keep");
         assert!(121_i64 >= threshold, "121d ≥ 121 — retire-eligible");
+    }
+
+    #[test]
+    fn three_rotations_retire_generation_zero_only() {
+        let threshold = retirement_threshold_days(90, 31);
+        let keep_n = 1;
+        let keys = [
+            ("gen-2", 0_i64),
+            ("gen-1", 90_i64),
+            ("gen-0", 180_i64),
+        ];
+        let excess = keys.len().saturating_sub(keep_n);
+        let mut retired: Vec<&str> = keys
+            .iter()
+            .rev()
+            .filter(|(_, age_days)| *age_days >= threshold)
+            .take(excess)
+            .map(|(kid, _)| *kid)
+            .collect();
+        retired.sort_unstable();
+
+        assert_eq!(retired, vec!["gen-0"]);
     }
 }

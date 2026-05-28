@@ -528,7 +528,6 @@ fn header_value<'a>(req: &'a httparse::Request, name: &str) -> Option<&'a str> {
 /// pulled in via `auth::check` because `auth::check` takes an
 /// `ntex::HttpRequest`, and we have a `httparse::Request` here.
 fn check_bearer(req: &httparse::Request, state: &AppState) -> bool {
-    use subtle::ConstantTimeEq;
     if state.config.token.is_empty() {
         // Same opt-in shape as `auth::check`: dev-mode allows
         // unauthenticated when the operator explicitly turned auth off.
@@ -542,10 +541,7 @@ fn check_bearer(req: &httparse::Request, state: &AppState) -> bool {
     // (capital B). Don't loosen here.
     let presented = auth.strip_prefix("Bearer ").unwrap_or("").as_bytes();
     let expected = state.config.token.as_bytes();
-    if presented.len() != expected.len() {
-        return false;
-    }
-    presented.ct_eq(expected).into()
+    crate::auth::constant_time_bearer_eq(presented, expected)
 }
 
 /// Pull `?user_id=…` out of the request URL.
