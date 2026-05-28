@@ -18,8 +18,11 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+const ID_TOKEN_IAT_SKEW_SECS: i64 = 300;
+const ID_TOKEN_NBF_SKEW_SECS: i64 = 30;
 
 #[derive(Debug, Error)]
 pub enum OidcError {
@@ -58,6 +61,15 @@ pub enum OidcError {
 
     #[error("c_hash mismatch")]
     CHashMismatch,
+
+    #[error("iat too old")]
+    IatTooOld,
+
+    #[error("iat is in the future")]
+    IatInFuture,
+
+    #[error("nbf is in the future")]
+    NbfInFuture,
 }
 
 pub type Result<T> = std::result::Result<T, OidcError>;
@@ -378,6 +390,18 @@ pub async fn verify_id_token(
             _ => return Err(OidcError::NonceMismatch),
         }
     }
+    let now = unix_timestamp()?;
+    if claims.iat < now.saturating_sub(ID_TOKEN_IAT_SKEW_SECS) {
+        return Err(OidcError::IatTooOld);
+    }
+    if claims.iat > now.saturating_add(ID_TOKEN_IAT_SKEW_SECS) {
+        return Err(OidcError::IatInFuture);
+    }
+    if let Some(nbf) = claims.nbf {
+        if nbf > now.saturating_add(ID_TOKEN_NBF_SKEW_SECS) {
+            return Err(OidcError::NbfInFuture);
+        }
+    }
     if let Some(at_hash) = claims.at_hash.as_deref() {
         let input = expected_at_hash_input.ok_or(OidcError::AtHashInputMissing)?;
         let expected = oidc_token_hash(alg, input.as_bytes());
@@ -394,6 +418,14 @@ pub async fn verify_id_token(
     }
 
     Ok(claims)
+}
+
+fn unix_timestamp() -> Result<i64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| OidcError::Verify(format!("system clock before Unix epoch: {e}")))?;
+    i64::try_from(duration.as_secs())
+        .map_err(|_| OidcError::Verify("system clock timestamp overflow".into()))
 }
 
 fn oidc_token_hash(alg: Algorithm, input: &[u8]) -> String {
@@ -589,5 +621,72 @@ mod tests {
         ))
         .expect_err("wrong access token must reject at_hash");
         assert!(matches!(err, OidcError::AtHashMismatch), "got: {err:?}");
+    }
+
+    #[test]
+    fn bounds_iat_and_honors_nbf() {
+        let (key, cache) = make_key();
+        let now = now_secs();
+        let mut claims = json!({
+            "sub": "usr_alice",
+            "iss": "https://auth.zeroship.ai/",
+            "aud": "gateway",
+            "exp": now + 7200,
+            "iat": now - 3600,
+            "nonce": "nonce-123",
+        });
+        let old_token = sign(&key, &claims);
+        let err = poll_ready(verify_id_token(
+            &cache,
+            &old_token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            None,
+            None,
+        ))
+        .expect_err("old iat must reject");
+        assert!(matches!(err, OidcError::IatTooOld), "got: {err:?}");
+
+        claims["iat"] = json!(now + 3600);
+        let future_token = sign(&key, &claims);
+        let err = poll_ready(verify_id_token(
+            &cache,
+            &future_token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            None,
+            None,
+        ))
+        .expect_err("future iat must reject");
+        assert!(matches!(err, OidcError::IatInFuture), "got: {err:?}");
+
+        claims["iat"] = json!(now - 60);
+        let fresh_token = sign(&key, &claims);
+        poll_ready(verify_id_token(
+            &cache,
+            &fresh_token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            None,
+            None,
+        ))
+        .expect("fresh iat verifies");
+
+        claims["nbf"] = json!(now + 120);
+        let nbf_token = sign(&key, &claims);
+        let err = poll_ready(verify_id_token(
+            &cache,
+            &nbf_token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            None,
+            None,
+        ))
+        .expect_err("future nbf beyond skew must reject");
+        assert!(matches!(err, OidcError::NbfInFuture), "got: {err:?}");
     }
 }
