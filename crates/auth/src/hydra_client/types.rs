@@ -36,6 +36,13 @@ pub struct RejectRequest {
     #[serde(skip_serializing_if = "Option::is_none")] pub status_code: Option<i32>,
 }
 
+// ─── Device Authorization Grant ─────────────────────────────────────────
+
+#[derive(Debug, Serialize, Default)]
+pub struct AcceptDeviceUserCodeRequest {
+    #[serde(skip_serializing_if = "Option::is_none")] pub user_code: Option<String>,
+}
+
 // ─── Consent challenge ───────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

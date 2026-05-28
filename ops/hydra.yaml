@@ -32,6 +32,11 @@ oauth2:
       rotation_grace_period: 30s
       rotation_grace_reuse_count: 3
 
+device_authorization:
+  token_polling_interval: 5s
+  user_code:
+    entropy_preset: medium
+
 ttl:
   access_token: 1h
   refresh_token: 720h

@@ -10,6 +10,7 @@
 //! "text/html; charset=utf-8").body(rendered)`.
 
 pub mod consent;
+pub mod device;
 pub mod forgot;
 pub mod link;
 pub mod login;
@@ -155,6 +156,15 @@ pub struct MagicAwaitCodePage<'a> {
 pub struct MagicShowCodePage<'a> {
     pub code: &'a str,
     pub email: &'a str,
+}
+
+/// `/device` GET + POST page for OAuth 2.0 Device Authorization Grant
+/// user-code entry.
+#[derive(Debug, Template)]
+#[template(path = "device.html")]
+pub struct DevicePage<'a> {
+    pub user_code: &'a str,
+    pub error: Option<&'a str>,
 }
 
 /// `/verify` GET page (P5-U5) — shown after a successful email-verification

@@ -7,6 +7,7 @@
 
 pub mod clients;
 pub mod consent;
+pub mod device;
 pub mod jwks;
 pub mod login;
 pub mod logout;
