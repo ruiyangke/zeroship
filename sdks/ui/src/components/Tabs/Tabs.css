@@ -56,13 +56,12 @@
   --zs-tabs-radius-lg: var(--zs-control-radius-lg);    /* 10 */
 
   /* Match Button's per-size type rhythm so a Tabs row next to a Button
-     reads coherent. Same scale Toggle uses. */
+     reads coherent. Same scale Toggle uses. Line-height is pinned to 1
+     by the .zs-tabs-tab rule (the button uses fixed block-size for
+     rhythm), so we only carry the per-size font-size tokens. */
   --zs-tabs-font-sm: var(--zs-text-subheadline-size);
-  --zs-tabs-line-sm: var(--zs-text-subheadline-line);
   --zs-tabs-font-md: var(--zs-text-body-size);
-  --zs-tabs-line-md: var(--zs-text-body-line);
   --zs-tabs-font-lg: var(--zs-text-headline-size);
-  --zs-tabs-line-lg: var(--zs-text-headline-line);
 
   --zs-tabs-gap-sm: var(--zs-space-1);                 /* 4 */
   --zs-tabs-gap-md: var(--zs-space-2);                 /* 8 */
@@ -323,8 +322,14 @@
   border-end-start-radius: var(--zs-tabs-radius-lg);
 }
 
-/* Focus ring uses outline (not box-shadow) so it escapes the list's
-   overflow and any clipped surfaces. Same rule Toggle uses. */
+/* Focus ring uses outline (not box-shadow) so it matches the Toggle /
+   Button focus treatment. Note: outlines DO get clipped by an ancestor
+   `overflow: hidden/auto` — the list scrolls horizontally for ManyTabs
+   (`overflow-x: auto` above), so edge-tab focus rings will be clipped at
+   the rail boundary. Acceptable trade-off: the rail's overflow is what
+   keeps the row usable when tabs spill; the alternative (visible
+   overflow on the list + a separate scroll wrapper) trades a worse
+   layout for a marginal focus-ring win. */
 .zs-tabs-tab:focus-visible {
   outline: 0.125rem solid var(--zs-button-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
@@ -346,9 +351,17 @@
 .zs-tabs-indicator {
   position: absolute;
   pointer-events: none;
+  /* Indicator uses PHYSICAL `left` + `top` to consume Base UI's
+     direction-agnostic measurements (`--active-tab-left/top` are
+     computed as `tabRect.left - tabsListRect.left + scrollLeft -
+     clientLeft`, always relative to the physical-left edge). Using
+     `inset-inline-start` here would invert under `dir="rtl"` and
+     mirror the indicator away from the active tab — see the RTL
+     story. Transition the same physical properties so the slide
+     animation tracks the actual moving values. */
   transition:
-    inset-inline-start var(--zs-motion-base) var(--zs-motion-ease),
-    inset-block-start var(--zs-motion-base) var(--zs-motion-ease),
+    left var(--zs-motion-base) var(--zs-motion-ease),
+    top var(--zs-motion-base) var(--zs-motion-ease),
     inline-size var(--zs-motion-base) var(--zs-motion-ease),
     block-size var(--zs-motion-base) var(--zs-motion-ease),
     background-color var(--zs-motion-fast) var(--zs-motion-ease);
@@ -356,7 +369,7 @@
 
 /* Default variant indicator — underline under the active tab. */
 .zs-tabs-indicator--default {
-  inset-inline-start: var(--active-tab-left);
+  left: var(--active-tab-left);
   inset-block-end: 0;
   inline-size: var(--active-tab-width);
   block-size: var(--zs-tabs-underline-thickness);
@@ -365,11 +378,14 @@
 }
 
 /* Vertical default indicator — vertical bar along the inline-end edge
-   of the active tab. */
+   of the active tab. `inset-inline-end: 0` here is a logical zero
+   (anchor to the rail's inline-end edge), which is intentional — it
+   has no physical Base UI value backing it, so direction-flip is
+   correct by construction. */
 .zs-tabs-indicator--default.zs-tabs-indicator--vertical {
-  inset-inline-start: auto;
+  left: auto;
   inset-inline-end: 0;
-  inset-block-start: var(--active-tab-top);
+  top: var(--active-tab-top);
   inset-block-end: auto;
   inline-size: var(--zs-tabs-underline-thickness);
   block-size: var(--active-tab-height);
@@ -383,8 +399,12 @@
    pill stays visually contiguous with the static accent fill on the
    selected tab. */
 .zs-tabs-indicator--pill {
-  inset-inline-start: var(--active-tab-left);
-  inset-block-start: var(--active-tab-top);
+  /* Physical `left` + `top` — same direction-agnostic anchoring as the
+     default indicator above. Base UI's `--active-tab-left/top` are
+     physical pixels relative to the list's top-left corner, so
+     `inset-inline-start` would mirror under RTL. */
+  left: var(--active-tab-left);
+  top: var(--active-tab-top);
   inline-size: var(--active-tab-width);
   block-size: var(--active-tab-height);
   background-color: var(--zs-accent);
@@ -450,7 +470,15 @@
 /* ─── forced-colors ─────────────────────────────────────────────────── *
  *
  * Map the active-tab affordance to system colors so high-contrast
- * users still see which tab is current. */
+ * users still see which tab is current.
+ *
+ * IMPORTANT: the per-state `:hover` / `:active` rules above use higher
+ * specificity (`.zs-tabs-tab:not([data-disabled]):not([data-active]):hover`,
+ * `.zs-tabs-tab--pill[data-active]:not([data-disabled]):hover`, etc.),
+ * so an unmirrored forced-colors block would let those higher-specificity
+ * selectors reintroduce `color-mix(... oklch ...)` paint over `Canvas`.
+ * Mirror every state selector at equal specificity inside the media block
+ * — same Slice-5/6/7 fix pattern. */
 @media (forced-colors: active) {
   .zs-tabs-tab {
     forced-color-adjust: none;
@@ -467,12 +495,55 @@
   .zs-tabs-tab:focus-visible {
     outline-color: Highlight;
   }
+  /* Equal-specificity mirrors of the unselected hover/active rules — these
+     outrank the base `.zs-tabs-tab` reset above, so the forced-colors
+     paint MUST be re-asserted at the same selector. Listed flat (not
+     nested under `@media (hover: hover)`) because some browser engines
+     evaluate nested-media in source-order before resolving specificity,
+     and the unmirrored `:hover` rule outside the forced-colors block
+     would otherwise stay applied. Hover rules without the `@media
+     (hover: hover)` guard still no-op on coarse pointers because there's
+     no hover state to trigger them. */
+  .zs-tabs-tab:not([data-disabled]):not([data-active]):hover {
+    color: CanvasText;
+    background-color: Canvas;
+  }
+  .zs-tabs-tab--pill[data-active]:not([data-disabled]):hover {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+  .zs-tabs-tab:not([data-disabled]):not([data-active]):active {
+    color: CanvasText;
+    background-color: Canvas;
+  }
+  .zs-tabs-tab--pill[data-active]:not([data-disabled]):active {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+  /* Card-variant tab surfaces are painted by `.zs-tabs-tab--card` and
+     `.zs-tabs-tab--card[data-active]` above (higher specificity than the
+     bare `.zs-tabs-tab` reset). Mirror them so HC mode renders the
+     unselected card on Canvas and the selected card on Highlight. */
+  .zs-tabs-tab--card {
+    background-color: Canvas;
+    border-color: CanvasText;
+  }
+  .zs-tabs-tab--card[data-active] {
+    background-color: Highlight;
+    color: HighlightText;
+  }
   .zs-tabs-list--default::after,
   .zs-tabs-list--card,
   .zs-tabs-list--vertical.zs-tabs-list--default::after,
   .zs-tabs-list--vertical.zs-tabs-list--card {
     border-color: CanvasText;
     background-color: Canvas;
+  }
+  /* Pill-variant list rail paints `var(--zs-fill-secondary)` at higher
+     specificity than the base reset; surface it on Canvas in HC. */
+  .zs-tabs-list--pill {
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
   .zs-tabs-indicator--default {
     background-color: Highlight;

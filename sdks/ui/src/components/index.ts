@@ -240,7 +240,7 @@ export type {
   ContextMenuComponent,
 } from "./ContextMenu";
 
-export { Tabs, TabsList, TabsTab, TabsPanel, TabsIndicator } from "./Tabs";
+export { Tabs } from "./Tabs";
 export type {
   TabsProps,
   TabsListProps,

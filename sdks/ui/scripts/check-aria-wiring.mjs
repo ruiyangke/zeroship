@@ -3168,6 +3168,163 @@ await open("components-tabs--controlled-value");
   );
 }
 
+/* ─── 75. Slice 13 review-fix: RTL indicator overlaps the active tab ──
+ *
+ * Regression for Slice-13 🔴 fix 1. Base UI computes
+ * `--active-tab-left` as a physical-LTR offset
+ * (`tabRect.left - tabsListRect.left + scrollLeft - clientLeft`). If
+ * the indicator anchors via logical `inset-inline-start` under RTL,
+ * the indicator MIRRORS away from the active tab. Switching to
+ * physical `left:` keeps the indicator under the active tab in both
+ * directions.
+ *
+ * Open the RTL story, find the active tab and the indicator, and
+ * assert the indicator's horizontal center sits WITHIN the active
+ * tab's horizontal span. A pre-fix indicator would land outside that
+ * box (off by ~tab-row-width − tab-width). */
+await open("components-tabs--rtl");
+{
+  const root = page.locator('[data-testid="tabs-rtl"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  // Wait an extra frame for Base UI's indicator measurement pass —
+  // the indicator hides until layout settles + posts position vars.
+  await page.waitForTimeout(250);
+  const activeTab = root.locator('[role="tab"][aria-selected="true"]');
+  const indicator = root.locator(".zs-tabs-indicator");
+  const tabBox = await activeTab.boundingBox();
+  const indBox = await indicator.boundingBox();
+  // Indicator center-x within active tab's [left, right] span — the
+  // pre-fix RTL indicator would land at the mirrored position
+  // (visually on the wrong end of the rail).
+  const tabCenterX = tabBox ? tabBox.x + tabBox.width / 2 : -1;
+  const indCenterX = indBox ? indBox.x + indBox.width / 2 : -1;
+  const tabLeft = tabBox ? tabBox.x : 0;
+  const tabRight = tabBox ? tabBox.x + tabBox.width : 0;
+  const centerOverlap =
+    indBox != null &&
+    tabBox != null &&
+    indCenterX >= tabLeft &&
+    indCenterX <= tabRight;
+  // Also assert the indicator's own box overlaps the active tab's box
+  // horizontally — a stronger constraint than just the center test.
+  const horizontalOverlap =
+    indBox != null &&
+    tabBox != null &&
+    indBox.x + indBox.width > tabLeft &&
+    indBox.x < tabRight;
+  const ok = centerOverlap && horizontalOverlap;
+  report(
+    "Tabs RTL indicator overlaps the active tab (physical `left:` anchor)",
+    ok,
+    `tab=[${tabLeft.toFixed(1)},${tabRight.toFixed(1)}] indCenter=${indCenterX.toFixed(1)} tabCenter=${tabCenterX.toFixed(1)}`,
+  );
+}
+
+/* ─── 76. Slice 13 review-fix: forced-colors pill hover stays system ─
+ *
+ * Regression for Slice-13 🔴 fix 2. The unmirrored forced-colors
+ * block let higher-specificity `:hover` rules on the pill variant
+ * reintroduce token / `color-mix(... oklch ...)` paint over `Canvas`
+ * in HC mode. The mirror inside `@media (forced-colors: active)`
+ * re-asserts `Highlight` for the active pill on hover at equal
+ * specificity, so this assertion compares the computed
+ * background-color against `Highlight`'s computed value (probed at
+ * runtime via a sacrificial element) — they must match exactly.
+ * Pre-fix the bg would resolve to `var(--zs-accent-hover)` (an oklch
+ * brand token) instead of the system `Highlight` value. */
+await page.emulateMedia({ forcedColors: "active" });
+await open("components-tabs--all-variants");
+{
+  const pillRoot = page.locator('[data-testid="tabs-variant-pill"]');
+  await pillRoot.waitFor({ state: "visible", timeout: 5000 });
+  const activePill = pillRoot.locator('[role="tab"][aria-selected="true"]');
+  // Probe what `Highlight` actually resolves to in this emulated
+  // forced-colors environment (Playwright's chromium build picks a
+  // specific rgba). Use it as the post-fix comparison anchor — the
+  // hovered active pill's bg MUST equal this value, not the
+  // unmirrored brand accent paint.
+  const highlightBg = await page.evaluate(() => {
+    const d = document.createElement("div");
+    d.style.backgroundColor = "Highlight";
+    document.body.appendChild(d);
+    const r = getComputedStyle(d).backgroundColor;
+    d.remove();
+    return r;
+  });
+  await activePill.hover();
+  await page.waitForTimeout(50);
+  const bg = await activePill.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  // Pre-fix value: `rgba(0, 122, 255, ?)` / `oklch(...)` form derived
+  // from `--zs-accent-hover`. Post-fix: matches the probed Highlight.
+  const ok =
+    bg === highlightBg &&
+    !/oklch\(/i.test(bg) &&
+    !/color-mix/i.test(bg);
+  report(
+    "Tabs forced-colors: hovering active pill paints with system color (Highlight)",
+    ok,
+    `bg="${bg}" highlight="${highlightBg}"`,
+  );
+}
+await page.emulateMedia({ forcedColors: "none" });
+
+/* ─── 76b. Slice 13 review-fix: disabled-tab keyboard contract ───────
+ *
+ * Regression for Slice-13 🟡 fix 4. Before this fix, the source
+ * comment + story doc promised "roving navigation skips disabled
+ * tabs", but no real-path assertion verified it — and Base UI's
+ * composite controller actually hardcodes `disabledIndices: []`, so
+ * disabled tabs ARE in the roving order. Tabs Guarantee 10 now
+ * documents the honest contract: a disabled tab IS a focus stop on
+ * ArrowRight/Left, but it cannot be ACTIVATED (Enter / Space / click
+ * do not flip `aria-selected` and do not swap the panel).
+ *
+ * Lock the contract here so any future Base UI change that DOES
+ * implement skip-disabled trips the assertion and forces us to
+ * update Guarantee 10 + the story doc + this test together. */
+await open("components-tabs--disabled-tab");
+{
+  const firstTab = page.locator(
+    '[data-testid="tabs-disabled"] [role="tab"]',
+    { hasText: "Active" },
+  );
+  const disabledTab = page.locator('[data-testid="tabs-disabled-tab"]');
+  await firstTab.waitFor({ state: "visible", timeout: 5000 });
+  const firstSelectedBefore =
+    (await firstTab.getAttribute("aria-selected")) === "true";
+  await firstTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(50);
+  const disabledFocused = await disabledTab.evaluate(
+    (el) => el === document.activeElement,
+  );
+  // Try to ACTIVATE the disabled tab — pressing Enter on a focused
+  // disabled tab must not flip selection (the activation is a no-op).
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(50);
+  const disabledSelected =
+    (await disabledTab.getAttribute("aria-selected")) === "true";
+  const firstSelectedAfter =
+    (await firstTab.getAttribute("aria-selected")) === "true";
+  // Contract:
+  //   1. disabled tab IS a focus stop on ArrowRight (Guarantee 10).
+  //   2. Enter on the focused disabled tab does NOT flip selection —
+  //      activation is the part disabled blocks. This is the no-op
+  //      that distinguishes "focus stop" from "selectable tab".
+  const ok =
+    firstSelectedBefore === true &&
+    disabledFocused === true &&
+    disabledSelected === false &&
+    firstSelectedAfter === true;
+  report(
+    "Tabs disabled tab is roving-focusable but Enter does not activate it (Guarantee 10)",
+    ok,
+    `disabledFocused=${disabledFocused} disabledSelectedAfterEnter=${disabledSelected} firstStillSelected=${firstSelectedAfter}`,
+  );
+}
+
 /* ─── 77. Slice 12: Menubar — auto-open-on-hover-after-first-click ─── *
  *
  * Brief assertion 1: hover one trigger then hover next → second menu
