@@ -11,6 +11,7 @@ pub struct Session {
     pub auth_method: String,
     pub amr: Vec<String>,
     pub acr: Option<String>,
+    pub credential_version: i64,
     pub idle_expires_at: chrono::DateTime<chrono::Utc>,
     pub abs_expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -21,6 +22,7 @@ pub struct CreateSession<'a> {
     pub auth_method: &'a str,
     pub amr: Vec<String>,
     pub acr: Option<&'a str>,
+    pub expected_credential_version: Option<i64>,
     pub idle_minutes: i64,
     pub absolute_hours: i64,
 }
@@ -34,10 +36,15 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
     let rows = conn
         .query(
             "INSERT INTO auth.sessions \
-                (user_id, auth_method, amr, acr, idle_expires_at, abs_expires_at) \
-             VALUES ($1, $2, $3, $4, NOW() + ($5::text || ' minutes')::interval, \
-                                            NOW() + ($6::text || ' hours')::interval) \
-             RETURNING id, user_id, auth_method, amr, acr, idle_expires_at, abs_expires_at",
+                (user_id, auth_method, amr, acr, credential_version, idle_expires_at, abs_expires_at) \
+             SELECT id, $2, $3, $4, credential_version, \
+                    NOW() + ($5::text || ' minutes')::interval, \
+                    NOW() + ($6::text || ' hours')::interval \
+             FROM auth.users \
+             WHERE id = $1 \
+               AND ($7::BIGINT IS NULL OR credential_version = $7::BIGINT) \
+             RETURNING id, user_id, auth_method, amr, acr, credential_version, \
+                       idle_expires_at, abs_expires_at",
             &[
                 &params.user_id,
                 &params.auth_method,
@@ -45,6 +52,7 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
                 &params.acr,
                 &params.idle_minutes.to_string(),
                 &params.absolute_hours.to_string(),
+                &params.expected_credential_version,
             ],
         )
         .await
@@ -58,6 +66,7 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
         auth_method: row.get("auth_method"),
         amr: row.get("amr"),
         acr: row.try_get("acr").ok(),
+        credential_version: row.get("credential_version"),
         idle_expires_at: row.get("idle_expires_at"),
         abs_expires_at: row.get("abs_expires_at"),
     })
@@ -80,11 +89,15 @@ pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> 
         .query(
             "UPDATE auth.sessions \
              SET idle_expires_at = NOW() + ($2::text || ' minutes')::interval \
-             WHERE id = $1 \
-               AND revoked_at IS NULL \
-               AND idle_expires_at > NOW() \
-               AND abs_expires_at > NOW() \
-             RETURNING id, user_id, auth_method, amr, acr, idle_expires_at, abs_expires_at",
+             FROM auth.users \
+             WHERE auth.sessions.id = $1 \
+               AND auth.users.id = auth.sessions.user_id \
+               AND auth.sessions.credential_version = auth.users.credential_version \
+               AND auth.sessions.revoked_at IS NULL \
+               AND auth.sessions.idle_expires_at > NOW() \
+               AND auth.sessions.abs_expires_at > NOW() \
+             RETURNING auth.sessions.id, auth.sessions.user_id, auth_method, amr, acr, \
+                       auth.sessions.credential_version, idle_expires_at, abs_expires_at",
             &[
                 &id,
                 &crate::sessions::login::IDLE_MINUTES.to_string(),
@@ -98,6 +111,7 @@ pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> 
         auth_method: row.get("auth_method"),
         amr: row.get("amr"),
         acr: row.try_get("acr").ok(),
+        credential_version: row.get("credential_version"),
         idle_expires_at: row.get("idle_expires_at"),
         abs_expires_at: row.get("abs_expires_at"),
     }))

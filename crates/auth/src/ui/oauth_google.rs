@@ -310,6 +310,7 @@ pub async fn callback(
             auth_method: PROVIDER,
             amr: vec!["oauth".into()],
             acr: Some(ACR_GOOGLE),
+            expected_credential_version: None,
             idle_minutes: session_cookie::IDLE_MINUTES,
             absolute_hours: session_cookie::ABSOLUTE_HOURS,
         },

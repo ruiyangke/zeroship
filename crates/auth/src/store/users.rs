@@ -12,6 +12,7 @@ pub struct UserRow {
     pub name: String,
     pub avatar_url: Option<String>,
     pub password_hash: Option<String>,
+    pub credential_version: i64,
     pub locked_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -23,7 +24,8 @@ pub struct UserRow {
 pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>> {
     let rows = conn
         .query(
-            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until \
+            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
+                    credential_version, locked_until \
              FROM auth.users WHERE email = $1",
             &[&email],
         )
@@ -52,7 +54,8 @@ pub async fn find_by_id(conn: &Client, id: &str) -> Result<Option<UserRow>> {
     };
     let rows = conn
         .query(
-            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until \
+            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
+                    credential_version, locked_until \
              FROM auth.users WHERE id = $1",
             &[&uuid],
         )
@@ -76,7 +79,8 @@ pub async fn create(
         .query(
             "INSERT INTO auth.users (email, name, password_hash) \
              VALUES ($1, $2, $3) \
-             RETURNING id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until",
+             RETURNING id, email::text, email_verified_at, name, avatar_url, password_hash, \
+                       credential_version, locked_until",
             &[&email, &name, &password_hash],
         )
         .await
@@ -107,7 +111,11 @@ pub async fn update_password_hash(
     phc: &str,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE auth.users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+        "UPDATE auth.users \
+         SET password_hash = $1, \
+             credential_version = credential_version + 1, \
+             updated_at = NOW() \
+         WHERE id = $2",
         &[&phc, &id],
     )
     .await
@@ -138,6 +146,7 @@ fn row_to_user(row: &compio_postgres::Row) -> UserRow {
         name: row.get("name"),
         avatar_url: row.try_get("avatar_url").ok(),
         password_hash: row.try_get("password_hash").ok(),
+        credential_version: row.get("credential_version"),
         locked_until: row.try_get("locked_until").ok(),
     }
 }

@@ -19,11 +19,14 @@ const STATEMENTS: &[&str] = &[
         name              TEXT NOT NULL,
         avatar_url        TEXT,
         password_hash     TEXT,
+        credential_version BIGINT NOT NULL DEFAULT 0,
         locked_until      TIMESTAMPTZ,
         created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_login_at     TIMESTAMPTZ
     )",
+    "ALTER TABLE auth.users \
+        ADD COLUMN IF NOT EXISTS credential_version BIGINT NOT NULL DEFAULT 0",
 
     // 5.2 identities
     "CREATE TABLE IF NOT EXISTS auth.identities (
@@ -45,10 +48,13 @@ const STATEMENTS: &[&str] = &[
         amr             TEXT[] NOT NULL,
         acr             TEXT,
         auth_time       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        credential_version BIGINT NOT NULL DEFAULT 0,
         idle_expires_at TIMESTAMPTZ NOT NULL,
         abs_expires_at  TIMESTAMPTZ NOT NULL,
         revoked_at      TIMESTAMPTZ
     )",
+    "ALTER TABLE auth.sessions \
+        ADD COLUMN IF NOT EXISTS credential_version BIGINT NOT NULL DEFAULT 0",
 
     // 5.4 magic links
     "CREATE TABLE IF NOT EXISTS auth.magic_links (

@@ -92,6 +92,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
+            expected_credential_version: None,
             idle_minutes: 30,
             absolute_hours: 12,
         },
@@ -262,6 +263,87 @@ async fn issue_then_redeem_roundtrip() {
             "DELETE FROM auth.magic_links WHERE email = $1::citext",
             &[&email],
         )
+        .await
+        .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn session_create_rejects_stale_credential_generation() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!(
+        "reset-stale-generation-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    let old_hash = password::hash("old reset generation phrase")
+        .expect("hash old password");
+    users::update_password_hash(&client, user.id, &old_hash)
+        .await
+        .expect("set old password");
+    let before_reset = users::find_by_email(&client, &email)
+        .await
+        .expect("find user")
+        .expect("seeded user exists");
+
+    let new_hash = password::hash("new reset generation phrase")
+        .expect("hash new password");
+    users::update_password_hash(&client, user.id, &new_hash)
+        .await
+        .expect("simulate password reset generation bump");
+
+    let stale_session = sessions::create(
+        &client,
+        &sessions::CreateSession {
+            user_id: user.id,
+            auth_method: "pwd",
+            amr: vec!["pwd".to_string()],
+            acr: Some("urn:zeroship:pwd"),
+            expected_credential_version: Some(before_reset.credential_version),
+            idle_minutes: 30,
+            absolute_hours: 12,
+        },
+    )
+    .await;
+    assert!(
+        stale_session.is_err(),
+        "session creation with the pre-reset credential generation must fail"
+    );
+
+    let current_session = sessions::create(
+        &client,
+        &sessions::CreateSession {
+            user_id: user.id,
+            auth_method: "magic",
+            amr: vec!["magic".to_string()],
+            acr: Some("urn:zeroship:magic"),
+            expected_credential_version: None,
+            idle_minutes: 30,
+            absolute_hours: 12,
+        },
+    )
+    .await
+    .expect("current generation session should create");
+    let validated = sessions::validate(&client, current_session.id)
+        .await
+        .expect("validate current session")
+        .expect("current session should validate");
+    assert_eq!(
+        validated.credential_version,
+        before_reset.credential_version + 1
+    );
+
+    client
+        .execute("DELETE FROM auth.sessions WHERE user_id = $1", &[&user.id])
         .await
         .ok();
     client
