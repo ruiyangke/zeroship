@@ -25,6 +25,8 @@ jsonwebtoken = { workspace = true }
 parking_lot = "0.12"
 cyper = { workspace = true }
 http = { workspace = true }
+lru = { workspace = true }
+url = { workspace = true }
 compio-postgres = { workspace = true }
 # Observability — tracing subscriber init shared across all binaries.
 tracing = { workspace = true }
@@ -34,7 +36,11 @@ tracing-logfmt = { workspace = true }
 tracing-bunyan-formatter = { workspace = true }
 
 [dev-dependencies]
-compio = { workspace = true }
+# Core tests include local ntex/compio HTTP servers. The polling fallback
+# keeps them runnable in sandboxes that block io_uring; production builds use
+# the normal workspace compio dependency above the dev-dependency boundary.
+compio = { workspace = true, features = ["polling"] }
+ntex = { workspace = true }
 # Phase 7 U1 — sign synthetic BCL `logout_token` JWTs in the
 # `logout_token` verifier's unit tests. PKCS#8 encoding is needed
 # because `jsonwebtoken::EncodingKey::from_ed_der` takes the DER form.
