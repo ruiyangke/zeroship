@@ -175,6 +175,68 @@ const STATEMENTS: &[&str] = &[
         last_rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         notes           TEXT
     )",
+
+    // P9-U5 authorization storage — platform RBAC, creator app
+    // memberships, per-token policies, operator platform policies, and
+    // authorization decision audit.
+    "CREATE SCHEMA IF NOT EXISTS platform",
+    "CREATE SCHEMA IF NOT EXISTS control",
+    "CREATE TABLE IF NOT EXISTS platform.roles (
+        user_id    UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+        role       TEXT NOT NULL CHECK (role IN ('admin','support','billing','readonly')),
+        granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        granted_by UUID REFERENCES auth.users(id)
+    )",
+    "CREATE TABLE IF NOT EXISTS control.app_members (
+        app_id   TEXT NOT NULL,
+        user_id  UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+        role     TEXT NOT NULL CHECK (role IN ('owner','editor','viewer')),
+        added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        added_by UUID REFERENCES auth.users(id),
+        PRIMARY KEY (app_id, user_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS app_members_user_idx ON control.app_members (user_id)",
+    "CREATE TABLE IF NOT EXISTS control.permission_tokens (
+        id           UUID PRIMARY KEY,
+        owner_id     UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL CHECK (kind IN ('pat','oauth_grant')),
+        client_id    TEXT,
+        name         TEXT NOT NULL,
+        policies     JSONB NOT NULL,
+        policy_hash  TEXT NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at   TIMESTAMPTZ,
+        revoked_at   TIMESTAMPTZ,
+        last_used_at TIMESTAMPTZ
+    )",
+    "CREATE INDEX IF NOT EXISTS permission_tokens_owner_active_idx
+        ON control.permission_tokens (owner_id) WHERE revoked_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS permission_tokens_policies_gin_idx
+        ON control.permission_tokens USING GIN (policies)",
+    "CREATE TABLE IF NOT EXISTS control.platform_policies (
+        id           TEXT PRIMARY KEY,
+        cedar_source TEXT NOT NULL,
+        enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_by   UUID REFERENCES auth.users(id)
+    )",
+    "CREATE TABLE IF NOT EXISTS control.authz_decisions (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        occurred_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        user_id          UUID,
+        token_id         UUID,
+        action           TEXT NOT NULL,
+        resource_type    TEXT NOT NULL,
+        resource_id      TEXT,
+        decision         TEXT NOT NULL CHECK (decision IN ('allow','deny')),
+        matched_policies TEXT[] NOT NULL DEFAULT '{}',
+        request_ip       INET,
+        request_id       TEXT
+    )",
+    "CREATE INDEX IF NOT EXISTS authz_decisions_occurred_idx
+        ON control.authz_decisions (occurred_at DESC)",
+    "CREATE INDEX IF NOT EXISTS authz_decisions_user_idx
+        ON control.authz_decisions (user_id) WHERE user_id IS NOT NULL",
 ];
 
 /// Apply all migrations in order. Each statement is idempotent and safe to
