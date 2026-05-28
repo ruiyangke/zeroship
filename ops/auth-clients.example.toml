@@ -18,6 +18,17 @@ audience = ["https://api.zeroship.ai"]
 first_party = true
 
 [[client]]
+client_id = "zeroship-cli"
+client_name = "zeroship CLI"
+client_secret = ""
+grant_types = ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
+response_types = []
+redirect_uris = []
+scope = "openid offline_access apps:deploy apps:read"
+token_endpoint_auth_method = "none"
+first_party = true
+
+[[client]]
 client_id = "gateway"
 client_name = "zeroship Gateway (hosted apps)"
 client_secret = "dev-secret-rotate-me-too"

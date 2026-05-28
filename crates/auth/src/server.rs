@@ -52,6 +52,11 @@ pub fn configure(
                     .route(web::get().to(ui::consent::get))
                     .route(web::post().to(ui::consent::post)),
             )
+            .service(
+                web::resource("/device")
+                    .route(web::get().to(ui::device::get))
+                    .route(web::post().to(ui::device::post)),
+            )
             // RP-initiated logout (OIDC Session Management §5). hydra's
             // `urls.logout` config points here; the RP redirects to
             // hydra's `end_session_endpoint`, hydra issues a
