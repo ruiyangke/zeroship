@@ -120,3 +120,32 @@ None found.
 ## Status
 
 Read-only audit completed. Findings saved in this file; no source code changes were made.
+
+## Status
+
+Fix pass completed on 2026-05-28.
+
+- H1 fixed in `652cd238` (`Sanitize runtime dispatch 5xx errors`).
+- H2 fixed in `b6e9ff85` (`Sanitize control-plane infrastructure errors`).
+- H3 fixed in `2388ebd3` (`Sanitize sandbox create failures`).
+- M1 fixed in `daec66af` (`Sanitize OIDC callback failure pages`).
+- M2 fixed in `b8cbe3a2` (`Sanitize Builder upstream RPC errors`).
+- M3 fixed in `19b2533a` (`Report failed OAuth client rollback`).
+- M4 fixed in `6258d399` (`Handle runtime accept errors without panic`).
+- L1 fixed in `24fb8e2c` (`Recover poisoned request-path mutexes`).
+
+Verification completed where the local environment allowed it:
+
+- Passed: `cargo test -p zeroship-sandbox r9_h3_backend_create_sanitizes_raw_driver_error`
+- Passed: `cargo test -p zeroship-sandbox retry_loop_non_retriable_failure_message_is_sanitized`
+- Passed: `cargo test -p zeroship-gateway --lib oidc_callback_token_exchange_error_is_generic`
+- Passed: `cargo test -p zeroship-core local_jti_cache_recovers_after_lock_poison`
+- Passed: `cargo test -p zeroship-authz entity_cache_invalidation_recovers_after_poison`
+- Passed: `cargo test -p zeroship-gateway --lib recovers_after`
+
+Blocked verification:
+
+- `zeroship-runtime` tests cannot finish because `v8` attempts to download `librusty_v8_release_x86_64-unknown-linux-gnu.a.gz` and this environment has no DNS/network access.
+- `zeroship-control` tests cannot compile because `crates/control/src/token_handlers.rs` references missing `valid_pat_name`.
+- Builder/bootstrap JS tests cannot run because local `node_modules` is absent (`vitest`/`tsx` not found).
+- `cargo fmt --check` cannot run because `cargo fmt` is not installed in this environment.
