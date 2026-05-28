@@ -91,6 +91,28 @@
   --zs-toggle-gap-sm: var(--zs-space-1);             /* 4 */
   --zs-toggle-gap-md: var(--zs-space-2);             /* 8 */
   --zs-toggle-gap-lg: var(--zs-space-2);             /* 8 */
+
+  /* ─── per-variant pressed tokens (polish item 1) ────────────────────
+   *
+   * Pre-polish, all three variants painted the same solid accent fill
+   * when pressed — the variant ladder (quiet → loud) collapsed at the
+   * most important state. These tokens give each variant its own pressed
+   * treatment so the ladder survives:
+   *
+   *   default → solid accent (the "lit-up rectangle")
+   *   plain   → ghost — translucent accent wash, accent-active ink
+   *   tinted  → loudest — accent-hover fill + accent-active inset edge
+   *
+   * Plain-pressed uses the same 14% accent mix Slice 4 readonly uses;
+   * paired with `--zs-accent-active` ink that combination measured AA at
+   * all three sizes (4.5:1+) — verified via axe-core. If a future palette
+   * push lowers contrast, deepen 14% → 18% (the tinted-rest mix). */
+  --zs-toggle-pressed-bg: var(--zs-accent);
+  --zs-toggle-pressed-ink: var(--zs-accent-ink);
+  --zs-toggle-plain-pressed-bg: color-mix(in oklch, var(--zs-accent) 14%, transparent);
+  --zs-toggle-plain-pressed-ink: var(--zs-accent-active);
+  --zs-toggle-tinted-pressed-bg: var(--zs-accent-hover);
+  --zs-toggle-tinted-pressed-edge: var(--zs-accent-active);
 }
 
 /* ─── the standalone toggle ─────────────────────────────────────────── */
@@ -127,6 +149,45 @@
   inline-size: 1em;
   block-size: 1em;
   flex: 0 0 auto;
+}
+
+/* Icon-only toggle = square (polish item 2). Without this, an icon-only
+ * Toggle uses the text-button inline padding and reads chunky next to
+ * neighbouring icon buttons. The square treatment makes the segment the
+ * same width as it is tall — proper icon-button geometry.
+ *
+ * Selector rationale: `:has(> svg:only-child)` alone would also match
+ * `<button><svg/>Bold</button>` because CSS `:only-child` ignores text-
+ * node siblings — the SVG is the only ELEMENT child even when text
+ * follows. We compose with `[aria-label]` because icon-only buttons MUST
+ * carry an accessible name (the WithIconOnly story doc says "Icon-only
+ * Toggle requires an explicit `aria-label`"), while icon+text buttons
+ * get their accessible name from the text node and don't need
+ * `aria-label`. The pair therefore selects exactly the icon-only render
+ * path; icon+text Toggles keep the text-button padding so the label has
+ * room to breathe.
+ *
+ * Browser support: `:has()` is Chrome 105+ / Safari 15.4+ / Firefox 121+
+ * — all modern. Older browsers fall back to the text-button padding
+ * (acceptable). */
+.zs-toggle[aria-label]:has(> svg:only-child) {
+  inline-size: var(--zs-toggle-h-md);
+  padding-inline: var(--zs-space-0);
+}
+.zs-toggle--sm[aria-label]:has(> svg:only-child) {
+  inline-size: var(--zs-toggle-h-sm);
+}
+.zs-toggle--lg[aria-label]:has(> svg:only-child) {
+  inline-size: var(--zs-toggle-h-lg);
+}
+
+/* Icon+text gap (polish item 3) — tighten to match Button's
+ * `B Bold`-style label rhythm. The size-scoped gap tokens (4/8/8) are
+ * tuned for text-only segments; once an icon joins the label the
+ * 8-unit gap reads mechanically separated. Scope via `:has(> svg)` so
+ * text-only segments keep the roomier rhythm. */
+.zs-toggle:has(> svg) {
+  gap: var(--zs-space-1);
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
@@ -209,28 +270,58 @@
   background-color: color-mix(in oklch, var(--zs-accent) 30%, transparent);
 }
 
-/* ─── pressed state — accent fill across all variants ──────────────── *
+/* ─── pressed state — per-variant treatments (polish item 1) ───────── *
  *
- * The pressed pill paints the same in default / plain / tinted: solid
- * accent fill, accent-ink text. Two visual signals so the pressed
- * state survives `forced-colors` and reduced-color displays.
+ * Three distinct treatments so the variant ladder (quiet → loud) survives
+ * the most important state:
  *
- * Pressed-fill contrast (brief contingency): default-variant pressed
- * pill uses `--zs-accent` + `--zs-accent-ink` (white-on-indigo). The
- * combination measures ≥ AA at all three sizes — verified against the
- * Card.primary-fill which uses the same pair. If a future palette pushes
- * the ratio below AA the rule below can deepen to `--zs-accent-hover`
- * without changing the rest of the surface. */
+ *   default → solid `--zs-accent` + `--zs-accent-ink` (a "lit-up
+ *             rectangle" matching Button's filled variant).
+ *   plain   → ghost wash: 14% accent mix + `--zs-accent-active` ink.
+ *             Stays restrained — plain rests as transparent, presses as
+ *             a tinted echo, never as a solid fill. AA verified.
+ *   tinted  → loudest: `--zs-accent-hover` fill + `--zs-accent-ink` ink
+ *             with an `--zs-accent-active` hairline inset edge. The edge
+ *             is the variant-marker — tinted goes deeper than default.
+ *
+ * Hover/active continue to step toward `--zs-accent-hover` /
+ * `--zs-accent-active`. For tinted, hover is the rest tone so the inset
+ * edge plus tonal continuity carries the affordance.
+ *
+ * `forced-colors` block below mirrors per-variant pressed → `Highlight`/
+ * `HighlightText`; tinted retains the inset edge so the variant cue
+ * survives high-contrast emulation. */
 .zs-toggle[data-pressed] {
-  background-color: var(--zs-accent);
+  background-color: var(--zs-toggle-pressed-bg);
+  color: var(--zs-toggle-pressed-ink);
+}
+.zs-toggle--plain[data-pressed] {
+  background-color: var(--zs-toggle-plain-pressed-bg);
+  color: var(--zs-toggle-plain-pressed-ink);
+}
+.zs-toggle--tinted[data-pressed] {
+  background-color: var(--zs-toggle-tinted-pressed-bg);
   color: var(--zs-accent-ink);
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-toggle-tinted-pressed-edge);
 }
 @media (hover: hover) {
   .zs-toggle[data-pressed]:not([data-disabled]):hover {
     background-color: var(--zs-accent-hover);
   }
+  .zs-toggle--plain[data-pressed]:not([data-disabled]):hover {
+    background-color: color-mix(in oklch, var(--zs-accent) 22%, transparent);
+  }
+  .zs-toggle--tinted[data-pressed]:not([data-disabled]):hover {
+    background-color: var(--zs-accent-active);
+  }
 }
 .zs-toggle[data-pressed]:not([data-disabled]):active {
+  background-color: var(--zs-accent-active);
+}
+.zs-toggle--plain[data-pressed]:not([data-disabled]):active {
+  background-color: color-mix(in oklch, var(--zs-accent) 30%, transparent);
+}
+.zs-toggle--tinted[data-pressed]:not([data-disabled]):active {
   background-color: var(--zs-accent-active);
 }
 
@@ -251,12 +342,19 @@
   background-color: color-mix(in oklch, var(--zs-label) 4%, transparent);
 }
 .zs-toggle[data-disabled][data-pressed] {
-  /* Disabled-pressed keeps the accent fill but desaturates via mix
-   * toward the fill-secondary neutral. Reads "yes, this WAS selected"
-   * without claiming actionability. Same shape Button's destructive-
-   * disabled uses. */
-  background-color: color-mix(in oklch, var(--zs-accent) 30%, var(--zs-fill-secondary));
+  /* Polish item 4: desaturated lavender fill + hairline inset edge.
+   *
+   * Pre-polish, the 30% accent mix read close enough to an enabled tinted
+   * control to be ambiguous. Drop saturation (22% mix) so the fill steps
+   * meaningfully back, then carry the "was selected" history via a subtle
+   * inset edge (30% accent + separator mix). The edge stays just visible
+   * on Crystal's light surface — `--zs-selection-hairline` is 0.0625rem,
+   * the same hairline the group rim uses. */
+  --zs-toggle-disabled-pressed-bg: color-mix(in oklch, var(--zs-accent) 22%, var(--zs-fill-secondary));
+  --zs-toggle-disabled-pressed-edge: color-mix(in oklch, var(--zs-accent) 30%, var(--zs-separator));
+  background-color: var(--zs-toggle-disabled-pressed-bg);
   color: var(--zs-label-tertiary);
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-toggle-disabled-pressed-edge);
 }
 
 /* ─── group container ───────────────────────────────────────────────── */
@@ -340,7 +438,13 @@
   border-radius: calc(var(--zs-toggle-radius-md) - 0.125rem);
 }
 .zs-toggle-group .zs-toggle[data-size="lg"] {
-  border-radius: calc(var(--zs-toggle-radius-lg) - 0.125rem);
+  /* Polish item 5: keep the full lg radius — subtracting 2px made the
+   * pressed pill read tab-like (sharp shoulders at the larger size). The
+   * group's `--zs-space-1` padding already insets the pill from the rim;
+   * no extra radius compensation needed at lg. sm / md keep the
+   * subtraction because their radii are tight enough that even 1–2px
+   * makes a visible nesting gap. */
+  border-radius: var(--zs-toggle-radius-lg);
 }
 
 @media (hover: hover) {
@@ -424,6 +528,18 @@
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
   .zs-toggle[data-pressed] {
+    background-color: Highlight;
+    color: HighlightText;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  /* Per-variant pressed mirror (polish item 1) — under forced-colors,
+   * the user's high-contrast palette defines system contrast, so all
+   * three variants flatten to Highlight/HighlightText. The tinted
+   * inset-edge variant cue is replaced with the same Highlight ring used
+   * by the base rule, so we re-stamp it for specificity parity with the
+   * oklch tinted-pressed rule. */
+  .zs-toggle--plain[data-pressed],
+  .zs-toggle--tinted[data-pressed] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
