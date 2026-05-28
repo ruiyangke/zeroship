@@ -105,7 +105,7 @@ pub async fn post(
                         event_type: "password_reset_requested_throttled",
                         outcome: "failure",
                         detail: serde_json::json!({ "bucket": bucket_name }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -169,7 +169,7 @@ pub async fn post(
                         event_type: "password_reset_requested",
                         outcome: "success",
                         user_id: Some(&u.id),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -189,7 +189,7 @@ pub async fn post(
                 event_type: "password_reset_requested",
                 outcome: "failure",
                 detail: serde_json::json!({ "reason": "no_such_user" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;

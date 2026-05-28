@@ -133,7 +133,7 @@ pub async fn callback(
                 outcome: "failure",
                 auth_method: Some(PROVIDER),
                 detail: json!({ "reason": "stash_cookie_missing" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -147,7 +147,7 @@ pub async fn callback(
                 outcome: "failure",
                 auth_method: Some(PROVIDER),
                 detail: json!({ "reason": "stash_invalid_signature" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -169,7 +169,7 @@ pub async fn callback(
                     "error": err,
                     "description": query.error_description,
                 }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -192,7 +192,7 @@ pub async fn callback(
                 outcome: "failure",
                 auth_method: Some(PROVIDER),
                 detail: json!({ "reason": "state_mismatch" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -208,7 +208,7 @@ pub async fn callback(
                 outcome: "failure",
                 auth_method: Some(PROVIDER),
                 detail: json!({ "reason": "login_challenge_invalid" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -235,7 +235,7 @@ pub async fn callback(
                     outcome: "failure",
                     auth_method: Some(PROVIDER),
                     detail: json!({ "reason": "verify_failed", "error": e.to_string() }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -270,7 +270,7 @@ pub async fn callback(
                     outcome: "failure",
                     auth_method: Some(PROVIDER),
                     detail: json!({ "reason": "linker_failed", "error": e.to_string() }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -292,7 +292,7 @@ pub async fn callback(
                     outcome: "success",
                     auth_method: Some(PROVIDER),
                     detail: json!({ "subject": id.subject, "email": id.email }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -326,7 +326,7 @@ pub async fn callback(
                 user_id: Some(&user_id),
                 auth_method: Some(PROVIDER),
                 detail: json!({ "reason": "account_ineligible" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -389,7 +389,7 @@ pub async fn callback(
                 "created": matches!(outcome, LinkOutcome::Created { .. }),
                 "hd": id.hd,
             }),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;

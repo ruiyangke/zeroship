@@ -119,7 +119,7 @@ pub async fn postmark(
                         "email_domain": b.email.split('@').nth(1).unwrap_or(""),
                         "bounce_type": b.r#type,
                     }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -151,7 +151,7 @@ pub async fn postmark(
                     detail: serde_json::json!({
                         "email_domain": c.email.split('@').nth(1).unwrap_or(""),
                     }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -184,7 +184,7 @@ pub async fn postmark(
 #[allow(clippy::future_not_send)]
 #[allow(clippy::too_many_lines)]
 pub async fn ses_sns(
-    _req: HttpRequest,
+    req: HttpRequest,
     body: Json<serde_json::Value>,
     db: State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
@@ -254,7 +254,7 @@ pub async fn ses_sns(
                     return HttpResponse::Ok().finish();
                 }
             };
-            handle_ses_event(db.as_ref(), inner).await;
+            handle_ses_event(db.as_ref(), inner, &req).await;
             HttpResponse::Ok().finish()
         }
         _ => {
@@ -268,7 +268,7 @@ pub async fn ses_sns(
 
 /// Dispatch a parsed SES inner event. Suppression-list writes +
 /// audit emission only; never returns an error to the caller.
-async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent) {
+async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &HttpRequest) {
     match ev {
         SesEvent::Bounce { bounce } if bounce.bounce_type == "Permanent" => {
             for rec in &bounce.bounced_recipients {
@@ -294,7 +294,7 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent) {
                         "count": bounce.bounced_recipients.len(),
                         "kind": "permanent",
                     }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -325,7 +325,7 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent) {
                     detail: serde_json::json!({
                         "count": complaint.complained_recipients.len(),
                     }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;

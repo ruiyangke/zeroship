@@ -79,7 +79,7 @@ pub async fn get(
                     client_id: Some(&info.client.client_id),
                     auth_method: Some("hydra_skip"),
                     detail: json!({ "reason": "account_ineligible" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -256,7 +256,7 @@ pub async fn post(
                         client_id: Some(&client_id),
                         auth_method: Some("pwd"),
                         detail: json!({ "reason": "rate_limited", "bucket": key }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -324,7 +324,7 @@ pub async fn post(
                 client_id: Some(&client_id),
                 auth_method: Some("pwd"),
                 detail: json!({ "reason": "account_ineligible" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -352,7 +352,7 @@ pub async fn post(
                 client_id: Some(&client_id),
                 auth_method: Some("pwd"),
                 detail: json!({ "reason": "invalid_credentials" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -375,7 +375,7 @@ pub async fn post(
                 client_id: Some(&client_id),
                 auth_method: Some("pwd"),
                 detail: json!({ "reason": "invalid_credentials" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -402,7 +402,7 @@ pub async fn post(
                 client_id: Some(&client_id),
                 auth_method: Some("pwd"),
                 detail: json!({ "reason": "account_ineligible" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -471,7 +471,7 @@ pub async fn post(
             client_id: Some(&client_id),
             auth_method: Some("pwd"),
             detail: json!({}),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;

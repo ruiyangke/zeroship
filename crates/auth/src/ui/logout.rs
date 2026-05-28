@@ -176,7 +176,7 @@ pub async fn post(
                 "subject": subject,
                 "rp_initiated": info.rp_initiated,
             }),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;

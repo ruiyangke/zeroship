@@ -198,7 +198,7 @@ pub async fn start(
                         outcome: "failure",
                         auth_method: Some("magic"),
                         detail: json!({ "reason": "rate_limited", "bucket": key }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -286,7 +286,7 @@ pub async fn start(
                 detail: json!({
                     "email_domain": email_norm.split('@').nth(1).unwrap_or("")
                 }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -439,7 +439,7 @@ pub async fn verify_redeem(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "invalid_or_expired" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -453,7 +453,7 @@ pub async fn verify_redeem(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "consume_in_flight" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -467,7 +467,7 @@ pub async fn verify_redeem(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "already_consumed" }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -493,7 +493,7 @@ pub async fn verify_redeem(
                 outcome: "failure",
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "unexpected_purpose" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -537,7 +537,7 @@ pub async fn verify_redeem(
                 user_id: Some(&user_id),
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "account_ineligible" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -552,6 +552,7 @@ pub async fn verify_redeem(
             &redeemed.token_hash,
             user_id,
             &form.login_challenge,
+            &req,
         )
         .await
     } else {
@@ -562,6 +563,7 @@ pub async fn verify_redeem(
             &redeemed.email,
             &redeemed.csrf_nonce,
             &form.login_challenge,
+            &req,
         )
         .await
     }
@@ -589,6 +591,7 @@ async fn same_device_finish(
     token_hash: &[u8],
     user_id: Uuid,
     login_challenge: &str,
+    req: &HttpRequest,
 ) -> HttpResponse {
     let session = match sessions::create(
         db,
@@ -655,7 +658,7 @@ async fn same_device_finish(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;
@@ -685,6 +688,7 @@ async fn cross_device_show_code(
     email: &str,
     csrf_nonce: &str,
     login_challenge: &str,
+    req: &HttpRequest,
 ) -> HttpResponse {
     let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
     // 5-minute window — short, since the user is actively typing.
@@ -717,7 +721,7 @@ async fn cross_device_show_code(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;
@@ -785,7 +789,7 @@ pub async fn complete(
                     outcome: "failure",
                     auth_method: Some("magic"),
                     detail: json!({ "reason": "rate_limited", "bucket": rate_key }),
-                    ..Default::default()
+                    ..AuditEvent::from_request(&req)
                 },
             )
             .await;
@@ -813,7 +817,7 @@ pub async fn complete(
                         outcome: "failure",
                         auth_method: Some("magic"),
                         detail: json!({ "reason": "code_invalid_or_expired" }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -831,7 +835,7 @@ pub async fn complete(
                         outcome: "failure",
                         auth_method: Some("magic"),
                         detail: json!({ "reason": "consume_in_flight" }),
-                        ..Default::default()
+                        ..AuditEvent::from_request(&req)
                     },
                 )
                 .await;
@@ -850,7 +854,7 @@ pub async fn complete(
                 outcome: "failure",
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "login_challenge_mismatch" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -894,7 +898,7 @@ pub async fn complete(
                 user_id: Some(&user_id),
                 auth_method: Some("magic"),
                 detail: json!({ "reason": "account_ineligible" }),
-                ..Default::default()
+                ..AuditEvent::from_request(&req)
             },
         )
         .await;
@@ -971,7 +975,7 @@ pub async fn complete(
             outcome: "success",
             user_id: Some(&user_id),
             auth_method: Some("magic"),
-            ..Default::default()
+            ..AuditEvent::from_request(&req)
         },
     )
     .await;
