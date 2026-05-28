@@ -38,31 +38,52 @@
   inline-size: 100%;
   font-family: var(--zs-font-system);
   color: var(--zs-label);
-  /* Default layout: label/value (consumer-supplied) above, track below. */
-  grid-template-columns: 1fr auto;
+  /* Single-column flow: consumer-supplied label (if any) goes above the
+     control. The value badge no longer occupies its own grid column —
+     it floats over the control overlay at the thumb position (Slice 7
+     visual-polish item 1). */
+  grid-template-columns: 1fr;
   grid-template-rows: auto auto;
   align-items: center;
   gap: var(--zs-space-2);
   -webkit-touch-callout: none;
 }
 
-/* The value badge sits in the second column of the first row so
-   consumer-supplied labels can occupy the first column. */
+/* Slice 7 visual-polish item 2: horizontal floor so a Field-wrapped
+   Slider doesn't shrink to a dash when the Field's intrinsic width is
+   tight. Four lg-control-heights gives the track room to read as a
+   slider rather than a hyphen. Field cascade hands the Slider its full
+   container width; the floor is the lower bound. */
+.zs-slider--horizontal {
+  min-inline-size: var(--zs-slider-inline-min, calc(var(--zs-control-h-lg) * 4));
+}
+.zs-field > .zs-slider--horizontal {
+  inline-size: 100%;
+}
+
+/* The value badge floats ABOVE the thumb. `--zs-slider-value-position`
+   is inline-styled on the Root from the current value's percentage
+   (Slider.tsx) — single-thumb takes the scalar value, range mode reads
+   the first thumb. Without an inline override the badge centers above
+   the control so the rest state stays readable. */
 .zs-slider__value {
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: end;
+  position: absolute;
+  inset-block-end: calc(100% + var(--zs-space-2));
+  inset-inline-start: var(--zs-slider-value-position, 50%);
+  transform: translateX(-50%);
   font-size: var(--zs-text-subheadline-size);
   line-height: var(--zs-text-subheadline-line);
   color: var(--zs-label-secondary);
   font-variant-numeric: tabular-nums;
   min-inline-size: 2.5rem;
-  text-align: end;
+  text-align: center;
+  pointer-events: none;
 }
 
-/* Control fills the whole row 2, spanning both columns. */
+/* Control fills the row, no grid-column span needed in the single-column
+   layout. */
 .zs-slider__control {
-  grid-column: 1 / -1;
+  grid-column: 1;
   grid-row: 2;
   position: relative;
   display: flex;
@@ -119,10 +140,11 @@
   border-radius: inherit;
 }
 
-/* Outline variant indicator — accent at half opacity so the rim still
-   reads the dominant edge. */
+/* Outline variant indicator — accent at 45% mix so the rim stays the
+   dominant edge and the fill reads as a quieter trail behind the
+   thumb (Slice 7 visual-polish item 4). */
 .zs-slider--outline .zs-slider__indicator {
-  background: color-mix(in oklch, var(--zs-accent) 60%, transparent);
+  background: color-mix(in oklch, var(--zs-accent) 45%, transparent);
 }
 
 /* ─── Thumb — the draggable ────────────────────────────────────────── *
@@ -139,14 +161,18 @@
   /* Base UI emits inline styles for position + translate; we only set
      dimensions / surface / cursor here. The thumb sits ON TOP of the
      indicator (z-index 1 lifts it over the indicator's surface paint
-     so the rim ring stays visible on the indicator end). */
+     so the rim ring stays visible on the indicator end).
+     Slice 7 visual-polish item 4: rim mass dialed back to
+     (focus-ring-width − hairline) so the accent halo reads as a
+     defined rim instead of a knot against the indicator; outer drop
+     shadow lightened to 18% label opacity for a softer plate. */
   inline-size: var(--zs-slider-thumb-size, 1rem);
   block-size: var(--zs-slider-thumb-size, 1rem);
   background: var(--zs-surface-raised);
   border-radius: var(--zs-radius-full);
   box-shadow:
-    0 0 0 0.1875rem var(--zs-accent),
-    0 0.125rem 0.375rem 0 color-mix(in oklch, var(--zs-label) 25%, transparent);
+    0 0 0 calc(var(--zs-focus-ring-width) - var(--zs-selection-hairline)) var(--zs-accent),
+    0 var(--zs-space-half) var(--zs-space-2) color-mix(in oklch, var(--zs-label) 18%, transparent);
   z-index: 1;
   cursor: grab;
   -webkit-user-select: none;
@@ -192,12 +218,14 @@
   --zs-slider-thumb-size: 1.25rem;
 }
 
-/* Outline variant — accent rim only, no inner accent halo. */
+/* Outline variant — accent rim only, no inner accent halo.
+   Slice 7 visual-polish item 4: rim drops to a single hairline so the
+   outline read is genuinely thinner than the default-variant rim. */
 .zs-slider--outline .zs-slider__thumb {
   background: var(--zs-surface-raised);
   box-shadow:
-    0 0 0 0.125rem var(--zs-accent),
-    0 0.125rem 0.375rem 0 color-mix(in oklch, var(--zs-label) 20%, transparent);
+    0 0 0 var(--zs-selection-hairline) var(--zs-accent),
+    0 var(--zs-space-half) var(--zs-space-2) color-mix(in oklch, var(--zs-label) 18%, transparent);
 }
 
 @media (hover: hover) {
@@ -233,22 +261,30 @@
   margin: 0;
 }
 
-/* ─── Disabled state ───────────────────────────────────────────────── */
+/* ─── Disabled state ───────────────────────────────────────────────── *
+ *
+ * Slice 7 visual-polish item 5: pre-fix the disabled fill/rim used
+ * `--zs-label-tertiary` (a text-strength gray) so the track read as a
+ * darker stripe than the active state — the eye flipped "this is on,
+ * just muted" instead of "this is inactive". Shift to non-text fill
+ * tokens: indicator drops to `--zs-fill` (the same alpha the input
+ * filled-bg lands on, a quiet plate) and the thumb's rim drops to the
+ * weakest label rung (`--zs-label-quaternary`) at hairline weight. */
 .zs-slider[data-disabled] .zs-slider__indicator {
-  background: var(--zs-label-tertiary);
+  background: var(--zs-fill);
 }
 .zs-slider[data-disabled] .zs-slider__thumb {
   background: var(--zs-surface-raised);
   cursor: not-allowed;
   box-shadow:
-    0 0 0 0.1875rem var(--zs-label-tertiary),
-    none;
+    0 0 0 var(--zs-selection-hairline) var(--zs-label-quaternary),
+    0 0 0 0 transparent;
 }
 .zs-slider--outline[data-disabled] .zs-slider__thumb {
   background: var(--zs-surface-raised);
   box-shadow:
-    0 0 0 0.125rem var(--zs-label-tertiary),
-    none;
+    0 0 0 var(--zs-selection-hairline) var(--zs-label-quaternary),
+    0 0 0 0 transparent;
 }
 
 /* ─── Invalid state ────────────────────────────────────────────────── */
@@ -269,10 +305,19 @@
   inline-size: auto;
   block-size: 100%;
   min-block-size: 8rem;
+  /* Vertical orientation has no horizontal floor — its cross axis is
+     allowed to collapse to the track width. */
+  min-inline-size: 0;
 }
 .zs-slider--vertical .zs-slider__value {
-  grid-column: 1;
-  grid-row: 1;
+  /* Vertical reverts to in-flow above the track — the inline-axis
+     positioning that tracks the thumb doesn't translate to a vertical
+     track, so we anchor the badge to the top of the control area. */
+  position: static;
+  inset-block-end: auto;
+  inset-inline-start: auto;
+  transform: none;
+  text-align: center;
   justify-self: center;
 }
 .zs-slider--vertical .zs-slider__control {

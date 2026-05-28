@@ -70,12 +70,25 @@
   border-radius: var(--zs-control-radius-lg);
 }
 
-/* ─── Variants ─────────────────────────────────────────────────────── */
+/* ─── Variants ─────────────────────────────────────────────────────── *
+ *
+ * Slice 7 visual-polish item 6: pre-fix the `default` variant fell back
+ * to `--zs-input-bg` (Crystal: ~6% alpha — visually indistinguishable
+ * from the transparent `--outline`). Promote default to the FILLED
+ * surface so the two variants read as distinct material vs. rim. */
 .zs-number-field--default .zs-number-field__group {
-  background: var(--zs-input-bg);
+  background-color: var(--zs-input-bg-filled);
 }
 .zs-number-field--outline .zs-number-field__group {
   background: transparent;
+}
+@media (hover: hover) {
+  .zs-number-field--default:not([data-disabled]):not([data-readonly]):not(
+      [data-focused]
+    )
+    .zs-number-field__group:hover {
+    background-color: var(--zs-input-bg-filled-hover);
+  }
 }
 
 /* ─── Hover (hover-capable pointers only) ──────────────────────────── */
@@ -283,7 +296,15 @@
      bordered shell so it doesn't crowd the input. We use a negative
      inline-start offset relative to the Root; consumers reserve room by
      adding `padding-inline-start` (or margin) on the cell that wraps
-     the Root. The small visual is a horizontal-resize glyph. */
+     the Root. The small visual is a horizontal-resize glyph.
+
+     Slice 7 visual-polish item 3: pre-fix the chip was a near-blank
+     square (--zs-fill-quaternary is ≈ 6% alpha, no border, no resting
+     glyph — the ScrubAreaCursor's SVG only shows while pointer-locked).
+     Bump the rest treatment to `--zs-input-bg-hover` + a hairline rim
+     so the affordance reads at rest, and paint a bidirectional-arrow
+     glyph via a ::before SVG mask so `currentColor` (and forced-colors
+     mappings) flow through. */
   position: absolute;
   inset-block-start: 50%;
   inset-inline-start: calc(-1 * var(--zs-space-6));
@@ -294,16 +315,39 @@
   align-items: center;
   justify-content: center;
   color: var(--zs-label-secondary);
-  background: var(--zs-fill-quaternary);
+  background-color: var(--zs-input-bg-hover);
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-input-border);
   border-radius: var(--zs-control-radius-sm);
   cursor: ew-resize;
   -webkit-user-select: none;
   user-select: none;
   touch-action: none;
+  transition:
+    color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
 }
-.zs-number-field__scrub > svg {
-  inline-size: 1rem;
-  block-size: 1rem;
+.zs-number-field__scrub::before {
+  content: "";
+  display: block;
+  inline-size: 0.625rem;
+  block-size: 0.625rem;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1 5 L3 3 L3 7 Z M9 5 L7 3 L7 7 Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1 5 L3 3 L3 7 Z M9 5 L7 3 L7 7 Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+@media (hover: hover) {
+  .zs-number-field__scrub:hover {
+    color: var(--zs-accent-active);
+    box-shadow: inset 0 0 0 var(--zs-selection-hairline)
+      var(--zs-input-border-hover);
+  }
+}
+/* The fixed-position ScrubAreaCursor's SVG sizing (used during
+   pointer-lock drag, not at rest). The resting affordance is the
+   ::before SVG-mask glyph above. */
+.zs-number-field__scrub-cursor > svg {
+  inline-size: 1.625rem;
+  block-size: 0.875rem;
 }
 .zs-number-field__scrub-cursor {
   position: fixed;

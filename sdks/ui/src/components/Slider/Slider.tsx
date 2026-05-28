@@ -72,6 +72,7 @@
 import {
   forwardRef,
   type ComponentPropsWithoutRef,
+  type CSSProperties,
   type JSX,
   type ReactNode,
   type RefAttributes,
@@ -254,6 +255,48 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
   const isRange = Array.isArray(observed);
   const thumbCount = isRange ? (observed as readonly number[]).length : 1;
 
+  // ──────────────────────────────────────────────────────────────────
+  // Value-label thumb-tracking (Slice 7 visual-polish item 1).
+  //
+  // Compute the active thumb's percentage and emit it as the
+  // `--zs-slider-value-position` custom property on the Root. The
+  // value badge (`.zs-slider__value`) consumes it via
+  // `inset-inline-start: var(--zs-slider-value-position, 50%)` so the
+  // "60%" output floats above the thumb instead of pinning to the
+  // top-right corner of the grid row.
+  //
+  // The current value is read directly from the controlled `value`
+  // prop OR the uncontrolled `defaultValue` so the static
+  // screenshot/SSR pass renders the label in the right place without
+  // a render-callback (Base UI's `state.value` would only update on
+  // the client). For range mode we use the FIRST thumb's value — the
+  // single-thumb shape is the dominant case; future work can paint a
+  // pair of value badges if the brief calls for it.
+  //
+  // The computation is undefined (→ falls back to 50%) when neither
+  // value nor defaultValue is provided AND `showValue` is set — the
+  // Slider has no anchor to track, so center is the safest read.
+  const min = (rest as { min?: number }).min ?? 0;
+  const max = (rest as { max?: number }).max ?? 100;
+  const trackedValue: number | undefined = isRange
+    ? (observed as readonly number[])[0]
+    : (observed as number | undefined);
+  let valuePositionStyle: CSSProperties | undefined;
+  if (
+    showValue &&
+    orientation === "horizontal" &&
+    typeof trackedValue === "number" &&
+    Number.isFinite(trackedValue) &&
+    max > min
+  ) {
+    const ratio = (trackedValue - min) / (max - min);
+    const clamped = Math.max(0, Math.min(1, ratio));
+    const percent = clamped * 100;
+    valuePositionStyle = {
+      ["--zs-slider-value-position" as string]: `${percent}%`,
+    };
+  }
+
   return (
     <BaseSlider.Root
       {...(rest as BaseRootProps)}
@@ -272,6 +315,7 @@ const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
         `zs-slider--${orientation}`,
         className,
       )}
+      style={valuePositionStyle}
       data-variant={variant}
       data-size={size}
       data-orientation={orientation}
