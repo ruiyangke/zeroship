@@ -1178,5 +1178,37 @@ pub mod completions_store {
 /// "Unknown device" when the header is missing or malformed.
 fn user_agent_str(h: Option<&HeaderValue>) -> String {
     h.and_then(|v| v.to_str().ok())
-        .map_or_else(|| "Unknown device".to_string(), str::to_string)
+        .map(|s| {
+            let trimmed: String = s
+                .chars()
+                .take(120)
+                .filter(|ch| !ch.is_control())
+                .collect();
+            if trimmed.is_empty() {
+                "Unknown device".to_string()
+            } else {
+                trimmed
+            }
+        })
+        .unwrap_or_else(|| "Unknown device".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_agent_str_caps_long_values() {
+        let raw = "A".repeat(121);
+        let header = HeaderValue::from_str(&raw).expect("header value");
+        let got = user_agent_str(Some(&header));
+        assert_eq!(got.len(), 120);
+        assert!(got.chars().all(|ch| ch == 'A'));
+    }
+
+    #[test]
+    fn user_agent_str_uses_unknown_for_empty_values() {
+        let header = HeaderValue::from_static("");
+        assert_eq!(user_agent_str(Some(&header)), "Unknown device");
+    }
 }
