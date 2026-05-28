@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Button, Menu } from "../components";
 
@@ -44,6 +45,22 @@ export const BasicItems: Story = {
       </Menu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /^actions$/i });
+
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      await body.findByRole("menuitem", { name: /new file/i }),
+    ).toBeVisible();
+
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("aria-expanded", "false"),
+    );
+  },
 };
 
 /* ─── 2. WithGroups ─────────────────────────────────────────────────── */
@@ -175,6 +192,22 @@ export const WithCheckboxItem: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /format/i }));
+    const bold = await body.findByRole("menuitemcheckbox", { name: /bold/i });
+    const italic = body.getByRole("menuitemcheckbox", { name: /italic/i });
+
+    await expect(bold).toHaveAttribute("aria-checked", "true");
+    await expect(italic).toHaveAttribute("aria-checked", "false");
+    await userEvent.click(italic);
+    await waitFor(() =>
+      expect(italic).toHaveAttribute("aria-checked", "true"),
+    );
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 5. WithRadioGroup ─────────────────────────────────────────────── */
@@ -222,6 +255,21 @@ export const WithRadioGroup: Story = {
         </Menu>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /appearance/i }),
+    );
+    const system = await body.findByRole("menuitemradio", { name: /system/i });
+    const dark = body.getByRole("menuitemradio", { name: /dark/i });
+
+    await expect(system).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(dark);
+    await waitFor(() => expect(dark).toHaveAttribute("aria-checked", "true"));
+    await userEvent.keyboard("{Escape}");
   },
 };
 
@@ -305,6 +353,17 @@ export const WithKeyboardShortcuts: Story = {
       </Menu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /^edit$/i }));
+    const paste = await body.findByRole("menuitem", { name: /^paste$/i });
+    await expect(paste).toBeVisible();
+    await userEvent.keyboard("P");
+    await expect(paste).toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 8. NestedSubmenu ──────────────────────────────────────────────── */
@@ -345,6 +404,18 @@ export const NestedSubmenu: Story = {
       </Menu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /more/i }));
+    const share = await body.findByRole("menuitem", { name: /share with/i });
+    await userEvent.hover(share);
+    await expect(
+      await body.findByRole("menuitem", { name: /email/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 9. WithArrow ──────────────────────────────────────────────────── */
@@ -414,6 +485,20 @@ export const DisabledItem: Story = {
       </Menu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /actions/i }));
+    const duplicate = await body.findByRole("menuitem", {
+      name: /duplicate/i,
+    });
+
+    await expect(duplicate).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(duplicate);
+    await expect(duplicate).not.toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 11. PlacementSide ─────────────────────────────────────────────── */
@@ -562,6 +647,78 @@ export const WithLinkItemAsChild: Story = {
       </Menu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /help/i }));
+    const native = await body.findByRole("menuitem", { name: /read docs/i });
+    const support = body.getByRole("menuitem", { name: /contact support/i });
+
+    await expect(native).toHaveAttribute("href", "https://example.com/docs");
+    await expect(support).toHaveAttribute(
+      "href",
+      "https://example.com/support",
+    );
+    await expect(support.tagName).toBe("A");
+    await userEvent.keyboard("{Escape}");
+  },
+};
+
+/* ─── 14. ModalBackdrop ────────────────────────────────────────────── */
+export const ModalBackdrop: Story = {
+  name: "Modal menu with backdrop",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Modal menu">
+      <Menu modal>
+        <Menu.Trigger render={<Button>Share</Button>} />
+        <Menu.Portal>
+          <Menu.Backdrop />
+          <Menu.Popup align="center" sideOffset={10}>
+            <Menu.Arrow>
+              <svg width="16" height="8" viewBox="0 0 16 8" aria-hidden="true">
+                <path d="M 0,0 L 8,8 L 16,0 Z" fill="currentColor" />
+              </svg>
+            </Menu.Arrow>
+            <Menu.Item shortcut="S">Send invite</Menu.Item>
+            <Menu.CheckboxItem checked={false} shortcut="N">
+              Notify team
+            </Menu.CheckboxItem>
+            <Menu.RadioGroup value="viewer">
+              <Menu.RadioItem value="viewer" shortcut="V">
+                Viewer
+              </Menu.RadioItem>
+              <Menu.RadioItem value="editor" shortcut="E">
+                Editor
+              </Menu.RadioItem>
+            </Menu.RadioGroup>
+            <Menu.LinkItem href="https://example.com/audit" shortcut="A">
+              Audit log
+            </Menu.LinkItem>
+          </Menu.Popup>
+        </Menu.Portal>
+      </Menu>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /share/i }));
+    await expect(
+      await body.findByRole("menuitem", { name: /send invite/i }),
+    ).toBeVisible();
+    await expect(
+      body.getByRole("menuitemcheckbox", { name: /notify team/i }),
+    ).toHaveAttribute("aria-checked", "false");
+    await expect(
+      body.getByRole("menuitemradio", { name: /viewer/i }),
+    ).toHaveAttribute("aria-checked", "true");
+    await expect(
+      body.getByRole("menuitem", { name: /audit log/i }),
+    ).toHaveAttribute("href", "https://example.com/audit");
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── tiny SVG glyphs ─────────────────────────────────────────────── */

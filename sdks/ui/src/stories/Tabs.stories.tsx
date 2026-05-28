@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useState } from "react";
 import { Tabs } from "../components";
 
@@ -88,6 +89,20 @@ export const Basic: Story = {
       </Tabs>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const overview = canvas.getByRole("tab", { name: /overview/i });
+    const usage = canvas.getByRole("tab", { name: /usage/i });
+
+    await expect(overview).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(usage);
+    await waitFor(() =>
+      expect(usage).toHaveAttribute("aria-selected", "true"),
+    );
+    await expect(
+      canvas.getByRole("tabpanel", { name: /usage/i }),
+    ).toHaveTextContent(/request volume/i);
+  },
 };
 
 /* ─── 2. AllVariants — default / pill / card side by side ──────────── */
@@ -154,6 +169,16 @@ export const AllVariants: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(canvas.getByRole("tab", { name: /archive/i }));
+    await expect(canvas.getByText(/archive content/i)).toBeVisible();
+    await userEvent.click(canvas.getByRole("tab", { name: /week/i }));
+    await expect(canvas.getByText(/this week/i)).toBeVisible();
+    await userEvent.click(canvas.getByRole("tab", { name: /history/i }));
+    await expect(canvas.getByText(/history panel/i)).toBeVisible();
+  },
 };
 
 /* ─── 3. AllSizes — sm / md / lg ───────────────────────────────────── */
@@ -237,6 +262,22 @@ export const Vertical: Story = {
       </Tabs>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const profile = canvas.getByRole("tab", { name: /profile/i });
+    const account = canvas.getByRole("tab", { name: /account/i });
+
+    await expect(canvas.getByRole("tablist")).toHaveAttribute(
+      "aria-orientation",
+      "vertical",
+    );
+    await userEvent.tab();
+    await expect(profile).toHaveFocus();
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    await waitFor(() =>
+      expect(account).toHaveAttribute("aria-selected", "true"),
+    );
+  },
 };
 
 /* ─── 5. WithIcons — leading glyph ─────────────────────────────────── */
@@ -434,6 +475,17 @@ export const DisabledTab: Story = {
       </Tabs>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const active = canvas.getByRole("tab", { name: /active/i });
+    const disabled = canvas.getByRole("tab", { name: /disabled/i });
+
+    await expect(active).toHaveAttribute("aria-selected", "true");
+    await expect(disabled).toBeDisabled();
+    await userEvent.click(disabled);
+    await expect(active).toHaveAttribute("aria-selected", "true");
+    await expect(disabled).toHaveAttribute("aria-selected", "false");
+  },
 };
 
 /* ─── 9. ControlledValue — controlled with external state ──────────── */
@@ -490,6 +542,15 @@ export const ControlledValue: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await expect(canvas.getByText(/selected: two/i)).toBeVisible();
+    await userEvent.click(canvas.getByRole("tab", { name: /three/i }));
+    await waitFor(() =>
+      expect(canvas.getByText(/selected: three/i)).toBeVisible(),
+    );
+  },
 };
 
 /* ─── 10. WithAnimatedIndicator — sandboxed default variant ────────── */
@@ -526,6 +587,14 @@ export const WithAnimatedIndicator: Story = {
       </Tabs>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await expect(canvas.getByText(/active content/i)).toBeVisible();
+    await expect(canvas.queryByText(/dormant content/i)).not.toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("tab", { name: /dormant/i }));
+    await expect(await canvas.findByText(/dormant content/i)).toBeVisible();
+  },
 };
 
 /* ─── 11. LazyMountPanel — only the active panel is in the DOM ─────── */
@@ -572,6 +641,50 @@ export const LazyMountPanel: Story = {
       </Tabs>
     </div>
   ),
+};
+
+/* ─── 13. ActivationAndOverrides ───────────────────────────────────── */
+export const ActivationAndOverrides: Story = {
+  name: "Activate on focus and overrides",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Activation overrides"
+    >
+      <Tabs defaultValue="alpha" size="sm" data-testid="tabs-overrides">
+        <Tabs.List activateOnFocus loopFocus={false}>
+          <Tabs.Tab value="alpha" size="lg">
+            Alpha
+          </Tabs.Tab>
+          <Tabs.Tab value="beta">Beta</Tabs.Tab>
+          <Tabs.Indicator />
+        </Tabs.List>
+        <Tabs.Panel value="alpha" keepMounted={false}>
+          Alpha panel.
+        </Tabs.Panel>
+        <Tabs.Panel value="beta" keepMounted>
+          Beta panel.
+        </Tabs.Panel>
+      </Tabs>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const alpha = canvas.getByRole("tab", { name: /alpha/i });
+    const beta = canvas.getByRole("tab", { name: /beta/i });
+
+    await expect(alpha).toHaveAttribute("data-size", "lg");
+    await userEvent.tab();
+    await expect(alpha).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await waitFor(() =>
+      expect(beta).toHaveAttribute("aria-selected", "true"),
+    );
+    await userEvent.keyboard("{ArrowRight}");
+    await expect(beta).toHaveFocus();
+    await expect(canvas.getByText(/beta panel/i)).toBeVisible();
+  },
 };
 
 /* ─── 12. RTL — mirrored layout ────────────────────────────────────── */
