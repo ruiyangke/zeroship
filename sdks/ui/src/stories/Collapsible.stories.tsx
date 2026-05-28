@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import { useState } from "react";
 import { Card, Collapsible } from "../components";
 
@@ -40,6 +41,22 @@ export const Basic: Story = {
       </Collapsible>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", {
+      name: /show advanced options/i,
+    });
+
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      canvas.getByText(/advanced options reveal here/i),
+    ).toBeVisible();
+
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  },
 };
 
 /* ─── 2. Controlled — external state drives open ───────────────────── */
@@ -94,6 +111,20 @@ export const Controlled: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", { name: /release notes/i });
+    const readout = canvas.getByText(/open: true/i);
+
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(readout).toHaveTextContent("Open: false");
+
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(readout).toHaveTextContent("Open: true");
+  },
 };
 
 /* ─── 3. Disabled — root cascade ───────────────────────────────────── */
@@ -121,6 +152,18 @@ export const Disabled: Story = {
       </Collapsible>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", {
+      name: /disabled disclosure/i,
+    });
+
+    await expect(trigger).toBeDisabled();
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(trigger).not.toHaveFocus();
+  },
 };
 
 /* ─── 4. InsideCard — Collapsible sits inside a Card ───────────────── */
@@ -163,6 +206,20 @@ export const InsideCard: Story = {
       </Card>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", {
+      name: /advanced filters/i,
+    });
+
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(trigger);
+    await expect(
+      canvas.getByText(/filter by event type/i),
+    ).toBeVisible();
+  },
 };
 
 /* ─── 5. RTL — mirrored layout ─────────────────────────────────────── */
@@ -196,4 +253,14 @@ export const RTL: Story = {
       </Collapsible>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", {
+      name: /הצג אפשרויות מתקדמות/i,
+    });
+
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  },
 };
