@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
+use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
@@ -43,6 +44,8 @@ use crate::store::identities::{GuardedUnlink, Identity};
 use crate::store::{identities, sessions, users};
 use crate::store::users::UserRow;
 use crate::ui::{ErrorPage, LinkedIdentity, MePage, PublicErrorMessage};
+
+const MAX_PROVIDER_PATH_BYTES: usize = 64;
 
 // ─── /me GET ─────────────────────────────────────────────────────────────
 
@@ -101,7 +104,13 @@ pub async fn unlink(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let provider = &path.0;
+    let provider = path.into_inner().0;
+    if !valid_provider_path_segment(&provider) {
+        return render_error_page_with_status(
+            PublicErrorMessage::InvalidRequest,
+            StatusCode::BAD_REQUEST,
+        );
+    }
 
     // 1. CSRF.
     let cookie_header = req
@@ -123,7 +132,7 @@ pub async fn unlink(
     };
 
     // 3. Unlink with the orphan-guard enforced atomically in SQL.
-    let result = match identities::unlink_preserving_credential(db.as_ref(), user.id, provider)
+    let result = match identities::unlink_preserving_credential(db.as_ref(), user.id, &provider)
         .await
     {
         Ok(result) => result,
@@ -160,7 +169,7 @@ pub async fn unlink(
                 event_type: "oauth_unlink_refused",
                 outcome: "failure",
                 user_id: Some(&user.id),
-                auth_method: Some(provider),
+                auth_method: Some(&provider),
                 detail: json!({ "reason": "would_orphan_account" }),
                 ..Default::default()
             },
@@ -184,7 +193,7 @@ pub async fn unlink(
             event_type: "oauth_unlink_success",
             outcome: "success",
             user_id: Some(&user.id),
-            auth_method: Some(provider),
+            auth_method: Some(&provider),
             detail: json!({ "provider": provider }),
             ..Default::default()
         },
@@ -238,6 +247,10 @@ pub(crate) const fn would_leave_credential(has_password: bool, other_identities:
     has_password || other_identities > 0
 }
 
+fn valid_provider_path_segment(provider: &str) -> bool {
+    !provider.is_empty() && provider.len() <= MAX_PROVIDER_PATH_BYTES
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_me(
     user: &UserRow,
@@ -286,6 +299,10 @@ fn redirect_to_login() -> HttpResponse {
 }
 
 fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
+    render_error_page_with_status(message, StatusCode::OK)
+}
+
+fn render_error_page_with_status(message: PublicErrorMessage, status: StatusCode) -> HttpResponse {
     let page = ErrorPage {
         message,
         error_code: message.error_code(),
@@ -293,7 +310,7 @@ fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
-    let mut r = HttpResponse::Ok();
+    let mut r = HttpResponse::build(status);
     r.content_type("text/html; charset=utf-8");
     r.body(body)
 }
@@ -331,5 +348,13 @@ mod tests {
         let has_password = false;
         let other_identities = 1;
         assert!(would_leave_credential(has_password, other_identities));
+    }
+
+    #[test]
+    fn provider_path_segment_is_bounded() {
+        assert!(valid_provider_path_segment("github"));
+        assert!(valid_provider_path_segment(&"a".repeat(64)));
+        assert!(!valid_provider_path_segment(""));
+        assert!(!valid_provider_path_segment(&"a".repeat(65)));
     }
 }
