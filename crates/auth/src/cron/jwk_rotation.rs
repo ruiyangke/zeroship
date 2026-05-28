@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use compio_postgres::Client;
 
+use crate::advisory_lock::{jwk_set_lock_key, with_advisory_lock};
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
 use crate::hydra_client::HydraAdmin;
@@ -69,8 +70,16 @@ pub(crate) async fn tick(
     rotation_days: i64,
     retain_days: i64,
 ) -> Result<()> {
-    retire_stale_keys(admin, db, ID_TOKEN_SET, ID_TOKEN_ALGS, rotation_days, retain_days).await?;
-    retire_stale_keys(
+    process_set(
+        admin,
+        db,
+        ID_TOKEN_SET,
+        ID_TOKEN_ALGS,
+        rotation_days,
+        retain_days,
+    )
+    .await?;
+    process_set(
         admin,
         db,
         ACCESS_TOKEN_SET,
@@ -79,8 +88,6 @@ pub(crate) async fn tick(
         retain_days,
     )
     .await?;
-    rotate_set_if_due(admin, db, ID_TOKEN_SET, ID_TOKEN_ALGS, rotation_days).await?;
-    rotate_set_if_due(admin, db, ACCESS_TOKEN_SET, ACCESS_TOKEN_ALGS, rotation_days).await?;
     Ok(())
 }
 
@@ -94,6 +101,22 @@ pub async fn tick_once_for_test(
     retain_days: i64,
 ) -> Result<()> {
     tick(admin, db, rotation_days, retain_days).await
+}
+
+async fn process_set(
+    admin: &HydraAdmin,
+    db: &Client,
+    set: &str,
+    algs: &[&str],
+    rotation_days: i64,
+    retain_days: i64,
+) -> Result<()> {
+    let lock_key = jwk_set_lock_key(set);
+    with_advisory_lock(db, lock_key, || async {
+        retire_stale_keys(admin, db, set, algs, rotation_days, retain_days).await?;
+        rotate_set_if_due(admin, db, set, algs, rotation_days).await
+    })
+    .await
 }
 
 /// Returns the days since the set was last rotated, or `None` if we

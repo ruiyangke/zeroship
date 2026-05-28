@@ -11,6 +11,8 @@
 pub mod clients_config;
 pub mod keys;
 
+use compio_postgres::Client;
+
 use crate::error::Result;
 use crate::hydra_client::HydraAdmin;
 use clients_config::ClientsConfig;
@@ -29,9 +31,14 @@ use clients_config::ClientsConfig;
 ///   clients config cannot be read or parsed.
 /// - [`AuthError::Hydra`](crate::error::AuthError::Hydra) for any admin
 ///   API failure during key generation or client reconciliation.
-pub async fn run(admin: &HydraAdmin, allow_bootstrap: bool, clients_config_path: &str) -> Result<()> {
+pub async fn run(
+    admin: &HydraAdmin,
+    db: &Client,
+    allow_bootstrap: bool,
+    clients_config_path: &str,
+) -> Result<()> {
     if allow_bootstrap {
-        keys::ensure_signing_keys(admin).await?;
+        keys::ensure_signing_keys(admin, db).await?;
     } else if keys_empty(admin).await? {
         return Err(crate::error::AuthError::Bootstrap(
             "hydra signing-key sets are empty; restart with --bootstrap to generate".into(),

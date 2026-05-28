@@ -8,6 +8,9 @@
 
 use std::collections::HashSet;
 
+use compio_postgres::Client;
+
+use crate::advisory_lock::{with_advisory_lock, BOOTSTRAP_SIGNING_KEYS_LOCK};
 use crate::error::Result;
 use crate::hydra_client::HydraAdmin;
 
@@ -22,10 +25,13 @@ pub const ACCESS_TOKEN_SET: &str = "hydra.jwt.access-token";
 ///
 /// Propagates any [`AuthError::Hydra`](crate::error::AuthError::Hydra) error
 /// from the admin API (network failures, non-2xx responses, decode errors).
-pub async fn ensure_signing_keys(admin: &HydraAdmin) -> Result<()> {
-    ensure_set(admin, ID_TOKEN_SET, &["EdDSA", "RS256"]).await?;
-    ensure_set(admin, ACCESS_TOKEN_SET, &["EdDSA"]).await?;
-    Ok(())
+pub async fn ensure_signing_keys(admin: &HydraAdmin, db: &Client) -> Result<()> {
+    with_advisory_lock(db, BOOTSTRAP_SIGNING_KEYS_LOCK, || async {
+        ensure_set(admin, ID_TOKEN_SET, &["EdDSA", "RS256"]).await?;
+        ensure_set(admin, ACCESS_TOKEN_SET, &["EdDSA"]).await?;
+        Ok(())
+    })
+    .await
 }
 
 async fn ensure_set(admin: &HydraAdmin, set: &str, algs: &[&str]) -> Result<()> {

@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Bootstrap: keys + client reconciliation.
     let admin = HydraAdmin::new(&cfg.hydra_admin);
-    bootstrap::run(&admin, cfg.bootstrap, &cfg.clients_config).await?;
+    bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
     tracing::info!("bootstrap complete");
 
     // 4. Build the Google JWKS cache. Only constructed when Google OAuth
