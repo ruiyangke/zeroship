@@ -39,7 +39,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::sessions::login as session_cookie;
-use crate::store::identities::Identity;
+use crate::store::identities::{GuardedUnlink, Identity};
 use crate::store::{identities, sessions, users};
 use crate::store::users::UserRow;
 use crate::ui::{ErrorPage, LinkedIdentity, MePage, PublicErrorMessage};
@@ -122,7 +122,17 @@ pub async fn unlink(
         return redirect_to_login();
     };
 
-    // 3. Load identities, enforce orphan-guard.
+    // 3. Unlink with the orphan-guard enforced atomically in SQL.
+    let result = match identities::unlink_preserving_credential(db.as_ref(), user.id, provider)
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!(error = %e, "identities::unlink_preserving_credential failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    };
+
     let idents = match identities::list_for_user(db.as_ref(), user.id).await {
         Ok(v) => v,
         Err(e) => {
@@ -131,11 +141,7 @@ pub async fn unlink(
         }
     };
 
-    let has_this = idents.iter().any(|i| &i.provider == provider);
-    let other_identities = idents.iter().filter(|i| &i.provider != provider).count();
-    let has_password = user.password_hash.is_some();
-
-    if !has_this {
+    if result == GuardedUnlink::NotLinked {
         let token = csrf::generate_token();
         return render_me(
             &user,
@@ -147,7 +153,7 @@ pub async fn unlink(
         );
     }
 
-    if !would_leave_credential(has_password, other_identities) {
+    if result == GuardedUnlink::WouldOrphan {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
@@ -171,30 +177,7 @@ pub async fn unlink(
         );
     }
 
-    // 4. Unlink.
-    let removed = match identities::unlink(db.as_ref(), user.id, provider).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(error = %e, "identities::unlink failed");
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
-    };
-
-    if !removed {
-        // Raced with another tab. Treat as not-found; the orphan-guard
-        // above already confirmed at least one row existed when we read.
-        let token = csrf::generate_token();
-        return render_me(
-            &user,
-            &idents,
-            &token,
-            &cfg,
-            Some("Identity not found"),
-            None,
-        );
-    }
-
-    // 5. Audit.
+    // 4. Audit.
     audit::emit(
         db.as_ref(),
         &AuditEvent {
@@ -208,15 +191,11 @@ pub async fn unlink(
     )
     .await;
 
-    // 6. Re-render with the fresh identities list.
-    let remaining: Vec<Identity> = idents
-        .into_iter()
-        .filter(|i| &i.provider != provider)
-        .collect();
+    // 5. Re-render with the fresh identities list.
     let token = csrf::generate_token();
     render_me(
         &user,
-        &remaining,
+        &idents,
         &token,
         &cfg,
         None,
@@ -254,6 +233,7 @@ async fn resolve_user(
 /// Returns `true` when at least one sign-in method remains after the
 /// unlink (a password OR one+ other linked identity).
 #[must_use]
+#[cfg(test)]
 pub(crate) const fn would_leave_credential(has_password: bool, other_identities: usize) -> bool {
     has_password || other_identities > 0
 }

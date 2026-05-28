@@ -20,6 +20,13 @@ pub struct Identity {
     pub email_at_link: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedUnlink {
+    Unlinked,
+    NotLinked,
+    WouldOrphan,
+}
+
 /// Find an identity by (provider, subject). None if not linked.
 ///
 /// # Errors
@@ -111,6 +118,75 @@ pub async fn unlink(conn: &Client, user_id: Uuid, provider: &str) -> Result<bool
         .await
         .map_err(|e| AuthError::Db(format!("identities unlink: {e}")))?;
     Ok(affected > 0)
+}
+
+/// Unlink an identity only if the user keeps at least one sign-in method.
+///
+/// This locks the user's row inside one statement so concurrent unlinks against
+/// different providers cannot both observe the same "other" identity and
+/// delete the last credentials.
+///
+/// # Errors
+///
+/// Returns `AuthError::Db` on PG failure.
+pub async fn unlink_preserving_credential(
+    conn: &Client,
+    user_id: Uuid,
+    provider: &str,
+) -> Result<GuardedUnlink> {
+    let row = conn
+        .query_one(
+            "WITH locked_user AS MATERIALIZED ( \
+                 SELECT password_hash IS NOT NULL AS has_password \
+                 FROM auth.users \
+                 WHERE id = $1 \
+                 FOR UPDATE \
+             ), \
+             target AS MATERIALIZED ( \
+                 SELECT EXISTS ( \
+                     SELECT 1 \
+                     FROM auth.identities i \
+                     WHERE i.user_id = $1 \
+                       AND i.provider = $2 \
+                 ) AS had_target \
+                 FROM locked_user \
+             ), \
+             deleted AS ( \
+                 DELETE FROM auth.identities i \
+                 USING locked_user u, target t \
+                 WHERE i.user_id = $1 \
+                   AND i.provider = $2 \
+                   AND t.had_target \
+                   AND ( \
+                       u.has_password \
+                       OR EXISTS ( \
+                           SELECT 1 \
+                           FROM auth.identities other \
+                           WHERE other.user_id = $1 \
+                             AND other.provider <> $2 \
+                       ) \
+                   ) \
+                 RETURNING i.provider \
+             ) \
+             SELECT \
+                 EXISTS (SELECT 1 FROM deleted) AS deleted, \
+                 EXISTS ( \
+                     SELECT 1 \
+                     FROM target t \
+                     WHERE t.had_target \
+                 ) AS had_target",
+            &[&user_id, &provider],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("identities guarded unlink: {e}")))?;
+
+    let deleted: bool = row.get("deleted");
+    let had_target: bool = row.get("had_target");
+    Ok(match (deleted, had_target) {
+        (true, _) => GuardedUnlink::Unlinked,
+        (false, true) => GuardedUnlink::WouldOrphan,
+        (false, false) => GuardedUnlink::NotLinked,
+    })
 }
 
 fn row_to_identity(row: &compio_postgres::Row) -> Identity {
