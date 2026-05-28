@@ -27,7 +27,6 @@ use std::time::Duration;
 use ntex::web;
 use uuid::Uuid;
 
-use zeroship_auth::config::AuthConfig;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
@@ -38,7 +37,7 @@ use zeroship_core::oidc_verify::JwksCache;
 mod common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
 use common::{
-    assert_redirect, extract_query_param, location, read_set_cookie, CookieJar,
+    assert_redirect, extract_query_param, location, read_set_cookie, test_auth_config, CookieJar,
 };
 
 #[ntex::test]
@@ -127,51 +126,19 @@ async fn google_federation_creates_new_user() {
     //    callback we drive. Since we DON'T follow the redirect to a
     //    real browser, we don't need that URL to actually resolve.
     //    We use the auth_base URL after-the-fact.
-    let cfg = Arc::new(AuthConfig {
-        addr: "127.0.0.1:0".to_string(),
-        db_url: db_url.clone(),
-        hydra_admin: hydra_admin_url.clone(),
-        hydra_public: hydra_public.clone(),
-        clients_config: "ops/auth-clients.example.toml".to_string(),
-        bootstrap: false,
-        insecure_dev: true,
-        google_client_id: Some("mock-google-client".into()),
-        google_client_secret: Some("mock-google-secret".into()),
-        // Placeholder — overwritten via the JWKS URL trick below; the
-        // actual value of `google_redirect_uri` only matters for the
-        // upstream `/authorize` redirect step, which we DON'T follow
-        // to a real Google. The mock will dutifully echo whatever we
-        // sent in `redirect_uri` query param.
-        google_redirect_uri: "http://placeholder/oauth/google/callback".to_string(),
-        google_auth_url: mock.google_auth_url(),
-        google_token_url: mock.google_token_url(),
-        google_jwks_url: mock.google_jwks_url(),
-        google_issuer: mock.google_issuer(),
-        github_client_id: None,
-        github_client_secret: None,
-        github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
-        github_authorize_url: "https://github.com/login/oauth/authorize".to_string(),
-        github_token_url: "https://github.com/login/oauth/access_token".to_string(),
-        github_user_url: "https://api.github.com/user".to_string(),
-        github_emails_url: "https://api.github.com/user/emails".to_string(),
-        stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
-        mailer: "stdout".to_string(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_username: None,
-        smtp_password: None,
-        smtp_starttls: true,
-        resend_api_key: None,
-        mail_from_email: "test@zeroship.test".to_string(),
-        mail_from_name: "Test".to_string(),
-        public_url: "http://localhost:0".to_string(),
-        postmark_webhook_user: None,
-        postmark_webhook_password: None,
-        jwk_rotation_days: 90,
-        jwk_retain_days: 31,
-        cron_tick_secs: 86400,
-        audit_retention_check_secs: 3600,
-    });
+    let mut cfg_inner = test_auth_config(&db_url, &hydra_admin_url, &hydra_public);
+    cfg_inner.google_client_id = Some("mock-google-client".into());
+    cfg_inner.google_client_secret = Some("mock-google-secret".into());
+    // Placeholder redirect — the actual value only matters for the
+    // upstream `/authorize` redirect step, which we DON'T follow to a
+    // real Google. The mock will dutifully echo whatever we sent in
+    // the `redirect_uri` query param.
+    cfg_inner.google_redirect_uri = "http://placeholder/oauth/google/callback".to_string();
+    cfg_inner.google_auth_url = mock.google_auth_url();
+    cfg_inner.google_token_url = mock.google_token_url();
+    cfg_inner.google_jwks_url = mock.google_jwks_url();
+    cfg_inner.google_issuer = mock.google_issuer();
+    let cfg = Arc::new(cfg_inner);
     let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
 
     let admin_state = admin.clone();

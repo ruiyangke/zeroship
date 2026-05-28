@@ -8,6 +8,13 @@
 //! NOT a production instance. CI gates them on `AUTH_DB_URL`+`AUTH_HYDRA_ADMIN`
 //! being set; absent either, the tests print `skip` and pass.
 
+// Holding a sync mutex across awaits is the entire point of
+// `JWK_TEST_LOCK` — see comment on the static below. Each
+// `#[compio::test]` spins up its own single-threaded compio runtime,
+// so this can't deadlock: the contender for the mutex is in a
+// SEPARATE thread / runtime.
+#![allow(clippy::await_holding_lock)]
+
 use compio_postgres::{connect, NoTls};
 use std::sync::Mutex;
 use zeroship_auth::cron::jwk_rotation;
@@ -33,7 +40,7 @@ static JWK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[compio::test]
 async fn rotation_first_tick_records_baseline_no_action() {
-    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
         eprintln!("skip: AUTH_DB_URL unset");
@@ -113,7 +120,7 @@ async fn rotation_first_tick_records_baseline_no_action() {
 
 #[compio::test]
 async fn rotation_due_prepends_new_keys() {
-    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
         eprintln!("skip: AUTH_DB_URL unset");

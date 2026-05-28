@@ -23,6 +23,7 @@ pub mod mock_provider;
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::Parser;
 use ntex::web;
 use uuid::Uuid;
 
@@ -32,6 +33,46 @@ use zeroship_auth::hydra_client::types::OAuth2Client;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 use zeroship_auth::store::migrations;
+
+// ─── AuthConfig test fixture ─────────────────────────────────────────────
+//
+// Every test that boots an in-process auth server needs an `AuthConfig`.
+// Building one as a struct literal means re-listing 30+ fields verbatim,
+// and every new field added in a future phase forces a fixture-sync
+// commit across every test file. Driving the same `clap::Parser::parse_from`
+// path the CLI uses lets unset fields take their declared defaults
+// automatically — new fields land with their defaults, no fixture churn.
+//
+// `test_auth_config` baked in the overrides every fixture needs:
+// random bind port, dev-mode cookies, in-repo clients TOML, test-only
+// stash key. Federation-specific tests build on the returned config by
+// mutating the OAuth fields directly (cheaper than parsing again with
+// 8 more CLI args).
+#[must_use]
+pub fn test_auth_config(db_url: &str, hydra_admin: &str, hydra_public: &str) -> AuthConfig {
+    AuthConfig::parse_from([
+        "zeroship-auth",
+        "--addr",
+        "127.0.0.1:0",
+        "--db-url",
+        db_url,
+        "--hydra-admin",
+        hydra_admin,
+        "--hydra-public",
+        hydra_public,
+        "--clients-config",
+        "ops/auth-clients.example.toml",
+        "--insecure-dev",
+        "--stash-signing-key",
+        "test-stash-key-not-for-prod-32bytes!",
+        "--mail-from-email",
+        "test@zeroship.test",
+        "--mail-from-name",
+        "Test",
+        "--public-url",
+        "http://localhost:0",
+    ])
+}
 
 // ─── PKCE ────────────────────────────────────────────────────────────────
 //
@@ -254,10 +295,7 @@ impl Fixture {
     //
     // The Fixture holds ntex's `TestServer` + cyper client, both of which
     // are intentionally `!Send`. Test helper futures here inherit that.
-    // The added URL fields pushed `boot` over the 100-line clippy
-    // pedantic threshold; the body is still cleanly sectioned so a
-    // local `allow` is preferable to artificial sub-extraction.
-    #[allow(clippy::future_not_send, clippy::too_many_lines)]
+    #[allow(clippy::future_not_send)]
     pub async fn boot(client_id_prefix: &str) -> Option<Self> {
         let (Ok(db_url), Ok(hydra_admin_url)) = (
             std::env::var("AUTH_DB_URL"),
@@ -282,46 +320,7 @@ impl Fixture {
         let pg = Arc::new(pg_client);
 
         let admin = HydraAdmin::new(&hydra_admin_url);
-        let cfg = Arc::new(AuthConfig {
-            addr: "127.0.0.1:0".to_string(),
-            db_url: db_url.clone(),
-            hydra_admin: hydra_admin_url.clone(),
-            hydra_public: hydra_public.clone(),
-            clients_config: "ops/auth-clients.example.toml".to_string(),
-            bootstrap: false,
-            insecure_dev: true,
-            google_client_id: None,
-            google_client_secret: None,
-            google_redirect_uri: "https://auth.zeroship.ai/oauth/google/callback".to_string(),
-            google_auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
-            google_token_url: "https://oauth2.googleapis.com/token".to_string(),
-            google_jwks_url: "https://www.googleapis.com/oauth2/v3/certs".to_string(),
-            google_issuer: "https://accounts.google.com".to_string(),
-            github_client_id: None,
-            github_client_secret: None,
-            github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
-            github_authorize_url: "https://github.com/login/oauth/authorize".to_string(),
-            github_token_url: "https://github.com/login/oauth/access_token".to_string(),
-            github_user_url: "https://api.github.com/user".to_string(),
-            github_emails_url: "https://api.github.com/user/emails".to_string(),
-            stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
-            mailer: "stdout".to_string(),
-            smtp_host: None,
-            smtp_port: 587,
-            smtp_username: None,
-            smtp_password: None,
-            smtp_starttls: true,
-            resend_api_key: None,
-            mail_from_email: "test@zeroship.test".to_string(),
-            mail_from_name: "Test".to_string(),
-            public_url: "http://localhost:0".to_string(),
-            postmark_webhook_user: None,
-            postmark_webhook_password: None,
-            jwk_rotation_days: 90,
-            jwk_retain_days: 31,
-            cron_tick_secs: 86400,
-            audit_retention_check_secs: 3600,
-        });
+        let cfg = Arc::new(test_auth_config(&db_url, &hydra_admin_url, &hydra_public));
         let admin_state = admin.clone();
         let cfg_state = cfg.clone();
         let db_state = pg.clone();

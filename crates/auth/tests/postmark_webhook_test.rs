@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use ntex::web;
 use serde_json::json;
@@ -22,50 +23,30 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::store::{migrations, suppressions};
 
-/// Build an `AuthConfig` with sensible defaults for webhook tests. Only
-/// the `postmark_webhook_*` fields are interesting; everything else is
-/// stubbed.
+/// Build an `AuthConfig` for the webhook tests. Only the
+/// `postmark_webhook_*` fields are interesting; everything else takes
+/// the clap default declared in `AuthConfig`. Going through
+/// `parse_from` means new fields added in future phases land with
+/// their defaults — no fixture-sync churn.
 fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
-    AuthConfig {
-        addr: "127.0.0.1:0".to_string(),
-        db_url: String::new(),
-        hydra_admin: "http://127.0.0.1:4445".to_string(),
-        hydra_public: "http://127.0.0.1:4444".to_string(),
-        clients_config: "ops/auth-clients.example.toml".to_string(),
-        bootstrap: false,
-        insecure_dev: true,
-        google_client_id: None,
-        google_client_secret: None,
-        google_redirect_uri: "https://auth.zeroship.ai/oauth/google/callback".to_string(),
-        google_auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
-        google_token_url: "https://oauth2.googleapis.com/token".to_string(),
-        google_jwks_url: "https://www.googleapis.com/oauth2/v3/certs".to_string(),
-        google_issuer: "https://accounts.google.com".to_string(),
-        github_client_id: None,
-        github_client_secret: None,
-        github_redirect_uri: "https://auth.zeroship.ai/oauth/github/callback".to_string(),
-        github_authorize_url: "https://github.com/login/oauth/authorize".to_string(),
-        github_token_url: "https://github.com/login/oauth/access_token".to_string(),
-        github_user_url: "https://api.github.com/user".to_string(),
-        github_emails_url: "https://api.github.com/user/emails".to_string(),
-        stash_signing_key: "test-stash-key-not-for-prod-32bytes!".to_string(),
-        mailer: "stdout".to_string(),
-        smtp_host: None,
-        smtp_port: 587,
-        smtp_username: None,
-        smtp_password: None,
-        smtp_starttls: true,
-        resend_api_key: None,
-        mail_from_email: "test@zeroship.test".to_string(),
-        mail_from_name: "Test".to_string(),
-        public_url: "http://localhost:0".to_string(),
-        postmark_webhook_user: user.map(String::from),
-        postmark_webhook_password: pass.map(String::from),
-        jwk_rotation_days: 90,
-        jwk_retain_days: 31,
-        cron_tick_secs: 86400,
-        audit_retention_check_secs: 3600,
+    let mut args: Vec<String> = vec![
+        "zeroship-auth".to_string(),
+        // Required by clap (no default on `--db-url`). Webhook tests
+        // bring their own pg client and only use AuthConfig for the
+        // basic-auth comparison, so any value parses.
+        "--db-url".to_string(),
+        String::new(),
+        "--insecure-dev".to_string(),
+    ];
+    if let Some(u) = user {
+        args.push("--postmark-webhook-user".to_string());
+        args.push(u.to_string());
     }
+    if let Some(p) = pass {
+        args.push("--postmark-webhook-password".to_string());
+        args.push(p.to_string());
+    }
+    AuthConfig::parse_from(args)
 }
 
 /// Boot PG + register the `/webhooks/postmark` route. Returns `None` if
