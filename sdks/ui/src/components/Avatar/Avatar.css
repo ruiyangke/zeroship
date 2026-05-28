@@ -1,0 +1,186 @@
+/*
+ * Avatar — identity lockup (image with fallback).
+ *
+ * Anatomy:
+ *   .zs-avatar                       — Root span (the content-box)
+ *     ├─ .zs-avatar__image           — <img> when src loaded
+ *     └─ .zs-avatar__fallback        — <span> initials / icon
+ *
+ * Modifier classes:
+ *   size:    --xs | --sm | --md | --lg | --xl
+ *   shape:   --circle | --square | --rounded
+ *
+ * State surface (data-* from Base UI):
+ *   data-image-loading-status="idle" | "loading" | "loaded" | "error"
+ *
+ * Layout discipline:
+ *   - The Root is `inline-flex` with a fixed inline-size + block-size.
+ *     Children are absolutely centered so the lockup reads as a single
+ *     content-shape regardless of which child is mounted.
+ *   - The Image is `inline-size: 100%; block-size: 100%; object-fit:
+ *     cover` so non-square sources still fill the lockup without
+ *     distortion.
+ *   - Group overlap rides `data-position="overlap"` — the consumer
+ *     wraps a row of Avatars and that attribute applies a negative
+ *     `margin-inline-start` so the lockups overlap by a third of
+ *     the size. RTL flips the overlap direction automatically via
+ *     logical properties.
+ *
+ * Motion: none. Avatar carries no transitions.
+ */
+
+.zs-avatar {
+  /* Default token-driven sizing — overridden per `--<size>` modifier. */
+  --zs-avatar-size: 2.5rem;
+  --zs-avatar-text-size: var(--zs-text-headline-size);
+  --zs-avatar-text-line: var(--zs-text-headline-line);
+  --zs-avatar-text-weight: var(--zs-text-headline-weight);
+  --zs-avatar-radius: var(--zs-radius-full);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  inline-size: var(--zs-avatar-size);
+  block-size: var(--zs-avatar-size);
+  border-radius: var(--zs-avatar-radius);
+  overflow: hidden;
+  user-select: none;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  /* Fallback surface — translucent accent so the initials read tinted
+     against any background, not as a flat solid swatch. */
+  background: color-mix(in oklch, var(--zs-accent) 14%, transparent);
+  /* Subtle inset hairline so the lockup reads cut-out from the canvas
+     under it. Same token Card edges use. */
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline)
+    color-mix(in oklch, var(--zs-label) 8%, transparent);
+}
+
+/* ─── Size scale ────────────────────────────────────────────────────── */
+
+.zs-avatar--xs {
+  --zs-avatar-size: 1.5rem;
+  --zs-avatar-text-size: var(--zs-text-caption-2-size);
+  --zs-avatar-text-line: var(--zs-text-caption-2-line);
+  --zs-avatar-text-weight: 600;
+}
+.zs-avatar--sm {
+  --zs-avatar-size: 2rem;
+  --zs-avatar-text-size: var(--zs-text-caption-1-size);
+  --zs-avatar-text-line: var(--zs-text-caption-1-line);
+  --zs-avatar-text-weight: 600;
+}
+.zs-avatar--md {
+  --zs-avatar-size: 2.5rem;
+  --zs-avatar-text-size: var(--zs-text-footnote-size);
+  --zs-avatar-text-line: var(--zs-text-footnote-line);
+  --zs-avatar-text-weight: 600;
+}
+.zs-avatar--lg {
+  --zs-avatar-size: 3rem;
+  --zs-avatar-text-size: var(--zs-text-callout-size);
+  --zs-avatar-text-line: var(--zs-text-callout-line);
+  --zs-avatar-text-weight: 600;
+}
+.zs-avatar--xl {
+  --zs-avatar-size: 4rem;
+  --zs-avatar-text-size: var(--zs-text-headline-size);
+  --zs-avatar-text-line: var(--zs-text-headline-line);
+  --zs-avatar-text-weight: 700;
+}
+
+/* ─── Shape scale ───────────────────────────────────────────────────── */
+
+.zs-avatar--circle {
+  --zs-avatar-radius: var(--zs-radius-full);
+}
+.zs-avatar--square {
+  --zs-avatar-radius: 0;
+}
+.zs-avatar--rounded {
+  --zs-avatar-radius: var(--zs-radius-2);
+}
+
+/* ─── Image ─────────────────────────────────────────────────────────── */
+
+.zs-avatar__image {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+  /* Inherit the Root's radius so a non-overflow-clipped image still
+     reads as the right shape under print / when overflow:hidden is
+     overridden by a consumer. */
+  border-radius: var(--zs-avatar-radius);
+}
+
+/* ─── Fallback ──────────────────────────────────────────────────────── */
+
+.zs-avatar__fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+  block-size: 100%;
+  font-size: var(--zs-avatar-text-size);
+  line-height: var(--zs-avatar-text-line);
+  font-weight: var(--zs-avatar-text-weight);
+  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  color: var(--zs-label);
+}
+
+/* ─── Group overlap ─────────────────────────────────────────────────── *
+ *
+ * Consumer wraps a row of Avatars and sets `data-position="overlap"` on
+ * each child after the first. The negative `margin-inline-start` of
+ * one third of the lockup gives the canonical "stack" rhythm. A
+ * `box-shadow` ring around overlap-tagged Avatars separates them from
+ * the lockup below — uses the canvas-mix so it inherits the parent
+ * surface color (light theme on dark surface still reads). */
+.zs-avatar[data-position="overlap"] {
+  margin-inline-start: calc(-1 * var(--zs-avatar-size) / 3);
+  box-shadow:
+    inset 0 0 0 var(--zs-selection-hairline)
+      color-mix(in oklch, var(--zs-label) 8%, transparent),
+    0 0 0 0.125rem var(--zs-surface);
+}
+
+/* ─── forced-colors / Windows High Contrast ──────────────────────────
+ *
+ * Mirror at the same selector depth so the system palette wins. The
+ * fallback surface becomes Canvas; the inset hairline becomes
+ * CanvasText. The image is left untouched (forced-color-adjust:
+ * auto by default) so photographic content still renders. */
+@media (forced-colors: active) {
+  .zs-avatar {
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-avatar__fallback {
+    color: CanvasText;
+  }
+  .zs-avatar[data-position="overlap"] {
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0.125rem Canvas;
+  }
+}
+
+/* ─── Reduced motion ───────────────────────────────────────────────── *
+ *
+ * No-op block — Avatar has no transitions. Block exists for parity
+ * with the rest of the surface so a future maintainer adding (e.g.) a
+ * fade-in on `data-image-loading-status="loaded"` finds the hook
+ * pre-wired. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-avatar,
+  .zs-avatar__image,
+  .zs-avatar__fallback {
+    transition: none;
+    animation: none;
+  }
+}

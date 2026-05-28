@@ -47,6 +47,8 @@
 @import "./components/Toast/Toast.css";
 @import "./components/Drawer/Drawer.css";
 @import "./components/ScrollArea/ScrollArea.css";
+@import "./components/Avatar/Avatar.css";
+@import "./components/Separator/Separator.css";
 
 *,
 *::before,

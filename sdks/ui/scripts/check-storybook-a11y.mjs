@@ -401,6 +401,23 @@ const stories = [
   "components-scrollarea--inside-card",
   "components-scrollarea--rtl",
   "components-scrollarea--keyboard-scroll",
+  // Slice 17: Avatar + Separator.
+  "components-avatar--basic",
+  "components-avatar--fallback",
+  "components-avatar--fallback-on-error",
+  "components-avatar--sizes",
+  "components-avatar--shapes",
+  "components-avatar--with-icon",
+  "components-avatar--group",
+  "components-avatar--rtl",
+  "components-separator--horizontal",
+  "components-separator--vertical",
+  "components-separator--hairline",
+  "components-separator--thick",
+  "components-separator--not-decorative",
+  "components-separator--inside-list",
+  "components-separator--inside-toolbar",
+  "components-separator--rtl",
 ];
 
 async function launchBrowser() {
