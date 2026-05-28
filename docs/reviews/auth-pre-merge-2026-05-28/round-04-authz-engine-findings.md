@@ -138,3 +138,23 @@ Add a regression test: user with `app_owner_of = [X]` and no platform role, cons
 - **PAT JWT mint/verify** (`crates/control/src/token_handlers.rs:104-162`). Ed25519, requires `typ=pat+jwt`, kid matched against the issuer, issuer + audience pinned, no `alg=none` window. JWT carries `policy_hash`, DB lookup re-checks `(id, owner_id, policy_hash, kind='pat', not revoked, not expired)`. Solid.
 - **OAuth scope subset comparison** (`crates/auth/src/ui/consent.rs:238-249`). Both sides are `sort_dedup`'d before `binary_search`. Subset semantics (`requested ⊆ previously_granted`) is correct; superset requests fall through to the consent UI rather than silently auto-approving. Standard OIDC scopes (`openid`/`email`/`profile`/`offline_access`) are treated as just-another-string in the subset check, which is correct because they're case-sensitive per RFC 6749 and the comparison is exact.
 - **Static policy file syntax**. All nine `.cedar` files terminate with `;\n`, and `build.rs:6-19` parses each at compile time so a malformed policy never lands in a binary. `load_platform_policies` joins them with `\n` and re-parses; `tests::all_static_policies_parse_cleanly` asserts the count.
+
+## Status
+
+- CLOSED C1 (`df95ee3fdd8d8a634d5a2ac8bce6b639aa24fdb2`) — Cedar policy comments now sanitize user-controlled policy names and regression coverage proves injected source does not escape the wrapper.
+- CLOSED C2 (`b9acebdce503f567f16ac9b690b87970a594ddeb`) — `apps.audit_locked` is a real schema field, emitted on app entities, enforced by the static forbid policy, and wired to an admin-gated lock handler.
+- CLOSED H1 (`92607a2c34fb95f2e655fabf759a8f8f93c4303b`) — Cedar resource IDs are validated against the closed typed-id alphabet and invalid route resources are rejected before authorization.
+- CLOSED H2 (`a92b563cf496ef0699aa7f36a49d1aa11775a50c`) — consent and PAT grant validation now authorize "anywhere" by checking `Resource::Any` plus app resources where the user has membership.
+- CLOSED H3 (`e420281acd08b7d1edfd5adc3f427b6c276dbd89`) — `Condition::TimeWindow` lowers to an enforced UTC minute predicate backed by Cedar-visible request time.
+- CLOSED H4 (`b9acebdce503f567f16ac9b690b87970a594ddeb`) — `apps.suspended` is a real schema field, emitted on app entities, enforced by the static forbid policy, and wired to an admin-gated suspend handler.
+- CLOSED M1 (`c32045d17bf2cf28ffd745b455e4c47c5435fa2b`) — entity cache invalidation is exposed and called after role, token, grant, and app flag changes.
+- CLOSED M2 (`d7a9f923ace219f9cfcbb04c0ec9cadaa7643e97`) — authorization audit rows now persist Cedar matched policy IDs.
+- CLOSED M3 (`2fcd65a27829d6565c48c0b6ccfba36d48929eb9`) — PAT validation documents deny-statement subset semantics and rejects empty allow/deny statement shapes.
+- DEFERRED L1 — low-severity vocabulary cleanup; `platform_policies:write` is still used by OAuth client handlers and admin wildcard grants, so deleting or narrowing it should happen as a product/API cleanup decision rather than inside the urgent authz drain.
+- CLOSED L2 (`afd820b177820b194e899d38165a94c964fea0a6`) — PAT validation rejects MFA conditions until MFA state is wired into `AuthzGuard`.
+
+Verification:
+
+- `cargo test -p zeroship-authz` passes.
+- Focused control/auth test binaries for the touched handlers compile with `--no-run`.
+- The requested full command compiles but cannot complete in this sandbox because several live `compio::test` auth tests fail while creating the runtime with `Operation not permitted`.
