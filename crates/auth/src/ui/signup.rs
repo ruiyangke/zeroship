@@ -29,6 +29,7 @@ use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
 
 const MAX_LOGIN_CHALLENGE_BYTES: usize = 256;
+const MAX_SIGNUP_NAME_CHARS: usize = 200;
 
 #[derive(Debug, Deserialize)]
 pub struct SignupQuery {
@@ -114,7 +115,17 @@ pub async fn post(
         return render_signup_bad_request(&challenge, &cfg, "enter a valid email");
     }
 
-    // 4. Rate-limit per IP before entering the CPU-bound password hash.
+    // 4. Name sanity before entering rate limits, hashing, or storage.
+    let Some(name) = normalize_signup_name(&form.name) else {
+        return render_signup_bad_request(
+            &challenge,
+            &cfg,
+            "name must be 1-200 characters",
+        );
+    };
+    let name = name.to_string();
+
+    // 5. Rate-limit per IP before entering the CPU-bound password hash.
     let ip = req
         .peer_addr()
         .map(|addr| addr.ip().to_string())
@@ -141,7 +152,7 @@ pub async fn post(
         }
     }
 
-    // 5. Hash the password — argon2 is CPU-bound, run on spawn_blocking so
+    // 6. Hash the password — argon2 is CPU-bound, run on spawn_blocking so
     // the ntex event loop is not parked (same constraint as /login).
     let password_clone = form.password.clone();
     let phc = match compio::runtime::spawn_blocking(move || password::hash(&password_clone)).await {
@@ -156,11 +167,10 @@ pub async fn post(
         }
     };
 
-    // 6. Insert the user row. Account-enumeration defense: a duplicate
+    // 7. Insert the user row. Account-enumeration defense: a duplicate
     // email is logged but produces the same response as a successful
     // insert — the attacker cannot probe email existence via this endpoint.
-    let name = form.name.trim();
-    let created = match users::create(db.as_ref(), &email, name, Some(&phc)).await {
+    let created = match users::create(db.as_ref(), &email, &name, Some(&phc)).await {
         Ok(u) => Some(u),
         Err(e) => {
             tracing::info!(error = %e, "signup users::create rejected (duplicate or otherwise)");
@@ -168,7 +178,7 @@ pub async fn post(
         }
     };
 
-    // 6b. On a successful create, issue a verification token and email
+    // 7b. On a successful create, issue a verification token and email
     //     it to the user. Both the token issue and the email send are
     //     best-effort — a failure is logged but never surfaced to the
     //     user, because:
@@ -241,7 +251,7 @@ pub async fn post(
         }
     }
 
-    // 7. Redirect to /login carrying the same challenge so the user can
+    // 8. Redirect to /login carrying the same challenge so the user can
     // immediately sign in. The verification email is in their inbox;
     // verifying is decoupled from sign-in.
     redirect_to_login(&challenge)
@@ -267,6 +277,15 @@ fn bounded_login_challenge(challenge: Option<&str>) -> &str {
     challenge
         .filter(|value| value.len() <= MAX_LOGIN_CHALLENGE_BYTES)
         .unwrap_or("")
+}
+
+fn normalize_signup_name(name: &str) -> Option<&str> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_SIGNUP_NAME_CHARS {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 fn render_signup_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
@@ -336,5 +355,19 @@ mod tests {
         let challenge = "a".repeat(257);
         let resp = redirect_to_login(&challenge);
         assert_eq!(location(&resp), "/login");
+    }
+
+    #[test]
+    fn normalize_signup_name_trims_and_accepts_limit() {
+        let name = "A".repeat(200);
+        assert_eq!(normalize_signup_name(" Ada "), Some("Ada"));
+        assert_eq!(normalize_signup_name(&name), Some(name.as_str()));
+    }
+
+    #[test]
+    fn normalize_signup_name_rejects_empty_and_long_values() {
+        let name = "A".repeat(201);
+        assert_eq!(normalize_signup_name("   "), None);
+        assert_eq!(normalize_signup_name(&name), None);
     }
 }
