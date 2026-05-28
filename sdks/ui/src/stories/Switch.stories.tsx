@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useState } from "react";
 import { Button, Field, Switch } from "../components";
 
@@ -51,6 +52,29 @@ export const AllStates: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const off = canvas.getByRole("switch", { name: /^off$/i });
+    const on = canvas.getByRole("switch", { name: /^on$/i });
+    const disabled = canvas.getByRole("switch", { name: /^disabled$/i });
+    const readOnly = canvas.getByRole("switch", { name: /^read only$/i });
+
+    await expect(off).toHaveAttribute("aria-checked", "false");
+    await userEvent.click(off);
+    await waitFor(() => expect(off).toHaveAttribute("aria-checked", "true"));
+
+    await expect(on).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(on);
+    await waitFor(() => expect(on).toHaveAttribute("aria-checked", "false"));
+
+    await expect(disabled).toHaveAttribute("data-disabled");
+    await userEvent.click(disabled);
+    await expect(disabled).toHaveAttribute("aria-checked", "false");
+
+    await expect(readOnly).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(readOnly);
+    await expect(readOnly).toHaveAttribute("aria-checked", "true");
+  },
 };
 
 /* ─── 2. All sizes ─────────────────────────────────────────────────── */
@@ -193,6 +217,16 @@ export const ImmediateEffect: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const darkMode = canvas.getByRole("switch", { name: /dark mode/i });
+    const status = canvas.getByText(/^status:/i);
+
+    await expect(status).toHaveTextContent("status: off");
+    await userEvent.click(darkMode);
+    await waitFor(() => expect(status).toHaveTextContent("status: on"));
+    await expect(darkMode).toHaveAttribute("aria-checked", "true");
+  },
 };
 
 /* ─── 6. Inside a form ─────────────────────────────────────────────── */
@@ -226,6 +260,23 @@ export const InsideForm: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const newsletters = canvas.getByRole("switch", {
+      name: /receive newsletters/i,
+    });
+    const publicProfile = canvas.getByRole("switch", { name: /public profile/i });
+    const save = canvas.getByRole("button", { name: /save preferences/i });
+    const result = canvas.getByText(/^submitted:/i);
+
+    await expect(newsletters).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(save);
+    await waitFor(() => expect(result).toHaveTextContent("newsletters=on"));
+
+    await userEvent.click(publicProfile);
+    await userEvent.click(save);
+    await waitFor(() => expect(result).toHaveTextContent("public=on"));
+  },
 };
 
 /* ─── 7. Disabled (Field cascade) ──────────────────────────────────── */
@@ -246,6 +297,18 @@ export const Disabled: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const locked = canvas.getByRole("switch", { name: /locked off/i });
+    const inherited = canvas.getByRole("switch", { name: /billing alerts/i });
+
+    await expect(locked).toHaveAttribute("data-disabled");
+    await expect(inherited).toHaveAttribute("data-disabled");
+    await userEvent.click(locked);
+    await userEvent.click(inherited);
+    await expect(locked).toHaveAttribute("aria-checked", "false");
+    await expect(inherited).toHaveAttribute("aria-checked", "true");
+  },
 };
 
 /* ─── 8. RTL ──────────────────────────────────────────────────────── */
