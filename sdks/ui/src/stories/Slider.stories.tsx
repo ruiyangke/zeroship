@@ -1,0 +1,365 @@
+import type { Meta, StoryObj } from "@storybook/react";
+import { useState } from "react";
+import { Field, Slider } from "../components";
+
+const meta: Meta<typeof Slider> = {
+  title: "Components/Slider",
+  component: Slider,
+  parameters: {
+    layout: "fullscreen",
+  },
+};
+
+export default meta;
+
+type Story = StoryObj<typeof Slider>;
+
+/* ─── 1. Basic — single thumb ──────────────────────────────────────── */
+export const Basic: Story = {
+  name: "Basic (single thumb)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Stock single-thumb slider. Click the track to seek; drag the " +
+          "thumb to fine-tune; ArrowLeft / ArrowRight on the thumb's nested " +
+          "<input type=range> step by `step` (defaults to 1). The aria-" +
+          "wiring suite asserts that ArrowRight×5 advances the value by " +
+          "exactly 5 × step.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Basic slider">
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Slider
+          defaultValue={50}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Volume"
+          data-testid="slider-basic"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 2. Range — two thumbs ────────────────────────────────────────── */
+export const Range: Story = {
+  name: "Range (two thumbs)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Pass an array to `value` / `defaultValue` and Base UI auto-" +
+          "detects range mode: two thumbs, an indicator that spans the " +
+          "selected segment, independent keyboard control per thumb. The " +
+          "aria-wiring suite asserts dragging thumb-1 right increases " +
+          "value[0] without touching value[1].",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Range slider">
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Slider
+          defaultValue={[20, 60]}
+          min={0}
+          max={100}
+          step={1}
+          data-testid="slider-range"
+          aria-label="Price range"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 3. All sizes ─────────────────────────────────────────────────── */
+export const AllSizes: Story = {
+  name: "All sizes",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="All slider sizes"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">Small (track 0.25rem)</span>
+        <Slider
+          size="sm"
+          defaultValue={30}
+          aria-label="Small slider"
+        />
+      </div>
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">Medium (track 0.375rem)</span>
+        <Slider
+          size="md"
+          defaultValue={50}
+          aria-label="Medium slider"
+        />
+      </div>
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">Large (track 0.5rem)</span>
+        <Slider
+          size="lg"
+          defaultValue={75}
+          aria-label="Large slider"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 4. All variants ──────────────────────────────────────────────── */
+export const AllVariants: Story = {
+  name: "All variants",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="All slider variants"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">Default (solid accent)</span>
+        <Slider
+          variant="default"
+          defaultValue={50}
+          aria-label="Default variant"
+        />
+      </div>
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">Outline (accent rim)</span>
+        <Slider
+          variant="outline"
+          defaultValue={50}
+          aria-label="Outline variant"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 5. Steps (discrete) ──────────────────────────────────────────── */
+export const Steps: Story = {
+  name: "Steps (discrete with snap)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "step=25 — the slider snaps to 0 / 25 / 50 / 75 / 100. " +
+          "Discrete stops let the user pick a coarse setting (e.g. quality " +
+          "level / poll grade) without needing the precision of a numeric " +
+          "input.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Stepped slider">
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Slider
+          defaultValue={50}
+          min={0}
+          max={100}
+          step={25}
+          aria-label="Quality"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 6. With value badge ──────────────────────────────────────────── */
+export const WithValue: Story = {
+  name: "With numeric value badge",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`showValue` renders a Base UI `<output>` next to the track that " +
+          "auto-updates as the value changes. Use formatOptions to spell " +
+          "out percent / currency / units.",
+      },
+    },
+  },
+  render: function WithValueRender() {
+    const [value, setValue] = useState<number>(60);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Slider with value">
+        <div className="zs-story-cell" style={{ inlineSize: "22rem" }}>
+          <Slider
+            showValue
+            value={value}
+            onValueChange={(next) => setValue(next)}
+            min={0}
+            max={100}
+            step={1}
+            // Format as a unit (%) so the value reads as the integer the
+            // user expects. Intl's `style: "percent"` would interpret the
+            // raw number as a fraction (60 → "6,000%") — surprising for a
+            // 0–100 slider.
+            format={{ style: "unit", unit: "percent", maximumFractionDigits: 0 }}
+            aria-label="Brightness"
+            data-testid="slider-withvalue"
+          />
+        </div>
+      </div>
+    );
+  },
+};
+
+/* ─── 7. Disabled ──────────────────────────────────────────────────── */
+export const Disabled: Story = {
+  name: "Disabled",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Disabled slider">
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <span className="zs-story-label">disabled prop</span>
+        <Slider disabled defaultValue={40} aria-label="Locked slider" />
+      </div>
+      <div
+        className="zs-story-cell"
+        style={{ inlineSize: "20rem", marginInlineStart: "2rem" }}
+      >
+        <span className="zs-story-label">Field disabled — inherits</span>
+        <Field disabled>
+          <Field.Label>Speed</Field.Label>
+          <Slider defaultValue={60} aria-label="Speed" />
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 8. With label (Field cascade) ────────────────────────────────── */
+export const WithLabel: Story = {
+  name: "With label + Field cascade",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Composed inside a Field — label sits above, description below. " +
+          "Field's `size` cascades to Slider (size='sm' shown). The label " +
+          "auto-associates with the thumb input via aria-labelledby.",
+      },
+    },
+  },
+  render: function WithLabelRender() {
+    const [value, setValue] = useState<number>(70);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Slider with label">
+        <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+          <Field size="sm">
+            <Field.Label>Volume — {value}%</Field.Label>
+            <Slider
+              value={value}
+              onValueChange={(next) => setValue(next)}
+              min={0}
+              max={100}
+              step={1}
+            />
+            <Field.Description>
+              Drag the handle or use arrow keys.
+            </Field.Description>
+          </Field>
+        </div>
+      </div>
+    );
+  },
+};
+
+/* ─── 9. Vertical orientation ──────────────────────────────────────── */
+export const Vertical: Story = {
+  name: "Vertical orientation",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`orientation=\"vertical\"` flips the track to the block-axis. " +
+          "Up is more (the indicator fills from the bottom), down is less. " +
+          "ArrowUp / ArrowDown still drive the value; PageUp / PageDown " +
+          "step by `largeStep`.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Vertical slider"
+      style={{ alignItems: "center", gap: "2rem" }}
+    >
+      <div
+        className="zs-story-cell"
+        style={{ blockSize: "10rem", inlineSize: "2.5rem" }}
+      >
+        <Slider
+          orientation="vertical"
+          defaultValue={60}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Vertical volume"
+          data-testid="slider-vertical"
+        />
+      </div>
+      <div
+        className="zs-story-cell"
+        style={{ blockSize: "10rem", inlineSize: "2.5rem" }}
+      >
+        <Slider
+          orientation="vertical"
+          defaultValue={[20, 80]}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Vertical range"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 10. RTL ──────────────────────────────────────────────────────── */
+export const RTL: Story = {
+  name: "RTL",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Hebrew label. Under `dir=\"rtl\"`, ArrowRight DECREASES the " +
+          "value and ArrowLeft INCREASES it (the inline-axis flips with " +
+          "writing direction) — every translate / position above is a " +
+          "logical property so the indicator fills from the inline-start, " +
+          "no JS branch.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      dir="rtl"
+      className="zs-story-row"
+      role="group"
+      aria-label="RTL slider"
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Field>
+          <Field.Label>עוצמת קול</Field.Label>
+          <Slider
+            defaultValue={60}
+            min={0}
+            max={100}
+            step={1}
+            aria-label="עוצמת קול"
+            data-testid="slider-rtl"
+          />
+          <Field.Description>גררו או השתמשו בחיצים</Field.Description>
+        </Field>
+      </div>
+    </div>
+  ),
+};

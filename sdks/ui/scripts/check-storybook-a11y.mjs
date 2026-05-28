@@ -197,6 +197,27 @@ const stories = [
   "components-autocomplete--required",
   "components-autocomplete--required-invalid",
   "components-autocomplete--aria-propagation",
+  // Slice 7: NumberField + Slider. 10 stories each = 20 new entries.
+  "components-numberfield--basic",
+  "components-numberfield--all-sizes",
+  "components-numberfield--all-variants",
+  "components-numberfield--min-max-step",
+  "components-numberfield--currency",
+  "components-numberfield--scrub-area",
+  "components-numberfield--disabled",
+  "components-numberfield--with-label",
+  "components-numberfield--required",
+  "components-numberfield--rtl",
+  "components-slider--basic",
+  "components-slider--range",
+  "components-slider--all-sizes",
+  "components-slider--all-variants",
+  "components-slider--steps",
+  "components-slider--with-value",
+  "components-slider--disabled",
+  "components-slider--with-label",
+  "components-slider--vertical",
+  "components-slider--rtl",
 ];
 
 async function launchBrowser() {

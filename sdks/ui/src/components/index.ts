@@ -123,6 +123,24 @@ export type {
   AutocompletePlacement,
 } from "./Autocomplete";
 
+export { NumberField } from "./NumberField";
+export type {
+  NumberFieldProps,
+  NumberFieldSize,
+  NumberFieldVariant,
+} from "./NumberField";
+
+export { Slider } from "./Slider";
+export type {
+  SliderProps,
+  SliderSingleProps,
+  SliderRangeProps,
+  SliderRangeUncontrolledProps,
+  SliderSize,
+  SliderVariant,
+  SliderOrientation,
+} from "./Slider";
+
 export { AlertDialog } from "./AlertDialog";
 export type {
   AlertDialogProps,

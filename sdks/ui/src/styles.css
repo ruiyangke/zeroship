@@ -27,6 +27,8 @@
 @import "./components/Select/Select.css";
 @import "./components/Combobox/Combobox.css";
 @import "./components/Autocomplete/Autocomplete.css";
+@import "./components/NumberField/NumberField.css";
+@import "./components/Slider/Slider.css";
 
 *,
 *::before,

@@ -1,0 +1,379 @@
+/*
+ * NumberField — text input + stepper buttons + optional scrub area.
+ *
+ * Anatomy:
+ *   .zs-number-field                       — Root (positioning context, scrub-area anchor)
+ *     ├─ .zs-number-field__scrub           — drag-to-scrub area (optional)
+ *     │   └─ .zs-number-field__scrub-cursor  — pointer-locked cursor glyph
+ *     └─ .zs-number-field__group           — the bordered shell (focus ring lives here)
+ *         ├─ .zs-number-field__step--dec   — stepper "-" button
+ *         ├─ .zs-number-field__input       — native <input>
+ *         └─ .zs-number-field__step--inc   — stepper "+" button
+ *
+ * Modifier classes (one of each axis):
+ *   variant: --default | --outline
+ *   size:    --sm | --md | --lg
+ *
+ * State surface (driven by data-* attributes Base UI emits on Root):
+ *   data-focused | data-disabled | data-readonly | data-invalid
+ *   data-scrubbing (while the user is drag-scrubbing)
+ *
+ * Layout discipline:
+ *   - Hairline border via `box-shadow inset` on the GROUP (NOT border:)
+ *     so state changes don't shift layout. Same trick Input uses.
+ *   - Logical properties only (inline-size, padding-inline, margin-inline-*)
+ *     so RTL flips correctly. Verified by the RTL story.
+ *   - Stepper hit-target ≥ 1.75rem at the sm size. On `pointer: coarse`
+ *     the buttons grow to `--zs-hit-min` (2.75rem) so a finger lands.
+ *   - The scrub area sits OUTSIDE the shell at the leading edge; absolute
+ *     positioning anchored to the Root. cursor: ew-resize so the
+ *     affordance reads even when ScrubAreaCursor is hidden (Safari).
+ *
+ * Motion: ease-in-out on background-color + box-shadow only.
+ */
+
+/* ─── Root — positioning context for the scrub area ────────────────── */
+.zs-number-field {
+  position: relative;
+  display: inline-block;
+  inline-size: 100%;
+  font-family: var(--zs-font-system);
+}
+
+/* ─── Group — the bordered shell (focus ring sits here) ────────────── */
+.zs-number-field__group {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  inline-size: 100%;
+  block-size: var(--zs-control-h-md);
+  border-radius: var(--zs-control-radius-md);
+  background: var(--zs-input-bg);
+  color: var(--zs-input-ink, var(--zs-label));
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* ─── Sizes ────────────────────────────────────────────────────────── */
+.zs-number-field--sm .zs-number-field__group {
+  block-size: var(--zs-control-h-sm);
+  border-radius: var(--zs-control-radius-sm);
+}
+.zs-number-field--lg .zs-number-field__group {
+  block-size: var(--zs-control-h-lg);
+  border-radius: var(--zs-control-radius-lg);
+}
+
+/* ─── Variants ─────────────────────────────────────────────────────── */
+.zs-number-field--default .zs-number-field__group {
+  background: var(--zs-input-bg);
+}
+.zs-number-field--outline .zs-number-field__group {
+  background: transparent;
+}
+
+/* ─── Hover (hover-capable pointers only) ──────────────────────────── */
+@media (hover: hover) {
+  .zs-number-field:not([data-disabled]):not([data-readonly]):not([data-focused])
+    .zs-number-field__group:hover {
+    background: var(--zs-input-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+}
+
+/* ─── Focused — group owns the ring so input + buttons share it ────── */
+.zs-number-field[data-focused] .zs-number-field__group {
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
+
+/* ─── Invalid ──────────────────────────────────────────────────────── */
+.zs-number-field[data-invalid] .zs-number-field__group {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 0 transparent;
+}
+.zs-number-field[data-invalid][data-focused] .zs-number-field__group {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 var(--zs-focus-ring-width)
+      color-mix(in oklch, var(--zs-system-red) 35%, transparent);
+}
+
+/* ─── Readonly ─────────────────────────────────────────────────────── */
+.zs-number-field[data-readonly] .zs-number-field__group {
+  background: var(--zs-input-bg-readonly);
+  color: var(--zs-input-ink-readonly);
+}
+
+/* ─── Disabled ─────────────────────────────────────────────────────── */
+.zs-number-field[data-disabled] .zs-number-field__group {
+  background: var(--zs-input-bg-disabled);
+  color: var(--zs-input-ink-disabled);
+  cursor: not-allowed;
+}
+.zs-number-field[data-disabled] .zs-number-field__input,
+.zs-number-field[data-disabled] .zs-number-field__step {
+  cursor: not-allowed;
+}
+
+/* ─── The native input ─────────────────────────────────────────────── */
+.zs-number-field__input {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  text-align: center;
+  padding-inline: var(--zs-space-2);
+  margin: 0;
+  outline: none;
+  /* Mobile Safari zooms when the focused input's computed font-size is
+     under 16 device-units. Clamp the sm font to a 1rem minimum so the
+     shell visual sizing stays as designed (height + padding follow the
+     subheadline token) but the text inside renders at the 16-device-unit
+     floor on focus. Same trick Input uses. */
+}
+.zs-number-field--sm .zs-number-field__input {
+  font-size: max(1rem, var(--zs-text-subheadline-size));
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-number-field--lg .zs-number-field__input {
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+.zs-number-field__input::placeholder {
+  color: var(--zs-input-placeholder);
+  opacity: 1;
+}
+
+/* The native spinner UI conflicts with our explicit stepper buttons —
+   hide it (same trick Input uses for `type="number"` inputs). */
+.zs-number-field__input::-webkit-outer-spin-button,
+.zs-number-field__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ─── Stepper buttons ──────────────────────────────────────────────── *
+ *
+ * Hit-target floor at 1.75rem (sm) so finger / touch lands a real area.
+ * On pointer:coarse the buttons grow to --zs-hit-min (44 device-units).
+ * The buttons render as flex children of the group so their height ties
+ * to the shell's block-size.
+ *
+ * The inline-size is the hit-target floor, NOT the icon's intrinsic
+ * width — keeping the button square at every size so it never crowds
+ * the input. */
+.zs-number-field__step {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.75rem;
+  block-size: 100%;
+  min-inline-size: 1.75rem;
+  border: 0;
+  background: transparent;
+  color: var(--zs-label-secondary);
+  cursor: pointer;
+  /* Buttons sit inside the group's bordered shell — no extra outline so
+     focus ring escapes the inset rim via the focus-visible block below. */
+  outline: none;
+  padding: 0;
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-number-field__step > svg {
+  inline-size: 1em;
+  block-size: 1em;
+  flex: 0 0 auto;
+}
+
+/* Per-size button widths — md / lg slightly wider so the glyph breathes
+   alongside the bigger control height. The 1.75rem floor stays on sm. */
+.zs-number-field--md .zs-number-field__step {
+  inline-size: 2rem;
+  min-inline-size: 1.75rem;
+}
+.zs-number-field--lg .zs-number-field__step {
+  inline-size: 2.5rem;
+  min-inline-size: 2rem;
+}
+
+@media (pointer: coarse) {
+  .zs-number-field__step {
+    min-inline-size: var(--zs-hit-min);
+  }
+}
+
+@media (hover: hover) {
+  .zs-number-field__step:not([data-disabled]):hover {
+    background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+    color: var(--zs-label);
+  }
+}
+.zs-number-field__step:not([data-disabled]):active {
+  background-color: color-mix(in oklch, var(--zs-label) 14%, transparent);
+}
+.zs-number-field__step:focus-visible {
+  /* Inset outline so the ring stays inside the shell's overflow. */
+  outline: 0.125rem solid var(--zs-input-border-focus);
+  outline-offset: -0.125rem;
+}
+.zs-number-field__step[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── Scrub area ────────────────────────────────────────────────────── *
+ *
+ * Lives outside the group at the leading edge of the Root. cursor: ew-resize
+ * so even with the ScrubAreaCursor hidden (Safari pointer-lock denial)
+ * the affordance reads. While scrubbing, the Root gets `data-scrubbing`
+ * and the cursor element pops in over the page. */
+.zs-number-field__scrub {
+  /* The scrub lives at the leading edge of the Root, OUTSIDE the group's
+     bordered shell so it doesn't crowd the input. We use a negative
+     inline-start offset relative to the Root; consumers reserve room by
+     adding `padding-inline-start` (or margin) on the cell that wraps
+     the Root. The small visual is a horizontal-resize glyph. */
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: calc(-1 * var(--zs-space-6));
+  transform: translateY(-50%);
+  inline-size: var(--zs-space-5);
+  block-size: var(--zs-space-5);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--zs-label-secondary);
+  background: var(--zs-fill-quaternary);
+  border-radius: var(--zs-control-radius-sm);
+  cursor: ew-resize;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+.zs-number-field__scrub > svg {
+  inline-size: 1rem;
+  block-size: 1rem;
+}
+.zs-number-field__scrub-cursor {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  color: var(--zs-label);
+  background: var(--zs-surface-raised);
+  border-radius: var(--zs-radius-2);
+  padding: var(--zs-space-1);
+  box-shadow: 0 0.125rem 0.5rem 0 color-mix(in oklch, var(--zs-label) 30%, transparent);
+}
+
+/* ─── Reduced motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-number-field__group,
+  .zs-number-field__step {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors / Windows High Contrast ────────────────────────── *
+ *
+ * Slice 5/6 lesson: every state selector mirrored inside the @media
+ * block at EQUAL specificity so the system palette wins the cascade.
+ * Without this, the per-state oklch rules above would outrank the bare
+ * `.zs-number-field__group` reset and bleed brand color through. */
+@media (forced-colors: active) {
+  .zs-number-field__group {
+    background: Field;
+    color: FieldText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+    forced-color-adjust: none;
+  }
+  .zs-number-field[data-focused] .zs-number-field__group {
+    background: Field;
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-number-field[data-invalid] .zs-number-field__group {
+    box-shadow:
+      inset 0 0 0 0.0625rem Mark,
+      0 0 0 0 transparent;
+  }
+  .zs-number-field[data-invalid][data-focused] .zs-number-field__group {
+    box-shadow:
+      inset 0 0 0 0.0625rem Mark,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-number-field[data-disabled] .zs-number-field__group {
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-number-field__input::placeholder {
+    color: GrayText;
+  }
+  .zs-number-field__step {
+    color: CanvasText;
+    background-color: Field;
+  }
+  .zs-number-field[data-disabled] .zs-number-field__step {
+    color: GrayText;
+  }
+
+  /* Equal-specificity mirror of every hover / active selector above so
+     the system palette wins under forced-colors emulation. Mirrors the
+     Slice 5 / Slice 6 forced-colors specificity fix. */
+  @media (hover: hover) {
+    .zs-number-field:not([data-disabled]):not([data-readonly]):not([data-focused])
+      .zs-number-field__group:hover {
+      background: Field;
+      box-shadow:
+        inset 0 0 0 0.0625rem CanvasText,
+        0 0 0 0 transparent;
+    }
+    .zs-number-field__step:not([data-disabled]):hover {
+      background-color: Highlight;
+      color: HighlightText;
+    }
+  }
+  .zs-number-field__step:not([data-disabled]):active {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-number-field__step:focus-visible {
+    outline-color: Highlight;
+  }
+  .zs-number-field__scrub {
+    color: CanvasText;
+  }
+  .zs-number-field__scrub-cursor {
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: 0 0 0 0.0625rem CanvasText;
+  }
+}

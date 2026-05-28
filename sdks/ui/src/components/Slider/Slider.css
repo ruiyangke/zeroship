@@ -1,0 +1,379 @@
+/*
+ * Slider — continuous range with thumb(s) and a filled indicator.
+ *
+ * Anatomy:
+ *   .zs-slider                              — Root (display grid for label/value/track)
+ *     ├─ .zs-slider__value                  — optional numeric badge (output)
+ *     └─ .zs-slider__control                — interactive area (pointer events)
+ *         └─ .zs-slider__track              — the rail
+ *             ├─ .zs-slider__indicator      — the filled segment
+ *             └─ .zs-slider__thumb (×1-N)   — the draggable
+ *
+ * Modifier classes:
+ *   variant:     --default | --outline
+ *   size:        --sm | --md | --lg     (track block-size 0.25 / 0.375 / 0.5rem)
+ *   orientation: --horizontal | --vertical
+ *
+ * State surface (driven by data-* attributes Base UI emits):
+ *   data-dragging | data-disabled | data-invalid | data-focused
+ *
+ * Layout discipline:
+ *   - Track block-size is the visual ladder; thumb is always ≥ 1.75rem
+ *     hit target via padding extending the touchable area outward when
+ *     the visual thumb is smaller.
+ *   - Logical properties only (inline-size / block-size / inset-block-*)
+ *     so RTL flips correctly. The indicator's --relative-size flow
+ *     stays inline-axis-driven for free.
+ *   - Vertical orientation flips the track to block-axis via
+ *     orientation-conditional dimensions.
+ *
+ * Motion: thumb scale on press, indicator + thumb position via Base UI's
+ * inline styles (no JS animation needed).
+ */
+
+/* ─── Root — the layout grid ───────────────────────────────────────── */
+.zs-slider {
+  position: relative;
+  display: grid;
+  inline-size: 100%;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  /* Default layout: label/value (consumer-supplied) above, track below. */
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: var(--zs-space-2);
+  -webkit-touch-callout: none;
+}
+
+/* The value badge sits in the second column of the first row so
+   consumer-supplied labels can occupy the first column. */
+.zs-slider__value {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+  font-variant-numeric: tabular-nums;
+  min-inline-size: 2.5rem;
+  text-align: end;
+}
+
+/* Control fills the whole row 2, spanning both columns. */
+.zs-slider__control {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  position: relative;
+  display: flex;
+  align-items: center;
+  inline-size: 100%;
+  /* Min hit-target floor regardless of track height — gives the user a
+     1.75rem strip to land a pointer on. */
+  min-block-size: 1.75rem;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.zs-slider[data-disabled] .zs-slider__control {
+  cursor: not-allowed;
+}
+
+/* ─── Track — the rail ─────────────────────────────────────────────── */
+.zs-slider__track {
+  position: relative;
+  inline-size: 100%;
+  block-size: var(--zs-slider-track-block, 0.375rem);
+  background: var(--zs-fill-secondary);
+  border-radius: var(--zs-radius-full);
+  /* No overflow:hidden — the thumb extends past the track's block-axis
+     edges, and the indicator's rounded ends share the track's radius so
+     a separate clip isn't needed. */
+}
+
+/* Per-size track block-size — sm 0.25rem / md 0.375rem / lg 0.5rem. */
+.zs-slider--sm .zs-slider__track {
+  --zs-slider-track-block: 0.25rem;
+}
+.zs-slider--md .zs-slider__track {
+  --zs-slider-track-block: 0.375rem;
+}
+.zs-slider--lg .zs-slider__track {
+  --zs-slider-track-block: 0.5rem;
+}
+
+/* Outline variant — transparent rail with an inset hairline. */
+.zs-slider--outline .zs-slider__track {
+  background: transparent;
+  box-shadow: inset 0 0 0 0.0625rem var(--zs-separator);
+}
+
+/* ─── Indicator — the filled progress segment ──────────────────────── *
+ *
+ * Base UI emits its own inline styles for position + extent that already
+ * handle orientation, so we only paint surface here (background +
+ * radius). The rounded ends carry the track radius so the progress fill
+ * meets the track edges cleanly. */
+.zs-slider__indicator {
+  background: var(--zs-accent);
+  border-radius: inherit;
+}
+
+/* Outline variant indicator — accent at half opacity so the rim still
+   reads the dominant edge. */
+.zs-slider--outline .zs-slider__indicator {
+  background: color-mix(in oklch, var(--zs-accent) 60%, transparent);
+}
+
+/* ─── Thumb — the draggable ────────────────────────────────────────── *
+ *
+ * Visual thumb dimensions scale per size; an INVISIBLE padding ring
+ * pushes the hit target up to 1.75rem (brief floor). The padding is
+ * pointer-active so pointerdown anywhere in the 1.75rem ring fires the
+ * Base UI grab — the visible knob is a centered marker.
+ *
+ * Base UI translates the thumb via `--position` (inline-style) so it
+ * follows the value. We use translate(-50%) so the thumb centers on
+ * that position rather than left-edge-aligning. */
+.zs-slider__thumb {
+  /* Base UI emits inline styles for position + translate; we only set
+     dimensions / surface / cursor here. The thumb sits ON TOP of the
+     indicator (z-index 1 lifts it over the indicator's surface paint
+     so the rim ring stays visible on the indicator end). */
+  inline-size: var(--zs-slider-thumb-size, 1rem);
+  block-size: var(--zs-slider-thumb-size, 1rem);
+  background: var(--zs-surface-raised);
+  border-radius: var(--zs-radius-full);
+  box-shadow:
+    0 0 0 0.1875rem var(--zs-accent),
+    0 0.125rem 0.375rem 0 color-mix(in oklch, var(--zs-label) 25%, transparent);
+  z-index: 1;
+  cursor: grab;
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    transform var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+  /* Hit-target: padding pseudo extends the touchable area beyond the
+     visible knob. Use a padding-equivalent via box-shadow spread for
+     the transparent halo + an absolute-positioned ::before so pointer
+     events still resolve to the thumb. */
+}
+/* Hit-target halo — 1.75rem on every size via ::after (transparent,
+   absolutely-positioned, no pointer-events override so the parent
+   absorbs the click). The center anchors via inset:50%; translation
+   to negative-half via the margin-inline+margin-block trick so we
+   don't fight Base UI's `transform: scale(...)` on hover/drag. */
+.zs-slider__thumb::after {
+  content: "";
+  position: absolute;
+  inset: 50%;
+  inline-size: 1.75rem;
+  block-size: 1.75rem;
+  margin-inline: -0.875rem;
+  margin-block: -0.875rem;
+  border-radius: inherit;
+  background: transparent;
+}
+
+.zs-slider--sm .zs-slider__thumb {
+  --zs-slider-thumb-size: 0.875rem;
+}
+.zs-slider--md .zs-slider__thumb {
+  --zs-slider-thumb-size: 1rem;
+}
+.zs-slider--lg .zs-slider__thumb {
+  --zs-slider-thumb-size: 1.25rem;
+}
+
+/* Outline variant — accent rim only, no inner accent halo. */
+.zs-slider--outline .zs-slider__thumb {
+  background: var(--zs-surface-raised);
+  box-shadow:
+    0 0 0 0.125rem var(--zs-accent),
+    0 0.125rem 0.375rem 0 color-mix(in oklch, var(--zs-label) 20%, transparent);
+}
+
+@media (hover: hover) {
+  .zs-slider:not([data-disabled]) .zs-slider__thumb:hover {
+    /* Base UI sets a CSS `translate` for positioning, which is independent
+       of `transform`. We scale via `transform` so the two compose
+       additively without us needing to know the position offset. */
+    transform: scale(1.1);
+  }
+}
+.zs-slider__thumb[data-dragging] {
+  cursor: grabbing;
+  transform: scale(1.15);
+}
+
+/* Focus ring on the input nested inside the Thumb. Base UI renders
+   <input type="range"> inside .zs-slider__thumb; sighted focus is the
+   ring on the knob itself. */
+.zs-slider__thumb:focus-within {
+  box-shadow:
+    0 0 0 0.1875rem var(--zs-accent),
+    0 0 0 calc(0.1875rem + var(--zs-focus-ring-width)) var(--zs-input-focus-ring-color),
+    0 0.125rem 0.375rem 0 color-mix(in oklch, var(--zs-label) 25%, transparent);
+}
+
+/* The nested input absorbs focus events but is visually hidden — Base UI
+   already does this via opacity:0 on the input. We pin it for safety. */
+.zs-slider__thumb input[type="range"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  margin: 0;
+}
+
+/* ─── Disabled state ───────────────────────────────────────────────── */
+.zs-slider[data-disabled] .zs-slider__indicator {
+  background: var(--zs-label-tertiary);
+}
+.zs-slider[data-disabled] .zs-slider__thumb {
+  background: var(--zs-surface-raised);
+  cursor: not-allowed;
+  box-shadow:
+    0 0 0 0.1875rem var(--zs-label-tertiary),
+    none;
+}
+.zs-slider--outline[data-disabled] .zs-slider__thumb {
+  background: var(--zs-surface-raised);
+  box-shadow:
+    0 0 0 0.125rem var(--zs-label-tertiary),
+    none;
+}
+
+/* ─── Invalid state ────────────────────────────────────────────────── */
+.zs-slider[data-invalid] .zs-slider__indicator {
+  background: var(--zs-system-red);
+}
+.zs-slider[data-invalid] .zs-slider__thumb {
+  background: var(--zs-surface-raised);
+  box-shadow:
+    0 0 0 0.1875rem var(--zs-system-red),
+    0 0.125rem 0.375rem 0 color-mix(in oklch, var(--zs-label) 25%, transparent);
+}
+
+/* ─── Vertical orientation ─────────────────────────────────────────── */
+.zs-slider--vertical {
+  grid-template-columns: auto;
+  grid-template-rows: auto 1fr;
+  inline-size: auto;
+  block-size: 100%;
+  min-block-size: 8rem;
+}
+.zs-slider--vertical .zs-slider__value {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: center;
+}
+.zs-slider--vertical .zs-slider__control {
+  grid-column: 1;
+  grid-row: 2;
+  inline-size: auto;
+  min-inline-size: 1.75rem;
+  block-size: 100%;
+  justify-content: center;
+}
+.zs-slider--vertical .zs-slider__track {
+  inline-size: var(--zs-slider-track-block, 0.375rem);
+  block-size: 100%;
+}
+/* Vertical indicator: Base UI's inline styles already handle the
+   position/extent flip — we don't override here. */
+/* Vertical thumb position is set inline by Base UI — no override needed.
+   The hover/drag scale rules above apply to both orientations (transform
+   is independent of Base UI's translate property). */
+
+/* ─── Reduced motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-slider__thumb {
+    transition: none;
+  }
+  @media (hover: hover) {
+    .zs-slider:not([data-disabled]) .zs-slider__thumb:hover,
+    .zs-slider:not([data-disabled]) .zs-slider__thumb[data-dragging] {
+      transform: none;
+    }
+  }
+}
+
+/* ─── forced-colors / Windows High Contrast ────────────────────────── *
+ *
+ * Slice 5/6 lesson: mirror every state selector at equal specificity so
+ * the system palette wins. The aria-wiring suite asserts the thumb's
+ * computed background-color is a system color (Highlight) under
+ * forced-colors emulation, not an oklch token mix. */
+@media (forced-colors: active) {
+  .zs-slider__track {
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-slider__indicator {
+    background: Highlight;
+  }
+  .zs-slider__thumb {
+    background: Highlight;
+    box-shadow:
+      0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+    /* Without this, Chromium's forced-colors emulation re-paints the
+       accent-derived background with its auto-darkened approximation
+       (rgba(5, 0, 73, 0.8) in dev), bypassing the `Highlight` we set.
+       `none` opts the thumb out of auto-adjustment so the system color
+       wins the cascade — Slice 5/6 forced-colors lesson applied to the
+       thumb's solid fill. */
+    forced-color-adjust: none;
+  }
+  .zs-slider__indicator {
+    forced-color-adjust: none;
+  }
+  .zs-slider__thumb:focus-within {
+    box-shadow:
+      0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight,
+      0 0 0 0 transparent;
+  }
+  .zs-slider[data-disabled] .zs-slider__indicator {
+    background: GrayText;
+  }
+  .zs-slider[data-disabled] .zs-slider__thumb {
+    background: GrayText;
+    box-shadow:
+      0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-slider[data-invalid] .zs-slider__indicator {
+    background: Mark;
+  }
+  .zs-slider[data-invalid] .zs-slider__thumb {
+    background: Mark;
+    box-shadow:
+      0 0 0 0.0625rem Mark,
+      0 0 0 0 transparent;
+  }
+
+  /* Hover / drag mirror so the oklch :hover rule above doesn't outrank
+     the system-color base under forced-colors. Same shape as Slice 5/6. */
+  @media (hover: hover) {
+    .zs-slider:not([data-disabled]) .zs-slider__thumb:hover,
+    .zs-slider--vertical:not([data-disabled]) .zs-slider__thumb:hover {
+      background: Highlight;
+      box-shadow:
+        0 0 0 0.0625rem CanvasText,
+        0 0 0 0 transparent;
+    }
+  }
+  .zs-slider__thumb[data-dragging] {
+    background: Highlight;
+    box-shadow:
+      0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+  }
+  .zs-slider__value {
+    color: CanvasText;
+  }
+}
