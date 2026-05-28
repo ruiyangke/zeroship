@@ -103,6 +103,18 @@ async fn main() -> std::io::Result<()> {
         Arc::new(issuer)
     });
 
+    // Phase 8 U4 — wrapper-token verifier. Built from the PUBLIC half
+    // of the same signing key in lockstep with `wrapper_issuer` (both
+    // Some, or both None). The dispatch path consults this to detect
+    // wrapper-bound DPoP requests; raw-hydra DPoP requests fall through
+    // to the P7-U5 introspection path. Cheap to construct (no PKCS#8
+    // encoding — `DecodingKey::from_ed_der` accepts the raw 32-byte
+    // public key), so we just build it eagerly at boot.
+    let wrapper_verifier: Option<Arc<wrapper_token::Verifier>> = signing_key.as_ref().map(|sk| {
+        let public = sk.verifying_key();
+        Arc::new(wrapper_token::Verifier::new(&public, public_url.clone()))
+    });
+
     let blob_cache_bytes: usize = blob_cache_mem_mb
         .parse::<usize>()
         .unwrap_or(256)
@@ -208,6 +220,7 @@ async fn main() -> std::io::Result<()> {
         dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
         signing_key,
         wrapper_issuer,
+        wrapper_verifier,
     });
 
     sync::start_sync(state.clone());

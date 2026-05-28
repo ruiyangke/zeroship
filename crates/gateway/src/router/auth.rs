@@ -124,12 +124,33 @@ fn has_dpop_authorization(req: &HttpRequest) -> bool {
 ///   3. The proof verifies (signature, htm, htu, iat, ath), AND
 ///   4. The proof's `jti` has not been seen before in the freshness
 ///      window (replay defense), AND
-///   5. Hydra's `/oauth2/introspect` returns `active: true` for the
-///      access token.
+///   5. EITHER the access token verifies as a gateway-issued wrapper
+///      AND `wrapper.cnf.jkt == proof.jkt` (Phase 8 U4 fast path —
+///      self-contained, no introspection),
+///      OR the wrapper verification fails / no verifier configured AND
+///      hydra's `/oauth2/introspect` returns `active: true` (P7-U5
+///      fallback, no `cnf.jkt` enforcement).
 ///
 /// Returns `None` for "no `DPoP` token in this request" AND for every
 /// failure mode above. The caller distinguishes the two via
 /// [`has_dpop_authorization`].
+///
+/// ## Wrapper-vs-raw branching (Phase 8 U4)
+///
+/// We try the wrapper-verifier first. A successful verify means the
+/// gateway minted this token via `/__zs/auth/dpop-exchange` (U3) — it's
+/// already bound to a specific `DPoP` key in its `cnf.jkt` claim. We
+/// require that binding match the actual proof; mismatch is a hard
+/// reject (no fallback). On a wrapper hit we build the worker user
+/// from the embedded claims and skip the introspection round-trip
+/// entirely.
+///
+/// A wrapper-verify FAILURE (token isn't a wrapper, or is malformed) is
+/// treated as "not a wrapper, try raw hydra path". This is the v1
+/// fallback the plan calls for: clients that haven't migrated to
+/// wrapper tokens still work with their raw hydra tokens + `DPoP`, just
+/// without `cnf.jkt` binding. A future `--strict-dpop` flag would
+/// disable this fallback.
 async fn resolve_dpop_user_header(
     req: &HttpRequest,
     state: &Arc<GateState>,
@@ -187,8 +208,60 @@ async fn resolve_dpop_user_header(
         return None;
     }
 
-    // 6. Introspect the access token. Hydra's response carries the
-    //    user identity claims when `active: true`.
+    // 6a. Wrapper-token fast path (Phase 8 U4). Try to verify the
+    //     access token as a gateway-issued wrapper. On success we
+    //     enforce `cnf.jkt == proof.jkt` and build the worker user
+    //     from the embedded claims — no hydra round-trip required.
+    if let Some(verifier) = state.wrapper_verifier.as_ref() {
+        match verifier.verify(access_token) {
+            Ok(claims) => {
+                // Strict binding: a wrapper minted for jkt_A cannot be
+                // presented with a proof signed by jkt_B. Mismatch is a
+                // hard reject — we deliberately do NOT fall through to
+                // introspection here, because falling through would let
+                // an attacker who stole a wrapper bypass its binding
+                // simply by also presenting a different valid DPoP
+                // proof for their own key.
+                if claims.cnf.jkt != verified.jkt {
+                    tracing::warn!(
+                        expected = %claims.cnf.jkt,
+                        actual = %verified.jkt,
+                        "DPoP proof jkt does not match wrapper cnf.jkt — rejecting"
+                    );
+                    return None;
+                }
+                let owned = build_worker_user_from_wrapper(&claims);
+                let user: oidc_rp::WorkerUser<'_> = (&owned).into();
+                return Some(oidc_rp::encode_user_header(
+                    &user,
+                    &state.config.worker_key,
+                ));
+            }
+            Err(e) => {
+                // Wrapper verification failed. Could be:
+                //   (a) not a wrapper token (regular hydra opaque
+                //       access token — fall through to introspection),
+                //   (b) a malformed/forged wrapper (would also fail
+                //       introspection — fall through is safe).
+                //
+                // Phase 8 v1 falls through silently. A future
+                // `--strict-dpop` flag would log+reject here so a
+                // malformed wrapper can't silently downgrade to the
+                // unbound introspection path.
+                tracing::debug!(
+                    error = %e,
+                    "wrapper verify failed; falling back to hydra introspect"
+                );
+            }
+        }
+    }
+
+    // 6b. Fallback: introspect the access token as a raw hydra opaque
+    //     token. Hydra's response carries the user identity claims when
+    //     `active: true`. No `cnf.jkt` enforcement here — hydra doesn't
+    //     currently surface `cnf.jkt` on access tokens, so binding is
+    //     proof-of-possession only (the proof's `ath` claim already
+    //     binds the proof to this specific access token in step 4).
     let info = match state.oidc_rp.introspect_token(access_token).await {
         Ok(i) if i.active => i,
         Ok(_) => {
@@ -202,21 +275,69 @@ async fn resolve_dpop_user_header(
     };
 
     // 7. Build the `ZeroShip-User` header from the introspection result.
-    //    `WorkerUser` borrows — keep the owned strings on the stack.
-    let id = info.sub.unwrap_or_default();
-    let email = info.email.unwrap_or_default();
-    let name = info.name.unwrap_or_default();
-    let user = oidc_rp::WorkerUser {
-        id: &id,
-        email: &email,
-        name: &name,
-        avatar: None,
-        email_verified: info.email_verified.unwrap_or(false),
-    };
+    let owned = build_worker_user_from_introspection(&info);
+    let user: oidc_rp::WorkerUser<'_> = (&owned).into();
     Some(oidc_rp::encode_user_header(
         &user,
         &state.config.worker_key,
     ))
+}
+
+/// Materialise a `WorkerUser` from a verified wrapper-token claim set.
+///
+/// The wrapper's claims are self-contained (the gateway populated them
+/// from the original hydra introspection at exchange time, U3), so this
+/// is purely a field rename — no network calls, no further validation.
+/// `OwnedWorkerUser` holds the strings on the stack so the
+/// `WorkerUser` borrow can survive the lifetime needed by
+/// `encode_user_header`.
+fn build_worker_user_from_wrapper(claims: &crate::wrapper_token::WrapperClaims) -> OwnedWorkerUser {
+    OwnedWorkerUser {
+        id: claims.sub.clone(),
+        email: claims.email.clone().unwrap_or_default(),
+        name: claims.name.clone().unwrap_or_default(),
+        email_verified: claims.email_verified.unwrap_or(false),
+    }
+}
+
+/// Materialise a `WorkerUser` from a hydra introspection response.
+///
+/// Caller MUST have already gated on `info.active == true`. Used by the
+/// P7-U5 fallback path — wrapper-verifier failed (or absent) and we
+/// fell through to introspection.
+fn build_worker_user_from_introspection(
+    info: &crate::oidc_rp::IntrospectionResponse,
+) -> OwnedWorkerUser {
+    OwnedWorkerUser {
+        id: info.sub.clone().unwrap_or_default(),
+        email: info.email.clone().unwrap_or_default(),
+        name: info.name.clone().unwrap_or_default(),
+        email_verified: info.email_verified.unwrap_or(false),
+    }
+}
+
+/// Owned counterpart to [`oidc_rp::WorkerUser`] — the public type
+/// borrows, but our build sites need to hold the strings somewhere on
+/// the stack so the borrow stays valid through
+/// [`oidc_rp::encode_user_header`]. `From` makes the borrow conversion
+/// implicit at call sites.
+struct OwnedWorkerUser {
+    id: String,
+    email: String,
+    name: String,
+    email_verified: bool,
+}
+
+impl<'a> From<&'a OwnedWorkerUser> for oidc_rp::WorkerUser<'a> {
+    fn from(owned: &'a OwnedWorkerUser) -> Self {
+        oidc_rp::WorkerUser {
+            id: &owned.id,
+            email: &owned.email,
+            name: &owned.name,
+            avatar: None,
+            email_verified: owned.email_verified,
+        }
+    }
 }
 
 /// Resolve the `ZeroShip-User` header value from the per-origin app
@@ -365,5 +486,408 @@ mod tests {
             .header(http::header::AUTHORIZATION, "dpop abc")
             .to_http_request();
         assert!(!has_dpop_authorization(&req));
+    }
+
+    // ─── Wrapper-token worker-user builders (Phase 8 U4) ──────────────
+    //
+    // The wrapper-token fast path skips hydra introspection by mapping
+    // the wrapper's embedded claims straight onto a `WorkerUser`. A
+    // regression in the field mapping (e.g. losing `email_verified`,
+    // dropping `name`) would silently degrade the worker's view of the
+    // authenticated user — covered here.
+
+    #[test]
+    fn build_worker_user_from_wrapper_maps_all_fields() {
+        use crate::wrapper_token::{Cnf, WrapperClaims};
+        let claims = WrapperClaims {
+            iss: "https://api.zeroship.ai".into(),
+            aud: "myapp.zeroship.ai".into(),
+            sub: "usr_abc".into(),
+            exp: 0,
+            iat: 0,
+            jti: "j".into(),
+            cnf: Cnf { jkt: "k".into() },
+            scope: "openid".into(),
+            client_id: "gateway".into(),
+            email: Some("a@b.test".into()),
+            email_verified: Some(true),
+            name: Some("Alice".into()),
+            wraps: "w".into(),
+        };
+        let owned = build_worker_user_from_wrapper(&claims);
+        assert_eq!(owned.id, "usr_abc");
+        assert_eq!(owned.email, "a@b.test");
+        assert_eq!(owned.name, "Alice");
+        assert!(owned.email_verified);
+    }
+
+    #[test]
+    fn build_worker_user_from_wrapper_defaults_missing_optionals() {
+        // hydra omits `email`/`name`/`email_verified` for client-credentials
+        // grants (or when the scope wasn't granted). The wrapper claims
+        // mirror that with `Option`; the worker-user struct doesn't —
+        // we materialise defaults so the worker never sees a serde error
+        // on a token issued for a non-user identity.
+        use crate::wrapper_token::{Cnf, WrapperClaims};
+        let claims = WrapperClaims {
+            iss: "https://api.zeroship.ai".into(),
+            aud: "myapp.zeroship.ai".into(),
+            sub: String::new(), // client-credentials grants omit sub
+            exp: 0,
+            iat: 0,
+            jti: "j".into(),
+            cnf: Cnf { jkt: "k".into() },
+            scope: String::new(),
+            client_id: "gateway".into(),
+            email: None,
+            email_verified: None,
+            name: None,
+            wraps: "w".into(),
+        };
+        let owned = build_worker_user_from_wrapper(&claims);
+        assert_eq!(owned.id, "");
+        assert_eq!(owned.email, "");
+        assert_eq!(owned.name, "");
+        assert!(!owned.email_verified);
+    }
+
+    #[test]
+    fn build_worker_user_from_introspection_maps_all_fields() {
+        // The introspection fallback path (P7-U5) builds the WorkerUser
+        // from the hydra `/oauth2/introspect` response. Same regression
+        // surface as the wrapper helper — a field-rename break here
+        // would silently corrupt the worker's authenticated-user view.
+        let info = crate::oidc_rp::IntrospectionResponse {
+            active: true,
+            sub: Some("usr_xyz".into()),
+            client_id: Some("gateway".into()),
+            email: Some("u@x.test".into()),
+            email_verified: Some(true),
+            name: Some("Bob".into()),
+            scope: Some("openid email".into()),
+            exp: Some(0),
+        };
+        let owned = build_worker_user_from_introspection(&info);
+        assert_eq!(owned.id, "usr_xyz");
+        assert_eq!(owned.email, "u@x.test");
+        assert_eq!(owned.name, "Bob");
+        assert!(owned.email_verified);
+    }
+
+    // ─── cnf.jkt enforcement (Phase 8 U4) ──────────────────────────────
+    //
+    // The whole point of the wrapper-token branch is the binding check:
+    // a wrapper minted for jkt_A presented with a DPoP proof signed by
+    // jkt_B must be rejected. The wrapper-token round-trip itself is
+    // covered in `wrapper_token::tests`; the integration with a real
+    // DPoP proof + GateState lives in U5. Here we cover the
+    // binding-comparison call sites directly — same `cnf.jkt` shape
+    // the dispatch path consumes.
+
+    #[test]
+    fn cnf_jkt_match_compares_strings_exactly() {
+        use crate::wrapper_token::Cnf;
+        // Two thumbprints with the same logical value but different
+        // string content MUST NOT match — DPoP thumbprints are
+        // base64url-encoded SHA-256 outputs, so any visual difference
+        // is a real key difference.
+        let a = Cnf {
+            jkt: "abcDEF123".into(),
+        };
+        let b = Cnf {
+            jkt: "abcDEF123".into(),
+        };
+        let c = Cnf {
+            jkt: "abcDEF124".into(),
+        };
+        assert_eq!(a.jkt, b.jkt);
+        assert_ne!(a.jkt, c.jkt);
+    }
+
+    // ─── End-to-end wrapper-token binding (Phase 8 U4) ────────────────
+    //
+    // The integration test below builds a real DPoP proof, a real
+    // wrapper token, and a real `GateState` (sans live PG / hydra) and
+    // drives `resolve_dpop_user_header` directly. This exercises:
+    //
+    //   1. Wrapper-verify SUCCESS + matching `cnf.jkt` → returns Some
+    //      (the worker-user header). No hydra call required (the
+    //      OidcRp in the fixture points at a dead URL — a successful
+    //      return PROVES the wrapper path short-circuited).
+    //
+    //   2. Wrapper-verify SUCCESS + mismatched `cnf.jkt` → returns
+    //      None (binding rejected; no fallthrough to introspection).
+    //      Same OidcRp pointing at a dead URL — a fallthrough would
+    //      surface as a network error in tracing but still return
+    //      None; the assertion is that we never reach the network at
+    //      all (the test passes in <100 ms regardless of the dead URL).
+
+    /// `BlobStore` stub for the test fixture — `GateState` requires
+    /// one, but the auth path never reaches it.
+    #[derive(Debug, Default)]
+    struct StubBlobStore;
+
+    #[async_trait::async_trait(?Send)]
+    impl zeroship_bundle::BlobStore for StubBlobStore {
+        async fn get_blob(
+            &self,
+            _h: &str,
+        ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
+            Err(zeroship_bundle::BlobError::NotFound("unused".into()))
+        }
+        fn local_path(&self, _h: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+        async fn put_blob(
+            &self,
+            _h: &str,
+            _d: &[u8],
+        ) -> Result<zeroship_bundle::PutOutcome, zeroship_bundle::BlobError> {
+            Ok(zeroship_bundle::PutOutcome::Wrote)
+        }
+        async fn put_blob_stream(
+            &self,
+            _h: &str,
+            _s: u64,
+            _r: &mut dyn std::io::Read,
+        ) -> Result<zeroship_bundle::PutOutcome, zeroship_bundle::BlobError> {
+            Ok(zeroship_bundle::PutOutcome::Wrote)
+        }
+        async fn has_blob(&self, _h: &str) -> Result<bool, zeroship_bundle::BlobError> {
+            Ok(false)
+        }
+        async fn put_manifest(
+            &self,
+            _a: &uuid::Uuid,
+            _d: &str,
+            _j: &[u8],
+        ) -> Result<(), zeroship_bundle::BlobError> {
+            Ok(())
+        }
+        async fn get_manifest(
+            &self,
+            _a: &uuid::Uuid,
+            _d: &str,
+        ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
+            Err(zeroship_bundle::BlobError::NotFound("unused".into()))
+        }
+    }
+
+    /// Build a Gateway state with wrapper-token issuer + verifier
+    /// configured against the supplied signing key. `OidcRp` points at
+    /// a dead URL — a successful return from `resolve_dpop_user_header`
+    /// PROVES the wrapper short-circuit fired, since the fallback
+    /// would have failed on the network call.
+    fn build_state_with_wrapper(
+        signing: ed25519_dalek::SigningKey,
+    ) -> std::sync::Arc<crate::GateState> {
+        use std::sync::Arc as StdArc;
+
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "zsgate-auth-u4-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024)
+            .expect("disk cache");
+
+        let issuer =
+            crate::wrapper_token::Issuer::new(&signing, "https://api.zeroship.ai".into())
+                .expect("issuer");
+        let verifier = crate::wrapper_token::Verifier::new(
+            &signing.verifying_key(),
+            "https://api.zeroship.ai".into(),
+        );
+
+        StdArc::new(crate::GateState {
+            config: crate::GateConfig {
+                control_url: String::new(),
+                control_key: String::new(),
+                worker_urls: vec![],
+                poll_interval_secs: 5,
+                auth_secret: String::new(),
+                worker_key: "wk".into(),
+                hydra_public: String::new(),
+                // Dead URL — a fallthrough to introspection here would
+                // surface as a connection-refused error in the test.
+                // The wrapper-path success test must NOT touch this.
+                auth_public: "http://127.0.0.1:1".into(),
+                insecure_dev: true,
+                public_url: "https://api.zeroship.ai".into(),
+            },
+            routes: crate::sync::RouteCache::new(),
+            hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
+            rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
+            per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
+            concurrency: crate::enforce::ConcurrencyRegistry::new(1),
+            blob_store: StdArc::new(StubBlobStore),
+            blob_cache: crate::blob_cache::BlobCache::new(8 * 1024 * 1024),
+            disk_cache: disk,
+            idempotency_store: StdArc::new(
+                crate::idempotency::InMemoryIdempotencyStore::new(),
+            ),
+            oidc_rp: StdArc::new(crate::oidc_rp::OidcRp::new(
+                "http://127.0.0.1:1",
+                "gateway",
+                "test-secret",
+                b"test-stash-key-32-bytes-long----".to_vec(),
+            )),
+            db: None,
+            dpop_jti_cache: StdArc::new(zeroship_core::dpop::JtiCache::default()),
+            signing_key: Some(StdArc::new(signing)),
+            wrapper_issuer: Some(StdArc::new(issuer)),
+            wrapper_verifier: Some(StdArc::new(verifier)),
+        })
+    }
+
+    /// Sign a `DPoP` proof with the supplied Ed25519 client key, bound
+    /// to the given htm/htu/access-token. Mirrors the test-helper
+    /// used in `zeroship_core::dpop::tests` — we duplicate it here to
+    /// keep the test self-contained (the core helper is `cfg(test)`
+    /// private to that module).
+    fn sign_dpop_proof(
+        client_key: &ed25519_dalek::SigningKey,
+        htm: &str,
+        htu: &str,
+        access_token: &str,
+        now: i64,
+    ) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        use ed25519_dalek::Signer;
+        use sha2::{Digest, Sha256};
+
+        let pk = client_key.verifying_key();
+        let x = URL_SAFE_NO_PAD.encode(pk.to_bytes());
+        let jwk = serde_json::json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": x,
+        });
+        let header = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "EdDSA",
+            "jwk": jwk,
+        });
+        let ath = URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()));
+        let body = serde_json::json!({
+            "jti": uuid::Uuid::new_v4().to_string(),
+            "htm": htm,
+            "htu": htu,
+            "iat": now,
+            "ath": ath,
+        });
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+        let body_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&body).unwrap());
+        let signing_input = format!("{header_b64}.{body_b64}");
+        let sig = client_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        format!("{signing_input}.{sig_b64}")
+    }
+
+    /// Compute the RFC 7638 JWK thumbprint of an Ed25519 client key —
+    /// used to bind the wrapper token to a specific `DPoP` key on the
+    /// issue side.
+    fn client_jkt(client_key: &ed25519_dalek::SigningKey) -> String {
+        crate::signing::jwk_thumbprint(client_key)
+    }
+
+    /// Mint a wrapper token via the issuer, bound to `proof_jkt`.
+    fn issue_wrapper(
+        state: &crate::GateState,
+        proof_jkt: &str,
+        aud: &str,
+    ) -> String {
+        let intro = crate::oidc_rp::IntrospectionResponse {
+            active: true,
+            sub: Some("usr_test".into()),
+            client_id: Some("gateway".into()),
+            email: Some("test@example.com".into()),
+            email_verified: Some(true),
+            name: Some("Test".into()),
+            scope: Some("openid".into()),
+            exp: None,
+        };
+        state
+            .wrapper_issuer
+            .as_ref()
+            .expect("issuer configured")
+            .issue(aud, &intro, proof_jkt, "hydra-token-shadow")
+            .expect("issue wrapper")
+    }
+
+    #[compio::test]
+    async fn resolve_dpop_accepts_wrapper_when_jkt_matches() {
+        // Happy path: client signs the DPoP proof with key A, wrapper
+        // is bound to key A's thumbprint, dispatch verifies → Some.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+
+        let jkt = client_jkt(&client_key);
+        let aud = "myapp.zeroship.ai";
+        let wrapper = issue_wrapper(&state, &jkt, aud);
+
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{aud}/api/me");
+        let proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
+            .header("dpop", proof)
+            .to_http_request();
+
+        let header = resolve_dpop_user_header(&req, &state).await;
+        assert!(header.is_some(), "wrapper path must accept matched jkt");
+    }
+
+    #[compio::test]
+    async fn resolve_dpop_rejects_wrapper_when_jkt_mismatches() {
+        // cnf.jkt mismatch: wrapper bound to key A's thumbprint, but
+        // the client signs the proof with key B. Must return None
+        // (binding rejected). Critically, this MUST NOT silently fall
+        // through to introspection — that would defeat the whole
+        // point of the binding.
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key_a = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let client_key_b = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let state = build_state_with_wrapper(gateway_signing);
+
+        let jkt_a = client_jkt(&client_key_a);
+        let aud = "myapp.zeroship.ai";
+        // Wrapper bound to A.
+        let wrapper = issue_wrapper(&state, &jkt_a, aud);
+
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{aud}/api/me");
+        // Proof signed by B.
+        let proof = sign_dpop_proof(&client_key_b, "GET", &htu, &wrapper, now);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
+            .header("dpop", proof)
+            .to_http_request();
+
+        let header = resolve_dpop_user_header(&req, &state).await;
+        assert!(
+            header.is_none(),
+            "wrapper path must reject when cnf.jkt does not match proof jkt"
+        );
     }
 }

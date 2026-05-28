@@ -90,12 +90,20 @@ fn build_state(with_issuer: bool) -> Arc<GateState> {
     let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
 
     let signing_key = SigningKey::from_bytes(&[7u8; 32]);
-    let (wrapper_issuer, signing_key_arc) = if with_issuer {
+    let (wrapper_issuer, wrapper_verifier, signing_key_arc) = if with_issuer {
         let issuer = wrapper_token::Issuer::new(&signing_key, "https://api.zeroship.ai".into())
             .expect("issuer");
-        (Some(Arc::new(issuer)), Some(Arc::new(signing_key)))
+        let verifier = wrapper_token::Verifier::new(
+            &signing_key.verifying_key(),
+            "https://api.zeroship.ai".into(),
+        );
+        (
+            Some(Arc::new(issuer)),
+            Some(Arc::new(verifier)),
+            Some(Arc::new(signing_key)),
+        )
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     Arc::new(GateState {
@@ -130,6 +138,7 @@ fn build_state(with_issuer: bool) -> Arc<GateState> {
         dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
         signing_key: signing_key_arc,
         wrapper_issuer,
+        wrapper_verifier,
     })
 }
 

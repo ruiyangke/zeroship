@@ -127,4 +127,15 @@ pub struct GateState {
     /// short-circuits to 503 when this is absent so the rest of the
     /// gateway can keep serving traffic during the `DPoP` rollout.
     pub wrapper_issuer: Option<Arc<wrapper_token::Issuer>>,
+    /// Wrapper-token verifier (Phase 8 U4). Built in lockstep with
+    /// `wrapper_issuer` from the public half of the same signing key.
+    /// The dispatch path (`router::auth::resolve_dpop_user_header`)
+    /// consults this BEFORE falling back to hydra introspection — a
+    /// `DPoP` request whose access token verifies as a wrapper gets
+    /// the strict `cnf.jkt ↔ proof jkt` binding check; a request whose
+    /// token is a raw hydra opaque token falls through to the P7-U5
+    /// introspection path (no binding). `None` means "wrapper-token
+    /// verification is disabled" — every DPoP request falls through
+    /// to introspection.
+    pub wrapper_verifier: Option<Arc<wrapper_token::Verifier>>,
 }
