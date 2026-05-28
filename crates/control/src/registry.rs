@@ -324,6 +324,7 @@ impl Registry {
                 action TEXT NOT NULL,
                 resource TEXT,
                 source_ip TEXT,
+                detail JSONB,
                 at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )",
             &[],
@@ -338,6 +339,12 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
         conn.execute(
             "ALTER TABLE app_audit ADD COLUMN IF NOT EXISTS actor_token_id UUID",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE app_audit ADD COLUMN IF NOT EXISTS detail JSONB",
             &[],
         )
         .await

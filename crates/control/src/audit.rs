@@ -6,6 +6,7 @@
 //! audited later, do it at the gateway layer with a sampling
 //! middleware instead.
 //!
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::registry::{Registry, RegistryError};
@@ -54,6 +55,12 @@ pub struct AuditEntry<'a> {
 /// because we couldn't write an audit row — if the DB is partially down
 /// the user-facing op should still succeed and we log to stderr instead.
 pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
+    log_with_detail(registry, entry, &Value::Null).await;
+}
+
+/// Best-effort audit insert with structured detail JSON for operations where
+/// `resource` alone is not enough to reconstruct the mutation.
+pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail: &Value) {
     let conn = match registry.conn().await {
         Ok(c) => c,
         Err(e) => {
@@ -64,9 +71,9 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
     let result = conn
         .execute(
             "INSERT INTO app_audit(
-                app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip
+                app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip, detail
              )
-             VALUES($1, $2, $3, $4, $5, $6, $7)",
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8)",
             &[
                 &entry.app_id,
                 &entry.creator_id,
@@ -75,6 +82,7 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
                 &entry.action.as_str(),
                 &entry.resource,
                 &entry.source_ip,
+                &detail,
             ],
         )
         .await;

@@ -314,6 +314,8 @@ struct StripeEventData {
 #[derive(Deserialize, Debug)]
 struct StripeObject {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     amount_paid: Option<i64>,
     #[serde(default)]
     application_fee_amount: Option<i64>,
@@ -473,11 +475,41 @@ pub async fn webhook(
         )
         .await
     {
-        Ok(rec) => web::HttpResponse::Ok().json(&serde_json::json!({
-            "status": "recorded",
-            "id": rec.id.to_string(),
-            "net_amount": rec.net_amount,
-        })),
+        Ok(rec) => {
+            let ip = source_ip(&req, &state);
+            let detail = serde_json::json!({
+                "creator_id": creator_id.to_string(),
+                "amount_cents": rec.gross_amount,
+                "platform_fee_cents": rec.platform_fee,
+                "net_amount_cents": rec.net_amount,
+                "currency": &rec.currency,
+                "stripe_event_id": &rec.event_id,
+                "stripe_event_type": &rec.event_type,
+                "stripe_object_id": obj.id.as_deref(),
+                "stripe_payout_id": obj.id.as_deref().unwrap_or(rec.event_id.as_str()),
+                "payout_id": rec.id.to_string(),
+            });
+            audit::log_with_detail(
+                &state.registry,
+                AuditEntry {
+                    app_id: None,
+                    creator_id: Some(creator_id),
+                    actor_user_id: None,
+                    actor_token_id: None,
+                    action: Action::RecordPayout,
+                    resource: Some(&event.id),
+                    source_ip: ip.as_deref(),
+                },
+                &detail,
+            )
+            .await;
+
+            web::HttpResponse::Ok().json(&serde_json::json!({
+                "status": "recorded",
+                "id": rec.id.to_string(),
+                "net_amount": rec.net_amount,
+            }))
+        }
         Err(StripeError::Duplicate) => {
             web::HttpResponse::Ok().json(&serde_json::json!({"status": "duplicate"}))
         }
