@@ -278,9 +278,11 @@ export const WithKeyboardShortcuts: Story = {
     docs: {
       description: {
         story:
-          "kbd hint at the trailing edge of each row. The hint is " +
-          "presentational — Base UI's text-navigation matches the row's " +
-          "label, not its shortcut text.",
+          "Each row passes a `shortcut` prop that projects into the row's " +
+          "trailing column. The hint is presentational — Base UI's " +
+          "text-navigation matches the row's label, not its shortcut text. " +
+          "The grid pins the shortcut to the inline-end edge so multi-word " +
+          "labels keep their natural flow.",
       },
     },
   },
@@ -292,69 +294,11 @@ export const WithKeyboardShortcuts: Story = {
         />
         <Menu.Portal>
           <Menu.Popup data-testid="menu-kbd-popup">
-            <Menu.Item>
-              <span
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  inlineSize: "100%",
-                  gap: "1rem",
-                }}
-              >
-                <span>Cut</span>
-                <kbd
-                  style={{
-                    fontFamily: "var(--zs-font-mono)",
-                    color: "var(--zs-label-secondary)",
-                    fontSize: "0.8125rem",
-                  }}
-                >
-                  ⌘X
-                </kbd>
-              </span>
-            </Menu.Item>
-            <Menu.Item>
-              <span
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  inlineSize: "100%",
-                  gap: "1rem",
-                }}
-              >
-                <span>Copy</span>
-                <kbd
-                  style={{
-                    fontFamily: "var(--zs-font-mono)",
-                    color: "var(--zs-label-secondary)",
-                    fontSize: "0.8125rem",
-                  }}
-                >
-                  ⌘C
-                </kbd>
-              </span>
-            </Menu.Item>
-            <Menu.Item>
-              <span
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  inlineSize: "100%",
-                  gap: "1rem",
-                }}
-              >
-                <span>Paste</span>
-                <kbd
-                  style={{
-                    fontFamily: "var(--zs-font-mono)",
-                    color: "var(--zs-label-secondary)",
-                    fontSize: "0.8125rem",
-                  }}
-                >
-                  ⌘V
-                </kbd>
-              </span>
-            </Menu.Item>
+            <Menu.Item shortcut="⌘X">Cut</Menu.Item>
+            <Menu.Item shortcut="⌘C">Copy</Menu.Item>
+            <Menu.Item shortcut="⌘V">Paste</Menu.Item>
+            <Menu.Separator />
+            <Menu.Item shortcut="⇧⌘Z">Redo</Menu.Item>
           </Menu.Popup>
         </Menu.Portal>
       </Menu>

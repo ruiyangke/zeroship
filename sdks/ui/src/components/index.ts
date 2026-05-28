@@ -251,3 +251,34 @@ export type {
   TabsVariant,
   TabsOrientation,
 } from "./Tabs";
+
+export { Menubar } from "./Menubar";
+export type { MenubarProps, MenubarOrientation } from "./Menubar";
+
+export { Toolbar } from "./Toolbar";
+export type {
+  ToolbarProps,
+  ToolbarOrientation,
+  ToolbarSeparatorProps,
+  ToolbarComponent,
+} from "./Toolbar";
+
+export { NavigationMenu } from "./NavigationMenu";
+export type {
+  NavigationMenuProps,
+  NavigationMenuComponent,
+  NavMenuSide,
+  NavMenuAlign,
+  NavMenuOrientation,
+  NavMenuListProps,
+  NavMenuItemProps,
+  NavMenuTriggerProps,
+  NavMenuContentProps,
+  NavMenuLinkProps,
+  NavMenuPortalProps,
+  NavMenuPositionerProps,
+  NavMenuPopupProps,
+  NavMenuViewportProps,
+  NavMenuArrowProps,
+  NavMenuIconProps,
+} from "./NavigationMenu";

@@ -1,0 +1,261 @@
+/*
+ * Menubar — horizontal (or vertical) strip of menu triggers.
+ *
+ * Anatomy:
+ *   .zs-menubar                    flex row of children (Menu.Root nodes)
+ *     └─ Menu.Trigger              each child renders a real <button> (Base UI)
+ *
+ * Visual rhythm:
+ *   - Sits on a translucent fill (matches Toolbar so the chrome reads
+ *     as one family). The menubar's triggers paint on hover/open;
+ *     we ship the trigger paint here as `[data-popup-open]` (Base UI
+ *     emits the attribute on the active trigger).
+ *   - Triggers are sized to the body-tall hit target (≥ 1.75rem) by
+ *     padding alone; no border, so the strip stays low-chrome.
+ *
+ * Menu siblings (Menu.Popup styling) sit in stories.css for now — once
+ * Slice 11 lands we'll fold the popup paint into Menu.css and import
+ * it directly. The styles below cover the menubar root + trigger only.
+ *
+ * Forced-colors: Canvas/CanvasText for the chrome, Highlight/HighlightText
+ * for the active trigger. Reduced-motion: nothing to do — Base UI's
+ * auto-open-on-hover doesn't animate at the menubar level (the popup
+ * transitions are owned by Menu.Popup).
+ *
+ * RTL: logical paddings; arrow-key roving is owned by Base UI which
+ * mirrors the keymap for `direction: rtl`.
+ */
+
+/* ─── Root ──────────────────────────────────────────────────────────── */
+.zs-menubar {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--zs-space-1);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  border-radius: var(--zs-radius-3);
+  background-color: var(--zs-fill-quaternary);
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  outline: none;
+}
+
+.zs-menubar--vertical {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* ─── Trigger paint ─────────────────────────────────────────────────── *
+ *
+ * Menu.Trigger lives inside Menubar but is owned by Slice 11 / Base UI.
+ * We paint the trigger from the menubar's stylesheet so it reads as
+ * "part of the menubar" rather than as a stand-alone Button — that's
+ * the canonical macOS chrome (label-only, no surface until hover/open).
+ *
+ * The trigger's class name is "zs-menubar-trigger" — applied in stories
+ * via Menu.Trigger's `className` prop. When Slice 11 lands the
+ * `Menu.Trigger` wrapper will accept a `chrome="menubar"` data attribute
+ * (or similar) and we'll switch to attribute-based scoping. For now the
+ * shared class keeps the styling decoupled from Menu's component shape. */
+.zs-menubar-trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-1);
+  block-size: 1.75rem;
+  min-inline-size: 1.75rem;
+  padding-inline: var(--zs-space-3);
+  border: 0;
+  border-radius: var(--zs-radius-2);
+  background-color: transparent;
+  color: var(--zs-label);
+  font: inherit;
+  font-weight: var(--zs-text-body-weight);
+  letter-spacing: var(--zs-text-body-tracking);
+  cursor: default;
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  user-select: none;
+}
+
+.zs-menubar-trigger:hover:not([data-disabled]) {
+  background-color: var(--zs-fill-tertiary);
+}
+
+.zs-menubar-trigger[data-popup-open],
+.zs-menubar-trigger[data-highlighted] {
+  background-color: var(--zs-fill-secondary);
+}
+
+.zs-menubar-trigger:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+.zs-menubar-trigger[data-disabled] {
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zs-menubar-trigger {
+    transition: none;
+  }
+}
+
+/* ─── Menu popup surface (story-scoped via .zs-menubar-menu) ──────── *
+ *
+ * Until Slice 11 ships our wrapped Menu component, the Menubar stories
+ * point Base UI's `Menu.Popup` at the `.zs-menubar-menu` class below so
+ * the popout surface paints coherently with the menubar chrome. When
+ * Slice 11 lands, this block folds into Menu.css and Menu.Popup picks
+ * up the styling without consumers touching their markup. The class
+ * name `.zs-menubar-menu` is scoped to the menubar context — Slice 11
+ * will introduce `.zs-menu` for the standalone Menu component. */
+.zs-menubar-menu {
+  background-color: var(--zs-surface);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  min-inline-size: 12rem;
+  max-inline-size: 22rem;
+  padding-block: var(--zs-space-1);
+  padding-inline: 0;
+  border-radius: var(--zs-radius-4);
+  box-shadow:
+    var(--zs-shadow-dialog),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
+  opacity: 1;
+  outline: none;
+  isolation: isolate;
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+.zs-menubar-menu[data-side="top"] {
+  transform-origin: bottom center;
+}
+.zs-menubar-menu[data-side="bottom"] {
+  transform-origin: top center;
+}
+.zs-menubar-menu[data-side="left"] {
+  transform-origin: center right;
+}
+.zs-menubar-menu[data-side="right"] {
+  transform-origin: center left;
+}
+
+.zs-menubar-menu[data-starting-style],
+.zs-menubar-menu[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.97);
+}
+
+.zs-menubar-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  min-block-size: 1.75rem;
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  color: var(--zs-label);
+  font: inherit;
+  cursor: default;
+  user-select: none;
+  text-align: start;
+  outline: none;
+}
+
+.zs-menubar-menu-item[data-highlighted] {
+  background-color: var(--zs-accent);
+  color: var(--zs-accent-ink);
+}
+
+.zs-menubar-menu-item[data-disabled] {
+  color: var(--zs-label-tertiary);
+}
+
+.zs-menubar-menu-separator {
+  block-size: var(--zs-selection-hairline);
+  background-color: var(--zs-separator);
+  margin-block: var(--zs-space-1);
+  margin-inline: var(--zs-space-2);
+}
+
+.zs-menubar-menu-indicator {
+  display: inline-flex;
+  inline-size: 1rem;
+  block-size: 1rem;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+}
+
+.zs-menubar-menu-positioner {
+  z-index: calc(var(--zs-z-modal) + 10);
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zs-menubar-menu,
+  .zs-menubar-menu[data-starting-style],
+  .zs-menubar-menu[data-ending-style] {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors mirror ─────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-menubar {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-menubar-trigger {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-menubar-trigger[data-popup-open],
+  .zs-menubar-trigger[data-highlighted] {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-menubar-trigger[data-disabled] {
+    color: GrayText;
+  }
+  .zs-menubar-menu {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    forced-color-adjust: none;
+  }
+  .zs-menubar-menu-item {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-menubar-menu-item[data-highlighted] {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-menubar-menu-item[data-disabled] {
+    color: GrayText;
+  }
+  .zs-menubar-menu-separator {
+    background-color: CanvasText;
+  }
+}

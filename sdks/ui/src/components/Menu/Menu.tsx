@@ -257,16 +257,29 @@ function ArrowGlyph() {
 
 /* ─── Item ─────────────────────────────────────────────────────────── *
  *
- * The flag-and-text item. Two-column grid mirrors Select.Item's
- * indicator gutter so the row layout reads consistent across the
- * popover-family — even an Item without a leading glyph reserves the
- * indicator column so adjacent CheckboxItem / RadioItem rows line up. */
+ * The flag-and-text item. Three-column grid (indicator gutter | text |
+ * trailing) mirrors Select.Item's indicator gutter so the row layout
+ * reads consistent across the popover-family — every Item reserves the
+ * indicator column so adjacent CheckboxItem / RadioItem rows line up.
+ * The trailing column hosts an optional keyboard-shortcut hint or the
+ * submenu chevron — without it, plain Items pass children straight into
+ * the text lane (which would otherwise land in the indicator track and
+ * stack multi-word labels vertically).
+ *
+ * A `shortcut` prop projects into the trailing `.zs-menu-item__shortcut`
+ * slot. Item / LinkItem / CheckboxItem / RadioItem all accept it; the
+ * Submenu trigger reserves the slot for its chevron. */
 
 type BaseItemProps = ComponentPropsWithoutRef<typeof BaseMenu.Item>;
-export type MenuItemProps = BaseItemProps;
+export interface MenuItemProps extends BaseItemProps {
+  /** Trailing keyboard-shortcut hint (e.g. `"⌘X"`). Presentational
+   *  only — Base UI's text-navigation matches the row's label, not the
+   *  shortcut text. */
+  shortcut?: ReactNode;
+}
 
 const MenuItem = forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
-  { className, ...rest },
+  { className, children, shortcut, ...rest },
   ref,
 ) {
   return (
@@ -274,7 +287,15 @@ const MenuItem = forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
       ref={ref as Ref<HTMLDivElement>}
       className={composeBaseClass("zs-menu-item", className)}
       {...rest}
-    />
+    >
+      <span className="zs-menu-item__indicator" aria-hidden="true" />
+      <span className="zs-menu-item__text">{children}</span>
+      {shortcut !== undefined ? (
+        <span className="zs-menu-item__shortcut" aria-hidden="true">
+          {shortcut}
+        </span>
+      ) : null}
+    </BaseMenu.Item>
   );
 });
 MenuItem.displayName = "Menu.Item";
@@ -349,10 +370,13 @@ MenuSeparator.displayName = "Menu.Separator";
 type BaseCheckboxItemProps = ComponentPropsWithoutRef<
   typeof BaseMenu.CheckboxItem
 >;
-export type MenuCheckboxItemProps = BaseCheckboxItemProps;
+export interface MenuCheckboxItemProps extends BaseCheckboxItemProps {
+  /** Trailing keyboard-shortcut hint. See `MenuItemProps.shortcut`. */
+  shortcut?: ReactNode;
+}
 
 const MenuCheckboxItem = forwardRef<HTMLElement, MenuCheckboxItemProps>(
-  function MenuCheckboxItem({ className, children, ...rest }, ref) {
+  function MenuCheckboxItem({ className, children, shortcut, ...rest }, ref) {
     return (
       <BaseMenu.CheckboxItem
         ref={ref as Ref<HTMLDivElement>}
@@ -368,6 +392,11 @@ const MenuCheckboxItem = forwardRef<HTMLElement, MenuCheckboxItemProps>(
           </BaseMenu.CheckboxItemIndicator>
         </span>
         <span className="zs-menu-item__text">{children}</span>
+        {shortcut !== undefined ? (
+          <span className="zs-menu-item__shortcut" aria-hidden="true">
+            {shortcut}
+          </span>
+        ) : null}
       </BaseMenu.CheckboxItem>
     );
   },
@@ -416,10 +445,13 @@ const MenuRadioGroup = forwardRef<HTMLDivElement, MenuRadioGroupProps>(
 MenuRadioGroup.displayName = "Menu.RadioGroup";
 
 type BaseRadioItemProps = ComponentPropsWithoutRef<typeof BaseMenu.RadioItem>;
-export type MenuRadioItemProps = BaseRadioItemProps;
+export interface MenuRadioItemProps extends BaseRadioItemProps {
+  /** Trailing keyboard-shortcut hint. See `MenuItemProps.shortcut`. */
+  shortcut?: ReactNode;
+}
 
 const MenuRadioItem = forwardRef<HTMLElement, MenuRadioItemProps>(
-  function MenuRadioItem({ className, children, ...rest }, ref) {
+  function MenuRadioItem({ className, children, shortcut, ...rest }, ref) {
     return (
       <BaseMenu.RadioItem
         ref={ref as Ref<HTMLDivElement>}
@@ -435,6 +467,11 @@ const MenuRadioItem = forwardRef<HTMLElement, MenuRadioItemProps>(
           </BaseMenu.RadioItemIndicator>
         </span>
         <span className="zs-menu-item__text">{children}</span>
+        {shortcut !== undefined ? (
+          <span className="zs-menu-item__shortcut" aria-hidden="true">
+            {shortcut}
+          </span>
+        ) : null}
       </BaseMenu.RadioItem>
     );
   },
@@ -461,11 +498,14 @@ type BaseLinkItemProps = ComponentPropsWithoutRef<typeof BaseMenu.LinkItem>;
 export interface MenuLinkItemProps extends BaseLinkItemProps {
   /** Render the single child element instead of our `<a>`. */
   asChild?: boolean;
+  /** Trailing keyboard-shortcut hint. See `MenuItemProps.shortcut`.
+   *  Ignored when `asChild` is set — caller owns the child layout. */
+  shortcut?: ReactNode;
 }
 
 const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
   function MenuLinkItem(
-    { asChild = false, className, children, ...rest },
+    { asChild = false, className, children, shortcut, ...rest },
     ref,
   ) {
     if (
@@ -490,6 +530,10 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
           const linkPropsRef = (linkProps as { ref?: Ref<unknown> }).ref;
 
           if (asChild) {
+            // asChild defers row layout to the caller's element — we
+            // can't safely inject the indicator/text/shortcut spans
+            // around an arbitrary router <Link>. The caller owns the
+            // grid lanes (or absorbs the column collapse).
             if (!isValidElement(children)) return <></>;
             const child = children as ReactElement;
             const childRef = getElementRef<unknown>(child);
@@ -515,7 +559,13 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
                 linkPropsRef as Ref<HTMLAnchorElement>,
               )}
             >
-              {children}
+              <span className="zs-menu-item__indicator" aria-hidden="true" />
+              <span className="zs-menu-item__text">{children}</span>
+              {shortcut !== undefined ? (
+                <span className="zs-menu-item__shortcut" aria-hidden="true">
+                  {shortcut}
+                </span>
+              ) : null}
             </a>
           );
         }}

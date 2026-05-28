@@ -39,6 +39,9 @@
 @import "./components/Meter/Meter.css";
 @import "./components/Progress/Progress.css";
 @import "./components/Tabs/Tabs.css";
+@import "./components/Menubar/Menubar.css";
+@import "./components/Toolbar/Toolbar.css";
+@import "./components/NavigationMenu/NavigationMenu.css";
 
 *,
 *::before,
