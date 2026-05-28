@@ -426,3 +426,10 @@ bad_request(...); }` next to the `expires_in_days` validation.
   PAT, oauth grants); (b) validated against a fixed regex (env-store key
   `valid_key`, line 66); or (c) passed only as a parameterised SQL bind.
   No `Path<String>` reached `std::fs` without normalisation.
+
+## Blockers
+
+- H2 is blocked by the fixer coordination rule: the required validation
+  change lands in `crates/control/src/oauth_handlers.rs`, which this round's
+  instructions identify as a likely R4/R1 overlap file. No code was changed
+  for H2 in this pass.
