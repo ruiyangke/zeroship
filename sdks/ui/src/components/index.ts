@@ -348,3 +348,20 @@ export type {
   ToastEmitter,
   ToastOptions,
 } from "./Toast";
+
+export { Avatar, AvatarRoot, AvatarImage, AvatarFallback } from "./Avatar";
+export type {
+  AvatarProps,
+  AvatarRootProps,
+  AvatarImageProps,
+  AvatarFallbackProps,
+  AvatarSize,
+  AvatarShape,
+} from "./Avatar";
+
+export { Separator } from "./Separator";
+export type {
+  SeparatorProps,
+  SeparatorOrientation,
+  SeparatorVariant,
+} from "./Separator";

@@ -46,6 +46,8 @@
 @import "./components/Collapsible/Collapsible.css";
 @import "./components/Toast/Toast.css";
 @import "./components/Drawer/Drawer.css";
+@import "./components/Avatar/Avatar.css";
+@import "./components/Separator/Separator.css";
 
 *,
 *::before,

@@ -4353,6 +4353,96 @@ await openStoryAndTrigger(
   );
 }
 
+/* ─── 87. Slice 17: Avatar — src + alt → <img> mounts with that alt ── */
+await open("components-avatar--basic");
+{
+  const root = page.locator('[data-testid="avatar-basic"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  let imgAlt = null;
+  let foundImage = false;
+  for (let i = 0; i < 20; i++) {
+    const img = root.locator("img");
+    const count = await img.count();
+    if (count > 0) {
+      imgAlt = await img.first().getAttribute("alt");
+      foundImage = true;
+      break;
+    }
+    await page.waitForTimeout(100);
+  }
+  const ok = foundImage && imgAlt === "Ada Lovelace";
+  report(
+    "Avatar src + alt → <img> with correct alt",
+    ok,
+    `foundImage=${foundImage}, alt="${imgAlt}"`,
+  );
+}
+
+/* ─── 88. Slice 17: Avatar — broken src → fallback after delay ──────── */
+await open("components-avatar--fallback-on-error");
+{
+  const root = page.locator('[data-testid="avatar-error"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  let fallbackVisible = false;
+  let status = null;
+  for (let i = 0; i < 60; i++) {
+    const text = (await root.innerText().catch(() => "")) || "";
+    status = await root.getAttribute("data-image-loading-status");
+    if (text.includes("BR") || status === "error") {
+      fallbackVisible = true;
+      break;
+    }
+    await page.waitForTimeout(100);
+  }
+  report(
+    "Avatar broken src → fallback after delay",
+    fallbackVisible,
+    `fallbackVisible=${fallbackVisible}, status="${status}"`,
+  );
+}
+
+/* ─── 89. Slice 17: Separator decorative=true → role=none + hidden ── */
+await open("components-separator--horizontal");
+{
+  const sep = page.locator('[data-testid="separator-horizontal"]');
+  await sep.waitFor({ state: "visible", timeout: 5000 });
+  const role = await sep.getAttribute("role");
+  const ariaHidden = await sep.getAttribute("aria-hidden");
+  const ok = role === "none" && ariaHidden === "true";
+  report(
+    "Separator decorative=true → role=none + aria-hidden=true",
+    ok,
+    `role="${role}", aria-hidden="${ariaHidden}"`,
+  );
+}
+
+/* ─── 90. Slice 17: Separator decorative=false → role=separator ──── */
+await open("components-separator--not-decorative");
+{
+  const horizontal = page.locator(
+    '[data-testid="separator-semantic-horizontal"]',
+  );
+  await horizontal.waitFor({ state: "visible", timeout: 5000 });
+  const hRole = await horizontal.getAttribute("role");
+  const hOrient = await horizontal.getAttribute("aria-orientation");
+  const vertical = page.locator(
+    '[data-testid="separator-semantic-vertical"]',
+  );
+  await vertical.waitFor({ state: "visible", timeout: 5000 });
+  const vRole = await vertical.getAttribute("role");
+  const vOrient = await vertical.getAttribute("aria-orientation");
+  const ok =
+    hRole === "separator" &&
+    hOrient === "horizontal" &&
+    vRole === "separator" &&
+    vOrient === "vertical";
+  report(
+    "Separator decorative=false → role=separator + aria-orientation",
+    ok,
+    `h:role="${hRole}"/orient="${hOrient}", v:role="${vRole}"/orient="${vOrient}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

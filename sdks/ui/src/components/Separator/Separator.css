@@ -1,0 +1,103 @@
+/*
+ * Separator — visual divider.
+ *
+ * Anatomy:
+ *   .zs-separator                    — the line element
+ *
+ * Modifier classes:
+ *   orientation: --horizontal | --vertical
+ *   variant:     --hairline | --thick
+ *
+ * Layout discipline:
+ *   - The Separator owns NO outer margin. Spacing rhythm belongs to
+ *     the parent — `gap` on a flex/grid container, padding on a
+ *     card. Adding margin here would cascade-break every consumer.
+ *   - Logical properties: `border-block-end-width` for horizontal,
+ *     `border-inline-end-width` for vertical. RTL is automatic.
+ *   - The cross-axis dimension is `100%` (fills the parent's main
+ *     axis); the main-axis dimension is `0` (the border carries the
+ *     line, not the element box).
+ *
+ * Motion: none. Separator carries no transitions.
+ */
+
+.zs-separator {
+  /* Color is theme-token only — no `color` prop on the component. */
+  --zs-separator-color: var(--zs-separator);
+  /* Hairline weight resolves to one device-pixel via the foundation token.
+     The `thick` variant overrides to space-1 (0.25rem). */
+  --zs-separator-weight: var(--zs-selection-hairline);
+
+  display: block;
+  flex-shrink: 0;
+  border: 0 solid var(--zs-separator-color);
+  background: transparent;
+}
+
+/* ─── Variants ──────────────────────────────────────────────────────── */
+
+.zs-separator--hairline {
+  --zs-separator-weight: var(--zs-selection-hairline);
+}
+
+.zs-separator--thick {
+  --zs-separator-weight: var(--zs-space-1);
+}
+
+/* ─── Orientation × variant ─────────────────────────────────────────── */
+
+/* Horizontal: full inline-size; border on the block-end edge so the
+ * line sits at the bottom of the element box (lets a consumer give the
+ * Separator a tiny block-size for hit-test-friendly placement, while
+ * the visible line stays a single device pixel). */
+.zs-separator--horizontal {
+  inline-size: 100%;
+  block-size: 0;
+  border-block-end-width: var(--zs-separator-weight);
+}
+
+/* Vertical: full block-size; border on the inline-end edge so the line
+ * sits at the trailing edge (RTL flips automatically via logical
+ * properties — no separate rule needed). */
+.zs-separator--vertical {
+  inline-size: 0;
+  /* Sensible visible default: 1.25rem block-size lets a vertical
+     Separator render in a row whose parent doesn't stretch (e.g. a
+     row of inline-content). Consumers wanting full-row height set
+     `align-self: stretch` on a parent with `align-items: stretch`,
+     or set `block-size` explicitly. */
+  block-size: 1.25rem;
+  align-self: center;
+  border-inline-end-width: var(--zs-separator-weight);
+}
+
+/* ─── forced-colors / Windows High Contrast ──────────────────────────
+ *
+ * Mirror at the same selector depth so the system palette wins. The
+ * `thick` variant retains its block-size so the heavier divider still
+ * reads as the heavier divider; it just paints in CanvasText instead
+ * of the token color. */
+@media (forced-colors: active) {
+  .zs-separator {
+    border-color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-separator--horizontal {
+    border-block-end-width: var(--zs-separator-weight);
+  }
+  .zs-separator--vertical {
+    border-inline-end-width: var(--zs-separator-weight);
+  }
+}
+
+/* ─── Reduced motion ───────────────────────────────────────────────── *
+ *
+ * No-op block — Separator has no transitions. Block exists for parity
+ * with the rest of the surface so a future maintainer adding (e.g.) a
+ * draw-in animation finds the hook pre-wired. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-separator {
+    transition: none;
+    animation: none;
+  }
+}
