@@ -10,6 +10,7 @@ const STATEMENTS: &[&str] = &[
     // citext for case-insensitive emails
     "CREATE EXTENSION IF NOT EXISTS citext",
     "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"",
+    "CREATE EXTENSION IF NOT EXISTS pgcrypto",
 
     // 5.1 users
     "CREATE TABLE IF NOT EXISTS auth.users (
@@ -380,7 +381,20 @@ const STATEMENTS: &[&str] = &[
         created_by           UUID REFERENCES auth.users(id),
         hydra_client_id      TEXT NOT NULL
     )",
-    "ALTER TABLE control.oauth_clients ALTER COLUMN created_by DROP NOT NULL",
+    "DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'control'
+              AND table_name = 'oauth_clients'
+              AND column_name = 'created_by'
+              AND is_nullable = 'NO'
+        ) THEN
+            ALTER TABLE control.oauth_clients ALTER COLUMN created_by DROP NOT NULL;
+        END IF;
+    END;
+    $$",
     "CREATE TABLE IF NOT EXISTS control.oauth_grants (
         user_id          UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
         client_id        TEXT NOT NULL REFERENCES control.oauth_clients(client_id) ON DELETE CASCADE,

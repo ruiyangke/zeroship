@@ -25,6 +25,7 @@ async fn migrations_apply_cleanly() {
 
     migrations::migrate(&client).await.expect("migrate");
 
+    assert_extension_exists(&client, "pgcrypto").await;
     assert_table_exists(&client, "auth.users").await;
     assert_queryable(&client, "platform.roles").await;
     assert_queryable(&client, "control.app_members").await;
@@ -35,6 +36,7 @@ async fn migrations_apply_cleanly() {
     assert_hot_path_indexes(&client).await;
     assert_one_active_token_indexes(&client).await;
     assert_token_sweep_indexes(&client).await;
+    assert_oauth_clients_created_by_nullable(&client).await;
 
     let owner_email = format!("authz-migration-owner-{}@zeroship.test", Uuid::new_v4().simple());
     let actor_email = format!("authz-migration-actor-{}@zeroship.test", Uuid::new_v4().simple());
@@ -123,6 +125,36 @@ async fn migrations_apply_cleanly() {
         .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
         .await
         .expect("cleanup users");
+}
+
+async fn assert_extension_exists(client: &compio_postgres::Client, name: &str) {
+    let rows = client
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1) AS found",
+            &[&name],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("query extension {name}: {e}"));
+    assert!(rows[0].get::<_, bool>("found"), "extension {name} should exist");
+}
+
+async fn assert_oauth_clients_created_by_nullable(client: &compio_postgres::Client) {
+    let rows = client
+        .query(
+            "SELECT is_nullable
+             FROM information_schema.columns
+             WHERE table_schema = 'control'
+               AND table_name = 'oauth_clients'
+               AND column_name = 'created_by'",
+            &[],
+        )
+        .await
+        .expect("query oauth_clients.created_by nullability");
+    let nullable: String = rows
+        .first()
+        .expect("control.oauth_clients.created_by exists")
+        .get("is_nullable");
+    assert_eq!(nullable, "YES", "created_by should allow bootstrap rows");
 }
 
 async fn assert_token_sweep_indexes(client: &compio_postgres::Client) {
