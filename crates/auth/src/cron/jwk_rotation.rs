@@ -69,8 +69,6 @@ pub(crate) async fn tick(
     rotation_days: i64,
     retain_days: i64,
 ) -> Result<()> {
-    rotate_set_if_due(admin, db, ID_TOKEN_SET, ID_TOKEN_ALGS, rotation_days).await?;
-    rotate_set_if_due(admin, db, ACCESS_TOKEN_SET, ACCESS_TOKEN_ALGS, rotation_days).await?;
     retire_stale_keys(admin, db, ID_TOKEN_SET, ID_TOKEN_ALGS, rotation_days, retain_days).await?;
     retire_stale_keys(
         admin,
@@ -81,6 +79,8 @@ pub(crate) async fn tick(
         retain_days,
     )
     .await?;
+    rotate_set_if_due(admin, db, ID_TOKEN_SET, ID_TOKEN_ALGS, rotation_days).await?;
+    rotate_set_if_due(admin, db, ACCESS_TOKEN_SET, ACCESS_TOKEN_ALGS, rotation_days).await?;
     Ok(())
 }
 
