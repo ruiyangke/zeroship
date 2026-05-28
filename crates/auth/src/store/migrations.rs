@@ -79,6 +79,8 @@ const STATEMENTS: &[&str] = &[
         expires_at       TIMESTAMPTZ NOT NULL,
         consumed_at      TIMESTAMPTZ
     )",
+    "ALTER TABLE auth.magic_completions \
+        ADD COLUMN IF NOT EXISTS attempts SMALLINT NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS auth_magic_completions_expires_idx \
         ON auth.magic_completions (expires_at) WHERE consumed_at IS NULL",
 
