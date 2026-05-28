@@ -56,9 +56,8 @@ pub struct LogoutToken {
     /// surfaces this so receivers can enforce one-shot use with
     /// [`LogoutJtiCache`].
     pub jti: String,
-    /// Event marker(s). Must contain [`BCL_EVENT`] with an empty-object
-    /// value. Use a [`HashSet`] of keys for cheap membership lookups —
-    /// the value shape (`{}`) isn't validated beyond "present".
+    /// Event marker. Must be exactly `{ BCL_EVENT: {} }`; extra event
+    /// keys or a non-empty BCL event payload are rejected.
     pub events: std::collections::BTreeMap<String, serde_json::Value>,
     /// Subject (end-user id). Either `sub` or `sid` (or both) MUST be
     /// present.
@@ -178,6 +177,9 @@ pub enum LogoutError {
     #[error("events claim missing the backchannel-logout marker")]
     EventsMissing,
 
+    #[error("events claim must be exactly {{ {BCL_EVENT}: {{}} }}")]
+    EventsShape,
+
     #[error("sub and sid both missing (BCL §2.4 requires at least one)")]
     SubjectMissing,
 
@@ -197,7 +199,7 @@ pub enum LogoutError {
 ///    default `validate_exp` is disabled accordingly.
 /// 3. Run the BCL-specific claim checks:
 ///    - `nonce` MUST NOT be present
-///    - `events` MUST contain the [`BCL_EVENT`] marker
+///    - `events` MUST be exactly `{ BCL_EVENT: {} }`
 ///    - at least one of `sub` / `sid` MUST be present
 ///    - `iat` MUST be within ±5 min of the verifier's clock
 ///
@@ -280,8 +282,15 @@ pub async fn verify(
     if claims.nonce.is_some() {
         return Err(LogoutError::NonceForbidden);
     }
-    if !claims.events.contains_key(BCL_EVENT) {
+    let Some(event_value) = claims.events.get(BCL_EVENT) else {
         return Err(LogoutError::EventsMissing);
+    };
+    if claims.events.len() != 1 {
+        return Err(LogoutError::EventsShape);
+    }
+    match event_value {
+        serde_json::Value::Object(map) if map.is_empty() => {}
+        _ => return Err(LogoutError::EventsShape),
     }
     if claims.sub.is_none() && claims.sid.is_none() {
         return Err(LogoutError::SubjectMissing);
@@ -399,6 +408,22 @@ mod tests {
     }
 
     #[compio::test]
+    async fn accepts_exact_events_claim_shape() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({ BCL_EVENT: {} });
+        let token = sign(&key, &c);
+        let claims = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect("exact BCL events shape must verify");
+        assert_eq!(
+            claims.events.get(BCL_EVENT),
+            Some(&json!({})),
+            "events must round-trip as the exact empty-object marker"
+        );
+    }
+
+    #[compio::test]
     async fn rejects_stale_iat() {
         let (key, cache) = make_key();
         let mut c = happy_claims();
@@ -429,6 +454,45 @@ mod tests {
             .await
             .expect_err("must reject missing BCL event");
         assert!(matches!(err, LogoutError::EventsMissing), "got: {err:?}");
+    }
+
+    #[compio::test]
+    async fn rejects_empty_events_claim() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({});
+        let token = sign(&key, &c);
+        let err = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect_err("must reject empty events");
+        assert!(matches!(err, LogoutError::EventsMissing), "got: {err:?}");
+    }
+
+    #[compio::test]
+    async fn rejects_extra_events_claim_keys() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({
+            BCL_EVENT: {},
+            "https://zeroship.ai/events/unexpected": {},
+        });
+        let token = sign(&key, &c);
+        let err = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect_err("must reject extra events");
+        assert!(matches!(err, LogoutError::EventsShape), "got: {err:?}");
+    }
+
+    #[compio::test]
+    async fn rejects_non_empty_backchannel_logout_event_payload() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({ BCL_EVENT: { "some": "data" } });
+        let token = sign(&key, &c);
+        let err = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect_err("must reject non-empty BCL event payload");
+        assert!(matches!(err, LogoutError::EventsShape), "got: {err:?}");
     }
 
     #[compio::test]
