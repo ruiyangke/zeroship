@@ -159,9 +159,27 @@ pub async fn post(
     let name = form.name.trim();
     let created = match users::create(db.as_ref(), &email, name, Some(&phc)).await {
         Ok(u) => Some(u),
-        Err(e) => {
-            tracing::info!(error = %e, "signup users::create rejected (duplicate or otherwise)");
+        Err(e) if e.db_code() == Some("23505") => {
+            tracing::info!(error = %e, "signup users::create rejected duplicate email");
             None
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "signup users::create failed");
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "signup_failed",
+                    outcome: "failure",
+                    auth_method: Some("password"),
+                    detail: serde_json::json!({
+                        "reason": "users_create_failed",
+                        "db_code": e.db_code(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
