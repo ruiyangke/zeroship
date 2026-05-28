@@ -99,6 +99,7 @@ impl Fixture {
             oidc_rp,
             auth_pg: Arc::new(auth_pg_client),
             hydra_admin_url: hydra.base.clone(),
+            expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),

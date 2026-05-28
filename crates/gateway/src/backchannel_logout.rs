@@ -98,6 +98,23 @@ pub async fn handle(
     if let Some(db) = state.db.as_ref() {
         match token.sub.as_deref() {
             Some(sub) => {
+                if let Some(subject) = zeroship_core::wrapper_revocation::subject_uuid(sub) {
+                    if let Err(e) =
+                        zeroship_core::wrapper_revocation::revoke_subject(db.as_ref(), subject)
+                            .await
+                    {
+                        tracing::error!(
+                            error = %e,
+                            sub = %sub,
+                            "backchannel_logout: wrapper subject revoke failed"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        sub = %sub,
+                        "backchannel_logout: non-UUID sub cannot enter wrapper denylist"
+                    );
+                }
                 let revoked = sessions::revoke_all_for_user(db, sub).await.unwrap_or_else(|e| {
                     tracing::error!(error = %e, "backchannel_logout: revoke_all_for_user failed");
                     0

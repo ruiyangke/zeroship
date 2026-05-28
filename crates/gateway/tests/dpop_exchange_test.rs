@@ -80,9 +80,13 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
 
 /// Build a `GateState` suitable for the exchange handler. The
 /// `with_issuer` switch controls whether `wrapper_issuer` is `Some` —
-/// the 503 path needs it `None`; the other three need `Some` so the
+/// the 503 path needs it `None`; the other paths need `Some` so the
 /// handler progresses past the first guard.
 fn build_state(with_issuer: bool) -> Arc<GateState> {
+    build_state_with_auth_public(with_issuer, "http://auth.test")
+}
+
+fn build_state_with_auth_public(with_issuer: bool, auth_public: &str) -> Arc<GateState> {
     // Unique tmpdir per test invocation — disk cache writes here on
     // construction, even though the exchange handler never hits it.
     let mut tmp = std::env::temp_dir();
@@ -115,7 +119,7 @@ fn build_state(with_issuer: bool) -> Arc<GateState> {
             auth_secret: String::new(),
             worker_key: String::new(),
             hydra_public: String::new(),
-            auth_public: String::new(),
+            auth_public: auth_public.to_string(),
             insecure_dev: true,
             public_url: "https://api.zeroship.ai".into(),
         },
@@ -129,7 +133,7 @@ fn build_state(with_issuer: bool) -> Arc<GateState> {
         disk_cache: disk,
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp: Arc::new(OidcRp::new(
-            "http://auth.test",
+            auth_public,
             "gateway",
             "test-secret",
             b"test-stash-key-32-bytes-long----".to_vec(),
@@ -141,6 +145,46 @@ fn build_state(with_issuer: bool) -> Arc<GateState> {
         wrapper_issuer,
         wrapper_verifier,
     })
+}
+
+fn sign_dpop_proof(
+    client_key: &SigningKey,
+    htm: &str,
+    htu: &str,
+    access_token: &str,
+    now: i64,
+) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use ed25519_dalek::Signer;
+    use sha2::{Digest, Sha256};
+
+    let pk = client_key.verifying_key();
+    let jwk = serde_json::json!({
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": URL_SAFE_NO_PAD.encode(pk.to_bytes()),
+    });
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "EdDSA",
+        "jwk": jwk,
+    });
+    let body = serde_json::json!({
+        "jti": uuid::Uuid::new_v4().to_string(),
+        "htm": htm,
+        "htu": htu,
+        "iat": now,
+        "ath": URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes())),
+    });
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let body_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&body).unwrap());
+    let signing_input = format!("{header_b64}.{body_b64}");
+    let sig = client_key.sign(signing_input.as_bytes());
+    format!(
+        "{signing_input}.{}",
+        URL_SAFE_NO_PAD.encode(sig.to_bytes())
+    )
 }
 
 #[ntex::test]
@@ -297,4 +341,63 @@ async fn returns_401_when_dpop_malformed() {
     let json: serde_json::Value =
         serde_json::from_slice(&bytes).expect("JSON body");
     assert_eq!(json["error"], "invalid_dpop_proof");
+}
+
+#[ntex::test]
+async fn returns_401_when_introspection_has_no_sub() {
+    async fn introspect_no_sub() -> ntex::web::HttpResponse {
+        ntex::web::HttpResponse::Ok().json(&serde_json::json!({
+            "active": true,
+            "client_id": "gateway",
+            "scope": "openid"
+        }))
+    }
+
+    let srv = ntex::web::test::server(|| async {
+        ntex::web::App::new().service(
+            ntex::web::resource("/oauth2/introspect")
+                .route(ntex::web::post().to(introspect_no_sub)),
+        )
+    })
+    .await;
+    let auth_public = srv.url("").trim_end_matches('/').to_string();
+    let state = build_state_with_auth_public(true, &auth_public);
+    let app = test::init_service(
+        web::App::new()
+            .state(state)
+            .service(
+                web::resource("/__zs/auth/dpop-exchange")
+                    .route(web::post().to(dpop_exchange::handle)),
+            ),
+    )
+    .await;
+
+    let hydra_token = "ht_client_credentials";
+    let host = "myapp.zeroship.ai";
+    let htu = format!("http://{host}/__zs/auth/dpop-exchange");
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let client_key = SigningKey::from_bytes(&[42u8; 32]);
+    let proof = sign_dpop_proof(&client_key, "POST", &htu, hydra_token, now);
+
+    let req = test::TestRequest::post()
+        .uri("/__zs/auth/dpop-exchange")
+        .header("host", host)
+        .header("authorization", format!("Bearer {hydra_token}"))
+        .header("dpop", proof)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let bytes = test::read_body(resp).await;
+    let json: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("JSON body");
+    assert_eq!(json["error"], "missing_oauth_sub");
+
+    drop(srv);
 }

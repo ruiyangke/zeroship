@@ -46,6 +46,9 @@ const CSRF_NONCE_LEN_BYTES: usize = 16;
 /// login magic links.
 pub const LOGIN_PURPOSE: &str = "login";
 
+/// Pending consume reservations older than this are burned, not retried.
+const PENDING_STALE_SECONDS: i64 = 5;
+
 /// Result of [`issue`] — the values the HTTP layer needs to assemble the
 /// email body and the requesting-device cookie.
 #[derive(Debug, Clone)]
@@ -70,6 +73,7 @@ pub struct RedeemedLoginToken {
 
 #[derive(Debug)]
 pub enum RedeemError {
+    AlreadyConsumed,
     InFlight,
     Store(AuthError),
 }
@@ -135,13 +139,15 @@ pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedTo
 /// `Ok(Some(_))` when the token is reserved for this request, `Ok(None)`
 /// if the token doesn't match any unconsumed, unexpired
 /// `purpose = 'login'` row, and `Err(RedeemError::InFlight)` if another
-/// request reserved the same token in the last 60 seconds.
+/// request reserved the same token in the last 5 seconds. Stale pending
+/// reservations are marked consumed and return
+/// `Err(RedeemError::AlreadyConsumed)`.
 ///
 /// Implementation: single `UPDATE … RETURNING` keyed by
 /// `(token_hash, purpose)`. The purpose predicate prevents password-
 /// reset rows from being repurposed as login sessions. `PostgreSQL`
 /// guarantees only one concurrent caller can reserve the row at a time;
-/// stale pending reservations older than 60 seconds can be retried.
+/// stale pending reservations are burned instead of being retried.
 ///
 /// # Errors
 ///
@@ -151,14 +157,14 @@ pub async fn redeem_pending(
     raw_token: &str,
 ) -> std::result::Result<Option<RedeemedLoginToken>, RedeemError> {
     let token_hash = sha256(raw_token);
+    let stale_secs = PENDING_STALE_SECONDS as f64;
     let rows = conn
         .query(
             "UPDATE auth.magic_links SET consumed_pending_at = NOW() \
              WHERE token_hash = $1 \
                AND purpose = $2 \
                AND consumed_at IS NULL \
-               AND (consumed_pending_at IS NULL \
-                    OR consumed_pending_at <= NOW() - INTERVAL '60 seconds') \
+               AND consumed_pending_at IS NULL \
                AND expires_at > NOW() \
              RETURNING email::text, csrf_nonce, purpose",
             &[&token_hash.as_slice(), &LOGIN_PURPOSE],
@@ -174,6 +180,27 @@ pub async fn redeem_pending(
         }));
     }
 
+    let stale = conn
+        .query(
+            "UPDATE auth.magic_links \
+             SET consumed_at = NOW() \
+             WHERE token_hash = $1 \
+               AND purpose = $2 \
+               AND consumed_at IS NULL \
+               AND consumed_pending_at IS NOT NULL \
+               AND consumed_pending_at <= NOW() - make_interval(secs => $3::double precision) \
+               AND expires_at > NOW() \
+             RETURNING 1",
+            &[&token_hash.as_slice(), &LOGIN_PURPOSE, &stale_secs],
+        )
+        .await
+        .map_err(|e| {
+            RedeemError::Store(AuthError::Db(format!("magic_link redeem stale: {e}")))
+        })?;
+    if stale.first().is_some() {
+        return Err(RedeemError::AlreadyConsumed);
+    }
+
     let in_flight = conn
         .query(
             "SELECT TRUE AS in_flight \
@@ -181,9 +208,9 @@ pub async fn redeem_pending(
              WHERE token_hash = $1 \
                AND purpose = $2 \
                AND consumed_at IS NULL \
-               AND consumed_pending_at > NOW() - INTERVAL '60 seconds' \
+               AND consumed_pending_at > NOW() - make_interval(secs => $3::double precision) \
                AND expires_at > NOW()",
-            &[&token_hash.as_slice(), &LOGIN_PURPOSE],
+            &[&token_hash.as_slice(), &LOGIN_PURPOSE, &stale_secs],
         )
         .await
         .map_err(|e| {

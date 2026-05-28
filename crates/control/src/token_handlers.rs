@@ -102,8 +102,8 @@ impl PatIssuer {
     }
 
     pub fn dev_insecure() -> Self {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
-        Self::new(&key).expect("static dev PAT key is valid")
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        Self::new(&key).expect("generated dev PAT key is valid")
     }
 
     pub fn issue(
@@ -433,4 +433,20 @@ fn jwk_thumbprint(key: &ed25519_dalek::SigningKey) -> String {
     let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
     let digest = Sha256::digest(canonical.as_bytes());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_insecure_generates_fresh_key_per_issuer() {
+        let first = PatIssuer::dev_insecure();
+        let second = PatIssuer::dev_insecure();
+
+        assert_ne!(
+            first.kid, second.kid,
+            "dev_insecure PAT issuers must not share one constant signing key"
+        );
+    }
 }

@@ -42,7 +42,7 @@ use ntex::http::header::{AUTHORIZATION, HOST};
 use ntex::web::{types::State, HttpRequest, HttpResponse};
 use serde_json::json;
 
-use crate::GateState;
+use crate::{error::GatewayError, GateState};
 
 /// Cache-Control value applied to every response from this handler.
 const CACHE_NO_STORE: &str = "no-store";
@@ -208,6 +208,12 @@ pub async fn handle(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRespo
     let aud = host.to_string();
     let wrapper = match issuer.issue(&aud, &intro, &verified.jkt, hydra_token) {
         Ok(t) => t,
+        Err(GatewayError::Internal(message)) if message == "missing oauth sub" => {
+            tracing::warn!("dpop-exchange: introspection response missing oauth sub");
+            return HttpResponse::Unauthorized()
+                .header("cache-control", CACHE_NO_STORE)
+                .json(&json!({"error": "missing_oauth_sub"}));
+        }
         Err(e) => {
             tracing::error!(error = %e, "dpop-exchange: issue failed");
             return HttpResponse::InternalServerError()

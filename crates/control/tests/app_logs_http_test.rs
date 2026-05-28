@@ -99,6 +99,7 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             oidc_rp,
             auth_pg,
             hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+            expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
