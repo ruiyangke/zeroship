@@ -369,7 +369,7 @@ async fn validate_grant_subset(
     state: &AppState,
     policy: &Policy,
 ) -> Result<(), web::HttpResponse> {
-    validate_policy_resources(policy)?;
+    validate_policy_shape(policy)?;
 
     let now = now_unix().map_err(|err| {
         tracing::error!(error = %err, "control: PAT grant validation clock failed");
@@ -378,6 +378,9 @@ async fn validate_grant_subset(
 
     let mut pairs = 0usize;
     for statement in &policy.statements {
+        // Deny statements only narrow the wrapper policy. The subset check
+        // validates every Allow pair because those are the only statements
+        // that can grant authority beyond what the principal already has.
         if statement.effect != Effect::Allow {
             continue;
         }
@@ -435,8 +438,20 @@ async fn validate_grant_subset(
     Ok(())
 }
 
-fn validate_policy_resources(policy: &Policy) -> Result<(), web::HttpResponse> {
+fn validate_policy_shape(policy: &Policy) -> Result<(), web::HttpResponse> {
     for statement in &policy.statements {
+        if statement.actions.is_empty() {
+            return Err(web::HttpResponse::BadRequest().json(&json!({
+                "error": "empty_policy_statement",
+                "message": "policy statements must include at least one action",
+            })));
+        }
+        if statement.resources.is_empty() {
+            return Err(web::HttpResponse::BadRequest().json(&json!({
+                "error": "empty_policy_statement",
+                "message": "policy statements must include at least one resource",
+            })));
+        }
         for resource in &statement.resources {
             if let Err(message) = resource.validate_ids() {
                 return Err(web::HttpResponse::BadRequest().json(&json!({
