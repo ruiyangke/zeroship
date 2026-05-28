@@ -106,3 +106,19 @@ Total: 7 findings (0 critical, 2 high, 3 medium, 2 low).
 - Hydra-client (`crates/auth/src/hydra_client/*.rs`) — not reviewed for admin-API authentication / TLS pinning.
 - The advisory-lock JWK rotation cron — not deep-audited for race conditions in the prepend+retire sequence.
 - GitHub/Google OAuth identity providers — only integration with magic_link/password_reset was checked, not the OAuth handshake itself.
+
+## Status
+
+### CLOSED
+
+- **H1** — `9f861ce5` (`audit R2.H1: enforce control OAuth audience`)
+- **H2** — `5286ed57` (`audit R2.H2: reject OAuth tokens without subject`)
+- **M1** — `a92f3b36` (`audit R2.M1: invalidate Hydra cache on logout`) for the cached control-plane `HydraIntrospector` path.
+- **M2** — `f65e4d0e` (`audit R2.M2: deny revoked wrapper subjects`)
+- **M3** — `d2f95f92` (`audit R2.M3: honor DPoP PG JTI TTL`)
+- **L1** — `18eff1c4` (`audit R2.L1: burn stale magic links`)
+- **L2** — `3a509627` (`audit R2.L2: randomize dev PAT key`)
+
+### DEFERRED
+
+- **M1 gateway invalidation hook** — no gateway-side `HydraIntrospector` cache exists to invalidate; gateway DPoP exchange/fallback paths call `OidcRp::introspect_token` directly. See `## Blockers`.
