@@ -284,39 +284,55 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
 //   max-age, set on the redirect to hydra, cleared on callback.
 //
 // The `__Host-` prefix (RFC 6265bis §4.1.3) requires `Path=/`, no
-// `Domain=`, and `Secure`. The dev override drops `Secure` only for
-// HTTP localhost; the rest of the attributes never move.
+// `Domain=`, and `Secure`. RFC 6265bis §4.1.3.2 makes `Secure` non-
+// optional for `__Host-` — compliant clients silently reject the
+// cookie when Secure is missing. Dev mode (HTTP localhost) therefore
+// drops `Secure` AND the prefix together so the cookie can complete
+// the round-trip; the rest of the attributes never move.
 
-/// Per-origin console session cookie name. Set after a successful code
-/// exchange; cleared on logout.
-pub const CONSOLE_SESSION_COOKIE: &str = "__Host-zs_console_session";
+/// Production console session cookie name (`__Host-` → Secure required).
+pub const CONSOLE_SESSION_COOKIE_PROD: &str = "__Host-zs_console_session";
+/// Dev console session cookie name (no `__Host-` prefix).
+pub const CONSOLE_SESSION_COOKIE_DEV: &str = "zs_console_session";
 
 /// 12-hour absolute lifetime for the console session cookie.
 pub const CONSOLE_SESSION_MAX_AGE_SECS: i64 = 12 * 3600;
 
+/// Resolve the console session cookie name for the current environment.
+#[must_use]
+pub fn console_session_cookie_name(insecure_dev: bool) -> &'static str {
+    if insecure_dev { CONSOLE_SESSION_COOKIE_DEV } else { CONSOLE_SESSION_COOKIE_PROD }
+}
+
 /// Build the `Set-Cookie` header value for the console session.
 ///
-/// `insecure_dev = true` drops `Secure` so localhost HTTP works. In
-/// production this MUST be false (the `__Host-` prefix requires Secure).
+/// `insecure_dev = true` drops the `Secure` flag AND the `__Host-`
+/// prefix (RFC 6265bis §4.1.3.2 — `__Host-` requires Secure).
 #[must_use]
 pub fn set_console_session_cookie(session_id: &uuid::Uuid, insecure_dev: bool) -> String {
+    let name = console_session_cookie_name(insecure_dev);
     let secure = if insecure_dev { "" } else { "; Secure" };
     format!(
-        "{CONSOLE_SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={CONSOLE_SESSION_MAX_AGE_SECS}"
+        "{name}={session_id}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={CONSOLE_SESSION_MAX_AGE_SECS}"
     )
 }
 
 /// Clear the console session cookie on logout.
 #[must_use]
 pub fn clear_console_session_cookie(insecure_dev: bool) -> String {
+    let name = console_session_cookie_name(insecure_dev);
     let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{CONSOLE_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+    format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
 }
 
 /// Parse the console session UUID from a `Cookie` header value.
 #[must_use]
-pub fn parse_console_session_cookie(cookie_header: &str) -> Option<uuid::Uuid> {
-    let prefix = format!("{CONSOLE_SESSION_COOKIE}=");
+pub fn parse_console_session_cookie(
+    cookie_header: &str,
+    insecure_dev: bool,
+) -> Option<uuid::Uuid> {
+    let name = console_session_cookie_name(insecure_dev);
+    let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&prefix) {
@@ -326,19 +342,27 @@ pub fn parse_console_session_cookie(cookie_header: &str) -> Option<uuid::Uuid> {
     None
 }
 
-/// PKCE/state stash cookie name. Lives only between the initial redirect
-/// to hydra and the eventual `/auth/callback`.
-pub const CONSOLE_STASH_COOKIE: &str = "__Host-zs_console_stash";
+/// Production stash cookie name (`__Host-` → Secure required).
+pub const CONSOLE_STASH_COOKIE_PROD: &str = "__Host-zs_console_stash";
+/// Dev stash cookie name (no `__Host-` prefix).
+pub const CONSOLE_STASH_COOKIE_DEV: &str = "zs_console_stash";
 
 /// 10-minute window for the OIDC dance to complete.
 pub const CONSOLE_STASH_MAX_AGE_SECS: i64 = 600;
 
+/// Resolve the console stash cookie name for the current environment.
+#[must_use]
+pub fn console_stash_cookie_name(insecure_dev: bool) -> &'static str {
+    if insecure_dev { CONSOLE_STASH_COOKIE_DEV } else { CONSOLE_STASH_COOKIE_PROD }
+}
+
 /// Build the `Set-Cookie` header value for the OIDC stash.
 #[must_use]
 pub fn set_console_stash_cookie(value: &str, insecure_dev: bool) -> String {
+    let name = console_stash_cookie_name(insecure_dev);
     let secure = if insecure_dev { "" } else { "; Secure" };
     format!(
-        "{CONSOLE_STASH_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={CONSOLE_STASH_MAX_AGE_SECS}"
+        "{name}={value}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age={CONSOLE_STASH_MAX_AGE_SECS}"
     )
 }
 
@@ -346,16 +370,18 @@ pub fn set_console_stash_cookie(value: &str, insecure_dev: bool) -> String {
 /// short-lived stash doesn't linger after the dance completes.
 #[must_use]
 pub fn clear_console_stash_cookie(insecure_dev: bool) -> String {
+    let name = console_stash_cookie_name(insecure_dev);
     let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{CONSOLE_STASH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+    format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
 }
 
 /// Parse the raw stash value out of a `Cookie` header. Returns the
 /// signed-blob string; pass it to `ConsoleOidcRp::finish_callback` to
 /// verify and recover the payload.
 #[must_use]
-pub fn parse_console_stash_cookie(cookie_header: &str) -> Option<String> {
-    let prefix = format!("{CONSOLE_STASH_COOKIE}=");
+pub fn parse_console_stash_cookie(cookie_header: &str, insecure_dev: bool) -> Option<String> {
+    let name = console_stash_cookie_name(insecure_dev);
+    let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
         if let Some(rest) = part.strip_prefix(&prefix) {
@@ -475,9 +501,15 @@ mod tests {
     }
 
     #[test]
-    fn console_session_set_cookie_drops_secure_in_dev() {
+    fn console_session_set_cookie_drops_secure_and_host_prefix_in_dev() {
+        // RFC 6265bis §4.1.3.2: __Host- cookies require Secure. Dev
+        // runs over plain HTTP without Secure, so the prefix MUST be
+        // dropped too — otherwise compliant clients silently reject
+        // the cookie.
         let id = uuid::Uuid::new_v4();
         let c = set_console_session_cookie(&id, true);
+        assert!(!c.starts_with("__Host-"), "dev cookie must NOT use __Host- prefix: {c}");
+        assert!(c.starts_with("zs_console_session="), "dev cookie name: {c}");
         assert!(
             !c.contains("Secure"),
             "dev cookie must NOT have Secure: {c}"
@@ -493,18 +525,24 @@ mod tests {
         assert!(c.contains("Secure"));
         let dev = clear_console_session_cookie(true);
         assert!(!dev.contains("Secure"));
+        assert!(!dev.starts_with("__Host-"));
     }
 
     #[test]
     fn console_session_parse_cookie_roundtrips() {
         let id = uuid::Uuid::new_v4();
         let header = format!("foo=bar; __Host-zs_console_session={id}; baz=qux");
-        assert_eq!(parse_console_session_cookie(&header), Some(id));
-        assert_eq!(parse_console_session_cookie("nothing-here"), None);
+        assert_eq!(parse_console_session_cookie(&header, false), Some(id));
+        assert_eq!(parse_console_session_cookie("nothing-here", false), None);
         assert_eq!(
-            parse_console_session_cookie("__Host-zs_console_session=not-a-uuid"),
+            parse_console_session_cookie("__Host-zs_console_session=not-a-uuid", false),
             None
         );
+
+        // Dev mode reads the bare-name cookie.
+        let dev_header = format!("zs_console_session={id}");
+        assert_eq!(parse_console_session_cookie(&dev_header, true), Some(id));
+        assert_eq!(parse_console_session_cookie(&header, true), None);
     }
 
     // ─── Stash cookie ───────────────────────────────────────────────
@@ -521,8 +559,10 @@ mod tests {
     }
 
     #[test]
-    fn console_stash_set_cookie_drops_secure_in_dev() {
+    fn console_stash_set_cookie_drops_secure_and_host_prefix_in_dev() {
         let c = set_console_stash_cookie("v", true);
+        assert!(!c.starts_with("__Host-"), "dev cookie must NOT use __Host- prefix: {c}");
+        assert!(c.starts_with("zs_console_stash=v"));
         assert!(!c.contains("Secure"));
     }
 
@@ -533,12 +573,17 @@ mod tests {
         assert!(c.contains("Secure"));
         let dev = clear_console_stash_cookie(true);
         assert!(!dev.contains("Secure"));
+        assert!(!dev.starts_with("__Host-"));
     }
 
     #[test]
     fn console_stash_parse_cookie_roundtrips() {
         let header = "foo=bar; __Host-zs_console_stash=abc.def; baz=qux";
-        assert_eq!(parse_console_stash_cookie(header), Some("abc.def".into()));
-        assert_eq!(parse_console_stash_cookie("nothing"), None);
+        assert_eq!(parse_console_stash_cookie(header, false), Some("abc.def".into()));
+        assert_eq!(parse_console_stash_cookie("nothing", false), None);
+
+        let dev_header = "zs_console_stash=abc.def";
+        assert_eq!(parse_console_stash_cookie(dev_header, true), Some("abc.def".into()));
+        assert_eq!(parse_console_stash_cookie(header, true), None);
     }
 }

@@ -144,7 +144,7 @@ pub async fn post(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header);
+    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))

@@ -353,7 +353,7 @@ async fn resolve_app_session_user_header_inner(
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let session_id = oidc_rp::parse_app_session_cookie(cookie_header)?;
+    let session_id = oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev)?;
     let db = state.db.as_ref()?;
     let session = match sessions::validate(db, session_id, app_id_str).await {
         Ok(Some(s)) => s,
@@ -397,13 +397,20 @@ pub(super) fn jwt_subject_unverified(jwt: &str) -> Option<String> {
     v.get("sub").and_then(|s| s.as_str()).map(|s| s.to_string())
 }
 
-/// Pull the `__Host-zs_app_session` value out of a Cookie header.
-/// Returns `None` when the cookie is missing or empty so callers can
-/// fall back to a different discriminator (e.g. per-rule rate-limit
-/// session-keyed buckets falling back to IP).
-pub(super) fn extract_session_cookie(cookie_header: Option<&str>) -> Option<String> {
+/// Pull the app-session cookie value out of a Cookie header.
+///
+/// Cookie name is `__Host-zs_app_session` in production and
+/// `zs_app_session` in dev (RFC 6265bis §4.1.3.2 — `__Host-` mandates
+/// Secure, which dev runs over plain HTTP without). Returns `None`
+/// when the cookie is missing or empty so callers can fall back to a
+/// different discriminator (e.g. per-rule rate-limit session-keyed
+/// buckets falling back to IP).
+pub(super) fn extract_session_cookie(
+    cookie_header: Option<&str>,
+    insecure_dev: bool,
+) -> Option<String> {
     let s = cookie_header?;
-    let prefix = format!("{}=", oidc_rp::APP_SESSION_COOKIE);
+    let prefix = format!("{}=", oidc_rp::app_session_cookie_name(insecure_dev));
     let token = s
         .split(';')
         .map(|p| p.trim())
@@ -426,19 +433,34 @@ mod tests {
         // falls back to IP. Treating empty as a real bucket key would
         // collapse every cookie-empty client into one shared bucket.
         assert_eq!(
-            extract_session_cookie(Some("__Host-zs_app_session=")),
+            extract_session_cookie(Some("__Host-zs_app_session="), false),
             None
         );
-        assert_eq!(extract_session_cookie(None), None);
-        assert_eq!(extract_session_cookie(Some("other=foo")), None);
+        assert_eq!(extract_session_cookie(None, false), None);
+        assert_eq!(extract_session_cookie(Some("other=foo"), false), None);
     }
 
     #[test]
     fn extract_session_cookie_reads_app_session_value() {
         let id = uuid::Uuid::new_v4();
         let header = format!("foo=bar; __Host-zs_app_session={id}; baz=qux");
-        let extracted = extract_session_cookie(Some(&header)).expect("present");
+        let extracted = extract_session_cookie(Some(&header), false).expect("present");
         assert_eq!(extracted, id.to_string());
+    }
+
+    #[test]
+    fn extract_session_cookie_dev_uses_bare_name_and_rejects_host_prefix() {
+        // Regression for the __Host- + insecure-dev incompatibility:
+        // dev cookies have no __Host- prefix (RFC 6265bis §4.1.3.2),
+        // so the dev parser must look for the bare name and ignore a
+        // stale __Host- cookie of the same suffix.
+        let id = uuid::Uuid::new_v4();
+        let dev_header = format!("zs_app_session={id}");
+        let extracted = extract_session_cookie(Some(&dev_header), true).expect("present");
+        assert_eq!(extracted, id.to_string());
+
+        let prod_header = format!("__Host-zs_app_session={id}");
+        assert_eq!(extract_session_cookie(Some(&prod_header), true), None);
     }
 
     // ─── DPoP detection ─────────────────────────────────────────────

@@ -206,9 +206,9 @@ async fn e2e_password_flow() {
         "GET /login expected 200, got {}",
         resp.status()
     );
-    let csrf_cookie = read_set_cookie(&resp, "__Host-zsidp_csrf")
-        .expect("__Host-zsidp_csrf cookie set on GET /login");
-    jar.set("__Host-zsidp_csrf", &csrf_cookie);
+    let csrf_cookie = read_set_cookie(&resp, "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /login");
+    jar.set("zsidp_csrf", &csrf_cookie);
 
     // 7. POST /signup — create the user. login_challenge is preserved.
     let email = format!("e2e-{}@zeroship.test", Uuid::new_v4().simple());
@@ -251,9 +251,9 @@ async fn e2e_password_flow() {
         .await
         .expect("send GET /login (2)");
     assert!(resp.status().is_success(), "GET /login (2) expected 200");
-    let csrf_cookie = read_set_cookie(&resp, "__Host-zsidp_csrf")
-        .expect("__Host-zsidp_csrf cookie set on GET /login (2)");
-    jar.set("__Host-zsidp_csrf", &csrf_cookie);
+    let csrf_cookie = read_set_cookie(&resp, "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /login (2)");
+    jar.set("zsidp_csrf", &csrf_cookie);
 
     // 9. POST /login — accept_login → 302 to hydra (https://auth.zeroship.ai/oauth2/auth?…).
     let login_body = url::form_urlencoded::Serializer::new(String::new())

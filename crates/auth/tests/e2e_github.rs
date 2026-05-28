@@ -237,8 +237,8 @@ async fn github_federation_creates_new_user() {
         mock_authorize_loc.starts_with(&mock.github_authorize_url()),
         "redirect must point at mock /authorize: {mock_authorize_loc}"
     );
-    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_github_stash")
-        .expect("__Host-zsidp_github_stash on /oauth/github/start");
+    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
+        .expect("zsidp_github_stash on /oauth/github/start");
 
     // 2. Follow to mock /authorize → 302 with code+state.
     let resp = fx
@@ -262,7 +262,7 @@ async fn github_federation_creates_new_user() {
 
     // 3. GET /oauth/github/callback with stash cookie.
     let mut jar = CookieJar::default();
-    jar.set("__Host-zsidp_github_stash", &stash_cookie);
+    jar.set("zsidp_github_stash", &stash_cookie);
     let resp = fx
         .http
         .request(http::Method::GET, &callback_with_local)
@@ -375,7 +375,7 @@ async fn github_federation_rejects_noreply_only_email() {
         .send()
         .await
         .expect("send /oauth/github/start");
-    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_github_stash")
+    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
         .expect("stash cookie on /oauth/github/start");
     let mock_authorize_loc = location(&resp);
 
@@ -393,7 +393,7 @@ async fn github_federation_rejects_noreply_only_email() {
     );
 
     let mut jar = CookieJar::default();
-    jar.set("__Host-zsidp_github_stash", &stash_cookie);
+    jar.set("zsidp_github_stash", &stash_cookie);
     let resp = fx
         .http
         .request(http::Method::GET, &callback_with_local)

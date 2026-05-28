@@ -157,8 +157,8 @@ async fn auth_login_throughput() {
                 "GET /login expected 200, got {}",
                 get_resp.status()
             );
-            let csrf = read_set_cookie(&get_resp, "__Host-zsidp_csrf")
-                .expect("__Host-zsidp_csrf cookie on GET /login");
+            let csrf = read_set_cookie(&get_resp, "zsidp_csrf")
+                .expect("zsidp_csrf cookie on GET /login");
 
             // POST /login → on success, 302 to hydra accept_login redirect_to.
             let body = url::form_urlencoded::Serializer::new(String::new())
@@ -166,7 +166,7 @@ async fn auth_login_throughput() {
                 .append_pair("email", &email)
                 .append_pair("password", PASSWORD)
                 .finish();
-            let cookie_header = format!("__Host-zsidp_csrf={csrf}");
+            let cookie_header = format!("zsidp_csrf={csrf}");
             let post_resp = http
                 .request(http::Method::POST, &login_url)
                 .expect("build POST /login")

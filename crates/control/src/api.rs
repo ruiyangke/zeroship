@@ -527,7 +527,7 @@ pub async fn auth_callback(
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let Some(stash) = crate::oidc_rp::parse_console_stash_cookie(cookie_header) else {
+    let Some(stash) = crate::oidc_rp::parse_console_stash_cookie(cookie_header, state.insecure_dev) else {
         return render_callback_error(state.insecure_dev, "missing stash cookie");
     };
 
@@ -623,7 +623,7 @@ pub async fn require_console_session(
         .get("cookie")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let Some(id) = crate::oidc_rp::parse_console_session_cookie(cookie_header) else {
+    let Some(id) = crate::oidc_rp::parse_console_session_cookie(cookie_header, state.insecure_dev) else {
         return Err(reject_response(req, state));
     };
 

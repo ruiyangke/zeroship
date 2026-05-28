@@ -47,8 +47,8 @@ async fn login_csrf_missing_field_rejected() {
         .send()
         .await
         .expect("send GET");
-    let csrf_cookie = read_set_cookie(&resp, "__Host-zsidp_csrf")
-        .expect("__Host-zsidp_csrf cookie set on GET /login");
+    let csrf_cookie = read_set_cookie(&resp, "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /login");
 
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("email", "anyone@zeroship.test")
@@ -60,7 +60,7 @@ async fn login_csrf_missing_field_rejected() {
         .expect("build POST")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("ct")
-        .header("cookie", format!("__Host-zsidp_csrf={csrf_cookie}"))
+        .header("cookie", format!("zsidp_csrf={csrf_cookie}"))
         .expect("cookie")
         .body(body)
         .send()
@@ -97,8 +97,8 @@ async fn login_csrf_mismatched_token_rejected() {
         .send()
         .await
         .expect("send GET");
-    let csrf_cookie = read_set_cookie(&resp, "__Host-zsidp_csrf")
-        .expect("__Host-zsidp_csrf cookie set on GET /login");
+    let csrf_cookie = read_set_cookie(&resp, "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /login");
 
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf", "completely-different-bogus-token-value")
@@ -111,7 +111,7 @@ async fn login_csrf_mismatched_token_rejected() {
         .expect("build POST")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("ct")
-        .header("cookie", format!("__Host-zsidp_csrf={csrf_cookie}"))
+        .header("cookie", format!("zsidp_csrf={csrf_cookie}"))
         .expect("cookie")
         .body(body)
         .send()
@@ -244,8 +244,8 @@ async fn login_rate_limit_kicks_in() {
             .send()
             .await
             .expect("send GET");
-        let csrf = read_set_cookie(&resp, "__Host-zsidp_csrf")
-            .expect("__Host-zsidp_csrf cookie set on GET /login");
+        let csrf = read_set_cookie(&resp, "zsidp_csrf")
+            .expect("zsidp_csrf cookie set on GET /login");
 
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("csrf", &csrf)
@@ -258,7 +258,7 @@ async fn login_rate_limit_kicks_in() {
             .expect("build POST")
             .header("content-type", "application/x-www-form-urlencoded")
             .expect("ct")
-            .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
+            .header("cookie", format!("zsidp_csrf={csrf}"))
             .expect("cookie")
             .body(body)
             .send()
@@ -285,7 +285,7 @@ async fn login_rate_limit_kicks_in() {
 }
 
 /// Drive one full successful POST /login round-trip and return the
-/// `__Host-zsidp_session` cookie value. Helper for the rotation test.
+/// `zsidp_session` cookie value. Helper for the rotation test.
 //
 // `Fixture` carries `!Send` ntex/cyper handles.
 #[allow(clippy::future_not_send)]
@@ -305,8 +305,8 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
         "GET /login expected 200, got {}",
         resp.status()
     );
-    let csrf = read_set_cookie(&resp, "__Host-zsidp_csrf")
-        .expect("__Host-zsidp_csrf cookie set on GET /login");
+    let csrf = read_set_cookie(&resp, "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /login");
 
     let mut jar = CookieJar::default();
     jar.absorb(&resp);
@@ -334,8 +334,8 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
         "POST /login expected 302 success, got {}",
         resp.status()
     );
-    let sid = read_set_cookie(&resp, "__Host-zsidp_session")
-        .expect("__Host-zsidp_session cookie set on POST /login success");
+    let sid = read_set_cookie(&resp, "zsidp_session")
+        .expect("zsidp_session cookie set on POST /login success");
 
     // Drain the hydra redirect so the consumed login_challenge doesn't
     // linger in a half-completed state — important for the second
@@ -355,7 +355,7 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
     sid
 }
 
-/// §13 "Session fixation": `__Host-zsidp_session` rotates on successful
+/// §13 "Session fixation": `zsidp_session` rotates on successful
 /// login. Drive two separate logins for the same user and assert the cookie
 /// values differ.
 #[ntex::test]

@@ -349,9 +349,9 @@ async fn gateway_oidc_rp_full_dance() {
         "GET /login expected 2xx, got {}",
         resp.status()
     );
-    let csrf_cookie = read_set_cookie(&resp, "__Host-zsidp_csrf")
-        .expect("__Host-zsidp_csrf cookie on GET /login");
-    jar.set("__Host-zsidp_csrf", &csrf_cookie);
+    let csrf_cookie = read_set_cookie(&resp, "zsidp_csrf")
+        .expect("zsidp_csrf cookie on GET /login");
+    jar.set("zsidp_csrf", &csrf_cookie);
 
     // 9. POST /login — verify password, accept_login at hydra, 302 back
     //    to /oauth2/auth on hydra.

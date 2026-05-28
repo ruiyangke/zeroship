@@ -216,8 +216,8 @@ async fn google_federation_creates_new_user() {
         mock_authorize_loc.starts_with(&mock.google_auth_url()),
         "redirect target must be the mock's /authorize: got {mock_authorize_loc}"
     );
-    let stash_cookie = read_set_cookie(&resp, "__Host-zsidp_google_stash")
-        .expect("__Host-zsidp_google_stash on /oauth/google/start");
+    let stash_cookie = read_set_cookie(&resp, "zsidp_google_stash")
+        .expect("zsidp_google_stash on /oauth/google/start");
 
     // 7. Follow the redirect to the mock's /authorize. The mock echoes
     //    code+state back to our callback. We don't follow it
@@ -251,7 +251,7 @@ async fn google_federation_creates_new_user() {
     //    handler reads the stash, exchanges the code (against the mock
     //    /token), verifies the ID token (against the mock JWKS), and
     //    finally calls hydra's `accept_login`.
-    jar.set("__Host-zsidp_google_stash", &stash_cookie);
+    jar.set("zsidp_google_stash", &stash_cookie);
     let resp = http
         .request(http::Method::GET, &callback_with_local)
         .expect("build /oauth/google/callback")

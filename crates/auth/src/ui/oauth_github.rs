@@ -37,7 +37,7 @@ use crate::identity::oauth::github::{self, GitHubIdentity};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::oauth_stash::{
-    clear_stash_cookie, parse_stash_cookie, set_stash_cookie, OAuthStash, GITHUB_STASH_COOKIE,
+    clear_stash_cookie, github_stash_cookie_name, parse_stash_cookie, set_stash_cookie, OAuthStash,
 };
 use crate::ui::ErrorPage;
 
@@ -97,7 +97,7 @@ pub async fn start(
     );
     resp.header(
         SET_COOKIE,
-        set_stash_cookie(GITHUB_STASH_COOKIE, &cookie_value, cfg.insecure_dev),
+        set_stash_cookie(github_stash_cookie_name(cfg.insecure_dev), &cookie_value, cfg.insecure_dev),
     );
     resp.finish()
 }
@@ -120,7 +120,7 @@ pub async fn callback(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let Some(stash_blob) = parse_stash_cookie(cookie_header, GITHUB_STASH_COOKIE) else {
+    let Some(stash_blob) = parse_stash_cookie(cookie_header, github_stash_cookie_name(cfg.insecure_dev)) else {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
@@ -283,7 +283,7 @@ pub async fn callback(
             );
             resp.header(
                 SET_COOKIE,
-                clear_stash_cookie(GITHUB_STASH_COOKIE, cfg.insecure_dev),
+                clear_stash_cookie(github_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
             );
             return resp.finish();
         }
@@ -360,7 +360,7 @@ pub async fn callback(
     );
     resp.header(
         SET_COOKIE,
-        clear_stash_cookie(GITHUB_STASH_COOKIE, cfg.insecure_dev),
+        clear_stash_cookie(github_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
     );
     resp.finish()
 }
@@ -420,7 +420,7 @@ fn render_error_clearing(
     resp.content_type("text/html; charset=utf-8");
     resp.header(
         SET_COOKIE,
-        clear_stash_cookie(GITHUB_STASH_COOKIE, cfg.insecure_dev),
+        clear_stash_cookie(github_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
     );
     resp.body(body)
 }

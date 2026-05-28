@@ -56,10 +56,17 @@ use crate::ui::{ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage, MagicShowCod
 
 // ─── Cookie helpers ──────────────────────────────────────────────────
 
-/// Name of the cookie set at the requesting device when a magic-link is
-/// issued. Match against the magic-link row's `csrf_nonce` to decide
-/// same-device vs cross-device on redeem (P5-U4.3).
-pub const MAGIC_CSRF_COOKIE: &str = "__Host-zsidp_magic_csrf";
+/// Production cookie name (`__Host-` → Secure required) for the
+/// per-device magic-link CSRF nonce.
+pub const MAGIC_CSRF_COOKIE_PROD: &str = "__Host-zsidp_magic_csrf";
+/// Dev cookie name (no `__Host-` prefix). RFC 6265bis §4.1.3.2 — the
+/// `__Host-` prefix mandates Secure; dev runs over plain HTTP.
+pub const MAGIC_CSRF_COOKIE_DEV: &str = "zsidp_magic_csrf";
+
+/// Resolve the magic-link CSRF cookie name for the current environment.
+pub(crate) fn magic_csrf_cookie_name(insecure_dev: bool) -> &'static str {
+    if insecure_dev { MAGIC_CSRF_COOKIE_DEV } else { MAGIC_CSRF_COOKIE_PROD }
+}
 
 /// Build the `Set-Cookie` header value for the magic-link CSRF cookie.
 ///
@@ -70,9 +77,10 @@ pub const MAGIC_CSRF_COOKIE: &str = "__Host-zsidp_magic_csrf";
 /// `/magic/verify`. `Path=/` because the cookie must be present on the
 /// `/magic/verify` and `/magic/complete` paths alike.
 pub(crate) fn magic_csrf_set_cookie(nonce: &str, insecure_dev: bool) -> String {
+    let name = magic_csrf_cookie_name(insecure_dev);
     let secure = if insecure_dev { "" } else { "; Secure" };
     format!(
-        "{MAGIC_CSRF_COOKIE}={nonce}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=900"
+        "{name}={nonce}; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=900"
     )
 }
 
@@ -80,8 +88,9 @@ pub(crate) fn magic_csrf_set_cookie(nonce: &str, insecure_dev: bool) -> String {
 /// CSRF cookie. Used after a successful redeem so the nonce can't be
 /// reused.
 fn magic_csrf_clear_cookie(insecure_dev: bool) -> String {
+    let name = magic_csrf_cookie_name(insecure_dev);
     let secure = if insecure_dev { "" } else { "; Secure" };
-    format!("{MAGIC_CSRF_COOKIE}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
+    format!("{name}=; Path=/; HttpOnly; SameSite=Lax{secure}; Max-Age=0")
 }
 
 /// Parse the magic-link CSRF nonce from a request's `Cookie` header
@@ -89,10 +98,12 @@ fn magic_csrf_clear_cookie(insecure_dev: bool) -> String {
 ///
 /// Used by `/magic/verify` to decide same-device vs cross-device on
 /// redeem.
-pub(crate) fn parse_magic_csrf_cookie(cookie_header: &str) -> Option<String> {
+pub(crate) fn parse_magic_csrf_cookie(cookie_header: &str, insecure_dev: bool) -> Option<String> {
+    let name = magic_csrf_cookie_name(insecure_dev);
+    let prefix = format!("{name}=");
     for part in cookie_header.split(';') {
         let part = part.trim();
-        if let Some(rest) = part.strip_prefix(&format!("{MAGIC_CSRF_COOKIE}=")) {
+        if let Some(rest) = part.strip_prefix(&prefix) {
             return Some(rest.to_string());
         }
     }
@@ -130,7 +141,7 @@ pub async fn start(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header);
+    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -383,7 +394,7 @@ pub async fn verify(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_nonce = parse_magic_csrf_cookie(cookie_header);
+    let cookie_nonce = parse_magic_csrf_cookie(cookie_header, cfg.insecure_dev);
     let same_device = cookie_nonce.as_deref() == Some(redeemed.csrf_nonce.as_str());
 
     // 3. Find-or-create the user.
@@ -552,7 +563,7 @@ pub async fn complete(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header);
+    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))

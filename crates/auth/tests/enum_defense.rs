@@ -61,10 +61,10 @@ async fn one_failure(
         "GET /login expected 200, got {}",
         resp.status()
     );
-    let csrf = read_set_cookie(&resp, "__Host-zsidp_csrf")
-        .expect("__Host-zsidp_csrf cookie set on GET /login");
+    let csrf = read_set_cookie(&resp, "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /login");
     let mut jar = CookieJar::default();
-    jar.set("__Host-zsidp_csrf", &csrf);
+    jar.set("zsidp_csrf", &csrf);
 
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf", &csrf)

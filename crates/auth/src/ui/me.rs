@@ -67,7 +67,7 @@ pub async fn get(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
         return redirect_to_login();
     };
 
@@ -109,7 +109,7 @@ pub async fn unlink(
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let cookie_token = csrf::parse_cookie(cookie_header);
+    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -118,7 +118,7 @@ pub async fn unlink(
     }
 
     // 2. Session.
-    let Some(user) = resolve_user(&req, db.as_ref()).await else {
+    let Some(user) = resolve_user(&req, db.as_ref(), cfg.insecure_dev).await else {
         return redirect_to_login();
     };
 
@@ -229,13 +229,17 @@ pub async fn unlink(
 /// Resolve the signed-in user from the request, or `None` if the cookie
 /// is missing/invalid/expired or the user row is gone.
 #[allow(clippy::future_not_send)]
-async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option<UserRow> {
+async fn resolve_user(
+    req: &HttpRequest,
+    db: &compio_postgres::Client,
+    insecure_dev: bool,
+) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
-    let session_id = session_cookie::parse_cookie(cookie_header)?;
+    let session_id = session_cookie::parse_cookie(cookie_header, insecure_dev)?;
 
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
     users::find_by_id(db, &session.user_id.to_string())
