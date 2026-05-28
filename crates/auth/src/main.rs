@@ -20,6 +20,7 @@ use zeroship_auth::mailer::{
     Mailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
 };
 use zeroship_auth::server;
+use zeroship_auth::startup_validation::validate_hydra_admin_url;
 use zeroship_auth::store;
 
 #[ntex::main]
@@ -30,6 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
     if let Err(message) = validate_stash_key(&cfg) {
+        tracing::error!("{message}");
+        std::process::exit(1);
+    }
+    if let Err(message) = validate_hydra_admin_url(&cfg) {
         tracing::error!("{message}");
         std::process::exit(1);
     }
