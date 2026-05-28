@@ -1,4 +1,4 @@
-//! zeroship CLI — serve, deploy, secret, var.
+//! zeroship CLI — serve, deploy, login, secret, var.
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use zeroship_runtime::{ModuleEntry, NativePlugin};
 
+mod auth;
 mod secrets;
 
 fn main() {
@@ -29,6 +30,9 @@ fn main() {
     match command {
         "serve" => cmd_serve(&args),
         "deploy" => cmd_deploy(&args),
+        "login" => exit_on_error("login", auth::cmd_login(&args)),
+        "logout" => exit_on_error("logout", auth::cmd_logout()),
+        "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
         _ => print_usage(),
@@ -286,10 +290,23 @@ fn print_usage() {
     eprintln!("                   Run a single JS file with the V8 runtime.");
     eprintln!("  zeroship deploy   <path-to-.zship> --app=<id> [--control=URL] [--key=KEY]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
+    eprintln!("  zeroship login    [--auth-url=https://auth.zeroship.ai]");
+    eprintln!("                   Sign in with OAuth Device Authorization Grant.");
+    eprintln!("  zeroship whoami");
+    eprintln!("                   Show the signed-in account.");
+    eprintln!("  zeroship logout");
+    eprintln!("                   Revoke and delete local CLI credentials.");
     eprintln!("  zeroship secret   set|list|rm  --app=<uuid>");
     eprintln!("  zeroship var      set|list|rm  --app=<uuid>");
     eprintln!();
     eprintln!("Builds go through @zeroship/vite-plugin. There is no `zeroship build`.");
+}
+
+fn exit_on_error(command: &str, result: Result<(), String>) {
+    if let Err(e) = result {
+        eprintln!("zeroship {command}: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn flag_u16(args: &[String], prefix: &str) -> Option<u16> {
