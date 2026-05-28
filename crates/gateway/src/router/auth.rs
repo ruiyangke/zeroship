@@ -125,8 +125,8 @@ fn has_dpop_authorization(req: &HttpRequest) -> bool {
 ///   4. The proof's `jti` has not been seen before in the freshness
 ///      window (replay defense), AND
 ///   5. EITHER the access token verifies as a gateway-issued wrapper
-///      AND `wrapper.cnf.jkt == proof.jkt` (Phase 8 U4 fast path —
-///      self-contained, no introspection),
+///      AND `wrapper.aud == Host` AND `wrapper.cnf.jkt == proof.jkt`
+///      (Phase 8 U4 fast path — self-contained, no introspection),
 ///      OR the wrapper verification fails / no verifier configured AND
 ///      hydra's `/oauth2/introspect` returns `active: true` (P7-U5
 ///      fallback, no `cnf.jkt` enforcement).
@@ -139,11 +139,11 @@ fn has_dpop_authorization(req: &HttpRequest) -> bool {
 ///
 /// We try the wrapper-verifier first. A successful verify means the
 /// gateway minted this token via `/__zs/auth/dpop-exchange` (U3) — it's
-/// already bound to a specific `DPoP` key in its `cnf.jkt` claim. We
-/// require that binding match the actual proof; mismatch is a hard
-/// reject (no fallback). On a wrapper hit we build the worker user
-/// from the embedded claims and skip the introspection round-trip
-/// entirely.
+/// already scoped to a specific request host in `aud` and bound to a
+/// specific `DPoP` key in its `cnf.jkt` claim. We require both the
+/// request Host and proof binding to match; mismatch is a hard reject
+/// (no fallback). On a wrapper hit we build the worker user from the
+/// embedded claims and skip the introspection round-trip entirely.
 ///
 /// A wrapper-verify FAILURE (token isn't a wrapper, or is malformed) is
 /// treated as "not a wrapper, try raw hydra path". This is the v1
@@ -213,7 +213,7 @@ async fn resolve_dpop_user_header(
     //     enforce `cnf.jkt == proof.jkt` and build the worker user
     //     from the embedded claims — no hydra round-trip required.
     if let Some(verifier) = state.wrapper_verifier.as_ref() {
-        match verifier.verify(access_token) {
+        match verifier.verify(access_token, host) {
             Ok(claims) => {
                 // Strict binding: a wrapper minted for jkt_A cannot be
                 // presented with a proof signed by jkt_B. Mismatch is a

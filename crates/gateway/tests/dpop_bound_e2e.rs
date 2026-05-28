@@ -14,10 +14,8 @@
 //!      RFC 7638 thumbprint of our client keypair — the binding the
 //!      P8-U4 dispatch path enforces.
 //!   6. Build a second proof for a "dispatch" URI signed with the
-//!      same client keypair and verify the wrapper-verify + cnf.jkt
-//!      check still passes (the integration assertion: a wrapper
-//!      issued at one URI can be presented at another URI of the same
-//!      gateway as long as the DPoP key matches).
+//!      same client keypair and verify the wrapper-verify + aud +
+//!      cnf.jkt check still passes for the same app host.
 //!   7. Repeat with a DIFFERENT client keypair on the second proof —
 //!      `cnf.jkt` mismatch — and assert the wrapper-verify still
 //!      succeeds but the binding check rejects.
@@ -56,8 +54,8 @@
 //! mismatch). To prove that without standing up the worker proxy,
 //! the test mounts a dedicated `/__test/dispatch-verify` route in the
 //! same `web::test::server` that reproduces the exact comparison
-//! `resolve_dpop_user_header` makes (verify wrapper, compare
-//! `cnf.jkt`, derive `ZeroShip-User`). The handler reads from
+//! `resolve_dpop_user_header` makes (verify wrapper for request
+//! Host, compare `cnf.jkt`, derive `ZeroShip-User`). The handler reads from
 //! `state.wrapper_verifier` — the same `Arc` the production dispatch
 //! path consults — so any regression in the wrapper-verify wiring
 //! shows up here.
@@ -288,8 +286,8 @@ fn build_state(
 //   1. Verify the DPoP proof against the request URI (signature, htm,
 //      htu, iat, ath).
 //   2. Verify the wrapper token via `state.wrapper_verifier` (the same
-//      `Arc` the production dispatch path uses) and check
-//      `claims.cnf.jkt == proof.jkt`.
+//      `Arc` the production dispatch path uses) for the request Host
+//      and check `claims.cnf.jkt == proof.jkt`.
 //
 // On success it emits a `ZeroShip-User` header (same encoding the
 // production path produces). On any failure it returns 401. The test
@@ -358,7 +356,7 @@ async fn dispatch_verify_handler(
         .wrapper_verifier
         .as_ref()
         .expect("wrapper_verifier configured");
-    let claims = match verifier.verify(&access_token) {
+    let claims = match verifier.verify(&access_token, host) {
         Ok(c) => c,
         Err(e) => {
             return HttpResponse::Unauthorized()
@@ -624,7 +622,7 @@ async fn e2e_dpop_bound_happy_path() {
         .as_ref()
         .expect("verifier configured");
     let claims = verifier
-        .verify(&wrapper_token)
+        .verify(&wrapper_token, exchange_host)
         .expect("wrapper must verify with the gateway's own verifier");
     assert_eq!(
         claims.iss, GATEWAY_PUBLIC_URL,
@@ -647,7 +645,7 @@ async fn e2e_dpop_bound_happy_path() {
     // 6. Build a SECOND proof (different jti) signed by the SAME key A
     //    for the dispatch URI, with ath bound to the wrapper token.
     //    The dispatch-verify handler must accept it.
-    let dispatch_host = "myapp.zeroship.test";
+    let dispatch_host = exchange_host;
     let dispatch_path = "/__test/dispatch-verify";
     let dispatch_uri_in_proof = format!("http://{dispatch_host}{dispatch_path}");
     let dispatch_proof = build_dpop_proof(
@@ -748,7 +746,7 @@ async fn e2e_dpop_bound_rejects_mismatched_jkt() {
         client_jkt(&client_key_b),
         "sanity: A and B must produce different jkts"
     );
-    let dispatch_host = "myapp.zeroship.test";
+    let dispatch_host = exchange_host;
     let dispatch_path = "/__test/dispatch-verify";
     let dispatch_uri_in_proof = format!("http://{dispatch_host}{dispatch_path}");
     let proof_b = build_dpop_proof(

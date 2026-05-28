@@ -292,13 +292,12 @@ impl Verifier {
         }
     }
 
-    /// Verify a wrapper token's signature + iss + exp + kid + typ.
+    /// Verify a wrapper token's signature + iss + aud + exp + kid + typ.
     /// Returns the decoded claims on success.
     ///
-    /// `aud` is intentionally NOT pinned at this layer — different
-    /// apps have different audiences and this verifier is shared
-    /// across all of them. The dispatcher (U4) takes the returned
-    /// claims and checks `claims.aud == request_host`.
+    /// `expected_aud` is the request `Host` value. It is per-request
+    /// rather than stored on the verifier because one gateway verifier
+    /// serves every app host.
     ///
     /// # Errors
     ///
@@ -306,12 +305,10 @@ impl Verifier {
     /// missing/wrong `kid`, wrong `typ`, expired token, wrong issuer,
     /// or invalid signature. Callers translate this into a `401
     /// invalid_token` response.
-    pub fn verify(&self, token: &str) -> Result<WrapperClaims> {
+    pub fn verify(&self, token: &str, expected_aud: &str) -> Result<WrapperClaims> {
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[&self.expected_iss]);
-        // Different apps have different audiences — the dispatcher
-        // checks `aud` once it knows which app the request targets.
-        validation.validate_aud = false;
+        validation.set_audience(&[expected_aud]);
         // `validate_exp` is on by default with a 60s leeway, which is
         // what we want.
 
@@ -375,7 +372,7 @@ mod tests {
             .expect("issue");
 
         let verifier = Verifier::new(&signing.verifying_key(), "https://api.zeroship.ai".into());
-        let claims = verifier.verify(&token).expect("verify");
+        let claims = verifier.verify(&token, "myapp.zeroship.ai").expect("verify");
 
         assert_eq!(claims.sub, "usr_test");
         assert_eq!(claims.cnf.jkt, "test-jkt");
@@ -400,7 +397,7 @@ mod tests {
         let tampered: String = chars.into_iter().collect();
 
         let verifier = Verifier::new(&signing.verifying_key(), "https://api.zeroship.ai".into());
-        assert!(verifier.verify(&tampered).is_err());
+        assert!(verifier.verify(&tampered, "aud").is_err());
     }
 
     #[test]
@@ -421,7 +418,7 @@ mod tests {
         // Either way, the result is an error.
         let verifier =
             Verifier::new(&signing_b.verifying_key(), "https://api.zeroship.ai".into());
-        assert!(verifier.verify(&token).is_err());
+        assert!(verifier.verify(&token, "aud").is_err());
     }
 
     #[test]
@@ -438,7 +435,7 @@ mod tests {
             &signing.verifying_key(),
             "https://other.zeroship.ai".into(),
         );
-        assert!(verifier.verify(&token).is_err());
+        assert!(verifier.verify(&token, "aud").is_err());
     }
 
     #[test]
@@ -482,7 +479,23 @@ mod tests {
         let token = encode(&header, &claims, &key).unwrap();
 
         let verifier = Verifier::new(&signing.verifying_key(), "https://api.zeroship.ai".into());
-        assert!(verifier.verify(&token).is_err());
+        assert!(verifier.verify(&token, "aud").is_err());
+    }
+
+    #[test]
+    fn verify_rejects_wrapper_with_wrong_aud() {
+        // Audience is the request Host. A wrapper minted for one app
+        // host must not verify for another app host, even when the
+        // signature, issuer and DPoP binding are otherwise valid.
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let issuer = Issuer::new(&signing, "https://api.zeroship.ai".into()).unwrap();
+        let intro = make_introspection();
+        let token = issuer
+            .issue("app-a.zeroship.ai", &intro, "jkt", "ht")
+            .unwrap();
+
+        let verifier = Verifier::new(&signing.verifying_key(), "https://api.zeroship.ai".into());
+        assert!(verifier.verify(&token, "app-b.zeroship.ai").is_err());
     }
 
     #[test]
@@ -500,7 +513,7 @@ mod tests {
             .unwrap();
 
         let verifier = Verifier::new(&signing.verifying_key(), "https://api.zeroship.ai".into());
-        let claims = verifier.verify(&token).expect("verify");
+        let claims = verifier.verify(&token, "aud").expect("verify");
         assert_eq!(claims.cnf.jkt, "the-special-jkt-value");
     }
 }
