@@ -451,6 +451,20 @@ pub async fn verify_redeem(
             .await;
             return render_error_page(PublicErrorMessage::PleaseTryAgain);
         }
+        Err(magic_link::RedeemError::AlreadyConsumed) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "magic_redeem",
+                    outcome: "failure",
+                    auth_method: Some("magic"),
+                    detail: json!({ "reason": "already_consumed" }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return render_error_page(PublicErrorMessage::SessionExpired);
+        }
         Err(magic_link::RedeemError::Store(e)) => {
             tracing::error!(error = %e, "magic_link::redeem_pending failed");
             return render_error_page(PublicErrorMessage::ContactSupport);

@@ -222,6 +222,63 @@ async fn second_redeem_while_pending_returns_in_flight() {
 }
 
 #[compio::test]
+async fn stale_pending_redeem_burns_link_as_consumed() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!("magic-stale-pending-{}@example.test", Uuid::new_v4().simple());
+    let issued = magic_link::issue(&client, &email, "login")
+        .await
+        .expect("issue");
+
+    let first = magic_link::redeem_pending(&client, &issued.raw)
+        .await
+        .expect("redeem pending 1")
+        .expect("first redeem should reserve token");
+
+    client
+        .execute(
+            "UPDATE auth.magic_links \
+             SET consumed_pending_at = NOW() - INTERVAL '6 seconds' \
+             WHERE token_hash = $1",
+            &[&first.token_hash.as_slice()],
+        )
+        .await
+        .expect("age pending reservation");
+
+    let err = magic_link::redeem_pending(&client, &issued.raw)
+        .await
+        .expect_err("stale pending redeem should burn link");
+    assert!(
+        matches!(err, magic_link::RedeemError::AlreadyConsumed),
+        "stale pending redeem should return AlreadyConsumed, got {err:?}"
+    );
+
+    let rows = client
+        .query(
+            "SELECT consumed_at IS NOT NULL AS consumed \
+             FROM auth.magic_links \
+             WHERE token_hash = $1",
+            &[&first.token_hash.as_slice()],
+        )
+        .await
+        .expect("load burned row");
+    assert_eq!(rows.len(), 1, "magic link row should exist");
+    let consumed: bool = rows[0].get("consumed");
+    assert!(consumed, "stale pending redeem should mark consumed_at");
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .ok();
+}
+
+#[compio::test]
 async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
     let Some(client) = pg().await else {
         eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
