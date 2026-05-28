@@ -42,6 +42,7 @@
 @import "./components/Menubar/Menubar.css";
 @import "./components/Toolbar/Toolbar.css";
 @import "./components/NavigationMenu/NavigationMenu.css";
+@import "./components/Toast/Toast.css";
 
 *,
 *::before,

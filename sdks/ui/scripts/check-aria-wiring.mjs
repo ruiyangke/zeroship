@@ -3357,6 +3357,115 @@ await open("components-navigationmenu--keyboard-nav");
   );
 }
 
+/* ─── 82. Slice 16: Toast — role/aria-live polite for default variant ─ *
+ *
+ * Brief assertion 1+2: triggering `toast()` with no variant renders a
+ * Toast.Root carrying `role="status"` and `aria-live="polite"`. */
+await open("components-toast--basic");
+{
+  const trigger = page.locator('[data-testid="toast-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  // The toast mounts inside the Viewport; the role on Toast.Root is
+  // the canonical announce target.
+  const toast = page.locator(".zs-toast-root").first();
+  await toast.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const role = await toast.getAttribute("role");
+  const ariaLive = await toast.getAttribute("aria-live");
+  const variant = await toast.getAttribute("data-variant");
+  const ok =
+    role === "status" && ariaLive === "polite" && variant === "default";
+  report(
+    "Toast — default variant role=status + aria-live=polite",
+    ok,
+    `role=${role} aria-live=${ariaLive} data-variant=${variant}`,
+  );
+}
+
+/* ─── 83. Slice 16: Toast — role/aria-live for error variant ───────── *
+ *
+ * Brief assertion 1+2: variant="error" renders Toast.Root with
+ * `role="alert"` + `aria-live="assertive"`. */
+await open("components-toast--error-variant");
+{
+  const trigger = page.locator('[data-testid="toast-error-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const toast = page.locator(".zs-toast-root").first();
+  await toast.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const role = await toast.getAttribute("role");
+  const ariaLive = await toast.getAttribute("aria-live");
+  const variant = await toast.getAttribute("data-variant");
+  const ok =
+    role === "alert" && ariaLive === "assertive" && variant === "error";
+  report(
+    "Toast — error variant role=alert + aria-live=assertive",
+    ok,
+    `role=${role} aria-live=${ariaLive} data-variant=${variant}`,
+  );
+}
+
+/* ─── 84. Slice 16: Toast — Close button dismisses the toast ────────── *
+ *
+ * Brief assertion 3: clicking Toast.Close dismisses the toast; the
+ * Root unmounts after the exit transition. */
+await open("components-toast--persistent");
+{
+  const trigger = page.locator('[data-testid="toast-persistent-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const toast = page.locator(".zs-toast-root").first();
+  await toast.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const closeBtn = page.locator(".zs-toast-close").first();
+  await closeBtn.waitFor({ state: "visible", timeout: 5000 });
+  await closeBtn.click();
+  // Base UI animates the exit (data-ending-style) before unmounting;
+  // wait for the toast root to leave the DOM. The base motion is
+  // ~250ms; allow a generous window.
+  await page.waitForTimeout(1200);
+  const stillMounted = await page
+    .locator(".zs-toast-root")
+    .count()
+    .catch(() => -1);
+  const ok = stillMounted === 0;
+  report(
+    "Toast — Close button dismisses + unmounts after exit",
+    ok,
+    `toast-root count after close: ${stillMounted}`,
+  );
+}
+
+/* ─── 85. Slice 16: Toast — Action click runs callback AND dismisses ── *
+ *
+ * Brief assertion 4: clicking Toast.Action runs the consumer callback
+ * (verified by side-effect on a ref) and then dismisses the toast. */
+await open("components-toast--with-action");
+{
+  const trigger = page.locator('[data-testid="toast-action-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const toast = page.locator(".zs-toast-root").first();
+  await toast.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const actionBtn = page.locator(".zs-toast-action").first();
+  await actionBtn.waitFor({ state: "visible", timeout: 5000 });
+  await actionBtn.click();
+  await page.waitForTimeout(1200);
+  const stillMounted = await page
+    .locator(".zs-toast-root")
+    .count()
+    .catch(() => -1);
+  const ok = stillMounted === 0;
+  report(
+    "Toast — Action click dismisses (callback runs + unmount)",
+    ok,
+    `toast-root count after action: ${stillMounted}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

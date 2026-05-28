@@ -341,6 +341,24 @@ const stories = [
   "components-navigationmenu--keyboard-nav",
   "components-navigationmenu--disabled",
   "components-navigationmenu--rtl",
+  // Slice 16: Toast. 15 stories covering basic / variant / position /
+  // duration / update / stacked / swipe / RTL — the imperative
+  // `useToast()` surface drives every story.
+  "components-toast--basic",
+  "components-toast--with-description",
+  "components-toast--with-action",
+  "components-toast--success",
+  "components-toast--error-variant",
+  "components-toast--warning",
+  "components-toast--info",
+  "components-toast--long-duration",
+  "components-toast--persistent",
+  "components-toast--imperative-update",
+  "components-toast--stacked",
+  "components-toast--position-top",
+  "components-toast--position-bottom",
+  "components-toast--swipe-to-dismiss",
+  "components-toast--rtl",
 ];
 
 async function launchBrowser() {

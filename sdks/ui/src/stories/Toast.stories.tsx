@@ -1,0 +1,661 @@
+import type { Meta, StoryObj } from "@storybook/react";
+import { useRef, type ReactNode } from "react";
+import { Button, Toast, useToast } from "../components";
+
+/* Storybook 8.6 doesn't expose a global decorator slot for arbitrary
+ * providers. `Wrap` mounts the Toast.Provider + the default Viewport
+ * so every story emits real toasts through the same imperative path
+ * the docs advertise. The Viewport position can be overridden per
+ * story via the `position` prop. */
+function Wrap({
+  children,
+  position,
+}: {
+  children: ReactNode;
+  position?: React.ComponentProps<typeof Toast.Viewport>["position"];
+}) {
+  return (
+    <Toast.Provider>
+      <div className="zs-story-row" role="group" aria-label="Toast demo">
+        {children}
+      </div>
+      <Toast.Viewport position={position} />
+    </Toast.Provider>
+  );
+}
+
+const meta: Meta<typeof Toast.Provider> = {
+  title: "Components/Toast",
+  component: Toast.Provider,
+  parameters: {
+    layout: "fullscreen",
+  },
+};
+
+export default meta;
+
+type Story = StoryObj<typeof Toast.Provider>;
+
+/* ─── 1. Basic ──────────────────────────────────────────────────────── */
+export const Basic: Story = {
+  name: "Basic (default variant)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Fire-and-forget toast with a title only. Default variant uses " +
+          "`role=\"status\"` + `aria-live=\"polite\"` so the announcement " +
+          "lands when the user is idle. Auto-dismisses after the " +
+          "Provider's `duration` (5000ms default).",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-basic-trigger"
+          onClick={() =>
+            toast({ id: "basic-demo", title: "Notification" })
+          }
+        >
+          Show toast
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 2. WithDescription ────────────────────────────────────────────── */
+export const WithDescription: Story = {
+  name: "With description",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Two-line toast: a title plus a supporting description. The " +
+          "description is wired as the toast's `aria-describedby` " +
+          "target, so screen readers announce title then description.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-description-trigger"
+          onClick={() =>
+            toast({
+              id: "desc-demo",
+              title: "Settings saved",
+              description: "Your preferences will sync to all devices.",
+            })
+          }
+        >
+          Show description toast
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 3. WithAction ─────────────────────────────────────────────────── */
+export const WithAction: Story = {
+  name: "With action",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Toast carrying an inline action button. Clicking the action " +
+          "runs the callback AND dismisses the toast (Base UI's `Action` " +
+          "subpart wires both behaviors).",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      const actionCountRef = useRef(0);
+      return (
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <Button
+            data-testid="toast-action-trigger"
+            onClick={() =>
+              toast({
+                id: "action-demo",
+                title: "Message deleted",
+                description: "You can recover it within 30 days.",
+                action: {
+                  label: "Undo",
+                  onClick: () => {
+                    actionCountRef.current += 1;
+                  },
+                },
+              })
+            }
+          >
+            Show action toast
+          </Button>
+        </div>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 4. Success variant ────────────────────────────────────────────── */
+export const Success: Story = {
+  name: "Variant: success",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Success variant — green leading dot. `role=\"status\"` + " +
+          "`aria-live=\"polite\"` (positive feedback is non-urgent).",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-success-trigger"
+          onClick={() =>
+            toast.success({
+              id: "success-demo",
+              title: "Backup complete",
+              description: "32 files were uploaded successfully.",
+            })
+          }
+        >
+          Show success
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 5. Error variant ──────────────────────────────────────────────── */
+export const ErrorVariant: Story = {
+  name: "Variant: error",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Error variant — red leading dot. `role=\"alert\"` + " +
+          "`aria-live=\"assertive\"`; screen readers interrupt the " +
+          "current speech queue to announce the error.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-error-trigger"
+          onClick={() =>
+            toast.error({
+              id: "error-demo",
+              title: "Upload failed",
+              description: "Check your network connection and try again.",
+              action: {
+                label: "Retry",
+                onClick: () => {},
+              },
+            })
+          }
+        >
+          Show error
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 6. Warning variant ────────────────────────────────────────────── */
+export const Warning: Story = {
+  name: "Variant: warning",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Warning variant — orange leading dot. `role=\"status\"` + " +
+          "`aria-live=\"assertive\"` so the announcement interrupts " +
+          "but the toast doesn't carry alert-level urgency.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-warning-trigger"
+          onClick={() =>
+            toast.warning({
+              id: "warning-demo",
+              title: "Storage almost full",
+              description: "You're using 96% of your plan.",
+            })
+          }
+        >
+          Show warning
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 7. Info variant ───────────────────────────────────────────────── */
+export const Info: Story = {
+  name: "Variant: info",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Info variant — accent-blue leading dot. `role=\"status\"` + " +
+          "`aria-live=\"polite\"`.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-info-trigger"
+          onClick={() =>
+            toast.info({
+              id: "info-demo",
+              title: "New build available",
+              description: "Restart to apply version 4.2.0.",
+            })
+          }
+        >
+          Show info
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 8. LongDuration ───────────────────────────────────────────────── */
+export const LongDuration: Story = {
+  name: "Long duration (10s)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Override the per-toast duration to 10 seconds. Useful when a " +
+          "toast's content needs a deliberate read (longer description " +
+          "or an action the user should consider).",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-long-trigger"
+          onClick={() =>
+            toast({
+              id: "long-demo",
+              title: "Scheduled maintenance",
+              description:
+                "Workers will pause briefly between 14:00 and 14:05 UTC.",
+              duration: 10_000,
+            })
+          }
+        >
+          Show 10s toast
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 9. Persistent ─────────────────────────────────────────────────── */
+export const Persistent: Story = {
+  name: "Persistent (duration: 0)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`duration: 0` makes the toast persistent — the auto-dismiss " +
+          "timer never fires. Manual dismissal (close button, swipe, or " +
+          "`dismiss(id)`) is the only way to close it.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast, dismiss } = useToast();
+      return (
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <Button
+            data-testid="toast-persistent-trigger"
+            onClick={() =>
+              toast({
+                id: "persistent-demo",
+                title: "Connection lost",
+                description: "Reconnecting…",
+                duration: 0,
+                variant: "warning",
+              })
+            }
+          >
+            Show persistent
+          </Button>
+          <Button
+            variant="tinted"
+            data-testid="toast-persistent-dismiss"
+            onClick={() => dismiss("persistent-demo")}
+          >
+            Dismiss persistent
+          </Button>
+        </div>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 10. ImperativeUpdate ──────────────────────────────────────────── */
+export const ImperativeUpdate: Story = {
+  name: "Imperative update (same id)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Calling `toast({ id: \"x\" })` twice UPDATES the existing " +
+          "toast in place (no second mount, no flicker). Base UI bumps " +
+          "the toast's `updateKey` and resets the auto-dismiss timer.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <Button
+            data-testid="toast-update-start"
+            onClick={() =>
+              toast({
+                id: "update-demo",
+                title: "Uploading…",
+                description: "Processing 12 files.",
+                duration: 0,
+                variant: "info",
+              })
+            }
+          >
+            Start upload
+          </Button>
+          <Button
+            data-testid="toast-update-finish"
+            onClick={() =>
+              toast({
+                id: "update-demo",
+                title: "Upload complete",
+                description: "12 files synced.",
+                variant: "success",
+              })
+            }
+          >
+            Finish upload
+          </Button>
+        </div>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 11. Stacked ───────────────────────────────────────────────────── */
+export const Stacked: Story = {
+  name: "Stacked (3 simultaneous)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Three toasts emitted in quick succession. The Provider's " +
+          "`limit` (default 3) caps how many are visible at once; " +
+          "exceeding the limit closes the oldest.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-stacked-trigger"
+          onClick={() => {
+            toast({ id: "stack-1", title: "First", variant: "info" });
+            toast({ id: "stack-2", title: "Second", variant: "success" });
+            toast({ id: "stack-3", title: "Third", variant: "warning" });
+          }}
+        >
+          Show three
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 12. PositionTop ───────────────────────────────────────────────── */
+export const PositionTop: Story = {
+  name: "Position: top-end",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Viewport anchored to the top-end (top-right under LTR). " +
+          "Toasts slide in from the trailing inline edge.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-position-top-trigger"
+          onClick={() =>
+            toast({
+              id: "position-top",
+              title: "Pinned to top",
+              variant: "info",
+            })
+          }
+        >
+          Show top toast
+        </Button>
+      );
+    }
+    return (
+      <Wrap position="top-end">
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 13. PositionBottom ────────────────────────────────────────────── */
+export const PositionBottom: Story = {
+  name: "Position: bottom-start",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Viewport anchored to the bottom-start (bottom-left under " +
+          "LTR). Toasts slide in from the leading inline edge.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-position-bottom-trigger"
+          onClick={() =>
+            toast({
+              id: "position-bottom",
+              title: "Pinned to bottom-start",
+              variant: "success",
+            })
+          }
+        >
+          Show bottom-start toast
+        </Button>
+      );
+    }
+    return (
+      <Wrap position="bottom-start">
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 14. SwipeToDismiss ────────────────────────────────────────────── */
+export const SwipeToDismiss: Story = {
+  name: "Swipe to dismiss",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Toasts can be swiped along the anchored axis to dismiss. " +
+          "Default swipe directions are end + down so a bottom-end " +
+          "viewport accepts swipe-right or swipe-down. Pointer drag " +
+          "is followed via the `--toast-swipe-movement-*` CSS vars.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-swipe-trigger"
+          onClick={() =>
+            toast({
+              id: "swipe-demo",
+              title: "Swipe me away",
+              description: "Drag right or down to dismiss.",
+              duration: 0,
+            })
+          }
+        >
+          Show swipeable toast
+        </Button>
+      );
+    }
+    return (
+      <Wrap>
+        <Trigger />
+      </Wrap>
+    );
+  },
+};
+
+/* ─── 15. RTL ───────────────────────────────────────────────────────── */
+export const Rtl: Story = {
+  name: "RTL",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Hebrew toast content under `direction: rtl`. Logical " +
+          "properties keep padding axis-correct; the bottom-end " +
+          "Viewport flips to bottom-LEFT under RTL.",
+      },
+    },
+  },
+  render: () => {
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-rtl-trigger"
+          onClick={() =>
+            toast({
+              id: "rtl-demo",
+              title: "התראה",
+              description: "השינויים שלך נשמרו.",
+              variant: "success",
+            })
+          }
+        >
+          הצג הודעה
+        </Button>
+      );
+    }
+    return (
+      <div dir="rtl" lang="he">
+        <Wrap>
+          <Trigger />
+        </Wrap>
+      </div>
+    );
+  },
+};

@@ -1,0 +1,407 @@
+/*
+ * Toast — transient notification anatomy.
+ *
+ *   .zs-toast-viewport             fixed positioning, holds the stack
+ *     └─ .zs-toast-root            single toast surface (raised + shadow)
+ *           ├─ .zs-toast-title     headline (h2)
+ *           ├─ .zs-toast-description supplementary text (p)
+ *           ├─ .zs-toast-action    inline action button
+ *           └─ .zs-toast-close     dismiss button
+ *
+ * Surface — raised translucent panel (`--zs-surface-raised`) over a
+ * `--zs-shadow-popover` elevation. A `box-shadow inset` hairline carries
+ * the surface-on-surface edge. The surface is OPAQUE-enough that axe's
+ * color-contrast walk terminates inside the toast (Crystal surface is
+ * 55% alpha over an opaque page background; that's the same posture
+ * Popover/Tooltip take).
+ *
+ * Variants — leading-icon tint only. The body text always stays on
+ * `--zs-label` so a colored variant doesn't degrade legibility. The
+ * `[data-variant="..."]` selector lives on Toast.Root and cascades to
+ * the leading icon via the `::before` pseudo on the root grid.
+ *
+ *   default → no tint (uses --zs-label-secondary so the dot blends).
+ *   success → --zs-system-green
+ *   error   → --zs-system-red
+ *   warning → --zs-system-orange
+ *   info    → --zs-accent
+ *
+ * Enter/exit — Base UI emits `data-starting-style` (entering) +
+ * `data-ending-style` (leaving) on the root. The enter slides in from
+ * the viewport's anchored edge along the inline or block axis (logical
+ * transform) and fades; the exit fades and slides out by half a step.
+ * Reduced-motion replaces the slide with fade-only (transform stays
+ * the identity).
+ *
+ * Swipe-to-dismiss — `data-swiping` is present while the pointer drags
+ * the toast; `--toast-swipe-movement-x/y` carry the pointer delta so
+ * the root follows the gesture. When the swipe completes, Base UI
+ * stamps `data-ending-style` and we collapse on the resolved direction.
+ *
+ * Forced-colors mirror — every PAINTING selector (background-color,
+ * color, box-shadow, border) is re-emitted under `@media (forced-
+ * colors: active)` at equal specificity so the system palette wins
+ * without losing the variant accent (variant tints fall back to
+ * `Highlight` for the unmistakable urgency signal; success/info keep
+ * the system color since forced-colors users still want the semantic).
+ *
+ * RTL — layout uses `padding-inline`, `inset-inline-end`,
+ * `inset-inline-start` so the stack flips correctly under
+ * `direction: rtl` without re-declaring selectors.
+ */
+
+/* ─── Viewport ──────────────────────────────────────────────────────── *
+ *
+ * Fixed to the visual viewport, holds the toast stack. Default anchor
+ * is bottom-end (right under LTR). Logical inset properties flip the
+ * anchor automatically under RTL. */
+.zs-toast-viewport {
+  position: fixed;
+  /* Toasts stack above dialogs but below tooltips (matches
+   * .zs-tooltip-positioner's `--zs-z-modal + 20` ceiling). */
+  z-index: calc(var(--zs-z-modal) + 10);
+  outline: none;
+  /* The container is a passive label region — clicks fall through to
+   * the underlying app unless they hit a real toast. */
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  /* Logical-end-aligned padding so the stack hugs the anchored corner
+   * with the same breathing room on all sides. */
+  padding: var(--zs-space-4);
+  /* Constrain the stack so toasts don't spill across half the viewport. */
+  inline-size: min(24rem, calc(100% - 2 * var(--zs-space-4)));
+}
+
+/* Position anchors — bottom-end is the default per the brief. */
+.zs-toast-viewport--top-start {
+  inset-block-start: 0;
+  inset-inline-start: 0;
+}
+.zs-toast-viewport--top-end {
+  inset-block-start: 0;
+  inset-inline-end: 0;
+}
+.zs-toast-viewport--bottom-start {
+  inset-block-end: 0;
+  inset-inline-start: 0;
+  /* Newest toast sits at the bottom of the stack — visual order matches
+   * announce order. */
+  flex-direction: column-reverse;
+}
+.zs-toast-viewport--bottom-end {
+  inset-block-end: 0;
+  inset-inline-end: 0;
+  flex-direction: column-reverse;
+}
+.zs-toast-viewport--top {
+  inset-block-start: 0;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+}
+.zs-toast-viewport--bottom {
+  inset-block-end: 0;
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  flex-direction: column-reverse;
+}
+
+/* ─── Root ──────────────────────────────────────────────────────────── *
+ *
+ * Each toast paints a raised surface with the popover-elevation shadow
+ * stack. Grid lays out:
+ *   leading-icon │ content (title + description + action) │ close
+ *
+ * Base UI sets `position: relative` on the root itself so swipe / stack
+ * transforms compose against the natural position. We do NOT add
+ * `position: fixed` — the Viewport owns positioning. */
+.zs-toast-root {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--zs-space-3);
+  align-items: start;
+  /* Logical padding so RTL flips for free. */
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+  background-color: var(--zs-surface-raised);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  border-radius: var(--zs-radius-4);
+  /* Popover elevation + inset hairline edge. The inset shadow is the
+   * surface-on-surface delineation; the popover shadow is the lift. */
+  box-shadow:
+    var(--zs-shadow-popover),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  isolation: isolate;
+  outline: none;
+  /* Crystal surfaces are opaque, but a future translucent theme inherits
+   * the popover material from --zs-material-regular automatically. */
+  backdrop-filter: var(--zs-material-regular);
+  -webkit-backdrop-filter: var(--zs-material-regular);
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zs-motion-base) var(--zs-motion-ease);
+  /* Swipe follow: Base UI emits --toast-swipe-movement-x/y. The fallback
+   * 0 keeps the transform identity when not swiping. */
+  transform: translate(
+    var(--toast-swipe-movement-x, 0),
+    var(--toast-swipe-movement-y, 0)
+  );
+}
+
+/* ─── Leading icon (variant tint) ───────────────────────────────────── *
+ *
+ * `::before` paints a small filled circle in the leading column. The
+ * color resolves from a per-variant CSS custom property so a single
+ * selector covers all five variants. */
+.zs-toast-root {
+  --zs-toast-leading-color: var(--zs-label-secondary);
+}
+.zs-toast-root--success {
+  --zs-toast-leading-color: var(--zs-system-green);
+}
+.zs-toast-root--error {
+  --zs-toast-leading-color: var(--zs-system-red);
+}
+.zs-toast-root--warning {
+  --zs-toast-leading-color: var(--zs-system-orange);
+}
+.zs-toast-root--info {
+  --zs-toast-leading-color: var(--zs-accent);
+}
+.zs-toast-root::before {
+  content: "";
+  display: block;
+  inline-size: var(--zs-space-2);
+  block-size: var(--zs-space-2);
+  margin-block-start: var(--zs-space-half);
+  border-radius: var(--zs-radius-full);
+  background-color: var(--zs-toast-leading-color);
+  /* The leading dot is a visual cue; the role/aria-live on the root
+   * carries the real semantics. */
+}
+
+/* ─── Content column ────────────────────────────────────────────────── *
+ *
+ * Holds title / description / action in a single flex column so the
+ * action sits directly under the body text. Lives in the middle grid
+ * column of Toast.Root. */
+.zs-toast-content {
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+}
+
+/* ─── Title / description ───────────────────────────────────────────── */
+.zs-toast-title {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: var(--zs-text-subheadline-weight);
+  color: var(--zs-label);
+}
+.zs-toast-description {
+  margin: 0;
+  margin-block-start: var(--zs-space-half);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── Action button ─────────────────────────────────────────────────── *
+ *
+ * Inline text button reusing the accent token. Sits below the
+ * description (or directly under the title when no description). */
+.zs-toast-action {
+  margin-block-start: var(--zs-space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  background-color: transparent;
+  color: var(--zs-toast-leading-color);
+  border: var(--zs-selection-hairline) solid var(--zs-separator-strong);
+  border-radius: var(--zs-radius-2);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: var(--zs-text-footnote-weight);
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    border-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-toast-action:hover {
+  background-color: color-mix(
+    in oklch,
+    var(--zs-toast-leading-color) 12%,
+    transparent
+  );
+}
+.zs-toast-action:focus-visible {
+  outline: var(--zs-selection-hairline) solid var(--zs-focus);
+  outline-offset: var(--zs-selection-hairline);
+}
+
+/* ─── Close button ──────────────────────────────────────────────────── *
+ *
+ * Quiet glyph button in the trailing column. Uses logical alignment so
+ * RTL renders the close on the leading visual edge automatically. */
+.zs-toast-close {
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--zs-space-5);
+  block-size: var(--zs-space-5);
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--zs-label-tertiary);
+  border-radius: var(--zs-radius-1);
+  cursor: pointer;
+  outline: none;
+  transition:
+    color var(--zs-motion-fast) var(--zs-motion-ease),
+    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-toast-close:hover {
+  color: var(--zs-label);
+  background-color: var(--zs-fill-quaternary);
+}
+.zs-toast-close:focus-visible {
+  outline: var(--zs-selection-hairline) solid var(--zs-focus);
+  outline-offset: var(--zs-selection-hairline);
+}
+
+/* ─── Enter / exit transitions ──────────────────────────────────────── *
+ *
+ * Slide-in from the anchored viewport edge along the logical inline
+ * axis; fade-in. The Viewport sets a context attribute so each Root
+ * can resolve the slide direction without inspecting Base UI's runtime
+ * state.
+ *
+ * Default (no position context) — slide in from the trailing inline
+ * edge. End-anchored positions slide in from end → 0; start-anchored
+ * positions slide in from start → 0. Block-anchored positions slide
+ * from the block edge. */
+.zs-toast-root[data-starting-style],
+.zs-toast-root[data-ending-style] {
+  opacity: 0;
+  transform: translateX(100%);
+}
+
+/* Position-aware enter — read the data-position the Viewport stamps so
+ * the toast slides in from the correct corner. We attach the data
+ * attribute to the Viewport; here we scope by descendant selector at
+ * EQUAL specificity to the base transform rule above. */
+.zs-toast-viewport--top-end .zs-toast-root[data-starting-style],
+.zs-toast-viewport--top-end .zs-toast-root[data-ending-style],
+.zs-toast-viewport--bottom-end .zs-toast-root[data-starting-style],
+.zs-toast-viewport--bottom-end .zs-toast-root[data-ending-style] {
+  transform: translateX(calc(100% + var(--zs-space-4)));
+}
+.zs-toast-viewport--top-start .zs-toast-root[data-starting-style],
+.zs-toast-viewport--top-start .zs-toast-root[data-ending-style],
+.zs-toast-viewport--bottom-start .zs-toast-root[data-starting-style],
+.zs-toast-viewport--bottom-start .zs-toast-root[data-ending-style] {
+  transform: translateX(calc(-100% - var(--zs-space-4)));
+}
+.zs-toast-viewport--top .zs-toast-root[data-starting-style],
+.zs-toast-viewport--top .zs-toast-root[data-ending-style] {
+  transform: translateY(calc(-100% - var(--zs-space-4)));
+}
+.zs-toast-viewport--bottom .zs-toast-root[data-starting-style],
+.zs-toast-viewport--bottom .zs-toast-root[data-ending-style] {
+  transform: translateY(calc(100% + var(--zs-space-4)));
+}
+
+/* Active swipe pauses the transform-driven slide so the gesture wins. */
+.zs-toast-root[data-swiping] {
+  transition: none;
+}
+
+/* ─── Reduced-motion: fade-only ─────────────────────────────────────── *
+ *
+ * Replace slide with fade-only. Every transform-bearing selector is
+ * mirrored at equal specificity inside the media query so the identity
+ * transform wins. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-toast-root,
+  .zs-toast-root[data-starting-style],
+  .zs-toast-root[data-ending-style],
+  .zs-toast-viewport--top-end .zs-toast-root[data-starting-style],
+  .zs-toast-viewport--top-end .zs-toast-root[data-ending-style],
+  .zs-toast-viewport--bottom-end .zs-toast-root[data-starting-style],
+  .zs-toast-viewport--bottom-end .zs-toast-root[data-ending-style],
+  .zs-toast-viewport--top-start .zs-toast-root[data-starting-style],
+  .zs-toast-viewport--top-start .zs-toast-root[data-ending-style],
+  .zs-toast-viewport--bottom-start .zs-toast-root[data-starting-style],
+  .zs-toast-viewport--bottom-start .zs-toast-root[data-ending-style],
+  .zs-toast-viewport--top .zs-toast-root[data-starting-style],
+  .zs-toast-viewport--top .zs-toast-root[data-ending-style],
+  .zs-toast-viewport--bottom .zs-toast-root[data-starting-style],
+  .zs-toast-viewport--bottom .zs-toast-root[data-ending-style] {
+    transform: none;
+    transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+  }
+}
+
+/* ─── Forced-colors mirror ──────────────────────────────────────────── *
+ *
+ * Equal-specificity overrides for every painting selector. Variant
+ * tints fall back to system semantic colors:
+ *   - error   → Mark (the closest "urgent" system color)
+ *   - warning → Mark
+ *   - success → LinkText (a distinct positive tone in most palettes)
+ *   - info    → LinkText
+ *   - default → CanvasText (mutes the dot to standard text)
+ *
+ * Toasts are panels first, so background+color+border are the priority. */
+@media (forced-colors: active) {
+  .zs-toast-root {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-toast-root--default {
+    --zs-toast-leading-color: CanvasText;
+  }
+  .zs-toast-root--success,
+  .zs-toast-root--info {
+    --zs-toast-leading-color: LinkText;
+  }
+  .zs-toast-root--error,
+  .zs-toast-root--warning {
+    --zs-toast-leading-color: Mark;
+  }
+  .zs-toast-title,
+  .zs-toast-description {
+    color: CanvasText;
+  }
+  .zs-toast-action {
+    color: LinkText;
+    border-color: CanvasText;
+  }
+  .zs-toast-action:hover {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-toast-close {
+    color: CanvasText;
+  }
+  .zs-toast-close:hover {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-toast-action:focus-visible,
+  .zs-toast-close:focus-visible {
+    outline: 0.125rem solid Highlight;
+  }
+}
