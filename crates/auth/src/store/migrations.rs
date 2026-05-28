@@ -162,6 +162,17 @@ const STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS auth_dpop_jti_inserted_idx
         ON auth.dpop_jti (inserted_at)",
 
+    // 5.9c Wrapper-token subject revocation denylist. Back-channel
+    // logout inserts a subject here; gateway wrapper verification
+    // rejects wrappers whose iat is at or before revoked_at. Rows are
+    // swept after the wrapper-token maximum lifetime plus cushion.
+    "CREATE TABLE IF NOT EXISTS auth.wrapper_revoked_subjects (
+        subject    UUID PRIMARY KEY,
+        revoked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )",
+    "CREATE INDEX IF NOT EXISTS auth_wrapper_revoked_subjects_revoked_idx
+        ON auth.wrapper_revoked_subjects (revoked_at)",
+
     // 5.10 console sessions — per-origin `__Host-zs_console_session`
     // cookies validated by the control plane (the OIDC RP for the
     // creator dashboard at `console.zeroship.ai`). Shape mirrors

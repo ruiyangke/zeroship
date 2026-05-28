@@ -8,6 +8,7 @@ pub mod dpop;
 pub mod observability;
 pub mod logout_token;
 pub mod hydra;
+pub mod wrapper_revocation;
 pub mod oidc_verify;
 pub mod pkce;
 pub mod preview_ports;

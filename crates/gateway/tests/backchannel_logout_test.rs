@@ -350,6 +350,19 @@ async fn audit_count(client: &Client, jti: &str) -> i64 {
     row.get("count")
 }
 
+async fn wrapper_revoked_count(client: &Client, subject: Uuid) -> i64 {
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS count \
+             FROM auth.wrapper_revoked_subjects \
+             WHERE subject = $1",
+            &[&subject],
+        )
+        .await
+        .expect("wrapper revoked count");
+    row.get("count")
+}
+
 #[ntex::test]
 async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
@@ -383,12 +396,13 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
     let issuer = format!("{auth_base}/");
 
-    let target_user = format!("usr_{}", Uuid::new_v4().simple());
+    let target_user = Uuid::new_v4();
+    let target_user_string = target_user.to_string();
     let app_id = format!("app-bcl-{}", Uuid::new_v4().simple());
     let session = create(
         &db,
         &NewSession {
-            user_id: &target_user,
+            user_id: &target_user_string,
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
@@ -400,7 +414,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     .expect("create session");
 
     let jti = format!("jti-{}", Uuid::new_v4().simple());
-    let token = sign_logout_token(&key, &issuer, &target_user, &jti);
+    let token = sign_logout_token(&key, &issuer, &target_user_string, &jti);
     let state = build_handler_state(db.clone(), &auth_base);
     let app = test::init_service(
         web::App::new()
@@ -431,6 +445,11 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         1,
         "first logout_token must emit one revocation audit row"
     );
+    assert_eq!(
+        wrapper_revoked_count(&db, target_user).await,
+        1,
+        "first logout_token must add subject to wrapper denylist"
+    );
 
     let replay = test::TestRequest::post()
         .uri("/oidc/backchannel-logout")
@@ -453,6 +472,12 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     db.execute(
         "DELETE FROM auth.audit_events WHERE detail->>'jti' = $1",
         &[&jti],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM auth.wrapper_revoked_subjects WHERE subject = $1",
+        &[&target_user],
     )
     .await
     .ok();

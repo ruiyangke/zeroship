@@ -273,6 +273,35 @@ async fn resolve_dpop_user_header(
                     tracing::warn!("DPoP wrapper token missing sub — rejecting");
                     return None;
                 }
+                if let (Some(db), Some(subject)) = (
+                    state.db.as_ref(),
+                    zeroship_core::wrapper_revocation::subject_uuid(&claims.sub),
+                ) {
+                    match zeroship_core::wrapper_revocation::is_subject_revoked_since(
+                        db.as_ref(),
+                        subject,
+                        claims.iat,
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            tracing::warn!(
+                                sub = %claims.sub,
+                                "DPoP wrapper subject was revoked after wrapper issue"
+                            );
+                            return None;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                sub = %claims.sub,
+                                "DPoP wrapper revocation check failed"
+                            );
+                            return None;
+                        }
+                    }
+                }
                 let owned = build_worker_user_from_wrapper(&claims);
                 let user: oidc_rp::WorkerUser<'_> = (&owned).into();
                 return Some(oidc_rp::encode_user_header(
@@ -758,6 +787,14 @@ mod tests {
         signing: ed25519_dalek::SigningKey,
         auth_public: &str,
     ) -> std::sync::Arc<crate::GateState> {
+        build_state_with_wrapper_and_auth_public_and_db(signing, auth_public, None)
+    }
+
+    fn build_state_with_wrapper_and_auth_public_and_db(
+        signing: ed25519_dalek::SigningKey,
+        auth_public: &str,
+        db: Option<std::sync::Arc<compio_postgres::Client>>,
+    ) -> std::sync::Arc<crate::GateState> {
         use std::sync::Arc as StdArc;
 
         let mut tmp = std::env::temp_dir();
@@ -806,7 +843,7 @@ mod tests {
                 "test-secret",
                 b"test-stash-key-32-bytes-long----".to_vec(),
             )),
-            db: None,
+            db,
             dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: StdArc::new(
                 zeroship_core::logout_token::LogoutJtiCache::default(),
@@ -875,9 +912,18 @@ mod tests {
         proof_jkt: &str,
         aud: &str,
     ) -> String {
+        issue_wrapper_for_sub(state, "usr_test", proof_jkt, aud)
+    }
+
+    fn issue_wrapper_for_sub(
+        state: &crate::GateState,
+        sub: &str,
+        proof_jkt: &str,
+        aud: &str,
+    ) -> String {
         let intro = crate::oidc_rp::IntrospectionResponse {
             active: true,
-            sub: Some("usr_test".into()),
+            sub: Some(sub.into()),
             client_id: Some("gateway".into()),
             email: Some("test@example.com".into()),
             email_verified: Some(true),
@@ -995,6 +1041,86 @@ mod tests {
         let request_id = Uuid::new_v4();
         let header = resolve_dpop_user_header(&req, &state, &request_id).await;
         assert!(header.is_some(), "wrapper path must accept matched jkt");
+    }
+
+    #[compio::test]
+    async fn resolve_dpop_rejects_wrapper_revoked_by_subject() {
+        let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+        let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
+            .await
+            .expect("connect auth db");
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        zeroship_auth::store::migrations::migrate(&client)
+            .await
+            .expect("migrate");
+        let db = std::sync::Arc::new(client);
+
+        let subject = Uuid::new_v4();
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let state = build_state_with_wrapper_and_auth_public_and_db(
+            gateway_signing,
+            "http://127.0.0.1:1",
+            Some(db.clone()),
+        );
+
+        let jkt = client_jkt(&client_key);
+        let aud = "myapp.zeroship.ai";
+        let wrapper = issue_wrapper_for_sub(&state, &subject.to_string(), &jkt, aud);
+        let htu = format!("http://{aud}/api/me");
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+
+        let first_proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
+        let first_req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
+            .header("dpop", first_proof)
+            .to_http_request();
+        let request_id = Uuid::new_v4();
+        assert!(
+            resolve_dpop_user_header(&first_req, &state, &request_id)
+                .await
+                .is_some(),
+            "wrapper should resolve before subject revocation"
+        );
+
+        zeroship_core::wrapper_revocation::revoke_subject(&db, subject)
+            .await
+            .expect("revoke subject");
+
+        let second_proof = sign_dpop_proof(&client_key, "GET", &htu, &wrapper, now);
+        let second_req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(http::header::AUTHORIZATION, format!("DPoP {wrapper}"))
+            .header("dpop", second_proof)
+            .to_http_request();
+        assert!(
+            resolve_dpop_user_header(&second_req, &state, &request_id)
+                .await
+                .is_none(),
+            "revoked wrapper subject must be rejected"
+        );
+
+        db.execute(
+            "DELETE FROM auth.wrapper_revoked_subjects WHERE subject = $1",
+            &[&subject],
+        )
+        .await
+        .ok();
     }
 
     #[compio::test]
