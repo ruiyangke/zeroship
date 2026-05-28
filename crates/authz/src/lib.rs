@@ -13,7 +13,7 @@ pub mod statement;
 pub use action::Action;
 pub use condition::Condition;
 pub use effect::Effect;
-pub use engine::{policy_hash, Authorizer};
+pub use engine::{load_platform_policies, policy_hash, Authorizer};
 pub use error::{AuthzError, ValidationError};
 pub use lower::lower;
 pub use policy::Policy;

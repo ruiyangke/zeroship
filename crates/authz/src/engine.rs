@@ -5,6 +5,18 @@ use sha2::{Digest, Sha256};
 
 use crate::{lower, AuthzError, Policy};
 
+const PLATFORM_POLICY_SOURCES: &[&str] = &[
+    include_str!("../../../policies/platform/admin.cedar"),
+    include_str!("../../../policies/platform/support.cedar"),
+    include_str!("../../../policies/platform/billing.cedar"),
+    include_str!("../../../policies/platform/readonly.cedar"),
+    include_str!("../../../policies/platform/suspended_apps.cedar"),
+    include_str!("../../../policies/platform/audit_locked.cedar"),
+    include_str!("../../../policies/creator/app_owner.cedar"),
+    include_str!("../../../policies/creator/app_editor.cedar"),
+    include_str!("../../../policies/creator/app_viewer.cedar"),
+];
+
 #[derive(Debug)]
 pub struct Authorizer {
     policies: PolicySet,
@@ -67,6 +79,17 @@ pub fn policy_hash(wrapper_json: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Loads the static platform and creator Cedar policies embedded in this crate.
+///
+/// # Errors
+///
+/// Returns [`AuthzError::CedarParse`] when Cedar rejects the embedded policy
+/// sources.
+pub fn load_platform_policies() -> Result<PolicySet, AuthzError> {
+    let source = PLATFORM_POLICY_SOURCES.join("\n");
+    PolicySet::from_str(&source).map_err(|err| AuthzError::CedarParse(err.to_string()))
 }
 
 fn canonical_json(value: &serde_json::Value) -> String {
