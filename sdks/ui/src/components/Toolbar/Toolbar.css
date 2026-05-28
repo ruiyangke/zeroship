@@ -1,0 +1,95 @@
+/*
+ * Toolbar — `role="toolbar"` cluster.
+ *
+ * Anatomy:
+ *   .zs-toolbar              flex row (or column) of controls
+ *     └─ children (Button / Toggle.Group / Toolbar.Separator / …)
+ *
+ * Visual rhythm:
+ *   - Horizontal toolbars sit on a translucent fill so the cluster reads
+ *     as one element. Vertical toolbars use the same paint with the
+ *     flow rotated.
+ *   - Gap rhythm = --zs-space-1 between adjacent items so segmented
+ *     groups don't feel crowded next to plain buttons.
+ *   - Hit-target minimum lives on the children (Button + Toggle min 1.75rem
+ *     intrinsic). Toolbar itself adds no extra padding around items.
+ *
+ * Forced-colors mirror: Canvas/CanvasText for the base; ButtonText for
+ * separators. Reduced-motion: nothing to do — the toolbar surface has
+ * no transitions of its own.
+ *
+ * RTL: flex flows with the document direction automatically; we use
+ * logical `padding-inline` + `padding-block`. Separators get their
+ * inline-size from `aria-orientation` (Base UI sets the attribute).
+ */
+
+/* ─── Root ──────────────────────────────────────────────────────────── */
+.zs-toolbar {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--zs-space-1);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  border-radius: var(--zs-radius-3);
+  background-color: var(--zs-fill-quaternary);
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  outline: none;
+}
+
+.zs-toolbar--vertical {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* ─── Separator ─────────────────────────────────────────────────────── *
+ *
+ * Hairline cluster boundary. The Base UI separator paints a div with
+ * `aria-orientation` flipped relative to the parent toolbar
+ * (vertical line inside a horizontal toolbar). We size off that
+ * attribute so authors don't need a wrapping class. */
+.zs-toolbar-separator {
+  background-color: var(--zs-separator);
+  /* The default is "vertical inside a horizontal toolbar". */
+  inline-size: var(--zs-selection-hairline);
+  block-size: 1.25rem;
+  margin-inline: var(--zs-space-1);
+  align-self: center;
+  flex: 0 0 auto;
+}
+
+.zs-toolbar-separator[aria-orientation="horizontal"] {
+  /* Flip dimensions for separators inside a vertical toolbar. */
+  inline-size: 1.25rem;
+  block-size: var(--zs-selection-hairline);
+  margin-block: var(--zs-space-1);
+  margin-inline: 0;
+}
+
+/* ─── focus visibility ─────────────────────────────────────────────── *
+ *
+ * The roving-tabindex item carries the focus; child components paint
+ * their own focus ring (Button outline, Toggle outline). Toolbar itself
+ * never receives focus (`tabindex="-1"` on the root), so there's nothing
+ * to paint here. We only neutralise the default outline on the
+ * container so Safari doesn't paint a stray ring when items briefly
+ * hand focus back to the root during arrow-key roving. */
+.zs-toolbar:focus {
+  outline: none;
+}
+
+/* ─── forced-colors mirror ─────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-toolbar {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-toolbar-separator {
+    background-color: CanvasText;
+    forced-color-adjust: none;
+  }
+}

@@ -33,6 +33,9 @@
 @import "./components/Tooltip/Tooltip.css";
 @import "./components/Form/Form.css";
 @import "./components/Fieldset/Fieldset.css";
+@import "./components/Menubar/Menubar.css";
+@import "./components/Toolbar/Toolbar.css";
+@import "./components/NavigationMenu/NavigationMenu.css";
 
 *,
 *::before,

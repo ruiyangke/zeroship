@@ -1,0 +1,305 @@
+/*
+ * NavigationMenu — topnav with mega-menu popouts.
+ *
+ * Anatomy:
+ *   .zs-navmenu                     <nav> at root (Base UI); <div> when nested.
+ *     └─ .zs-navmenu-list           <ul>
+ *           └─ .zs-navmenu-item     <li>
+ *                 ├─ .zs-navmenu-trigger    <button> + chevron
+ *                 └─ .zs-navmenu-link       <a> (top-level direct-link items)
+ *
+ *   .zs-navmenu-positioner          Floating UI anchored layer
+ *     └─ .zs-navmenu-popup          opaque sheet
+ *           ├─ .zs-navmenu-arrow    optional 16x8 triangle
+ *           └─ .zs-navmenu-viewport clipping window holding active Content
+ *                 └─ .zs-navmenu-content (Base UI portals it in)
+ *                       └─ .zs-navmenu-link (nested links inside a panel)
+ *
+ * Glass-surface invariant: Popup paints opaque `background-color`
+ * (--zs-surface) + optional `backdrop-filter` (gated by
+ * --zs-dialog-backdrop-filter). axe-core's color-contrast walk
+ * terminates at the opaque base.
+ *
+ * Forced-colors: Canvas/CanvasText for the popup; HighlightText/Highlight
+ * for the active trigger + active link.
+ *
+ * Reduced-motion: disable the Viewport morph + Popup enter/leave.
+ *
+ * RTL: layout uses logical properties; Floating UI mirrors `start`/`end`
+ * per the document direction.
+ */
+
+/* ─── Root + List ───────────────────────────────────────────────────── */
+.zs-navmenu {
+  position: relative;
+  display: inline-block;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+.zs-navmenu-list {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--zs-space-1);
+  margin: 0;
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-1);
+  list-style: none;
+  border-radius: var(--zs-radius-3);
+}
+
+.zs-navmenu--vertical .zs-navmenu-list {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.zs-navmenu-item {
+  list-style: none;
+  display: inline-flex;
+}
+
+/* ─── Trigger ───────────────────────────────────────────────────────── *
+ *
+ * Topnav triggers paint as label-only buttons. Hover adds a subtle fill;
+ * open paints a stronger fill so users can spot which panel is showing
+ * when their eyes leave the menu briefly. */
+.zs-navmenu-trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-1);
+  block-size: 1.75rem;
+  min-inline-size: 1.75rem;
+  padding-inline: var(--zs-space-3);
+  border: 0;
+  border-radius: var(--zs-radius-2);
+  background-color: transparent;
+  color: var(--zs-label);
+  font: inherit;
+  font-weight: var(--zs-text-body-weight);
+  letter-spacing: var(--zs-text-body-tracking);
+  cursor: default;
+  user-select: none;
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-navmenu-trigger:hover:not([data-disabled]) {
+  background-color: var(--zs-fill-tertiary);
+}
+
+.zs-navmenu-trigger[data-popup-open] {
+  background-color: var(--zs-fill-secondary);
+}
+
+.zs-navmenu-trigger:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+.zs-navmenu-trigger[data-disabled] {
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+}
+
+/* ─── Icon (chevron next to Trigger label) ────────────────────────── */
+.zs-navmenu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 0.75rem;
+  block-size: 0.75rem;
+  color: currentColor;
+  transition: transform var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+.zs-navmenu-icon[data-open] {
+  transform: rotate(180deg);
+}
+
+.zs-navmenu-icon > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+/* ─── Link (direct items + nested inside Content) ─────────────────── */
+.zs-navmenu-link {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--zs-space-2);
+  min-block-size: 1.75rem;
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-3);
+  border-radius: var(--zs-radius-2);
+  color: var(--zs-label);
+  text-decoration: none;
+  background-color: transparent;
+  font: inherit;
+  font-weight: var(--zs-text-body-weight);
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-navmenu-link:hover {
+  background-color: var(--zs-fill-tertiary);
+}
+
+.zs-navmenu-link:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+.zs-navmenu-link[data-active] {
+  background-color: color-mix(in oklch, var(--zs-accent) 12%, transparent);
+  color: var(--zs-accent);
+}
+
+/* ─── Positioner / Popup / Viewport / Content / Arrow ─────────────── */
+.zs-navmenu-positioner {
+  z-index: var(--zs-z-modal);
+  outline: none;
+}
+
+.zs-navmenu-popup {
+  /* Glass-surface invariant: opaque background paints first. */
+  background-color: var(--zs-surface);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  /* Sized to comfortably host a 2-3 column mega-menu without exceeding
+   * the viewport. The brief contingency: max-inline-size fits viewport.
+   * `min()` floors against viewport width minus a comfortable gutter. */
+  min-inline-size: 18rem;
+  max-inline-size: min(56rem, calc(100dvw - var(--zs-space-6) * 2));
+  border-radius: var(--zs-radius-5);
+  box-shadow:
+    var(--zs-shadow-dialog),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
+  opacity: 1;
+  outline: none;
+  isolation: isolate;
+  /* The Viewport (child) owns the panel clip — Base UI uses it as the
+   * morphing window. The Popup must stay overflow-visible so the
+   * `Arrow` slot, which sits as a sibling to the Viewport and is
+   * positioned by Floating UI outside the popup body, renders without
+   * being clipped. */
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+.zs-navmenu-popup[data-side="top"] {
+  transform-origin: bottom center;
+}
+.zs-navmenu-popup[data-side="bottom"] {
+  transform-origin: top center;
+}
+.zs-navmenu-popup[data-side="left"] {
+  transform-origin: center right;
+}
+.zs-navmenu-popup[data-side="right"] {
+  transform-origin: center left;
+}
+
+.zs-navmenu-popup[data-starting-style],
+.zs-navmenu-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.97);
+}
+
+/* ─── Viewport — clipping window that morphs between Items' Content ── *
+ *
+ * Base UI animates `width` + `height` between items so the panel reads
+ * as one surface that morphs. We provide a `transition` so the morph
+ * isn't a hard jump; reduced-motion disables it below. */
+.zs-navmenu-viewport {
+  position: relative;
+  inline-size: var(--positioner-width, auto);
+  block-size: var(--positioner-height, auto);
+  border-radius: var(--zs-radius-5);
+  /* The Viewport is the clipping window for the panel morph — owns the
+   * `overflow: hidden` rather than the Popup, so the Arrow slot
+   * (positioned outside the popup body by Floating UI) doesn't get
+   * clipped. The two custom properties above are emitted by Base UI on
+   * the Positioner; we read them here so the viewport tracks the
+   * current popup geometry. Falls back to `auto` when the props are
+   * absent (e.g. before the first open). */
+  overflow: hidden;
+  transition:
+    inline-size var(--zs-motion-base) var(--zs-motion-ease),
+    block-size var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+.zs-navmenu-content {
+  display: block;
+  padding-block: var(--zs-space-4);
+  padding-inline: var(--zs-space-4);
+}
+
+/* ─── Arrow (mirrors Popover's 16x8 triangle) ──────────────────────── */
+.zs-navmenu-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1rem;
+  block-size: 0.5rem;
+  color: var(--zs-surface);
+  filter: drop-shadow(0 0 0.0625rem color-mix(in oklch, var(--zs-label) 18%, transparent));
+}
+
+.zs-navmenu-arrow > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+/* ─── reduced-motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-navmenu-trigger,
+  .zs-navmenu-link,
+  .zs-navmenu-icon,
+  .zs-navmenu-popup,
+  .zs-navmenu-popup[data-starting-style],
+  .zs-navmenu-popup[data-ending-style],
+  .zs-navmenu-viewport {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors mirror ─────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-navmenu-trigger,
+  .zs-navmenu-link {
+    color: CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-navmenu-trigger[data-popup-open],
+  .zs-navmenu-link[data-active] {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-navmenu-trigger[data-disabled] {
+    color: GrayText;
+  }
+  .zs-navmenu-popup {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    forced-color-adjust: none;
+  }
+  .zs-navmenu-arrow {
+    color: Canvas;
+    filter: drop-shadow(0 0 0.0625rem CanvasText);
+  }
+}
