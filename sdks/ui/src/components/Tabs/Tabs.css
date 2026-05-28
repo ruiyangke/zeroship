@@ -1,0 +1,487 @@
+/*
+ * Tabs — TabList + Tab + Panel + Indicator.
+ *
+ * Anatomy:
+ *   .zs-tabs                       — root container; data-orientation
+ *     ├─ .zs-tabs-list             — role="tablist" rail
+ *     │   ├─ .zs-tabs-tab          — role="tab" buttons (data-active)
+ *     │   └─ .zs-tabs-indicator    — role="presentation" sliding affordance
+ *     └─ .zs-tabs-panel            — role="tabpanel" content (data-orientation)
+ *
+ * Modifier classes (all parts):
+ *   --horizontal | --vertical
+ *   --sm | --md | --lg
+ *   --default | --pill | --card
+ *
+ * Variant ladder (guarantee 1 in Tabs.tsx):
+ *
+ *   default → quiet. Underline indicator under the active tab; list
+ *             surface stays transparent; active tab text deepens to
+ *             the label color while inactive tabs read secondary.
+ *
+ *   pill    → loud. Accent-filled rounded segment behind the active
+ *             tab; list rail paints a unified track surface (same
+ *             pattern Toggle.Group uses for its pressed pill, Slice 5).
+ *             Indicator is the pill itself.
+ *
+ *   card    → structural. Each tab is an opaque raised rectangle that
+ *             shares the panel's top edge when active; reads as folder
+ *             tabs over a sheet.
+ *
+ * Active-tab geometry uses Base UI's CSS custom properties on the
+ * Indicator span — `--active-tab-left/top/width/height`. The indicator
+ * reads those vars and animates between values when the active tab
+ * changes. `prefers-reduced-motion` suppresses the transition.
+ *
+ * Vertical orientation translates the indicator vertically; logical
+ * properties keep RTL automatic without manual flips.
+ */
+
+/* ─── component-local tokens ────────────────────────────────────────── *
+ *
+ * Heights mirror the Button / Input / Toggle rhythm via the foundation
+ * --zs-control-h-* tokens. Tab inline padding tracks Button's padding
+ * scale so tab labels share the same rhythm as button labels. */
+.zs-tabs {
+  --zs-tabs-h-sm: var(--zs-control-h-sm);              /* 2rem */
+  --zs-tabs-h-md: var(--zs-control-h-md);              /* 2.5rem (default) */
+  --zs-tabs-h-lg: var(--zs-control-h-lg);              /* 3rem */
+
+  --zs-tabs-px-sm: var(--zs-control-px-sm);            /* 12 */
+  --zs-tabs-px-md: var(--zs-control-px-md);            /* 16 */
+  --zs-tabs-px-lg: var(--zs-control-px-lg);            /* 20 */
+
+  --zs-tabs-radius-sm: var(--zs-control-radius-sm);    /* 6 */
+  --zs-tabs-radius-md: var(--zs-control-radius-md);    /* 8 */
+  --zs-tabs-radius-lg: var(--zs-control-radius-lg);    /* 10 */
+
+  /* Match Button's per-size type rhythm so a Tabs row next to a Button
+     reads coherent. Same scale Toggle uses. */
+  --zs-tabs-font-sm: var(--zs-text-subheadline-size);
+  --zs-tabs-line-sm: var(--zs-text-subheadline-line);
+  --zs-tabs-font-md: var(--zs-text-body-size);
+  --zs-tabs-line-md: var(--zs-text-body-line);
+  --zs-tabs-font-lg: var(--zs-text-headline-size);
+  --zs-tabs-line-lg: var(--zs-text-headline-line);
+
+  --zs-tabs-gap-sm: var(--zs-space-1);                 /* 4 */
+  --zs-tabs-gap-md: var(--zs-space-2);                 /* 8 */
+  --zs-tabs-gap-lg: var(--zs-space-2);                 /* 8 */
+
+  /* Underline thickness for the default variant indicator. Same hairline
+     family Slice 4 uses for selection edges; a touch heavier so the
+     underline reads through the focus ring. */
+  --zs-tabs-underline-thickness: 0.125rem;             /* 2 */
+
+  /* Panel rhythm — gap between list and panel. */
+  --zs-tabs-panel-gap: var(--zs-space-4);              /* 16 */
+}
+
+.zs-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-tabs-panel-gap);
+  min-inline-size: 0;
+}
+
+.zs-tabs--vertical {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+/* ─── list rail ─────────────────────────────────────────────────────── */
+
+.zs-tabs-list {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  /* Gap between tabs — pill / card use a tighter gap because the active
+     surface needs room around it; default's underline lets neighbors
+     sit closer. Per-variant overrides below. */
+  gap: var(--zs-space-1);
+  /* Horizontal default — the list scrolls horizontally if it overflows
+     so ManyTabs stays usable without wrapping. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Hide the scrollbar in modern browsers — the rail reads cleaner
+     when it does NOT advertise overflow. Firefox supports `scrollbar-
+     width`; Chromium/WebKit use the ::-webkit-scrollbar pseudo. */
+  scrollbar-width: none;
+  isolation: isolate;
+}
+.zs-tabs-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* Default variant: subtle inset bottom rule under the list so the
+   underline indicator sits on a defined baseline. */
+.zs-tabs-list--default::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: 0;
+  block-size: 0.0625rem;
+  background-color: var(--zs-separator);
+  pointer-events: none;
+}
+
+/* Pill variant: unified track. Same pattern Toggle.Group uses — the
+   list paints the rail surface, individual tabs are transparent over
+   it, and the active pill (the indicator) reads as a lit rectangle. */
+.zs-tabs-list--pill {
+  padding: var(--zs-space-1);
+  border-radius: var(--zs-tabs-radius-md);
+  background-color: var(--zs-fill-secondary);
+  box-shadow: inset 0 0 0 0.0625rem var(--zs-separator);
+  overflow: visible;
+  gap: 0;
+}
+.zs-tabs-list--pill.zs-tabs-list--sm {
+  border-radius: var(--zs-tabs-radius-sm);
+}
+.zs-tabs-list--pill.zs-tabs-list--lg {
+  border-radius: var(--zs-tabs-radius-lg);
+}
+
+/* Card variant: each tab is its own surface; no list rail. The
+   underline-style rule from `default` is suppressed for card. */
+.zs-tabs-list--card {
+  gap: var(--zs-space-1);
+  padding-block-end: 0;
+  border-block-end: 0.0625rem solid var(--zs-separator);
+}
+
+/* Vertical orientation: stack the rail along the inline axis. The list
+   becomes a column; tabs justify-start and the underline / pill /
+   border edges all rotate via logical properties. */
+.zs-tabs-list--vertical {
+  flex-direction: column;
+  align-items: stretch;
+  overflow-x: visible;
+  overflow-y: auto;
+  min-inline-size: max-content;
+}
+.zs-tabs-list--vertical.zs-tabs-list--default::after {
+  /* Move the baseline rule from bottom to the inline-end edge so
+     vertical default still has a defined rail. */
+  inset-inline: auto;
+  inset-inline-end: 0;
+  inset-block: 0;
+  block-size: auto;
+  inline-size: 0.0625rem;
+}
+.zs-tabs-list--vertical.zs-tabs-list--card {
+  border-block-end: 0;
+  border-inline-end: 0.0625rem solid var(--zs-separator);
+}
+
+/* ─── tab buttons ───────────────────────────────────────────────────── */
+
+.zs-tabs-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-tabs-gap-md);
+  block-size: var(--zs-tabs-h-md);
+  padding-block: 0;
+  padding-inline: var(--zs-tabs-px-md);
+  border: 0;
+  border-radius: var(--zs-tabs-radius-md);
+  background-color: transparent;
+  color: var(--zs-label-secondary);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-tabs-font-md);
+  line-height: 1;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Icons inside tabs scale to 1em (currentColor) — same rule Toggle uses
+   so glyph weights match the label across sizes. */
+.zs-tabs-tab > svg {
+  inline-size: 1em;
+  block-size: 1em;
+  flex: 0 0 auto;
+}
+
+/* Sizes — block-size + padding + font-size + radius. */
+.zs-tabs-tab--sm {
+  block-size: var(--zs-tabs-h-sm);
+  padding-inline: var(--zs-tabs-px-sm);
+  border-radius: var(--zs-tabs-radius-sm);
+  font-size: var(--zs-tabs-font-sm);
+  gap: var(--zs-tabs-gap-sm);
+}
+.zs-tabs-tab--lg {
+  block-size: var(--zs-tabs-h-lg);
+  padding-inline: var(--zs-tabs-px-lg);
+  border-radius: var(--zs-tabs-radius-lg);
+  font-size: var(--zs-tabs-font-lg);
+  gap: var(--zs-tabs-gap-lg);
+}
+
+/* Hover — quiet label tint so the cursor-target reads without claiming
+   the active treatment. Hover suppressed for selected tabs (the active
+   styling already paints stronger). */
+@media (hover: hover) {
+  .zs-tabs-tab:not([data-disabled]):not([data-active]):hover {
+    color: var(--zs-label);
+    background-color: color-mix(in oklch, var(--zs-label) 4%, transparent);
+  }
+}
+
+.zs-tabs-tab:not([data-disabled]):not([data-active]):active {
+  background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+}
+
+/* Selected — variant-specific. Default deepens the ink to the
+   primary label and lets the underline indicator carry the affordance.
+   Pill paints the accent fill on the tab itself. Card raises the tab
+   into the panel surface. */
+.zs-tabs-tab[data-active] {
+  color: var(--zs-label);
+  font-weight: 600;
+}
+
+/* Pill variant: the active tab paints the accent fill + ink. Same
+   treatment Toggle pressed uses. The indicator sits BEHIND the tab
+   button via z-index so the label paints over the colored pill. */
+.zs-tabs-tab--pill[data-active] {
+  color: var(--zs-accent-ink);
+  background-color: var(--zs-accent);
+  z-index: 1;
+}
+@media (hover: hover) {
+  .zs-tabs-tab--pill[data-active]:not([data-disabled]):hover {
+    background-color: var(--zs-accent-hover);
+  }
+}
+.zs-tabs-tab--pill[data-active]:not([data-disabled]):active {
+  background-color: var(--zs-accent-active);
+}
+
+/* Card variant: every tab gets a card-shape surface; the active one
+   merges into the panel. Inactive tabs sit on the list rail with a
+   subtle fill; active tabs paint the surface color and pull the
+   bottom edge under the panel. */
+.zs-tabs-tab--card {
+  background-color: var(--zs-fill-quaternary);
+  border: 0.0625rem solid var(--zs-separator);
+  border-block-end: 0;
+  border-start-start-radius: var(--zs-tabs-radius-md);
+  border-start-end-radius: var(--zs-tabs-radius-md);
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+  /* Pull each card tab down one hairline so the bottom rule of the list
+     rail (`.zs-tabs-list--card`'s `border-block-end`) sits flush behind
+     the unselected tabs and BEHIND the selected tab's surface. */
+  margin-block-end: -0.0625rem;
+}
+.zs-tabs-tab--card.zs-tabs-tab--sm {
+  border-start-start-radius: var(--zs-tabs-radius-sm);
+  border-start-end-radius: var(--zs-tabs-radius-sm);
+}
+.zs-tabs-tab--card.zs-tabs-tab--lg {
+  border-start-start-radius: var(--zs-tabs-radius-lg);
+  border-start-end-radius: var(--zs-tabs-radius-lg);
+}
+.zs-tabs-tab--card[data-active] {
+  background-color: var(--zs-surface);
+  /* Selected card aligns its bottom edge to the panel surface — the
+     hairline negative margin above already does that; here we just lift
+     the z-index so the surface paints over the list's bottom rule. */
+  z-index: 1;
+}
+
+/* Vertical card tabs: rotate the border-side trick — strip the inline-
+   end border and pull margin-inline-end instead. */
+.zs-tabs-tab--card.zs-tabs-tab--vertical {
+  border-block-end: 0.0625rem solid var(--zs-separator);
+  border-inline-end: 0;
+  border-start-start-radius: var(--zs-tabs-radius-md);
+  border-start-end-radius: 0;
+  border-end-start-radius: var(--zs-tabs-radius-md);
+  border-end-end-radius: 0;
+  margin-block-end: 0;
+  margin-inline-end: -0.0625rem;
+}
+.zs-tabs-tab--card.zs-tabs-tab--vertical.zs-tabs-tab--sm {
+  border-start-start-radius: var(--zs-tabs-radius-sm);
+  border-end-start-radius: var(--zs-tabs-radius-sm);
+}
+.zs-tabs-tab--card.zs-tabs-tab--vertical.zs-tabs-tab--lg {
+  border-start-start-radius: var(--zs-tabs-radius-lg);
+  border-end-start-radius: var(--zs-tabs-radius-lg);
+}
+
+/* Focus ring uses outline (not box-shadow) so it escapes the list's
+   overflow and any clipped surfaces. Same rule Toggle uses. */
+.zs-tabs-tab:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* Disabled — quiet. The tab still occupies its slot in the list but
+   reads inactive. Roving focus skips it (Base UI handles that). */
+.zs-tabs-tab[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-quaternary);
+  background-color: transparent;
+}
+
+/* ─── indicator ─────────────────────────────────────────────────────── *
+ *
+ * Base UI emits the active tab's position+size as CSS custom
+ * properties on the indicator span. Our CSS reads those vars and
+ * transitions between values when the active tab changes. */
+.zs-tabs-indicator {
+  position: absolute;
+  pointer-events: none;
+  transition:
+    inset-inline-start var(--zs-motion-base) var(--zs-motion-ease),
+    inset-block-start var(--zs-motion-base) var(--zs-motion-ease),
+    inline-size var(--zs-motion-base) var(--zs-motion-ease),
+    block-size var(--zs-motion-base) var(--zs-motion-ease),
+    background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Default variant indicator — underline under the active tab. */
+.zs-tabs-indicator--default {
+  inset-inline-start: var(--active-tab-left);
+  inset-block-end: 0;
+  inline-size: var(--active-tab-width);
+  block-size: var(--zs-tabs-underline-thickness);
+  background-color: var(--zs-accent);
+  border-radius: var(--zs-tabs-underline-thickness);
+}
+
+/* Vertical default indicator — vertical bar along the inline-end edge
+   of the active tab. */
+.zs-tabs-indicator--default.zs-tabs-indicator--vertical {
+  inset-inline-start: auto;
+  inset-inline-end: 0;
+  inset-block-start: var(--active-tab-top);
+  inset-block-end: auto;
+  inline-size: var(--zs-tabs-underline-thickness);
+  block-size: var(--active-tab-height);
+}
+
+/* Pill variant indicator — a filled rounded rect that sits behind the
+   active tab. Reads as the lit-up pill (mirrors Toggle.Group pressed).
+   The active tab itself paints the accent fill via the tab rule above;
+   the indicator becomes a complementary surface behind it that smooths
+   the cross-tab transition. Use the same accent color so the moving
+   pill stays visually contiguous with the static accent fill on the
+   selected tab. */
+.zs-tabs-indicator--pill {
+  inset-inline-start: var(--active-tab-left);
+  inset-block-start: var(--active-tab-top);
+  inline-size: var(--active-tab-width);
+  block-size: var(--active-tab-height);
+  background-color: var(--zs-accent);
+  border-radius: var(--zs-tabs-radius-md);
+  z-index: 0;
+}
+.zs-tabs-indicator--pill.zs-tabs-indicator--sm {
+  border-radius: calc(var(--zs-tabs-radius-sm) - 0.0625rem);
+}
+.zs-tabs-indicator--pill.zs-tabs-indicator--lg {
+  border-radius: var(--zs-tabs-radius-lg);
+}
+
+/* Card variant: no separate indicator (the card tab's own surface IS
+   the affordance). Hide the indicator span if a consumer mounts one
+   under a card variant. */
+.zs-tabs-indicator--card {
+  display: none;
+}
+
+/* ─── panels ────────────────────────────────────────────────────────── */
+
+.zs-tabs-panel {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+}
+
+.zs-tabs-panel--card {
+  padding: var(--zs-space-5);
+  background-color: var(--zs-surface);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-5);
+  /* Card panel meets the active tab — strip the top radius so the
+     active tab merges into it. */
+  border-start-start-radius: 0;
+  border-start-end-radius: 0;
+}
+.zs-tabs-panel--card.zs-tabs-panel--vertical {
+  border-start-start-radius: 0;
+  border-start-end-radius: var(--zs-radius-5);
+  border-end-start-radius: 0;
+  border-end-end-radius: var(--zs-radius-5);
+}
+
+/* Hidden panels — Base UI sets `hidden` on the panel element when its
+   value doesn't match. Browsers default `[hidden] { display: none }`;
+   we leave that alone. */
+
+/* ─── reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-tabs-indicator {
+    transition: none;
+  }
+  .zs-tabs-tab {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ─────────────────────────────────────────────────── *
+ *
+ * Map the active-tab affordance to system colors so high-contrast
+ * users still see which tab is current. */
+@media (forced-colors: active) {
+  .zs-tabs-tab {
+    forced-color-adjust: none;
+    color: CanvasText;
+    background-color: Canvas;
+  }
+  .zs-tabs-tab[data-active] {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+  .zs-tabs-tab[data-disabled] {
+    color: GrayText;
+  }
+  .zs-tabs-tab:focus-visible {
+    outline-color: Highlight;
+  }
+  .zs-tabs-list--default::after,
+  .zs-tabs-list--card,
+  .zs-tabs-list--vertical.zs-tabs-list--default::after,
+  .zs-tabs-list--vertical.zs-tabs-list--card {
+    border-color: CanvasText;
+    background-color: Canvas;
+  }
+  .zs-tabs-indicator--default {
+    background-color: Highlight;
+  }
+  .zs-tabs-indicator--pill {
+    background-color: Highlight;
+  }
+  .zs-tabs-panel--card {
+    border-color: CanvasText;
+    background-color: Canvas;
+  }
+}

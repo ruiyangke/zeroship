@@ -33,6 +33,7 @@
 @import "./components/Tooltip/Tooltip.css";
 @import "./components/Form/Form.css";
 @import "./components/Fieldset/Fieldset.css";
+@import "./components/Tabs/Tabs.css";
 
 *,
 *::before,
