@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::hydra_client::types::AcceptLoginRequest;
+use crate::hydra_client::types::{AcceptLoginRequest, RejectRequest};
 use crate::hydra_client::HydraAdmin;
 use crate::identity::password;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
@@ -43,6 +43,7 @@ pub async fn get(
     query: ntex::web::types::Query<LoginQuery>,
     admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     let _ = req; // header extraction (UA, request-id) lands in later phases.
     let challenge = &query.login_challenge;
@@ -58,6 +59,31 @@ pub async fn get(
 
     // Skip path: hydra already knows the subject.
     if info.skip {
+        let eligible = match users::find_by_id(db.as_ref(), &info.subject).await {
+            Ok(Some(user)) => {
+                let locked = user.locked_until.is_some_and(|t| t > chrono::Utc::now());
+                !locked && user.disabled_at.is_none()
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::error!(error = %e, subject = %info.subject, "skip-login user lookup failed");
+                return render_error(PublicErrorMessage::ContactSupport);
+            }
+        };
+        if !eligible {
+            let reject = RejectRequest {
+                error: "access_denied".into(),
+                error_description: Some("account temporarily locked".into()),
+                status_code: Some(403),
+            };
+            match admin.reject_login(challenge, &reject).await {
+                Ok(resp) => return redirect(&resp.redirect_to),
+                Err(e) => {
+                    tracing::error!(error = %e, subject = %info.subject, "reject_login (skip path) failed");
+                    return render_error(PublicErrorMessage::ContactSupport);
+                }
+            }
+        }
         let accept = AcceptLoginRequest {
             subject: info.subject.clone(),
             remember: Some(true),

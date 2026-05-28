@@ -13,6 +13,7 @@ pub struct UserRow {
     pub avatar_url: Option<String>,
     pub password_hash: Option<String>,
     pub locked_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Look up a user by email. Returns `None` if not found.
@@ -23,7 +24,7 @@ pub struct UserRow {
 pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>> {
     let rows = conn
         .query(
-            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until \
+            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until, disabled_at \
              FROM auth.users WHERE email = $1",
             &[&email],
         )
@@ -52,7 +53,7 @@ pub async fn find_by_id(conn: &Client, id: &str) -> Result<Option<UserRow>> {
     };
     let rows = conn
         .query(
-            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until \
+            "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until, disabled_at \
              FROM auth.users WHERE id = $1",
             &[&uuid],
         )
@@ -76,7 +77,7 @@ pub async fn create(
         .query(
             "INSERT INTO auth.users (email, name, password_hash) \
              VALUES ($1, $2, $3) \
-             RETURNING id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until",
+             RETURNING id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until, disabled_at",
             &[&email, &name, &password_hash],
         )
         .await
@@ -135,5 +136,6 @@ fn row_to_user(row: &compio_postgres::Row) -> UserRow {
         avatar_url: row.try_get("avatar_url").ok(),
         password_hash: row.try_get("password_hash").ok(),
         locked_until: row.try_get("locked_until").ok(),
+        disabled_at: row.try_get("disabled_at").ok(),
     }
 }

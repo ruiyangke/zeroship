@@ -5,14 +5,17 @@
 //! removes every row the test inserted.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use ntex::http::header::SET_COOKIE;
 use ntex::web::{self, test};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
+use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::password;
 use zeroship_auth::identity::password_reset;
 use zeroship_auth::store::{migrations, sessions, users};
@@ -39,6 +42,29 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
         }
     }
     None
+}
+
+#[derive(Debug, Default)]
+struct MockHydraState {
+    deleted_subjects: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteLoginSessionsQuery {
+    subject: String,
+}
+
+#[allow(clippy::future_not_send)]
+async fn mock_delete_login_sessions(
+    query: web::types::Query<DeleteLoginSessionsQuery>,
+    state: web::types::State<Arc<Mutex<MockHydraState>>>,
+) -> web::HttpResponse {
+    state
+        .lock()
+        .expect("lock hydra state")
+        .deleted_subjects
+        .push(query.subject.clone());
+    web::HttpResponse::NoContent().finish()
 }
 
 // `compio_postgres::Client` is `!Send` — the futures inherit that
@@ -123,12 +149,27 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .await
         .expect("issue reset token");
 
+    let hydra_state = Arc::new(Mutex::new(MockHydraState::default()));
+    let hydra_state_for_srv = hydra_state.clone();
+    let hydra_srv = web::test::server(move || {
+        let hydra_state = hydra_state_for_srv.clone();
+        async move {
+            web::App::new().state(hydra_state).service(
+                web::resource("/admin/oauth2/auth/sessions/login")
+                    .route(web::delete().to(mock_delete_login_sessions)),
+            )
+        }
+    })
+    .await;
+    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
+
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let cfg_state = cfg.clone();
     let pg_state = pg.clone();
+    let admin_state = admin.clone();
     let app = test::init_service(
-        web::App::new().state(cfg_state).state(pg_state).service(
+        web::App::new().state(cfg_state).state(pg_state).state(admin_state).service(
             web::resource("/reset")
                 .route(web::get().to(zeroship_auth::ui::reset::get))
                 .route(web::post().to(zeroship_auth::ui::reset::post)),
@@ -156,6 +197,17 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .to_request();
     let post_resp = test::call_service(&app, post_req).await;
     assert_eq!(post_resp.status().as_u16(), 302);
+
+    let deleted_subjects = hydra_state
+        .lock()
+        .expect("lock hydra state")
+        .deleted_subjects
+        .clone();
+    assert_eq!(
+        deleted_subjects,
+        vec![user.id.to_string()],
+        "password reset must delete hydra login sessions for the reset subject"
+    );
 
     let idp_count: i64 = pg
         .query_one(
