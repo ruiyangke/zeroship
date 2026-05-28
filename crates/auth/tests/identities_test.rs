@@ -3,9 +3,10 @@
 //! Skipped unless `AUTH_DB_URL` is set. Seeds an OAuth-only user (no password
 //! hash), exercises link/find/list/unlink, then cleans up via FK cascade.
 
-use compio_postgres::{connect, NoTls};
+use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 
+use zeroship_auth::store::identities::GuardedUnlink;
 use zeroship_auth::store::{identities, migrations};
 
 #[compio::test]
@@ -15,13 +16,7 @@ async fn identities_link_find_list_unlink_roundtrip() {
         return;
     };
 
-    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            eprintln!("identities_test connection error: {e}");
-        }
-    })
-    .detach();
+    let client = pg_connect(&dsn).await;
 
     migrations::migrate(&client).await.expect("migrate");
 
@@ -107,4 +102,89 @@ async fn identities_link_find_list_unlink_roundtrip() {
         .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
         .await
         .ok();
+}
+
+#[compio::test]
+async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping identities_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let client = pg_connect(&dsn).await;
+    migrations::migrate(&client).await.expect("migrate");
+
+    let email = format!("identities-{}@example.test", Uuid::new_v4().simple());
+    let row = client
+        .query_one(
+            "INSERT INTO auth.users (email, name, password_hash) \
+             VALUES ($1::citext, $2, NULL) RETURNING id",
+            &[&email, &"OAuth Only"],
+        )
+        .await
+        .expect("seed user");
+    let user_id: Uuid = row.get("id");
+
+    let google_subject = format!("google-{}", Uuid::new_v4().simple());
+    let github_subject = format!("github-{}", Uuid::new_v4().simple());
+    identities::link(&client, user_id, "google", &google_subject, Some(&email), None)
+        .await
+        .expect("link google");
+    identities::link(&client, user_id, "github", &github_subject, Some(&email), None)
+        .await
+        .expect("link github");
+
+    let client_a = pg_connect(&dsn).await;
+    let client_b = pg_connect(&dsn).await;
+    let unlink_google = compio::runtime::spawn(async move {
+        identities::unlink_preserving_credential(&client_a, user_id, "google").await
+    });
+    let unlink_github = compio::runtime::spawn(async move {
+        identities::unlink_preserving_credential(&client_b, user_id, "github").await
+    });
+
+    let google_result = unlink_google
+        .await
+        .expect("join google unlink")
+        .expect("google unlink");
+    let github_result = unlink_github
+        .await
+        .expect("join github unlink")
+        .expect("github unlink");
+
+    let unlinked = [google_result, github_result]
+        .into_iter()
+        .filter(|r| *r == GuardedUnlink::Unlinked)
+        .count();
+    let refused = [google_result, github_result]
+        .into_iter()
+        .filter(|r| *r == GuardedUnlink::WouldOrphan)
+        .count();
+    assert_eq!(unlinked, 1, "exactly one unlink should delete a row");
+    assert_eq!(refused, 1, "exactly one unlink should hit the orphan guard");
+
+    let remaining = identities::list_for_user(&client, user_id)
+        .await
+        .expect("list remaining identities");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "concurrent guarded unlink must leave one sign-in identity"
+    );
+
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .await
+        .ok();
+}
+
+async fn pg_connect(dsn: &str) -> Client {
+    let (client, connection) = connect(dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("identities_test connection error: {e}");
+        }
+    })
+    .detach();
+    client
 }
