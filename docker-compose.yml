@@ -29,15 +29,22 @@ services:
         --bundles /data/bundles
         --control-key platform-key
         --master-key master-key
+        --dev-insecure
+        --hydra-admin-url http://hydra:4445
+        --bootstrap-builder-client
+        --builder-client-secret-file /data/builder-client-secret
     ports:
       - "9090:9090"
     volumes:
       - bundles:/data/bundles
+      - ./data:/data
     security_opt:
       - seccomp:unconfined
     depends_on:
       postgres:
         condition: service_healthy
+      hydra:
+        condition: service_started
 
   gateway:
     build: .
@@ -180,6 +187,53 @@ services:
     security_opt:
       - seccomp:unconfined
 
+  builder:
+    image: node:22-bookworm
+    working_dir: /workspace
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        corepack enable
+        pnpm config set store-dir /pnpm/store
+        for i in $$(seq 1 60); do
+          [ -s /data/builder-client-secret ] && break
+          sleep 1
+        done
+        if [ ! -s /data/builder-client-secret ]; then
+          echo "[builder] missing /data/builder-client-secret" >&2
+          exit 1
+        fi
+        export BUILDER_CLIENT_SECRET="$$(cat /data/builder-client-secret)"
+        pnpm install --frozen-lockfile
+        exec pnpm --dir apps/zeroship-builder dev -- --host 0.0.0.0 --port 3001 --strictPort
+    environment:
+      CONTROL_URL: http://control:9090
+      CONTROL_KEY: platform-key
+      HYDRA_AUTHORIZE_URL: http://localhost:4444/oauth2/auth
+      HYDRA_TOKEN_URL: http://hydra:4444/oauth2/token
+      HYDRA_REVOKE_URL: http://hydra:4444/oauth2/revoke
+      BUILDER_CLIENT_ID: zeroship-builder
+      BUILDER_REDIRECT_URI: http://localhost:3001/auth/callback
+      BUILDER_INSTANCE_ID: docker-compose
+      BUILDER_TOKEN_ENCRYPTION_KEY: ${BUILDER_TOKEN_ENCRYPTION_KEY:-dev-builder-token-encryption-key-change}
+      SANDBOX_URL: http://sandbox:9091
+      SANDBOX_TOKEN: sandbox-key
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      - .:/workspace
+      - ./data:/data:ro
+      - builder-pnpm-store:/pnpm/store
+    depends_on:
+      control:
+        condition: service_started
+      hydra:
+        condition: service_started
+      sandbox:
+        condition: service_started
+
 networks:
   zeroship-sandbox-net:
     name: zeroship-sandbox-net
@@ -187,3 +241,4 @@ networks:
 
 volumes:
   bundles:
+  builder-pnpm-store:

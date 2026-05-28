@@ -7,8 +7,9 @@ use std::sync::Arc;
 use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    admin_handlers, api, backchannel_logout, env_handlers, internal, oidc_rp, stripe_handlers,
-    oauth_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
+    admin_handlers, api, backchannel_logout, bootstrap_builder, env_handlers, internal,
+    oauth_handlers, oidc_rp, stripe_handlers, token_handlers, AppState, EnvStore, Quota,
+    RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -26,6 +27,13 @@ fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> Stri
         }
     }
     env_or(env_key, default)
+}
+
+fn flag_or_env(args: &[String], flag: &str, env_key: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+        || std::env::var(env_key)
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
 }
 
 #[ntex::main]
@@ -59,6 +67,23 @@ async fn main() -> std::io::Result<()> {
     let trust_proxy =
         args.iter().any(|a| a == "--trust-proxy")
             || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
+    let bootstrap_builder_client = flag_or_env(
+        &args,
+        "--bootstrap-builder-client",
+        "BOOTSTRAP_BUILDER_OAUTH_CLIENT",
+    );
+    let builder_redirect_uri = arg_or_env(
+        &args,
+        "--builder-redirect-uri",
+        "BUILDER_REDIRECT_URI",
+        bootstrap_builder::DEFAULT_BUILDER_REDIRECT_URI,
+    );
+    let builder_client_secret_path = PathBuf::from(arg_or_env(
+        &args,
+        "--builder-client-secret-file",
+        "BUILDER_CLIENT_SECRET_FILE",
+        bootstrap_builder::DEFAULT_BUILDER_CLIENT_SECRET_PATH,
+    ));
 
     let deploy_tmp_dir_str = arg_or_env(
         &args,
@@ -191,11 +216,11 @@ async fn main() -> std::io::Result<()> {
     // introspection. Refuses to boot unless these pieces are configured
     // (`--dev-insecure` permits localhost defaults only).
     let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "");
-    let hydra_admin_url = arg_or_env(
+    let legacy_hydra_admin_url = arg_or_env(
         &args,
         "--hydra-admin",
         "AUTH_HYDRA_ADMIN",
-        "http://127.0.0.1:4445",
+        "",
     );
     let console_oidc_secret =
         arg_or_env(&args, "--console-oidc-secret", "CONSOLE_OIDC_SECRET", "");
@@ -209,7 +234,7 @@ async fn main() -> std::io::Result<()> {
     let hydra_admin_url = {
         let value = arg_or_env(&args, "--hydra-admin-url", "HYDRA_ADMIN_URL", "");
         if value.is_empty() {
-            env_or("AUTH_HYDRA_ADMIN", "")
+            legacy_hydra_admin_url
         } else {
             value
         }
@@ -305,6 +330,27 @@ async fn main() -> std::io::Result<()> {
         Arc::new(pg_client)
     };
 
+    if bootstrap_builder_client {
+        zeroship_auth::store::migrations::migrate(&auth_pg)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "control: auth/control migrations failed");
+                std::io::Error::other(err.to_string())
+            })?;
+        let cfg = bootstrap_builder::BuilderClientBootstrapConfig {
+            enabled: true,
+            hydra_admin_url: hydra_admin_url_value.clone(),
+            redirect_uri: builder_redirect_uri,
+            client_secret_path: builder_client_secret_path,
+        };
+        bootstrap_builder::bootstrap_builder_oauth_client(&auth_pg, &cfg)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "control: builder OAuth client bootstrap failed");
+                std::io::Error::other(err.to_string())
+            })?;
+    }
+
     let state = Arc::new(AppState {
         registry,
         env_store,
@@ -328,7 +374,7 @@ async fn main() -> std::io::Result<()> {
         deploy_tmp_dir,
         oidc_rp,
         auth_pg,
-        hydra_admin_url,
+        hydra_admin_url: hydra_admin_url_value,
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
         pat_issuer,

@@ -96,6 +96,13 @@ Notes:
 
 - `zeroship-control` uses `--jwt-secret`; `zeroship-gate` must use the same value via `--auth-secret`.
 - `zeroship-worker` binds `127.0.0.1` by default. Only add `--bind 0.0.0.0` together with `--worker-key`.
+- To seed the Builder OAuth client in local dev, start control with
+  `BOOTSTRAP_BUILDER_OAUTH_CLIENT=1` or `--bootstrap-builder-client` while
+  Hydra admin is reachable. Control registers `zeroship-builder` in Hydra and
+  mirrors it in `control.oauth_clients`; the generated client secret is stored
+  at `data/builder-client-secret` by default. Override the callback with
+  `BUILDER_REDIRECT_URI` and the secret path with `BUILDER_CLIENT_SECRET_FILE`
+  if your Builder dev server is not on `http://localhost:3001/auth/callback`.
 
 ## Deploy an example app
 
