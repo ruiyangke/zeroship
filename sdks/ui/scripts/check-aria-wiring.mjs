@@ -1233,6 +1233,223 @@ await open("components-toggle--forced-colors-hover");
 // Reset the emulation so subsequent navigations aren't affected.
 await page.emulateMedia({ forcedColors: "none" });
 
+/* ─── 37. Select Basic — ↓ + Enter commits value (slice 6) ───────────── *
+ *
+ * Open the popup via Trigger click; press ArrowDown twice to roving-
+ * highlight "Orange" (the second item alphabetically); press Enter to
+ * commit; popup closes; trigger shows "Orange". */
+await open("components-select--basic");
+{
+  const trigger = page.locator('[data-testid="select-basic"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  // Wait for popup to mount. The basic popup IS the open popup —
+  // Base UI's Select renders the popup as a portal sibling under
+  // body, so we query by the item testid to know it's mounted.
+  await page
+    .locator('[data-testid="select-basic-item-apple"]')
+    .waitFor({ state: "visible", timeout: 5000 });
+  // Keyboard navigation: open lands on the first item (apple), one
+  // ArrowDown highlights the second (orange). Base UI's Select pre-
+  // highlights the first row on open, so a single ↓ moves to the
+  // second row even though no value is committed yet.
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(50);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  const triggerText = (await trigger.innerText()).trim();
+  // Popup should now be closed — item locator goes away.
+  const itemHidden =
+    (await page
+      .locator('[data-testid="select-basic-item-apple"]')
+      .count()) === 0 ||
+    !(await page
+      .locator('[data-testid="select-basic-item-apple"]')
+      .first()
+      .isVisible()
+      .catch(() => false));
+  const ok = /orange/i.test(triggerText) && itemHidden;
+  report(
+    "Select Basic — keyboard ↓ Enter commits value",
+    ok,
+    `trigger text="${triggerText}" popupClosed=${itemHidden}`,
+  );
+}
+
+/* ─── 38. Select Multiple — selecting two items keeps both selected ──── */
+await open("components-select--multiple");
+{
+  const trigger = page.locator('[data-testid="select-multiple"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  // Click two items. Base UI keeps the popup open in multi-mode.
+  await page
+    .locator('[data-testid="select-multi-item-apple"]')
+    .waitFor({ state: "visible", timeout: 5000 });
+  await page.locator('[data-testid="select-multi-item-apple"]').click();
+  await page.waitForTimeout(50);
+  await page.locator('[data-testid="select-multi-item-banana"]').click();
+  await page.waitForTimeout(50);
+  // Both items should carry data-selected.
+  const appleSelected = await page
+    .locator('[data-testid="select-multi-item-apple"]')
+    .evaluate((el) => el.getAttribute("data-selected") !== null);
+  const bananaSelected = await page
+    .locator('[data-testid="select-multi-item-banana"]')
+    .evaluate((el) => el.getAttribute("data-selected") !== null);
+  const ok = appleSelected && bananaSelected;
+  report(
+    "Select Multiple — both items carry data-selected",
+    ok,
+    `apple=${appleSelected} banana=${bananaSelected}`,
+  );
+}
+
+/* ─── 39. Combobox Basic — typing filters list (slice 6) ────────────── */
+await open("components-combobox--basic");
+{
+  const input = page.locator('[data-testid="combobox-basic"] input');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await input.click();
+  await input.fill("or");
+  await page.waitForTimeout(150);
+  // After typing "or": "orange" passes the includes-filter; "apple",
+  // "lemon", "banana" don't. Base UI keeps filtered items mounted but
+  // hides them via `[hidden]` / `display: none`; we assert orange is
+  // VISIBLE while apple is NOT visible (visible check tracks layout
+  // visibility, not DOM presence).
+  const orangeVisible = await page
+    .locator('[data-testid="combobox-basic-item-orange"]')
+    .isVisible()
+    .catch(() => false);
+  const appleHidden = !(await page
+    .locator('[data-testid="combobox-basic-item-apple"]')
+    .isVisible()
+    .catch(() => false));
+  const ok = orangeVisible && appleHidden;
+  report(
+    "Combobox Basic — typing filters list",
+    ok,
+    `orangeVisible=${orangeVisible} appleHidden=${appleHidden}`,
+  );
+}
+
+/* ─── 40. Combobox Empty — empty state renders when filter excludes all ─ */
+await open("components-combobox--empty");
+{
+  const input = page.locator('[data-testid="combobox-empty"] input');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await input.click();
+  await input.fill("xyzzy");
+  await page.waitForTimeout(200);
+  const empty = page.locator('[data-testid="combobox-empty-sentinel"]');
+  const visible = await empty.isVisible().catch(() => false);
+  const text = visible ? (await empty.innerText()).trim() : "";
+  const ok = visible && text.includes("No fruits match");
+  report(
+    "Combobox Empty — empty state renders when filter excludes all",
+    ok,
+    `visible=${visible} text="${text}"`,
+  );
+}
+
+/* ─── 41. Autocomplete Basic — ↓ Enter commits input value ──────────── */
+await open("components-autocomplete--basic");
+{
+  const input = page.locator('[data-testid="autocomplete-basic"] input');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await input.click();
+  await input.fill("hello@");
+  await page.waitForTimeout(200);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(50);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  const value = await input.inputValue();
+  // Base UI's Autocomplete (mode: 'list' default) commits the
+  // highlighted item to the input value on Enter. The first item is
+  // alphabetically `hello@fastmail.com` (after sort under the includes
+  // filter). The exact value depends on filter ordering — we assert
+  // it's one of the gmail-style entries from EMAIL_DOMAINS.
+  const ok = /hello@.+\..+/.test(value);
+  report(
+    "Autocomplete Basic — ArrowDown + Enter commits suggestion",
+    ok,
+    `inputValue="${value}"`,
+  );
+}
+
+/* ─── 42. All three — ESC closes popup AND restores focus to trigger ── */
+{
+  let escClosesPass = true;
+  let detail = "";
+  // Select.
+  await open("components-select--basic");
+  {
+    const trigger = page.locator('[data-testid="select-basic"]');
+    await trigger.waitFor({ state: "visible", timeout: 5000 });
+    await trigger.click();
+    await page
+      .locator('[data-testid="select-basic-item-apple"]')
+      .waitFor({ state: "visible", timeout: 5000 });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    const popupClosed =
+      (await page
+        .locator('[data-testid="select-basic-item-apple"]')
+        .count()) === 0 ||
+      !(await page
+        .locator('[data-testid="select-basic-item-apple"]')
+        .first()
+        .isVisible()
+        .catch(() => false));
+    const focused = await trigger.evaluate((el) => el === document.activeElement);
+    detail += `select: closed=${popupClosed} focused=${focused}; `;
+    if (!(popupClosed && focused)) escClosesPass = false;
+  }
+  // Combobox.
+  await open("components-combobox--basic");
+  {
+    const input = page.locator('[data-testid="combobox-basic"] input');
+    await input.waitFor({ state: "visible", timeout: 5000 });
+    await input.click();
+    await page
+      .locator('[data-testid="combobox-basic-item-apple"]')
+      .waitFor({ state: "visible", timeout: 5000 });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    const popupClosed =
+      (await page
+        .locator('[data-testid="combobox-basic-item-apple"]')
+        .count()) === 0 ||
+      !(await page
+        .locator('[data-testid="combobox-basic-item-apple"]')
+        .first()
+        .isVisible()
+        .catch(() => false));
+    // Combobox keeps focus on the input (it IS the trigger).
+    const focused = await input.evaluate((el) => el === document.activeElement);
+    detail += `combobox: closed=${popupClosed} focused=${focused}; `;
+    if (!(popupClosed && focused)) escClosesPass = false;
+  }
+  // Autocomplete.
+  await open("components-autocomplete--basic");
+  {
+    const input = page.locator('[data-testid="autocomplete-basic"] input');
+    await input.waitFor({ state: "visible", timeout: 5000 });
+    await input.click();
+    await input.fill("hello");
+    await page.waitForTimeout(200);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    // After ESC: popup is closed; focus stays on input.
+    const focused = await input.evaluate((el) => el === document.activeElement);
+    detail += `autocomplete: focused=${focused}`;
+    if (!focused) escClosesPass = false;
+  }
+  report("Slice-6 popovers — ESC closes popup + restores focus", escClosesPass, detail);
+}
+
 await ctx.close();
 await browser.close();
 

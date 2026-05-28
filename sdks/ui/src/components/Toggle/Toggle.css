@@ -438,12 +438,12 @@
   border-radius: calc(var(--zs-toggle-radius-md) - 0.125rem);
 }
 .zs-toggle-group .zs-toggle[data-size="lg"] {
-  /* Polish item 5: keep the full lg radius — subtracting 2px made the
+  /* Polish item 5: keep the full lg radius — subtracting 0.125rem made the
    * pressed pill read tab-like (sharp shoulders at the larger size). The
    * group's `--zs-space-1` padding already insets the pill from the rim;
    * no extra radius compensation needed at lg. sm / md keep the
-   * subtraction because their radii are tight enough that even 1–2px
-   * makes a visible nesting gap. */
+   * subtraction because their radii are tight enough that even
+   * 0.0625–0.125rem makes a visible nesting gap. */
   border-radius: var(--zs-toggle-radius-lg);
 }
 

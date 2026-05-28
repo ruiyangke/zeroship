@@ -84,6 +84,45 @@ export type {
   DialogViewportProps,
 } from "./Dialog";
 
+export { Select } from "./Select";
+export type {
+  SelectProps,
+  SelectSingleProps,
+  SelectMultipleProps,
+  SelectItemProps,
+  SelectGroupProps,
+  SelectGroupLabelProps,
+  SelectSeparatorProps,
+  SelectSize,
+  SelectVariant,
+  SelectAlign,
+  SelectPlacement,
+} from "./Select";
+
+export { Combobox } from "./Combobox";
+export type {
+  ComboboxProps,
+  ComboboxSingleProps,
+  ComboboxMultipleProps,
+  ComboboxItemProps,
+  ComboboxEmptyProps,
+  ComboboxChipProps,
+  ComboboxSize,
+  ComboboxVariant,
+  ComboboxAlign,
+  ComboboxPlacement,
+} from "./Combobox";
+
+export { Autocomplete } from "./Autocomplete";
+export type {
+  AutocompleteProps,
+  AutocompleteItemProps,
+  AutocompleteSize,
+  AutocompleteVariant,
+  AutocompleteAlign,
+  AutocompletePlacement,
+} from "./Autocomplete";
+
 export { AlertDialog } from "./AlertDialog";
 export type {
   AlertDialogProps,

@@ -1,0 +1,428 @@
+/*
+ * Select — popover-anchored dropdown from a fixed option list.
+ *
+ * Anatomy:
+ *   .zs-select-trigger              — Base UI's <button>, reads like Input
+ *     ├─ .zs-select-trigger__value  — selected value or placeholder
+ *     └─ .zs-select-trigger__icon   — chevron
+ *   .zs-select-positioner           — Floating UI anchored layer
+ *     └─ .zs-select-popup           — opaque sheet with --zs-shadow-dialog
+ *          └─ .zs-select-list       — vertical option list
+ *               ├─ .zs-select-group + .zs-select-group-label
+ *               ├─ .zs-select-item
+ *               │   ├─ .zs-select-item__indicator (checkmark gutter)
+ *               │   └─ .zs-select-item__text
+ *               └─ .zs-select-separator
+ *
+ * Modifier classes:
+ *   trigger:  --default | --outline · --sm | --md | --lg
+ *   popup:    --sm | --md | --lg
+ *
+ * Glass-surface invariant (from Dialog/Card/story.css): the popup paints
+ * with an OPAQUE background-color so axe-core's color-contrast walk
+ * resolves cleanly, plus an optional backdrop-filter the active theme
+ * may disable via `--zs-dialog-backdrop-filter: none`.
+ *
+ * Hit-target floor: items use `min-block-size: 1.75rem` (28 device-units)
+ * which lands above the brief's ≥ 1.75rem floor and keeps popup density
+ * comfortable for keyboard + pointer.
+ *
+ * Forced-colors: every state selector below is mirrored inside
+ * `@media (forced-colors: active)` per the Slice-5 lesson — pre-mirror
+ * the `:hover` / `[data-highlighted]` selectors had higher specificity
+ * than a bare `.zs-select-item` reset and the high-contrast mode would
+ * leak through the oklch token tints.
+ *
+ * Backdrop: NO Backdrop primitive — Select is a popover, not a modal.
+ * Per-brief contingency: Base UI's Select.Backdrop is skipped to keep
+ * the popup-feel rather than the dialog-feel.
+ */
+
+/* ─── trigger — reads like Input ───────────────────────────────────── */
+.zs-select-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  inline-size: 100%;
+  block-size: var(--zs-control-h-md);
+  padding-inline: var(--zs-control-px-md);
+  border: 0;
+  border-radius: var(--zs-control-radius-md);
+  background: var(--zs-input-bg);
+  color: var(--zs-input-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  text-align: start;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* ─── sizes ────────────────────────────────────────────────────────── */
+.zs-select-trigger--sm {
+  block-size: var(--zs-control-h-sm);
+  padding-inline: var(--zs-control-px-sm);
+  border-radius: var(--zs-control-radius-sm);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-select-trigger--lg {
+  block-size: var(--zs-control-h-lg);
+  padding-inline: var(--zs-control-px-lg);
+  border-radius: var(--zs-control-radius-lg);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+
+@media (pointer: coarse) {
+  .zs-select-trigger--sm {
+    min-block-size: var(--zs-hit-min);
+  }
+}
+
+/* ─── variants ─────────────────────────────────────────────────────── */
+.zs-select-trigger--outline {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+}
+
+/* ─── hover ────────────────────────────────────────────────────────── */
+@media (hover: hover) {
+  .zs-select-trigger:not([disabled]):not([data-popup-open]):hover {
+    background: var(--zs-input-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+  .zs-select-trigger--outline:not([disabled]):not([data-popup-open]):hover {
+    background: transparent;
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+}
+
+/* ─── focus / open ─────────────────────────────────────────────────── */
+.zs-select-trigger:focus-visible,
+.zs-select-trigger[data-popup-open] {
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+  outline: none;
+}
+.zs-select-trigger--outline:focus-visible,
+.zs-select-trigger--outline[data-popup-open] {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
+
+/* ─── invalid ──────────────────────────────────────────────────────── */
+.zs-select-trigger[data-invalid] {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 0 transparent;
+}
+
+/* ─── disabled ─────────────────────────────────────────────────────── */
+.zs-select-trigger[disabled],
+.zs-select-trigger[data-disabled] {
+  background: var(--zs-input-bg-disabled);
+  color: var(--zs-input-ink-disabled);
+  cursor: not-allowed;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+}
+
+/* ─── trigger children ─────────────────────────────────────────────── */
+.zs-select-trigger__value {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* When the value is the placeholder (Base UI marks the Trigger
+ * `data-placeholder` when no value is selected), soften the ink so it
+ * reads as a hint, not as a chosen value. */
+/* Visible placeholder text. Axe walks the inner <span> for contrast
+ * (it's real DOM, not a UA ::placeholder pseudo). Use label-secondary
+ * (L=0.42 — measured 4.7:1+ on Crystal) instead of label-tertiary
+ * (L=0.55 — measured 4.1:1, below AA) so the placeholder reads as a
+ * hint without dropping below the contrast floor. Mirrors Input's
+ * ::placeholder color choice but lifts one rung to compensate for
+ * axe seeing the foreground color directly. */
+.zs-select-trigger[data-placeholder] .zs-select-trigger__value {
+  color: var(--zs-label-secondary);
+}
+.zs-select-trigger__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--zs-label-secondary);
+  transition: transform var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-select-trigger__icon > svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+.zs-select-trigger[data-popup-open] .zs-select-trigger__icon {
+  /* Quiet rotate cue mirrors the Dialog header chevron in detail panels.
+   * Reduced-motion overrides --zs-motion-fast to 1ms so the rotate
+   * happens instantly. */
+  transform: rotate(180deg);
+}
+
+/* ─── positioner ───────────────────────────────────────────────────── *
+ *
+ * Base UI's positioner is a raw <div>; we don't paint it (it carries
+ * Floating UI's transform-origin / x / y inline styles). Stack above
+ * dialogs via the same `--zs-z-modal` z-token plus a small bump so
+ * popovers float over an open dialog when both are mounted. */
+.zs-select-positioner {
+  z-index: calc(var(--zs-z-modal) + 10);
+  outline: none;
+}
+
+/* ─── popup — opaque sheet, dialog-shadow ──────────────────────────── */
+.zs-select-popup {
+  /* Glass-surface invariant: opaque background-color + optional
+   * backdrop-filter. Themes that swap --zs-surface to a translucent
+   * value get the frosted look automatically. */
+  background-color: var(--zs-surface);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  border-radius: var(--zs-radius-5);
+  box-shadow: var(--zs-shadow-dialog);
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
+  /* Brief contingency: cap height so LongList stories scroll cleanly. */
+  max-block-size: min(50vh, 28rem);
+  min-inline-size: var(--anchor-width, 12rem);
+  overflow: hidden;
+  outline: none;
+  isolation: isolate;
+}
+.zs-select-popup--sm {
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-select-popup--lg {
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+
+/* The Trigger's width is exposed by Base UI as a CSS variable on the
+ * positioner so the popup matches the trigger's inline-size at minimum. */
+.zs-select-positioner {
+  --anchor-width: var(--anchor-width-fallback, 12rem);
+}
+
+/* ─── list (scrollable) ────────────────────────────────────────────── */
+.zs-select-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-half);
+  padding: var(--zs-space-1);
+  max-block-size: inherit;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+}
+
+/* ─── item ─────────────────────────────────────────────────────────── */
+.zs-select-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
+  align-items: center;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  min-block-size: 1.75rem;
+  border-radius: var(--zs-radius-2);
+  color: var(--zs-label);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-select-item[data-size="sm"] {
+  min-block-size: 1.75rem;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-select-item[data-size="lg"] {
+  min-block-size: 2.25rem;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+
+.zs-select-item__indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  color: var(--zs-accent);
+  opacity: 0;
+}
+.zs-select-item__indicator > svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+.zs-select-item[data-selected] .zs-select-item__indicator {
+  opacity: 1;
+}
+.zs-select-item__text {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Highlight (keyboard roving / pointer hover via Base UI). */
+.zs-select-item[data-highlighted]:not([data-disabled]) {
+  background-color: var(--zs-fill-tertiary);
+  color: var(--zs-label);
+}
+.zs-select-item[data-highlighted][data-selected]:not([data-disabled]) {
+  background-color: color-mix(in oklch, var(--zs-accent) 14%, transparent);
+  color: var(--zs-accent-active);
+}
+.zs-select-item[data-selected]:not([data-highlighted]):not([data-disabled]) {
+  color: var(--zs-accent-active);
+}
+.zs-select-item[data-disabled] {
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+}
+
+/* ─── group + group label ──────────────────────────────────────────── */
+.zs-select-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-half);
+}
+.zs-select-group + .zs-select-group {
+  margin-block-start: var(--zs-space-1);
+}
+.zs-select-group-label {
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  color: var(--zs-label-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ─── separator ────────────────────────────────────────────────────── */
+.zs-select-separator {
+  block-size: 0.0625rem;
+  background-color: var(--zs-separator);
+  margin-block: var(--zs-space-half);
+  margin-inline: var(--zs-space-1);
+}
+
+/* ─── reduced motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-select-trigger,
+  .zs-select-trigger__icon,
+  .zs-select-item {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ────────────────────────────────────────────────── *
+ *
+ * Mirror every state selector that paints background / color / box-shadow
+ * inside the forced-colors media so the system palette wins over the
+ * oklch token mixes. Slice-5 lesson: the per-state selectors outrank a
+ * bare `.zs-select-item` reset block, so we re-emit each rule at equal
+ * specificity. */
+@media (forced-colors: active) {
+  .zs-select-trigger {
+    background: Field;
+    color: FieldText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-select-trigger[data-popup-open],
+  .zs-select-trigger:focus-visible {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-select-trigger[disabled],
+  .zs-select-trigger[data-disabled] {
+    color: GrayText;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-select-trigger[data-placeholder] .zs-select-trigger__value {
+    color: GrayText;
+  }
+  .zs-select-trigger__icon {
+    color: CanvasText;
+  }
+
+  .zs-select-popup {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .zs-select-item {
+    background-color: Canvas;
+    color: CanvasText;
+  }
+  .zs-select-item[data-highlighted]:not([data-disabled]),
+  .zs-select-item[data-highlighted][data-selected]:not([data-disabled]) {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-select-item[data-selected]:not([data-highlighted]):not([data-disabled]) {
+    background-color: Canvas;
+    color: HighlightText;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  .zs-select-item[data-disabled] {
+    color: GrayText;
+  }
+  .zs-select-item__indicator {
+    color: Highlight;
+  }
+  .zs-select-group-label {
+    color: GrayText;
+  }
+  .zs-select-separator {
+    background-color: GrayText;
+  }
+}

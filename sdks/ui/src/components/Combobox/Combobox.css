@@ -1,0 +1,417 @@
+/*
+ * Combobox — typeahead + selection hybrid.
+ *
+ * Anatomy:
+ *   .zs-combobox-input-group            — Input-shaped trigger row
+ *     ├─ .zs-combobox-chips             — (multi-mode) chip rail
+ *     │     └─ .zs-combobox-chip
+ *     │          ├─ .zs-combobox-chip__label
+ *     │          └─ .zs-combobox-chip__remove
+ *     ├─ .zs-combobox-input             — the actual <input>
+ *     └─ .zs-combobox-input-group__icon — chevron
+ *   .zs-combobox-positioner             — Floating UI anchored layer
+ *     └─ .zs-combobox-popup             — opaque sheet
+ *          ├─ .zs-combobox-list
+ *          │     ├─ .zs-combobox-item
+ *          │     │     ├─ .zs-combobox-item__indicator (checkmark gutter)
+ *          │     │     └─ .zs-combobox-item__text
+ *          │     └─ … repeated
+ *          └─ .zs-combobox-empty        — "No results" sentinel
+ *
+ * Mirrors Select.css's tokens line-for-line so a Combobox sitting next
+ * to a Select reads coherent (same height, same rhythm, same focus ring).
+ */
+
+/* ─── input row (reads like Input) ─────────────────────────────────── */
+.zs-combobox-input-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+  flex-wrap: wrap;
+  inline-size: 100%;
+  min-block-size: var(--zs-control-h-md);
+  padding-block: var(--zs-space-half);
+  padding-inline: var(--zs-control-px-md);
+  border-radius: var(--zs-control-radius-md);
+  background: var(--zs-input-bg);
+  color: var(--zs-input-ink);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  cursor: text;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-combobox-input-group--sm {
+  min-block-size: var(--zs-control-h-sm);
+  padding-inline: var(--zs-control-px-sm);
+  border-radius: var(--zs-control-radius-sm);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-combobox-input-group--lg {
+  min-block-size: var(--zs-control-h-lg);
+  padding-inline: var(--zs-control-px-lg);
+  border-radius: var(--zs-control-radius-lg);
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+@media (pointer: coarse) {
+  .zs-combobox-input-group--sm {
+    min-block-size: var(--zs-hit-min);
+  }
+}
+
+.zs-combobox-input-group--outline {
+  background: transparent;
+}
+
+@media (hover: hover) {
+  .zs-combobox-input-group:not([data-disabled]):not([data-focused]):hover {
+    background: var(--zs-input-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+  .zs-combobox-input-group--outline:not([data-disabled]):not([data-focused]):hover {
+    background: transparent;
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+}
+
+.zs-combobox-input-group:focus-within,
+.zs-combobox-input-group[data-popup-open] {
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+  outline: none;
+}
+.zs-combobox-input-group--outline:focus-within,
+.zs-combobox-input-group--outline[data-popup-open] {
+  background: transparent;
+}
+
+.zs-combobox-input-group[data-invalid] {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 0 transparent;
+}
+.zs-combobox-input-group[data-disabled] {
+  background: var(--zs-input-bg-disabled);
+  color: var(--zs-input-ink-disabled);
+  cursor: not-allowed;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+}
+
+/* ─── the native input ─────────────────────────────────────────────── */
+.zs-combobox-input {
+  flex: 1 1 6rem;
+  min-inline-size: 4rem;
+  block-size: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+  padding: 0;
+  margin: 0;
+}
+.zs-combobox-input::placeholder {
+  color: var(--zs-input-placeholder);
+  opacity: 1;
+}
+.zs-combobox-input-group[data-disabled] .zs-combobox-input {
+  cursor: not-allowed;
+}
+
+/* iOS Safari zoom defense — same shape as Input.css. */
+.zs-combobox-input-group--sm .zs-combobox-input {
+  font-size: max(1rem, var(--zs-text-subheadline-size));
+  line-height: var(--zs-text-subheadline-line);
+}
+
+/* ─── trailing icon ────────────────────────────────────────────────── */
+.zs-combobox-input-group__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-inline-start: var(--zs-space-1);
+  color: var(--zs-label-secondary);
+}
+.zs-combobox-input-group__icon > svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+
+/* ─── chips rail (multi-mode) ──────────────────────────────────────── */
+.zs-combobox-chips {
+  display: contents;
+}
+
+.zs-combobox-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-1);
+  padding-block: 0;
+  padding-inline-start: var(--zs-space-2);
+  padding-inline-end: var(--zs-space-1);
+  block-size: 1.5rem;
+  border-radius: var(--zs-radius-full);
+  background-color: color-mix(in oklch, var(--zs-accent) 14%, transparent);
+  color: var(--zs-accent-active);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  max-inline-size: 12rem;
+}
+.zs-combobox-chip__label {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zs-combobox-chip__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.125rem;
+  block-size: 1.125rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--zs-radius-full);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.zs-combobox-chip__remove:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: 0.0625rem;
+}
+@media (hover: hover) {
+  .zs-combobox-chip__remove:hover {
+    background-color: color-mix(in oklch, var(--zs-accent) 22%, transparent);
+  }
+}
+.zs-combobox-chip__remove > svg {
+  inline-size: 0.75rem;
+  block-size: 0.75rem;
+}
+.zs-combobox-chip[data-disabled] .zs-combobox-chip__remove {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+/* ─── positioner ───────────────────────────────────────────────────── */
+.zs-combobox-positioner {
+  z-index: calc(var(--zs-z-modal) + 10);
+  outline: none;
+}
+
+/* ─── popup ────────────────────────────────────────────────────────── */
+.zs-combobox-popup {
+  background-color: var(--zs-surface);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  border-radius: var(--zs-radius-5);
+  box-shadow: var(--zs-shadow-dialog);
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
+  max-block-size: min(50vh, 28rem);
+  min-inline-size: var(--anchor-width, 16rem);
+  overflow: hidden;
+  outline: none;
+  isolation: isolate;
+}
+.zs-combobox-popup--sm {
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-combobox-popup--lg {
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+
+/* ─── list ─────────────────────────────────────────────────────────── */
+.zs-combobox-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-half);
+  padding: var(--zs-space-1);
+  max-block-size: inherit;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+}
+
+/* ─── item ─────────────────────────────────────────────────────────── */
+.zs-combobox-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.25rem 1fr;
+  align-items: center;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  min-block-size: 1.75rem;
+  border-radius: var(--zs-radius-2);
+  color: var(--zs-label);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-combobox-item[data-size="sm"] {
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-combobox-item[data-size="lg"] {
+  min-block-size: 2.25rem;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+}
+
+.zs-combobox-item__indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  color: var(--zs-accent);
+  opacity: 0;
+}
+.zs-combobox-item__indicator > svg {
+  inline-size: 1em;
+  block-size: 1em;
+}
+.zs-combobox-item[data-selected] .zs-combobox-item__indicator {
+  opacity: 1;
+}
+.zs-combobox-item__text {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zs-combobox-item[data-highlighted]:not([data-disabled]) {
+  background-color: var(--zs-fill-tertiary);
+  color: var(--zs-label);
+}
+.zs-combobox-item[data-highlighted][data-selected]:not([data-disabled]) {
+  background-color: color-mix(in oklch, var(--zs-accent) 14%, transparent);
+  color: var(--zs-accent-active);
+}
+.zs-combobox-item[data-selected]:not([data-highlighted]):not([data-disabled]) {
+  color: var(--zs-accent-active);
+}
+.zs-combobox-item[data-disabled] {
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+}
+
+/* ─── empty ────────────────────────────────────────────────────────── */
+.zs-combobox-empty {
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-3);
+  color: var(--zs-label-secondary);
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  text-align: center;
+}
+
+/* ─── reduced motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-combobox-input-group,
+  .zs-combobox-item {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ────────────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-combobox-input-group {
+    background: Field;
+    color: FieldText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-combobox-input-group:focus-within,
+  .zs-combobox-input-group[data-popup-open] {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-combobox-input-group[data-disabled] {
+    color: GrayText;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-combobox-input::placeholder {
+    color: GrayText;
+  }
+  .zs-combobox-input-group__icon {
+    color: CanvasText;
+  }
+
+  .zs-combobox-chip {
+    background-color: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+  .zs-combobox-chip__remove {
+    color: HighlightText;
+  }
+  .zs-combobox-chip__remove:focus-visible {
+    outline-color: HighlightText;
+  }
+
+  .zs-combobox-popup {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+
+  .zs-combobox-item {
+    background-color: Canvas;
+    color: CanvasText;
+  }
+  .zs-combobox-item[data-highlighted]:not([data-disabled]),
+  .zs-combobox-item[data-highlighted][data-selected]:not([data-disabled]) {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-combobox-item[data-selected]:not([data-highlighted]):not([data-disabled]) {
+    background-color: Canvas;
+    color: HighlightText;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  .zs-combobox-item[data-disabled] {
+    color: GrayText;
+  }
+  .zs-combobox-item__indicator {
+    color: Highlight;
+  }
+  .zs-combobox-empty {
+    color: GrayText;
+  }
+}

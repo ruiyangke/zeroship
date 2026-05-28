@@ -24,6 +24,9 @@
 @import "./components/Switch/Switch.css";
 @import "./components/Radio/Radio.css";
 @import "./components/Toggle/Toggle.css";
+@import "./components/Select/Select.css";
+@import "./components/Combobox/Combobox.css";
+@import "./components/Autocomplete/Autocomplete.css";
 
 *,
 *::before,

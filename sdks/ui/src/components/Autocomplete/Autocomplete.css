@@ -1,0 +1,36 @@
+/*
+ * Autocomplete — text input with suggestion list.
+ *
+ * Inherits the input-row and popup CSS from Combobox.css — Autocomplete
+ * IS the same surface from a paint perspective, minus the multi-mode
+ * chips and the per-item checkmark gutter (Autocomplete items have no
+ * "selected" notion).
+ *
+ * This file only owns the override needed to suppress the checkmark
+ * gutter on autocomplete items, and the forced-colors specificity
+ * mirror for that override.
+ */
+
+/* The autocomplete item drops the indicator gutter — content gets the
+ * full inline width. We override the grid template defined by
+ * .zs-combobox-item (which reserves a 1.25rem column for the indicator)
+ * so single-column rows stretch comfortably. */
+.zs-autocomplete-item {
+  grid-template-columns: 1fr;
+}
+
+.zs-autocomplete-item__text {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Forced-colors mirror — the autocomplete-specific override needs to
+ * stay equal-specificity with the Combobox forced-colors rule that
+ * paints items. Without re-emitting, the bare `.zs-combobox-item`
+ * rule under forced-colors would stay in place (which is fine — the
+ * grid-template-columns we changed above is layout, not paint).
+ * Documented for the reader: no paint override needed here, all
+ * Combobox forced-colors rules apply to autocomplete items via the
+ * shared `zs-combobox-item` class. */
