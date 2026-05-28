@@ -347,7 +347,13 @@
   }
 }
 
-/* ─── forced-colors ────────────────────────────────────────────────── */
+/* ─── forced-colors ────────────────────────────────────────────────── *
+ *
+ * Mirror every STATE selector. The `:hover` rules carry higher
+ * specificity than the single-class base reset; the Slice-5 lesson is
+ * to re-emit each hover/focus/data-state selector at equal specificity
+ * inside the forced-colors block so system colors win over the oklch
+ * token mixes. */
 @media (forced-colors: active) {
   .zs-combobox-input-group {
     background: Field;
@@ -355,8 +361,21 @@
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
+  /* Hover mirror — match the base `:not([data-disabled]):not([data-focused]):hover`
+   * specificity. Both default and outline variants converge on the same
+   * system surface under high-contrast mode. */
+  .zs-combobox-input-group:not([data-disabled]):not([data-focused]):hover,
+  .zs-combobox-input-group--outline:not([data-disabled]):not([data-focused]):hover {
+    background: Field;
+    color: FieldText;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
   .zs-combobox-input-group:focus-within,
-  .zs-combobox-input-group[data-popup-open] {
+  .zs-combobox-input-group[data-popup-open],
+  .zs-combobox-input-group--outline:focus-within,
+  .zs-combobox-input-group--outline[data-popup-open] {
+    background: Field;
+    color: FieldText;
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0.125rem Highlight;
@@ -379,6 +398,12 @@
   }
   .zs-combobox-chip__remove {
     color: HighlightText;
+  }
+  /* Chip-remove hover mirror — single-class :hover outranks the bare
+   * `.zs-combobox-chip__remove` rule, so we re-emit at equal specificity. */
+  .zs-combobox-chip__remove:hover {
+    background-color: HighlightText;
+    color: Highlight;
   }
   .zs-combobox-chip__remove:focus-visible {
     outline-color: HighlightText;

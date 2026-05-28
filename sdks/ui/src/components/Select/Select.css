@@ -366,7 +366,11 @@
  * inside the forced-colors media so the system palette wins over the
  * oklch token mixes. Slice-5 lesson: the per-state selectors outrank a
  * bare `.zs-select-item` reset block, so we re-emit each rule at equal
- * specificity. */
+ * (or higher) specificity. Pay particular attention to `:hover` rules
+ * gated by `:not([disabled])` — those carry higher specificity than a
+ * single-class trigger reset, so they MUST be mirrored at equal
+ * specificity inside the forced-colors block (otherwise the oklch
+ * background-color leaks through under high-contrast mode). */
 @media (forced-colors: active) {
   .zs-select-trigger {
     background: Field;
@@ -374,8 +378,23 @@
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
+  /* Hover mirror — must match the specificity of the base hover rule
+   * (`:not([disabled]):not([data-popup-open]):hover`) so the system
+   * palette wins. Both `--default` and `--outline` variants paint into
+   * the same Field/CanvasText system surface; the variant distinction
+   * collapses under forced-colors. */
+  .zs-select-trigger:not([disabled]):not([data-popup-open]):hover,
+  .zs-select-trigger--outline:not([disabled]):not([data-popup-open]):hover {
+    background: Field;
+    color: FieldText;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
   .zs-select-trigger[data-popup-open],
-  .zs-select-trigger:focus-visible {
+  .zs-select-trigger:focus-visible,
+  .zs-select-trigger--outline[data-popup-open],
+  .zs-select-trigger--outline:focus-visible {
+    background: Field;
+    color: FieldText;
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0.125rem Highlight;

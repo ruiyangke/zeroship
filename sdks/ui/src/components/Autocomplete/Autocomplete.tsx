@@ -99,9 +99,25 @@ function AutocompleteRoot<Value extends string = string>(
     disabled: disabledProp,
     required: requiredProp,
     /*
-     * Sift native HTML attrs / test hooks off Root rest so they land on
-     * the InputGroup. Same rationale as Select/Combobox — Autocomplete.Root
-     * is a context-only node.
+     * Pull value/defaultValue/onValueChange/items off rest so we forward
+     * them with per-field `as never` casts below. Base UI's Root is
+     * double-overloaded over the `items` shape (flat vs grouped); the
+     * generic `Value` does NOT narrow either overload (the discriminant
+     * is whether items[i] has an `items` sub-array, sniffed at runtime).
+     * The previous `as unknown as Record<string, unknown>` cast stripped
+     * ALL typing from rootRest, which masked real prop mistakes. Per-
+     * field `as never` is narrower and honest.
+     */
+    value,
+    defaultValue,
+    onValueChange,
+    items,
+    /*
+     * Sift `data-testid` onto the InputGroup (visible host). Sift
+     * `aria-label` / `aria-labelledby` / `aria-describedby` onto the
+     * focusable `<input>` (not the group `<div>`); aria-* on a
+     * `<div role="group">` is legal but doesn't name the focused
+     * control.
      */
     "data-testid": dataTestid,
     "aria-label": ariaLabel,
@@ -111,6 +127,10 @@ function AutocompleteRoot<Value extends string = string>(
   } = props as AutocompleteProps<Value> & {
     disabled?: boolean;
     required?: boolean;
+    value?: Value | null;
+    defaultValue?: Value | null;
+    onValueChange?: (next: Value | null, details: unknown) => void;
+    items?: readonly unknown[];
     "data-testid"?: string;
     "aria-label"?: string;
     "aria-labelledby"?: string;
@@ -131,25 +151,17 @@ function AutocompleteRoot<Value extends string = string>(
 
   return (
     <AutocompleteContext.Provider value={ctxValue}>
-      {/*
-       * Base UI's `Autocomplete.Root` is double-overloaded over the
-       * `items` prop shape (flat array vs grouped). We cast through
-       * `unknown` at the boundary so the type-checker doesn't try to
-       * pick one overload — both are valid for our consumer surface
-       * (the discriminant is whether items[i] has an `items` sub-array,
-       * which Base UI sniffs at runtime). The Autocomplete generic
-       * still constrains the public Value type.
-       */}
       <BaseAutocomplete.Root
-        {...(rootRest as unknown as Record<string, unknown>)}
+        {...rootRest}
+        value={value as never}
+        defaultValue={defaultValue as never}
+        onValueChange={onValueChange as never}
+        items={items as never}
         disabled={disabled || undefined}
         required={required || undefined}
       >
         <BaseAutocomplete.InputGroup
           data-testid={dataTestid}
-          aria-label={ariaLabel}
-          aria-labelledby={ariaLabelledBy}
-          aria-describedby={ariaDescribedBy}
           className={classnames(
             "zs-combobox-input-group",
             "zs-autocomplete-input-group",
@@ -163,6 +175,9 @@ function AutocompleteRoot<Value extends string = string>(
           <BaseAutocomplete.Input
             className="zs-combobox-input"
             placeholder={placeholder}
+            aria-label={ariaLabel}
+            aria-labelledby={ariaLabelledBy}
+            aria-describedby={ariaDescribedBy}
           />
           <BaseAutocomplete.Icon
             className="zs-combobox-input-group__icon"

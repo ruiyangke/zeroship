@@ -181,6 +181,7 @@ const stories = [
   "components-combobox--long-list",
   "components-combobox--disabled",
   "components-combobox--rtl",
+  "components-combobox--aria-propagation",
   "components-autocomplete--basic",
   "components-autocomplete--all-sizes",
   "components-autocomplete--with-label",
@@ -189,6 +190,7 @@ const stories = [
   "components-autocomplete--rtl",
   "components-autocomplete--with-description",
   "components-autocomplete--long-list",
+  "components-autocomplete--aria-propagation",
 ];
 
 if (themes.length === 0 || stories.length === 0) {

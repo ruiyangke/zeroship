@@ -1249,10 +1249,15 @@ await open("components-select--basic");
   await page
     .locator('[data-testid="select-basic-item-apple"]')
     .waitFor({ state: "visible", timeout: 5000 });
-  // Keyboard navigation: open lands on the first item (apple), one
-  // ArrowDown highlights the second (orange). Base UI's Select pre-
-  // highlights the first row on open, so a single ↓ moves to the
-  // second row even though no value is committed yet.
+  // Keyboard navigation in popover mode (Slice-6 review-fix 2
+  // converted the wrapper from `alignItemWithTrigger=true` to
+  // `false`): the popup opens with NO pre-highlight, so the first
+  // ArrowDown moves focus onto the first item (apple) and the second
+  // ArrowDown moves onto the second (orange). Pre-fix the popup was
+  // dropdown-style and pre-highlighted apple; the assertion only
+  // pressed ArrowDown once. We now press twice to reach orange.
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(50);
   await page.keyboard.press("ArrowDown");
   await page.waitForTimeout(50);
   await page.keyboard.press("Enter");
@@ -1353,29 +1358,45 @@ await open("components-combobox--empty");
   );
 }
 
-/* ─── 41. Autocomplete Basic — ↓ Enter commits input value ──────────── */
+/* ─── 41. Autocomplete Basic — typing narrows + Enter commits ───────── *
+ *
+ * Slice-6 review-fix 11: prior assertion typed `hello@` which matches
+ * EVERY EMAIL_DOMAINS entry, so a broken filter would still pass. Switch
+ * to a discriminating query (`gmail`) that includes only the gmail
+ * fixture and assert a NON-matching entry (`yahoo`) is no longer
+ * visible. THEN ArrowDown + Enter commits the highlighted gmail
+ * suggestion. */
 await open("components-autocomplete--basic");
 {
   const input = page.locator('[data-testid="autocomplete-basic"] input');
   await input.waitFor({ state: "visible", timeout: 5000 });
   await input.click();
-  await input.fill("hello@");
+  await input.fill("gmail");
   await page.waitForTimeout(200);
+  // After `gmail`: hello@gmail.com is the only match; hello@yahoo.com
+  // and the rest are hidden by Base UI's substring-includes filter.
+  const gmailVisible = await page
+    .locator('[data-testid="autocomplete-basic-item-hello@gmail.com"]')
+    .isVisible()
+    .catch(() => false);
+  const yahooHidden = !(await page
+    .locator('[data-testid="autocomplete-basic-item-hello@yahoo.com"]')
+    .isVisible()
+    .catch(() => false));
+  // ArrowDown + Enter commits the highlighted gmail suggestion to the
+  // input value. Base UI's Autocomplete (mode: 'list' default) writes
+  // the chosen item into the <input>.
   await page.keyboard.press("ArrowDown");
   await page.waitForTimeout(50);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(200);
   const value = await input.inputValue();
-  // Base UI's Autocomplete (mode: 'list' default) commits the
-  // highlighted item to the input value on Enter. The first item is
-  // alphabetically `hello@fastmail.com` (after sort under the includes
-  // filter). The exact value depends on filter ordering — we assert
-  // it's one of the gmail-style entries from EMAIL_DOMAINS.
-  const ok = /hello@.+\..+/.test(value);
+  const commits = /gmail/.test(value);
+  const ok = gmailVisible && yahooHidden && commits;
   report(
-    "Autocomplete Basic — ArrowDown + Enter commits suggestion",
+    "Autocomplete Basic — typing filters list + Enter commits suggestion",
     ok,
-    `inputValue="${value}"`,
+    `gmailVisible=${gmailVisible} yahooHidden=${yahooHidden} commitValue="${value}"`,
   );
 }
 
@@ -1432,23 +1453,226 @@ await open("components-autocomplete--basic");
     detail += `combobox: closed=${popupClosed} focused=${focused}; `;
     if (!(popupClosed && focused)) escClosesPass = false;
   }
-  // Autocomplete.
+  // Autocomplete — Slice-6 review-fix 7+12: prior assertion only
+  // checked focus; a no-op ESC would have passed spuriously. Mirror the
+  // Select pattern: assert a known popup item is no longer visible AND
+  // focus stays on the input.
   await open("components-autocomplete--basic");
   {
     const input = page.locator('[data-testid="autocomplete-basic"] input');
     await input.waitFor({ state: "visible", timeout: 5000 });
     await input.click();
-    await input.fill("hello");
-    await page.waitForTimeout(200);
+    await input.fill("gmail");
+    await page
+      .locator('[data-testid="autocomplete-basic-item-hello@gmail.com"]')
+      .waitFor({ state: "visible", timeout: 5000 });
     await page.keyboard.press("Escape");
     await page.waitForTimeout(300);
-    // After ESC: popup is closed; focus stays on input.
+    const popupClosed =
+      (await page
+        .locator('[data-testid="autocomplete-basic-item-hello@gmail.com"]')
+        .count()) === 0 ||
+      !(await page
+        .locator('[data-testid="autocomplete-basic-item-hello@gmail.com"]')
+        .first()
+        .isVisible()
+        .catch(() => false));
     const focused = await input.evaluate((el) => el === document.activeElement);
-    detail += `autocomplete: focused=${focused}`;
-    if (!focused) escClosesPass = false;
+    detail += `autocomplete: closed=${popupClosed} focused=${focused}`;
+    if (!(popupClosed && focused)) escClosesPass = false;
   }
   report("Slice-6 popovers — ESC closes popup + restores focus", escClosesPass, detail);
 }
+
+/* ─── 43. Select Basic — modal=false default keeps scroll unlocked ───── *
+ *
+ * Slice-6 review-fix 2 regression: Base UI's `Select.Root` defaults
+ * `modal: true`, which mounts an internal backdrop AND scroll-locks the
+ * document body via `overflow: hidden`. The brief specified popover-
+ * feel, so the wrapper now defaults `modal: false`. Pre-fix this
+ * assertion would catch the modal default (body.style.overflow ===
+ * 'hidden' once the popup is open). */
+await open("components-select--basic");
+{
+  const trigger = page.locator('[data-testid="select-basic"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  await page
+    .locator('[data-testid="select-basic-item-apple"]')
+    .waitFor({ state: "visible", timeout: 5000 });
+  // Body scroll should NOT be locked under popover-mode. Base UI's
+  // Select modal mode sets `document.body.style.overflow = 'hidden'`
+  // (and adds padding-right to compensate for scrollbar). We assert the
+  // overflow is not 'hidden' to prove modal=false took effect. The
+  // computed overflowY catches both the inline-style and a stylesheet
+  // override, but the inline style is what modal mode emits.
+  const bodyOverflowInline = await page.evaluate(
+    () => document.body.style.overflow,
+  );
+  const ok = bodyOverflowInline !== "hidden";
+  report(
+    "Select Basic — modal=false default does NOT scroll-lock body",
+    ok,
+    `body.style.overflow="${bodyOverflowInline}"`,
+  );
+  // Close the popup so subsequent assertions start clean.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 44. Combobox AriaPropagation — aria-label propagates to input ── *
+ *
+ * Slice-6 review-fix 4 regression: aria-* on `<Combobox>` lands on the
+ * focusable `<input>`, not on the surrounding `<div role="group">`. The
+ * AriaPropagation story passes `aria-label="Pick a fruit"`; we assert
+ * the input carries that label and the InputGroup does NOT. */
+await open("components-combobox--aria-propagation");
+{
+  const inputWithLabel = page.locator(
+    'input[aria-label="Pick a fruit"]',
+  );
+  const inputVisible = await inputWithLabel
+    .isVisible()
+    .catch(() => false);
+  const group = page.locator(
+    '[data-testid="combobox-aria-propagation"]',
+  );
+  const groupAriaLabel = await group.getAttribute("aria-label");
+  const ok = inputVisible && groupAriaLabel == null;
+  report(
+    "Combobox AriaPropagation — aria-label lands on input, not group",
+    ok,
+    `inputVisible=${inputVisible} groupAriaLabel="${groupAriaLabel}"`,
+  );
+}
+
+/* ─── 45. Autocomplete AriaPropagation — aria-label propagates to input ─ */
+await open("components-autocomplete--aria-propagation");
+{
+  const inputWithLabel = page.locator(
+    'input[aria-label="Email address"]',
+  );
+  const inputVisible = await inputWithLabel
+    .isVisible()
+    .catch(() => false);
+  const group = page.locator(
+    '[data-testid="autocomplete-aria-propagation"]',
+  );
+  const groupAriaLabel = await group.getAttribute("aria-label");
+  const ok = inputVisible && groupAriaLabel == null;
+  report(
+    "Autocomplete AriaPropagation — aria-label lands on input, not group",
+    ok,
+    `inputVisible=${inputVisible} groupAriaLabel="${groupAriaLabel}"`,
+  );
+}
+
+/* ─── 46. Combobox Multiple — chip <div> has NO `value=` attribute ──── *
+ *
+ * Slice-6 review-fix 5 regression: `<Combobox.Chip value=…>` was leaking
+ * a stray `value="apple"` attribute onto the chip's `<div>` (Base UI
+ * doesn't accept value; removal is index-keyed). Open the Multiple
+ * story, select two chips, and assert every rendered `.zs-combobox-chip`
+ * has no `value` attribute. */
+await open("components-combobox--multiple");
+{
+  const input = page.locator('[data-testid="combobox-multiple"] input');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await input.click();
+  await page
+    .locator('[role="option"]')
+    .first()
+    .waitFor({ state: "visible", timeout: 5000 });
+  // Click the first two options to materialise chips.
+  await page.locator('[role="option"]').nth(0).click();
+  await page.waitForTimeout(50);
+  await page.locator('[role="option"]').nth(1).click();
+  await page.waitForTimeout(150);
+  const chipValueAttrs = await page
+    .locator('[data-testid="combobox-multiple"] .zs-combobox-chip')
+    .evaluateAll((els) =>
+      els.map((el) => ({
+        text: el.textContent ?? "",
+        value: el.getAttribute("value"),
+      })),
+    );
+  const noStrayValue =
+    chipValueAttrs.length > 0 &&
+    chipValueAttrs.every((c) => c.value === null);
+  report(
+    "Combobox Multiple — chip div has NO stray `value=` attribute",
+    noStrayValue,
+    `chips=${JSON.stringify(chipValueAttrs)}`,
+  );
+}
+
+/* ─── 47-49. Select / Combobox / Autocomplete forced-colors hover ───── *
+ *
+ * Slice-6 review-fix 3 regression: the per-state `:hover` rules outrank
+ * the single-class base reset under `@media (forced-colors: active)`.
+ * Mirror Toggle's Slice-5 pattern: with forcedColors emulated, hover the
+ * control and assert the computed background-color resolves to a solid
+ * system rgb() (Canvas / Field), not an oklch token mix. */
+await page.emulateMedia({ forcedColors: "active" });
+
+const isSystemBg = (bg) =>
+  (/^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/.test(bg) ||
+    /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*1\s*\)$/.test(bg)) &&
+  !/oklch\(/i.test(bg);
+
+await open("components-select--basic");
+{
+  const trigger = page.locator('[data-testid="select-basic"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.hover();
+  await page.waitForTimeout(50);
+  const bg = await trigger.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  const ok = isSystemBg(bg);
+  report(
+    "Select forced-colors hover — paints with system color (Field)",
+    ok,
+    `bg="${bg}"`,
+  );
+}
+
+await open("components-combobox--basic");
+{
+  const group = page.locator('[data-testid="combobox-basic"]');
+  await group.waitFor({ state: "visible", timeout: 5000 });
+  await group.hover();
+  await page.waitForTimeout(50);
+  const bg = await group.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  const ok = isSystemBg(bg);
+  report(
+    "Combobox forced-colors hover — paints with system color (Field)",
+    ok,
+    `bg="${bg}"`,
+  );
+}
+
+await open("components-autocomplete--basic");
+{
+  const group = page.locator('[data-testid="autocomplete-basic"]');
+  await group.waitFor({ state: "visible", timeout: 5000 });
+  await group.hover();
+  await page.waitForTimeout(50);
+  const bg = await group.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  const ok = isSystemBg(bg);
+  report(
+    "Autocomplete forced-colors hover — paints with system color (Field)",
+    ok,
+    `bg="${bg}"`,
+  );
+}
+// Reset forced-colors emulation so it doesn't bleed into subsequent runs
+// (this is the last block, but be defensive).
+await page.emulateMedia({ forcedColors: "none" });
 
 await ctx.close();
 await browser.close();

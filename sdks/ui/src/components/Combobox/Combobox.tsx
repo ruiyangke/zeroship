@@ -115,6 +115,15 @@ interface ComboboxBaseProps<Value>
    * (Base UI auto-mounts persistently for live-region announcements).
    */
   empty?: ReactNode;
+  /**
+   * Multi-mode chip label resolver. Escape hatch for callers whose
+   * `Value` is a non-string shape (e.g. `{id, name}`); the default
+   * walks the `items` array to find a `label` for a matching value, or
+   * falls back to `String(v)` when no match is found. Provide
+   * `getChipLabel` when you need typed access to the value (e.g.
+   * `(v) => v.name`).
+   */
+  getChipLabel?: (value: Value) => ReactNode;
 }
 
 export interface ComboboxSingleProps<Value> extends ComboboxBaseProps<Value> {
@@ -157,11 +166,17 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
     onValueChange,
     disabled: disabledProp,
     required: requiredProp,
+    getChipLabel,
     /*
-     * Sift native HTML attrs / test hooks off the Root rest so they land
-     * on the InputGroup (the actual DOM host). Same reasoning as Select:
-     * Combobox.Root is a context-only node and won't forward
-     * `data-testid` to a real element.
+     * Sift `data-testid` off the Root rest so it lands on the
+     * InputGroup (the visible DOM host) — Combobox.Root is a context-only
+     * node and won't forward to a real element.
+     *
+     * Sift `aria-label` / `aria-labelledby` / `aria-describedby` so they
+     * land on the focusable `<input>` (NOT the InputGroup). The
+     * InputGroup is a `<div role="group">`; aria-label on a group is
+     * legal but doesn't accessibly-name the focusable control. Stamping
+     * aria-* on the Input is what screen readers announce on focus.
      */
     "data-testid": dataTestid,
     "aria-label": ariaLabel,
@@ -175,10 +190,41 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
     onValueChange?: (next: Value | Value[] | null, details: unknown) => void;
     disabled?: boolean;
     required?: boolean;
+    getChipLabel?: (v: Value) => ReactNode;
     "data-testid"?: string;
     "aria-label"?: string;
     "aria-labelledby"?: string;
     "aria-describedby"?: string;
+  };
+
+  /*
+   * Default chip-label resolver. When the consumer didn't pass
+   * `getChipLabel`, we walk the `items` array (Base UI's `items` prop is
+   * Root-level, lives on `rootRest`) looking for a matching value. Each
+   * candidate may be `Value` directly OR a `{value, label}` pair (Base
+   * UI's grouped/labelled shape). Fallback: `String(v)`, same as
+   * Slice-6's first-pass behavior — kept as a last resort, never as the
+   * default for typed value shapes.
+   */
+  const items = (rootRest as { items?: readonly unknown[] }).items;
+  const resolveChipLabel = (v: Value): ReactNode => {
+    if (getChipLabel) return getChipLabel(v);
+    if (Array.isArray(items)) {
+      for (const candidate of items) {
+        if (candidate === v) return String(v);
+        if (
+          candidate != null &&
+          typeof candidate === "object" &&
+          "value" in candidate &&
+          (candidate as { value: unknown }).value === v
+        ) {
+          const labelled = candidate as { value: unknown; label?: ReactNode };
+          if (labelled.label != null) return labelled.label;
+          return String(v);
+        }
+      }
+    }
+    return String(v);
   };
 
   const fieldCtx = useFieldContext();
@@ -209,9 +255,6 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
       <BaseCombobox.Root {...rootProps}>
         <BaseCombobox.InputGroup
           data-testid={dataTestid}
-          aria-label={ariaLabel}
-          aria-labelledby={ariaLabelledBy}
-          aria-describedby={ariaDescribedBy}
           className={classnames(
             "zs-combobox-input-group",
             `zs-combobox-input-group--${variant}`,
@@ -228,14 +271,17 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
                   <>
                     {Array.isArray(values)
                       ? values.map((v, i) => (
-                          <ComboboxChip key={String(v) + i} value={v}>
-                            {String(v)}
+                          <ComboboxChip key={String(v) + i}>
+                            {resolveChipLabel(v as Value)}
                           </ComboboxChip>
                         ))
                       : null}
                     <BaseCombobox.Input
                       className="zs-combobox-input"
                       placeholder={placeholder}
+                      aria-label={ariaLabel}
+                      aria-labelledby={ariaLabelledBy}
+                      aria-describedby={ariaDescribedBy}
                     />
                   </>
                 )}
@@ -245,6 +291,9 @@ function ComboboxRoot<Value = string>(props: ComboboxProps<Value>) {
             <BaseCombobox.Input
               className="zs-combobox-input"
               placeholder={placeholder}
+              aria-label={ariaLabel}
+              aria-labelledby={ariaLabelledBy}
+              aria-describedby={ariaDescribedBy}
             />
           )}
           <BaseCombobox.Icon
@@ -378,12 +427,17 @@ ComboboxEmpty.displayName = "Combobox.Empty";
  * The Chip renders a single removable token inside multi-mode triggers.
  * We pair Base UI's Chip + ChipRemove so the chip carries its own
  * remove button (X) with the canonical aria-label.
+ *
+ * NOTE: removal is keyed by the chip's index in the composite-list —
+ * NOT by a `value` prop. Base UI's `<Combobox.Chip>` accepts only the
+ * native `<div>` props plus internal state; passing `value` leaks onto
+ * the DOM as a stray `value="…"` attribute, which is invalid HTML on a
+ * div and reads as a contract drift. The chip's parent must render
+ * chips in the same order Base UI emits values from `<Combobox.Value>`.
  */
 
 type BaseChipProps = ComponentPropsWithoutRef<typeof BaseCombobox.Chip>;
 export interface ComboboxChipProps extends BaseChipProps {
-  /** The chip's value — passed up to Base UI for removal correlation. */
-  value?: unknown;
   /**
    * Aria-label for the remove button. Defaults to `"Remove"`. Localized
    * consumers override per-instance.

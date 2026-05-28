@@ -284,3 +284,43 @@ export const LongList: Story = {
     );
   },
 };
+
+/* ─── 9. AriaPropagation ────────────────────────────────────────────── *
+ *
+ * Slice-6 review-fix regression mirror: aria-* on `<Autocomplete>` must
+ * propagate to the focusable `<input>`, not the `<div role="group">`
+ * InputGroup. Pre-fix the wrapper stamped aria-* on the group. */
+export const AriaPropagation: Story = {
+  name: "Aria-* propagates to input",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression hook for Slice-6 review-fix 4: aria-* on " +
+          "`<Autocomplete>` lands on the focusable `<input>`.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Aria propagation"
+    >
+      <div className="zs-story-cell" style={{ minWidth: "20rem" }}>
+        <Autocomplete
+          placeholder="email@example.com"
+          items={EMAIL_DOMAINS}
+          aria-label="Email address"
+          data-testid="autocomplete-aria-propagation"
+        >
+          {(d: string) => (
+            <Autocomplete.Item key={d} value={d}>
+              {d}
+            </Autocomplete.Item>
+          )}
+        </Autocomplete>
+      </div>
+    </div>
+  ),
+};

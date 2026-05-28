@@ -124,12 +124,17 @@ interface SelectBaseProps<Value> extends BaseRootShapeProps<Value, false> {
   children?: ReactNode;
 }
 
-/** Single-selection branch — default when `multiple` is unset or false. */
+/** Single-selection branch — default when `multiple` is unset or false.
+ *
+ * Note: `onValueChange` receives `Value | null` because Base UI emits
+ * `null` on clear-paths and when the currently-selected item disappears
+ * from the options array. Wrapping this as `Value` would be unsound.
+ */
 export interface SelectSingleProps<Value> extends SelectBaseProps<Value> {
   multiple?: false;
   value?: Value | null;
   defaultValue?: Value | null;
-  onValueChange?: (value: Value, eventDetails: unknown) => void;
+  onValueChange?: (value: Value | null, eventDetails: unknown) => void;
 }
 
 /** Multiple-selection branch — value is `Value[]`. */
@@ -140,6 +145,14 @@ export interface SelectMultipleProps<Value> extends SelectBaseProps<Value> {
   onValueChange?: (value: Value[], eventDetails: unknown) => void;
 }
 
+/*
+ * `SelectProps` is the union (single | multiple). Useful as a typed bag,
+ * but call-site inference must go through the overload signatures below —
+ * the union alone doesn't help TypeScript narrow `Value` from the
+ * `value` prop's shape (it locks Value before reading `multiple`, which
+ * is why `useState<string[]>` + `value={value}` was inferring
+ * `Value=string[]` instead of `Value=string`).
+ */
 export type SelectProps<Value = string> =
   | SelectSingleProps<Value>
   | SelectMultipleProps<Value>;
@@ -170,6 +183,15 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
     disabled: disabledProp,
     required: requiredProp,
     /*
+     * Default the wrapper to popover-mode (`modal: false`). Base UI's
+     * `Select.Root` defaults `modal: true`, which mounts an internal
+     * backdrop AND scroll-locks the page. The Slice 6 brief specifies
+     * popover-feel for Select (NO Backdrop, NO scroll lock), so the
+     * wrapper flips the default. Consumers can override by passing
+     * `modal={true}` explicitly; preserved here via `modalProp`.
+     */
+    modal: modalProp,
+    /*
      * Sift native HTML-attribute / story-test props off of `...rootRest`
      * so they land on the visible Trigger rather than on the headless
      * Root (which doesn't render any DOM). Without this split, attrs
@@ -187,9 +209,10 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
     multiple?: boolean;
     value?: Value | readonly Value[] | null;
     defaultValue?: Value | readonly Value[] | null;
-    onValueChange?: (next: Value | Value[], details: unknown) => void;
+    onValueChange?: (next: Value | Value[] | null, details: unknown) => void;
     disabled?: boolean;
     required?: boolean;
+    modal?: boolean;
     "aria-label"?: string;
     "aria-labelledby"?: string;
     "aria-describedby"?: string;
@@ -208,7 +231,7 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
   );
 
   // Base UI's Root is strongly typed across the Multiple generic.
-  // The discriminated union above keeps the public surface honest; the
+  // The overload signatures above keep the public surface honest; the
   // cast below funnels into the runtime call site once we've narrowed.
   const rootProps = {
     ...rootRest,
@@ -218,6 +241,8 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
     onValueChange: onValueChange as never,
     disabled: disabled || undefined,
     required: required || undefined,
+    // Popover-feel: default modal=false; consumer explicit override wins.
+    modal: modalProp ?? false,
   };
 
   return (
@@ -230,15 +255,15 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
            * lives in an inner `<span>` (via Select.Value), but the
            * `role="combobox"` button doesn't auto-name from descendant
            * text on every screen reader. When no explicit `aria-label`
-           * is provided we default it to the placeholder string so the
-           * SR announces something useful for an empty Select. Field
-           * label wiring (via Base UI's Field auto-binds) still wins
-           * because it sets `aria-labelledby`, which takes precedence
-           * over `aria-label` per the ARIA spec — so wrapping a Select
-           * in `<Field><Field.Label>…</Field.Label></Field>` doesn't
-           * read a stale placeholder twice.
+           * is provided AND no Field is wrapping us (Field auto-wires
+           * `aria-labelledby` at the Trigger level), we default
+           * `aria-label` to the placeholder so an empty Select still
+           * announces something. Inside a Field, we skip the placeholder
+           * fallback entirely — the Field's `aria-labelledby` already
+           * names the trigger, and a stale duplicate aria-label that
+           * drifts when the placeholder changes is dead weight.
            */
-          aria-label={ariaLabel ?? placeholder}
+          aria-label={ariaLabel ?? (fieldCtx ? undefined : placeholder)}
           aria-labelledby={ariaLabelledBy}
           aria-describedby={ariaDescribedBy}
           data-testid={dataTestid}
@@ -268,6 +293,19 @@ function SelectRoot<Value = string>(props: SelectProps<Value>) {
             align={align}
             side={placement}
             sideOffset={sideOffset}
+            /*
+             * Popover-feel: disable Base UI's default
+             * `alignItemWithTrigger` (overlap-trigger so the selected
+             * item's text aligns with the trigger value). That mode also
+             * forces scroll-lock on the body even when `modal=false`
+             * (the positioner uses `useAnchoredPopupScrollLock` gated by
+             * `alignItemWithTriggerActive || modal`). We want the popup
+             * to anchor BELOW the trigger like a Combobox / Dialog, so
+             * we turn this off here. Consumers who want the overlap-mode
+             * behavior should reach for a different primitive (or
+             * Slice 6 will add an opt-in once a real use-case appears).
+             */
+            alignItemWithTrigger={false}
           >
             <BaseSelect.Popup
               className={classnames(
@@ -424,17 +462,26 @@ const SelectSeparator = forwardRef<HTMLDivElement, SelectSeparatorProps>(
 );
 SelectSeparator.displayName = "Select.Separator";
 
-/* ─── namespace export ─────────────────────────────────────────────── */
-
-type SelectComponent = (<Value = string>(
-  props: SelectProps<Value>,
-) => React.JSX.Element) & {
+/* ─── namespace export ─────────────────────────────────────────────── *
+ *
+ * Use call-signature OVERLOADS, not a single union signature, so
+ * inference picks the correct branch from the `value` prop's shape +
+ * `multiple` discriminant. With a single union signature TypeScript
+ * locks `Value` from the first prop it sees (typically `value`) before
+ * reading `multiple`, which causes the multi-mode story shape
+ * `useState<string[]>` + `<Select multiple value={value}>` to infer
+ * `Value=string[]` instead of `Value=string`. Overloads let TS try the
+ * Single branch first, fail when `multiple: true` is present, then try
+ * the Multiple branch with Value-from-array narrowing intact. */
+export interface SelectComponent {
+  <Value = string>(props: SelectSingleProps<Value>): React.JSX.Element;
+  <Value = string>(props: SelectMultipleProps<Value>): React.JSX.Element;
   Item: typeof SelectItem;
   Group: typeof SelectGroup;
   GroupLabel: typeof SelectGroupLabel;
   Separator: typeof SelectSeparator;
   displayName?: string;
-};
+}
 
 const ForwardedSelect = SelectRoot as unknown as SelectComponent;
 ForwardedSelect.Item = SelectItem;

@@ -31,6 +31,32 @@
  * paints items. Without re-emitting, the bare `.zs-combobox-item`
  * rule under forced-colors would stay in place (which is fine — the
  * grid-template-columns we changed above is layout, not paint).
- * Documented for the reader: no paint override needed here, all
- * Combobox forced-colors rules apply to autocomplete items via the
- * shared `zs-combobox-item` class. */
+ *
+ * The hover-state mirror for `.zs-autocomplete-input-group` is also
+ * defensive: an autocomplete-specific selector that escaped the
+ * generic combobox hover mirror would leak oklch tints under
+ * high-contrast. Re-declare here so any future divergence stays
+ * forced-colors-safe. */
+@media (forced-colors: active) {
+  .zs-autocomplete-input-group:not([data-disabled]):not([data-focused]):hover {
+    background: Field;
+    color: FieldText;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  .zs-autocomplete-input-group:focus-within,
+  .zs-autocomplete-input-group[data-popup-open] {
+    background: Field;
+    color: FieldText;
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-autocomplete-item {
+    background-color: Canvas;
+    color: CanvasText;
+  }
+  .zs-autocomplete-item[data-highlighted]:not([data-disabled]) {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+}

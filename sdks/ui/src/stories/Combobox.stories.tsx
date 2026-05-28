@@ -414,3 +414,47 @@ export const RTL: Story = {
     </div>
   ),
 };
+
+/* ─── 11. AriaPropagation ──────────────────────────────────────────── *
+ *
+ * Slice-6 review-fix regression: a consumer-passed `aria-label` MUST
+ * propagate to the focusable `<input>` (NOT the InputGroup `<div
+ * role="group">`). Pre-fix the wrapper stamped aria-* on InputGroup; the
+ * focused control therefore had no accessible name. The aria-wiring
+ * script queries `input[aria-label="Pick a fruit"]` to prove the post-
+ * fix wiring lands on the right element. */
+export const AriaPropagation: Story = {
+  name: "Aria-* propagates to input",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression hook for Slice-6 review-fix 4: aria-* on `<Combobox>` " +
+          "lands on the focusable `<input>`, not on the surrounding " +
+          "`<div role=\"group\">`.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Aria propagation"
+    >
+      <div className="zs-story-cell" style={{ minWidth: "16rem" }}>
+        <Combobox
+          placeholder="Type a fruit"
+          items={FRUITS as unknown as string[]}
+          aria-label="Pick a fruit"
+          data-testid="combobox-aria-propagation"
+        >
+          {(item: string) => (
+            <Combobox.Item key={item} value={item}>
+              {item.charAt(0).toUpperCase() + item.slice(1)}
+            </Combobox.Item>
+          )}
+        </Combobox>
+      </div>
+    </div>
+  ),
+};
