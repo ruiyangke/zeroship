@@ -342,6 +342,7 @@ async fn main() -> std::io::Result<()> {
             hydra_admin_url: hydra_admin_url_value.clone(),
             redirect_uri: builder_redirect_uri,
             client_secret_path: builder_client_secret_path,
+            auth_db_url: auth_db_url_resolved.clone(),
         };
         bootstrap_builder::bootstrap_builder_oauth_client(&auth_pg, &cfg)
             .await
