@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, within } from "@storybook/test";
+import { useState } from "react";
 import { Button } from "../components/Button";
 
 const meta: Meta<typeof Button> = {
@@ -328,6 +329,54 @@ export const ClickInteraction: Story = {
   },
 };
 
+export const DisabledAndLoadingAreInert: Story = {
+  name: "Disabled and loading are inert (play)",
+  render: function DisabledAndLoadingAreInertRender() {
+    const [count, setCount] = useState(0);
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Disabled and loading button interactions"
+      >
+        <Button onClick={() => setCount((value) => value + 1)}>
+          Increment
+        </Button>
+        <Button disabled onClick={() => setCount((value) => value + 10)}>
+          Locked
+        </Button>
+        <Button loading onClick={() => setCount((value) => value + 100)}>
+          Saving
+        </Button>
+        <output role="status" aria-label="Button activation count">
+          Count: {count}
+        </output>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const increment = canvas.getByRole("button", { name: /increment/i });
+    const locked = canvas.getByRole("button", { name: /locked/i });
+    const saving = canvas.getByRole("button", { name: /saving/i });
+    const count = canvas.getByRole("status", {
+      name: /button activation count/i,
+    });
+
+    await expect(locked).toBeDisabled();
+    await expect(saving).toBeDisabled();
+    await expect(saving).toHaveAttribute("aria-busy", "true");
+
+    await userEvent.click(locked);
+    await userEvent.click(saving);
+    await expect(count).toHaveTextContent("Count: 0");
+
+    await userEvent.click(increment);
+    await expect(increment).toHaveFocus();
+    await expect(count).toHaveTextContent("Count: 1");
+  },
+};
+
 export const AsChild: Story = {
   name: "As child (anchor)",
   parameters: {
@@ -361,4 +410,48 @@ export const AsChild: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const openLink = canvas.getByRole("link", { name: /open in browser/i });
+    const learnLink = canvas.getByRole("link", { name: /learn more/i });
+
+    await expect(openLink.tagName).toBe("A");
+    await expect(openLink).toHaveAttribute("href", "#open");
+    await expect(learnLink.tagName).toBe("A");
+    await expect(learnLink).toHaveAttribute("data-variant", "plain");
+
+    await userEvent.click(openLink);
+    await expect(openLink).toHaveFocus();
+  },
+};
+
+export const AsChildBusyAndDisabled: Story = {
+  name: "asChild busy and disabled (play)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="asChild state attributes"
+    >
+      <Button asChild disabled variant="tinted">
+        <a href="#disabled-link">Disabled link action</a>
+      </Button>
+      <Button asChild loading variant="gray">
+        <a href="#busy-link">Busy link action</a>
+      </Button>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const disabledLink = canvas.getByRole("link", {
+      name: /disabled link action/i,
+    });
+    const busyLink = canvas.getByRole("link", { name: /busy link action/i });
+
+    await expect(disabledLink.tagName).toBe("A");
+    await expect(disabledLink).toHaveAttribute("aria-disabled", "true");
+    await expect(busyLink.tagName).toBe("A");
+    await expect(busyLink).toHaveAttribute("aria-disabled", "true");
+    await expect(busyLink).toHaveAttribute("aria-busy", "true");
+  },
 };

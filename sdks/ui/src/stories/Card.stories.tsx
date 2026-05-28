@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import { useRef, useState, type CSSProperties } from "react";
 import { Button, Card, Field, Input } from "../components";
 
@@ -270,7 +271,11 @@ function InteractiveWithKeyboardImpl() {
           </Card.Description>
         </Card.Header>
         <Card.Content>
-          <p data-testid="card-interactive-counter">
+          <p
+            role="status"
+            aria-label="Card activation count"
+            data-testid="card-interactive-counter"
+          >
             Activations: <strong>{count}</strong>
           </p>
         </Card.Content>
@@ -281,6 +286,22 @@ function InteractiveWithKeyboardImpl() {
 export const InteractiveWithKeyboard: Story = {
   name: "Interactive with keyboard",
   render: () => <InteractiveWithKeyboardImpl />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const card = canvas.getByRole("button", { name: /activate me/i });
+    const status = canvas.getByRole("status", {
+      name: /card activation count/i,
+    });
+
+    await userEvent.click(card);
+    await expect(status).toHaveTextContent("Activations: 1");
+
+    await userEvent.keyboard("{Enter}");
+    await expect(status).toHaveTextContent("Activations: 2");
+
+    await userEvent.keyboard(" ");
+    await expect(status).toHaveTextContent("Activations: 3");
+  },
 };
 
 /* ─── 5c. Interactive without onClick (CAUTION) ──────────────────────── */
@@ -319,6 +340,15 @@ function InteractiveWithoutOnClickImpl() {
 export const InteractiveWithoutOnClick: Story = {
   name: "Interactive without onClick (caution)",
   render: () => <InteractiveWithoutOnClickImpl />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const card = canvas.getByRole("button", { name: /caution/i });
+
+    await userEvent.tab();
+    await expect(card).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    await expect(card).toHaveFocus();
+  },
 };
 
 /* ─── 6. AsChild ─────────────────────────────────────────────────────── */
@@ -346,6 +376,16 @@ export const AsChild: Story = {
       </Card>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const link = canvas.getByRole("link", { name: /whole-card link/i });
+
+    await expect(link.tagName).toBe("A");
+    await expect(link).toHaveAttribute("href", "#cards");
+    await expect(link).toHaveAttribute("data-interactive");
+    await userEvent.click(link);
+    await expect(link).toHaveFocus();
+  },
 };
 
 /* ─── 6b. AsChild ref composition (review-fix item 4) ───────────────── */
@@ -406,6 +446,8 @@ function AsChildRefCompositionImpl() {
             Verify consumer ref
           </Button>
           <span
+            role="status"
+            aria-label="Card ref status"
             data-testid="card-aschild-ref-status"
             style={
               {
@@ -425,6 +467,119 @@ function AsChildRefCompositionImpl() {
 export const AsChildRefComposition: Story = {
   name: "asChild ref composition",
   render: () => <AsChildRefCompositionImpl />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const verify = canvas.getByRole("button", { name: /verify consumer ref/i });
+    const status = canvas.getByRole("status", { name: /card ref status/i });
+
+    await expect(status).toHaveTextContent("idle");
+    await userEvent.click(verify);
+    await expect(status).toHaveTextContent("ref-attached");
+  },
+};
+
+function KeyboardPreventDefaultImpl() {
+  const [status, setStatus] = useState("idle");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Interactive card keyboard prevent default"
+    >
+      <Card
+        interactive
+        onClick={() => setStatus("activated")}
+        onKeyDown={(event) => {
+          if (event.key === " ") {
+            event.preventDefault();
+            setStatus("space-prevented");
+          }
+        }}
+        style={{ inlineSize: "20rem" }}
+      >
+        <Card.Header>
+          <Card.Title>Guarded card</Card.Title>
+          <Card.Description>
+            Space is intercepted by the caller; Enter still activates.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content>
+          <output role="status" aria-label="Guarded card status">
+            {status}
+          </output>
+        </Card.Content>
+      </Card>
+    </div>
+  );
+}
+export const KeyboardPreventDefault: Story = {
+  name: "Keyboard preventDefault (play)",
+  render: () => <KeyboardPreventDefaultImpl />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const card = canvas.getByRole("button", { name: /guarded card/i });
+    const status = canvas.getByRole("status", {
+      name: /guarded card status/i,
+    });
+
+    await card.focus();
+    await userEvent.keyboard(" ");
+    await expect(status).toHaveTextContent("space-prevented");
+
+    await userEvent.keyboard("{Enter}");
+    await expect(status).toHaveTextContent("activated");
+  },
+};
+
+export const TitleAsChildAndMediaOverride: Story = {
+  name: "Title asChild and media override (play)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Card asChild subparts"
+    >
+      <Card variant="outline" style={{ inlineSize: "22rem" }}>
+        <Card.Media side="fill" aria-hidden={false}>
+          <MediaPlaceholder label="meaningful fill" fill />
+        </Card.Media>
+        <Card.Header>
+          <Card.Title asChild>
+            <h2>Custom heading level</h2>
+          </Card.Title>
+          <Card.Description>
+            The title renders as the supplied h2 and the fill media opts
+            into the accessibility tree.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content>Subpart render-as behavior.</Card.Content>
+        <Card.Footer align="between" divider="top">
+          <Button size="small" variant="plain">
+            Back
+          </Button>
+          <Button size="small">Continue</Button>
+        </Card.Footer>
+      </Card>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const heading = canvas.getByRole("heading", {
+      name: /custom heading level/i,
+      level: 2,
+    });
+    const footer = heading
+      .closest("[data-slot='card']")
+      ?.querySelector("[data-slot='card-footer']");
+    const media = heading
+      .closest("[data-slot='card']")
+      ?.querySelector("[data-slot='card-media']");
+
+    await expect(heading.tagName).toBe("H2");
+    await expect(footer).toHaveAttribute("data-align", "between");
+    await expect(footer).toHaveAttribute("data-divider", "top");
+    await expect(media).toHaveAttribute("aria-hidden", "false");
+  },
 };
 
 /* ─── 7. Ghost ───────────────────────────────────────────────────────── */

@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import { useState } from "react";
 import { AlertDialog, Button, Input } from "../components";
 
@@ -69,6 +70,19 @@ export const TwoButtons: Story = {
       </AlertDialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /discard changes/i,
+    }));
+    await expect(await page.findByRole("alertdialog", {
+      name: /discard changes/i,
+    })).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: /keep editing/i }));
+  },
 };
 
 /* ─── 3. Destructive ─────────────────────────────────────────────────── */
@@ -179,6 +193,23 @@ export const WithBody: Story = {
       </AlertDialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /delete project/i,
+    }));
+    await page.findByRole("alertdialog", { name: /delete this project/i });
+
+    const confirmation = page.getByRole("textbox", {
+      name: /type project name/i,
+    });
+    await userEvent.type(confirmation, "my-app");
+    await expect(confirmation).toHaveValue("my-app");
+
+    await userEvent.click(page.getByRole("button", { name: /^delete$/i }));
+  },
 };
 
 /* ─── 6. Outside click ignored ───────────────────────────────────────── */
@@ -217,6 +248,19 @@ export const OutsideClickIgnored: Story = {
       </AlertDialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /confirm exit/i }));
+    const alert = await page.findByRole("alertdialog", {
+      name: /confirm exit/i,
+    });
+
+    await userEvent.click(canvasElement.ownerDocument.body);
+    await expect(alert).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: /stay/i }));
+  },
 };
 
 /* ─── 7. ESC closes via Cancel (review-fix item 1) ───────────────────── */
@@ -231,7 +275,13 @@ function EscClosesCancelStory() {
       role="group"
       aria-label="AlertDialog ESC closes via Cancel"
     >
-      <p data-testid="cancel-clicked-status">Status: {clicked}</p>
+      <p
+        role="status"
+        aria-label="Cancel click status"
+        data-testid="cancel-clicked-status"
+      >
+        Status: {clicked}
+      </p>
       <AlertDialog>
         <AlertDialog.Trigger
           render={
@@ -264,6 +314,19 @@ function EscClosesCancelStory() {
 export const EscClosesCancel: Story = {
   name: "ESC closes via Cancel",
   render: () => <EscClosesCancelStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", { name: /cancel click status/i });
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /press esc to cancel/i,
+    }));
+    await page.findByRole("alertdialog", { name: /discard changes/i });
+
+    await userEvent.keyboard("{Escape}");
+    await expect(status).toHaveTextContent("Status: cancelled");
+  },
 };
 
 /* ─── 8. ESC no-ops when no Cancel (review-fix item 1) ───────────────── */
@@ -307,6 +370,21 @@ export const EscNoOpsWithoutCancel: Story = {
       </AlertDialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open hard alert/i,
+    }));
+    const alert = await page.findByRole("alertdialog", {
+      name: /action required/i,
+    });
+
+    await userEvent.keyboard("{Escape}");
+    await expect(alert).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: /acknowledge/i }));
+  },
 };
 
 /* ─── 9. ESC ignores a disabled Cancel (review-fix item 1) ──────────── */
@@ -353,6 +431,24 @@ export const EscIgnoresDisabledCancel: Story = {
       </AlertDialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open with disabled cancel/i,
+    }));
+    const alert = await page.findByRole("alertdialog", {
+      name: /processing/i,
+    });
+    await expect(page.getByRole("button", {
+      name: /cancel \(disabled\)/i,
+    })).toBeDisabled();
+
+    await userEvent.keyboard("{Escape}");
+    await expect(alert).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: /wait/i }));
+  },
 };
 
 /* ─── 10. Cancel onClick composes (review-fix item 2) ────────────────── */
@@ -364,7 +460,13 @@ function CancelWithCleanupOnClickStory() {
       role="group"
       aria-label="AlertDialog Cancel onClick composes with close"
     >
-      <p data-testid="cancel-cleanup-status">Status: {cleanup}</p>
+      <p
+        role="status"
+        aria-label="Cancel cleanup status"
+        data-testid="cancel-cleanup-status"
+      >
+        Status: {cleanup}
+      </p>
       <AlertDialog>
         <AlertDialog.Trigger
           render={
@@ -403,6 +505,20 @@ function CancelWithCleanupOnClickStory() {
 export const CancelWithCleanupOnClick: Story = {
   name: "Cancel — onClick composes with close",
   render: () => <CancelWithCleanupOnClickStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", {
+      name: /cancel cleanup status/i,
+    });
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open cleanup alert/i,
+    }));
+    await page.findByRole("alertdialog", { name: /discard changes/i });
+    await userEvent.click(page.getByRole("button", { name: /^cancel$/i }));
+    await expect(status).toHaveTextContent("Status: cleanup-ran");
+  },
 };
 
 /* ─── 11. Cancel asChild (review-fix item 7) ─────────────────────────── */
@@ -414,7 +530,13 @@ function CancelAsChildStory() {
       role="group"
       aria-label="AlertDialog Cancel asChild"
     >
-      <p data-testid="cancel-aschild-status">Status: {clicked}</p>
+      <p
+        role="status"
+        aria-label="Cancel asChild status"
+        data-testid="cancel-aschild-status"
+      >
+        Status: {clicked}
+      </p>
       <AlertDialog>
         <AlertDialog.Trigger
           render={
@@ -457,6 +579,196 @@ function CancelAsChildStory() {
 export const CancelAsChild: Story = {
   name: "Cancel — asChild (Slot)",
   render: () => <CancelAsChildStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", {
+      name: /cancel aschild status/i,
+    });
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open custom-cancel alert/i,
+    }));
+    await page.findByRole("alertdialog", { name: /custom cancel target/i });
+    const done = page.getByRole("button", { name: /done/i });
+
+    await expect(done.tagName).toBe("BUTTON");
+    await userEvent.click(done);
+    await expect(status).toHaveTextContent("Status: child-onclick-ran");
+  },
+};
+
+function ActionPreventCloseStory() {
+  const [status, setStatus] = useState("idle");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="AlertDialog action preventClose"
+    >
+      <p role="status" aria-label="Alert action status">
+        Status: {status}
+      </p>
+      <AlertDialog>
+        <AlertDialog.Trigger render={<Button>Open async alert</Button>} />
+        <AlertDialog.Portal>
+          <AlertDialog.Backdrop />
+          <AlertDialog.Popup>
+            <AlertDialog.Header>
+              <AlertDialog.Title>Check availability?</AlertDialog.Title>
+              <AlertDialog.Description>
+                The action stays open while the caller handles async work.
+              </AlertDialog.Description>
+            </AlertDialog.Header>
+            <AlertDialog.Footer>
+              <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+              <AlertDialog.Action
+                preventClose
+                onClick={() => setStatus("checked")}
+              >
+                Check availability
+              </AlertDialog.Action>
+            </AlertDialog.Footer>
+          </AlertDialog.Popup>
+        </AlertDialog.Portal>
+      </AlertDialog>
+    </div>
+  );
+}
+export const ActionPreventClose: Story = {
+  name: "Action preventClose (play)",
+  render: () => <ActionPreventCloseStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", { name: /alert action status/i });
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open async alert/i,
+    }));
+    const alert = await page.findByRole("alertdialog", {
+      name: /check availability/i,
+    });
+
+    await userEvent.click(page.getByRole("button", {
+      name: /check availability/i,
+    }));
+    await expect(status).toHaveTextContent("Status: checked");
+    await expect(alert).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: /^cancel$/i }));
+  },
+};
+
+function ActionPreventDefaultStory() {
+  const [status, setStatus] = useState("idle");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="AlertDialog action preventDefault"
+    >
+      <p role="status" aria-label="Alert guarded action status">
+        Status: {status}
+      </p>
+      <AlertDialog>
+        <AlertDialog.Trigger render={<Button>Open guarded action</Button>} />
+        <AlertDialog.Portal>
+          <AlertDialog.Backdrop />
+          <AlertDialog.Popup>
+            <AlertDialog.Header>
+              <AlertDialog.Title>Guarded action</AlertDialog.Title>
+              <AlertDialog.Description>
+                The caller prevents the first action close.
+              </AlertDialog.Description>
+            </AlertDialog.Header>
+            <AlertDialog.Footer>
+              <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+              <AlertDialog.Action
+                onClick={(event) => {
+                  event.preventDefault();
+                  setStatus("prevented");
+                }}
+              >
+                Try action
+              </AlertDialog.Action>
+            </AlertDialog.Footer>
+          </AlertDialog.Popup>
+        </AlertDialog.Portal>
+      </AlertDialog>
+    </div>
+  );
+}
+export const ActionPreventDefault: Story = {
+  name: "Action preventDefault (play)",
+  render: () => <ActionPreventDefaultStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", {
+      name: /alert guarded action status/i,
+    });
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open guarded action/i,
+    }));
+    const alert = await page.findByRole("alertdialog", {
+      name: /guarded action/i,
+    });
+
+    await userEvent.click(page.getByRole("button", { name: /try action/i }));
+    await expect(status).toHaveTextContent("Status: prevented");
+    await expect(alert).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: /^cancel$/i }));
+  },
+};
+
+export const FragmentFooterButtons: Story = {
+  name: "Fragment footer buttons (play)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="AlertDialog fragment footer buttons"
+    >
+      <AlertDialog>
+        <AlertDialog.Trigger render={<Button>Open fragment footer</Button>} />
+        <AlertDialog.Portal>
+          <AlertDialog.Backdrop />
+          <AlertDialog.Popup>
+            <AlertDialog.Header>
+              <AlertDialog.Title>Archive project?</AlertDialog.Title>
+              <AlertDialog.Description>
+                Footer child walking handles arrays and fragments.
+              </AlertDialog.Description>
+            </AlertDialog.Header>
+            <AlertDialog.Footer>
+              {[
+                <AlertDialog.Cancel key="cancel">Cancel</AlertDialog.Cancel>,
+                null,
+              ]}
+              <>
+                <AlertDialog.Action>Archive</AlertDialog.Action>
+              </>
+            </AlertDialog.Footer>
+          </AlertDialog.Popup>
+        </AlertDialog.Portal>
+      </AlertDialog>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open fragment footer/i,
+    }));
+    await expect(await page.findByRole("alertdialog", {
+      name: /archive project/i,
+    })).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: /^cancel$/i }));
+  },
 };
 
 /* ─── 12. 3-button destructive at bottom (positive; review-fix item 5) */
@@ -566,7 +878,7 @@ export const DestructiveWithoutCancelWarns: Story = {
     docs: {
       description: {
         story:
-          "HIG: destructive action without Cancel = no safe exit. The dev-warn nudges the consumer to add one (review-fix item 6). axe disabled — same reason as ThreeButtonsDestructiveMisplaced.",
+          "Destructive action without Cancel = no safe exit. The dev-warn nudges the consumer to add one (review-fix item 6). axe disabled — same reason as ThreeButtonsDestructiveMisplaced.",
       },
     },
     a11y: { disable: true },
