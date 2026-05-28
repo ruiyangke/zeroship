@@ -742,3 +742,192 @@ mod tests {
         assert_eq!(got, expected);
     }
 }
+
+// ─── jti replay protection ─────────────────────────────────────────────
+//
+// Bounded in-process LRU-ish cache for DPoP `jti` values. Phase 7 v1
+// ships this as a per-instance cache; for multi-instance gateway
+// deployments, a replay-across-instances attack is possible during the
+// freshness window (±60s by default). A PG-backed `auth.dpop_jti` table
+// sweep'd by the same retention pattern as `audit_retention` is the
+// Phase 8+ hardening path.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Bounded in-process cache of `DPoP` `jti` values for replay protection.
+///
+/// Each entry stores its absolute `expires_at_secs`; expired entries are
+/// swept lazily on every [`JtiCache::insert`] call (no background task,
+/// no separate timer thread — keeps the runtime tokio-free).
+///
+/// **Multi-instance caveat.** This cache is per-process. In a multi-node
+/// gateway deployment a replay landing on a different instance during
+/// the ±60 s freshness window will NOT be detected. The Phase 8+ plan
+/// promotes the cache to a shared PG-backed `auth.dpop_jti` table
+/// (sweep'd by the same retention pattern as `audit_retention`).
+///
+/// # Panics
+///
+/// The accessor methods (`insert`, `len`, `is_empty`) acquire an
+/// internal `Mutex` and will panic if the lock has been poisoned by
+/// another thread panicking while holding it. In practice that
+/// requires a panic inside the very small critical sections in this
+/// file, none of which can panic on well-formed input.
+#[derive(Debug)]
+pub struct JtiCache {
+    inner: Mutex<HashMap<String, i64>>, // jti → expires_at_secs
+    max_entries: usize,
+}
+
+impl JtiCache {
+    /// Build a cache with the given maximum entries. Choose a value
+    /// comfortably larger than peak QPS × the `DPoP` freshness window —
+    /// e.g. 100 RPS × 120 s = 12 000 jtis; size to 50 000 for headroom.
+    #[must_use]
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            max_entries,
+        }
+    }
+
+    /// Attempt to insert a fresh `jti`. Returns `true` if it is new and
+    /// was inserted; `false` if the `jti` was already present (replay
+    /// detected).
+    ///
+    /// Expired entries are swept lazily on each insert. When the cache
+    /// is at `max_entries` after the sweep, one arbitrary entry is
+    /// dropped to make room — exact LRU behaviour is not required for
+    /// correctness (the freshness window already bounds the attack
+    /// surface), and a `HashMap`-based "drop any" policy keeps the
+    /// implementation contention-free.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned by another
+    /// thread panicking while holding the lock. The critical section
+    /// here cannot itself panic on well-formed input.
+    pub fn insert(&self, jti: &str, now_secs: i64, ttl_secs: i64) -> bool {
+        let mut guard = self.inner.lock().expect("poisoned");
+        // 1. Evict expired entries.
+        guard.retain(|_, expires_at| *expires_at > now_secs);
+        // 2. Replay check.
+        if guard.contains_key(jti) {
+            return false;
+        }
+        // 3. Capacity guard: drop one arbitrary entry if at the limit.
+        if guard.len() >= self.max_entries {
+            if let Some(victim) = guard.keys().next().cloned() {
+                guard.remove(&victim);
+            }
+        }
+        // 4. Insert.
+        guard.insert(jti.to_string(), now_secs + ttl_secs);
+        true
+    }
+
+    /// Current live entry count (post-last-sweep). Useful for metrics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.lock().expect("poisoned").len()
+    }
+
+    /// Whether the cache is currently empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().expect("poisoned").is_empty()
+    }
+}
+
+impl Default for JtiCache {
+    /// 50 000 entries — comfortable headroom for ~100 RPS sustained
+    /// over the default 120 s `DPoP` freshness window.
+    fn default() -> Self {
+        Self::new(50_000)
+    }
+}
+
+#[cfg(test)]
+mod jti_cache_tests {
+    use super::*;
+
+    #[test]
+    fn first_insert_returns_true_and_grows() {
+        let cache = JtiCache::new(10);
+        assert!(cache.insert("jti-1", 1000, 60));
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.is_empty());
+    }
+
+    #[test]
+    fn duplicate_insert_returns_false_and_does_not_grow() {
+        let cache = JtiCache::new(10);
+        assert!(cache.insert("jti-1", 1000, 60));
+        assert!(!cache.insert("jti-1", 1001, 60), "replay must be detected");
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn expired_entries_are_evicted_on_insert() {
+        let cache = JtiCache::new(10);
+        assert!(cache.insert("jti-old", 1000, 60)); // expires at 1060
+        // Time advances past expiry; insert a fresh jti.
+        assert!(cache.insert("jti-new", 1100, 60));
+        // Old entry should have been evicted.
+        assert_eq!(cache.len(), 1, "stale entry should be swept");
+        // Old jti can now be re-used (the cache no longer remembers it).
+        assert!(cache.insert("jti-old", 1100, 60));
+    }
+
+    #[test]
+    fn capacity_caps_entry_count() {
+        let cache = JtiCache::new(3);
+        assert!(cache.insert("a", 1000, 600));
+        assert!(cache.insert("b", 1000, 600));
+        assert!(cache.insert("c", 1000, 600));
+        assert!(cache.insert("d", 1000, 600));
+        // After the 4th insert at capacity, the cache evicts one entry
+        // (not necessarily "a" — eviction is arbitrary). Total stays at 3.
+        assert_eq!(cache.len(), 3, "cache should not exceed max_entries");
+    }
+
+    #[test]
+    fn zero_ttl_is_immediately_expired_on_next_insert() {
+        let cache = JtiCache::new(10);
+        assert!(cache.insert("jti-1", 1000, 0)); // expires at 1000 — effectively now
+        // At now_secs == 1000 on the next call, the retain predicate is
+        // `expires_at > now_secs`, i.e. 1000 > 1000 is false → evicted.
+        let inserted = cache.insert("jti-2", 1000, 60);
+        assert!(inserted);
+        assert_eq!(cache.len(), 1, "zero-ttl entry should be swept on next insert");
+    }
+
+    #[test]
+    fn concurrent_inserts_race_safe() {
+        // Spawn N threads each inserting a unique jti; verify all
+        // succeed and len == N. Uses std::thread (sync test runner;
+        // no compio needed).
+        use std::sync::Arc;
+        use std::thread;
+        let cache = Arc::new(JtiCache::new(1000));
+        let mut handles = vec![];
+        for i in 0..50 {
+            let c = cache.clone();
+            handles.push(thread::spawn(move || {
+                c.insert(&format!("jti-{i}"), 1000, 60)
+            }));
+        }
+        let all_ok = handles.into_iter().all(|h| h.join().unwrap());
+        assert!(all_ok, "all unique jti inserts should return true");
+        assert_eq!(cache.len(), 50);
+    }
+}
