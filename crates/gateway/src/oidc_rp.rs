@@ -227,6 +227,8 @@ impl OidcRp {
             &self.issuer,
             &self.client_id,
             Some(&stash.nonce),
+            Some(&tr.access_token),
+            Some(code),
         )
         .await?;
 

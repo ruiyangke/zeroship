@@ -187,6 +187,8 @@ impl ConsoleOidcRp {
             &expected_iss,
             &self.client_id,
             Some(&stash.nonce),
+            Some(&tr.access_token),
+            Some(code),
         )
         .await?;
 

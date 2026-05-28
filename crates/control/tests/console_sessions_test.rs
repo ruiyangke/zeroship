@@ -22,6 +22,8 @@ fn claims_for(user_id: &str, email: &str) -> TokenClaims {
         iat: 0,
         nbf: None,
         nonce: None,
+        at_hash: None,
+        c_hash: None,
         email: Some(email.to_string()),
         email_verified: Some(true),
         name: Some("Console User".to_string()),

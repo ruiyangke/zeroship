@@ -17,12 +17,11 @@ use zeroship_core::pkce::{generate_verifier, s256_challenge};
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
 
-/// Subset of Google's `/token` response. Only `id_token` is consumed
-/// (verified against Google's JWKS); the access token / refresh token
-/// aren't needed — we don't make further Google API calls after the OIDC
-/// dance.
+/// Subset of Google's `/token` response. The access token is consumed
+/// only for OIDC `at_hash` verification when Google includes that claim.
 #[derive(Deserialize)]
 struct TokenResponse {
+    access_token: Option<String>,
     id_token: String,
 }
 
@@ -165,6 +164,8 @@ pub async fn complete_callback(
         cfg.google_issuer.as_str(),
         client_id,
         Some(expected_nonce),
+        tr.access_token.as_deref(),
+        Some(code),
     )
     .await
     .map_err(|e| AuthError::Internal(format!("google id_token verify: {e}")))?;
