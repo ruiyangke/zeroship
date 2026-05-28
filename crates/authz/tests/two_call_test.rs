@@ -3,7 +3,7 @@ use std::future::Future;
 use uuid::Uuid;
 use zeroship_authz::{
     enforce, is_authorized_anywhere, load_platform_policies, policy_hash, Action, AuthzContext,
-    AuthzDecision, Condition, Effect, Policy, Resource, Statement,
+    AuthzDecision, Condition, Effect, EntityCache, Policy, Resource, Statement,
 };
 
 #[test]
@@ -186,6 +186,30 @@ fn time_window_policy_enforces_utc_hours() {
 
         assert_eq!(denied, AuthzDecision::Deny);
         assert_eq!(allowed, AuthzDecision::Allow);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn entity_cache_invalidation_refreshes_platform_role() {
+    run_db_test(|pg| async move {
+        let fixture = Fixture::new(&pg, "cache-invalidate", None, None).await;
+        let policies = load_platform_policies().unwrap();
+
+        let denied = enforce(&pg, &policies, &fixture.ctx(None)).await.unwrap();
+        assert_eq!(denied, AuthzDecision::Deny);
+
+        pg.execute(
+            "INSERT INTO platform.roles (user_id, role) VALUES ($1, 'admin')",
+            &[&fixture.user_id],
+        )
+        .await
+        .expect("insert platform role");
+        EntityCache::invalidate(fixture.user_id);
+
+        let allowed = enforce(&pg, &policies, &fixture.ctx(None)).await.unwrap();
+        assert_eq!(allowed, AuthzDecision::Allow);
+
         fixture.cleanup(&pg).await;
     });
 }

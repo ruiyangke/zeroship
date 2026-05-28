@@ -33,6 +33,36 @@ struct CacheEntry {
     entities: Entities,
 }
 
+#[derive(Debug)]
+pub struct EntityCache;
+
+impl EntityCache {
+    pub fn invalidate(principal_id: Uuid) {
+        let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+        let keys = cache
+            .iter()
+            .filter(|(key, _)| key.principal_id == principal_id)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            cache.pop(&key);
+        }
+    }
+
+    pub fn invalidate_resource(resource: &Resource) {
+        let resource_key = resource_cache_key(resource);
+        let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+        let keys = cache
+            .iter()
+            .filter(|(key, _)| key.resource_key == resource_key)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            cache.pop(&key);
+        }
+    }
+}
+
 #[derive(Default)]
 struct Memberships {
     owner: Vec<String>,

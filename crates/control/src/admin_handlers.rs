@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_authz::{Action, PolicySet, Resource};
+use zeroship_authz::{Action, EntityCache, PolicySet, Resource};
 
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
@@ -114,6 +114,7 @@ pub async fn grant_platform_role(
         tracing::error!(error = %err, "control: platform role grant failed");
         return db_error();
     }
+    EntityCache::invalidate(target);
 
     if let Err(resp) = audit_event(
         &req,
@@ -157,6 +158,7 @@ pub async fn revoke_platform_role(
         tracing::error!(error = %err, "control: platform role revoke failed");
         return db_error();
     }
+    EntityCache::invalidate(target);
 
     if let Err(resp) = audit_event(
         &req,
@@ -239,6 +241,9 @@ pub async fn set_app_audit_lock(
     let Some(row) = rows.first() else {
         return web::HttpResponse::NotFound().json(&json!({"error": "app not found"}));
     };
+    EntityCache::invalidate_resource(&Resource::App {
+        id: app_id.to_string(),
+    });
 
     if let Err(resp) = audit_event(
         &req,
@@ -297,6 +302,9 @@ pub async fn set_app_suspension(
     let Some(row) = rows.first() else {
         return web::HttpResponse::NotFound().json(&json!({"error": "app not found"}));
     };
+    EntityCache::invalidate_resource(&Resource::App {
+        id: app_id.to_string(),
+    });
 
     if let Err(resp) = audit_event(
         &req,

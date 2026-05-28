@@ -13,7 +13,9 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_authz::{self as authz, AuthzContext, AuthzDecision, Effect, Policy, Resource};
+use zeroship_authz::{
+    self as authz, AuthzContext, AuthzDecision, Effect, EntityCache, Policy, Resource,
+};
 
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
@@ -345,6 +347,7 @@ pub async fn delete_token(
     let Some(row) = rows.first() else {
         return web::HttpResponse::NotFound().json(&json!({"error": "token_not_found"}));
     };
+    EntityCache::invalidate(guard.principal_id);
     let revoked_at: DateTime<Utc> = row.get("revoked_at");
     web::HttpResponse::Ok().json(&DeleteTokenResponse {
         id: token_id.to_string(),
