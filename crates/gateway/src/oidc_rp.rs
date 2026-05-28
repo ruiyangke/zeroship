@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use zeroship_core::auth::hmac_sha256;
 use zeroship_core::oidc_verify::{verify_id_token, JwksCache, OidcError, TokenClaims};
 use zeroship_core::pkce::{generate_verifier, s256_challenge};
 
@@ -309,13 +310,6 @@ impl Stash {
         let json = URL_SAFE_NO_PAD.decode(b64).ok()?;
         serde_json::from_slice(&json).ok()
     }
-}
-
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(key).expect("hmac key");
-    mac.update(msg);
-    mac.finalize().into_bytes().into()
 }
 
 // ─── Cookie helpers ──────────────────────────────────────────────────────

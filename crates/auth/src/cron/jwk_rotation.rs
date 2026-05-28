@@ -10,6 +10,11 @@
 //! `auth.cron_state` row keyed by the set name. We never inspect key
 //! `kid`s or hydra-internal timestamps — operationally simpler and the
 //! one decision we control.
+//!
+//! Companion: [`super::audit_retention`] sweeps `auth.audit_events` on a
+//! separate ticker (different cadence, different table — kept in their
+//! own modules so a JWK-rotation incident never blocks log retention
+//! and vice versa).
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -30,10 +30,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::Client;
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use uuid::Uuid;
+use zeroship_core::auth::hmac_sha256;
 
 use crate::error::{AuthError, Result};
 use crate::store::{identities, users};
@@ -161,12 +160,6 @@ impl PendingLink {
         }
         Some(pl)
     }
-}
-
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("hmac key");
-    mac.update(msg);
-    mac.finalize().into_bytes().into()
 }
 
 /// Resolve the local user for a federation callback.

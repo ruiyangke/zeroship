@@ -12,9 +12,8 @@
 //! the same as the gateway's `oidc_rp::Stash`.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use zeroship_core::auth::hmac_sha256;
 
 /// Payload stashed between `/oauth/<provider>/start` and `/oauth/<provider>/callback`.
 ///
@@ -73,12 +72,6 @@ impl OAuthStash {
         let json = URL_SAFE_NO_PAD.decode(b64).ok()?;
         serde_json::from_slice(&json).ok()
     }
-}
-
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("hmac key");
-    mac.update(msg);
-    mac.finalize().into_bytes().into()
 }
 
 // ─── Cookie helpers ──────────────────────────────────────────────────────

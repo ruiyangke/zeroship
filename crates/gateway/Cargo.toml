@@ -29,8 +29,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-# Phase 3 U3 — gateway OIDC RP module.
-hmac = { workspace = true }
 thiserror = { workspace = true }
 cyper = { workspace = true }
 http = { workspace = true }

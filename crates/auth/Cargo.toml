@@ -22,9 +22,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
 sha2 = { workspace = true }
-# Used by `ui::oauth_stash` to MAC the short-lived federation stash cookie.
-hmac = { workspace = true }
-hex = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 mimalloc = { workspace = true }

@@ -14,6 +14,11 @@
 //! Events not in any bucket are kept forever (defensive default — better
 //! to retain a not-yet-classified event than silently delete forensic
 //! evidence).
+//!
+//! Companion: [`super::jwk_rotation`] rotates the hydra JWKS on its own
+//! ticker (different cadence, different table — kept in their own
+//! modules so a JWK-rotation incident never blocks log retention and
+//! vice versa).
 
 use std::sync::Arc;
 use std::time::Duration;

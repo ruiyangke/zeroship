@@ -54,12 +54,26 @@ pub fn extract_bearer(header: &str) -> Option<&str> {
 // HMAC-SHA256 signing — used to sign forwarded identity across trust boundaries
 // ---------------------------------------------------------------------------
 
+/// Compute an HMAC-SHA256 over `payload` with `key`, returned as the
+/// raw 32-byte tag.
+///
+/// Used by the federation stash cookie (auth: `ui::oauth_stash`),
+/// the pending-link token (auth: `identity::linker`), and the
+/// gateway-side RP-callback stash (gateway: `oidc_rp`). Each
+/// previously inlined the same three lines — keep it in one place so
+/// the constant-time-compare wrappers above stay co-located with the
+/// MAC primitive.
+#[must_use]
+pub fn hmac_sha256(key: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(payload);
+    mac.finalize().into_bytes().into()
+}
+
 /// Compute an HMAC-SHA256 over `payload` with `key`, returned as lowercase hex.
 #[must_use]
 pub fn hmac_sha256_hex(key: &[u8], payload: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(payload);
-    hex::encode(mac.finalize().into_bytes())
+    hex::encode(hmac_sha256(key, payload))
 }
 
 /// Constant-time verify of `expected_hex` against `payload` HMAC-signed with `key`.
@@ -131,5 +145,27 @@ mod tests {
     fn hmac_rejects_wrong_key() {
         let mac = hmac_sha256_hex(b"key-a", b"payload");
         assert!(!verify_hmac_sha256_hex(b"key-b", b"payload", &mac));
+    }
+
+    /// Raw 32-byte HMAC tag matches the hex-encoded form bit-for-bit.
+    /// Regression test for the dedupe in
+    /// `auth: ui::oauth_stash`/`identity::linker` and `gateway: oidc_rp`
+    /// — if `hmac_sha256` ever drifts from `hmac_sha256_hex`, every
+    /// federation cookie + pending-link token signed under one and
+    /// verified under the other would silently reject. The fixture is a
+    /// known-answer test from RFC 4231 §4.2 (HMAC-SHA-256, key 20×0x0b,
+    /// data "Hi There").
+    #[test]
+    fn hmac_raw_matches_hex_and_rfc4231_kat() {
+        let key = [0x0b_u8; 20];
+        let data = b"Hi There";
+        let raw = hmac_sha256(&key, data);
+        let hex_form = hmac_sha256_hex(&key, data);
+        assert_eq!(hex::encode(raw), hex_form);
+        // RFC 4231 §4.2 expected output.
+        assert_eq!(
+            hex_form,
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
     }
 }
