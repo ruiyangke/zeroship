@@ -137,3 +137,18 @@ Read-only source audit. Source was not modified.
 - Token sweeper and DPoP JTI sweeper: deletes are idempotent; concurrent sweepers can duplicate work but do not double-spend or widen token validity. `PgJtiCache` inserts use `ON CONFLICT DO NOTHING RETURNING`.
 - Platform role grant/revoke and PAT delete: the role/PAT row mutations are single SQL statements. Concurrent grant/revoke is last-statement-wins, which is at least database-linearized; the remaining concern is product semantics, not an unprotected read-modify-write window.
 - `std::sync::{Mutex,RwLock}`/`OnceLock` search: observed locks are short critical sections and are not held across `.await`. The mutable state concern that rises to a finding is the process-local control rate limiter above.
+
+## Status
+
+- C1 — FIXED in `8762d6d5` (`fix(auth): isolate password reset transaction`).
+- H1 — FIXED in `7c5fd383` (`fix(auth): fence sessions by credential generation`).
+- H2 — FIXED in `b488e229` (`fix(auth): reserve magic completions before wrong attempts`).
+- H3 — FIXED in `2799de0a` (`fix(auth): persist consent grants after hydra accept`).
+- H4 — FIXED in `1bfa7831` (`fix(auth): serialize oauth grant mutations`).
+- H5 — DEFERRED: already covered outside R5 by R1.H4 token issuance work; R3.H3 owns the belt-and-suspender partial-index constraints.
+- H6 — FIXED in `90e1e8bb` (`fix(control): lock builder oauth bootstrap`).
+- M1 — FIXED in `02caf537` (`fix(auth): bind magic reservation finalization`).
+- M2 — FIXED in `6f432b4b` (`fix(auth): lock hydra client bootstrap`).
+- L1 — FIXED in `e97df2bb` (`fix(control): share rate limits through postgres`).
+
+Verification note: this sandbox cannot create the `compio` runtime (`Operation not permitted` from io_uring), so live `#[compio::test]` execution was blocked. Each changed path was verified with targeted `cargo test ... --no-run` compile checks plus `git diff --check`.
