@@ -1,10 +1,10 @@
-//! Per-IP token-bucket rate limiter for the control plane.
+//! Per-IP token-bucket quota helpers for the control plane.
 //!
-//! In-memory only — losing the bucket state on restart is fine (worst
-//! case: an attacker gets one full burst per restart). Production
-//! deployments behind a load balancer should ALSO configure
-//! LB-level rate limits as the primary defense; this is one layer
-//! down for redundancy.
+//! HTTP handlers consume from the DB-backed `auth.rate_limits` table via
+//! `http_util`, so buckets are shared across control-plane instances.
+//! The in-memory implementation below stays as a small local primitive
+//! for unit tests and non-HTTP callers that explicitly want process-local
+//! accounting.
 //!
 //! Buckets are evicted lazily on access if untouched for `IDLE_TTL`,
 //! so the map can't grow unbounded under a churning attacker.
@@ -50,6 +50,11 @@ pub struct RateLimiter {
 impl RateLimiter {
     pub fn new(quota: Quota) -> Self {
         Self { quota, buckets: Mutex::new(HashMap::new()) }
+    }
+
+    #[must_use]
+    pub fn quota(&self) -> Quota {
+        self.quota
     }
 
     /// Try to consume one token for `ip`. Returns true if allowed,
