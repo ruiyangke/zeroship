@@ -6,6 +6,7 @@
 //!
 //! Each test uses a unique app row so parallel runs don't collide.
 
+use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
@@ -17,6 +18,17 @@ async fn create_test_app(registry: &Registry) -> Uuid {
     let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let rec = registry.create_app(&name, "free").await.expect("create_app");
     rec.id
+}
+
+async fn raw_conn(db_url: &str) -> compio_postgres::Client {
+    let (client, connection) = connect(db_url, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+    client
 }
 
 #[compio::test]
@@ -299,6 +311,46 @@ async fn audit_log_roundtrip() {
     assert_eq!(rows[1].action, "set_secret");
     assert_eq!(rows[1].source_ip.as_deref(), Some("203.0.113.7"));
     assert_eq!(rows[0].actor, "admin");
+
+    registry.delete_app(&app).await.ok();
+}
+
+#[compio::test]
+async fn app_audit_is_append_only() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let app = create_test_app(&registry).await;
+
+    audit::log(&registry, AuditEntry {
+        app_id: Some(app),
+        creator_id: None,
+        actor: "admin",
+        action: Action::SetVar,
+        resource: Some("APPEND_ONLY_PROBE"),
+        source_ip: None,
+    }).await;
+
+    let conn = raw_conn(&url).await;
+    let rows = conn
+        .query(
+            "SELECT id FROM app_audit WHERE app_id = $1 AND resource = 'APPEND_ONLY_PROBE'",
+            &[&app],
+        )
+        .await
+        .expect("select audit row");
+    let audit_id: Uuid = rows[0].get("id");
+
+    let err = conn
+        .execute("DELETE FROM app_audit WHERE id = $1", &[&audit_id])
+        .await
+        .expect_err("app_audit should reject delete");
+    let message = err.to_string();
+    assert!(
+        message.contains("append-only")
+            || message.contains("permission")
+            || message.contains("db error"),
+        "expected append-only/permission rejection, got: {message}"
+    );
 
     registry.delete_app(&app).await.ok();
 }

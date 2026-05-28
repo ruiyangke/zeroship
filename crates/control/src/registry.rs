@@ -331,6 +331,94 @@ impl Registry {
         .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
+            "CREATE OR REPLACE FUNCTION public.app_audit_block_tamper()
+             RETURNS trigger AS $$
+             BEGIN
+                 RAISE EXCEPTION 'app_audit is append-only'
+                     USING ERRCODE = 'insufficient_privilege';
+             END
+             $$ LANGUAGE plpgsql",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DROP TRIGGER IF EXISTS app_audit_block_update ON app_audit",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE TRIGGER app_audit_block_update
+                BEFORE UPDATE ON app_audit
+                FOR EACH ROW EXECUTE FUNCTION public.app_audit_block_tamper()",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DROP TRIGGER IF EXISTS app_audit_block_delete ON app_audit",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE TRIGGER app_audit_block_delete
+                BEFORE DELETE ON app_audit
+                FOR EACH ROW EXECUTE FUNCTION public.app_audit_block_tamper()",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DROP TRIGGER IF EXISTS app_audit_block_truncate ON app_audit",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE TRIGGER app_audit_block_truncate
+                BEFORE TRUNCATE ON app_audit
+                FOR EACH STATEMENT EXECUTE FUNCTION public.app_audit_block_tamper()",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "REVOKE UPDATE, DELETE, TRUNCATE ON TABLE app_audit FROM PUBLIC",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DO $$
+             DECLARE
+                 role_name TEXT;
+             BEGIN
+                 FOREACH role_name IN ARRAY ARRAY[
+                     'zeroship_auth',
+                     'zeroship_control',
+                     'zeroship_gateway',
+                     'zeroship_worker',
+                     'zeroship_app',
+                     'auth',
+                     'control'
+                 ] LOOP
+                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                         EXECUTE format(
+                             'REVOKE UPDATE, DELETE, TRUNCATE ON TABLE app_audit FROM %I',
+                             role_name
+                         );
+                     END IF;
+                 END LOOP;
+             END
+             $$",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_app_audit_app_at ON app_audit(app_id, at DESC)",
             &[],
         )

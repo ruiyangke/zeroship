@@ -93,6 +93,30 @@ async fn migrations_apply_cleanly() {
         .await
         .expect("insert authz decision");
 
+    let audit_rows = client
+        .query(
+            "INSERT INTO auth.audit_events (event_type, outcome, user_id, detail)
+             VALUES ('migration_append_only_probe', 'success', $1, '{\"test\":\"append_only\"}'::jsonb)
+             RETURNING id",
+            &[&owner_id],
+        )
+        .await
+        .expect("insert auth audit probe");
+    let audit_id: i64 = audit_rows[0].get("id");
+
+    assert_append_only_fails(
+        &client,
+        "DELETE FROM auth.audit_events WHERE id = $1",
+        &[&audit_id],
+    )
+    .await;
+    assert_append_only_fails(
+        &client,
+        "UPDATE control.authz_decisions SET decision = 'deny' WHERE request_id = $1",
+        &[&request_id],
+    )
+    .await;
+
     assert_check_fails(
         &client,
         "INSERT INTO platform.roles (user_id, role) VALUES ($1, 'evil_admin')",
@@ -179,5 +203,23 @@ async fn assert_check_fails(
     assert!(
         message.contains("check") || message.contains("violates") || message.contains("db error"),
         "expected CHECK violation, got: {message}"
+    );
+}
+
+async fn assert_append_only_fails(
+    client: &compio_postgres::Client,
+    statement: &str,
+    params: &[&(dyn compio_postgres::types::ToSql + Sync)],
+) {
+    let err = client
+        .execute(statement, params)
+        .await
+        .expect_err("append-only audit table should reject mutation");
+    let message = err.to_string();
+    assert!(
+        message.contains("append-only")
+            || message.contains("permission")
+            || message.contains("db error"),
+        "expected append-only/permission rejection, got: {message}"
     );
 }
