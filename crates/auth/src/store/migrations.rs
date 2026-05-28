@@ -258,7 +258,10 @@ const STATEMENTS: &[&str] = &[
         last_used_at     TIMESTAMPTZ,
         PRIMARY KEY (user_id, client_id)
     )",
-    "CREATE INDEX IF NOT EXISTS oauth_grants_user_idx ON control.oauth_grants (user_id)",
+    "CREATE INDEX IF NOT EXISTS oauth_grants_user_granted_idx
+        ON control.oauth_grants (user_id, granted_at DESC)",
+    "CREATE INDEX IF NOT EXISTS oauth_grants_client_idx
+        ON control.oauth_grants (client_id)",
     "CREATE TABLE IF NOT EXISTS control.authz_decisions (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         occurred_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

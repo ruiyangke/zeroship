@@ -1,4 +1,4 @@
-// Platform readonly - universal read-only access.
+// Platform readonly - read access plus self-service account management.
 permit (
   principal is User,
   action,
@@ -12,5 +12,6 @@ permit (
    || action == Action::"billing:read"
    || action == Action::"team:read"
    || action == Action::"account:read"
+   || action == Action::"account:write"
    || action == Action::"deployments:read")
 };
