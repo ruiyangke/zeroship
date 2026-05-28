@@ -15,13 +15,13 @@
 // SEPARATE thread / runtime.
 #![allow(clippy::await_holding_lock)]
 
-use compio_postgres::{connect, NoTls};
+use compio_postgres::{connect, Client, NoTls};
 use std::sync::Mutex;
 use zeroship_auth::cron::jwk_rotation;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::store::migrations;
 
-// Both tests in this file mutate the same `auth.cron_state` rows
+// The hydra-backed tests in this file mutate the same `auth.cron_state` rows
 // (`hydra.openid.id-token`, `hydra.jwt.access-token`) and the same
 // live hydra JWKS sets. When cargo's test runner schedules them in
 // parallel, one test's `DELETE FROM auth.cron_state` clobbers the
@@ -38,6 +38,15 @@ use zeroship_auth::store::migrations;
 // / hydra sets and remain parallel-safe with this file.
 static JWK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+async fn pg_connect(dsn: &str) -> Client {
+    let (client, conn) = connect(dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
+}
+
 #[compio::test]
 async fn rotation_first_tick_records_baseline_no_action() {
     let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -51,11 +60,7 @@ async fn rotation_first_tick_records_baseline_no_action() {
         return;
     };
 
-    let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
-        let _ = conn.run().await;
-    })
-    .detach();
+    let client = pg_connect(&dsn).await;
     migrations::migrate(&client).await.expect("migrate");
 
     // Ensure no prior cron_state for these sets so we exercise the
@@ -131,11 +136,7 @@ async fn rotation_due_prepends_new_keys() {
         return;
     };
 
-    let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
-        let _ = conn.run().await;
-    })
-    .detach();
+    let client = pg_connect(&dsn).await;
     migrations::migrate(&client).await.expect("migrate");
 
     let admin = HydraAdmin::new(&admin_url);
@@ -202,6 +203,86 @@ async fn rotation_due_prepends_new_keys() {
 }
 
 #[compio::test]
+async fn concurrent_rotation_ticks_create_one_key_batch() {
+    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skip: AUTH_DB_URL unset");
+        return;
+    };
+    let Ok(admin_url) = std::env::var("AUTH_HYDRA_ADMIN") else {
+        eprintln!("skip: AUTH_HYDRA_ADMIN unset");
+        return;
+    };
+
+    let client = pg_connect(&dsn).await;
+    migrations::migrate(&client).await.expect("migrate");
+
+    let id_token_set = "hydra.openid.id-token";
+    let access_set = "hydra.jwt.access-token";
+    let rotation_days = 90;
+    let retain_days = 31;
+    let admin = HydraAdmin::new(&admin_url);
+
+    client
+        .execute(
+            "INSERT INTO auth.cron_state (key, last_rotated_at) \
+             VALUES ($1, NOW() - INTERVAL '100 days') \
+             ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW() - INTERVAL '100 days'",
+            &[&id_token_set],
+        )
+        .await
+        .expect("seed due id-token set");
+    client
+        .execute(
+            "INSERT INTO auth.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
+             ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW()",
+            &[&access_set],
+        )
+        .await
+        .expect("seed access-token set");
+
+    let before = admin
+        .get_jwks(id_token_set)
+        .await
+        .expect("get_jwks before")
+        .expect("id-token set populated by bootstrap");
+
+    let client_a = pg_connect(&dsn).await;
+    let client_b = pg_connect(&dsn).await;
+    let admin_a = HydraAdmin::new(&admin_url);
+    let admin_b = HydraAdmin::new(&admin_url);
+    let tick_a = compio::runtime::spawn(async move {
+        jwk_rotation::tick_once_for_test(&admin_a, &client_a, rotation_days, retain_days).await
+    });
+    let tick_b = compio::runtime::spawn(async move {
+        jwk_rotation::tick_once_for_test(&admin_b, &client_b, rotation_days, retain_days).await
+    });
+
+    tick_a.await.expect("join tick A").expect("tick A");
+    tick_b.await.expect("join tick B").expect("tick B");
+
+    let after = admin
+        .get_jwks(id_token_set)
+        .await
+        .expect("get_jwks after")
+        .expect("id-token set still present");
+    assert_eq!(
+        before.keys.len() + 2,
+        after.keys.len(),
+        "two concurrent ticks must serialize: one id-token batch only"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
+            &[],
+        )
+        .await
+        .ok();
+}
+
+#[compio::test]
 async fn stale_access_token_keys_are_retired_before_rotation() {
     let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -214,11 +295,7 @@ async fn stale_access_token_keys_are_retired_before_rotation() {
         return;
     };
 
-    let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
-        let _ = conn.run().await;
-    })
-    .detach();
+    let client = pg_connect(&dsn).await;
     migrations::migrate(&client).await.expect("migrate");
 
     let admin = HydraAdmin::new(&admin_url);
