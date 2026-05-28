@@ -141,6 +141,12 @@ export type {
   SliderOrientation,
 } from "./Slider";
 
+export { Form } from "./Form";
+export type { FormProps, FormVariant } from "./Form";
+
+export { Fieldset } from "./Fieldset";
+export type { FieldsetProps, FieldsetSize } from "./Fieldset";
+
 export { AlertDialog } from "./AlertDialog";
 export type {
   AlertDialogProps,

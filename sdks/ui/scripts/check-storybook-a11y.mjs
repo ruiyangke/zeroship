@@ -225,6 +225,23 @@ const stories = [
   "components-slider--forced-colors-outline",
   "components-slider--coarse-pointer",
   "components-slider--rtl",
+  // Slice 8: Form + Fieldset (structural wrappers).
+  "components-form--basic-submit",
+  "components-form--with-validation",
+  "components-form--validation-modes",
+  "components-form--variants",
+  "components-form--with-fields",
+  "components-form--actions-ref-validate",
+  "components-form--disabled",
+  "components-form--rtl",
+  "components-fieldset--basic-with-legend",
+  "components-fieldset--all-sizes",
+  "components-fieldset--nested-fields",
+  "components-fieldset--disabled-cascade",
+  "components-fieldset--with-form-integration",
+  "components-fieldset--nested-fieldset",
+  "components-fieldset--custom-legend-position",
+  "components-fieldset--rtl",
 ];
 
 async function launchBrowser() {

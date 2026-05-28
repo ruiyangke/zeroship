@@ -1,0 +1,103 @@
+/*
+ * Form — submit + validation surface.
+ *
+ * Anatomy:
+ *   .zs-form              the root <form> element (variant=default —
+ *                         no surface chrome; pure layout container).
+ *   .zs-form--card        same root with an opaque surface + Card-style
+ *                         rim so the form can stand alone as a page-
+ *                         level container without nesting inside Card.
+ *
+ * Variants:
+ *   --default | --card
+ *
+ * Rhythm:
+ *   - The root is `display: grid` (single column) so children stack
+ *     with a consistent gap and Fieldsets / Fields measure block-size
+ *     against the grid track (avoids the flex-with-min-height: 0 dance
+ *     a Textarea inside a Form would otherwise hit).
+ *   - --zs-form-gap controls the vertical rhythm between top-level
+ *     Field rows; consumers can override per-form by setting
+ *     `--zs-form-gap` inline on the Form element.
+ *   - `min-inline-size: 0` lets a Form nested inside a flex parent
+ *     shrink without pushing its inputs to overflow.
+ *
+ * Card variant carries the same edge / shadow tokens Card.surface
+ * uses, so a Form variant=card visually reads as a sibling of a
+ * surface Card. backdrop-filter is gated through
+ * --zs-card-backdrop-filter (opaque themes get `none`).
+ *
+ * RTL: every directional spacing rule uses logical properties — no
+ * margin-left / margin-right in this file. Tested via the RTL story.
+ */
+
+.zs-form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--zs-form-gap, var(--zs-space-5));
+  min-inline-size: 0;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+/* ─── variant=card ────────────────────────────────────────────────── */
+/*
+ * Surface + rim matches Card.surface (--zs-card-surface-edge, opaque
+ * --zs-surface base) so dropping a Form variant=card next to a Card
+ * doesn't double the chrome. Padding lifts from --zs-card-padding-md
+ * for the same reason.
+ */
+.zs-form--card {
+  padding: var(--zs-card-padding-md);
+  border-radius: var(--zs-card-radius-md);
+  background-color: var(--zs-surface);
+  box-shadow: var(--zs-card-surface-edge);
+  backdrop-filter: var(--zs-card-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-card-backdrop-filter,
+    var(--zs-material-regular)
+  );
+  /* `overflow: hidden` so a sub-Card.Media inside the form clips to
+     the form's border-radius the same way it does inside a Card. */
+  overflow: hidden;
+}
+
+/* ─── reduced motion ──────────────────────────────────────────────── *
+ * Form itself owns no animation today, but downstream Field error
+ * subtrees may animate in. The reduced-motion @media on the foundation
+ * tokens (--zs-motion-base → 1ms) already gates that. No per-form rule
+ * needed; the @media block exists to document the contract. */
+@media (prefers-reduced-motion: reduce) {
+  /* No per-component motion to disable — placeholder so the
+     reduced-motion contract is visible in the stylesheet for future
+     audits. */
+  .zs-form {
+    /* explicit no-op */
+  }
+}
+
+/* ─── forced-colors / Windows High Contrast ───────────────────────── *
+ * variant=card replaces the soft surface rim with a system-color
+ * CanvasText hairline so the form's edge stays visible under forced
+ * colors (where box-shadow + background-color are both flattened to
+ * the system palette).
+ *
+ * State-selector specificity mirror (Slice 5/6/7 lesson): every
+ * selector inside the @media block matches the authored selector at
+ * equal specificity so a forced-colors UA can't fall through to the
+ * default rule. Today the only state worth mirroring is the
+ * variant=card chrome; the default variant has no chrome to mirror. */
+@media (forced-colors: active) {
+  .zs-form {
+    color: CanvasText;
+  }
+  .zs-form--card {
+    background-color: Canvas;
+    /* `box-shadow` is flattened in forced-colors mode; use a real
+       border in CanvasText so the rim survives. The `0.0625rem`
+       rem-based width keeps the rim at exactly 1 device pixel at
+       the default root font-size (16 device pixels). */
+    box-shadow: none;
+    border: 0.0625rem solid CanvasText;
+  }
+}

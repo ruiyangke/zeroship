@@ -1,0 +1,143 @@
+/*
+ * Fieldset — structural grouping of related Fields under a shared
+ * visible label (Legend) and a shared `disabled` cascade.
+ *
+ * Anatomy:
+ *   .zs-fieldset             the root <fieldset> element (Base UI
+ *                             auto-wires aria-labelledby to the legend's
+ *                             id; the legend itself can sit anywhere
+ *                             inside the fieldset).
+ *     └─ .zs-fieldset__legend  the visible group label (Base UI
+ *                              renders a <div>, not a <legend> — see
+ *                              Fieldset.tsx header for the rationale).
+ *
+ * Modifiers:
+ *   sizes: --sm | --lg (md is the default; no class needed)
+ *
+ * Why no surface chrome by default: Fieldset is structural. The shell
+ * is layout-only so a Fieldset inside a Form variant=card doesn't
+ * double the surface. If a consumer wants chrome around a group,
+ * wrap the Fieldset in a Card surface.
+ *
+ * Native `<fieldset>` quirks we work around:
+ *   - The legacy browser default `padding-block-end` / `padding-block-
+ *     start` differs across UAs. We zero them and lift padding to our
+ *     token-driven values so the rhythm is stylesheet-defined.
+ *   - The legacy `min-inline-size: min-content` on `<fieldset>` from
+ *     UA stylesheets forces the fieldset to be as wide as its widest
+ *     child — clamp it back to `0` so flex parents can shrink the
+ *     fieldset normally.
+ *   - The default border (1-device-pixel groove) is removed; we own
+ *     the chrome.
+ *
+ * RTL: every directional spacing rule uses logical properties. Tested
+ * via the RTL story.
+ */
+
+.zs-fieldset {
+  /* Reset the UA stylesheet's default fieldset chrome. The native
+     border + padding combo doesn't match our token system, and the
+     `min-inline-size: min-content` quirk blocks Form-level shrink. */
+  margin: 0;
+  padding-block: var(--zs-space-4);
+  padding-inline: var(--zs-space-4);
+  border: 0;
+  min-inline-size: 0;
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-fieldset-gap, var(--zs-space-4));
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+/* ─── sizes ───────────────────────────────────────────────────────── */
+.zs-fieldset--sm {
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-3);
+  gap: var(--zs-space-3);
+}
+.zs-fieldset--lg {
+  padding-block: var(--zs-space-5);
+  padding-inline: var(--zs-space-5);
+  gap: var(--zs-space-5);
+}
+
+/* ─── Legend ──────────────────────────────────────────────────────── *
+ * Base UI renders the legend as a <div> bound via `aria-labelledby`,
+ * NOT a native <legend>. The native <legend>'s "punch a hole in the
+ * fieldset border" affordance therefore doesn't apply (and Fieldset
+ * has no border anyway). Type token matches the Field label so a
+ * Legend sitting above a row of Fields stays in visual rhythm.
+ *
+ * Note: we deliberately avoid `position: absolute` games — the legend
+ * is a regular block in the flex column. The `CustomLegendPosition`
+ * story places the legend at the bottom of the fieldset via `order:
+ * 999` on a wrapping class; the underlying contract (aria-labelledby
+ * tracks the legend by id, regardless of DOM order) is unaffected. */
+.zs-fieldset__legend {
+  margin: 0;
+  padding: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  font-weight: 600;
+  color: var(--zs-label);
+}
+
+/* ─── disabled cascade ────────────────────────────────────────────── *
+ * Native <fieldset disabled> already disables every interactive
+ * descendant at the browser level (no JS needed). The visual greying
+ * happens at the legend (we re-color it) and at each descendant
+ * control (their own [data-disabled] / :disabled rules fire because
+ * the browser propagates the disabled state). The aria-wiring
+ * assertion verifies the cascade reaches a nested Input.
+ *
+ * We use both the data-disabled selector (we set it explicitly in
+ * Fieldset.tsx for parity with Field/Card) AND the native
+ * :disabled pseudo as a defense-in-depth selector. Forced-colors
+ * specificity mirror lives in its own @media block below. */
+/* Disabled legend: NOT shifted to --zs-label-tertiary (which sits at
+ * L~0.55 in Crystal and measures 4.46:1 against the surface — just
+ * under the 4.5:1 AA threshold for normal-weight 15px text). Same
+ * contingency Field's Description hit (held on label-secondary
+ * instead of tertiary). The native disabled cascade already greys
+ * every interactive descendant; the legend keeping label-secondary
+ * reads as "section is disabled" without the AA shortfall. */
+.zs-fieldset[data-disabled] > .zs-fieldset__legend,
+.zs-fieldset:disabled > .zs-fieldset__legend {
+  color: var(--zs-label-secondary);
+}
+
+/* ─── forced-colors / Windows High Contrast ───────────────────────── *
+ * Specificity mirror: every state selector above must match the
+ * authored selector at equal/higher specificity inside the
+ * forced-colors block. Slice 5/6/7 lesson — without the mirror a
+ * forced-colors UA can fall through to the default color rule and
+ * the disabled state stops reading as disabled.
+ *
+ * GrayText is the system color for inactive content; CanvasText for
+ * default text. */
+@media (forced-colors: active) {
+  .zs-fieldset {
+    color: CanvasText;
+  }
+  .zs-fieldset__legend {
+    color: CanvasText;
+  }
+  .zs-fieldset[data-disabled] > .zs-fieldset__legend,
+  .zs-fieldset:disabled > .zs-fieldset__legend {
+    color: GrayText;
+  }
+}
+
+/* ─── reduced motion ──────────────────────────────────────────────── *
+ * Fieldset itself owns no animation. The motion-tokens already gate
+ * descendant Field animations; placeholder block exists so the
+ * reduced-motion contract is visible in the stylesheet for future
+ * audits. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-fieldset {
+    /* explicit no-op — descendants handle their own motion via
+       --zs-motion-* tokens which are already reduced. */
+  }
+}

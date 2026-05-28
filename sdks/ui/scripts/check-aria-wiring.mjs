@@ -2204,6 +2204,127 @@ await injectCoarsePointerOverride();
   );
 }
 
+/* ─── 63. Form submit → onFormSubmit fires with collected formValues ─ *
+ *
+ * BasicSubmit: typing a value, then clicking the submit button must
+ * invoke `onFormSubmit(values)` with the typed value at the Field's
+ * `name`. The story mirrors the collected map into a status span; we
+ * read the span and verify the value round-tripped. */
+await open("components-form--basic-submit");
+{
+  const input = page.locator('[data-testid="form-basic-email"]');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await input.fill("submit-test@example.com");
+  const submit = page.getByRole("button", { name: "Submit" });
+  await submit.click();
+  // Allow the onFormSubmit callback + state-flush to settle before
+  // reading the status span.
+  await page.waitForTimeout(150);
+  const status = (
+    await page.locator('[data-testid="form-basic-result"]').innerText()
+  ).trim();
+  const ok =
+    status.includes("submit-test@example.com") && status.includes("email=");
+  report(
+    "Form submit → onFormSubmit fires with collected formValues",
+    ok,
+    `result="${status}"`,
+  );
+}
+
+/* ─── 64. Form actionsRef.validate() — programmatic Field validation ─ *
+ *
+ * ActionsRefValidate: clicking the "Validate now" button must
+ * imperatively trigger Field validation. The story Field is required
+ * + empty, so `actionsRef.current.validate()` should flip
+ * aria-invalid on the input AND render the Field.Error subtree
+ * (which carries the "Email is required." copy). */
+await open("components-form--actions-ref-validate");
+{
+  const button = page.locator('[data-testid="form-actions-ref-button"]');
+  await button.waitFor({ state: "visible", timeout: 5000 });
+  await button.click();
+  await page.waitForTimeout(200);
+  const input = page.locator('[data-testid="form-actions-ref-email"]');
+  const invalid = await input.getAttribute("aria-invalid");
+  const errorVisible = await page
+    .getByText("Email is required.", { exact: false })
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const statusText = (
+    await page.locator('[data-testid="form-actions-ref-status"]').innerText()
+  ).trim();
+  const ok =
+    invalid === "true" &&
+    errorVisible &&
+    statusText.includes("validate() called");
+  report(
+    "Form actionsRef.validate() programmatically invokes Field validation",
+    ok,
+    `aria-invalid="${invalid}" errorVisible=${errorVisible} status="${statusText}"`,
+  );
+}
+
+/* ─── 65. Fieldset disabled cascades to nested input ───────────────── *
+ *
+ * Native <fieldset disabled> propagates the disabled state to every
+ * interactive descendant at the browser layer. The aria-wiring
+ * contract: a nested input inside a disabled Fieldset MUST report
+ * `.disabled === true` (the DOM property the browser flips), and
+ * the input MUST be unfocusable (clicking the input does NOT move
+ * focus). aria-disabled is the screen-reader-visible signal; the
+ * native cascade also sets it through Base UI Field's own state
+ * machine. We check the DOM-level disabled property here since that
+ * is the actual semantic the browser cascades; aria-disabled may
+ * or may not be present depending on how the descendant Field
+ * mirrors the state. */
+await open("components-fieldset--disabled-cascade");
+{
+  const input = page.locator('[data-testid="fieldset-disabled-email"]');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const domDisabled = await input.evaluate((el) => el.disabled);
+  // Click on the input; if the cascade reached it, focus should NOT
+  // move to the input (disabled inputs are unfocusable).
+  await input.click({ force: true });
+  await page.waitForTimeout(50);
+  const isFocused = await input.evaluate((el) => el === document.activeElement);
+  const ok = domDisabled === true && isFocused === false;
+  report(
+    "Fieldset disabled cascades to nested input (DOM .disabled + unfocusable)",
+    ok,
+    `domDisabled=${domDisabled} focused=${isFocused}`,
+  );
+}
+
+/* ─── 66. Fieldset.Legend id is referenced by aria-labelledby ──────── *
+ *
+ * The Base UI Fieldset.Root binds `aria-labelledby` to the Legend's
+ * id via a RootContext.Provider. Verify the wiring: the
+ * <fieldset>'s aria-labelledby attribute MUST resolve to the
+ * Legend element via id, and that Legend element's text MUST match
+ * the visible label. */
+await open("components-fieldset--basic-with-legend");
+{
+  const fieldset = page.locator('[data-testid="fieldset-basic"]');
+  await fieldset.waitFor({ state: "visible", timeout: 5000 });
+  const labelledBy = await fieldset.getAttribute("aria-labelledby");
+  // Resolve the legend element via its id (using [id="..."] so
+  // colons / dots in the id don't break a CSS-escape-free selector).
+  const legendEl = labelledBy
+    ? page.locator(`[id="${labelledBy}"]`)
+    : null;
+  const legendText = legendEl
+    ? (await legendEl.innerText().catch(() => "")).trim()
+    : "";
+  const ok = Boolean(labelledBy) && legendText === "Mailing address";
+  report(
+    "Fieldset aria-labelledby resolves to Legend id with matching text",
+    ok,
+    `aria-labelledby="${labelledBy}" legend="${legendText}"`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
