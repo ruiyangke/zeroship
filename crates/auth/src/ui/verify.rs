@@ -1,5 +1,5 @@
-//! `/verify` GET handler — redeems an email-verification token and marks
-//! `auth.users.email_verified_at = NOW()`.
+//! `/verify` handlers — GET renders a POST interstitial, then POST redeems
+//! an email-verification token and marks `auth.users.email_verified_at = NOW()`.
 //!
 //! Per proposal §8.3 (Phase 5). The token is issued by [`crate::ui::signup`]
 //! on a successful signup and emailed to the user. Clicking the link in
@@ -12,13 +12,23 @@
 //! The success page links back to `/login` so the user can continue.
 
 use askama::Template;
-use ntex::web::HttpResponse;
+use ntex::http::header::COOKIE;
+use ntex::http::StatusCode;
+use ntex::web::{
+    types::{Form, Query, State},
+    HttpRequest, HttpResponse,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::audit::{self, AuditEvent};
+use crate::config::AuthConfig;
+use crate::csrf;
 use crate::identity::verification;
-use crate::ui::{ErrorPage, PublicErrorMessage, VerifyOkPage};
+use crate::ui::{
+    render_token_interstitial, ErrorPage, PublicErrorMessage, TokenRedeemInterstitial,
+    VerifyOkPage,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct VerifyQuery {
@@ -26,18 +36,49 @@ pub struct VerifyQuery {
     pub token: String,
 }
 
-/// `/verify?token=<token>` — atomically redeem the verification token, set
+#[derive(Debug, Deserialize)]
+pub struct VerifyRedeemForm {
+    pub csrf: Option<String>,
+    pub token: String,
+}
+
+/// `/verify?token=<token>` — render a one-shot interstitial that immediately
+/// POSTs the token to `/verify/redeem`.
+#[allow(clippy::unused_async, clippy::future_not_send)]
+pub async fn get(query: Query<VerifyQuery>, cfg: State<Arc<AuthConfig>>) -> HttpResponse {
+    let csrf_token = csrf::generate_token();
+    let page = TokenRedeemInterstitial {
+        title: "Verify email",
+        action: "/verify/redeem",
+        token: &query.token,
+        csrf: &csrf_token,
+        extra_fields: Vec::new(),
+    };
+    let csrf_set_cookie = csrf::set_cookie(&csrf_token, cfg.insecure_dev);
+    render_token_interstitial(&page, &csrf_set_cookie)
+}
+
+/// `/verify/redeem` — atomically redeem the verification token, set
 /// `email_verified_at = NOW()` on the user, render the success page.
 ///
 /// Invalid/expired tokens render the generic [`ErrorPage`]; the user can
 /// request a fresh verification email from the (future) `/me` action.
 #[allow(clippy::future_not_send)]
-pub async fn get(
-    query: ntex::web::types::Query<VerifyQuery>,
-    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+pub async fn post_redeem(
+    req: HttpRequest,
+    form: Form<VerifyRedeemForm>,
+    cfg: State<Arc<AuthConfig>>,
+    db: State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
+    if !valid_csrf(&req, form.csrf.as_deref(), &cfg) {
+        return render_error_with_status(
+            PublicErrorMessage::InvalidRequest,
+            StatusCode::FORBIDDEN,
+        );
+    }
+
     // 1. Redeem atomically.
-    let redeemed = match verification::redeem(db.as_ref(), &query.token).await {
+    let redeemed = match verification::redeem(db.as_ref(), &form.token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             audit::emit(
@@ -96,7 +137,24 @@ pub async fn get(
     resp.body(body)
 }
 
+fn valid_csrf(req: &HttpRequest, form_csrf: Option<&str>, cfg: &AuthConfig) -> bool {
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    cookie_token
+        .as_deref()
+        .zip(form_csrf)
+        .is_some_and(|(cookie, form)| csrf::matches(form, cookie))
+}
+
 fn render_error(message: PublicErrorMessage) -> HttpResponse {
+    render_error_with_status(message, StatusCode::OK)
+}
+
+fn render_error_with_status(message: PublicErrorMessage, status: StatusCode) -> HttpResponse {
     let page = ErrorPage {
         message,
         error_code: message.error_code(),
@@ -104,7 +162,7 @@ fn render_error(message: PublicErrorMessage) -> HttpResponse {
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
-    let mut resp = HttpResponse::Ok();
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
 }

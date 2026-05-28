@@ -104,12 +104,20 @@ pub fn configure(
                 web::resource("/magic/verify").route(web::get().to(ui::magic::verify)),
             )
             .service(
+                web::resource("/magic/verify/redeem")
+                    .route(web::post().to(ui::magic::verify_redeem)),
+            )
+            .service(
                 web::resource("/magic/complete")
                     .route(web::post().to(ui::magic::complete)),
             )
-            // Email verification (P5-U5). Token issued at /signup is
-            // redeemed here; sets auth.users.email_verified_at = NOW().
+            // Email verification (P5-U5). Token issued at /signup lands on
+            // GET /verify, then POST /verify/redeem consumes it and sets
+            // auth.users.email_verified_at = NOW().
             .service(web::resource("/verify").route(web::get().to(ui::verify::get)))
+            .service(
+                web::resource("/verify/redeem").route(web::post().to(ui::verify::post_redeem)),
+            )
             // Password reset (P5-U6). /forgot issues a 1h reset token
             // (enumeration-resistant); /reset redeems it and updates
             // auth.users.password_hash.

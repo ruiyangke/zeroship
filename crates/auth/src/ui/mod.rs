@@ -26,6 +26,10 @@ pub mod verify;
 pub mod webhooks;
 
 use askama::Template;
+use ntex::http::header::SET_COOKIE;
+use ntex::web::HttpResponse;
+
+use crate::headers;
 
 /// `/login` GET page. The handler resolves `client_name` from
 /// `info.client.client_name.as_deref().unwrap_or(&info.client.client_id)`
@@ -181,6 +185,35 @@ pub struct DevicePage<'a> {
 #[template(path = "verify_ok.html")]
 pub struct VerifyOkPage<'a> {
     pub email: &'a str,
+}
+
+#[derive(Debug, Template)]
+#[template(path = "token_redeem_interstitial.html")]
+pub struct TokenRedeemInterstitial<'a> {
+    pub title: &'a str,
+    pub action: &'a str,
+    pub token: &'a str,
+    pub csrf: &'a str,
+    pub extra_fields: Vec<(&'a str, &'a str)>,
+}
+
+pub fn render_token_interstitial(
+    page: &TokenRedeemInterstitial<'_>,
+    csrf_set_cookie: &str,
+) -> HttpResponse {
+    let body = page
+        .render()
+        .unwrap_or_else(|_| "<p>Redirecting...</p>".to_string());
+    let mut resp = HttpResponse::Ok();
+    resp.content_type("text/html; charset=utf-8");
+    resp.header("Cache-Control", "no-store");
+    resp.header("Pragma", "no-cache");
+    resp.header(
+        "Content-Security-Policy",
+        headers::content_security_policy_with_script_nonce(page.csrf),
+    );
+    resp.header(SET_COOKIE, csrf_set_cookie);
+    resp.body(body)
 }
 
 /// `/forgot` GET + POST page (P5-U6).
