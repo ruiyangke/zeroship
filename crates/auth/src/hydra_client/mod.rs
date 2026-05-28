@@ -13,14 +13,19 @@ pub mod logout;
 pub mod sessions;
 pub mod types;
 
+use std::time::Duration;
+
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::error::{AuthError, Result};
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct HydraAdmin {
     base: String,
     client: cyper::Client,
+    timeout: Duration,
 }
 
 impl std::fmt::Debug for HydraAdmin {
@@ -35,7 +40,17 @@ impl std::fmt::Debug for HydraAdmin {
 
 impl HydraAdmin {
     pub fn new(base: impl Into<String>) -> Self {
-        Self { base: base.into(), client: cyper::Client::new() }
+        Self {
+            base: base.into(),
+            client: cyper::Client::new(),
+            timeout: DEFAULT_TIMEOUT,
+        }
+    }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     pub(crate) fn url(&self, path: &str) -> String {
@@ -55,7 +70,9 @@ impl HydraAdmin {
         let res = self.client
             .request(http::Method::GET, url)
             .map_err(|e| AuthError::Hydra(format!("build GET {path}: {e}")))?
-            .send().await
+            .send_with_timeout(self.timeout)
+            .await
+            .map_err(|_| timeout_error("GET", path))?
             .map_err(|e| AuthError::Hydra(format!("GET {path}: {e}")))?;
         finish::<T>(res, path).await
     }
@@ -82,7 +99,9 @@ impl HydraAdmin {
             .header("content-type", "application/json")
             .map_err(|e| AuthError::Hydra(format!("PUT {path} header: {e}")))?
             .body(body_bytes)
-            .send().await
+            .send_with_timeout(self.timeout)
+            .await
+            .map_err(|_| timeout_error("PUT", path))?
             .map_err(|e| AuthError::Hydra(format!("PUT {path}: {e}")))?;
         finish::<T>(res, path).await
     }
@@ -101,7 +120,9 @@ impl HydraAdmin {
             .header("content-type", "application/json")
             .map_err(|e| AuthError::Hydra(format!("POST {path} header: {e}")))?
             .body(body_bytes)
-            .send().await
+            .send_with_timeout(self.timeout)
+            .await
+            .map_err(|_| timeout_error("POST", path))?
             .map_err(|e| AuthError::Hydra(format!("POST {path}: {e}")))?;
         finish::<T>(res, path).await
     }
@@ -118,7 +139,9 @@ impl HydraAdmin {
         let res = self.client
             .request(http::Method::DELETE, url)
             .map_err(|e| AuthError::Hydra(format!("build DELETE {path}: {e}")))?
-            .send().await
+            .send_with_timeout(self.timeout)
+            .await
+            .map_err(|_| timeout_error("DELETE", path))?
             .map_err(|e| AuthError::Hydra(format!("DELETE {path}: {e}")))?;
         let status = res.status().as_u16();
         if !(200..300).contains(&status) {
@@ -127,6 +150,26 @@ impl HydraAdmin {
         }
         Ok(())
     }
+}
+
+trait HydraRequestTimeout {
+    async fn send_with_timeout(
+        self,
+        timeout: Duration,
+    ) -> std::result::Result<cyper::Result<cyper::Response>, compio::time::Elapsed>;
+}
+
+impl HydraRequestTimeout for cyper::RequestBuilder {
+    async fn send_with_timeout(
+        self,
+        timeout: Duration,
+    ) -> std::result::Result<cyper::Result<cyper::Response>, compio::time::Elapsed> {
+        compio::time::timeout(timeout, self.send()).await
+    }
+}
+
+fn timeout_error(method: &str, path: &str) -> AuthError {
+    AuthError::Hydra(format!("{method} {path}: timeout"))
 }
 
 async fn finish<T: DeserializeOwned>(res: cyper::Response, path: &str) -> Result<T> {
