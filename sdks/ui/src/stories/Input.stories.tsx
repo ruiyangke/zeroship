@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import { useRef, useState } from "react";
 import { Field, Input, Button } from "../components";
 
@@ -236,6 +237,18 @@ export const Decomposed: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const email = canvas.getByRole("textbox", { name: /email/i });
+
+    await expect(email).toHaveAttribute("aria-required", "true");
+    await userEvent.type(email, "not-an-email");
+    await userEvent.tab();
+
+    const alert = await canvas.findByRole("alert");
+    await expect(alert).toHaveTextContent(/valid email address/i);
+    await expect(email).toHaveAttribute("aria-invalid", "true");
+  },
 };
 
 /* ─── 6. Combined shorthand ──────────────────────────────────────────── */
@@ -280,6 +293,49 @@ export const Combined: Story = {
       </div>
     </div>
   ),
+};
+
+export const ControlledRoundTrip: Story = {
+  name: "Controlled round trip (play)",
+  render: function ControlledRoundTripRender() {
+    const [value, setValue] = useState("ada");
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Controlled Input round trip"
+      >
+        <div
+          className="zs-story-cell"
+          style={{ flex: "1 1 18rem", minWidth: "14rem" }}
+        >
+          <Field>
+            <Field.Label>Project slug</Field.Label>
+            <Input
+              value={value}
+              onChange={(event) => setValue(event.currentTarget.value)}
+              placeholder="acme-prod"
+            />
+          </Field>
+          <output role="status" aria-label="Project slug value">
+            value: {value}
+          </output>
+        </div>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const slug = canvas.getByRole("textbox", { name: /project slug/i });
+    const status = canvas.getByRole("status", {
+      name: /project slug value/i,
+    });
+
+    await expect(slug).toHaveValue("ada");
+    await userEvent.clear(slug);
+    await userEvent.type(slug, "zeroship");
+    await expect(status).toHaveTextContent("value: zeroship");
+  },
 };
 
 /* ─── 7. Required ────────────────────────────────────────────────────── */
@@ -635,6 +691,17 @@ export const ErrorBooleanOnly: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const tokenFields = canvas.getAllByRole("textbox", { name: /token/i });
+    const bareToken = canvas.getByRole("textbox", {
+      name: /token \(no wrap when error=false\)/i,
+    });
+
+    await expect(tokenFields[0]).toHaveAttribute("aria-invalid", "true");
+    await expect(tokenFields[1]).toHaveAttribute("aria-invalid", "true");
+    await expect(bareToken).not.toHaveAttribute("aria-invalid", "true");
+  },
 };
 
 /* ─── 15. With external description ──────────────────────────────────── */
@@ -672,6 +739,14 @@ export const WithExternalDescription: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const apiKey = canvas.getByRole("textbox", { name: /api key/i });
+    const describedBy = apiKey.getAttribute("aria-describedby") ?? "";
+
+    await expect(describedBy.split(/\s+/)).toContain("external-help");
+    await expect(describedBy.trim().split(/\s+/).length).toBeGreaterThan(1);
+  },
 };
 
 /* ─── 16. Field disabled propagation ─────────────────────────────────── */
@@ -706,6 +781,21 @@ export const FieldDisabledPropagation: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const [disabledRegion, enabledRegion] = canvas.getAllByRole("textbox", {
+      name: /region/i,
+    });
+
+    await expect(disabledRegion).toBeDisabled();
+    await userEvent.click(disabledRegion);
+    await expect(disabledRegion).not.toHaveFocus();
+
+    await expect(enabledRegion).not.toBeDisabled();
+    await userEvent.clear(enabledRegion);
+    await userEvent.type(enabledRegion, "eu-west-1");
+    await expect(enabledRegion).toHaveValue("eu-west-1");
+  },
 };
 
 /* ─── 17. Horizontal layout with error ───────────────────────────────── */
@@ -791,13 +881,29 @@ export const InputRefIntegration: Story = {
             >
               Focus input
             </Button>
-            <span data-testid="input-ref-status" style={{ fontSize: "0.8125rem" }}>
+            <span
+              role="status"
+              aria-label="Input ref status"
+              data-testid="input-ref-status"
+              style={{ fontSize: "0.8125rem" }}
+            >
               status: {status}
             </span>
           </div>
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("textbox", { name: /search query/i });
+    const focusButton = canvas.getByRole("button", { name: /focus input/i });
+    const status = canvas.getByRole("status", { name: /input ref status/i });
+
+    await expect(input).not.toHaveFocus();
+    await userEvent.click(focusButton);
+    await expect(input).toHaveFocus();
+    await expect(status).toHaveTextContent(/focused/i);
   },
 };
 

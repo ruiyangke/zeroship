@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import { useRef, useState } from "react";
 import { Button, Dialog, Field, Input } from "../components";
 
@@ -45,6 +46,18 @@ export const Default: Story = {
       </Dialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /open dialog/i });
+
+    await userEvent.click(trigger);
+    const dialog = await page.findByRole("dialog", { name: /are you sure/i });
+    await expect(dialog).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: /^close$/i }));
+    await expect(trigger).toHaveFocus();
+  },
 };
 
 /* ─── 2. Sizes ───────────────────────────────────────────────────────── */
@@ -232,6 +245,22 @@ export const NonDismissible: Story = {
       </Dialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open required action/i,
+    }));
+    const dialog = await page.findByRole("dialog", {
+      name: /required action/i,
+    });
+
+    await userEvent.keyboard("{Escape}");
+    await expect(dialog).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: /acknowledge/i }));
+  },
 };
 
 /* ─── 7. Initial focus ───────────────────────────────────────────────── */
@@ -282,6 +311,14 @@ function InitialFocusStory() {
 export const InitialFocus: Story = {
   name: "Initial focus",
   render: () => <InitialFocusStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /sign in/i }));
+    await page.findByRole("dialog", { name: /sign in/i });
+    await expect(page.getByRole("textbox", { name: /username/i })).toHaveFocus();
+  },
 };
 
 /* ─── 8a. Close with caller onClick — composes side-effect + close ──── */
@@ -296,7 +333,13 @@ function CloseWithSaveOnClickStory() {
       role="group"
       aria-label="Dialog close with caller onClick"
     >
-      <p data-testid="dialog-close-onclick-status">Status: {saved}</p>
+      <p
+        role="status"
+        aria-label="Dialog save status"
+        data-testid="dialog-close-onclick-status"
+      >
+        Status: {saved}
+      </p>
       <Dialog>
         <Dialog.Trigger
           render={<Button data-testid="dialog-trigger">Open save form</Button>}
@@ -337,6 +380,18 @@ function CloseWithSaveOnClickStory() {
 export const CloseWithSaveOnClick: Story = {
   name: "Close — onClick composes with close",
   render: () => <CloseWithSaveOnClickStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", { name: /dialog save status/i });
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open save form/i,
+    }));
+    await page.findByRole("dialog", { name: /save changes/i });
+    await userEvent.click(page.getByRole("button", { name: /^save$/i }));
+    await expect(status).toHaveTextContent("Status: saved");
+  },
 };
 
 /* ─── 8b. Close asChild — Slot routing ───────────────────────────────── */
@@ -379,6 +434,125 @@ export const CloseAsChild: Story = {
       </Dialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /^open$/i }));
+    await page.findByRole("dialog", { name: /custom close target/i });
+    const done = page.getByRole("button", { name: /done/i });
+
+    await expect(done.tagName).toBe("BUTTON");
+    await userEvent.click(done);
+  },
+};
+
+function ClosePreventDefaultStory() {
+  const [status, setStatus] = useState("idle");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog close preventDefault"
+    >
+      <p role="status" aria-label="Dialog close guard status">
+        Status: {status}
+      </p>
+      <Dialog>
+        <Dialog.Trigger render={<Button>Open guarded close</Button>} />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup>
+            <Dialog.Header>
+              <Dialog.Title>Guarded close</Dialog.Title>
+              <Dialog.Description>
+                The caller prevents the first close attempt.
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Footer>
+              <Dialog.Close
+                onClick={(event) => {
+                  event.preventDefault();
+                  setStatus("prevented");
+                }}
+              >
+                Stay open
+              </Dialog.Close>
+              <Dialog.Close variant="filled">Close now</Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  );
+}
+export const ClosePreventDefault: Story = {
+  name: "Close preventDefault (play)",
+  render: () => <ClosePreventDefaultStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const status = canvas.getByRole("status", {
+      name: /dialog close guard status/i,
+    });
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open guarded close/i,
+    }));
+    const dialog = await page.findByRole("dialog", { name: /guarded close/i });
+
+    await userEvent.click(page.getByRole("button", { name: /stay open/i }));
+    await expect(status).toHaveTextContent("Status: prevented");
+    await expect(dialog).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: /close now/i }));
+  },
+};
+
+export const CloseAsChildLink: Story = {
+  name: "Close — asChild link (play)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog close asChild link"
+    >
+      <Dialog>
+        <Dialog.Trigger render={<Button>Open link close</Button>} />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup>
+            <Dialog.Header>
+              <Dialog.Title>Link close target</Dialog.Title>
+              <Dialog.Description>
+                Dialog.Close can route Base UI close behavior into a
+                non-button element.
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Footer>
+              <Dialog.Close asChild>
+                <a href="#dialog-link-close">Done as link</a>
+              </Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open link close/i,
+    }));
+    await page.findByRole("dialog", { name: /link close target/i });
+    const link = page.getByRole("link", { name: /done as link/i });
+
+    await expect(link.tagName).toBe("A");
+    await expect(link).toHaveAttribute("href", "#dialog-link-close");
+    await userEvent.click(link);
+  },
 };
 
 /* ─── 8c. RTL — popup stays centred in right-to-left ─────────────────── */
@@ -513,6 +687,58 @@ export const UnlabeledPopupWarns: Story = {
   ),
 };
 
+export const FullTopWarns: Story = {
+  name: "Full size plus top placement (warn)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Negative test: size=\"full\" owns placement, so placement=\"top\" " +
+          "fires a dev warning and the full-screen sizing wins.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog full plus top placement"
+    >
+      <Dialog>
+        <Dialog.Trigger render={<Button>Open full top</Button>} />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup size="full" placement="top">
+            <Dialog.Header>
+              <Dialog.Title>Full takeover</Dialog.Title>
+              <Dialog.Description>
+                Full size ignores top placement by design.
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Body>Full-viewport takeover content.</Dialog.Body>
+            <Dialog.Footer>
+              <Dialog.Close>Close</Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", {
+      name: /open full top/i,
+    }));
+    const dialog = await page.findByRole("dialog", { name: /full takeover/i });
+
+    await expect(dialog).toHaveAttribute("data-size", "full");
+    await expect(dialog).toHaveAttribute("data-placement", "top");
+    await userEvent.click(page.getAllByRole("button", { name: /^close$/i })[0]);
+  },
+};
+
 /* ─── 8f. Non-modal — outside interaction allowed ────────────────────── */
 export const NonModal: Story = {
   name: "Non-modal",
@@ -607,4 +833,18 @@ export const Nested: Story = {
       </Dialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /open outer/i }));
+    await page.findByRole("dialog", { name: /outer dialog/i });
+
+    await userEvent.click(page.getByRole("button", { name: /open inner/i }));
+    await expect(await page.findByRole("dialog", {
+      name: /inner dialog/i,
+    })).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: /close inner/i }));
+  },
 };
