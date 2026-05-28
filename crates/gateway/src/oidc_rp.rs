@@ -550,22 +550,27 @@ pub struct WorkerUser<'a> {
     pub email_verified: bool,
 }
 
-/// Serialize the authenticated user as `base64(JSON).<hex-hmac>` for
-/// the `ZeroShip-User` header. The worker decodes the base64 portion
-/// and verifies the HMAC against the same `worker_key` before trusting
-/// the identity.
+/// Serialize the authenticated user as
+/// `base64(JSON).<request_id>.<iat>.<hex-hmac>` for the `ZeroShip-User`
+/// header. The worker decodes the base64 portion and verifies the HMAC
+/// against the same `worker_key` before trusting the identity.
 ///
 /// Signing prevents a caller with direct network access to the worker
-/// from forging a user identity, even if the worker's endpoint
-/// bearer-auth were ever bypassed.
+/// from forging a user identity, even if the worker's endpoint bearer-auth
+/// were ever bypassed. The request id and timestamp binding limit replay if
+/// a header leaks through logs or a proxy.
 #[must_use]
-pub fn encode_user_header(user: &WorkerUser<'_>, worker_key: &str) -> String {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
+pub fn encode_user_header(
+    user: &WorkerUser<'_>,
+    worker_key: &str,
+    request_id: uuid::Uuid,
+) -> String {
     let json = serde_json::to_string(user).unwrap_or_default();
-    let b64 = B64.encode(json.as_bytes());
-    let mac = zeroship_core::auth::hmac_sha256_hex(worker_key.as_bytes(), b64.as_bytes());
-    format!("{b64}.{mac}")
+    zeroship_core::auth::sign_zeroship_user_header(
+        worker_key.as_bytes(),
+        json.as_bytes(),
+        request_id,
+    )
 }
 
 #[cfg(test)]
