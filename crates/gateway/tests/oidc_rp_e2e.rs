@@ -183,6 +183,7 @@ async fn gateway_oidc_rp_full_dance() {
         addr: "127.0.0.1:0".to_string(),
         db_url: db_url.clone(),
         hydra_admin: hydra_admin_url.clone(),
+        allow_remote_hydra_admin: false,
         hydra_public: hydra_public.clone(),
         clients_config: "ops/auth-clients.example.toml".to_string(),
         bootstrap: false,
