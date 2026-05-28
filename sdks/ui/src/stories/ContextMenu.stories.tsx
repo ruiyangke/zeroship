@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Card, ContextMenu } from "../components";
 
 const meta: Meta<typeof ContextMenu> = {
@@ -283,6 +284,9 @@ export const Rtl: Story = {
     },
   },
   render: () => (
+    // DirectionProvider seeds Base UI's DirectionContext for the
+    // portal-rendered popup; see Menu Rtl story for the rationale.
+    <DirectionProvider direction="rtl">
     <div
       className="zs-story-row"
       role="group"
@@ -316,5 +320,6 @@ export const Rtl: Story = {
         </ContextMenu.Portal>
       </ContextMenu>
     </div>
+    </DirectionProvider>
   ),
 };

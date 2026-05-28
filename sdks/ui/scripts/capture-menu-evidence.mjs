@@ -77,6 +77,10 @@ const stories = [
     id: "components-menu--rtl",
     triggers: ['[data-testid="menu-rtl-trigger"]'],
   },
+  {
+    id: "components-menu--with-link-item-as-child",
+    triggers: ['[data-testid="menu-link-trigger"]'],
+  },
 ];
 
 const mimeMap = new Map([

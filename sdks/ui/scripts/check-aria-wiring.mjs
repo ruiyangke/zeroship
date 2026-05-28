@@ -2891,6 +2891,282 @@ await open("components-contextmenu--basic-right-click-area");
   await page.waitForTimeout(200);
 }
 
+/* ─── 72. Slice 11 review-fix #1: shortcut text doesn't leak into
+ *         Base UI typeahead ───────────────────────────────────────── *
+ *
+ * Pre-fix: typing "P" inside the open Menu — WithKeyboardShortcuts
+ * popup landed on the "Cut" row (its shortcut span ⌘X contains an
+ * "X", and the typeahead character-walked the textContent). With
+ * `label` auto-forwarded from the string child, Base UI matches the
+ * row label and "P" jumps to "Paste". Asserts the highlighted item's
+ * accessible name (= textContent minus aria-hidden tail) starts with
+ * "P". */
+await open("components-menu--with-keyboard-shortcuts");
+{
+  const trigger = page.locator('[data-testid="menu-kbd-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  await page.waitForTimeout(200);
+  const popup = page.locator('[data-testid="menu-kbd-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  // Type a letter that ONLY appears as the first character of a real
+  // label. "P" — Paste is the only row whose label starts with P.
+  // Pre-fix this also matched "Copy⌘C" through textContent walking
+  // (no, but ⌘C → "Copy⌘C" contains nothing starting with P) — the
+  // robust signal is `V`: only Paste's shortcut tail (⌘V) carried V
+  // pre-fix; no label starts with V. We assert P → Paste so we get
+  // a positive signal.
+  await page.keyboard.type("P");
+  await page.waitForTimeout(150);
+  // Base UI tags the highlighted row with [data-highlighted].
+  const highlightedLabel = await page.evaluate(() => {
+    const node = document.querySelector(
+      ".zs-menu-popup .zs-menu-item[data-highlighted]",
+    );
+    if (!node) return null;
+    const text = node.querySelector(".zs-menu-item__text");
+    return text ? (text.textContent ?? "").trim() : "";
+  });
+  // Also verify a `V`-typeahead-doesn't-jump-from-the-shortcut: type
+  // V on a fresh open — the popup has no V label, so the highlight
+  // should stay where it is (no row whose label starts with V). The
+  // pre-fix code WOULD have moved highlight to "Paste" because
+  // textContent included ⌘V.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  await trigger.click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(50);
+  const firstLabel = await page.evaluate(() => {
+    const node = document.querySelector(
+      ".zs-menu-popup .zs-menu-item[data-highlighted]",
+    );
+    if (!node) return null;
+    const text = node.querySelector(".zs-menu-item__text");
+    return text ? (text.textContent ?? "").trim() : "";
+  });
+  await page.keyboard.type("V");
+  await page.waitForTimeout(150);
+  const afterVLabel = await page.evaluate(() => {
+    const node = document.querySelector(
+      ".zs-menu-popup .zs-menu-item[data-highlighted]",
+    );
+    if (!node) return null;
+    const text = node.querySelector(".zs-menu-item__text");
+    return text ? (text.textContent ?? "").trim() : "";
+  });
+  const ok =
+    typeof highlightedLabel === "string" &&
+    /^P/i.test(highlightedLabel) &&
+    afterVLabel === firstLabel;
+  report(
+    "Menu typeahead — `shortcut` text doesn't leak into label match",
+    ok,
+    `P→${JSON.stringify(highlightedLabel)} V-stayed=${afterVLabel === firstLabel} (was ${JSON.stringify(firstLabel)}, became ${JSON.stringify(afterVLabel)})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 73. Slice 11 review-fix #2: forced-colors mirror covers the
+ *         shortcut tail ───────────────────────────────────────────── *
+ *
+ * Pre-fix: `.zs-menu-popup` sets `forced-color-adjust: none` (the
+ * mirror inherits down), but the per-state `.zs-menu-item__shortcut`
+ * color rules weren't restated inside the @media block, so oklch
+ * tokens paint through high-contrast mode. Emulate forced colors,
+ * open the keyboard-shortcuts menu, read computed shortcut color,
+ * assert it resolves to a system keyword. */
+await page.emulateMedia({ forcedColors: "active" });
+await open("components-menu--with-keyboard-shortcuts");
+{
+  const trigger = page.locator('[data-testid="menu-kbd-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  await page.waitForTimeout(200);
+  const popup = page.locator('[data-testid="menu-kbd-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  // Capture the non-highlighted shortcut color first.
+  const idleColors = await page.evaluate(() => {
+    const rows = Array.from(
+      document.querySelectorAll(".zs-menu-popup .zs-menu-item"),
+    );
+    return rows
+      .map((row) => {
+        const sc = row.querySelector(".zs-menu-item__shortcut");
+        if (!sc) return null;
+        return getComputedStyle(sc).color;
+      })
+      .filter(Boolean);
+  });
+  // ArrowDown forces a [data-highlighted] row so we can read the
+  // highlighted-state computed color too.
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(120);
+  const highlightedColor = await page.evaluate(() => {
+    const row = document.querySelector(
+      ".zs-menu-popup .zs-menu-item[data-highlighted]",
+    );
+    if (!row) return null;
+    const sc = row.querySelector(".zs-menu-item__shortcut");
+    return sc ? getComputedStyle(sc).color : null;
+  });
+  // Pre-fix: the shortcut paints with the inherited `var(--zs-label-
+  // tertiary)` oklch token (the popup inherits `forced-color-adjust:
+  // none` and the per-state rules weren't restated). Post-fix: the
+  // shortcut resolves to GrayText / HighlightText (concrete rgb()
+  // under forced-colors emulation).
+  //
+  // Cross-browser signal: under forced-colors:active, system color
+  // keywords resolve to plain rgb() / rgba() strings — NOT oklch().
+  // oklch in the output means the token painted through.
+  const allRgb =
+    idleColors.length > 0 &&
+    idleColors.every((c) => /^rgba?\(/.test(c) && !/oklch/i.test(c));
+  const highlightedRgb =
+    typeof highlightedColor === "string" &&
+    /^rgba?\(/.test(highlightedColor) &&
+    !/oklch/i.test(highlightedColor);
+  const ok = allRgb && highlightedRgb;
+  report(
+    "Menu forced-colors — shortcut tail uses system color (not oklch token)",
+    ok,
+    `idleSamples=${idleColors.length} idleColors=${JSON.stringify(idleColors[0] ?? null)} highlighted=${highlightedColor}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+await page.emulateMedia({ forcedColors: "none" });
+
+/* ─── 74. Slice 11 review-fix #3: ContextMenu.Trigger is tabbable ── *
+ *
+ * Pre-fix: Base UI's ContextMenu.Trigger renders a plain <div> with
+ * no tabIndex/role. Tab skipped it; Shift+F10 (documented on the
+ * story) was unreachable. We stamp `tabIndex={0}` by default; Tab
+ * from the body should land focus on the trigger. */
+await open("components-contextmenu--basic-right-click-area");
+{
+  const trigger = page.locator('[data-testid="contextmenu-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Focus the body explicitly first so Tab starts from a known state.
+  await page.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    document.body.focus();
+  });
+  // Tab through focusables until we land on the trigger or give up.
+  let landed = false;
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press("Tab");
+    landed = await page.evaluate(() => {
+      const node = document.querySelector(
+        '[data-testid="contextmenu-basic-trigger"]',
+      );
+      return Boolean(node && node === document.activeElement);
+    });
+    if (landed) break;
+  }
+  const focusVisible = await page.evaluate(() => {
+    const node = document.querySelector(
+      '[data-testid="contextmenu-basic-trigger"]',
+    );
+    return Boolean(node && node.matches(":focus-visible"));
+  });
+  const tabIndex = await trigger.getAttribute("tabindex");
+  const ok = landed && focusVisible && tabIndex === "0";
+  report(
+    "ContextMenu.Trigger — tabbable + :focus-visible after Tab from body",
+    ok,
+    `landed=${landed} focusVisible=${focusVisible} tabindex=${tabIndex}`,
+  );
+}
+
+/* ─── 75. Slice 11 review-fix #4: Submenu RTL opens on the LEFT ──── *
+ *
+ * Pre-fix: Submenu defaulted `side="right"` which is a physical
+ * direction; under `dir="rtl"` the chevron flipped (CSS) but the
+ * popup still opened on the visual right edge — opposite the
+ * chevron's direction. We now default to `side="inline-end"` so the
+ * popup flips with `dir`. Asserts that in the RTL story, the submenu
+ * popup's bounding box X is to the LEFT of the trigger. */
+await open("components-menu--rtl");
+{
+  const trigger = page.locator('[data-testid="menu-rtl-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  await page.waitForTimeout(200);
+  const popup = page.locator('[data-testid="menu-rtl-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  // The submenu has no testid in the RTL story; locate by class
+  // (the SubmenuTrigger row carries `.zs-menu-submenu-trigger`).
+  const submenuTrigger = popup.locator(".zs-menu-submenu-trigger").first();
+  await submenuTrigger.waitFor({ state: "visible", timeout: 5000 });
+  const triggerBox = await submenuTrigger.boundingBox();
+  await submenuTrigger.hover();
+  await page.waitForTimeout(300);
+  // Submenu popup appears anywhere in the document via Portal — pick
+  // the .zs-menu-popup--submenu painted by Submenu's <BaseMenu.Popup>.
+  const submenuPopup = page.locator(".zs-menu-popup--submenu").first();
+  await submenuPopup.waitFor({ state: "visible", timeout: 3000 });
+  const submenuBox = await submenuPopup.boundingBox();
+  const ok =
+    !!triggerBox &&
+    !!submenuBox &&
+    submenuBox.x + submenuBox.width <= triggerBox.x + 1;
+  report(
+    "Menu Submenu RTL — popup opens on the LEFT of trigger",
+    ok,
+    `trigger.x=${triggerBox?.x} submenu.x+w=${submenuBox ? submenuBox.x + submenuBox.width : "?"}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
+/* ─── 76. Slice 11 review-fix #8: Menu.LinkItem asChild renders the
+ *         consumer's <a> and Escape closes the menu ───────────────── *
+ *
+ * Coverage from fix #8. Opens the new LinkItem story, asserts the
+ * rendered DOM node for `asChild` is the caller's <a>, then Escape
+ * closes the popup. */
+await open("components-menu--with-link-item-as-child");
+{
+  const trigger = page.locator('[data-testid="menu-link-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  await page.waitForTimeout(200);
+  const popup = page.locator('[data-testid="menu-link-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const asChildAnchor = page.locator('[data-testid="menu-link-aschild"]');
+  await asChildAnchor.waitFor({ state: "visible", timeout: 5000 });
+  const tagName = await asChildAnchor.evaluate((el) => el.tagName);
+  const href = await asChildAnchor.getAttribute("href");
+  // The consumer-passed `data-testid` lives on the SAME node Slot
+  // renders (Slot merges props onto the child). Confirms our render
+  // path didn't wrap the child or shadow its element type.
+  const hasItemClass = await asChildAnchor.evaluate((el) =>
+    el.classList.contains("zs-menu-item"),
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  const popupGone =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  const ok =
+    tagName === "A" &&
+    href === "https://example.com/support" &&
+    hasItemClass &&
+    popupGone;
+  report(
+    "Menu.LinkItem asChild — renders consumer's <a> + Escape closes",
+    ok,
+    `tag=${tagName} href=${href} hasClass=${hasItemClass} popupClosed=${popupGone}`,
+  );
+}
+
 /* ─── 67. Tabs roles: tablist + tab + tabpanel + aria-labelledby ───── *
  *
  * Slice 13. Tabs anatomy must expose the canonical ARIA tab pattern:

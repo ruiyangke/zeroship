@@ -46,11 +46,11 @@ import {
   type Ref,
 } from "react";
 import { ContextMenu as BaseContextMenu } from "@base-ui/react/context-menu";
+import { Menu as BaseMenu } from "@base-ui/react/menu";
 import { composeBaseClass } from "../_classnames";
 import {
   MenuPortal,
   MenuBackdrop,
-  MenuPopup,
   MenuItem,
   MenuGroup,
   MenuGroupLabel,
@@ -85,20 +85,89 @@ ContextMenuRoot.displayName = "ContextMenu";
  * INSIDE without any layout pressure. */
 
 type BaseTriggerProps = ComponentPropsWithoutRef<typeof BaseContextMenu.Trigger>;
-export type ContextMenuTriggerProps = BaseTriggerProps;
+export type ContextMenuTriggerProps = BaseTriggerProps & {
+  /** Disable the trigger; drops it out of the tab sequence. */
+  disabled?: boolean;
+};
 
 const ContextMenuTrigger = forwardRef<HTMLDivElement, ContextMenuTriggerProps>(
-  function ContextMenuTrigger({ className, ...rest }, ref) {
+  function ContextMenuTrigger(
+    { className, tabIndex, disabled, ...rest },
+    ref,
+  ) {
+    // Base UI renders the trigger as a plain `<div>` with no
+    // tabIndex/role, so Tab skips it and the Shift+F10 keyboard-open
+    // path documented on the stories is unreachable. Stamp a default
+    // tabIndex so keyboard users can focus the trigger and fire the
+    // contextmenu via Shift+F10. Caller-supplied tabIndex wins. */
+    const resolvedTabIndex =
+      tabIndex !== undefined ? tabIndex : disabled ? -1 : 0;
     return (
       <BaseContextMenu.Trigger
         ref={ref}
         className={composeBaseClass("zs-contextmenu-trigger", className)}
+        tabIndex={resolvedTabIndex}
+        aria-disabled={disabled || undefined}
         {...rest}
       />
     );
   },
 );
 ContextMenuTrigger.displayName = "ContextMenu.Trigger";
+
+/* ─── Popup ────────────────────────────────────────────────────────── *
+ *
+ * ContextMenu.Popup is a small wrapper that paints the shared
+ * `.zs-menu-popup` class but does NOT inject Menu.Popup's `side`/
+ * `align`/`sideOffset` defaults — Base UI's ContextMenu positioning
+ * is pointer-anchored at the click coordinates, so the click-menu
+ * defaults (`side="bottom"`, `align="start"`, `sideOffset=6`) would
+ * shift the popup off the pointer. We forward Popup-level positioner
+ * props (`side`, `align`, `sideOffset`) only when the consumer sets
+ * them, otherwise let Base UI's defaults apply. */
+
+type BaseContextPopupProps = ComponentPropsWithoutRef<
+  typeof BaseContextMenu.Popup
+>;
+type BaseContextPositionerProps = ComponentPropsWithoutRef<
+  typeof BaseContextMenu.Positioner
+>;
+export interface ContextMenuPopupProps extends BaseContextPopupProps {
+  /** Override anchor side. Default: Base UI's pointer-anchored
+   *  default (no specific side). */
+  side?: BaseContextPositionerProps["side"];
+  /** Override alignment along the chosen side. */
+  align?: BaseContextPositionerProps["align"];
+  /** Override pixel offset between pointer and popup edge. */
+  sideOffset?: number;
+}
+
+const ContextMenuPopup = forwardRef<HTMLElement, ContextMenuPopupProps>(
+  function ContextMenuPopup(
+    { side, align, sideOffset, className, children, ...rest },
+    ref,
+  ) {
+    const positionerProps: BaseContextPositionerProps = {};
+    if (side !== undefined) positionerProps.side = side;
+    if (align !== undefined) positionerProps.align = align;
+    if (sideOffset !== undefined) positionerProps.sideOffset = sideOffset;
+    return (
+      <BaseContextMenu.Positioner
+        className="zs-menu-positioner"
+        {...positionerProps}
+      >
+        <BaseMenu.Popup
+          {...rest}
+          ref={ref as Ref<HTMLDivElement>}
+          className={composeBaseClass("zs-menu-popup", className)}
+        >
+          {children}
+        </BaseMenu.Popup>
+      </BaseContextMenu.Positioner>
+    );
+  },
+);
+ContextMenuPopup.displayName = "ContextMenu.Popup";
 
 /* ─── public namespace ─────────────────────────────────────────────── *
  *
@@ -110,7 +179,7 @@ export type ContextMenuComponent = typeof ContextMenuRoot & {
   Trigger: typeof ContextMenuTrigger;
   Portal: typeof MenuPortal;
   Backdrop: typeof MenuBackdrop;
-  Popup: typeof MenuPopup;
+  Popup: typeof ContextMenuPopup;
   Item: typeof MenuItem;
   Group: typeof MenuGroup;
   GroupLabel: typeof MenuGroupLabel;
@@ -127,7 +196,7 @@ export const ContextMenu = ContextMenuRoot as ContextMenuComponent;
 ContextMenu.Trigger = ContextMenuTrigger;
 ContextMenu.Portal = MenuPortal;
 ContextMenu.Backdrop = MenuBackdrop;
-ContextMenu.Popup = MenuPopup;
+ContextMenu.Popup = ContextMenuPopup;
 ContextMenu.Item = MenuItem;
 ContextMenu.Group = MenuGroup;
 ContextMenu.GroupLabel = MenuGroupLabel;
