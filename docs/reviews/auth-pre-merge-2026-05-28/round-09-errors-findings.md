@@ -125,7 +125,7 @@ Read-only audit completed. Findings saved in this file; no source code changes w
 
 Fix pass completed on 2026-05-28.
 
-- H1 fixed in `652cd238` (`Sanitize runtime dispatch 5xx errors`).
+- H1 fixed in `652cd238` (`Sanitize runtime dispatch 5xx errors`) with compile follow-up `93188cc8` (`Fix runtime RPC rejection request IDs`).
 - H2 fixed in `b6e9ff85` (`Sanitize control-plane infrastructure errors`).
 - H3 fixed in `2388ebd3` (`Sanitize sandbox create failures`).
 - M1 fixed in `daec66af` (`Sanitize OIDC callback failure pages`).
@@ -145,7 +145,7 @@ Verification completed where the local environment allowed it:
 
 Blocked verification:
 
-- `zeroship-runtime` tests cannot finish because `v8` attempts to download `librusty_v8_release_x86_64-unknown-linux-gnu.a.gz` and this environment has no DNS/network access.
+- `zeroship-runtime` tests cannot finish in the default environment because `v8` attempts to download `librusty_v8_release_x86_64-unknown-linux-gnu.a.gz` and this environment has no DNS/network access. With a local `RUSTY_V8_ARCHIVE`, compilation proceeds until generated `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js` files are missing.
 - `zeroship-control` tests cannot compile because `crates/control/src/token_handlers.rs` references missing `valid_pat_name`.
 - Builder/bootstrap JS tests cannot run because local `node_modules` is absent (`vitest`/`tsx` not found).
 - `cargo fmt --check` cannot run because `cargo fmt` is not installed in this environment.
