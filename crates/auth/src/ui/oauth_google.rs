@@ -81,12 +81,12 @@ pub async fn start(
         }
     };
 
-    let stash = OAuthStash {
-        state: auth_start.state.clone(),
-        verifier: auth_start.verifier,
-        nonce: auth_start.nonce.clone(),
-        login_challenge: query.login_challenge.clone(),
-    };
+    let stash = OAuthStash::new(
+        auth_start.state.clone(),
+        auth_start.verifier,
+        auth_start.nonce.clone(),
+        query.login_challenge.clone(),
+    );
     let cookie_value = stash.encode(cfg.stash_signing_key.as_bytes());
 
     let mut resp = HttpResponse::Found();

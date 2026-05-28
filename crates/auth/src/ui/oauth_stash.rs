@@ -18,6 +18,7 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 use zeroship_core::auth::hmac_sha256;
 
 /// Payload stashed between `/oauth/<provider>/start` and `/oauth/<provider>/callback`.
@@ -31,9 +32,30 @@ pub struct OAuthStash {
     pub verifier: String,
     pub nonce: String,
     pub login_challenge: String,
+    pub iat: i64,
+    pub exp: i64,
 }
 
 impl OAuthStash {
+    /// Build a fresh stash with the standard 10-minute validity window.
+    #[must_use]
+    pub fn new(
+        state: String,
+        verifier: String,
+        nonce: String,
+        login_challenge: String,
+    ) -> Self {
+        let iat = unix_now();
+        Self {
+            state,
+            verifier,
+            nonce,
+            login_challenge,
+            iat,
+            exp: iat.saturating_add(STASH_MAX_AGE_SECS),
+        }
+    }
+
     /// Encode + HMAC-sign with `key`. Returns `base64url(json).base64url(hmac)`.
     ///
     /// The JSON is the canonical wire payload; we sign its base64url form
@@ -55,9 +77,9 @@ impl OAuthStash {
     }
 
     /// Decode + verify the HMAC, returning `Some(stash)` on a valid cookie
-    /// (matching MAC + parseable JSON), `None` otherwise. Uses a
-    /// constant-time MAC comparison to keep the signing key opaque
-    /// against timing probes.
+    /// (matching MAC + parseable JSON + unexpired timestamp claims), `None`
+    /// otherwise. Uses a constant-time MAC comparison to keep the signing key
+    /// opaque against timing probes.
     #[must_use]
     pub fn decode(value: &str, key: &[u8]) -> Option<Self> {
         let (b64, mac_b64) = value.split_once('.')?;
@@ -75,7 +97,15 @@ impl OAuthStash {
             return None;
         }
         let json = URL_SAFE_NO_PAD.decode(b64).ok()?;
-        serde_json::from_slice(&json).ok()
+        let stash: Self = serde_json::from_slice(&json).ok()?;
+        let now = unix_now();
+        if stash.exp < now {
+            return None;
+        }
+        if stash.iat > now.saturating_add(STASH_FUTURE_SKEW_SECS) {
+            return None;
+        }
+        Some(stash)
     }
 }
 
@@ -101,6 +131,15 @@ pub const GITHUB_STASH_COOKIE_DEV: &str = "zsidp_github_stash";
 
 /// 10-minute window for the OAuth dance to complete.
 pub const STASH_MAX_AGE_SECS: i64 = 600;
+/// Tolerated issuer clock skew for a freshly signed stash.
+pub const STASH_FUTURE_SKEW_SECS: i64 = 30;
+
+fn unix_now() -> i64 {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    i64::try_from(secs).unwrap_or(i64::MAX)
+}
 
 /// Resolve the Google stash cookie name for the current environment.
 #[must_use]
@@ -156,11 +195,18 @@ mod tests {
     use super::*;
 
     fn sample_stash() -> OAuthStash {
+        let iat = unix_now();
+        sample_stash_at(iat, iat + 60)
+    }
+
+    fn sample_stash_at(iat: i64, exp: i64) -> OAuthStash {
         OAuthStash {
             state: "state-xyz".into(),
             verifier: "v".into(),
             nonce: "n".into(),
             login_challenge: "lc-123".into(),
+            iat,
+            exp,
         }
     }
 
@@ -191,6 +237,34 @@ mod tests {
         let last = tampered.pop().unwrap();
         tampered.push(if last == 'A' { 'B' } else { 'A' });
         assert!(OAuthStash::decode(&tampered, &key).is_none());
+    }
+
+    #[test]
+    fn accepts_current_stash_claims() {
+        let key = b"k".repeat(32);
+        let now = unix_now();
+        let stash = sample_stash_at(now, now + 60);
+        let encoded = stash.encode(&key);
+        let decoded = OAuthStash::decode(&encoded, &key).expect("decode current stash");
+        assert_eq!(decoded, stash);
+    }
+
+    #[test]
+    fn rejects_expired_stash_claims() {
+        let key = b"k".repeat(32);
+        let now = unix_now();
+        let stash = sample_stash_at(now - 1000, now - 600);
+        let encoded = stash.encode(&key);
+        assert!(OAuthStash::decode(&encoded, &key).is_none());
+    }
+
+    #[test]
+    fn rejects_future_issued_stash_claims() {
+        let key = b"k".repeat(32);
+        let now = unix_now();
+        let stash = sample_stash_at(now + 60, now + 600);
+        let encoded = stash.encode(&key);
+        assert!(OAuthStash::decode(&encoded, &key).is_none());
     }
 
     #[test]

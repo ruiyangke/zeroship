@@ -80,14 +80,14 @@ pub async fn start(
         }
     };
 
-    let stash = OAuthStash {
-        state: auth_start.state.clone(),
-        verifier: auth_start.verifier,
+    let stash = OAuthStash::new(
+        auth_start.state.clone(),
+        auth_start.verifier,
         // GitHub is OAuth 2.0 — no nonce. We carry an empty string
         // through the stash so the shared payload shape is unchanged.
-        nonce: String::new(),
-        login_challenge: query.login_challenge.clone(),
-    };
+        String::new(),
+        query.login_challenge.clone(),
+    );
     let cookie_value = stash.encode(cfg.stash_signing_key.as_bytes());
 
     let mut resp = HttpResponse::Found();
