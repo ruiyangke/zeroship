@@ -96,6 +96,10 @@ Total: 7 findings (0 critical, 2 high, 3 medium, 2 low).
 - **ZeroShip-User HMAC header** — `request_id`+`iat` covered by MAC, replay rejected via expected_request_id mismatch and ±60s/±5s window, constant-time hex compare.
 - **`extract_bearer`, `validate_control_key`, `hash_api_key`** — constant-time XOR-fold comparison.
 
+## Blockers
+
+- **M1 gateway invalidation hook:** `GateState` currently has no `hydra_introspector` field, and the gateway DPoP fallback/exchange paths call `OidcRp::introspect_token` directly without a local active-token cache. There is no gateway-side `state.hydra_introspector.invalidate_by_sub(&sub)` hook to wire without introducing a new gateway admin-introspection client. The cached `HydraIntrospector` path exists in control and is fixed there.
+
 ## Subsystems NOT fully audited (time-limited)
 
 - The OIDC RP callback / consent flow — only intersection with token issuance was traced.

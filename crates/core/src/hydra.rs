@@ -99,6 +99,29 @@ impl HydraIntrospector {
         self
     }
 
+    /// Remove every cached introspection result whose subject matches
+    /// `sub`. Used after OIDC back-channel logout so an otherwise
+    /// unexpired active-token cache entry cannot outlive revocation.
+    pub fn invalidate_by_sub(&self, sub: &str) {
+        if sub.is_empty() {
+            return;
+        }
+
+        let Ok(mut cache) = self.cache.lock() else {
+            tracing::warn!("hydra introspection cache mutex poisoned during sub invalidation");
+            return;
+        };
+        let hashes: Vec<TokenHash> = cache
+            .iter()
+            .filter_map(|(hash, cached)| {
+                (cached.result.sub.as_deref() == Some(sub)).then_some(*hash)
+            })
+            .collect();
+        for hash in hashes {
+            cache.pop(&hash);
+        }
+    }
+
     /// Token must not be empty.
     ///
     /// Returns `Ok(IntrospectResult { active: false, .. })` when hydra

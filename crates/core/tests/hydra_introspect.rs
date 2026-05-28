@@ -184,6 +184,36 @@ async fn cache_hit_does_not_call_hydra() {
 }
 
 #[compio::test]
+async fn invalidate_by_sub_evicts_matching_cached_tokens() {
+    let hydra = MockHydra::echo_active();
+    let client = HydraIntrospector::new(hydra.base.as_str());
+
+    client.introspect("usr_revoked").await.expect("first revoked");
+    client.introspect("usr_other").await.expect("first other");
+    assert_eq!(hydra.calls(), 2);
+
+    client
+        .introspect("usr_revoked")
+        .await
+        .expect("revoked cache hit before invalidate");
+    assert_eq!(hydra.calls(), 2);
+
+    client.invalidate_by_sub("usr_revoked");
+
+    client
+        .introspect("usr_other")
+        .await
+        .expect("other token should stay cached");
+    assert_eq!(hydra.calls(), 2);
+
+    client
+        .introspect("usr_revoked")
+        .await
+        .expect("revoked token should refetch after invalidate");
+    assert_eq!(hydra.calls(), 3);
+}
+
+#[compio::test]
 async fn cache_expires_at_ttl() {
     let hydra = MockHydra::fixed(
         200,

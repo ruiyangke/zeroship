@@ -105,6 +105,7 @@ pub async fn handle(
     // `console_sessions.user_id` column).
     match token.sub.as_deref() {
         Some(sub) => {
+            state.hydra_introspector.invalidate_by_sub(sub);
             let revoked = console_sessions::revoke_all_for_user(&state.auth_pg, sub)
                 .await
                 .unwrap_or_else(|e| {
