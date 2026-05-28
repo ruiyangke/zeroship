@@ -165,6 +165,12 @@ pub async fn start(
     }
 
     let email_norm = form.email.trim().to_ascii_lowercase();
+    if email_validation::validate_email(&email_norm).is_err() {
+        return render_error_page_with_status(
+            PublicErrorMessage::InvalidRequest,
+            StatusCode::BAD_REQUEST,
+        );
+    }
     let login_challenge = form.login_challenge.clone();
 
     // 2. Rate-limit per-email + per-IP. On throttle, render the
@@ -1008,6 +1014,9 @@ fn render_error_page_with_status(
 /// if absent (clicking the magic link is itself proof of email
 /// ownership).
 async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) -> Result<Uuid> {
+    email_validation::validate_email(email)
+        .map_err(|_| AuthError::Internal("invalid email".into()))?;
+
     if let Some(user) = users::find_by_email(db, email).await? {
         if user.email_verified_at.is_none() {
             // Magic-link click counts as email verification — make
@@ -1070,6 +1079,9 @@ pub mod completions_store {
         login_challenge: &str,
         expires_secs: i64,
     ) -> crate::error::Result<()> {
+        super::email_validation::validate_email(email)
+            .map_err(|_| AuthError::Internal("invalid email".into()))?;
+
         db.execute(
             "INSERT INTO auth.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
@@ -1225,5 +1237,37 @@ pub mod completions_store {
 /// "Unknown device" when the header is missing or malformed.
 fn user_agent_str(h: Option<&HeaderValue>) -> String {
     h.and_then(|v| v.to_str().ok())
-        .map_or_else(|| "Unknown device".to_string(), str::to_string)
+        .map(|s| {
+            let trimmed: String = s
+                .chars()
+                .take(120)
+                .filter(|ch| !ch.is_control())
+                .collect();
+            if trimmed.is_empty() {
+                "Unknown device".to_string()
+            } else {
+                trimmed
+            }
+        })
+        .unwrap_or_else(|| "Unknown device".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_agent_str_caps_long_values() {
+        let raw = "A".repeat(121);
+        let header = HeaderValue::from_str(&raw).expect("header value");
+        let got = user_agent_str(Some(&header));
+        assert_eq!(got.len(), 120);
+        assert!(got.chars().all(|ch| ch == 'A'));
+    }
+
+    #[test]
+    fn user_agent_str_uses_unknown_for_empty_values() {
+        let header = HeaderValue::from_static("");
+        assert_eq!(user_agent_str(Some(&header)), "Unknown device");
+    }
 }

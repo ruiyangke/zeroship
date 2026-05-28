@@ -12,6 +12,7 @@
 
 use askama::Template;
 use ntex::http::header::{COOKIE, SET_COOKIE};
+use ntex::http::StatusCode;
 use ntex::web::{
     types::{Form, State},
     HttpRequest, HttpResponse,
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::identity::password_reset;
+use crate::identity::{email as email_validation, password_reset};
 use crate::mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
 use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
@@ -73,6 +74,14 @@ pub async fn post(
     //    enumeration leak). The email is normalized to lowercase
     //    consistently with /signup so case-only differences match.
     let email_norm = form.email.trim().to_ascii_lowercase();
+    if email_validation::validate_email(&email_norm).is_err() {
+        return render_form_with_status(
+            &cfg,
+            Some("enter a valid email"),
+            false,
+            StatusCode::BAD_REQUEST,
+        );
+    }
     let email_hash = hex::encode(Sha256::digest(email_norm.as_bytes()));
     let ip = req
         .peer_addr()
@@ -190,6 +199,15 @@ pub async fn post(
 }
 
 fn render_form(cfg: &AuthConfig, error: Option<&str>, sent: bool) -> HttpResponse {
+    render_form_with_status(cfg, error, sent, StatusCode::OK)
+}
+
+fn render_form_with_status(
+    cfg: &AuthConfig,
+    error: Option<&str>,
+    sent: bool,
+    status: StatusCode,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = ForgotPage {
         csrf: &csrf_token,
@@ -199,7 +217,7 @@ fn render_form(cfg: &AuthConfig, error: Option<&str>, sent: bool) -> HttpRespons
     let body = page
         .render()
         .unwrap_or_else(|_| "<h1>error</h1>".to_string());
-    let mut resp = HttpResponse::Ok();
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)

@@ -433,6 +433,9 @@ async fn main() -> std::io::Result<()> {
             )
             .service(
                 web::resource("/api/apps/{id}/vars")
+                    .state(web::types::PayloadConfig::new(
+                        env_handlers::ENV_MUTATION_PAYLOAD_BYTES,
+                    ))
                     .route(web::get().to(env_handlers::list_vars))
                     .route(web::post().to(env_handlers::set_var)),
             )
@@ -442,6 +445,9 @@ async fn main() -> std::io::Result<()> {
             )
             .service(
                 web::resource("/api/apps/{id}/secrets")
+                    .state(web::types::PayloadConfig::new(
+                        env_handlers::ENV_MUTATION_PAYLOAD_BYTES,
+                    ))
                     .route(web::get().to(env_handlers::list_secrets))
                     .route(web::post().to(env_handlers::set_secret)),
             )

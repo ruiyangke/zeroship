@@ -3,6 +3,7 @@
 use compio_postgres::Client;
 
 use crate::error::{AuthError, Result};
+use crate::identity::email as email_validation;
 
 #[derive(Debug, Clone)]
 pub struct UserRow {
@@ -22,6 +23,10 @@ pub struct UserRow {
 ///
 /// Returns `AuthError::Db` on PG failure.
 pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>> {
+    if email_validation::validate_email(email).is_err() {
+        return Ok(None);
+    }
+
     let rows = conn
         .query(
             "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, locked_until, disabled_at \
@@ -73,6 +78,9 @@ pub async fn create(
     name: &str,
     password_hash: Option<&str>,
 ) -> Result<UserRow> {
+    email_validation::validate_email(email)
+        .map_err(|_| AuthError::Internal("invalid email".into()))?;
+
     let rows = conn
         .query(
             "INSERT INTO auth.users (email, name, password_hash) \

@@ -84,6 +84,9 @@ pub async fn get(
     let Some(pending) = PendingLink::decode(&query.token, cfg.stash_signing_key.as_bytes()) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
+    if email_validation::validate_email(&pending.email).is_err() {
+        return render_error_page(PublicErrorMessage::SessionExpired);
+    }
 
     let csrf_token = csrf::generate_token();
     let page = LinkPage {
@@ -158,6 +161,9 @@ pub async fn post(
     let Some(pending) = PendingLink::decode(&form.token, cfg.stash_signing_key.as_bytes()) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
+    if email_validation::validate_email(&pending.email).is_err() {
+        return render_error_page(PublicErrorMessage::SessionExpired);
+    }
 
     if let Err(e) = admin.get_login(&pending.login_challenge).await {
         tracing::warn!(error = %e, challenge = %pending.login_challenge, "link hydra challenge validation failed");

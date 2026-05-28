@@ -416,7 +416,10 @@ pub async fn webhook(
 
     let event: StripeEvent = match serde_json::from_slice(raw) {
         Ok(e) => e,
-        Err(e) => return err_json(400, format!("invalid json: {e}")),
+        Err(e) => {
+            tracing::debug!(error = %e, "stripe: invalid webhook json");
+            return err_json(400, invalid_json_message());
+        }
     };
 
     // Only invoice.paid moves money on the platform v1.
@@ -478,6 +481,10 @@ pub async fn webhook(
         }
         Err(e) => stripe_err_response(e),
     }
+}
+
+fn invalid_json_message() -> &'static str {
+    "invalid json"
 }
 
 fn sanitize_event_id(s: &str) -> String {
@@ -590,5 +597,10 @@ mod verification_tests {
             CROSS_BODY, &header, CROSS_SECRET, CROSS_TIMESTAMP, 300,
         );
         assert_eq!(result.unwrap(), CROSS_TIMESTAMP);
+    }
+
+    #[test]
+    fn invalid_json_message_is_constant() {
+        assert_eq!(invalid_json_message(), "invalid json");
     }
 }

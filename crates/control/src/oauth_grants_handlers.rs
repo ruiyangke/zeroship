@@ -12,6 +12,8 @@ use zeroship_authz::{Action, EntityCache, Resource};
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
 
+const MAX_CLIENT_ID_PATH_BYTES: usize = 128;
+
 #[derive(Debug, Serialize)]
 pub struct OauthGrantSummary {
     pub client_id: String,
@@ -91,6 +93,10 @@ pub async fn revoke_grant(
     }
 
     let client_id = client_id.into_inner();
+    if !valid_client_id_path_segment(&client_id) {
+        return web::HttpResponse::BadRequest().json(&json!({"error": "invalid_client_id"}));
+    }
+
     let deleted = match state
         .auth_pg
         .execute(
@@ -180,6 +186,10 @@ fn hydra_revoke_consent_url(base_url: &str, subject: &str, client_id: &str) -> S
     )
 }
 
+fn valid_client_id_path_segment(client_id: &str) -> bool {
+    !client_id.is_empty() && client_id.len() <= MAX_CLIENT_ID_PATH_BYTES
+}
+
 #[derive(Debug)]
 enum HydraRevokeError {
     Build(String),
@@ -194,5 +204,18 @@ impl std::fmt::Display for HydraRevokeError {
             Self::Transport(err) => write!(f, "transport: {err}"),
             Self::Response { status, body } => write!(f, "hydra returned {status}: {body}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_id_path_segment_is_bounded() {
+        assert!(valid_client_id_path_segment("client_123"));
+        assert!(valid_client_id_path_segment(&"a".repeat(128)));
+        assert!(!valid_client_id_path_segment(""));
+        assert!(!valid_client_id_path_segment(&"a".repeat(129)));
     }
 }

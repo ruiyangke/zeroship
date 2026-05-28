@@ -39,6 +39,7 @@ use uuid::Uuid;
 use zeroship_core::auth::hmac_sha256;
 
 use crate::error::{AuthError, Result};
+use crate::identity::email as email_validation;
 use crate::store::{identities, users};
 
 /// Per-callback profile distilled from the upstream `IdP`.
@@ -185,6 +186,9 @@ pub async fn resolve_or_link(
     login_challenge: &str,
     pending_signing_key: &[u8],
 ) -> Result<LinkOutcome> {
+    email_validation::validate_email(profile.email)
+        .map_err(|_| AuthError::Internal("invalid email".into()))?;
+
     // 1. Already linked?
     if let Some(id) =
         identities::find_by_provider_subject(db, profile.provider, profile.subject).await?

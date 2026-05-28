@@ -1283,7 +1283,7 @@ async fn handle_auth_callback(
     //    the stash cookie. Two `Set-Cookie` headers on one response is
     //    valid per RFC 6265 §3 (and is how hydra emits its own cookies).
     let mut builder = HttpResponse::Found();
-    builder.header("location", original_path.clone());
+    builder.header("location", sanitize_oidc_original_path(&original_path));
     builder.header(
         "set-cookie",
         oidc_rp::set_app_session_cookie(&session.id, state.config.insecure_dev),
@@ -1332,6 +1332,7 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpRespons
         .map(|p| p.as_str())
         .unwrap_or("/")
         .to_string();
+    let original_path = sanitize_oidc_original_path(&original_path);
     let host = req
         .headers()
         .get("host")
@@ -1355,6 +1356,38 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpRespons
         oidc_rp::set_stash_cookie(&stash, state.config.insecure_dev),
     );
     builder.finish()
+}
+
+fn sanitize_oidc_original_path(path: &str) -> String {
+    if is_safe_oidc_original_path(path) {
+        path.to_string()
+    } else {
+        "/".to_string()
+    }
+}
+
+fn is_safe_oidc_original_path(path: &str) -> bool {
+    if path == "/" {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'/' {
+        return false;
+    }
+
+    if !matches!(
+        bytes[1],
+        b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'
+    ) {
+        return false;
+    }
+
+    let first_segment_end = path[1..]
+        .find('/')
+        .map(|idx| idx + 1)
+        .unwrap_or(path.len());
+    !path[1..first_segment_end].contains(':')
 }
 
 #[cfg(test)]
@@ -2309,6 +2342,27 @@ mod tests {
         assert!(
             set_cookie.starts_with("zs_oidc_stash="),
             "must set the dev stash cookie; got {set_cookie:?}"
+        );
+    }
+
+    #[test]
+    fn oidc_original_path_rejects_protocol_relative_redirects() {
+        assert_eq!(sanitize_oidc_original_path("//evil.com/path"), "/");
+        assert_eq!(sanitize_oidc_original_path("/\\evil.com/path"), "/");
+        assert_eq!(sanitize_oidc_original_path("/foo:bar/baz"), "/");
+        assert_eq!(sanitize_oidc_original_path("https://evil.com/path"), "/");
+    }
+
+    #[test]
+    fn oidc_original_path_keeps_origin_relative_paths() {
+        assert_eq!(sanitize_oidc_original_path("/"), "/");
+        assert_eq!(
+            sanitize_oidc_original_path("/dashboard?welcome=true"),
+            "/dashboard?welcome=true"
+        );
+        assert_eq!(
+            sanitize_oidc_original_path("/_zs/auth/callback"),
+            "/_zs/auth/callback"
         );
     }
 

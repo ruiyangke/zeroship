@@ -40,6 +40,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::error::{AuthError, Result};
+use crate::identity::email as email_validation;
 
 /// Lifetime of a reset token from issue to expiry.
 pub const TTL_MINUTES: i64 = 60;

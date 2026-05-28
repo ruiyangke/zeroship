@@ -12,19 +12,24 @@
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
+use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use std::sync::Arc;
+use url::form_urlencoded;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::identity::{password, verification};
+use crate::identity::{email as email_validation, password, verification};
 use crate::mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
+
+const MAX_LOGIN_CHALLENGE_BYTES: usize = 256;
+const MAX_SIGNUP_NAME_CHARS: usize = 200;
 
 #[derive(Debug, Deserialize)]
 pub struct SignupQuery {
@@ -52,7 +57,7 @@ pub async fn get(
     query: ntex::web::types::Query<SignupQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let challenge = query.login_challenge.as_deref().unwrap_or("");
+    let challenge = bounded_login_challenge(query.login_challenge.as_deref());
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
         challenge,
@@ -78,7 +83,7 @@ pub async fn post(
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     mailer: ntex::web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
-    let challenge = query.login_challenge.clone().unwrap_or_default();
+    let challenge = bounded_login_challenge(query.login_challenge.as_deref()).to_string();
 
     // 1. CSRF.
     let cookie_header = req
@@ -104,14 +109,23 @@ pub async fn post(
         );
     }
 
-    // 3. Email basic sanity. Full validation belongs at the SMTP-verify
-    // layer (Phase 5); this is just a typo-catch.
+    // 3. Email sanity before we enter rate limits, hashing, or storage.
     let email = form.email.trim().to_ascii_lowercase();
-    if !email.contains('@') || email.len() < 3 {
-        return render_signup_error(&challenge, &cfg, "enter a valid email");
+    if email_validation::validate_email(&email).is_err() {
+        return render_signup_bad_request(&challenge, &cfg, "enter a valid email");
     }
 
-    // 4. Rate-limit per IP before entering the CPU-bound password hash.
+    // 4. Name sanity before entering rate limits, hashing, or storage.
+    let Some(name) = normalize_signup_name(&form.name) else {
+        return render_signup_bad_request(
+            &challenge,
+            &cfg,
+            "name must be 1-200 characters",
+        );
+    };
+    let name = name.to_string();
+
+    // 5. Rate-limit per IP before entering the CPU-bound password hash.
     let ip = req
         .peer_addr()
         .map(|addr| addr.ip().to_string())
@@ -138,7 +152,7 @@ pub async fn post(
         }
     }
 
-    // 5. Hash the password — argon2 is CPU-bound, run on spawn_blocking so
+    // 6. Hash the password — argon2 is CPU-bound, run on spawn_blocking so
     // the ntex event loop is not parked (same constraint as /login).
     let password_clone = form.password.clone();
     let phc = match compio::runtime::spawn_blocking(move || password::hash(&password_clone)).await {
@@ -153,11 +167,10 @@ pub async fn post(
         }
     };
 
-    // 6. Insert the user row. Account-enumeration defense: a duplicate
+    // 7. Insert the user row. Account-enumeration defense: a duplicate
     // email is logged but produces the same response as a successful
     // insert — the attacker cannot probe email existence via this endpoint.
-    let name = form.name.trim();
-    let created = match users::create(db.as_ref(), &email, name, Some(&phc)).await {
+    let created = match users::create(db.as_ref(), &email, &name, Some(&phc)).await {
         Ok(u) => Some(u),
         Err(e) if e.db_code() == Some("23505") => {
             tracing::info!(error = %e, "signup users::create rejected duplicate email");
@@ -183,7 +196,7 @@ pub async fn post(
         }
     };
 
-    // 6b. On a successful create, issue a verification token and email
+    // 7b. On a successful create, issue a verification token and email
     //     it to the user. Both the token issue and the email send are
     //     best-effort — a failure is logged but never surfaced to the
     //     user, because:
@@ -256,17 +269,19 @@ pub async fn post(
         }
     }
 
-    // 7. Redirect to /login carrying the same challenge so the user can
+    // 8. Redirect to /login carrying the same challenge so the user can
     // immediately sign in. The verification email is in their inbox;
     // verifying is decoupled from sign-in.
     redirect_to_login(&challenge)
 }
 
 fn redirect_to_login(challenge: &str) -> HttpResponse {
-    let to = if challenge.is_empty() {
+    let to = if challenge.is_empty() || challenge.len() > MAX_LOGIN_CHALLENGE_BYTES {
         "/login".to_string()
     } else {
-        format!("/login?login_challenge={challenge}")
+        let challenge_enc: String =
+            form_urlencoded::byte_serialize(challenge.as_bytes()).collect();
+        format!("/login?login_challenge={challenge_enc}")
     };
     let mut resp = HttpResponse::Found();
     resp.header(
@@ -276,7 +291,35 @@ fn redirect_to_login(challenge: &str) -> HttpResponse {
     resp.finish()
 }
 
+fn bounded_login_challenge(challenge: Option<&str>) -> &str {
+    challenge
+        .filter(|value| value.len() <= MAX_LOGIN_CHALLENGE_BYTES)
+        .unwrap_or("")
+}
+
+fn normalize_signup_name(name: &str) -> Option<&str> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_SIGNUP_NAME_CHARS {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 fn render_signup_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
+    render_signup_error_with_status(challenge, cfg, err, StatusCode::OK)
+}
+
+fn render_signup_bad_request(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
+    render_signup_error_with_status(challenge, cfg, err, StatusCode::BAD_REQUEST)
+}
+
+fn render_signup_error_with_status(
+    challenge: &str,
+    cfg: &AuthConfig,
+    err: &str,
+    status: StatusCode,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
         challenge,
@@ -286,7 +329,7 @@ fn render_signup_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResp
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
-    let mut resp = HttpResponse::Ok();
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
@@ -303,4 +346,46 @@ fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn location(resp: &HttpResponse) -> &str {
+        resp.headers()
+            .get(LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .expect("location header")
+    }
+
+    #[test]
+    fn redirect_to_login_url_encodes_challenge() {
+        let resp = redirect_to_login("foo&malicious=value");
+        assert_eq!(
+            location(&resp),
+            "/login?login_challenge=foo%26malicious%3Dvalue"
+        );
+    }
+
+    #[test]
+    fn redirect_to_login_drops_oversized_challenge() {
+        let challenge = "a".repeat(257);
+        let resp = redirect_to_login(&challenge);
+        assert_eq!(location(&resp), "/login");
+    }
+
+    #[test]
+    fn normalize_signup_name_trims_and_accepts_limit() {
+        let name = "A".repeat(200);
+        assert_eq!(normalize_signup_name(" Ada "), Some("Ada"));
+        assert_eq!(normalize_signup_name(&name), Some(name.as_str()));
+    }
+
+    #[test]
+    fn normalize_signup_name_rejects_empty_and_long_values() {
+        let name = "A".repeat(201);
+        assert_eq!(normalize_signup_name("   "), None);
+        assert_eq!(normalize_signup_name(&name), None);
+    }
 }
