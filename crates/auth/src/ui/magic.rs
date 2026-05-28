@@ -50,6 +50,7 @@ use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
+use crate::identity::email as email_validation;
 use crate::identity::eligibility;
 use crate::identity::magic_link;
 use crate::mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
