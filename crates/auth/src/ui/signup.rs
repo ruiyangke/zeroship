@@ -22,6 +22,7 @@ use crate::csrf;
 use crate::identity::{password, verification};
 use crate::mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use crate::mailer::{Address, Mailer};
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::store::users;
 use crate::ui::{ErrorPage, SignupPage};
 
@@ -110,7 +111,34 @@ pub async fn post(
         return render_signup_error(&challenge, &cfg, "enter a valid email");
     }
 
-    // 4. Hash the password — argon2 is CPU-bound, run on spawn_blocking so
+    // 4. Rate-limit per IP before entering the CPU-bound password hash.
+    let ip = req
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+    let signup_ip_key = format!("signup_ip:{ip}");
+    match ratelimit::consume_or_throttle(db.as_ref(), &signup_ip_key, Bucket::SIGNUP_IP).await {
+        Ok(RateLimitDecision::Allowed) => {}
+        Ok(RateLimitDecision::Throttled(_)) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "signup_throttled",
+                    outcome: "failure",
+                    detail: serde_json::json!({ "bucket": "signup_per_ip" }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return redirect_to_login(&challenge);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, bucket = %signup_ip_key, "signup rate-limit consume failed");
+            return render_error_page("internal error", Some("rate limit"));
+        }
+    }
+
+    // 5. Hash the password — argon2 is CPU-bound, run on spawn_blocking so
     // the ntex event loop is not parked (same constraint as /login).
     let password_clone = form.password.clone();
     let phc = match compio::runtime::spawn_blocking(move || password::hash(&password_clone)).await {
@@ -125,7 +153,7 @@ pub async fn post(
         }
     };
 
-    // 5. Insert the user row. Account-enumeration defense: a duplicate
+    // 6. Insert the user row. Account-enumeration defense: a duplicate
     // email is logged but produces the same response as a successful
     // insert — the attacker cannot probe email existence via this endpoint.
     let name = form.name.trim();
@@ -137,7 +165,7 @@ pub async fn post(
         }
     };
 
-    // 5b. On a successful create, issue a verification token and email
+    // 6b. On a successful create, issue a verification token and email
     //     it to the user. Both the token issue and the email send are
     //     best-effort — a failure is logged but never surfaced to the
     //     user, because:
@@ -210,9 +238,13 @@ pub async fn post(
         }
     }
 
-    // 6. Redirect to /login carrying the same challenge so the user can
+    // 7. Redirect to /login carrying the same challenge so the user can
     // immediately sign in. The verification email is in their inbox;
     // verifying is decoupled from sign-in.
+    redirect_to_login(&challenge)
+}
+
+fn redirect_to_login(challenge: &str) -> HttpResponse {
     let to = if challenge.is_empty() {
         "/login".to_string()
     } else {

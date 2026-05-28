@@ -25,8 +25,10 @@ use crate::csrf;
 use crate::identity::password_reset;
 use crate::mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
 use crate::mailer::{Address, Mailer};
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::store::users;
 use crate::ui::ForgotPage;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Deserialize)]
 pub struct ForgotForm {
@@ -71,6 +73,42 @@ pub async fn post(
     //    enumeration leak). The email is normalized to lowercase
     //    consistently with /signup so case-only differences match.
     let email_norm = form.email.trim().to_ascii_lowercase();
+    let email_hash = hex::encode(Sha256::digest(email_norm.as_bytes()));
+    let ip = req
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "0.0.0.0".to_string());
+    let buckets = [
+        (
+            format!("forgot_email:{email_hash}"),
+            Bucket::FORGOT_EMAIL,
+            "forgot_per_email",
+        ),
+        (format!("forgot_ip:{ip}"), Bucket::FORGOT_IP, "forgot_per_ip"),
+    ];
+    for (key, bucket, bucket_name) in &buckets {
+        match ratelimit::consume_or_throttle(db.as_ref(), key, *bucket).await {
+            Ok(RateLimitDecision::Allowed) => {}
+            Ok(RateLimitDecision::Throttled(_)) => {
+                audit::emit(
+                    db.as_ref(),
+                    &AuditEvent {
+                        event_type: "password_reset_requested_throttled",
+                        outcome: "failure",
+                        detail: serde_json::json!({ "bucket": bucket_name }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+                return render_form(&cfg, None, true);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, bucket = %key, "forgot rate-limit consume failed");
+                return render_form(&cfg, None, true);
+            }
+        }
+    }
+
     let user = users::find_by_email(db.as_ref(), &email_norm)
         .await
         .ok()
