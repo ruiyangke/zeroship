@@ -118,7 +118,8 @@ pub async fn callback(
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 creator_id: Some(creator_id),
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::LinkAccount,
                 resource: Some(&body.stripe_account_id),
                 source_ip: ip.as_deref(),
@@ -189,7 +190,8 @@ pub async fn unlink(
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 creator_id: Some(creator_id),
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::UnlinkAccount,
                 resource: None,
                 source_ip: ip.as_deref(),

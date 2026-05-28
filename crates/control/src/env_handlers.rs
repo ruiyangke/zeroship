@@ -108,7 +108,8 @@ pub async fn set_var(
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::SetVar,
                 resource: Some(&body.key),
                 source_ip: ip.as_deref(),
@@ -140,7 +141,8 @@ pub async fn delete_var(
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::DeleteVar,
                 resource: Some(&key),
                 source_ip: ip.as_deref(),
@@ -197,7 +199,8 @@ pub async fn set_secret(
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::SetSecret,
                 resource: Some(&body.key),
                 source_ip: ip.as_deref(),
@@ -279,7 +282,8 @@ pub async fn set_expose(
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::SetEnvExpose,
                 resource: Some(&resource),
                 source_ip: ip.as_deref(),
@@ -317,7 +321,8 @@ pub async fn list_audit(
         Ok(rows) => web::HttpResponse::Ok().json(&serde_json::json!({
             "audit": rows.iter().map(|r| serde_json::json!({
                 "id": r.id.to_string(),
-                "actor": r.actor,
+                "actor_user_id": r.actor_user_id.map(|id| id.to_string()),
+                "actor_token_id": r.actor_token_id.map(|id| id.to_string()),
                 "action": r.action,
                 "resource": r.resource,
                 "source_ip": r.source_ip,
@@ -360,7 +365,8 @@ pub async fn delete_secret(
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
                 creator_id: None,
-                actor: "admin",
+                actor_user_id: Some(authz.principal_id),
+                actor_token_id: authz.token_id,
                 action: Action::DeleteSecret,
                 resource: Some(&key),
                 source_ip: ip.as_deref(),

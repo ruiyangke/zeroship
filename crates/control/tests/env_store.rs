@@ -284,11 +284,15 @@ async fn audit_log_roundtrip() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");
     let app = create_test_app(&registry).await;
+    let first_actor = Uuid::new_v4();
+    let second_actor = Uuid::new_v4();
+    let token_id = Uuid::new_v4();
 
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
         creator_id: None,
-        actor: "admin",
+        actor_user_id: Some(first_actor),
+        actor_token_id: Some(token_id),
         action: Action::SetSecret,
         resource: Some("STRIPE_KEY"),
         source_ip: Some("203.0.113.7"),
@@ -296,7 +300,8 @@ async fn audit_log_roundtrip() {
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
         creator_id: None,
-        actor: "admin",
+        actor_user_id: Some(second_actor),
+        actor_token_id: None,
         action: Action::DeleteSecret,
         resource: Some("STRIPE_KEY"),
         source_ip: None,
@@ -310,7 +315,10 @@ async fn audit_log_roundtrip() {
     assert_eq!(rows[0].source_ip, None);
     assert_eq!(rows[1].action, "set_secret");
     assert_eq!(rows[1].source_ip.as_deref(), Some("203.0.113.7"));
-    assert_eq!(rows[0].actor, "admin");
+    assert_eq!(rows[0].actor_user_id, Some(second_actor));
+    assert_eq!(rows[0].actor_token_id, None);
+    assert_eq!(rows[1].actor_user_id, Some(first_actor));
+    assert_eq!(rows[1].actor_token_id, Some(token_id));
 
     registry.delete_app(&app).await.ok();
 }
@@ -324,7 +332,8 @@ async fn app_audit_is_append_only() {
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
         creator_id: None,
-        actor: "admin",
+        actor_user_id: Some(Uuid::new_v4()),
+        actor_token_id: None,
         action: Action::SetVar,
         resource: Some("APPEND_ONLY_PROBE"),
         source_ip: None,

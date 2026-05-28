@@ -319,7 +319,8 @@ impl Registry {
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 app_id UUID,
                 creator_id UUID,
-                actor TEXT NOT NULL,
+                actor_user_id UUID,
+                actor_token_id UUID,
                 action TEXT NOT NULL,
                 resource TEXT,
                 source_ip TEXT,
@@ -329,6 +330,21 @@ impl Registry {
         )
         .await
         .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE app_audit ADD COLUMN IF NOT EXISTS actor_user_id UUID",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "ALTER TABLE app_audit ADD COLUMN IF NOT EXISTS actor_token_id UUID",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute("ALTER TABLE app_audit DROP COLUMN IF EXISTS actor", &[])
+            .await
+            .map_err(|e| format!("migration: {e}"))?;
 
         conn.execute(
             "CREATE OR REPLACE FUNCTION public.app_audit_block_tamper()
