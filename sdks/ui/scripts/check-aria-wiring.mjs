@@ -2357,6 +2357,9 @@ await open("components-tooltip--on-focusable");
     "Tooltip keyboard — Tab opens + aria-describedby on trigger refs popup",
     ok,
     `focused=${focused} visible=${popupVisible} describedby=${describedBy} matches=${describedByMatchesPopup}`,
+  );
+}
+
 /* ─── 63. Form submit → onFormSubmit fires with collected formValues ─ *
  *
  * BasicSubmit: typing a value, then clicking the submit button must
@@ -2475,6 +2478,9 @@ await open("components-fieldset--basic-with-legend");
     "Fieldset aria-labelledby resolves to Legend id with matching text",
     ok,
     `aria-labelledby="${labelledBy}" legend="${legendText}"`,
+  );
+}
+
 /* ─── 63. OtpField typing first cell auto-advances focus (slice 9) ─── *
  *
  * Type a single character into cell 0. Base UI advances focus to
