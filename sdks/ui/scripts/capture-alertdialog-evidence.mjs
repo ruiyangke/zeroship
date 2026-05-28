@@ -31,6 +31,15 @@ const stories = [
   "components-alertdialog--three-buttons",
   "components-alertdialog--with-body",
   "components-alertdialog--outside-click-ignored",
+  // Phase 2.C AlertDialog review-fix additions (items 1, 2, 5, 6, 7).
+  "components-alertdialog--esc-closes-cancel",
+  "components-alertdialog--esc-no-ops-without-cancel",
+  "components-alertdialog--esc-ignores-disabled-cancel",
+  "components-alertdialog--cancel-with-cleanup-on-click",
+  "components-alertdialog--cancel-as-child",
+  "components-alertdialog--three-buttons-destructive-bottom",
+  "components-alertdialog--three-buttons-destructive-misplaced",
+  "components-alertdialog--destructive-without-cancel-warns",
 ];
 
 const mimeMap = new Map([

@@ -79,7 +79,7 @@ import {
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Button, type ButtonProps } from "../Button";
 import { Slot, composeRefs } from "../_slot";
-import { classnames } from "../_classnames";
+import { classnames, composeBaseClass } from "../_classnames";
 
 export type DialogSize = "sm" | "md" | "lg" | "full";
 export type DialogPlacement = "center" | "top";
@@ -135,17 +135,9 @@ export interface DialogProps
   children?: ReactNode;
 }
 
-/* Compose our static class with a Base UI className that may be either
- * a string or a state-callback. Same shape as Field.tsx's
- * composeBaseClass invariant (slice 2 review fix 25). */
-function composeBaseClass<S>(
-  ours: string,
-  theirs: string | ((state: S) => string | undefined) | undefined,
-): string | ((state: S) => string | undefined) {
-  if (theirs == null) return ours;
-  if (typeof theirs === "string") return classnames(ours, theirs);
-  return (state: S) => classnames(ours, theirs(state));
-}
+/* `composeBaseClass` now lives in `../_classnames` (review-fix item 10,
+ * Phase 2.C) — Dialog, AlertDialog, and Field used byte-identical
+ * copies; one source of truth keeps the surface honest. */
 
 /* ─── Root ──────────────────────────────────────────────────────────── */
 

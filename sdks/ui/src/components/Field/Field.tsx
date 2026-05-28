@@ -55,7 +55,7 @@ import {
   type ReactNode,
 } from "react";
 import { Field as BaseField } from "@base-ui/react/field";
-import { classnames } from "../_classnames";
+import { classnames, composeBaseClass } from "../_classnames";
 
 export type FieldOrientation = "vertical" | "horizontal";
 export type FieldSize = "sm" | "md" | "lg";
@@ -112,18 +112,9 @@ export function useFieldContext(): FieldContextValue | null {
 
 /* ─── styled wrappers around Base UI parts ───────────────────────────── */
 
-// Base UI's `className` is `string | ((state) => string | undefined)`. We
-// preserve that surface by composing our own static class with the
-// caller's (string or callback). Callbacks become wrapping callbacks so
-// our class always wins; strings concat. See file-header invariant note.
-function composeBaseClass<S>(
-  ours: string,
-  theirs: string | ((state: S) => string | undefined) | undefined,
-): string | ((state: S) => string | undefined) {
-  if (theirs == null) return ours;
-  if (typeof theirs === "string") return classnames(ours, theirs);
-  return (state: S) => classnames(ours, theirs(state));
-}
+// `composeBaseClass` was hoisted to `../_classnames` (AlertDialog
+// review-fix item 10, Phase 2.C). Same shape — see file-header
+// invariant note above.
 
 type LabelProps = ComponentPropsWithoutRef<typeof BaseField.Label>;
 const FieldLabel = forwardRef<HTMLLabelElement, LabelProps>(

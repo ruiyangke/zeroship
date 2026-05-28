@@ -42,9 +42,9 @@
   gap: var(--zs-space-2);
   padding: var(--zs-dialog-padding-alert);
   padding-block-start: var(--zs-space-3);
-  /* Reset Dialog footer's flex justification — grid handles layout now. */
-  justify-content: stretch;
-  align-items: stretch;
+  /* No flex-justification reset needed: grid tracks already span the
+   * container, so `justify-content: stretch` / `align-items: stretch`
+   * would be no-ops (review-fix item 13). */
 }
 
 /* One button — full-width single column. */
@@ -73,10 +73,5 @@
   justify-content: center;
 }
 
-/* ─── forced-colors ────────────────────────────────────────────────────── */
-@media (forced-colors: active) {
-  .zs-alertdialog-popup {
-    /* Inherits .zs-dialog-popup forced-colors rules; nothing more to
-     * tweak here — the alert is structurally the same surface. */
-  }
-}
+/* forced-colors is inherited from .zs-dialog-popup — no alert-specific
+ * overrides needed (review-fix item 11). */

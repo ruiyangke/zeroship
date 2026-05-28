@@ -269,6 +269,158 @@ await openStoryAndTrigger(
   report("AlertDialog ESC closes", isHidden);
 }
 
+/* ─── 9a. AlertDialog ESC activates Cancel's onClick (Phase 2.C fix 1) ─
+ *
+ * The EscClosesCancel story has a Cancel whose onClick flips an outer
+ * status line to "cancelled" AND must close the popup. Both must run
+ * as one unit — review-fix item 1 routes ESC through the Cancel's
+ * click() (which fires the composed onClick → Base UI close). */
+await openStoryAndTrigger(
+  "components-alertdialog--esc-closes-cancel",
+  '[data-testid="alertdialog-trigger"]',
+);
+{
+  const popup = page.locator('[data-testid="alertdialog-esc-closes-cancel"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const statusBefore = (
+    await page.locator('[data-testid="cancel-clicked-status"]').innerText()
+  ).trim();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(500);
+  const popupHidden =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  const statusAfter = (
+    await page.locator('[data-testid="cancel-clicked-status"]').innerText()
+  ).trim();
+  const sideEffectRan =
+    statusBefore !== statusAfter && statusAfter.includes("cancelled");
+  report(
+    "AlertDialog ESC activates Cancel onClick (side-effect AND close)",
+    popupHidden && sideEffectRan,
+    `popupHidden=${popupHidden} statusBefore="${statusBefore}" statusAfter="${statusAfter}"`,
+  );
+}
+
+/* ─── 9b. AlertDialog ESC no-ops when no Cancel (Phase 2.C fix 1) ──── */
+await openStoryAndTrigger(
+  "components-alertdialog--esc-no-ops-without-cancel",
+  '[data-testid="alertdialog-trigger"]',
+);
+{
+  const popup = page.locator('[data-testid="alertdialog-esc-noop"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+  const stillVisible = await popup.isVisible().catch(() => false);
+  report(
+    "AlertDialog ESC no-ops without Cancel",
+    stillVisible,
+    `popupStillVisible=${stillVisible}`,
+  );
+}
+
+/* ─── 9c. AlertDialog ESC ignores disabled Cancel (Phase 2.C fix 1) ── */
+await openStoryAndTrigger(
+  "components-alertdialog--esc-ignores-disabled-cancel",
+  '[data-testid="alertdialog-trigger"]',
+);
+{
+  const popup = page.locator('[data-testid="alertdialog-esc-disabled-cancel"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+  const stillVisible = await popup.isVisible().catch(() => false);
+  report(
+    "AlertDialog ESC ignores disabled Cancel",
+    stillVisible,
+    `popupStillVisible=${stillVisible}`,
+  );
+}
+
+/* ─── 9d. AlertDialog.Cancel onClick composes (Phase 2.C fix 2) ──────
+ *
+ * The CancelWithCleanupOnClick story has a Cancel whose onClick flips an
+ * outer status line to "cleanup-ran" AND must close the popup. Before
+ * the spread-order fix, only the caller onClick ran and the popup
+ * stayed open (twin of the Dialog.Close bug we fixed in Phase 2.B). */
+await openStoryAndTrigger(
+  "components-alertdialog--cancel-with-cleanup-on-click",
+  '[data-testid="alertdialog-trigger"]',
+);
+{
+  const popup = page.locator(
+    '[data-testid="alertdialog-cancel-cleanup-popup"]',
+  );
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const statusBefore = (
+    await page.locator('[data-testid="cancel-cleanup-status"]').innerText()
+  ).trim();
+  const cancelBtn = page.locator(
+    '[data-testid="alertdialog-cancel-cleanup-btn"]',
+  );
+  await cancelBtn.waitFor({ state: "visible", timeout: 5000 });
+  await cancelBtn.click();
+  await page.waitForTimeout(500);
+  const popupHidden =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  const statusAfter = (
+    await page.locator('[data-testid="cancel-cleanup-status"]').innerText()
+  ).trim();
+  const sideEffectRan =
+    statusBefore !== statusAfter && statusAfter.includes("cleanup-ran");
+  report(
+    "AlertDialog.Cancel onClick composes (side-effect AND close)",
+    popupHidden && sideEffectRan,
+    `popupHidden=${popupHidden} statusBefore="${statusBefore}" statusAfter="${statusAfter}"`,
+  );
+}
+
+/* ─── 9e. AlertDialog.Cancel asChild Slot composes (Phase 2.C fix 7) ─
+ *
+ * The CancelAsChild story renders a custom <button> via asChild. The
+ * Slot route must compose: className keeps consumer's class hooks,
+ * the child's own onClick AND the close handler both run. The pre-fix
+ * cloneElement path silently dropped them. */
+await openStoryAndTrigger(
+  "components-alertdialog--cancel-as-child",
+  '[data-testid="alertdialog-trigger"]',
+);
+{
+  const popup = page.locator(
+    '[data-testid="alertdialog-cancel-aschild-popup"]',
+  );
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const customCancel = page.locator(
+    '[data-testid="alertdialog-cancel-aschild-target"]',
+  );
+  await customCancel.waitFor({ state: "visible", timeout: 5000 });
+  const hasConsumerClass = await customCancel.evaluate((el) =>
+    el.classList.contains("zs-button"),
+  );
+  const tag = await customCancel.evaluate((el) => el.tagName);
+  const statusBefore = (
+    await page.locator('[data-testid="cancel-aschild-status"]').innerText()
+  ).trim();
+  await customCancel.click();
+  await page.waitForTimeout(500);
+  const popupHidden =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  const statusAfter = (
+    await page.locator('[data-testid="cancel-aschild-status"]').innerText()
+  ).trim();
+  const childOnClickRan =
+    statusBefore !== statusAfter && statusAfter.includes("child-onclick-ran");
+  const ok = hasConsumerClass && tag === "BUTTON" && popupHidden && childOnClickRan;
+  report(
+    "AlertDialog.Cancel asChild Slot composes (className, onClick, close)",
+    ok,
+    `tag=${tag} hasConsumerClass=${hasConsumerClass} popupHidden=${popupHidden} statusBefore="${statusBefore}" statusAfter="${statusAfter}"`,
+  );
+}
+
 /* ─── 11. Card interactive keyboard — Enter activates onClick (slice-3 fix 1) ── */
 await open("components-card--interactive-with-keyboard");
 {

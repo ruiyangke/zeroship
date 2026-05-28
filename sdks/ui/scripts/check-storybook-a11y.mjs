@@ -82,6 +82,18 @@ const stories = [
   "components-alertdialog--three-buttons",
   "components-alertdialog--with-body",
   "components-alertdialog--outside-click-ignored",
+  // Phase 2.C AlertDialog review-fix additions (items 1, 2, 5, 7).
+  "components-alertdialog--esc-closes-cancel",
+  "components-alertdialog--esc-no-ops-without-cancel",
+  "components-alertdialog--esc-ignores-disabled-cancel",
+  "components-alertdialog--cancel-with-cleanup-on-click",
+  "components-alertdialog--cancel-as-child",
+  "components-alertdialog--three-buttons-destructive-bottom",
+  // Negative-test stories — excluded from the a11y list since their
+  // story meta sets `a11y: { disable: true }` and they exist purely to
+  // exercise dev-warn paths:
+  //   components-alertdialog--three-buttons-destructive-misplaced
+  //   components-alertdialog--destructive-without-cancel-warns
 ];
 
 if (themes.length === 0 || stories.length === 0) {
