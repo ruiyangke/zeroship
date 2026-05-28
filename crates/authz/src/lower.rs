@@ -6,7 +6,12 @@ use crate::{Condition, Effect, Policy, Resource, Statement};
 #[must_use]
 pub fn lower(policy: &Policy) -> String {
     let mut source = String::new();
-    writeln!(&mut source, "// Policy: {}", policy.name).expect("writing to String is infallible");
+    writeln!(
+        &mut source,
+        "// Policy: {}",
+        sanitize_cedar_comment_fragment(&policy.name)
+    )
+    .expect("writing to String is infallible");
 
     for (index, statement) in policy.statements.iter().enumerate() {
         append_time_window_todos(&mut source, statement);
@@ -141,6 +146,9 @@ fn lower_condition(condition: &Condition) -> String {
 fn append_time_window_todos(source: &mut String, statement: &Statement) {
     for condition in &statement.conditions {
         if let Condition::TimeWindow { start, end, tz } = condition {
+            let start = sanitize_cedar_comment_fragment(start);
+            let end = sanitize_cedar_comment_fragment(end);
+            let tz = sanitize_cedar_comment_fragment(tz);
             writeln!(
                 source,
                 "// TODO(authz): TimeWindow(start={start}, end={end}, tz={tz}) lowers to true in P9-U2; wire context.now/local-time comparison before enforcing it."
@@ -148,6 +156,11 @@ fn append_time_window_todos(source: &mut String, statement: &Statement) {
             .expect("writing to String is infallible");
         }
     }
+}
+
+fn sanitize_cedar_comment_fragment(value: &str) -> String {
+    let without_line_breaks = value.replace(['\n', '\r'], "");
+    without_line_breaks.replace("*/", "")
 }
 
 fn cedar_string(value: &str) -> String {
