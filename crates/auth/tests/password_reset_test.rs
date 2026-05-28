@@ -177,13 +177,12 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     .await
     .expect("seed idp session");
 
-    let user_id_text = user.id.to_string();
     client
         .execute(
             "INSERT INTO auth.gateway_sessions \
                 (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, true, NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours')",
-            &[&user_id_text, &"app_reset_revoke_test", &email, &"Test"],
+            &[&user.id, &"app_reset_revoke_test", &email, &"Test"],
         )
         .await
         .expect("seed gateway session");
@@ -192,7 +191,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
             "INSERT INTO auth.console_sessions \
                 (user_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2::citext, $3, true, NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours')",
-            &[&user_id_text, &email, &"Test"],
+            &[&user.id, &email, &"Test"],
         )
         .await
         .expect("seed console session");
@@ -272,7 +271,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let gateway_count: i64 = pg
         .query_one(
             "SELECT COUNT(*) FROM auth.gateway_sessions WHERE user_id = $1",
-            &[&user_id_text],
+            &[&user.id],
         )
         .await
         .expect("count gateway sessions")
@@ -280,7 +279,7 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let console_count: i64 = pg
         .query_one(
             "SELECT COUNT(*) FROM auth.console_sessions WHERE user_id = $1",
-            &[&user_id_text],
+            &[&user.id],
         )
         .await
         .expect("count console sessions")

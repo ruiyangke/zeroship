@@ -25,6 +25,7 @@ async fn migrations_apply_cleanly() {
 
     migrations::migrate(&client).await.expect("migrate");
 
+    assert_extension_exists(&client, "pgcrypto").await;
     assert_table_exists(&client, "auth.users").await;
     assert_queryable(&client, "platform.roles").await;
     assert_queryable(&client, "control.app_members").await;
@@ -133,6 +134,223 @@ async fn migrations_apply_cleanly() {
         .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
         .await
         .expect("cleanup users");
+}
+
+async fn assert_extension_exists(client: &compio_postgres::Client, name: &str) {
+    let rows = client
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1) AS found",
+            &[&name],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("query extension {name}: {e}"));
+    assert!(rows[0].get::<_, bool>("found"), "extension {name} should exist");
+}
+
+async fn assert_oauth_clients_created_by_nullable(client: &compio_postgres::Client) {
+    let rows = client
+        .query(
+            "SELECT is_nullable
+             FROM information_schema.columns
+             WHERE table_schema = 'control'
+               AND table_name = 'oauth_clients'
+               AND column_name = 'created_by'",
+            &[],
+        )
+        .await
+        .expect("query oauth_clients.created_by nullability");
+    let nullable: String = rows
+        .first()
+        .expect("control.oauth_clients.created_by exists")
+        .get("is_nullable");
+    assert_eq!(nullable, "YES", "created_by should allow bootstrap rows");
+}
+
+async fn assert_token_sweep_indexes(client: &compio_postgres::Client) {
+    for (index, table, column, predicate) in [
+        (
+            "auth_magic_links_expires_unconsumed_idx",
+            "auth.magic_links",
+            "expires_at",
+            "where (consumed_at is null)",
+        ),
+        (
+            "auth_magic_links_consumed_idx",
+            "auth.magic_links",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+        (
+            "auth_magic_completions_consumed_idx",
+            "auth.magic_completions",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+        (
+            "auth_email_verifications_expires_unconsumed_idx",
+            "auth.email_verifications",
+            "expires_at",
+            "where (consumed_at is null)",
+        ),
+        (
+            "auth_email_verifications_consumed_idx",
+            "auth.email_verifications",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+    ] {
+        assert_index_def_contains(client, "auth", index, &[table, column, predicate]).await;
+    }
+}
+
+async fn assert_one_active_token_indexes(client: &compio_postgres::Client) {
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_magic_links_active_email_purpose_uniq",
+        &[
+            "unique index",
+            "auth.magic_links",
+            "email, purpose",
+            "where (consumed_at is null)",
+        ],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_email_verifications_active_user_uniq",
+        &[
+            "unique index",
+            "auth.email_verifications",
+            "user_id",
+            "where (consumed_at is null)",
+        ],
+    )
+    .await;
+}
+
+async fn assert_hot_path_indexes(client: &compio_postgres::Client) {
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_identities_user_linked_idx",
+        &["auth.identities", "user_id", "linked_at"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_sessions_user_idx",
+        &["auth.sessions", "user_id"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_gateway_sessions_user_active_idx",
+        &["auth.gateway_sessions", "user_id", "where (revoked_at is null)"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "auth",
+        "auth_email_verifications_user_active_idx",
+        &["auth.email_verifications", "user_id", "where (consumed_at is null)"],
+    )
+    .await;
+    assert_index_def_contains(
+        client,
+        "control",
+        "permission_tokens_owner_kind_created_idx",
+        &[
+            "control.permission_tokens",
+            "owner_id",
+            "kind",
+            "created_at desc",
+            "id desc",
+        ],
+    )
+    .await;
+}
+
+async fn assert_index_def_contains(
+    client: &compio_postgres::Client,
+    schema: &str,
+    index: &str,
+    expected: &[&str],
+) {
+    let rows = client
+        .query(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2",
+            &[&schema, &index],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("query index {schema}.{index}: {e}"));
+    let def: String = rows
+        .first()
+        .unwrap_or_else(|| panic!("missing index {schema}.{index}"))
+        .get("indexdef");
+    let normalized = def.to_ascii_lowercase();
+    for fragment in expected {
+        assert!(
+            normalized.contains(&fragment.to_ascii_lowercase()),
+            "index {schema}.{index} definition missing `{fragment}`: {def}"
+        );
+    }
+}
+
+async fn assert_user_delete_cascades_session_state(client: &compio_postgres::Client) {
+    let email = format!("auth-session-cascade-{}@zeroship.test", Uuid::new_v4().simple());
+    let user_id = insert_user(client, &email, "Auth Session Cascade").await;
+
+    client
+        .execute(
+            "INSERT INTO auth.sessions (user_id, auth_method, amr, idle_expires_at, abs_expires_at)
+             VALUES ($1, 'password', ARRAY['pwd'], NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id],
+        )
+        .await
+        .expect("insert auth session");
+    client
+        .execute(
+            "INSERT INTO auth.gateway_sessions
+                (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at)
+             VALUES ($1, $2, $3::citext, 'Cascade User', TRUE, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id, &"app-cascade-test", &email],
+        )
+        .await
+        .expect("insert gateway session");
+    client
+        .execute(
+            "INSERT INTO auth.console_sessions
+                (user_id, email, name, email_verified, idle_expires_at, abs_expires_at)
+             VALUES ($1, $2::citext, 'Cascade User', TRUE, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '1 day')",
+            &[&user_id, &email],
+        )
+        .await
+        .expect("insert console session");
+
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .await
+        .expect("delete user should cascade session state");
+
+    for table in [
+        "auth.sessions",
+        "auth.gateway_sessions",
+        "auth.console_sessions",
+    ] {
+        let rows = client
+            .query(
+                &format!("SELECT COUNT(*)::BIGINT AS n FROM {table} WHERE user_id = $1"),
+                &[&user_id],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("count {table}: {e}"));
+        let count: i64 = rows[0].get("n");
+        assert_eq!(count, 0, "{table} rows should cascade on user delete");
+    }
 }
 
 async fn assert_table_exists(client: &compio_postgres::Client, table: &str) {

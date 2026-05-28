@@ -39,6 +39,7 @@ use crate::csrf;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
 use crate::identity::eligibility;
+use crate::identity::email as email_validation;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};

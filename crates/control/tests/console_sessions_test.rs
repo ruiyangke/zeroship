@@ -56,13 +56,14 @@ async fn create_validate_revoke_roundtrip() {
         .await
         .expect("migrate");
 
-    let user_id = format!("usr_{}", Uuid::new_v4().simple());
+    let user_id = insert_user(&client, "console-session").await;
+    let user_id_text = user_id.to_string();
     let email = format!("u-{}@zeroship.test", Uuid::new_v4().simple());
-    let claims = claims_for(&user_id, &email);
+    let claims = claims_for(&user_id_text, &email);
 
     let session = create(&client, &claims).await.expect("create");
 
-    assert_eq!(session.user_id, user_id);
+    assert_eq!(session.user_id, user_id_text);
     assert_eq!(session.email.as_deref(), Some(email.as_str()));
     assert_eq!(session.name.as_deref(), Some("Console User"));
     assert!(session.avatar_url.is_none());
@@ -103,4 +104,22 @@ async fn create_validate_revoke_roundtrip() {
         )
         .await
         .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+        .await
+        .ok();
+}
+
+async fn insert_user(client: &compio_postgres::Client, label: &str) -> Uuid {
+    let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
+    let rows = client
+        .query(
+            "INSERT INTO auth.users (email, name, email_verified_at)
+             VALUES ($1, $2, NOW())
+             RETURNING id",
+            &[&email, &label],
+        )
+        .await
+        .expect("insert user");
+    rows[0].get("id")
 }

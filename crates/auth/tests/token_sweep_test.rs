@@ -49,12 +49,12 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     client
         .execute(
             "INSERT INTO auth.magic_links \
-                (token_hash, email, csrf_nonce, purpose, expires_at) \
+                (token_hash, email, csrf_nonce, purpose, expires_at, consumed_at) \
              VALUES \
-                ($1, $2::citext, $3, 'login', NOW() - INTERVAL '10 days'), \
-                ($4, $2::citext, $5, 'login', NOW() + INTERVAL '1 hour'), \
-                ($6, $7::citext, $8, 'reset', NOW() - INTERVAL '10 days'), \
-                ($9, $7::citext, $10, 'reset', NOW() + INTERVAL '1 hour')",
+                ($1, $2::citext, $3, 'login', NOW() - INTERVAL '10 days', NOW() - INTERVAL '10 days'), \
+                ($4, $2::citext, $5, 'login', NOW() + INTERVAL '1 hour', NULL), \
+                ($6, $7::citext, $8, 'reset', NOW() - INTERVAL '10 days', NOW() - INTERVAL '10 days'), \
+                ($9, $7::citext, $10, 'reset', NOW() + INTERVAL '1 hour', NULL)",
             &[
                 &stale_login_hash.as_slice(),
                 &login_email,
@@ -92,10 +92,10 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     client
         .execute(
             "INSERT INTO auth.email_verifications \
-                (token_hash, user_id, email, expires_at) \
+                (token_hash, user_id, email, expires_at, consumed_at) \
              VALUES \
-                ($1, $2, $3::citext, NOW() - INTERVAL '10 days'), \
-                ($4, $2, $3::citext, NOW() + INTERVAL '1 hour')",
+                ($1, $2, $3::citext, NOW() - INTERVAL '10 days', NOW() - INTERVAL '10 days'), \
+                ($4, $2, $3::citext, NOW() + INTERVAL '1 hour', NULL)",
             &[
                 &stale_verify_hash.as_slice(),
                 &user.id,

@@ -208,7 +208,7 @@ async fn cleanup_user(pg: &Client, user_id: Uuid) {
         .execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user_id])
         .await;
     let _ = pg
-        .execute("DELETE FROM auth.console_sessions WHERE user_id = $1", &[&user_id.to_string()])
+        .execute("DELETE FROM auth.console_sessions WHERE user_id = $1", &[&user_id])
         .await;
     let _ = pg
         .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])

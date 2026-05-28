@@ -65,7 +65,7 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
     };
     let result = conn
         .execute(
-            "INSERT INTO app_audit(app_id, creator_id, actor, action, resource, source_ip)
+            "INSERT INTO control.app_audit(app_id, creator_id, actor, action, resource, source_ip)
              VALUES($1, $2, $3, $4, $5, $6)",
             &[
                 &entry.app_id,
@@ -94,7 +94,7 @@ pub async fn recent_for_app(
         .query(
             "SELECT id, actor, action, resource, source_ip,
                     to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at_text
-             FROM app_audit
+             FROM control.app_audit
              WHERE app_id = $1
              ORDER BY at DESC
              LIMIT $2",

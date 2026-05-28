@@ -66,7 +66,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
 
     // Two sessions for the same user at two different apps — the BCL
     // handler revokes ACROSS apps for the same sub.
-    let target_user = format!("usr_{}", Uuid::new_v4().simple());
+    let target_user_id = insert_user(&client, "gateway-bcl-target").await;
+    let target_user = target_user_id.to_string();
     let app_a = format!("app-a-{}", Uuid::new_v4().simple());
     let app_b = format!("app-b-{}", Uuid::new_v4().simple());
 
@@ -99,7 +100,8 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     .expect("create s_b");
 
     // One session for an unrelated user — must NOT be touched.
-    let other_user = format!("usr_{}", Uuid::new_v4().simple());
+    let other_user_id = insert_user(&client, "gateway-bcl-other").await;
+    let other_user = other_user_id.to_string();
     let s_other = create(
         &client,
         &NewSession {
@@ -169,6 +171,12 @@ async fn revoke_all_for_user_revokes_only_the_target_user() {
     for id in [s_a.id, s_b.id, s_other.id] {
         client
             .execute("DELETE FROM auth.gateway_sessions WHERE id = $1", &[&id])
+            .await
+            .ok();
+    }
+    for id in [target_user_id, other_user_id] {
+        client
+            .execute("DELETE FROM auth.users WHERE id = $1", &[&id])
             .await
             .ok();
     }
@@ -482,6 +490,9 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     .await
     .ok();
     db.execute("DELETE FROM auth.gateway_sessions WHERE id = $1", &[&session.id])
+        .await
+        .ok();
+    db.execute("DELETE FROM auth.users WHERE id = $1", &[&target_user_id])
         .await
         .ok();
 }
