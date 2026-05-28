@@ -34,6 +34,11 @@ impl Bucket {
         capacity: 60.0,
         refill_per_sec: 60.0 / 3600.0,
     };
+    /// Cross-device magic completion: 30 requests burst, refill 5/min.
+    pub const MAGIC_COMPLETE: Self = Self {
+        capacity: 30.0,
+        refill_per_sec: 5.0 / 60.0,
+    };
 }
 
 #[derive(Debug)]
@@ -71,4 +76,13 @@ pub async fn consume(conn: &Client, key: &str, bucket: Bucket) -> Result<RateLim
     Ok(RateLimitDecision::Throttled(RateLimited {
         retry_after_secs,
     }))
+}
+
+/// Named wrapper for call sites that need the DB-backed atomic consume path.
+pub async fn consume_or_throttle(
+    conn: &Client,
+    key: &str,
+    bucket: Bucket,
+) -> Result<RateLimitDecision> {
+    consume(conn, key, bucket).await
 }

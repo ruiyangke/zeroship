@@ -75,6 +75,7 @@ const STATEMENTS: &[&str] = &[
         code             TEXT NOT NULL,
         email            CITEXT NOT NULL,
         login_challenge  TEXT NOT NULL,
+        attempts         SMALLINT NOT NULL DEFAULT 0,
         expires_at       TIMESTAMPTZ NOT NULL,
         consumed_at      TIMESTAMPTZ
     )",

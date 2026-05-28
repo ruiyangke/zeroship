@@ -32,6 +32,7 @@
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE, USER_AGENT};
+use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use rand::Rng;
 use serde::Deserialize;
@@ -589,11 +590,45 @@ pub async fn complete(
         return render_error_page("invalid request", Some("csrf"));
     }
 
-    // 2. Consume atomically.
+    // 2. Per-IP throttle before touching the completion row. This limits
+    //    online guessing even across many CSRF nonces from one source.
+    let ip = req
+        .connection_info()
+        .remote()
+        .unwrap_or("0.0.0.0")
+        .to_string();
+    let rate_key = format!("magic_complete:{ip}");
+    match ratelimit::consume_or_throttle(db.as_ref(), &rate_key, Bucket::MAGIC_COMPLETE).await {
+        Ok(RateLimitDecision::Allowed) => {}
+        Ok(RateLimitDecision::Throttled(_)) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "magic_complete",
+                    outcome: "failure",
+                    auth_method: Some("magic"),
+                    detail: json!({ "reason": "rate_limited", "bucket": rate_key }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return render_error_page_with_status(
+                "too many attempts, try again later",
+                None,
+                StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, bucket = %rate_key, "magic complete rate-limit consume failed");
+            return render_error_page("internal error", Some("rate limit"));
+        }
+    }
+
+    // 3. Consume atomically.
     let completion =
         match completions_store::consume(db.as_ref(), &form.csrf_nonce, &form.code).await {
-            Ok(Some(c)) => c,
-            Ok(None) => {
+            Ok(c) => c,
+            Err(completions_store::ConsumeError::WrongCode) => {
                 audit::emit(
                     db.as_ref(),
                     &AuditEvent {
@@ -607,13 +642,13 @@ pub async fn complete(
                 .await;
                 return render_error_page("code invalid or expired", None);
             }
-            Err(e) => {
+            Err(completions_store::ConsumeError::Store(e)) => {
                 tracing::error!(error = %e, "magic_completions consume failed");
                 return render_error_page("internal error", Some("complete"));
             }
         };
 
-    // 3. Defence: form `login_challenge` must match the one stashed at
+    // 4. Defence: form `login_challenge` must match the one stashed at
     //    issue time. Defeats a forged challenge swap on the requesting
     //    device.
     if form.login_challenge != completion.login_challenge {
@@ -631,7 +666,7 @@ pub async fn complete(
         return render_error_page("session mismatch", None);
     }
 
-    // 4. Find-or-create the user (must succeed — the redeem path
+    // 5. Find-or-create the user (must succeed — the redeem path
     //    already found-or-created, so this is effectively a lookup).
     let user_id = match find_or_create_magic_user(db.as_ref(), &completion.email).await {
         Ok(id) => id,
@@ -641,7 +676,7 @@ pub async fn complete(
         }
     };
 
-    // 5. Mint session + accept_login + 302 — mirrors same-device path.
+    // 6. Mint session + accept_login + 302 — mirrors same-device path.
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
@@ -710,6 +745,14 @@ pub async fn complete(
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 fn render_error_page(error: &str, error_description: Option<&str>) -> HttpResponse {
+    render_error_page_with_status(error, error_description, StatusCode::OK)
+}
+
+fn render_error_page_with_status(
+    error: &str,
+    error_description: Option<&str>,
+    status: StatusCode,
+) -> HttpResponse {
     let page = ErrorPage {
         error,
         error_description,
@@ -717,7 +760,7 @@ fn render_error_page(error: &str, error_description: Option<&str>) -> HttpRespon
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
-    let mut resp = HttpResponse::Ok();
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
 }
@@ -753,15 +796,21 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
 
 // ─── auth.magic_completions store ────────────────────────────────────
 
-mod completions_store {
+pub mod completions_store {
     use compio_postgres::Client;
 
-    use crate::error::{AuthError, Result};
+    use crate::error::AuthError;
 
     #[derive(Debug, Clone)]
     pub struct Completion {
         pub email: String,
         pub login_challenge: String,
+    }
+
+    #[derive(Debug)]
+    pub enum ConsumeError {
+        WrongCode,
+        Store(AuthError),
     }
 
     /// Insert a fresh completion row. `expires_secs` is the lifetime
@@ -780,7 +829,7 @@ mod completions_store {
         email: &str,
         login_challenge: &str,
         expires_secs: i64,
-    ) -> Result<()> {
+    ) -> crate::error::Result<()> {
         db.execute(
             "INSERT INTO auth.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \
@@ -790,6 +839,7 @@ mod completions_store {
                 email = EXCLUDED.email, \
                 login_challenge = EXCLUDED.login_challenge, \
                 expires_at = EXCLUDED.expires_at, \
+                attempts = 0, \
                 consumed_at = NULL",
             &[
                 &csrf_nonce,
@@ -804,26 +854,46 @@ mod completions_store {
         Ok(())
     }
 
-    /// Atomically consume a completion row.
+    /// Atomically consume a completion row, invalidating it after five
+    /// failed code attempts.
     pub async fn consume(
         db: &Client,
         csrf_nonce: &str,
         code: &str,
-    ) -> Result<Option<Completion>> {
+    ) -> std::result::Result<Completion, ConsumeError> {
         let rows = db
             .query(
-                "UPDATE auth.magic_completions SET consumed_at = NOW() \
-                 WHERE csrf_nonce = $1 AND code = $2 \
-                   AND consumed_at IS NULL AND expires_at > NOW() \
-                 RETURNING email::text, login_challenge",
+                "UPDATE auth.magic_completions \
+                 SET attempts = (attempts + 1)::SMALLINT, \
+                     consumed_at = CASE \
+                         WHEN code = $2 AND attempts < 5 THEN NOW() \
+                         WHEN attempts + 1 >= 5 THEN NOW() \
+                         ELSE consumed_at \
+                     END \
+                 WHERE csrf_nonce = $1 \
+                   AND consumed_at IS NULL \
+                   AND expires_at > NOW() \
+                 RETURNING code = $2 AS matched, attempts, email::text, login_challenge",
                 &[&csrf_nonce, &code],
             )
             .await
-            .map_err(|e| AuthError::Db(format!("magic_completions consume: {e}")))?;
-        Ok(rows.first().map(|r| Completion {
-            email: r.get("email"),
-            login_challenge: r.get("login_challenge"),
-        }))
+            .map_err(|e| {
+                ConsumeError::Store(AuthError::Db(format!("magic_completions consume: {e}")))
+            })?;
+
+        let Some(row) = rows.first() else {
+            return Err(ConsumeError::WrongCode);
+        };
+        let matched: bool = row.get("matched");
+        let attempts: i16 = row.get("attempts");
+        if !matched || attempts > 5 {
+            return Err(ConsumeError::WrongCode);
+        }
+
+        Ok(Completion {
+            email: row.get("email"),
+            login_challenge: row.get("login_challenge"),
+        })
     }
 }
 
