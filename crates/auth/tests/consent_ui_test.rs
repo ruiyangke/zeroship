@@ -2,6 +2,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, Utc};
 use ntex::web;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -44,6 +45,7 @@ struct ConsentTestApp {
     pg: Arc<compio_postgres::Client>,
     user_id: Uuid,
     app_id: String,
+    client_id: String,
 }
 
 impl ConsentTestApp {
@@ -71,6 +73,7 @@ impl ConsentTestApp {
 
         let user_id = Uuid::new_v4();
         let app_id = format!("app-{}", Uuid::new_v4().simple());
+        let client_id = format!("zeroship-builder-{}", Uuid::new_v4().simple());
         let email = format!("consent-{user_id}@zeroship.test");
         pg.execute(
             "INSERT INTO auth.users (id, email, name, email_verified_at) \
@@ -97,9 +100,22 @@ impl ConsentTestApp {
             .await
             .expect("insert app member");
         }
+        let redirect_uris = vec!["https://builder.zeroship.test/callback".to_owned()];
+        let client_scopes = scopes
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect::<Vec<_>>();
+        pg.execute(
+            "INSERT INTO control.oauth_clients \
+                 (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
+             VALUES ($1, 'zeroship builder', $2, $3, $4, $1)",
+            &[&client_id, &redirect_uris, &client_scopes, &skip],
+        )
+        .await
+        .expect("insert oauth client");
 
         let hydra_state = Arc::new(Mutex::new(MockHydraState {
-            request: consent_request(user_id, scopes, skip),
+            request: consent_request(user_id, &client_id, scopes, skip),
             accept_records: Vec::new(),
             reject_records: Vec::new(),
         }));
@@ -156,11 +172,19 @@ impl ConsentTestApp {
             pg,
             user_id,
             app_id,
+            client_id,
         }
     }
 
     #[allow(clippy::future_not_send)]
     async fn cleanup(self) {
+        let _ = self
+            .pg
+            .execute(
+                "DELETE FROM control.oauth_grants WHERE user_id = $1 AND client_id = $2",
+                &[&self.user_id, &self.client_id],
+            )
+            .await;
         let _ = self
             .pg
             .execute(
@@ -178,6 +202,13 @@ impl ConsentTestApp {
         let _ = self
             .pg
             .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .await;
+        let _ = self
+            .pg
+            .execute(
+                "DELETE FROM control.oauth_clients WHERE client_id = $1",
+                &[&self.client_id],
+            )
             .await;
         let _ = self
             .pg
@@ -244,6 +275,51 @@ impl ConsentTestApp {
             .await
             .expect("send POST /consent/deny")
     }
+
+    #[allow(clippy::future_not_send)]
+    async fn insert_oauth_grant(&self, scopes: &[&str]) {
+        let scopes = sorted_scopes(scopes);
+        self.pg
+            .execute(
+                "INSERT INTO control.oauth_grants \
+                     (user_id, client_id, granted_scopes, granted_at, updated_at) \
+                 VALUES ($1, $2, $3, NOW(), NOW()) \
+                 ON CONFLICT (user_id, client_id) DO UPDATE \
+                 SET granted_scopes = EXCLUDED.granted_scopes, \
+                     updated_at = NOW(), \
+                     last_used_at = NULL",
+                &[&self.user_id, &self.client_id, &scopes],
+            )
+            .await
+            .expect("insert oauth grant");
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn oauth_grant(&self) -> OAuthGrant {
+        let rows = self
+            .pg
+            .query(
+                "SELECT granted_scopes, granted_at, last_used_at \
+                 FROM control.oauth_grants \
+                 WHERE user_id = $1 AND client_id = $2",
+                &[&self.user_id, &self.client_id],
+            )
+            .await
+            .expect("select oauth grant");
+        let row = rows.first().expect("oauth grant row");
+        OAuthGrant {
+            granted_scopes: row.get("granted_scopes"),
+            granted_at: row.get("granted_at"),
+            last_used_at: row.get("last_used_at"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OAuthGrant {
+    granted_scopes: Vec<String>,
+    granted_at: DateTime<Utc>,
+    last_used_at: Option<DateTime<Utc>>,
 }
 
 #[ntex::test]
@@ -353,15 +429,128 @@ async fn missing_csrf_returns_403() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
-async fn skip_consent_first_party_auto_accepts_without_render() {
-    let app = ConsentTestApp::boot(&["apps:deploy"], None, Some("viewer"), true).await;
+async fn first_grant_for_skip_consent_client_silently_grants_and_records() {
+    let app = ConsentTestApp::boot(&["apps:read"], None, None, true).await;
 
     let resp = app.get_consent().await;
     assert_eq!(resp.status().as_u16(), 302);
     assert_eq!(location_header(&resp), ACCEPT_REDIRECT);
     let records = app.hydra_state.lock().expect("lock hydra state").accept_records.clone();
     assert_eq!(records.len(), 1, "skip consent should auto-accept");
-    assert_eq!(records[0].body["grant_scope"], json!(["apps:deploy"]));
+    assert_eq!(records[0].body["grant_scope"], json!(["apps:read"]));
+    let grant = app.oauth_grant().await;
+    assert_eq!(grant.granted_scopes, vec!["apps:read"]);
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn second_grant_same_scopes_auto_accepts_and_updates_last_used() {
+    let app = ConsentTestApp::boot(&["apps:read"], None, None, true).await;
+    app.insert_oauth_grant(&["apps:read"]).await;
+    let before = app.oauth_grant().await;
+
+    let resp = app.get_consent().await;
+    assert_eq!(resp.status().as_u16(), 302);
+    assert_eq!(location_header(&resp), ACCEPT_REDIRECT);
+    let records = app.hydra_state.lock().expect("lock hydra state").accept_records.clone();
+    assert_eq!(records.len(), 1, "same scopes should auto-accept");
+
+    let after = app.oauth_grant().await;
+    assert_eq!(after.granted_scopes, vec!["apps:read"]);
+    assert_eq!(after.granted_at, before.granted_at);
+    assert!(before.last_used_at.is_none());
+    assert!(after.last_used_at.is_some());
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn new_scope_on_skip_consent_client_forces_reconsent() {
+    let app = ConsentTestApp::boot(&["apps:read", "apps:write"], Some("admin"), None, true).await;
+    app.insert_oauth_grant(&["apps:read"]).await;
+
+    let resp = app.get_consent().await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.contains("Create and modify your apps"),
+        "new scope should render in consent body: {body}"
+    );
+    assert!(body.contains("form=\"consent-accept\""));
+    let records = app.hydra_state.lock().expect("lock hydra state").accept_records.clone();
+    assert!(records.is_empty(), "new scope must not auto-accept");
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn subset_of_prior_grant_auto_accepts() {
+    let app = ConsentTestApp::boot(&["apps:read"], None, None, true).await;
+    app.insert_oauth_grant(&["apps:write", "apps:read"]).await;
+
+    let resp = app.get_consent().await;
+    assert_eq!(resp.status().as_u16(), 302);
+    assert_eq!(location_header(&resp), ACCEPT_REDIRECT);
+    let records = app.hydra_state.lock().expect("lock hydra state").accept_records.clone();
+    assert_eq!(records.len(), 1, "subset should auto-accept");
+    let grant = app.oauth_grant().await;
+    assert_eq!(grant.granted_scopes, vec!["apps:read", "apps:write"]);
+    assert!(grant.last_used_at.is_some());
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn third_party_client_always_renders_consent_even_on_subset() {
+    let app = ConsentTestApp::boot(&["apps:read"], Some("admin"), None, false).await;
+    app.insert_oauth_grant(&["apps:read", "apps:write"]).await;
+
+    let resp = app.get_consent().await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("form=\"consent-accept\""));
+    let records = app.hydra_state.lock().expect("lock hydra state").accept_records.clone();
+    assert!(records.is_empty(), "third-party client should render consent");
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn allow_button_writes_oauth_grants_row() {
+    let app = ConsentTestApp::boot(&["apps:read"], Some("admin"), None, false).await;
+    let get_resp = app.get_consent().await;
+    let csrf = read_set_cookie(&get_resp, "zsidp_csrf").expect("csrf cookie");
+
+    let resp = app.post_accept(Some(&csrf)).await;
+    assert_eq!(resp.status().as_u16(), 302);
+
+    let grant = app.oauth_grant().await;
+    assert_eq!(grant.granted_scopes, vec!["apps:read"]);
+    assert!(grant.last_used_at.is_none());
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn allow_button_extends_existing_oauth_grants_row() {
+    let app = ConsentTestApp::boot(&["apps:read", "apps:write"], Some("admin"), None, true).await;
+    app.insert_oauth_grant(&["apps:read"]).await;
+    let get_resp = app.get_consent().await;
+    assert_eq!(get_resp.status().as_u16(), 200);
+    let csrf = read_set_cookie(&get_resp, "zsidp_csrf").expect("csrf cookie");
+
+    let resp = app.post_accept(Some(&csrf)).await;
+    assert_eq!(resp.status().as_u16(), 302);
+
+    let grant = app.oauth_grant().await;
+    assert_eq!(grant.granted_scopes, vec!["apps:read", "apps:write"]);
 
     app.cleanup().await;
 }
@@ -412,13 +601,13 @@ async fn mock_reject_consent(
     web::HttpResponse::Ok().json(&json!({ "redirect_to": DENY_REDIRECT }))
 }
 
-fn consent_request(subject: Uuid, scopes: &[&str], skip: bool) -> Value {
+fn consent_request(subject: Uuid, client_id: &str, scopes: &[&str], skip: bool) -> Value {
     json!({
         "challenge": CHALLENGE,
         "skip": skip,
         "subject": subject.to_string(),
         "client": {
-            "client_id": "zeroship-builder",
+            "client_id": client_id,
             "client_name": "zeroship builder",
             "grant_types": ["authorization_code"],
             "response_types": ["code"],
@@ -437,8 +626,18 @@ fn consent_request(subject: Uuid, scopes: &[&str], skip: bool) -> Value {
         "login_session_id": null,
         "context": null,
         "oidc_context": null,
-        "request_url": "https://auth.zeroship.ai/oauth2/auth?client_id=zeroship-builder"
+        "request_url": format!("https://auth.zeroship.ai/oauth2/auth?client_id={client_id}")
     })
+}
+
+fn sorted_scopes(scopes: &[&str]) -> Vec<String> {
+    let mut scopes = scopes
+        .iter()
+        .map(|scope| (*scope).to_owned())
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 fn location_header(resp: &cyper::Response) -> String {

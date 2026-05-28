@@ -2,9 +2,8 @@
 //!
 //! Two paths share this file:
 //!
-//! - **First-party fast path**: if hydra reports `skip` or
-//!   `client.skip_consent`, accept silently with the verbatim requested
-//!   scopes/audience.
+//! - **First-party fast path**: `client.skip_consent` clients accept silently
+//!   only for first use or scopes already recorded in `control.oauth_grants`.
 //! - **Third-party UI**: render Allow/Deny forms with human-readable Phase 10
 //!   scope labels and CSRF protection, then PUT the decision to hydra-admin.
 
@@ -54,9 +53,51 @@ pub async fn get_consent(
         }
     };
 
-    // First-party clients and hydra-remembered consent skip the UI.
-    if info.client.skip_consent || info.skip {
-        return silent_accept(&admin, challenge, &info, db.as_ref()).await;
+    let subject = match consent_subject_uuid(&info) {
+        Ok(subject) => subject,
+        Err(e) => {
+            tracing::error!(error = %e, challenge = %challenge, "consent subject parse failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    let requested_scopes = sort_dedup_scopes(&info.requested_scope);
+    let prior_grant = match load_oauth_grant(db.as_ref(), subject, &info.client.client_id).await {
+        Ok(grant) => grant,
+        Err(e) => {
+            tracing::error!(error = %e, challenge = %challenge, "oauth grant lookup failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+
+    if info.client.skip_consent {
+        match prior_grant {
+            None => {
+                if let Err(e) = upsert_oauth_grant(
+                    db.as_ref(),
+                    subject,
+                    &info.client.client_id,
+                    &requested_scopes,
+                )
+                .await
+                {
+                    tracing::error!(error = %e, challenge = %challenge, "oauth grant insert failed");
+                    return render_error(PublicErrorMessage::ContactSupport);
+                }
+                return silent_accept(&admin, challenge, &info, db.as_ref()).await;
+            }
+            Some(previously_granted)
+                if scopes_are_subset(&requested_scopes, &previously_granted) =>
+            {
+                if let Err(e) =
+                    touch_oauth_grant(db.as_ref(), subject, &info.client.client_id).await
+                {
+                    tracing::error!(error = %e, challenge = %challenge, "oauth grant last_used update failed");
+                    return render_error(PublicErrorMessage::ContactSupport);
+                }
+                return silent_accept(&admin, challenge, &info, db.as_ref()).await;
+            }
+            Some(_) => {}
+        }
     }
 
     let can_grant = match grantor_can_grant_requested_scopes(db.as_ref(), &info).await {
@@ -114,6 +155,21 @@ pub async fn post_consent_accept(
             tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept authorization failed");
             return render_error(PublicErrorMessage::ContactSupport);
         }
+    }
+
+    let subject = match consent_subject_uuid(&info) {
+        Ok(subject) => subject,
+        Err(e) => {
+            tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept subject parse failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    let requested_scopes = sort_dedup_scopes(&info.requested_scope);
+    if let Err(e) =
+        upsert_oauth_grant(db.as_ref(), subject, &info.client.client_id, &requested_scopes).await
+    {
+        tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept oauth grant upsert failed");
+        return render_error(PublicErrorMessage::ContactSupport);
     }
 
     let id_token_claims =
@@ -175,8 +231,81 @@ pub async fn post_consent_deny(
 
 // ─── helpers ─────────────────────────────────────────────────────────────
 
-/// Silently accept consent for the fast paths (`skip_consent` clients and
-/// `info.skip` re-consent).
+fn consent_subject_uuid(info: &ConsentRequest) -> Result<Uuid, String> {
+    Uuid::parse_str(&info.subject).map_err(|e| format!("consent subject is not a UUID: {e}"))
+}
+
+fn sort_dedup_scopes(scopes: &[String]) -> Vec<String> {
+    let mut sorted = scopes.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    sorted
+}
+
+fn scopes_are_subset(requested: &[String], previously_granted: &[String]) -> bool {
+    requested
+        .iter()
+        .all(|scope| previously_granted.binary_search(scope).is_ok())
+}
+
+async fn load_oauth_grant(
+    db: &compio_postgres::Client,
+    user_id: Uuid,
+    client_id: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let rows = db
+        .query(
+            "SELECT granted_scopes \
+             FROM control.oauth_grants \
+             WHERE user_id = $1 AND client_id = $2",
+            &[&user_id, &client_id],
+        )
+        .await
+        .map_err(|e| format!("select control.oauth_grants: {e}"))?;
+
+    Ok(rows
+        .first()
+        .map(|row| sort_dedup_scopes(&row.get::<_, Vec<String>>("granted_scopes"))))
+}
+
+async fn upsert_oauth_grant(
+    db: &compio_postgres::Client,
+    user_id: Uuid,
+    client_id: &str,
+    granted_scopes: &[String],
+) -> Result<(), String> {
+    let granted_scopes = sort_dedup_scopes(granted_scopes);
+    db.execute(
+        "INSERT INTO control.oauth_grants \
+             (user_id, client_id, granted_scopes, granted_at, updated_at) \
+         VALUES ($1, $2, $3, NOW(), NOW()) \
+         ON CONFLICT (user_id, client_id) DO UPDATE \
+         SET granted_scopes = EXCLUDED.granted_scopes, \
+             updated_at = NOW()",
+        &[&user_id, &client_id, &granted_scopes],
+    )
+    .await
+    .map_err(|e| format!("upsert control.oauth_grants: {e}"))?;
+    Ok(())
+}
+
+async fn touch_oauth_grant(
+    db: &compio_postgres::Client,
+    user_id: Uuid,
+    client_id: &str,
+) -> Result<(), String> {
+    db.execute(
+        "UPDATE control.oauth_grants SET last_used_at = NOW() \
+         WHERE user_id = $1 AND client_id = $2",
+        &[&user_id, &client_id],
+    )
+    .await
+    .map_err(|e| format!("touch control.oauth_grants: {e}"))?;
+    Ok(())
+}
+
+/// Silently accept consent after the caller has already decided the request is
+/// eligible for the first-party fast path.
 #[allow(clippy::future_not_send)]
 async fn silent_accept(
     admin: &HydraAdmin,
