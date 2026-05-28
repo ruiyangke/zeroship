@@ -131,7 +131,7 @@
    * though it carries the correct role + aria-live + classes. The
    * `--zs-space-12` fallback (3rem) covers the very first paint
    * before Base UI's measurement runs. */
-  min-block-size: var(--toast-height, var(--zs-space-12));
+  min-block-size: var(--toast-height, var(--zs-space-9));
   /* Logical padding so RTL flips for free. */
   padding-block: var(--zs-space-3);
   padding-inline: var(--zs-space-4);
