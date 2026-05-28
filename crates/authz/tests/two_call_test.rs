@@ -234,6 +234,7 @@ impl Fixture {
         AuthzContext {
             principal_id: self.user_id,
             token_id,
+            token_policy: None,
             action: Action::AppsDeploy,
             resource: self.app(),
             request_ip: None,

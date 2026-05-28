@@ -144,6 +144,9 @@ pub struct AppState {
     /// Control uses the same key material as the gateway's
     /// `--signing-key-file` wrapper-token issuer for P9 v1.
     pub pat_issuer: Arc<token_handlers::PatIssuer>,
+    /// Hydra admin introspection client for third-party OAuth bearer
+    /// access tokens. Used only after local PAT verification fails.
+    pub hydra_introspector: Arc<zeroship_core::hydra::HydraIntrospector>,
     /// In-process replay cache for OIDC Back-Channel Logout
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.

@@ -187,9 +187,9 @@ async fn main() -> std::io::Result<()> {
     // Phase 3 U7/U8 — control plane OIDC RP for `console.zeroship.ai`.
     // Mandatory post-U8: the legacy `auth_handlers` / `auth_service`
     // chain has been retired, so the OIDC RP is the only console-auth
-    // surface. Refuses to boot unless all four pieces are configured
-    // (`--dev-insecure` permits the empty-stash-key shortcut for
-    // localhost only).
+    // surface. Control also needs hydra-admin for OAuth bearer
+    // introspection. Refuses to boot unless these pieces are configured
+    // (`--dev-insecure` permits localhost defaults only).
     let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "");
     let hydra_admin_url = arg_or_env(
         &args,
@@ -206,6 +206,14 @@ async fn main() -> std::io::Result<()> {
         "",
     );
     let auth_db_url = arg_or_env(&args, "--auth-db", "AUTH_DB_URL", "");
+    let hydra_admin_url = {
+        let value = arg_or_env(&args, "--hydra-admin-url", "HYDRA_ADMIN_URL", "");
+        if value.is_empty() {
+            env_or("AUTH_HYDRA_ADMIN", "")
+        } else {
+            value
+        }
+    };
 
     if !insecure_dev {
         let mut missing = Vec::new();
@@ -221,10 +229,13 @@ async fn main() -> std::io::Result<()> {
         if auth_db_url.is_empty() {
             missing.push("--auth-db / AUTH_DB_URL");
         }
+        if hydra_admin_url.is_empty() {
+            missing.push("--hydra-admin-url / HYDRA_ADMIN_URL");
+        }
         if !missing.is_empty() {
             tracing::error!(
                 missing = %missing.join(", "),
-                "control: refusing to start; OIDC RP requires all four flags. \
+                "control: refusing to start; OIDC RP and OAuth introspection require these flags. \
                  Pass --dev-insecure to run with localhost defaults."
             );
             std::process::exit(1);
@@ -246,6 +257,13 @@ async fn main() -> std::io::Result<()> {
     } else {
         auth_public.clone()
     };
+    let hydra_admin_url_value = if hydra_admin_url.is_empty() {
+        // Dev-only fallback: Hydra's default admin listener in local
+        // docker-compose. Production exited above.
+        "http://localhost:4445".to_string()
+    } else {
+        hydra_admin_url
+    };
     let console_oidc_secret_value = if console_oidc_secret.is_empty() {
         "dev-console-oidc-secret".to_string()
     } else {
@@ -260,6 +278,9 @@ async fn main() -> std::io::Result<()> {
         "console.zeroship.ai",
         console_oidc_secret_value,
         stash_key_bytes,
+    ));
+    let hydra_introspector = Arc::new(zeroship_core::hydra::HydraIntrospector::new(
+        &hydra_admin_url_value,
     ));
 
     let auth_pg: Arc<compio_postgres::Client> = {
@@ -311,6 +332,7 @@ async fn main() -> std::io::Result<()> {
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
         pat_issuer,
+        hydra_introspector,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
