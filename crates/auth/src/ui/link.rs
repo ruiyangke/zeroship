@@ -38,8 +38,10 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
+use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{identities, sessions, users};
 use crate::ui::{ErrorPage, LinkPage, PublicErrorMessage};
@@ -157,6 +159,61 @@ pub async fn post(
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
 
+    if let Err(e) = admin.get_login(&pending.login_challenge).await {
+        tracing::warn!(error = %e, challenge = %pending.login_challenge, "link hydra challenge validation failed");
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_link_failed",
+                outcome: "failure",
+                user_id: Some(&pending.user_id),
+                auth_method: Some(&pending.provider),
+                detail: json!({ "reason": "login_challenge_invalid" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_page(PublicErrorMessage::InvalidRequest);
+    }
+
+    let ip = req
+        .connection_info()
+        .remote()
+        .unwrap_or("0.0.0.0")
+        .to_string();
+    let link_attempt_key = format!("link_attempt:{}:{ip}", pending.user_id);
+    match ratelimit::consume(db.as_ref(), &link_attempt_key, Bucket::LINK_ATTEMPT).await {
+        Ok(RateLimitDecision::Allowed) => {}
+        Ok(RateLimitDecision::Throttled(_)) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "oauth_link_failed",
+                    outcome: "failure",
+                    user_id: Some(&pending.user_id),
+                    auth_method: Some(&pending.provider),
+                    detail: json!({
+                        "reason": "rate_limited",
+                        "bucket": link_attempt_key,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return render_link_error_with_status(
+                &form.token,
+                &pending,
+                &cfg,
+                "too many attempts, try again later",
+                ntex::http::StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, bucket = %link_attempt_key, "link rate-limit consume failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    }
+
     // 3. Look up the user. The pending token's HMAC guarantees the
     // `user_id` came from us — but the row might have been deleted between
     // token issuance and confirmation. Run dummy-hash on the missing arm so
@@ -174,7 +231,8 @@ pub async fn post(
         .as_ref()
         .and_then(|u| {
             let locked = u.locked_until.is_some_and(|t| t > now);
-            if locked || u.password_hash.is_none() || u.id != pending.user_id {
+            let disabled = u.disabled_at.is_some();
+            if locked || disabled || u.password_hash.is_none() || u.id != pending.user_id {
                 None
             } else {
                 u.password_hash.clone()
@@ -191,8 +249,37 @@ pub async fn post(
     .unwrap_or(false);
 
     // Re-evaluate the "real user" predicate (mirror the dummy-hash arm).
+    let ineligible_user = user.as_ref().filter(|u| {
+        u.id == pending.user_id
+            && (u.locked_until.is_some_and(|t| t > now) || u.disabled_at.is_some())
+    });
+    if let Some(u) = ineligible_user {
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_link_failed",
+                outcome: "failure",
+                user_id: Some(&u.id),
+                auth_method: Some(&pending.provider),
+                detail: json!({
+                    "reason": "account_ineligible",
+                    "email": pending.email,
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_link_error(
+            &form.token,
+            &pending,
+            &cfg,
+            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+        );
+    }
+
     let real_user = user.as_ref().filter(|u| {
         u.locked_until.is_none_or(|t| t <= now)
+            && u.disabled_at.is_none()
             && u.password_hash.is_some()
             && u.id == pending.user_id
     });
@@ -220,6 +307,34 @@ pub async fn post(
             "invalid password",
         );
     };
+
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), u.id).await {
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %u.id, "link eligibility check failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_link_failed",
+                outcome: "failure",
+                user_id: Some(&u.id),
+                auth_method: Some(&pending.provider),
+                detail: json!({
+                    "reason": "account_ineligible",
+                    "email": pending.email,
+                }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_link_error(
+            &form.token,
+            &pending,
+            &cfg,
+            PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+        );
+    }
 
     // 5a. Create the identity row.
     if let Err(e) = identities::link(
@@ -323,6 +438,22 @@ fn render_link_error(
     cfg: &AuthConfig,
     err: &str,
 ) -> HttpResponse {
+    render_link_error_with_status(
+        token,
+        pending,
+        cfg,
+        err,
+        ntex::http::StatusCode::UNAUTHORIZED,
+    )
+}
+
+fn render_link_error_with_status(
+    token: &str,
+    pending: &PendingLink,
+    cfg: &AuthConfig,
+    err: &str,
+    status: ntex::http::StatusCode,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = LinkPage {
         token,
@@ -334,7 +465,7 @@ fn render_link_error(
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
-    let mut resp = HttpResponse::build(ntex::http::StatusCode::UNAUTHORIZED);
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)

@@ -13,6 +13,7 @@ use serde::Deserialize;
 use crate::config::AuthConfig;
 use crate::hydra_client::types::AcceptDeviceUserCodeRequest;
 use crate::hydra_client::HydraAdmin;
+use crate::identity::eligibility;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::DevicePage;
@@ -79,9 +80,25 @@ pub async fn post(
         );
     };
 
-    let Some(_session) = current_session(&req, cfg.as_ref(), db.as_ref()).await else {
+    let Some(session) = current_session(&req, cfg.as_ref(), db.as_ref()).await else {
         return redirect("/login");
     };
+
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), session.user_id).await {
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %session.user_id, "device grant eligibility check failed");
+            return render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+            );
+        }
+        return render_form(
+            user_code,
+            Some("account temporarily locked"),
+            StatusCode::FORBIDDEN,
+        );
+    }
 
     let accept = AcceptDeviceUserCodeRequest {
         user_code: Some(user_code.to_string()),

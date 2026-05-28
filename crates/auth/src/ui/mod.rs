@@ -69,6 +69,7 @@ pub enum PublicErrorMessage {
     InvalidRequest,
     SessionExpired,
     PleaseTryAgain,
+    AccountTemporarilyLocked,
     ContactSupport,
 }
 
@@ -79,6 +80,7 @@ impl PublicErrorMessage {
             Self::InvalidRequest => "invalid request",
             Self::SessionExpired => "session expired",
             Self::PleaseTryAgain => "please try again",
+            Self::AccountTemporarilyLocked => "account temporarily locked",
             Self::ContactSupport => "contact support",
         }
     }
@@ -89,6 +91,7 @@ impl PublicErrorMessage {
             Self::InvalidRequest => "invalid_request",
             Self::SessionExpired => "session_expired",
             Self::PleaseTryAgain => "please_try_again",
+            Self::AccountTemporarilyLocked => "account_temporarily_locked",
             Self::ContactSupport => "contact_support",
         }
     }

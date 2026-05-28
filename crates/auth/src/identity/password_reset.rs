@@ -7,10 +7,10 @@
 //!   the raw token to the caller, which embeds it in the `/reset?token=`
 //!   email link.
 //!
-//! - **Redeem**: SHA-256 the raw token, atomically `UPDATE … RETURNING`
-//!   the row by `(token_hash, purpose='reset')` with the predicates
-//!   `consumed_at IS NULL` AND `expires_at > NOW()`. Single-use is
-//!   enforced at the database layer.
+//! - **Complete**: SHA-256 the raw token, atomically update the user's
+//!   password hash and consume the reset row by `(token_hash,
+//!   purpose='reset')` with the predicates `consumed_at IS NULL` AND
+//!   `expires_at > NOW()`. Single-use is enforced at the database layer.
 //!
 //! - **TTL**: 60 minutes. Longer than a magic-link's 15-minute window
 //!   (resetting a password is a deliberate flow the user may pick back
@@ -65,6 +65,13 @@ pub struct RedeemedToken {
     pub email: String,
 }
 
+/// Result of a successful [`complete`] — the row's linked user.
+#[derive(Debug, Clone)]
+pub struct CompletedReset {
+    pub user_id: uuid::Uuid,
+    pub email: String,
+}
+
 /// Issue a fresh password-reset token for `email`.
 ///
 /// Side effects:
@@ -78,18 +85,7 @@ pub struct RedeemedToken {
 ///
 /// Returns [`AuthError::Db`] on PG failure.
 pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
-    // 1. Invalidate any previously unconsumed reset tokens for this
-    //    email. Scoped to `purpose = 'reset'` so a pending magic-link
-    //    login on the same address is left alone.
-    db.execute(
-        "UPDATE auth.magic_links SET consumed_at = NOW() \
-         WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
-        &[&email, &PURPOSE],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("password_reset supersede previous: {e}")))?;
-
-    // 2. Generate the token.
+    // 1. Generate the token.
     let mut token_bytes = [0u8; TOKEN_LEN_BYTES];
     rand::thread_rng().fill_bytes(&mut token_bytes);
     let raw = URL_SAFE_NO_PAD.encode(token_bytes);
@@ -101,21 +97,57 @@ pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
     // entropy from elsewhere.
     let csrf_nonce_sentinel = "reset-no-csrf-nonce";
 
-    // 3. Insert the new row.
-    db.execute(
-        "INSERT INTO auth.magic_links \
-            (token_hash, email, csrf_nonce, purpose, expires_at) \
-         VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
-        &[
-            &token_hash.as_slice(),
-            &email,
-            &csrf_nonce_sentinel,
-            &PURPOSE,
-            &TTL_MINUTES.to_string(),
-        ],
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("password_reset insert: {e}")))?;
+    db.execute("BEGIN", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset issue begin: {e}")))?;
+
+    let issued = async {
+        db.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(lower($1::text))::bigint)",
+            &[&email],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset issue advisory lock: {e}")))?;
+
+        // 2. Invalidate any previously unconsumed reset tokens for this
+        //    email. Scoped to `purpose = 'reset'` so a pending magic-link
+        //    login on the same address is left alone.
+        db.execute(
+            "UPDATE auth.magic_links SET consumed_at = NOW() \
+             WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
+            &[&email, &PURPOSE],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset supersede previous: {e}")))?;
+
+        // 3. Insert the new row.
+        db.execute(
+            "INSERT INTO auth.magic_links \
+                (token_hash, email, csrf_nonce, purpose, expires_at) \
+             VALUES ($1, $2::citext, $3, $4, NOW() + ($5::text || ' minutes')::interval)",
+            &[
+                &token_hash.as_slice(),
+                &email,
+                &csrf_nonce_sentinel,
+                &PURPOSE,
+                &TTL_MINUTES.to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset insert: {e}")))?;
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = issued {
+        let _ = db.execute("ROLLBACK", &[]).await;
+        return Err(e);
+    }
+
+    db.execute("COMMIT", &[])
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset issue commit: {e}")))?;
 
     Ok(IssuedToken { raw })
 }
@@ -146,6 +178,60 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
         .await
         .map_err(|e| AuthError::Db(format!("password_reset redeem: {e}")))?;
     Ok(rows.first().map(|r| RedeemedToken {
+        email: r.get("email"),
+    }))
+}
+
+/// Atomically redeem a password-reset token and update the linked user's
+/// password hash. Returns `Ok(Some(_))` on success, `Ok(None)` if the
+/// token is invalid or expired.
+///
+/// The user update and token consume are one SQL statement. If the user
+/// update fails, PostgreSQL rolls back the token consume as part of that
+/// same statement.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Db`] on PG failure.
+pub async fn complete(
+    db: &Client,
+    raw_token: &str,
+    password_hash: &str,
+) -> Result<Option<CompletedReset>> {
+    let token_hash = sha256(raw_token);
+    let rows = db
+        .query(
+            "WITH candidate AS ( \
+                 SELECT u.id AS user_id, u.email::text AS email \
+                 FROM auth.magic_links ml \
+                 JOIN auth.users u ON u.email = ml.email \
+                 WHERE ml.token_hash = $1 \
+                   AND ml.purpose = $2 \
+                   AND ml.consumed_at IS NULL \
+                   AND ml.expires_at > NOW() \
+             ), updated_user AS ( \
+                 UPDATE auth.users u \
+                 SET password_hash = $3, updated_at = NOW() \
+                 FROM candidate c \
+                 WHERE u.id = c.user_id \
+                 RETURNING u.id, c.email \
+             ), consumed AS ( \
+                 UPDATE auth.magic_links ml \
+                 SET consumed_at = NOW() \
+                 FROM updated_user u \
+                 WHERE ml.token_hash = $1 \
+                   AND ml.purpose = $2 \
+                   AND ml.email = u.email::citext \
+                   AND ml.consumed_at IS NULL \
+                 RETURNING u.id AS user_id, u.email AS email \
+             ) \
+             SELECT user_id, email FROM consumed",
+            &[&token_hash.as_slice(), &PURPOSE, &password_hash],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset complete: {e}")))?;
+    Ok(rows.first().map(|r| CompletedReset {
+        user_id: r.get("user_id"),
         email: r.get("email"),
     }))
 }

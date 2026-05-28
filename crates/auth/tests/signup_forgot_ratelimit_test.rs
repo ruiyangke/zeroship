@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
-use ntex::http::header::SET_COOKIE;
+use ntex::http::header::{LOCATION, SET_COOKIE};
 use ntex::web::{self, test};
 use uuid::Uuid;
 
@@ -168,6 +168,117 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     pg.execute("DELETE FROM auth.users WHERE email::text LIKE $1", &[&like])
         .await
         .ok();
+}
+
+#[compio::test]
+#[allow(clippy::future_not_send)]
+async fn signup_non_duplicate_create_error_renders_error_page() {
+    let Some((dsn, client)) = pg().await else {
+        eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    client
+        .execute(
+            "ALTER TABLE auth.users \
+             DROP CONSTRAINT IF EXISTS auth_users_signup_m3_name_check",
+            &[],
+        )
+        .await
+        .expect("drop stale test constraint");
+    client
+        .execute(
+            "ALTER TABLE auth.users \
+             ADD CONSTRAINT auth_users_signup_m3_name_check CHECK (name <> 'M3_FAIL')",
+            &[],
+        )
+        .await
+        .expect("add test constraint");
+
+    let email = format!("signup-m3-{}@zeroship.test", Uuid::new_v4().simple());
+    let pg = Arc::new(client);
+    let cfg = Arc::new(test_cfg(&dsn));
+    let mailer = Arc::new(CountingMailer::default());
+    let mailer_state: Arc<dyn Mailer> = mailer.clone();
+    let app = test::init_service(
+        web::App::new()
+            .state(cfg.clone())
+            .state(pg.clone())
+            .state(mailer_state)
+            .service(
+                web::resource("/signup")
+                    .route(web::get().to(zeroship_auth::ui::signup::get))
+                    .route(web::post().to(zeroship_auth::ui::signup::post)),
+            ),
+    )
+    .await;
+
+    let get_resp = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/signup").to_request(),
+    )
+    .await;
+    assert_eq!(get_resp.status().as_u16(), 200);
+    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /signup");
+
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", &csrf)
+        .append_pair("name", "M3_FAIL")
+        .append_pair("email", &email)
+        .append_pair("password", "correct horse battery staple")
+        .finish();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/signup")
+            .peer_addr(SocketAddr::new(unique_loopback(), 49154))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("zsidp_csrf={csrf}"))
+            .set_payload(body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "non-23505 create failure must render an error page, not redirect"
+    );
+    assert!(
+        resp.headers().get(LOCATION).is_none(),
+        "non-23505 create failure must not return /login redirect"
+    );
+    assert_eq!(
+        mailer.count(),
+        0,
+        "failed signup must not issue verification email"
+    );
+
+    let created: i64 = pg
+        .query_one(
+            "SELECT COUNT(*) FROM auth.users WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .expect("count users")
+        .get(0);
+    assert_eq!(created, 0, "failed signup must not create user");
+
+    pg.execute(
+        "ALTER TABLE auth.users \
+         DROP CONSTRAINT IF EXISTS auth_users_signup_m3_name_check",
+        &[],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM auth.audit_events \
+         WHERE event_type = 'signup_failed' \
+           AND detail->>'reason' = 'users_create_failed'",
+        &[],
+    )
+    .await
+    .ok();
 }
 
 #[compio::test]

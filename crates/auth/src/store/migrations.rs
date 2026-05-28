@@ -20,10 +20,13 @@ const STATEMENTS: &[&str] = &[
         avatar_url        TEXT,
         password_hash     TEXT,
         locked_until      TIMESTAMPTZ,
+        disabled_at       TIMESTAMPTZ,
         created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_login_at     TIMESTAMPTZ
     )",
+    "ALTER TABLE auth.users \
+        ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ",
 
     // 5.2 identities
     "CREATE TABLE IF NOT EXISTS auth.identities (

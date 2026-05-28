@@ -17,8 +17,8 @@
 //!    `accept_logout(challenge)`. Hydra returns a `redirect_to` —
 //!    that's the RP's `post_logout_redirect_uri` (or hydra's
 //!    default if the RP didn't supply one). Best-effort revoke
-//!    the local `auth.sessions` row keyed by `sid` returned in
-//!    the challenge so the IdP session doesn't outlive hydra's.
+//!    the local `auth.sessions` row keyed by the IdP session cookie,
+//!    and also attempt the historical Hydra-`sid` revoke.
 //!
 //! No "Stay signed in" reject path: hydra has no
 //! `reject_logout` admin endpoint. If the user wants to abandon the
@@ -35,6 +35,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::HydraAdmin;
+use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{ErrorPage, LogoutPage, PublicErrorMessage};
 
@@ -94,7 +95,7 @@ pub async fn get(
 
 /// `/logout` POST — validate CSRF, accept the logout at hydra, 302 to
 /// hydra's post-logout `redirect_to`. Best-effort revoke the local IdP
-/// session row so the cookie stops resolving.
+/// session row from the browser cookie so the cookie stops resolving.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
@@ -110,6 +111,7 @@ pub async fn post(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
     let cookie_token = csrf::parse_cookie(cookie_header, cfg.insecure_dev);
+    let local_session_id = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev);
     if cookie_token
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
@@ -130,10 +132,19 @@ pub async fn post(
         }
     };
 
-    // 3. Best-effort: revoke the local auth.sessions row whose id matches
-    //    hydra's session id. hydra's `sid` claim is the same uuid we
-    //    minted at login time. Failures are non-fatal — hydra's
-    //    accept_logout still tears down hydra's own session.
+    // 3. Best-effort: revoke the local auth.sessions row from the
+    //    cookie the browser is actually presenting. Failures are
+    //    non-fatal — hydra's accept_logout still tears down hydra's
+    //    own session.
+    if let Some(session_id) = local_session_id {
+        if let Err(e) = sessions::revoke(db.as_ref(), session_id).await {
+            tracing::warn!(error = %e, session_id = %session_id, "logout: local cookie session revoke failed");
+        }
+    }
+
+    // 4. Best-effort compatibility with Hydra sessions that happen to
+    //    carry the local UUID as `sid`; Hydra still needs its row gone,
+    //    and older flows may have aligned the two ids.
     if let Ok(sid) = Uuid::parse_str(&info.sid) {
         if let Err(e) = sessions::revoke(db.as_ref(), sid).await {
             tracing::warn!(error = %e, sid = %info.sid, "logout: local session revoke failed");
@@ -142,7 +153,7 @@ pub async fn post(
         tracing::debug!(sid = %info.sid, "logout: sid is not a UUID (probably hydra-internal); skipping local revoke");
     }
 
-    // 4. Accept the logout at hydra.
+    // 5. Accept the logout at hydra.
     let resp = match admin.accept_logout(challenge).await {
         Ok(r) => r,
         Err(e) => {
@@ -151,7 +162,7 @@ pub async fn post(
         }
     };
 
-    // 5. Audit. Best-effort — failure here doesn't fail the response.
+    // 6. Audit. Best-effort — failure here doesn't fail the response.
     let subject = info.subject.clone();
     audit::emit(
         db.as_ref(),
@@ -170,7 +181,7 @@ pub async fn post(
     )
     .await;
 
-    // 6. 302 + clear the IdP session cookie so the browser drops it
+    // 7. 302 + clear the IdP session cookie so the browser drops it
     //    immediately (don't wait for Max-Age expiry).
     let mut http_resp = HttpResponse::Found();
     http_resp.header(
@@ -180,7 +191,7 @@ pub async fn post(
     );
     http_resp.header(
         SET_COOKIE,
-        crate::sessions::login::clear_cookie(cfg.insecure_dev),
+        session_cookie::clear_cookie(cfg.insecure_dev),
     );
     http_resp.finish()
 }

@@ -4,7 +4,7 @@
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row that test inserted (verifications + the seeded user).
 
-use compio_postgres::{connect, NoTls};
+use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 
 use zeroship_auth::identity::verification;
@@ -24,6 +24,126 @@ async fn pg() -> Option<compio_postgres::Client> {
     .detach();
     migrations::migrate(&client).await.expect("migrate");
     Some(client)
+}
+
+async fn pg_connect(dsn: &str) -> Client {
+    let (client, connection) = connect(dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("verification test pg connection error: {e}");
+        }
+    })
+    .detach();
+    client
+}
+
+async fn install_verifications_insert_delay(client: &Client) {
+    client
+        .execute(
+            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_verification_insert() \
+             RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 PERFORM pg_sleep(0.2); \
+                 RETURN NEW; \
+             END \
+             $$",
+            &[],
+        )
+        .await
+        .expect("create insert delay function");
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_verification_insert \
+             ON auth.email_verifications",
+            &[],
+        )
+        .await
+        .expect("drop stale insert delay trigger");
+    client
+        .execute(
+            "CREATE TRIGGER test_sleep_before_verification_insert \
+             BEFORE INSERT ON auth.email_verifications \
+             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_verification_insert()",
+            &[],
+        )
+        .await
+        .expect("create insert delay trigger");
+}
+
+async fn drop_verifications_insert_delay(client: &Client) {
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_verification_insert \
+             ON auth.email_verifications",
+            &[],
+        )
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn concurrent_issue_leaves_one_active_verification_token() {
+    let dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(dsn) => dsn,
+        Err(_) => {
+            eprintln!("skipping verification_test (no AUTH_DB_URL)");
+            return;
+        }
+    };
+    let Some(client) = pg().await else {
+        eprintln!("skipping verification_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!(
+        "verify-concurrent-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    install_verifications_insert_delay(&client).await;
+
+    let client_a = pg_connect(&dsn).await;
+    let client_b = pg_connect(&dsn).await;
+    let email_a = email.clone();
+    let email_b = email.clone();
+    let user_id = user.id;
+    let issue_a =
+        compio::runtime::spawn(async move { verification::issue(&client_a, user_id, &email_a).await });
+    let issue_b =
+        compio::runtime::spawn(async move { verification::issue(&client_b, user_id, &email_b).await });
+
+    issue_a.await.expect("join issue A").expect("issue A");
+    issue_b.await.expect("join issue B").expect("issue B");
+
+    drop_verifications_insert_delay(&client).await;
+
+    let active_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM auth.email_verifications \
+             WHERE user_id = $1 AND consumed_at IS NULL",
+            &[&user.id],
+        )
+        .await
+        .expect("count active verification links")
+        .get(0);
+    assert_eq!(
+        active_count, 1,
+        "concurrent issue must leave exactly one active verification token"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
 }
 
 #[compio::test]
@@ -63,6 +183,67 @@ async fn issue_then_redeem_roundtrip() {
     );
 
     // Cleanup.
+    client
+        .execute(
+            "DELETE FROM auth.email_verifications WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping verification_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!(
+        "verify-rollback-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    let issued = verification::issue(&client, user.id, &email)
+        .await
+        .expect("issue");
+
+    client.execute("BEGIN", &[]).await.expect("begin");
+    let redeemed = verification::redeem_and_mark_verified(&client, &issued.raw)
+        .await
+        .expect("redeem and mark verified")
+        .expect("token should redeem inside transaction");
+    assert_eq!(redeemed.user_id, user.id);
+    client.execute("ROLLBACK", &[]).await.expect("rollback");
+
+    let row = client
+        .query_one(
+            "SELECT ev.consumed_at IS NULL AS token_unconsumed, \
+                    u.email_verified_at IS NULL AS user_unverified \
+             FROM auth.email_verifications ev \
+             JOIN auth.users u ON u.id = ev.user_id \
+             WHERE ev.user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("load verification state");
+    let token_unconsumed: bool = row.get("token_unconsumed");
+    let user_unverified: bool = row.get("user_unverified");
+    assert!(
+        token_unconsumed,
+        "rolled-back verification must leave token unconsumed"
+    );
+    assert!(
+        user_unverified,
+        "rolled-back verification must leave user unverified"
+    );
+
     client
         .execute(
             "DELETE FROM auth.email_verifications WHERE user_id = $1",
