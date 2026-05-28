@@ -66,6 +66,7 @@ pub struct RedeemedLoginToken {
     pub email: String,
     pub csrf_nonce: String,
     pub purpose: String,
+    pub reserved_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug)]
@@ -160,7 +161,7 @@ pub async fn redeem_pending(
                AND (consumed_pending_at IS NULL \
                     OR consumed_pending_at <= NOW() - INTERVAL '60 seconds') \
                AND expires_at > NOW() \
-             RETURNING email::text, csrf_nonce, purpose",
+             RETURNING email::text, csrf_nonce, purpose, consumed_pending_at",
             &[&token_hash.as_slice(), &LOGIN_PURPOSE],
         )
         .await
@@ -171,6 +172,7 @@ pub async fn redeem_pending(
             email: row.get("email"),
             csrf_nonce: row.get("csrf_nonce"),
             purpose: row.get("purpose"),
+            reserved_at: row.get("consumed_pending_at"),
         }));
     }
 
@@ -198,15 +200,19 @@ pub async fn redeem_pending(
 
 /// Finalize a pending magic-link consume after the UI has completed the
 /// downstream login handoff.
-pub async fn finalize_consume(conn: &Client, token_hash: &[u8]) -> Result<bool> {
+pub async fn finalize_consume(
+    conn: &Client,
+    token_hash: &[u8],
+    reserved_at: &chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
     let updated = conn
         .execute(
             "UPDATE auth.magic_links \
              SET consumed_at = NOW() \
              WHERE token_hash = $1 \
-               AND consumed_pending_at IS NOT NULL \
+               AND consumed_pending_at = $2 \
                AND consumed_at IS NULL",
-            &[&token_hash],
+            &[&token_hash, reserved_at],
         )
         .await
         .map_err(|e| AuthError::Db(format!("magic_link finalize consume: {e}")))?;
@@ -215,15 +221,19 @@ pub async fn finalize_consume(conn: &Client, token_hash: &[u8]) -> Result<bool> 
 
 /// Clear a pending magic-link consume so the same link can be retried
 /// after a downstream login handoff failure.
-pub async fn clear_consume_pending(conn: &Client, token_hash: &[u8]) -> Result<bool> {
+pub async fn clear_consume_pending(
+    conn: &Client,
+    token_hash: &[u8],
+    reserved_at: &chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
     let updated = conn
         .execute(
             "UPDATE auth.magic_links \
              SET consumed_pending_at = NULL \
              WHERE token_hash = $1 \
-               AND consumed_pending_at IS NOT NULL \
+               AND consumed_pending_at = $2 \
                AND consumed_at IS NULL",
-            &[&token_hash],
+            &[&token_hash, reserved_at],
         )
         .await
         .map_err(|e| AuthError::Db(format!("magic_link clear consume pending: {e}")))?;
