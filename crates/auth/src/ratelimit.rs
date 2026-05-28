@@ -39,6 +39,21 @@ impl Bucket {
         capacity: 30.0,
         refill_per_sec: 5.0 / 60.0,
     };
+    /// Signup per-IP: 5 requests / minute, capacity 10.
+    pub const SIGNUP_IP: Self = Self {
+        capacity: 10.0,
+        refill_per_sec: 5.0 / 60.0,
+    };
+    /// Password reset per-email: 3 requests / hour, capacity 5.
+    pub const FORGOT_EMAIL: Self = Self {
+        capacity: 5.0,
+        refill_per_sec: 3.0 / 3600.0,
+    };
+    /// Password reset per-IP: 30 requests / hour.
+    pub const FORGOT_IP: Self = Self {
+        capacity: 30.0,
+        refill_per_sec: 30.0 / 3600.0,
+    };
 }
 
 #[derive(Debug)]
