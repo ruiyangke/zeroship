@@ -324,6 +324,47 @@ async fn create_pat_with_policy_exceeding_user_returns_400() {
 }
 
 #[compio::test]
+async fn create_pat_with_invalid_resource_id_returns_400() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "invalid-resource", Some("admin")).await;
+    let app = init_control!(fx);
+
+    let req = test::TestRequest::post()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("cookie", fx.cookie.as_str())
+        .set_json(&json!({
+            "name": "bad resource",
+            "policies": {
+                "name": "bad resource",
+                "statements": [{
+                    "effect": "allow",
+                    "actions": ["apps:read"],
+                    "resources": [{
+                        "type": "app",
+                        "id": "app\"; permit (principal, action, resource);"
+                    }]
+                }]
+            },
+            "expires_in_days": 90
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = test::read_body(resp).await;
+    let body: Value = serde_json::from_slice(&bytes).expect("error body");
+    assert_eq!(
+        body.get("error").and_then(Value::as_str),
+        Some("invalid_resource_id")
+    );
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
 async fn list_pats_returns_user_tokens_without_secret() {
     let Some(db_url) = db_url() else {
         eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");

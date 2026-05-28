@@ -366,6 +366,8 @@ async fn validate_grant_subset(
     state: &AppState,
     policy: &Policy,
 ) -> Result<(), web::HttpResponse> {
+    validate_policy_resources(policy)?;
+
     let mut pairs = 0usize;
     for statement in &policy.statements {
         if statement.effect != Effect::Allow {
@@ -409,6 +411,21 @@ async fn validate_grant_subset(
                             .json(&json!({"error": "authz_error"})));
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_resources(policy: &Policy) -> Result<(), web::HttpResponse> {
+    for statement in &policy.statements {
+        for resource in &statement.resources {
+            if let Err(message) = resource.validate_ids() {
+                return Err(web::HttpResponse::BadRequest().json(&json!({
+                    "error": "invalid_resource_id",
+                    "message": message,
+                    "resource": resource,
+                })));
             }
         }
     }

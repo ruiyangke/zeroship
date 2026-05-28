@@ -44,6 +44,13 @@ impl AuthzGuard {
         resource: Resource,
         state: &AppState,
     ) -> Result<(), HttpResponse> {
+        if let Err(message) = resource.validate_ids() {
+            return Err(HttpResponse::BadRequest().json(&json!({
+                "error": "invalid_resource_id",
+                "message": message,
+            })));
+        }
+
         let ctx = AuthzContext {
             principal_id: self.principal_id,
             token_id: self.token_id,

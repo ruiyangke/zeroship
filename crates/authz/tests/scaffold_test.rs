@@ -89,6 +89,19 @@ fn resource_cedar_uids_are_canonical() {
 }
 
 #[test]
+fn resource_cedar_uids_escape_string_literals() {
+    let resource = Resource::App {
+        id: "x\"; permit (principal, action, resource);".to_owned(),
+    };
+
+    assert_eq!(
+        resource.cedar_uid(),
+        "App::\"x\\\"; permit (principal, action, resource);\""
+    );
+    assert!(resource.validate_ids().is_err());
+}
+
+#[test]
 fn unknown_action_is_rejected() {
     assert!(serde_json::from_str::<Action>("\"foo_bar\"").is_err());
 }

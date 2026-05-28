@@ -14,9 +14,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
-    StripeStore,
+    api, authz_guard::AuthzGuard, oidc_rp, token_handlers, AppState, EnvStore, Quota,
+    RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_authz::{Action, Resource};
 use zeroship_core::hydra::HydraIntrospector;
 
 #[allow(dead_code)]
@@ -326,10 +327,34 @@ macro_rules! init_control {
                 .service(
                     web::resource("/api/apps/{id}/deploy")
                         .route(web::post().to(api::deploy)),
+                )
+                .service(
+                    web::resource("/raw-app/{id}")
+                        .route(web::get().to(raw_app_read)),
                 ),
         )
         .await
     }};
+}
+
+async fn raw_app_read(
+    path: web::types::Path<String>,
+    authz: AuthzGuard,
+    state: web::types::State<Arc<AppState>>,
+) -> web::HttpResponse {
+    match authz
+        .require(
+            Action::AppsRead,
+            Resource::App {
+                id: path.into_inner(),
+            },
+            &state,
+        )
+        .await
+    {
+        Ok(()) => web::HttpResponse::NoContent().finish(),
+        Err(resp) => resp,
+    }
 }
 
 fn bearer() -> String {
@@ -429,6 +454,25 @@ async fn unknown_scope_returns_401_not_silently_dropped() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn invalid_app_resource_id_returns_400_before_cedar() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active(user_id, "apps:read");
+    let Some(fx) = fixture_with_hydra(&hydra, "invalid-resource-id", user_id).await else {
+        return;
+    };
+    let app = init_control!(fx);
+
+    let req = test::TestRequest::get()
+        .uri("/raw-app/app%22%3B%20permit%20%28principal%2C%20action%2C%20resource%29%3B")
+        .header("authorization", bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     fx.cleanup().await;
 }
