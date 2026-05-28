@@ -5,8 +5,8 @@
 //! reset token (single-use), Argon2-hashes the new password on a
 //! `spawn_blocking` worker (the event loop stays free), updates
 //! `auth.users.password_hash`, emits a `password_changed` audit event,
-//! revokes every existing session, consumes outstanding reset tokens, and
-//! redirects to `/login`.
+//! revokes every existing session, consumes outstanding email tokens,
+//! clears cross-device magic completions, and redirects to `/login`.
 //!
 //! Note: GET does not "peek" at the token. Token validity is checked
 //! only at POST time, at the moment of redemption. The form might
@@ -57,7 +57,7 @@ pub async fn get(query: Query<ResetQuery>, cfg: State<Arc<AuthConfig>>) -> HttpR
 
 /// `/reset` POST — validate token + length, atomically redeem the
 /// reset token, hash the new password, update the user, audit, revoke
-/// existing sessions, consume pending reset tokens, and redirect to `/login`.
+/// existing sessions, consume pending email tokens, and redirect to `/login`.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
@@ -144,7 +144,7 @@ pub async fn post(
     };
 
     // 6. Persist the new hash, audit, revoke existing sessions, and consume
-    //    outstanding reset tokens in one transaction. The reset token itself
+    //    outstanding email tokens in one transaction. The reset token itself
     //    was already consumed by the atomic redeem above.
     let revoked = match complete_password_reset(db.as_ref(), user.id, &redeemed.email, &phc).await {
         Ok(counts) => counts,
@@ -159,7 +159,8 @@ pub async fn post(
         idp_sessions = revoked.idp_sessions,
         gateway_sessions = revoked.gateway_sessions,
         console_sessions = revoked.console_sessions,
-        reset_tokens = revoked.reset_tokens,
+        magic_tokens = revoked.magic_tokens,
+        magic_completions = revoked.magic_completions,
         "password_reset revoked sessions and stale tokens"
     );
 
@@ -198,7 +199,8 @@ struct ResetRevocationCounts {
     idp_sessions: u64,
     gateway_sessions: u64,
     console_sessions: u64,
-    reset_tokens: u64,
+    magic_tokens: u64,
+    magic_completions: u64,
 }
 
 async fn complete_password_reset(
@@ -270,23 +272,31 @@ async fn complete_password_reset_tx(
         .await
         .map_err(|e| AuthError::Db(format!("password_reset delete console_sessions: {e}")))?;
 
-    let reset_tokens = conn
+    let magic_tokens = conn
         .execute(
             "UPDATE auth.magic_links \
              SET consumed_at = NOW() \
              WHERE email = $1::citext \
-               AND purpose = 'reset' \
                AND consumed_at IS NULL",
             &[&email],
         )
         .await
-        .map_err(|e| AuthError::Db(format!("password_reset consume reset tokens: {e}")))?;
+        .map_err(|e| AuthError::Db(format!("password_reset consume magic links: {e}")))?;
+
+    let magic_completions = conn
+        .execute(
+            "DELETE FROM auth.magic_completions WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("password_reset delete magic_completions: {e}")))?;
 
     let counts = ResetRevocationCounts {
         idp_sessions,
         gateway_sessions,
         console_sessions,
-        reset_tokens,
+        magic_tokens,
+        magic_completions,
     };
 
     audit::emit_strict(
@@ -300,7 +310,8 @@ async fn complete_password_reset_tx(
                 "idp_sessions": counts.idp_sessions,
                 "gateway_sessions": counts.gateway_sessions,
                 "console_sessions": counts.console_sessions,
-                "reset_tokens": counts.reset_tokens,
+                "magic_tokens": counts.magic_tokens,
+                "magic_completions": counts.magic_completions,
             }),
             ..Default::default()
         },

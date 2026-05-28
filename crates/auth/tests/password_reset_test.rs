@@ -16,8 +16,7 @@ use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::identity::password;
-use zeroship_auth::identity::password_reset;
+use zeroship_auth::identity::{magic_link, password, password_reset};
 use zeroship_auth::store::{migrations, sessions, users};
 
 fn test_cfg(db_url: &str) -> AuthConfig {
@@ -311,6 +310,131 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .get(0);
     assert_eq!(password_changed, 1);
     assert_eq!(sessions_revoked, 1);
+
+    pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
+        .await
+        .ok();
+    pg.execute(
+        "DELETE FROM auth.magic_links WHERE email = $1::citext",
+        &[&email],
+    )
+    .await
+    .ok();
+    pg.execute("DELETE FROM auth.users WHERE id = $1", &[&user.id])
+        .await
+        .ok();
+}
+
+#[compio::test]
+#[allow(clippy::future_not_send)]
+async fn reset_post_consumes_magic_login_state_for_same_email() {
+    let dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(dsn) => dsn,
+        Err(_) => {
+            eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+            return;
+        }
+    };
+    let Some(client) = pg().await else {
+        eprintln!("skipping password_reset_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!(
+        "reset-consume-magic-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    let magic = magic_link::issue(&client, &email, "login")
+        .await
+        .expect("issue magic login");
+    let reset = password_reset::issue(&client, &email)
+        .await
+        .expect("issue reset token");
+
+    let csrf_nonce = format!("reset-clears-completion-{}", Uuid::new_v4().simple());
+    client
+        .execute(
+            "INSERT INTO auth.magic_completions \
+                (csrf_nonce, code, email, login_challenge, expires_at) \
+             VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
+            &[&csrf_nonce, &"123456", &email, &"lc-reset-clears-completion"],
+        )
+        .await
+        .expect("seed magic completion");
+
+    let hydra_state = Arc::new(Mutex::new(MockHydraState::default()));
+    let hydra_state_for_srv = hydra_state.clone();
+    let hydra_srv = web::test::server(move || {
+        let hydra_state = hydra_state_for_srv.clone();
+        async move {
+            web::App::new().state(hydra_state).service(
+                web::resource("/admin/oauth2/auth/sessions/login")
+                    .route(web::delete().to(mock_delete_login_sessions)),
+            )
+        }
+    })
+    .await;
+    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
+
+    let pg = Arc::new(client);
+    let cfg = Arc::new(test_cfg(&dsn));
+    let app = test::init_service(
+        web::App::new()
+            .state(cfg.clone())
+            .state(pg.clone())
+            .state(admin)
+            .service(
+                web::resource("/reset")
+                    .route(web::get().to(zeroship_auth::ui::reset::get))
+                    .route(web::post().to(zeroship_auth::ui::reset::post)),
+            ),
+    )
+    .await;
+
+    let get_req =
+        test::TestRequest::get().uri(&format!("/reset?token={}", reset.raw)).to_request();
+    let get_resp = test::call_service(&app, get_req).await;
+    assert_eq!(get_resp.status().as_u16(), 200);
+    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
+        .expect("zsidp_csrf cookie set on GET /reset");
+
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", &csrf)
+        .append_pair("token", &reset.raw)
+        .append_pair("password", "new reset password phrase")
+        .finish();
+    let post_req = test::TestRequest::post()
+        .uri("/reset")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .set_payload(body)
+        .to_request();
+    let post_resp = test::call_service(&app, post_req).await;
+    assert_eq!(post_resp.status().as_u16(), 302);
+
+    let old_magic = magic_link::redeem_pending(pg.as_ref(), &magic.raw)
+        .await
+        .expect("redeem old magic login after reset");
+    assert!(
+        old_magic.is_none(),
+        "password reset must consume outstanding login-purpose magic links"
+    );
+
+    let completions_left: i64 = pg
+        .query_one(
+            "SELECT COUNT(*) FROM auth.magic_completions WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .expect("count magic completions")
+        .get(0);
+    assert_eq!(
+        completions_left, 0,
+        "password reset must clear cross-device magic completions for the email"
+    );
 
     pg.execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user.id])
         .await
