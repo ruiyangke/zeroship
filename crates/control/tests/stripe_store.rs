@@ -309,6 +309,31 @@ async fn payload_hash_mismatch_rejects_duplicate() {
 }
 
 #[compio::test]
+async fn payout_ledger_check_constraints_reject_impossible_rows() {
+    let Some(url) = db_url() else { return; };
+    let registry = Registry::new(&url).await.expect("registry");
+    let store = StripeStore::new(registry);
+    let creator = fresh_creator_id();
+    store.link_account(creator, "acct_checkConstraints").await.unwrap();
+
+    let pg = pg(&url).await;
+    let bad = pg
+        .execute(
+            "INSERT INTO control.payouts
+                (creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at)
+             VALUES ($1, $2, 'invoice.paid', 100, 500, -400, 'usd', NOW())",
+            &[&creator, &format!("evt_bad_{}", Uuid::new_v4())],
+        )
+        .await;
+    assert!(
+        bad.is_err(),
+        "control.payouts CHECK constraints must reject impossible ledger rows"
+    );
+
+    store.unlink_account(creator).await.ok();
+}
+
+#[compio::test]
 async fn unlink_is_soft_delete_payouts_preserved() {
     let Some(url) = db_url() else { return; };
     let registry = Registry::new(&url).await.expect("registry");

@@ -299,14 +299,83 @@ impl Registry {
                 creator_id UUID NOT NULL REFERENCES control.creator_accounts(creator_id) ON DELETE RESTRICT,
                 event_id TEXT NOT NULL UNIQUE,
                 event_type TEXT NOT NULL,
-                gross_amount BIGINT NOT NULL,
-                platform_fee BIGINT NOT NULL,
-                net_amount BIGINT NOT NULL,
-                currency TEXT NOT NULL,
+                gross_amount BIGINT NOT NULL
+                    CONSTRAINT control_payouts_gross_nonnegative CHECK (gross_amount >= 0),
+                platform_fee BIGINT NOT NULL
+                    CONSTRAINT control_payouts_fee_nonnegative CHECK (platform_fee >= 0),
+                net_amount BIGINT NOT NULL
+                    CONSTRAINT control_payouts_net_nonnegative CHECK (net_amount >= 0),
+                currency TEXT NOT NULL
+                    CONSTRAINT control_payouts_currency_shape CHECK (currency ~ '^[a-z]{3}$'),
                 occurred_at TIMESTAMPTZ NOT NULL,
                 payload_hash BYTEA,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT control_payouts_fee_lte_gross CHECK (platform_fee <= gross_amount),
+                CONSTRAINT control_payouts_net_matches_amounts CHECK (net_amount = gross_amount - platform_fee)
             )",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_gross_nonnegative'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_gross_nonnegative
+                        CHECK (gross_amount >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_fee_nonnegative'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_fee_nonnegative
+                        CHECK (platform_fee >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_net_nonnegative'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_net_nonnegative
+                        CHECK (net_amount >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_fee_lte_gross'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_fee_lte_gross
+                        CHECK (platform_fee <= gross_amount);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_net_matches_amounts'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_net_matches_amounts
+                        CHECK (net_amount = gross_amount - platform_fee);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'control.payouts'::regclass
+                      AND conname = 'control_payouts_currency_shape'
+                ) THEN
+                    ALTER TABLE control.payouts
+                        ADD CONSTRAINT control_payouts_currency_shape
+                        CHECK (currency ~ '^[a-z]{3}$');
+                END IF;
+            END;
+            $$",
             &[],
         )
         .await
