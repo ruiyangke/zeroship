@@ -94,3 +94,24 @@ No low findings.
 - `crates/auth/src/ui/oauth_github.rs::callback` — callback verifies the signed stash, `state`, PKCE verifier, and uses GitHub's verified primary email selection before linking.
 - `crates/auth/src/identity/password_reset.rs::redeem` and `crates/auth/src/identity/verification.rs::redeem` — token redemption itself uses atomic `UPDATE ... RETURNING` single-use semantics.
 - `crates/auth/src/identity/magic_link.rs::redeem_pending` — login token reservation uses atomic `UPDATE ... RETURNING` and prevents concurrent double reservation within the pending window.
+
+## Status
+
+### CLOSED
+
+- C1 — `5f2eaed7` — `audit R1.C1: revoke Hydra SSO sessions on password reset`
+- H1 — `106e053f` — `audit R1.H1: centralize login eligibility checks`
+- H2 — `84360661` — `audit R1.H2: rate-limit link password confirmation`
+- H3 — `771920fd` — `audit R1.H3: validate Hydra challenges before OAuth side effects`
+- H4 — `1ca407c1` — `audit R1.H4: serialize token issuance`
+- H5 — `93a2cc13` — `audit R1.H5: consume magic login state on password reset`
+- H6 — `aa95fc4a` — `audit R1.H6: require POST before cookie-less magic redeem`
+- H7 — `8307ba58` — `audit R1.H7: exclude reserved magic completions from wrong-code updates`
+- H8 — `860dc3b6` — `audit R1.H8: revoke logout session from local cookie`
+- M1 — `66b1698c` — `audit R1.M1: scope magic token supersede by purpose`
+- M2 — `82fa7a99` — `audit R1.M2: couple token consume with user state updates`
+- M3 — `1db430da` — `audit R1.M3: distinguish duplicate signup emails from DB errors`
+
+### DEFERRED
+
+- None.
