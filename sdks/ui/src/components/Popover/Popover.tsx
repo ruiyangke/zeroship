@@ -31,7 +31,9 @@
  *     without losing the close-press handler.
  *   - Arrow renders an SVG triangle scoped to the popover's themed
  *     surface color so it reads as an extension of the popup, not a
- *     separate element. Base UI auto-rotates the wrapping div per side.
+ *     separate element. Base UI 1.5 stamps `data-side` on the wrapper
+ *     but does NOT auto-rotate it, so Popover.css owns side-specific
+ *     SVG rotation (see `.zs-popover-arrow[data-side=...] > svg`).
  *
  * Anti-patterns we explicitly avoid (mirrored from Dialog / AlertDialog):
  *   - Auto-close glyph absolutely positioned outside the popup chrome:
@@ -82,10 +84,21 @@ export interface PopoverProps extends Omit<BaseRootProps, "render"> {
   children?: ReactNode;
 }
 
-/* ─── Root ──────────────────────────────────────────────────────────── */
+/* ─── Root ──────────────────────────────────────────────────────────── *
+ *
+ * `modal` defaults to `false` explicitly — Base UI 1.5 ships the same
+ * default, but pinning it here owns the contract so a future Base UI
+ * change can't silently flip popovers into focus-trapping modals. The
+ * popover-feel is anchored panel; set `modal={true}` only for the rare
+ * Slack-style settings popover (which should usually also opt into
+ * `<Popover.Backdrop>`). */
 
-function PopoverRoot({ children, ...rest }: PopoverProps) {
-  return <BasePopover.Root {...rest}>{children}</BasePopover.Root>;
+function PopoverRoot({ modal = false, children, ...rest }: PopoverProps) {
+  return (
+    <BasePopover.Root modal={modal} {...rest}>
+      {children}
+    </BasePopover.Root>
+  );
 }
 PopoverRoot.displayName = "Popover";
 
@@ -232,11 +245,12 @@ PopoverDescription.displayName = "Popover.Description";
 
 /* ─── Arrow ─────────────────────────────────────────────────────────── *
  *
- * Floating UI rotates the wrapping `<div>` per side; the inner SVG is a
- * fixed downward-pointing triangle that the rotation reorients. The
- * brief specifies `M 0,0 L 8,8 L 16,0 Z` — a 16×8 downward triangle that
- * sits flush against the bottom edge of the popup when side="bottom"
- * (default), then Base UI rotates it for top/left/right. */
+ * Base UI 1.5 positions the arrow wrapper and tags it with `data-side`,
+ * but does NOT rotate the wrapper itself. Popover.css rotates the inner
+ * SVG per side (see `.zs-popover-arrow[data-side=...] > svg`). The
+ * brief specifies `M 0,0 L 8,8 L 16,0 Z` — a 16×8 downward-pointing
+ * triangle that the per-side rotation reorients so the apex always
+ * points at the trigger. */
 
 type BaseArrowProps = ComponentPropsWithoutRef<typeof BasePopover.Arrow>;
 export type PopoverArrowProps = BaseArrowProps;
