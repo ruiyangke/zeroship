@@ -116,8 +116,13 @@
 }
 
 /* RTL flip — translate runs the opposite direction so the sweep reads
-   right-to-left for RTL writing modes. */
-[dir="rtl"] .zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+   right-to-left for RTL writing modes. Uses `:dir(rtl)` (CSS Selectors
+   L4) so the match reaches whether `dir="rtl"` is set on `<html>`,
+   `<body>`, an ancestor, or the `.zs-progress` element itself — the
+   prior `[dir="rtl"]` attribute selector only matched when the
+   attribute lived literally on a `.zs-progress` ancestor element that
+   happened to also descend through the selector. */
+.zs-progress[data-status="indeterminate"]:dir(rtl) .zs-progress__indicator {
   animation-name: zs-progress-shimmer-rtl;
 }
 @keyframes zs-progress-shimmer-rtl {
@@ -185,10 +190,18 @@
     background: Highlight;
   }
   /* Suppress the indeterminate shimmer under forced-colors so the
-     Highlight surface doesn't translate / flicker. */
+     Highlight surface doesn't translate / flicker. Re-emit `background`
+     at the SAME (0,1,1) selector specificity as the reduced-motion
+     indeterminate rule above so that, when BOTH prefers-reduced-motion
+     and forced-colors are active, we don't leak the oklch
+     `color-mix(--zs-accent)` paint through — system Highlight wins.
+     (Source order would alone resolve this if the reduced-motion rule
+     didn't set `background` at the same specificity; making the
+     forced-colors rule explicit is the durable fix.) */
   .zs-progress[data-status="indeterminate"] .zs-progress__indicator {
     animation: none;
     inline-size: 100%;
+    background: Highlight;
   }
   .zs-progress__label,
   .zs-progress__value {

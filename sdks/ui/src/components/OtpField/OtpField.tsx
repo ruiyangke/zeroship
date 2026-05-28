@@ -66,9 +66,11 @@
  */
 import {
   forwardRef,
+  useId,
   type AriaAttributes,
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
+  type CSSProperties,
   type HTMLAttributes,
 } from "react";
 // Base UI ships the OTP Field as a `preview` namespace in 1.5.0 — the
@@ -81,6 +83,24 @@ import { classnames } from "../_classnames";
 
 export type OtpFieldSize = "sm" | "md" | "lg";
 export type OtpFieldVariant = "default" | "outline";
+
+/**
+ * Visually-hidden style mirroring the slate's story-side `srOnly` helper.
+ * Used for the cell-0 accessible-name fallback `<span>` when no Field
+ * wrapper / aria-label / aria-labelledby is supplied. Inline so we don't
+ * need to introduce a generic utility class.
+ */
+const visuallyHiddenStyle: CSSProperties = {
+  position: "absolute",
+  inlineSize: 1,
+  blockSize: 1,
+  margin: -1,
+  padding: 0,
+  overflow: "hidden",
+  clip: "rect(0 0 0 0)",
+  whiteSpace: "nowrap",
+  border: 0,
+};
 
 type BaseRootProps = ComponentPropsWithRef<typeof BaseOTPField.Root>;
 
@@ -151,6 +171,27 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
     const required = requiredProp ?? fieldCtx?.required ?? false;
     const disabled = disabledProp ?? fieldCtx?.disabled ?? false;
 
+    // Cell-0 accessible-name fallback. Base UI's OTPFieldInput.js wires
+    // `ariaLabel = index === 0 ? undefined : slotAriaLabel` — the first
+    // cell intentionally has no per-cell aria-label so it can inherit
+    // from a real `<label>` or Field.Label association. When neither a
+    // Field wraps us NOR the consumer forwards an aria-label /
+    // aria-labelledby, cell 0 ends up unnamed (axe fails the row). To
+    // patch that without forcing every consumer to write boilerplate,
+    // we render a visually-hidden `<span>` carrying the text
+    // "Verification code" and point the ROOT's aria-labelledby at it.
+    // The group label then names cell 0 (it announces as
+    // "Verification code, character 1 of N") and the other cells keep
+    // their per-cell labels from Base UI's auto-wiring.
+    //
+    // We DO NOT inject the hidden span when:
+    //   - a Field context is present (Field.Label owns the labelling),
+    //   - the consumer forwarded an explicit `aria-label`, OR
+    //   - the consumer forwarded an explicit `aria-labelledby`.
+    const hiddenLabelId = useId();
+    const needsHiddenLabel =
+      fieldCtx == null && ariaLabel == null && ariaLabelledBy == null;
+
     // Build aria-* spread only with defined keys so undefined values
     // don't clobber Base UI's auto-wired labelledby chain from Field.
     const ariaForwarded: Record<string, AriaAttributes[keyof AriaAttributes]> =
@@ -158,6 +199,8 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
     if (ariaLabel != null) ariaForwarded["aria-label"] = ariaLabel;
     if (ariaLabelledBy != null)
       ariaForwarded["aria-labelledby"] = ariaLabelledBy;
+    else if (needsHiddenLabel)
+      ariaForwarded["aria-labelledby"] = hiddenLabelId;
     if (ariaDescribedBy != null)
       ariaForwarded["aria-describedby"] = ariaDescribedBy;
 
@@ -202,6 +245,21 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
               data-complete={dataComplete}
               data-testid={dataTestId}
             >
+              {/* Visually-hidden cell-0 / group label fallback.
+               *
+               * Only rendered when no Field context AND no consumer-
+               * provided aria-label / aria-labelledby. Base UI's
+               * OTPFieldInput drops aria-label on cell 0 so this hidden
+               * span (referenced via aria-labelledby on the Root) is
+               * what cell 0 actually announces as. CSS for this span
+               * is inline because the @zeroship/ui slate doesn't have
+               * a generic visually-hidden utility class yet — keeping
+               * it inline avoids adding one just for this fix. */}
+              {needsHiddenLabel ? (
+                <span id={hiddenLabelId} style={visuallyHiddenStyle}>
+                  Verification code
+                </span>
+              ) : null}
               {Array.from({ length }, (_, index) => (
                 // Base UI's OTPField.Input derives its `index` from the
                 // composite-list order (useCompositeListItem inside the
@@ -212,15 +270,13 @@ export const OtpField = forwardRef<HTMLDivElement, OtpFieldProps>(
                 // cell 0 (the first input is supposed to inherit from a
                 // <label> or <Field.Label>); for cells 1..N-1 Base UI
                 // synthesizes "Character N" automatically when no
-                // external label is provided. axe still flags cell 0
-                // when there's no Field wrap (the bare Basic / AllSizes
-                // stories), so we forward an explicit per-cell aria-
-                // label whose first-cell value composes with whatever
-                // the Root's group label says: "Verification code,
-                // Character 1 of 6". Inside a Field, Base UI's
-                // labelledby chain wins (we don't override there
-                // because the per-cell aria-label is additive — both
-                // are announced).
+                // external label is provided. The cell-0 fix (above) is
+                // the visually-hidden labelledby span — cell 0 reads
+                // "Verification code, character 1 of N" via the group
+                // name + the per-cell suffix we forward here. Inside a
+                // Field, Base UI's labelledby chain wins (we don't
+                // override because the per-cell aria-label is additive
+                // — both are announced).
                 <BaseOTPField.Input
                   key={index}
                   className="zs-otp-field__input"

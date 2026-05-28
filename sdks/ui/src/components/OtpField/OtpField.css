@@ -48,6 +48,18 @@
   gap: var(--zs-space-2);
 }
 
+/* Coarse-pointer hit-target floor — touch users need at least 44px
+ * (--zs-hit-min, 2.75rem) on every cell. The sm size's 2rem cell would
+ * otherwise undershoot the WCAG 2.5.5 target-size floor on a phone or
+ * tablet. We bump --zs-otp-cell-size on sm specifically (md/lg already
+ * clear the floor) so each square cell grows to hit-min on a coarse
+ * pointer without disturbing the desktop sm density. */
+@media (pointer: coarse) {
+  .zs-otp-field--sm {
+    --zs-otp-cell-size: var(--zs-hit-min);
+  }
+}
+
 /* ─── Cell ─────────────────────────────────────────────────────────── */
 .zs-otp-field__input {
   inline-size: var(--zs-otp-cell-size);
@@ -84,7 +96,11 @@
   caret-color: var(--zs-input-ink);
 }
 
-/* Sm cell uses sm control radius + the slightly smaller font. */
+/* Sm cell uses sm control radius + the slightly smaller font.
+ * iOS Safari zoom-on-focus floor — Slice 2 lesson applied. The sm cell
+ * falls below 1rem font-size which would trigger Mobile Safari's auto-
+ * zoom; the `max(1rem, …)` floor pins the inner font to 1rem so iOS
+ * doesn't kick the viewport into a zoomed state when the cell focuses. */
 .zs-otp-field--sm .zs-otp-field__input {
   border-radius: var(--zs-control-radius-sm);
   font-size: max(1rem, var(--zs-text-subheadline-size));
@@ -186,13 +202,6 @@
     0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
 }
 
-/* ─── iOS Safari zoom-on-focus floor — Slice 2 lesson applied. The
-     OtpField sm cell falls below 1rem font-size which would trigger
-     Mobile Safari's auto-zoom. Pin the inner font to a 1rem floor. */
-.zs-otp-field--sm .zs-otp-field__input {
-  font-size: max(1rem, var(--zs-text-subheadline-size));
-}
-
 /* ─── Autofill — same inset-shadow trick as Input so the yellow
      autofill background doesn't bleed through. */
 .zs-otp-field__input:autofill,
@@ -275,5 +284,29 @@
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0 transparent;
+  }
+
+  /* Hover mirror — Toggle.css:581-600 lesson applied. The hover rule
+   * outside forced-colors lives under `@media (hover: hover)` and binds
+   * to `--zs-input-bg-hover` / `--zs-input-border-hover`. Under forced-
+   * colors that pair resolves back to oklch tokens — we re-paint to the
+   * system palette inside an inner `@media (hover: hover)` so a hover-
+   * capable pointer in high-contrast mode still wins the cascade. */
+  @media (hover: hover) {
+    .zs-otp-field:not([data-disabled]):not([data-readonly])
+      .zs-otp-field__input:hover {
+      background: Field;
+      color: FieldText;
+      box-shadow:
+        inset 0 0 0 0.0625rem Highlight,
+        0 0 0 0 transparent;
+    }
+    .zs-otp-field--outline:not([data-disabled]):not([data-readonly])
+      .zs-otp-field__input:hover {
+      background: Canvas;
+      box-shadow:
+        inset 0 0 0 0.0625rem Highlight,
+        0 0 0 0 transparent;
+    }
   }
 }

@@ -48,8 +48,10 @@
  *
  *   7. RTL — Base UI emits inline-size on the indicator so RTL flips
  *      the fill direction automatically. The indeterminate shimmer
- *      uses logical translation (`translate: var(--zs-progress-shimmer)`)
- *      so the sweep direction follows the writing-mode.
+ *      uses two `translateX` keyframe sets (LTR sweeps -100% → 400%;
+ *      RTL sweeps 100% → -400%) switched by a `:dir(rtl)` selector on
+ *      the Root so the sweep direction follows the writing-mode
+ *      regardless of which ancestor element carries `dir="rtl"`.
  *
  * Aria contract:
  *   Base UI emits `role="progressbar"`, `aria-valuemin`, `aria-valuemax`,
