@@ -101,7 +101,11 @@ pub async fn postmark(
             )
             .await
             {
-                tracing::error!(error = %e, email = %b.email, "suppression add failed");
+                tracing::error!(
+                    error = %e,
+                    email_domain = %email_domain(&b.email),
+                    "suppression add failed"
+                );
                 return HttpResponse::InternalServerError().finish();
             }
             // Audit detail uses email_domain only (not the full address)
@@ -128,7 +132,11 @@ pub async fn postmark(
             // Soft bounce — log only. Transient failures (mailbox full,
             // server down) recover; suppressing on them would
             // permanently block legitimate users.
-            tracing::info!(email = %b.email, kind = %b.r#type, "postmark soft bounce");
+            tracing::info!(
+                email_domain = %email_domain(&b.email),
+                kind = %b.r#type,
+                "postmark soft bounce"
+            );
         }
         PostmarkEvent::SpamComplaint(c) => {
             if let Err(e) = suppressions::add(
@@ -139,7 +147,11 @@ pub async fn postmark(
             )
             .await
             {
-                tracing::error!(error = %e, email = %c.email, "suppression add failed");
+                tracing::error!(
+                    error = %e,
+                    email_domain = %email_domain(&c.email),
+                    "suppression add failed"
+                );
                 return HttpResponse::InternalServerError().finish();
             }
             audit::emit(
@@ -280,7 +292,7 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
                 )
                 .await
                 {
-                    tracing::error!(error = %e, email = %rec.email_address,
+                    tracing::error!(error = %e, email_domain = %email_domain(&rec.email_address),
                                     "ses-sns suppression add failed");
                 }
             }
@@ -312,7 +324,7 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
                 if let Err(e) =
                     suppressions::add(db, &rec.email_address, "ses_complaint", None).await
                 {
-                    tracing::error!(error = %e, email = %rec.email_address,
+                    tracing::error!(error = %e, email_domain = %email_domain(&rec.email_address),
                                     "ses-sns complaint suppression add failed");
                 }
             }
@@ -334,5 +346,20 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
             // Delivery / DeliveryDelay / Send / Open / Click — we never
             // asked SES to post these but if they arrive, drop them.
         }
+    }
+}
+
+fn email_domain(email: &str) -> &str {
+    email.split_once('@').map(|(_, domain)| domain).unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::email_domain;
+
+    #[test]
+    fn email_domain_omits_local_part() {
+        assert_eq!(email_domain("victim@example.com"), "example.com");
+        assert_eq!(email_domain("not-an-email"), "");
     }
 }

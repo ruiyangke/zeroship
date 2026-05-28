@@ -274,7 +274,11 @@ pub async fn start(
             vec!["magic-link".into(), "login".into()],
         );
         if let Err(e) = mailer.send(db.as_ref(), email_msg).await {
-            tracing::warn!(error = %e, email = %email_norm, "magic_link email send failed");
+            tracing::warn!(
+                error = %e,
+                email_domain = %email_domain(&email_norm),
+                "magic_link email send failed"
+            );
         }
 
         audit::emit(
@@ -1257,6 +1261,10 @@ fn user_agent_str(h: Option<&HeaderValue>) -> String {
         .unwrap_or_else(|| "Unknown device".to_string())
 }
 
+fn email_domain(email: &str) -> &str {
+    email.split_once('@').map(|(_, domain)| domain).unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,5 +1282,11 @@ mod tests {
     fn user_agent_str_uses_unknown_for_empty_values() {
         let header = HeaderValue::from_static("");
         assert_eq!(user_agent_str(Some(&header)), "Unknown device");
+    }
+
+    #[test]
+    fn email_domain_omits_local_part() {
+        assert_eq!(email_domain("victim@example.com"), "example.com");
+        assert_eq!(email_domain("not-an-email"), "");
     }
 }
