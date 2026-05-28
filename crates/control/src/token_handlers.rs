@@ -13,7 +13,7 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_authz::{self as authz, AuthzContext, AuthzDecision, Effect, Policy};
+use zeroship_authz::{self as authz, AuthzContext, AuthzDecision, Effect, Policy, Resource};
 
 use crate::authz_guard::AuthzGuard;
 use crate::AppState;
@@ -395,9 +395,18 @@ async fn validate_grant_subset(
                     request_id: None,
                 };
 
-                match authz::enforce(&state.auth_pg, &state.static_policies, &ctx).await {
-                    Ok(AuthzDecision::Allow) => {}
-                    Ok(AuthzDecision::Deny) => {
+                let authorized = if matches!(resource, Resource::Any) {
+                    authz::is_authorized_anywhere(&state.auth_pg, &state.static_policies, &ctx)
+                        .await
+                } else {
+                    authz::enforce(&state.auth_pg, &state.static_policies, &ctx)
+                        .await
+                        .map(|decision| decision == AuthzDecision::Allow)
+                };
+
+                match authorized {
+                    Ok(true) => {}
+                    Ok(false) => {
                         return Err(web::HttpResponse::BadRequest().json(&json!({
                             "error": "excess_permissions",
                             "message": "you can't grant a permission you don't have",

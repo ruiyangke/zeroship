@@ -19,7 +19,7 @@ pub use condition::Condition;
 pub use effect::Effect;
 pub use engine::{load_platform_policies, policy_hash, Authorizer};
 pub use entities::assemble_entities;
-pub use eval::{enforce, AuthzContext, AuthzDecision};
+pub use eval::{enforce, is_authorized_anywhere, AuthzContext, AuthzDecision};
 pub use error::{AuthzError, ValidationError};
 pub use lower::lower;
 pub use policy::Policy;

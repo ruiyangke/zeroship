@@ -2,8 +2,8 @@ use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
 use uuid::Uuid;
 use zeroship_authz::{
-    enforce, load_platform_policies, policy_hash, Action, AuthzContext, AuthzDecision, Effect,
-    Policy, Resource, Statement,
+    enforce, is_authorized_anywhere, load_platform_policies, policy_hash, Action, AuthzContext,
+    AuthzDecision, Effect, Policy, Resource, Statement,
 };
 
 #[test]
@@ -117,6 +117,33 @@ fn suspended_app_denies_owner_writes() {
             .unwrap();
 
         assert_eq!(decision, AuthzDecision::Deny);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn app_owner_is_authorized_anywhere_for_owned_app_action() {
+    run_db_test(|pg| async move {
+        let fixture =
+            Fixture::new_registered_app(&pg, "owner-anywhere", "owner", false, false).await;
+        let policies = load_platform_policies().unwrap();
+        let ctx = AuthzContext {
+            principal_id: fixture.user_id,
+            token_id: None,
+            token_policy: None,
+            action: Action::AppsDeploy,
+            resource: Resource::Any,
+            request_ip: None,
+            mfa_verified: false,
+            mfa_age_seconds: None,
+            request_id: None,
+        };
+
+        assert!(
+            is_authorized_anywhere(&pg, &policies, &ctx).await.unwrap(),
+            "app owner should be allowed to grant apps:deploy somewhere"
+        );
+
         fixture.cleanup(&pg).await;
     });
 }

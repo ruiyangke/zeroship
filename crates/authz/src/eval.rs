@@ -71,6 +71,63 @@ pub async fn enforce(
     Ok(decision)
 }
 
+/// Return true when the principal can perform `ctx.action` on any resource
+/// they currently control: platform-wide `Resource::Any` first, then each app
+/// membership resource. This is used for grant/consent checks where the user is
+/// delegating an action vocabulary, not authorizing one concrete app request.
+pub async fn is_authorized_anywhere(
+    pg: &Client,
+    static_policies: &PolicySet,
+    ctx: &AuthzContext<'_>,
+) -> Result<bool, AuthzError> {
+    let mut resources = vec![Resource::Any];
+    resources.extend(load_principal_app_resources(pg, ctx.principal_id).await?);
+
+    for resource in resources {
+        let probe = AuthzContext {
+            principal_id: ctx.principal_id,
+            token_id: None,
+            token_policy: None,
+            action: ctx.action,
+            resource,
+            request_ip: ctx.request_ip,
+            mfa_verified: ctx.mfa_verified,
+            mfa_age_seconds: ctx.mfa_age_seconds,
+            request_id: ctx.request_id,
+        };
+        if enforce(pg, static_policies, &probe).await? == AuthzDecision::Allow {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn load_principal_app_resources(
+    pg: &Client,
+    principal_id: Uuid,
+) -> Result<Vec<Resource>, AuthzError> {
+    let rows = pg
+        .query(
+            "SELECT DISTINCT app_id FROM control.app_members WHERE user_id = $1",
+            &[&principal_id],
+        )
+        .await
+        .map_err(|err| AuthzError::Db(format!("load app grant resources: {err}")))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let resource = Resource::App {
+                id: row.get("app_id"),
+            };
+            resource
+                .validate_ids()
+                .map_err(|message| AuthzError::Validation(message.to_owned()))?;
+            Ok(resource)
+        })
+        .collect()
+}
+
 fn policy_set_from_policy(policy: &Policy) -> Result<PolicySet, AuthzError> {
     PolicySet::from_str(&lower(policy)).map_err(|err| AuthzError::CedarParse(err.to_string()))
 }

@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
-use zeroship_authz::{self as authz, AuthzContext, AuthzDecision, Resource, Scope};
+use zeroship_authz::{self as authz, AuthzContext, Resource, Scope};
 
 use crate::config::AuthConfig;
 use crate::csrf;
@@ -398,9 +398,9 @@ async fn grantor_can_grant_requested_scopes(
             mfa_age_seconds: None,
             request_id: None,
         };
-        match authz::enforce(db, &policies, &ctx).await {
-            Ok(AuthzDecision::Allow) => {}
-            Ok(AuthzDecision::Deny) => return Ok(false),
+        match authz::is_authorized_anywhere(db, &policies, &ctx).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
             Err(e) => return Err(format!("authorize {}: {e}", scope.as_str())),
         }
     }
