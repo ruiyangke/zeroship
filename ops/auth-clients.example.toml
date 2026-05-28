@@ -19,6 +19,10 @@ client_name = "zeroship Gateway (hosted apps)"
 client_secret = "dev-secret-rotate-me-too"
 # redirect_uris grow per-deployed-app — control plane appends on each deploy
 redirect_uris = []
+# OIDC Back-Channel Logout 1.0 — hydra POSTs here when a user signs out;
+# the gateway verifies the logout_token and revokes the user's app sessions.
+# One stable URL services every hosted creator-app subdomain.
+backchannel_logout_uri = "https://api.zeroship.ai/oidc/backchannel-logout"
 scope = "openid offline_access email profile"
 access_token_strategy = "jwt"
 id_token_signed_response_alg = "EdDSA"

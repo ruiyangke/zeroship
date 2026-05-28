@@ -1,4 +1,5 @@
 mod auth;
+mod backchannel_logout;
 mod blob_cache;
 mod compiled;
 mod dispatch;
@@ -257,6 +258,14 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
+            // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
+            // at the gateway-host level (not per-app) because the
+            // URI is stable across every `backchannel_logout_uri`
+            // entry in `ops/auth-clients.example.toml`. Must be
+            // mounted BEFORE the subdomain catch-all below — ntex's
+            // path routing is registration-order-sensitive for
+            // overlapping patterns.
+            .configure(backchannel_logout::configure)
             // Subdomain catch-all — must be last (lowest priority)
             .service(
                 web::resource("/{tail}*")
