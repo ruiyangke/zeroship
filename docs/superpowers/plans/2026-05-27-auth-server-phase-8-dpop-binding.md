@@ -1,5 +1,7 @@
 # Auth server — Phase 8 implementation plan: Full DPoP token binding
 
+**Phase 8 status:** COMPLETE on 2026-05-27 — `auth-phase-8` tag, ~488 workspace tests green. All units U1–U6 landed; the gateway is now a JWT issuer with a `cnf.jkt`-binding wrapper-token flow and the dispatcher enforces the binding for wrapper tokens. The raw-hydra-token DPoP path from P7-U5 is preserved as an unbound fallback (a future `--strict-dpop` flag will disable it).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development.
 
 **Goal:** Ship real DPoP token binding (`cnf.jkt`) without forking hydra. The gateway becomes a wrapper-token issuer: clients exchange their hydra access token + DPoP proof for a gateway-signed wrapper JWT whose `cnf.jkt` claim binds the token to a specific public key. The gateway then enforces that any subsequent DPoP-Auth request's proof JWT carries a key whose thumbprint matches `cnf.jkt`.
@@ -67,6 +69,8 @@ Total: ~4h, ~8 commits.
 ---
 
 ## Unit U1 · Gateway signing key
+
+- [x] Landed 2026-05-27 — `9ed2a652 gateway: signing — Ed25519 PKCS#8 key loader + JWK thumbprint helper`.
 
 The gateway needs its own Ed25519 key pair to sign wrapper tokens. Phase 8 v1: load from disk (or env-var) at boot. Future: KMS integration (Phase 9+).
 
@@ -175,6 +179,8 @@ gateway: signing — Ed25519 PKCS#8 key loader + JWK thumbprint helper
 ---
 
 ## Unit U2 · Wrapper-token issuer
+
+- [x] Landed 2026-05-27 — `8178e6b4 gateway: wrapper_token — Ed25519-signed JWT with cnf.jkt binding + RFC 9068 at+jwt typ`.
 
 ### Files
 
@@ -346,6 +352,8 @@ gateway: wrapper_token — Ed25519-signed JWT with cnf.jkt binding + RFC 9068 at
 
 ## Unit U3 · `/__zs/auth/dpop-exchange` endpoint
 
+- [x] Landed 2026-05-27 — `b3e7f245 gateway: /__zs/auth/dpop-exchange — issue wrapper token bound to client's DPoP key`.
+
 ### Files
 
 - Create `crates/gateway/src/dpop_exchange.rs`
@@ -455,6 +463,8 @@ gateway: /__zs/auth/dpop-exchange — issue wrapper token bound to client's DPoP
 
 ## Unit U4 · Dispatch verifies wrapper tokens with cnf.jkt check
 
+- [x] Landed 2026-05-27 — `841211f0 gateway: dispatch — verify wrapper tokens locally + enforce cnf.jkt binding (raw hydra path preserved)`.
+
 ### Modify `crates/gateway/src/router/auth.rs::resolve_dpop_user_header`
 
 Currently the DPoP path in P7-U5 introspects the access token at hydra per request. Phase 8 changes this for wrapper tokens:
@@ -526,6 +536,8 @@ gateway: dispatch — verify wrapper tokens locally + enforce cnf.jkt binding (r
 ---
 
 ## Unit U5 · E2e test: full DPoP-bound flow
+
+- [x] Landed 2026-05-27 — `269d62b6 gateway: e2e — DPoP-bound wrapper-token flow (exchange + dispatch + mismatch rejection)`. (Test file landed as `crates/gateway/tests/dpop_bound_e2e.rs`.)
 
 File: `crates/gateway/tests/dpop_binding_e2e.rs`.
 
