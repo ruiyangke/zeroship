@@ -193,3 +193,32 @@ export type {
   TooltipArrowProps,
   TooltipComponent,
 } from "./Tooltip";
+
+export { Menu, createMenuHandle } from "./Menu";
+export type {
+  MenuProps,
+  MenuSide,
+  MenuAlign,
+  MenuTriggerProps,
+  MenuPortalProps,
+  MenuBackdropProps,
+  MenuPopupProps,
+  MenuItemProps,
+  MenuGroupProps,
+  MenuGroupLabelProps,
+  MenuSeparatorProps,
+  MenuCheckboxItemProps,
+  MenuRadioGroupProps,
+  MenuRadioItemProps,
+  MenuLinkItemProps,
+  MenuSubmenuProps,
+  MenuArrowProps,
+  MenuComponent,
+} from "./Menu";
+
+export { ContextMenu } from "./ContextMenu";
+export type {
+  ContextMenuProps,
+  ContextMenuTriggerProps,
+  ContextMenuComponent,
+} from "./ContextMenu";

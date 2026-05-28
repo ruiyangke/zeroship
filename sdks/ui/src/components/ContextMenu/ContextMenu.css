@@ -1,0 +1,37 @@
+/*
+ * ContextMenu — right-click / long-press anchored menu.
+ *
+ * The popup surface is painted by Menu.css — ContextMenu only adds a
+ * trigger affordance + focus-ring polish.
+ *
+ * The trigger is a `<div>` that holds the consumer's interactive area
+ * (a card, a region, an image). We give it a real focus ring so
+ * keyboard users can land on it via Tab; the `contextmenu` event is
+ * what opens the popup (right-click / Shift+F10 / long-press).
+ */
+
+.zs-contextmenu-trigger {
+  position: relative;
+  display: block;
+  /* No padding / margin — the trigger is a wrapper; layout pressure
+   * comes from the consumer's content. */
+  border-radius: var(--zs-radius-2);
+  outline: none;
+  /* Stamp a focus ring when the trigger gets keyboard focus so a
+   * keyboard user knows where Shift+F10 will open the menu. */
+  transition: box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-contextmenu-trigger:focus-visible {
+  box-shadow:
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
+
+/* ─── Forced-colors mirror ─────────────────────────────────────────── */
+@media (forced-colors: active) {
+  .zs-contextmenu-trigger:focus-visible {
+    box-shadow:
+      0 0 0 0.125rem Highlight;
+    forced-color-adjust: none;
+  }
+}

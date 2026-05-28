@@ -31,6 +31,8 @@
 @import "./components/Slider/Slider.css";
 @import "./components/Popover/Popover.css";
 @import "./components/Tooltip/Tooltip.css";
+@import "./components/Menu/Menu.css";
+@import "./components/ContextMenu/ContextMenu.css";
 @import "./components/Form/Form.css";
 @import "./components/Fieldset/Fieldset.css";
 

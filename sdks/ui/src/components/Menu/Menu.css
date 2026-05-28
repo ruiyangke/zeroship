@@ -1,0 +1,398 @@
+/*
+ * Menu — anchored dropdown opened by a click trigger.
+ *
+ * Anatomy:
+ *   .zs-menu-backdrop          optional scrim (opt-in only).
+ *   .zs-menu-positioner        Base UI's Floating UI anchored layer.
+ *     └─ .zs-menu-popup        opaque sheet with --zs-shadow-dialog.
+ *           ├─ .zs-menu-arrow              16x8 triangle (currentColor).
+ *           ├─ .zs-menu-group + .zs-menu-group-label
+ *           ├─ .zs-menu-item               grid: indicator | text | tail
+ *           │     ├─ .zs-menu-item__indicator       (checkmark / dot gutter)
+ *           │     └─ .zs-menu-item__text
+ *           ├─ .zs-menu-checkbox-item       accent square when checked
+ *           ├─ .zs-menu-radio-item          dot when selected
+ *           ├─ .zs-menu-link-item           native <a>
+ *           ├─ .zs-menu-submenu-trigger     adds chevron tail
+ *           └─ .zs-menu-separator
+ *
+ * Glass-surface invariant: the popup paints an OPAQUE background-color
+ * + optional backdrop-filter (themes that swap --zs-surface to a
+ * translucent value get the frosted look automatically). Mirrors
+ * Dialog / Popover / Select.
+ *
+ * Hit-target floor: items use `min-block-size: 1.75rem` per the brief's
+ * Slice-11 contingency. Same floor Select.Item uses.
+ *
+ * Forced-colors mirror (Slice-5/6/7 lesson): every state selector below
+ * is mirrored inside `@media (forced-colors: active)` at equal or
+ * higher specificity, so the system palette wins over the oklch token
+ * mixes. Without this, per-state hover/highlight selectors gated by
+ * `:not([data-disabled])` outrank a bare `.zs-menu-item` reset and the
+ * high-contrast mode leaks through.
+ *
+ * RTL: layout-affecting axes use logical properties (`padding-inline`,
+ * `padding-block`, `inline-size`). Floating UI handles side-anchoring
+ * physically — `start` / `end` flip when `direction: rtl` is in effect.
+ */
+
+/* ─── Backdrop (opt-in) ────────────────────────────────────────────── */
+.zs-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--zs-z-modal);
+  background-color: var(--zs-scrim);
+  opacity: 1;
+  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-menu-backdrop[data-starting-style],
+.zs-menu-backdrop[data-ending-style] {
+  opacity: 0;
+}
+
+/* ─── Positioner ───────────────────────────────────────────────────── *
+ *
+ * Base UI's Positioner is the Floating UI anchored layer; we don't
+ * paint it (it carries inline transform / x / y styles). Stack above
+ * dialogs via `--zs-z-modal + 10` so menus float over an open dialog
+ * when both are mounted. Same z-token Popover uses. */
+.zs-menu-positioner {
+  z-index: calc(var(--zs-z-modal) + 10);
+  outline: none;
+}
+
+/* ─── Popup ────────────────────────────────────────────────────────── */
+.zs-menu-popup {
+  /* Glass-surface invariant: opaque background-color + optional
+   * backdrop-filter. Themes that swap --zs-surface to translucent get
+   * the frosted look automatically. */
+  background-color: var(--zs-surface);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  /* Logical sizing so RTL flows naturally. */
+  min-inline-size: 12rem;
+  max-inline-size: min(20rem, calc(100dvw - var(--zs-space-6) * 2));
+  /* Brief contingency: cap height so long menus scroll cleanly. */
+  max-block-size: min(50dvb, 24rem);
+  padding: var(--zs-space-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-half);
+  border-radius: var(--zs-radius-5);
+  box-shadow:
+    var(--zs-shadow-dialog),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+  isolation: isolate;
+  opacity: 1;
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* Submenu popup uses a slightly smaller minimum inline-size so nested
+ * surfaces don't dominate the parent. */
+.zs-menu-popup--submenu {
+  min-inline-size: 10rem;
+}
+
+/* ─── enter/leave transitions ─────────────────────────────────────── *
+ *
+ * Transform-origin reflects the anchored side so the popup grows out
+ * of the trigger edge, not its own centre. Base UI stamps `data-side`
+ * on the popup automatically. */
+.zs-menu-popup[data-side="top"] {
+  transform-origin: bottom center;
+}
+.zs-menu-popup[data-side="bottom"] {
+  transform-origin: top center;
+}
+.zs-menu-popup[data-side="left"] {
+  transform-origin: center right;
+}
+.zs-menu-popup[data-side="right"] {
+  transform-origin: center left;
+}
+.zs-menu-popup[data-starting-style],
+.zs-menu-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zs-menu-popup,
+  .zs-menu-popup[data-starting-style],
+  .zs-menu-popup[data-ending-style] {
+    transition: none;
+  }
+  .zs-menu-backdrop {
+    transition: none;
+  }
+  .zs-menu-item {
+    transition: none;
+  }
+}
+
+/* ─── Arrow ────────────────────────────────────────────────────────── */
+.zs-menu-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1rem;
+  block-size: 0.5rem;
+  color: var(--zs-surface);
+  filter: drop-shadow(0 0 0.0625rem color-mix(in oklch, var(--zs-label) 18%, transparent));
+}
+.zs-menu-arrow > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+/* ─── Item — base row ──────────────────────────────────────────────── *
+ *
+ * Two-column grid (indicator gutter | text). Submenu trigger adds a
+ * trailing chevron via grid-auto-flow, so the base grid stays
+ * 2-column and the chevron lays out into an implicit third column. */
+.zs-menu-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--zs-space-4) 1fr;
+  align-items: center;
+  gap: var(--zs-space-2);
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  min-block-size: 1.75rem;
+  border-radius: var(--zs-radius-2);
+  color: var(--zs-label);
+  background-color: transparent;
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Highlight (keyboard roving / pointer hover via Base UI). */
+.zs-menu-item[data-highlighted]:not([data-disabled]) {
+  background-color: var(--zs-fill-tertiary);
+  color: var(--zs-label);
+}
+.zs-menu-item[data-disabled] {
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+}
+
+/* ─── Item indicator gutter ─────────────────────────────────────────
+ *
+ * Every Item reserves the indicator column so rows align across
+ * Item / CheckboxItem / RadioItem types. The indicator glyph lives
+ * inside a fixed-size square; CheckboxItem + RadioItem render the
+ * glyph; plain Item leaves it empty. */
+.zs-menu-item__indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--zs-space-4);
+  block-size: var(--zs-space-4);
+  color: var(--zs-accent);
+}
+.zs-menu-item__indicator-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+  block-size: 100%;
+  opacity: 0;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-menu-item__indicator-glyph > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+.zs-menu-checkbox-item[data-checked] .zs-menu-item__indicator-glyph,
+.zs-menu-radio-item[data-checked] .zs-menu-item__indicator-glyph {
+  opacity: 1;
+}
+
+/* CheckboxItem visual reuse: accent fill behind the check glyph when
+ * ticked — mirrors Checkbox's chip-fill cue scaled to the indicator
+ * gutter. */
+.zs-menu-checkbox-item[data-checked] .zs-menu-item__indicator {
+  background-color: color-mix(in oklch, var(--zs-accent) 16%, transparent);
+  border-radius: var(--zs-radius-1);
+  color: var(--zs-accent-active);
+}
+
+/* RadioItem visual reuse: filled dot (the CSS just paints accent via
+ * the glyph's `currentColor` — same dot Radio renders). */
+.zs-menu-radio-item[data-checked] .zs-menu-item__indicator {
+  color: var(--zs-accent-active);
+}
+
+.zs-menu-item__text {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── LinkItem ────────────────────────────────────────────────────── *
+ *
+ * Native <a>. Inherits the row layout; we suppress the UA underline
+ * since the row highlight communicates the focusable affordance. */
+.zs-menu-link-item {
+  color: inherit;
+}
+.zs-menu-link-item:visited {
+  color: inherit;
+}
+
+/* ─── Submenu trigger — chevron tail ───────────────────────────────── *
+ *
+ * The chevron sits in an implicit third column thanks to
+ * `grid-template-columns: var(--zs-space-4) 1fr` + a third grid item
+ * that flows automatically when present. We layout it with `auto`
+ * sizing via a CSS custom property override on the grid. */
+.zs-menu-submenu-trigger {
+  grid-template-columns: var(--zs-space-4) 1fr auto;
+}
+.zs-menu-submenu-trigger__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--zs-space-3);
+  block-size: var(--zs-space-3);
+  color: var(--zs-label-secondary);
+  /* RTL: flip the chevron so it points away from the submenu in LTR
+   * and toward the submenu in RTL. Floating UI flips the popup side
+   * automatically; the chevron tail follows. */
+}
+.zs-menu-submenu-trigger__chevron > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+[dir="rtl"] .zs-menu-submenu-trigger__chevron > svg {
+  transform: scaleX(-1);
+}
+
+/* ─── Group + GroupLabel ───────────────────────────────────────────── */
+.zs-menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-half);
+}
+.zs-menu-group + .zs-menu-group {
+  margin-block-start: var(--zs-space-1);
+}
+.zs-menu-group-label {
+  padding-block: var(--zs-space-half);
+  padding-inline: var(--zs-space-2);
+  font-size: var(--zs-text-caption-1-size);
+  line-height: var(--zs-text-caption-1-line);
+  font-weight: var(--zs-text-caption-1-weight);
+  color: var(--zs-label-secondary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ─── Separator ────────────────────────────────────────────────────── */
+.zs-menu-separator {
+  block-size: 0.0625rem;
+  background-color: var(--zs-separator);
+  margin-block: var(--zs-space-half);
+  margin-inline: var(--zs-space-1);
+  border: 0;
+}
+
+/* ─── Coarse pointer — bump hit-target floor ───────────────────────── */
+@media (pointer: coarse) {
+  .zs-menu-item {
+    min-block-size: var(--zs-hit-min);
+  }
+}
+
+/* ─── Forced-colors mirror ─────────────────────────────────────────── *
+ *
+ * Mirror every painted selector at equal-or-higher specificity inside
+ * the forced-colors media. Per-state selectors (e.g.
+ * `[data-highlighted]:not([data-disabled])`) outrank a bare reset and
+ * MUST be re-emitted at matching specificity so the system palette
+ * wins. Slice 5/6/7 lesson. */
+@media (forced-colors: active) {
+  .zs-menu-popup {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    forced-color-adjust: none;
+  }
+  .zs-menu-backdrop {
+    background-color: color-mix(in oklch, CanvasText 40%, transparent);
+  }
+  .zs-menu-arrow {
+    color: Canvas;
+    filter: drop-shadow(0 0 0.0625rem CanvasText);
+  }
+
+  /* Base item reset — Canvas/CanvasText paint regardless of inherited
+   * highlight tints. */
+  .zs-menu-item {
+    background-color: Canvas;
+    color: CanvasText;
+  }
+  /* Highlight mirror — equal specificity to the base highlight rule
+   * (`[data-highlighted]:not([data-disabled])`). */
+  .zs-menu-item[data-highlighted]:not([data-disabled]) {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-menu-item[data-disabled] {
+    color: GrayText;
+  }
+
+  /* Checkbox / Radio checked rows — Highlight box + system Highlight
+   * ink for the indicator. Equal specificity to the base [data-checked]
+   * rules above. */
+  .zs-menu-checkbox-item[data-checked] .zs-menu-item__indicator,
+  .zs-menu-radio-item[data-checked] .zs-menu-item__indicator {
+    background-color: Canvas;
+    color: Highlight;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  /* When the checked row is also highlighted (keyboard rover or
+   * pointer hover), the indicator stays readable on Highlight. */
+  .zs-menu-item[data-highlighted][data-checked]:not([data-disabled])
+    .zs-menu-item__indicator {
+    background-color: Highlight;
+    color: HighlightText;
+    box-shadow: inset 0 0 0 0.0625rem HighlightText;
+  }
+
+  .zs-menu-group-label {
+    color: GrayText;
+  }
+  .zs-menu-separator {
+    background-color: GrayText;
+  }
+  .zs-menu-submenu-trigger__chevron {
+    color: CanvasText;
+  }
+}

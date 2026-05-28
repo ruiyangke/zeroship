@@ -261,6 +261,25 @@ const stories = [
   "components-fieldset--nested-fieldset",
   "components-fieldset--custom-legend-position",
   "components-fieldset--rtl",
+  // Slice 11: Menu + ContextMenu. 12 Menu + 6 ContextMenu = 18 new entries.
+  "components-menu--basic-items",
+  "components-menu--with-groups",
+  "components-menu--with-separator",
+  "components-menu--with-checkbox-item",
+  "components-menu--with-radio-group",
+  "components-menu--with-icons",
+  "components-menu--with-keyboard-shortcuts",
+  "components-menu--nested-submenu",
+  "components-menu--with-arrow",
+  "components-menu--disabled-item",
+  "components-menu--placement-side",
+  "components-menu--rtl",
+  "components-contextmenu--basic-right-click-area",
+  "components-contextmenu--with-checkbox-item",
+  "components-contextmenu--nested-submenu",
+  "components-contextmenu--with-disabled-item",
+  "components-contextmenu--custom-anchor",
+  "components-contextmenu--rtl",
 ];
 
 async function launchBrowser() {
