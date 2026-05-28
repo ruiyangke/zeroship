@@ -192,72 +192,9 @@ pub async fn migrate(conn: &Client) -> Result<()> {
             .await
             .map_err(|e| AuthError::Db(format!("migration `{}`: {e}", first_line(stmt))))?;
     }
-    migrate_legacy_auth_users(conn).await?;
     Ok(())
 }
 
 fn first_line(stmt: &str) -> &str {
     stmt.lines().next().unwrap_or("").trim()
-}
-
-/// One-shot migration from the legacy public-schema `auth_users` tables
-/// (created by the orphaned `crates/auth/migrations/001_*.sql` before P1-U1
-/// deleted that crate) to `auth.users`.
-///
-/// Idempotent: if `public.auth_users` doesn't exist, this is a no-op.
-/// Conflict resolution: rows whose email is already in `auth.users`
-/// (e.g., from a fresh Phase 1+2 signup) are skipped.
-///
-/// # Errors
-///
-/// Returns `AuthError::Db` on any PG failure.
-pub async fn migrate_legacy_auth_users(conn: &Client) -> Result<()> {
-    // Check existence of the legacy table.
-    let rows = conn
-        .query(
-            "SELECT 1 FROM information_schema.tables \
-             WHERE table_schema = 'public' AND table_name = 'auth_users'",
-            &[],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("legacy check: {e}")))?;
-    if rows.is_empty() {
-        tracing::debug!("legacy public.auth_users not present; skipping migration");
-        return Ok(());
-    }
-
-    tracing::info!("legacy public.auth_users found; migrating to auth.users");
-
-    // INSERT-then-DROP in a single batch_execute call so it's atomic per
-    // session. Note: batch_execute runs in implicit transaction;
-    // compio-postgres preserves the all-or-nothing semantics.
-    //
-    // Column mapping rationale:
-    //   - public.auth_users had `email_verified BOOLEAN`; we map to
-    //     `auth.users.email_verified_at` (TIMESTAMPTZ) using the
-    //     `created_at` value when verified, NULL otherwise.
-    //   - All other columns map by name.
-    //   - `password_hash` may be a bcrypt hash from the legacy flow;
-    //     after migration, those users will need to re-set their password
-    //     via the magic-link flow (Phase 5). For Phase 3, just preserve.
-    //   - `ON CONFLICT (email) DO NOTHING` so re-running is safe.
-    conn.batch_execute(
-        "INSERT INTO auth.users \
-            (id, email, name, avatar_url, password_hash, \
-             email_verified_at, created_at, last_login_at) \
-         SELECT id, email::citext, name, avatar_url, password_hash, \
-                CASE WHEN email_verified THEN created_at ELSE NULL END, \
-                created_at, last_login \
-         FROM public.auth_users \
-         ON CONFLICT (email) DO NOTHING; \
-         \
-         DROP TABLE IF EXISTS public.auth_users CASCADE; \
-         DROP TABLE IF EXISTS public.auth_app_consents CASCADE; \
-         DROP TABLE IF EXISTS public.auth_sessions CASCADE;",
-    )
-    .await
-    .map_err(|e| AuthError::Db(format!("legacy migrate: {e}")))?;
-
-    tracing::info!("legacy migration complete; public.auth_users dropped");
-    Ok(())
 }
