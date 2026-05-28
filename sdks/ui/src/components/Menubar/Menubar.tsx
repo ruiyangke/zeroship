@@ -2,22 +2,20 @@
  * Menubar — macOS-style horizontal strip of menu triggers.
  *
  *   <Menubar>
- *     <Menu.Root>
- *       <Menu.Trigger>File</Menu.Trigger>
+ *     <Menu>
+ *       <Menu.Trigger data-chrome="menubar">File</Menu.Trigger>
  *       <Menu.Portal>
- *         <Menu.Positioner>
- *           <Menu.Popup>
- *             <Menu.Item>New</Menu.Item>
- *             …
- *           </Menu.Popup>
- *         </Menu.Positioner>
+ *         <Menu.Popup data-chrome="menubar">
+ *           <Menu.Item>New</Menu.Item>
+ *           …
+ *         </Menu.Popup>
  *       </Menu.Portal>
- *     </Menu.Root>
+ *     </Menu>
  *
- *     <Menu.Root>
- *       <Menu.Trigger>Edit</Menu.Trigger>
+ *     <Menu>
+ *       <Menu.Trigger data-chrome="menubar">Edit</Menu.Trigger>
  *       …
- *     </Menu.Root>
+ *     </Menu>
  *   </Menubar>
  *
  * Shape decisions:
@@ -26,10 +24,11 @@
  *     trigger has been clicked open, hovering the sibling triggers swaps
  *     the open menu without an intermediate click. Base UI owns that
  *     behavior; we don't override it (brief contingency).
- *   - The children are standard Menu siblings. Slice 11 ships our wrapped
- *     `Menu.*`; until then stories use Base UI's `Menu` directly. Because
- *     Menubar only enforces structure at the root level, both wrapped and
- *     bare-Base-UI menus compose identically as siblings.
+ *   - Children are wrapped `Menu` siblings from `@zeroship/ui`. The
+ *     Menubar-flavored trigger / popup chrome is selected by the
+ *     `data-chrome="menubar"` attribute that the Menu wrapper passes
+ *     through transparently — `Menu.css` paints those variants. There
+ *     is no separate `.zs-menubar-menu*` class set.
  *   - Keyboard contract: Tab focuses the menubar; arrow-left/right rove
  *     between triggers; ArrowDown opens the focused menu and moves to
  *     its first item; Esc closes the open menu. Base UI implements the
@@ -42,8 +41,14 @@
  *     and matches the macOS menubar; we keep it.
  *   - Spreading `role` from props. Menubar locks `role="menubar"` via
  *     the underlying Base UI primitive; consumers can't override it.
+ *     The TS-level `Omit<…, "role">` and the runtime strip together
+ *     enforce the contract — Base UI's `mergeProps` puts caller-passed
+ *     element props last, so an unguarded spread would otherwise let
+ *     `<Menubar role="…">` win.
  *   - Adding a click-outside backdrop. Menubar inherits Base UI's
  *     dismiss-on-outside-click; no scrim needed.
+ *   - Setting `data-orientation` explicitly on the root. Base UI's
+ *     Menubar already emits the attribute from the `orientation` prop.
  */
 import { forwardRef, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import { Menubar as BaseMenubar } from "@base-ui/react/menubar";
@@ -54,12 +59,19 @@ export type MenubarOrientation = "horizontal" | "vertical";
 type BaseMenubarProps = ComponentPropsWithoutRef<typeof BaseMenubar>;
 
 /**
- * Public Menubar props. We omit `render` (we own the rendering surface so
- * the role contract sticks) but otherwise forward Base UI's prop set so
- * `modal`, `loopFocus`, `disabled`, and the data-attribute escape hatches
- * remain available.
+ * Public Menubar props. We deliberately omit:
+ *
+ *   - `render`: we own the rendering surface so the role contract sticks.
+ *   - `role`: LOCKED to `"menubar"` by Base UI. Surfacing it as a prop
+ *     would be misleading, and Base UI's `mergeProps` puts caller-passed
+ *     element props last (rightmost-wins), so an unguarded `<Menubar
+ *     role="…">` would otherwise overwrite the contract. The `Omit` here
+ *     plus the runtime strip in `MenubarRoot` together enforce it.
+ *
+ * Everything else passes through so `modal`, `loopFocus`, `disabled`, and
+ * the data-attribute escape hatches remain available.
  */
-export interface MenubarProps extends Omit<BaseMenubarProps, "render"> {
+export interface MenubarProps extends Omit<BaseMenubarProps, "render" | "role"> {
   /**
    * Layout axis.
    *
@@ -73,13 +85,13 @@ export interface MenubarProps extends Omit<BaseMenubarProps, "render"> {
   orientation?: MenubarOrientation;
   /** Optional class hook on the root. */
   className?: string;
-  /** Menu siblings — typically `<Menu.Root>` from `@zeroship/ui`. */
+  /** Menu siblings — typically `<Menu>` from `@zeroship/ui`. */
   children?: ReactNode;
 }
 
 const MenubarRoot = forwardRef<HTMLDivElement, MenubarProps>(
-  function MenubarRoot(
-    {
+  function MenubarRoot(props, ref) {
+    const {
       orientation = "horizontal",
       className,
       children,
@@ -87,12 +99,18 @@ const MenubarRoot = forwardRef<HTMLDivElement, MenubarProps>(
       loopFocus,
       disabled,
       ...rest
-    },
-    ref,
-  ) {
+    } = props;
+    // Strip `role` defensively in case a caller bypasses the type system
+    // (e.g., `<Menubar {...untypedProps}>`). The `Omit<…, "role">` above
+    // makes this a compile-time error in normal use; this guard keeps
+    // the contract intact under runtime spread.
+    const { role: _role, ...restNoRole } = rest as Record<string, unknown> & {
+      role?: string;
+    };
+    void _role;
     return (
       <BaseMenubar
-        {...rest}
+        {...(restNoRole as BaseMenubarProps)}
         ref={ref}
         orientation={orientation}
         modal={modal}
@@ -102,7 +120,6 @@ const MenubarRoot = forwardRef<HTMLDivElement, MenubarProps>(
           classnames("zs-menubar", `zs-menubar--${orientation}`),
           className,
         )}
-        data-orientation={orientation}
       >
         {children}
       </BaseMenubar>

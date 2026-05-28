@@ -31,6 +31,7 @@ const stories = [
   "components-toolbar--with-groups",
   "components-toolbar--disabled",
   "components-toolbar--rtl",
+  "components-toolbar--roving",
 ];
 
 const mimeMap = new Map([

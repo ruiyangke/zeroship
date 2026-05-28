@@ -275,12 +275,27 @@
   }
 }
 
-/* ─── forced-colors mirror ─────────────────────────────────────────── */
+/* ─── forced-colors mirror ─────────────────────────────────────────── *
+ *
+ * Mirror EVERY interactive state inside the media block at equal
+ * specificity (matching the Slice 5 Toggle pattern). Without the
+ * mirrored hover/focus rules the oklch token paints above can outrank
+ * the bare `.zs-navmenu-trigger` reset under high-contrast emulation. */
 @media (forced-colors: active) {
   .zs-navmenu-trigger,
   .zs-navmenu-link {
     color: CanvasText;
+    background-color: Canvas;
     forced-color-adjust: none;
+  }
+  .zs-navmenu-trigger:hover:not([data-disabled]),
+  .zs-navmenu-link:hover {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-navmenu-trigger:focus-visible,
+  .zs-navmenu-link:focus-visible {
+    outline-color: Highlight;
   }
   .zs-navmenu-trigger[data-popup-open],
   .zs-navmenu-link[data-active] {

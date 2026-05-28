@@ -36,7 +36,11 @@ const stories = [
       // open the submenu by hovering the recent trigger.
       '[data-testid="menubar-submenus-recent"]',
     ],
-    popup: '[data-testid="menubar-submenus-recent-popup"]',
+    // The submenu popup is owned by the project Menu.Submenu wrapper
+    // and renders as a `.zs-menu-popup--submenu` panel. We don't tag
+    // it with a test id (the wrapper doesn't expose one), so wait for
+    // the submenu class instead.
+    popup: ".zs-menu-popup--submenu",
     hover: true,
   },
   {
