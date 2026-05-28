@@ -172,7 +172,7 @@ export const WithSlots: Story = {
           <Field.Label>Filter</Field.Label>
           {/* Visual-polish item 11: the clear button now uses
               <Button variant="plain" size="small"> so it carries the
-              44pt HIG hit-target extension from Button slice 1. The
+              44pt minimum hit-target extension from Button slice 1. The
               visible × glyph stays small; the tap target is comfortable.
               When a first-class `clearable` Input prop ships, the clear
               control becomes a subpart with the same hit-area baked in. */}
@@ -327,7 +327,7 @@ export const InputTypes: Story = {
     docs: {
       description: {
         story:
-          "HIG: map text-field intent to the right virtual keyboard. The " +
+          "Map text-field intent to the right virtual keyboard. The " +
           "`type` + `inputMode` + `autoComplete` triple keeps autofill, " +
           "ValidityState, and mobile keyboards aligned.",
       },

@@ -1,5 +1,5 @@
 /*
- * Input — HIG-anchored single-line text field.
+ * Input — single-line text field.
  *
  * Two surfaces in one component (informed by the slice-2 DS survey):
  *
@@ -33,7 +33,7 @@
  *    shell; the outside-attached pattern is a future `InputGroup`.
  *  - `loadingPosition`. A spinner in `endSlot` covers the same ground.
  *  - `slots` / `slotProps` triple-prop API (MUI Base). One layer only.
- *  - Floating label / outlined-notch (MUI). HIG doesn't float labels.
+ *  - Floating label / outlined-notch (MUI). We don't float labels.
  *
  * Aria contract — DO NOT BREAK:
  *   The consumer's native input props (value/defaultValue/onChange/

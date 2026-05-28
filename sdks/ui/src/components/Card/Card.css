@@ -1,5 +1,5 @@
 /*
- * Card — HIG Boxes implementation.
+ * Card — container surface implementation.
  *
  * Anatomy:
  *   .zs-card                     surface; flex column; opaque base; clipped.

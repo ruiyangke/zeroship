@@ -1,12 +1,11 @@
 /**
  * @zeroship/ui — public surface.
  *
- * Mid-rebuild against Apple Human Interface Guidelines. The exports below
- * are intentionally narrow: theme primitives plus the HIG-styled
- * components that have landed so far, plus temporary native-HTML
- * placeholders for the names other packages still import.
+ * Mid-rebuild. The exports below are intentionally narrow: theme primitives
+ * plus the styled components that have landed so far, plus temporary
+ * native-HTML placeholders for the names other packages still import.
  *
- * As HIG-styled components land they replace the corresponding placeholder
+ * As styled components land they replace the corresponding placeholder
  * exports in this file.
  */
 import "./styles.css";
@@ -23,7 +22,7 @@ export {
   type ThemeProviderProps,
 } from "./theme";
 
-// Real, HIG-styled components.
+// Real, styled components.
 export {
   Button,
   type ButtonProps,

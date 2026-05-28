@@ -1,5 +1,5 @@
 /*
- * Button — HIG Style × Intent matrix.
+ * Button — Style × Intent matrix.
  *
  * Anatomy:
  *   .zs-button
@@ -35,7 +35,7 @@
   /* When asChild renders an <a> as the button root, override the UA
      link color so the anchor adopts the button's color. */
   color: inherit;
-  /* 44pt HIG-min hit target is enforced via an invisible ::before that
+  /* 44pt minimum hit target is enforced via an invisible ::before that
      extends in BOTH axes (icon-only small buttons can be <44pt wide too).
      The ::before lives on the button (not the inner), so the active-state
      scale below does not scale the hit area. */
@@ -143,7 +143,7 @@
   border-radius: var(--zs-radius-4);           /* 10 */
 }
 
-/* ─── variants × accent (HIG Style) ────────────────────────────────────── */
+/* ─── variants × accent (Style) ────────────────────────────────────────── */
 .zs-button--filled {
   background: var(--zs-accent);
   color: var(--zs-accent-ink);
@@ -218,7 +218,7 @@
   background: transparent;
 }
 
-/* ─── destructive override (HIG intent; works across variants) ─────────── */
+/* ─── destructive override (intent; works across variants) ────────────── */
 .zs-button--destructive.zs-button--filled {
   background: var(--zs-system-red);
   color: var(--zs-accent-ink);
@@ -275,9 +275,9 @@
   background: transparent;
 }
 
-/* gray + destructive: keep the neutral gray fill (HIG has no strong
-   combination for this), but signal destructive intent through the LABEL
-   color so the cell isn't silently neutral. */
+/* gray + destructive: keep the neutral gray fill (no strong combination
+   exists for this pairing), but signal destructive intent through the
+   LABEL color so the cell isn't silently neutral. */
 .zs-button--destructive.zs-button--gray {
   color: var(--zs-system-red);
 }

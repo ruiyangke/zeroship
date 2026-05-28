@@ -111,7 +111,7 @@ export const ThreeButtons: Story = {
             <AlertDialog.Header>
               <AlertDialog.Title>Unsaved changes</AlertDialog.Title>
               <AlertDialog.Description>
-                You have three options. Stacked vertically per HIG with the
+                You have three options. Stacked vertically with the
                 destructive option at the bottom.
               </AlertDialog.Description>
             </AlertDialog.Header>

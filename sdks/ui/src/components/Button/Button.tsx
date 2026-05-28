@@ -20,7 +20,7 @@ export type ButtonSize = "small" | "medium" | "large";
 export interface ButtonProps
   extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
   /**
-   * Visual style — HIG button styles.
+   * Visual style.
    * - `filled`: prominent, accent fill, white text. The "primary action" look.
    * - `tinted`: translucent accent-tinted fill, accent text. Secondary action.
    * - `gray`: neutral fill, label text. Tertiary action.
@@ -31,7 +31,7 @@ export interface ButtonProps
   variant?: ButtonVariant;
 
   /**
-   * Semantic intent — HIG button role.
+   * Semantic intent.
    * - `normal`: no special meaning.
    * - `destructive`: destructive action; OVERRIDES the accent palette
    *   with system-red regardless of variant (except `gray`, where only
@@ -49,8 +49,8 @@ export interface ButtonProps
   size?: ButtonSize;
 
   /**
-   * Activity indicator. Per HIG, show this for actions that don't
-   * instantly complete. While loading, the button is `aria-busy`,
+   * Activity indicator. Show this for actions that don't instantly
+   * complete. While loading, the button is `aria-busy`,
    * forced `disabled`, label/slots are hidden via `opacity: 0` to
    * preserve width and the accessible name, and an absolutely-centered
    * spinner is shown.

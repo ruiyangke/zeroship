@@ -19,8 +19,10 @@ export const Default: Story = {
   name: "Default",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Default dialog">
-      <Dialog defaultOpen>
-        <Dialog.Trigger render={<Button>Open dialog</Button>} />
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Open dialog</Button>}
+        />
         <Dialog.Portal>
           <Dialog.Backdrop />
           <Dialog.Popup data-testid="dialog-default-popup">
@@ -52,7 +54,16 @@ export const Sizes: Story = {
     <div className="zs-story-row" role="group" aria-label="All dialog sizes">
       {(["sm", "md", "lg", "full"] as const).map((size) => (
         <Dialog key={size}>
-          <Dialog.Trigger render={<Button variant="tinted">{size}</Button>} />
+          <Dialog.Trigger
+            render={
+              <Button
+                variant="tinted"
+                data-testid={`dialog-trigger-${size}`}
+              >
+                Open {size}
+              </Button>
+            }
+          />
           <Dialog.Portal>
             <Dialog.Backdrop />
             <Dialog.Popup size={size} data-testid={`dialog-size-${size}`}>
@@ -81,8 +92,10 @@ export const PlacementTop: Story = {
   name: "Placement: top",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Dialog top placement">
-      <Dialog defaultOpen>
-        <Dialog.Trigger render={<Button>Open top sheet</Button>} />
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Open top sheet</Button>}
+        />
         <Dialog.Portal>
           <Dialog.Backdrop />
           <Dialog.Popup placement="top" data-testid="dialog-placement-top">
@@ -113,14 +126,23 @@ export const BackdropTints: Story = {
     <div className="zs-story-row" role="group" aria-label="Backdrop tints">
       {(["scrim", "material", "none"] as const).map((tint) => (
         <Dialog key={tint}>
-          <Dialog.Trigger render={<Button variant="tinted">tint: {tint}</Button>} />
+          <Dialog.Trigger
+            render={
+              <Button
+                variant="tinted"
+                data-testid={`dialog-trigger-${tint}`}
+              >
+                Open tint: {tint}
+              </Button>
+            }
+          />
           <Dialog.Portal>
             <Dialog.Backdrop tint={tint} />
             <Dialog.Popup data-testid={`dialog-tint-${tint}`}>
               <Dialog.Header>
                 <Dialog.Title>Backdrop tint = {tint}</Dialog.Title>
                 <Dialog.Description>
-                  scrim is the HIG default; material is glass; none is
+                  scrim is the default; material is glass; none is
                   a transparent click-blocker.
                 </Dialog.Description>
               </Dialog.Header>
@@ -140,8 +162,10 @@ export const WithForm: Story = {
   name: "With form",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Dialog containing a form">
-      <Dialog defaultOpen>
-        <Dialog.Trigger render={<Button>Edit profile</Button>} />
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Edit profile</Button>}
+        />
         <Dialog.Portal>
           <Dialog.Backdrop />
           <Dialog.Popup data-testid="dialog-with-form">
@@ -180,8 +204,10 @@ export const NonDismissible: Story = {
   name: "Non-dismissible",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Non-dismissible dialog">
-      <Dialog defaultOpen dismissible={false}>
-        <Dialog.Trigger render={<Button>Open</Button>} />
+      <Dialog dismissible={false}>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Open required action</Button>}
+        />
         <Dialog.Portal>
           <Dialog.Backdrop />
           <Dialog.Popup data-testid="dialog-non-dismissible">

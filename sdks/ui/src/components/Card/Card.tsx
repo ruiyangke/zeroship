@@ -1,5 +1,5 @@
 /*
- * Card — HIG "Boxes" container. Decomposed subparts mirror the
+ * Card — container surface. Decomposed subparts mirror the
  * shadcn / Chakra / Park UI / Fluent convergence noted in the slice 3
  * library-survey report. Monolithic Cards (Radix Themes, Mantine,
  * Geist) inevitably need escape hatches anyway, so we decompose from
@@ -20,7 +20,7 @@
  * comes from
  * Card.Title (an <h3> by default; `asChild` lets you swap to h2/h4 so
  * the level matches the surrounding document outline). This matches
- * shadcn/Chakra/Park UI and avoids HIG-violation patterns like wrapping
+ * shadcn/Chakra/Park UI and avoids problematic patterns like wrapping
  * the entire card in an <a> (anti-pattern #2 from the survey).
  *
  * The Card root accepts `asChild` so the consumer can render-as an <a>
@@ -413,7 +413,7 @@ const CardContent = forwardRef<HTMLDivElement, CardContentProps>(
 CardContent.displayName = "Card.Content";
 
 export interface CardFooterProps extends DivProps {
-  /** Justify-content of the button row. Default `end` (HIG-standard). */
+  /** Justify-content of the button row. Default `end`. */
   align?: CardFooterAlign;
   /** Optional hairline divider — `"top"` adds a separator and extra
    *  top padding so the footer reads as a distinct band. */

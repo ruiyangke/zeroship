@@ -1,5 +1,5 @@
 /*
- * Input — HIG-anchored single-line text field shell.
+ * Input — single-line text field shell.
  *
  * Anatomy:
  *   .zs-input                    — bordered shell (focus ring lives here)
@@ -19,9 +19,9 @@
  *     changes don't shift surrounding layout. `0.0625rem` ≈ one device unit.
  *   - Logical properties only (inline-size, padding-inline, margin-inline-*)
  *     so RTL flips correctly. Verified via the RTL story.
- *   - 44pt HIG hit target on coarse pointers: small inputs grow their
- *     `min-block-size` to the HIG hit minimum so a small input on touch
- *     is genuinely tappable. No invisible pseudo-element trickery —
+ *   - 44pt minimum hit target on coarse pointers: small inputs grow their
+ *     `min-block-size` to the hit-target minimum so a small input on
+ *     touch is genuinely tappable. No invisible pseudo-element trickery —
  *     that approach catches no events because the element underneath
  *     (the wrapper) is non-focusable and `pointer-events: none` on the
  *     pseudo passes the tap through to whatever sits in the box-model
@@ -71,7 +71,7 @@
   line-height: var(--zs-text-subheadline-line);
 }
 
-/* 44pt HIG hit target on coarse pointers — small inputs only grow their
+/* 44pt minimum hit target on coarse pointers — small inputs only grow their
    tap area on touch devices. The desktop visual stays as designed
    (2rem high); on touch the box itself becomes 2.75rem so a finger has
    a genuine target. */
@@ -98,7 +98,7 @@
 }
 
 /* Plain variant — visual-polish item 4. Without chrome the plain
-   variant previously read as a static placeholder; the HIG iOS keyboard
+   variant previously read as a static placeholder; the iOS keyboard
    text-field idiom is a flat field with a single baseline hairline. The
    baseline lives in the inset shadow's BOTTOM edge (0 -0.0625rem) and
    intensifies to the accent color on focus — same affordance pattern,
@@ -137,7 +137,7 @@
 /* ─── focused — the wrapper owns the ring so slots + control share it.
    Visual-polish item 7: use --zs-input-focus-ring-color (alpha 0.25)
    instead of the heavier --zs-focus-ring-color (0.35) so the input
-   focus halo reads quieter, closer to Apple's form-control focus.
+   focus halo reads quieter — a softer form-control focus.
    Button keeps the heavier ring via its own selectors. */
 .zs-input[data-focused] {
   background: var(--zs-input-bg-focus);
@@ -174,10 +174,10 @@
 }
 
 /* ─── readonly — distinct from default + disabled. Visual-polish item 5.
-   HIG-aligned for non-editable text:
+   Non-editable text presentation:
      - background lifts one fill step (--zs-input-bg-readonly) so the
        cell visibly differs from a default editable input
-     - value italicizes (HIG's read-only / static text convention)
+     - value italicizes (read-only / static text convention)
      - cursor stays the default arrow — not the disabled not-allowed
        (readonly is presented, not blocked) */
 .zs-input[data-readonly] {

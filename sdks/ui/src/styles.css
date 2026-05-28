@@ -34,7 +34,7 @@
   --zs-font-mono:
     ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  /* ─── HIG type scale — sizes in rem so user font-size preference (the
+  /* ─── Type scale — sizes in rem so user font-size preference (the
      web equivalent of Dynamic Type) is honored. */
   --zs-text-large-title-size: 2.125rem;        /* 34 */
   --zs-text-large-title-line: 2.5rem;          /* 40 */
@@ -100,9 +100,9 @@
   --zs-space-9: 3rem;                          /* 48 */
   --zs-space-10: 4rem;                         /* 64 */
 
-  /* ─── Radii — circular border-radius approximating HIG continuous corners.
+  /* ─── Radii — circular border-radius approximating continuous corners.
      (True continuous-corner squircles aren't natively expressible on web;
-     these values look ~95% Apple to the eye.) */
+     these radii look correct to the eye.) */
   --zs-radius-1: 0.25rem;                      /* 4 — chip */
   --zs-radius-2: 0.375rem;                     /* 6 — small button */
   --zs-radius-3: 0.5rem;                       /* 8 — medium button, input */
@@ -123,12 +123,12 @@
   --zs-focus-ring-width: 0.1875rem;            /* 3 */
   --zs-focus-ring-offset: 0.125rem;            /* 2 */
 
-  /* ─── HIG 44pt minimum tappable */
+  /* ─── 44pt minimum tappable */
   --zs-hit-min: 2.75rem;                       /* 44 */
 
   /* ─── Control sizing — Input today; Select / Textarea / etc. follow.
      Sizes mirror Button so an Input next to a Button reads coherent
-     (HIG: controls share a visual rhythm). The 44pt HIG-min hit target
+     (controls share a visual rhythm). The 44pt minimum hit target
      is honored by Input via the same invisible ::before trick Button
      uses on coarse pointers. */
   --zs-control-h-sm: 2rem;                     /* 32 — matches Button.small */
@@ -151,9 +151,9 @@
      discoverable. Item 17 of the slice-2 review fix brief. */
   --zs-field-horizontal-label-w: 10rem;        /* 160 */
 
-  /* ─── Material thicknesses — HIG vocabulary. The default values here
-     are theme-invariant; the per-theme `--zs-material-regular` override
-     below tunes the saturation for that theme. */
+  /* ─── Material thicknesses. The default values here are theme-invariant;
+     the per-theme `--zs-material-regular` override below tunes the
+     saturation for that theme. */
   --zs-material-ultra-thin:  blur(0.5rem) saturate(1.6);
   --zs-material-thin:        blur(1rem) saturate(1.6);
   --zs-material-regular:     blur(1.5rem) saturate(1.8);   /* surfaces default */
@@ -162,7 +162,7 @@
 
   /* ─── Shadow scale — elevation as a function of depth. All shadows
      use oklch alpha; no rgb literals. Each entry is two layers (a
-     larger ambient + a smaller crisp) for the HIG layered-shadow feel. */
+     larger ambient + a smaller crisp) for the layered-shadow feel. */
   --zs-shadow-1: 0 0.0625rem 0.125rem oklch(0 0 0 / 0.06),
                  0 0.0625rem 0.125rem oklch(0 0 0 / 0.04);
   --zs-shadow-2: 0 0.25rem 0.5rem oklch(0 0 0 / 0.08),
@@ -238,13 +238,13 @@
   --zs-surface-overlay: oklch(1 0 0 / 0.66);
   --zs-surface-sunken: oklch(0.95 0.01 255 / 0.5);
 
-  /* ─── Label hierarchy — HIG label / secondary / tertiary / quaternary. */
+  /* ─── Label hierarchy: label / secondary / tertiary / quaternary. */
   --zs-label: oklch(0.25 0.02 275);
   --zs-label-secondary: oklch(0.42 0.02 275);
   --zs-label-tertiary: oklch(0.55 0.02 275);
   --zs-label-quaternary: oklch(0.68 0.02 275);
 
-  /* ─── Fill hierarchy — HIG fill / secondary / tertiary / quaternary. */
+  /* ─── Fill hierarchy: fill / secondary / tertiary / quaternary. */
   --zs-fill: oklch(0.5 0.02 275 / 0.18);
   --zs-fill-secondary: oklch(0.5 0.02 275 / 0.13);
   --zs-fill-tertiary: oklch(0.5 0.02 275 / 0.09);
@@ -254,7 +254,7 @@
   --zs-separator: oklch(0.5 0.02 275 / 0.18);
   --zs-separator-strong: oklch(0.5 0.02 275 / 0.4);
 
-  /* ─── Accent — HIG iOS systemBlue analog. Hue centered at 250 (in
+  /* ─── Accent — iOS systemBlue analog. Hue centered at 250 (in
      oklch's 0–360 hue space, ~245–255 is the canonical systemBlue
      range); earlier 285 leaned visibly indigo-purple.
      Lightness deepened from 0.55 → 0.52 on the base because the
@@ -269,7 +269,7 @@
   --zs-accent-active: oklch(0.43 0.2 250);
   --zs-accent-ink: oklch(0.99 0.005 255);
 
-  /* ─── HIG system colors (semantic).
+  /* ─── System colors (semantic).
      Destructive uses system-red; pushed darker than canonical iOS red so
      tinted/plain text on the mesh maintains 4.5:1 contrast. */
   --zs-system-red: oklch(0.52 0.2 25);
@@ -284,11 +284,11 @@
      Lightness matches the deepened accent base for consistency. */
   --zs-focus: oklch(0.52 0.18 250);
   --zs-focus-ring-color: oklch(0.52 0.18 250 / 0.35);
-  /* Input-specific focus ring — visual-polish item 7. Apple-quiet form
-     control focus uses a softer halo than buttons; Button keeps the
-     0.35 alpha for its primary-action ring. Reducing alpha 0.35 → 0.25
-     tones the double-edge effect codex flagged on inputs without
-     touching Button's heavier ring. */
+  /* Input-specific focus ring — visual-polish item 7. Quieter form-control
+     focus uses a softer halo than buttons; Button keeps the 0.35 alpha
+     for its primary-action ring. Reducing alpha 0.35 → 0.25 tones the
+     double-edge effect codex flagged on inputs without touching
+     Button's heavier ring. */
   --zs-input-focus-ring-color: oklch(0.52 0.18 250 / 0.25);
 
   /* ─── Material — glass. Crystal is the light glass, so a less intense
@@ -340,8 +340,8 @@
   --zs-input-ink: var(--zs-label);
   --zs-input-placeholder: var(--zs-label-tertiary);
   /* Disabled ink stays on --zs-label-tertiary. The brief proposed
-     shifting to --zs-label-quaternary (one rung weaker) for "Apple-quiet
-     disabled feel"; measured against --zs-input-bg-disabled
+     shifting to --zs-label-quaternary (one rung weaker) for a quieter
+     disabled feel; measured against --zs-input-bg-disabled
      (--zs-fill-quaternary ≈ 0.06 alpha over the crystal surface), the
      quaternary label (L=0.68) lands around 3.2:1 — below the readable
      threshold even though axe exempts disabled controls from AA. Same

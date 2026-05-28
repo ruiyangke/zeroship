@@ -1,5 +1,5 @@
 /*
- * Dialog — HIG Sheets / modal popup. Subparts mirror Base UI's headless
+ * Dialog — modal popup. Subparts mirror Base UI's headless
  * shape directly:
  *
  *   <Dialog>
@@ -194,8 +194,7 @@ type BaseBackdropProps = ComponentPropsWithoutRef<typeof BaseDialog.Backdrop>;
 export interface DialogBackdropProps extends BaseBackdropProps {
   /**
    * Backdrop tint.
-   * - `scrim` (default): a 40% black overlay — HIG-standard sheet
-   *   backdrop.
+   * - `scrim` (default): a 40% black overlay — standard sheet backdrop.
    * - `material`: a translucent surface with backdrop-filter — for
    *   sheets layered over content-rich backgrounds (gallery views).
    * - `none`: no visual tint — for non-modal dialogs that need a

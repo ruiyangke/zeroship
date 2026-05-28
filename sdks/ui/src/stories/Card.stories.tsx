@@ -454,7 +454,7 @@ export const Ghost: Story = {
 };
 
 /* ─── 8. With form inside ────────────────────────────────────────────── */
-/* HIG-aligned convention: forms embedded inside a Card use smaller
+/* Convention: forms embedded inside a Card use smaller
  * controls (Input size="sm", Button size="small"). macOS list-row
  * forms ship mini controls; reading a form inside a Card with default
  * (md) controls feels chunky because the card already supplies the

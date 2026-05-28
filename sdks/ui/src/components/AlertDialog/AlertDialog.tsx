@@ -1,5 +1,5 @@
 /*
- * AlertDialog — HIG Alerts. A SEPARATE component from Dialog (Base UI,
+ * AlertDialog — modal alert. A SEPARATE component from Dialog (Base UI,
  * Radix, shadcn, Chakra all converge on this), so the structural
  * differences are encoded in the shape itself:
  *
@@ -277,8 +277,8 @@ const AlertDialogFooter = forwardRef<HTMLDivElement, AlertDialogFooterProps>(
         // eslint-disable-next-line no-console
         console.warn(
           "[AlertDialog] Footer contains multiple non-destructive " +
-            "<AlertDialog.Action> children. Per HIG, an alert should " +
-            "have at most one primary action — distinguish destructive " +
+            "<AlertDialog.Action> children. An alert should have at " +
+            "most one primary action — distinguish destructive " +
             'choices with `tone="destructive"`.',
         );
       }

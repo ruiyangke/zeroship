@@ -1,5 +1,5 @@
 /*
- * Field — namespace component for HIG-anchored form-frame composition.
+ * Field — namespace component for form-frame composition.
  *
  * Wraps Base UI's `Field.*` headless primitives so consumers can write the
  * canonical decomposed form-row:
@@ -65,7 +65,7 @@ type BaseFieldRootProps = ComponentPropsWithRef<typeof BaseField.Root>;
 export interface FieldProps extends Omit<BaseFieldRootProps, "className"> {
   /**
    * Label-to-control axis. Default `vertical` (label above control —
-   * the HIG-standard form-row). Use `horizontal` for inspector-style
+   * the standard form-row). Use `horizontal` for inspector-style
    * dense forms (label left, control + helper right).
    */
   orientation?: FieldOrientation;

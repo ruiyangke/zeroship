@@ -4,12 +4,12 @@
  * padding, max-width, and switches the Footer to a grid that adapts
  * to button count.
  *
- * Footer auto-layout per HIG Alerts:
+ * Footer auto-layout:
  *   - 1 button  → full-width (single column).
  *   - 2 buttons → side-by-side (Cancel left, Action right).
  *   - 3+        → stacked vertically; destructive at bottom (visual
  *                  order matches the source order, so callers put the
- *                  destructive action LAST per HIG guidance).
+ *                  destructive action LAST).
  */
 
 /* ─── Popup ────────────────────────────────────────────────────────────── */
