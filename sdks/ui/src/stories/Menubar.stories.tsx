@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useState } from "react";
 import { Menu, Menubar } from "../components";
 
@@ -142,6 +143,20 @@ export const Basic: Story = {
       </Menubar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /^file$/i }));
+    await expect(
+      await body.findByRole("menuitem", { name: /^new$/i }),
+    ).toBeVisible();
+    await userEvent.hover(canvas.getByRole("button", { name: /^edit$/i }));
+    await expect(
+      await body.findByRole("menuitem", { name: /^undo$/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 2. WithSubmenus ──────────────────────────────────────────────── */
@@ -179,6 +194,20 @@ export const WithSubmenus: Story = {
       </Menubar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /^file$/i }));
+    const recent = await body.findByRole("menuitem", {
+      name: /open recent/i,
+    });
+    await userEvent.hover(recent);
+    await expect(
+      await body.findByRole("menuitem", { name: /project-alpha/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 3. WithCheckboxItem ──────────────────────────────────────────── */
@@ -227,6 +256,22 @@ export const WithCheckboxItem: Story = {
         </Menubar>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /view/i }));
+    const ruler = await body.findByRole("menuitemcheckbox", {
+      name: /show ruler/i,
+    });
+    const grid = body.getByRole("menuitemcheckbox", { name: /show grid/i });
+
+    await expect(ruler).toHaveAttribute("aria-checked", "true");
+    await expect(grid).toHaveAttribute("aria-checked", "false");
+    await userEvent.click(grid);
+    await waitFor(() => expect(grid).toHaveAttribute("aria-checked", "true"));
+    await userEvent.keyboard("{Escape}");
   },
 };
 void CheckGlyph;
@@ -279,6 +324,21 @@ export const WithRadioGroup: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /theme/i }));
+    const system = await body.findByRole("menuitemradio", {
+      name: /system/i,
+    });
+    const light = body.getByRole("menuitemradio", { name: /light/i });
+
+    await expect(system).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(light);
+    await waitFor(() => expect(light).toHaveAttribute("aria-checked", "true"));
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 5. KeyboardNav ───────────────────────────────────────────────── */
@@ -322,6 +382,23 @@ export const KeyboardNav: Story = {
       </Menubar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const file = canvas.getByRole("button", { name: /^file$/i });
+    const edit = canvas.getByRole("button", { name: /^edit$/i });
+
+    await userEvent.tab();
+    await expect(file).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect(edit).toHaveFocus();
+    await userEvent.keyboard("{ArrowDown}");
+    await expect(
+      await body.findByRole("menuitem", { name: /undo/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await expect(edit).toHaveFocus();
+  },
 };
 
 /* ─── 6. Disabled ──────────────────────────────────────────────────── */
@@ -365,6 +442,17 @@ export const Disabled: Story = {
       </Menubar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const edit = canvas.getByRole("button", { name: /^edit$/i });
+
+    await expect(edit).toBeDisabled();
+    await userEvent.click(edit);
+    await expect(
+      body.queryByRole("menuitem", { name: /^undo$/i }),
+    ).not.toBeInTheDocument();
+  },
 };
 
 /* ─── 7. WithIcons ─────────────────────────────────────────────────── */
@@ -458,6 +546,13 @@ export const RoleLockRegression: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("menubar")).toHaveAttribute(
+      "role",
+      "menubar",
+    );
+  },
 };
 
 /* ─── 9. Rtl ───────────────────────────────────────────────────────── */
@@ -494,6 +589,71 @@ export const Rtl: Story = {
           <MenubarMenuPopup testId="menubar-rtl-edit-popup">
             <Menu.Item>تراجع</Menu.Item>
             <Menu.Item>إعادة</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+      </Menubar>
+    </div>
+  ),
+};
+
+/* ─── 10. Vertical ─────────────────────────────────────────────────── */
+export const Vertical: Story = {
+  name: "Vertical orientation",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Vertical menubar"
+    >
+      <Menubar orientation="vertical" loopFocus={false} modal={false}>
+        <Menu>
+          <MenubarMenuTrigger label="File" />
+          <MenubarMenuPopup>
+            <Menu.Item>New window</Menu.Item>
+            <Menu.Item>Open file</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+        <Menu>
+          <MenubarMenuTrigger label="Tools" />
+          <MenubarMenuPopup>
+            <Menu.Item>Command palette</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+      </Menubar>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const file = canvas.getByRole("button", { name: /file/i });
+    const tools = canvas.getByRole("button", { name: /tools/i });
+
+    await userEvent.tab();
+    await expect(file).toHaveFocus();
+    await userEvent.keyboard("{ArrowDown}");
+    await expect(tools).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    await expect(
+      await body.findByRole("menuitem", { name: /command palette/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
+};
+
+/* ─── 11. RootDisabled ─────────────────────────────────────────────── */
+export const RootDisabled: Story = {
+  name: "Root disabled",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Root disabled menubar"
+    >
+      <Menubar disabled>
+        <Menu>
+          <MenubarMenuTrigger label="File" />
+          <MenubarMenuPopup>
+            <Menu.Item>New</Menu.Item>
           </MenubarMenuPopup>
         </Menu>
       </Menubar>

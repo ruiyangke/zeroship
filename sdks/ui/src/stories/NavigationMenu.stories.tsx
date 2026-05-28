@@ -1,4 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
+import { useState } from "react";
 import { NavigationMenu } from "../components";
 
 const meta: Meta<typeof NavigationMenu> = {
@@ -175,6 +177,16 @@ export const Basic: Story = {
       </NavigationMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await expect(canvas.getByRole("navigation")).toBeVisible();
+    await expect(
+      canvas.getByRole("link", { name: /builder/i }),
+    ).toHaveAttribute("href", "/builder");
+    await userEvent.tab();
+    await expect(canvas.getByRole("link", { name: /builder/i })).toHaveFocus();
+  },
 };
 
 /* ─── 2. WithContent (mega-menu) ───────────────────────────────────── */
@@ -240,6 +252,16 @@ export const WithContent: Story = {
       </NavigationMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /products/i }));
+    await expect(
+      await body.findByRole("link", { name: /builder/i }),
+    ).toHaveAttribute("href", "/builder");
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 3. WithIcons ─────────────────────────────────────────────────── */
@@ -375,6 +397,16 @@ export const WithViewport: Story = {
       </NavigationMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /products/i }));
+    await expect(await body.findByRole("link", { name: /runtime/i })).toBeVisible();
+    await userEvent.click(canvas.getByRole("button", { name: /resources/i }));
+    await expect(await body.findByRole("link", { name: /support/i })).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 5. WithArrow ─────────────────────────────────────────────────── */
@@ -489,6 +521,20 @@ export const KeyboardNav: Story = {
       </NavigationMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const products = canvas.getByRole("button", { name: /products/i });
+    const resources = canvas.getByRole("button", { name: /resources/i });
+
+    await userEvent.tab();
+    await expect(products).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect(resources).toHaveFocus();
+    await userEvent.keyboard("{ArrowDown}");
+    await expect(await body.findByRole("link", { name: /^c$/i })).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 7. Disabled ──────────────────────────────────────────────────── */
@@ -541,6 +587,17 @@ export const Disabled: Story = {
       </NavigationMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const resources = canvas.getByRole("button", { name: /resources/i });
+
+    await expect(resources).toBeDisabled();
+    await userEvent.click(resources);
+    await expect(
+      body.queryByRole("link", { name: /^c$/i }),
+    ).not.toBeInTheDocument();
+  },
 };
 
 /* ─── 8. Rtl ───────────────────────────────────────────────────────── */
@@ -593,4 +650,126 @@ export const Rtl: Story = {
       </NavigationMenu>
     </div>
   ),
+};
+
+/* ─── 9. ControlledAsChild ─────────────────────────────────────────── */
+export const ControlledAsChild: Story = {
+  name: "Controlled value + asChild link",
+  render: function ControlledAsChildRender() {
+    const [value, setValue] = useState<string | null>(null);
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Controlled navmenu"
+        style={{ flexDirection: "column", alignItems: "flex-start" }}
+      >
+        <NavigationMenu
+          value={value}
+          onValueChange={(next) => setValue(next === null ? null : String(next))}
+        >
+          <NavigationMenu.List>
+            <NavigationMenu.Item value="products">
+              <NavigationMenu.Trigger>
+                Products
+                <NavigationMenu.Icon />
+              </NavigationMenu.Trigger>
+              <ContentPanel>
+                <NavigationMenu.Link asChild className="router-link">
+                  <a
+                    href="/docs"
+                    onClick={(event) => event.preventDefault()}
+                  >
+                    Launch docs
+                  </a>
+                </NavigationMenu.Link>
+                <LinkCard
+                  href="/runtime"
+                  title="Runtime"
+                  description="Runtime internals."
+                />
+              </ContentPanel>
+            </NavigationMenu.Item>
+          </NavigationMenu.List>
+
+          <NavigationMenu.Portal>
+            <NavigationMenu.Positioner sideOffset={8}>
+              <NavigationMenu.Popup>
+                <NavigationMenu.Viewport />
+              </NavigationMenu.Popup>
+            </NavigationMenu.Positioner>
+          </NavigationMenu.Portal>
+        </NavigationMenu>
+        <output aria-live="polite">Open: {value ?? "none"}</output>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /products/i }));
+    await waitFor(() =>
+      expect(canvas.getByText(/open: products/i)).toBeVisible(),
+    );
+    const link = await body.findByRole("link", { name: /launch docs/i });
+    await expect(link).toHaveAttribute("href", "/docs");
+    await expect(link.tagName).toBe("A");
+    await userEvent.click(link);
+    await userEvent.keyboard("{Escape}");
+  },
+};
+
+/* ─── 10. VerticalCustomChrome ─────────────────────────────────────── */
+export const VerticalCustomChrome: Story = {
+  name: "Vertical with custom chrome",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Vertical navmenu"
+    >
+      <NavigationMenu orientation="vertical">
+        <NavigationMenu.List>
+          <NavigationMenu.Item>
+            <NavigationMenu.Trigger>
+              Resources
+              <NavigationMenu.Icon>
+                <span aria-hidden="true">v</span>
+              </NavigationMenu.Icon>
+            </NavigationMenu.Trigger>
+            <ContentPanel>
+              <LinkCard href="/docs" title="Docs" description="Guides." />
+              <LinkCard href="/status" title="Status" description="Uptime." />
+            </ContentPanel>
+          </NavigationMenu.Item>
+        </NavigationMenu.List>
+
+        <NavigationMenu.Portal>
+          <NavigationMenu.Positioner side="right" align="start" sideOffset={14}>
+            <NavigationMenu.Popup>
+              <NavigationMenu.Arrow>
+                <svg width="16" height="8" viewBox="0 0 16 8" aria-hidden="true">
+                  <path d="M 0,0 L 8,8 L 16,0 Z" fill="currentColor" />
+                </svg>
+              </NavigationMenu.Arrow>
+              <NavigationMenu.Viewport />
+            </NavigationMenu.Popup>
+          </NavigationMenu.Positioner>
+        </NavigationMenu.Portal>
+      </NavigationMenu>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await expect(canvas.getByRole("navigation")).toHaveAttribute(
+      "data-orientation",
+      "vertical",
+    );
+    await userEvent.click(canvas.getByRole("button", { name: /resources/i }));
+    await expect(await body.findByRole("link", { name: /status/i })).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
 };

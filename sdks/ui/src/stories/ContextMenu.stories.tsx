@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Card, ContextMenu } from "../components";
 
@@ -61,6 +62,20 @@ export const BasicRightClickArea: Story = {
       </ContextMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByText(/right-click here/i);
+
+    await userEvent.pointer([{ target: trigger, keys: "[MouseRight]" }]);
+    await expect(
+      await body.findByRole("menuitem", { name: /open/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByRole("menuitem", { name: /open/i })).not.toBeInTheDocument(),
+    );
+  },
 };
 
 /* ─── 2. WithCheckboxItem ───────────────────────────────────────────── */
@@ -122,6 +137,28 @@ export const WithCheckboxItem: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.pointer([
+      { target: canvas.getByText(/right-click for options/i), keys: "[MouseRight]" },
+    ]);
+    const pinned = await body.findByRole("menuitemcheckbox", {
+      name: /pinned/i,
+    });
+    const favorited = body.getByRole("menuitemcheckbox", {
+      name: /favorited/i,
+    });
+
+    await expect(pinned).toHaveAttribute("aria-checked", "false");
+    await expect(favorited).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(pinned);
+    await waitFor(() =>
+      expect(pinned).toHaveAttribute("aria-checked", "true"),
+    );
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 3. NestedSubmenu ──────────────────────────────────────────────── */
@@ -176,6 +213,20 @@ export const NestedSubmenu: Story = {
       </ContextMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.pointer([
+      { target: canvas.getByText(/right-click for nested/i), keys: "[MouseRight]" },
+    ]);
+    const move = await body.findByRole("menuitem", { name: /move to/i });
+    await userEvent.hover(move);
+    await expect(
+      await body.findByRole("menuitem", { name: /archive/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 4. WithDisabledItem ───────────────────────────────────────────── */
@@ -223,6 +274,22 @@ export const WithDisabledItem: Story = {
       </ContextMenu>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.pointer([
+      { target: canvas.getByText(/right-click for actions/i), keys: "[MouseRight]" },
+    ]);
+    const duplicate = await body.findByRole("menuitem", {
+      name: /duplicate/i,
+    });
+
+    await expect(duplicate).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(duplicate);
+    await expect(duplicate).not.toHaveFocus();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 5. CustomAnchor ───────────────────────────────────────────────── */
@@ -322,4 +389,107 @@ export const Rtl: Story = {
     </div>
     </DirectionProvider>
   ),
+};
+
+/* ─── 7. PositionedPopup ───────────────────────────────────────────── */
+export const PositionedPopup: Story = {
+  name: "Positioned popup override",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Positioned context menu"
+    >
+      <ContextMenu>
+        <ContextMenu.Trigger
+          role="button"
+          aria-label="Open positioned context menu"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            inlineSize: "16rem",
+            blockSize: "8rem",
+            border: "0.0625rem dashed var(--zs-separator)",
+            borderRadius: "var(--zs-radius-3)",
+            color: "var(--zs-label-secondary)",
+          }}
+        >
+          Right-click for positioned actions
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          <ContextMenu.Popup side="right" align="start" sideOffset={12}>
+            <ContextMenu.Arrow>
+              <svg width="16" height="8" viewBox="0 0 16 8" aria-hidden="true">
+                <path d="M 0,0 L 8,8 L 16,0 Z" fill="currentColor" />
+              </svg>
+            </ContextMenu.Arrow>
+            <ContextMenu.Group>
+              <ContextMenu.GroupLabel>File</ContextMenu.GroupLabel>
+              <ContextMenu.LinkItem href="https://example.com/open">
+                Open in browser
+              </ContextMenu.LinkItem>
+              <ContextMenu.Item shortcut="R">Rename</ContextMenu.Item>
+            </ContextMenu.Group>
+          </ContextMenu.Popup>
+        </ContextMenu.Portal>
+      </ContextMenu>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.pointer([
+      {
+        target: canvas.getByRole("button", {
+          name: /open positioned context menu/i,
+        }),
+        keys: "[MouseRight]",
+      },
+    ]);
+    await expect(
+      await body.findByRole("menuitem", { name: /open in browser/i }),
+    ).toHaveAttribute("href", "https://example.com/open");
+    await expect(body.getByText(/file/i)).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+  },
+};
+
+/* ─── 8. DisabledTrigger ───────────────────────────────────────────── */
+export const DisabledTrigger: Story = {
+  name: "Disabled trigger",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Disabled context menu trigger"
+    >
+      <ContextMenu>
+        <ContextMenu.Trigger
+          disabled
+          role="button"
+          aria-label="Unavailable context menu"
+        >
+          Unavailable actions
+        </ContextMenu.Trigger>
+        <ContextMenu.Portal>
+          <ContextMenu.Popup>
+            <ContextMenu.Item>Hidden action</ContextMenu.Item>
+          </ContextMenu.Popup>
+        </ContextMenu.Portal>
+      </ContextMenu>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", {
+      name: /unavailable context menu/i,
+    });
+
+    await expect(trigger).toHaveAttribute("aria-disabled", "true");
+    await expect(trigger).toHaveAttribute("tabindex", "-1");
+    await userEvent.tab();
+    await expect(trigger).not.toHaveFocus();
+  },
 };

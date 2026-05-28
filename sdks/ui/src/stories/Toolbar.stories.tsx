@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { Toggle, Toolbar } from "../components";
 
 const meta: Meta<typeof Toolbar> = {
@@ -103,6 +104,20 @@ export const Basic: Story = {
       </Toolbar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const cut = canvas.getByRole("button", { name: /cut/i });
+    const copy = canvas.getByRole("button", { name: /copy/i });
+
+    await expect(canvas.getByRole("toolbar")).toHaveAttribute(
+      "aria-orientation",
+      "horizontal",
+    );
+    await userEvent.tab();
+    await expect(cut).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect(copy).toHaveFocus();
+  },
 };
 
 /* ─── 2. WithSeparator ──────────────────────────────────────────────── */
@@ -177,6 +192,17 @@ export const WithToggleGroup: Story = {
       </Toolbar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const left = canvas.getByRole("button", { name: /align left/i });
+    const center = canvas.getByRole("button", { name: /align center/i });
+
+    await expect(center).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(left);
+    await waitFor(() =>
+      expect(left).toHaveAttribute("aria-pressed", "true"),
+    );
+  },
 };
 
 /* ─── 4. WithIconButtons ────────────────────────────────────────────── */
@@ -245,6 +271,20 @@ export const Vertical: Story = {
       </Toolbar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const bold = canvas.getByRole("button", { name: /bold/i });
+    const italic = canvas.getByRole("button", { name: /italic/i });
+
+    await expect(canvas.getByRole("toolbar")).toHaveAttribute(
+      "aria-orientation",
+      "vertical",
+    );
+    await userEvent.tab();
+    await expect(bold).toHaveFocus();
+    await userEvent.keyboard("{ArrowDown}");
+    await expect(italic).toHaveFocus();
+  },
 };
 
 /* ─── 6. WithGroups ─────────────────────────────────────────────────
@@ -303,6 +343,22 @@ export const WithGroups: Story = {
       </Toolbar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const bold = canvas.getByRole("button", { name: /bold/i });
+    const italic = canvas.getByRole("button", { name: /italic/i });
+    const center = canvas.getByRole("button", { name: /align center/i });
+
+    await expect(bold).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(italic);
+    await waitFor(() =>
+      expect(italic).toHaveAttribute("aria-pressed", "true"),
+    );
+    await userEvent.click(center);
+    await waitFor(() =>
+      expect(center).toHaveAttribute("aria-pressed", "true"),
+    );
+  },
 };
 
 /* ─── 7. Disabled ───────────────────────────────────────────────────── */
@@ -328,6 +384,17 @@ export const Disabled: Story = {
       </Toolbar>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const cut = canvas.getByRole("button", { name: /cut/i });
+    const copy = canvas.getByRole("button", { name: /copy/i });
+
+    await expect(cut).toBeDisabled();
+    await userEvent.click(cut);
+    await expect(cut).not.toHaveFocus();
+    await userEvent.tab();
+    await expect(copy).not.toHaveFocus();
+  },
 };
 
 /* ─── 8. Rtl ────────────────────────────────────────────────────────── */
@@ -402,6 +469,13 @@ export const RoleLockRegression: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("toolbar")).toHaveAttribute(
+      "role",
+      "toolbar",
+    );
+  },
 };
 
 /* ─── 10. Roving — regression for Slice 12 review fix #1 ────────────── *
@@ -446,4 +520,51 @@ export const Roving: Story = {
       </button>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const before = canvas.getByRole("button", { name: /before/i });
+    const cut = canvas.getByRole("button", { name: /cut/i });
+    const paste = canvas.getByRole("button", { name: /paste/i });
+    const after = canvas.getByRole("button", { name: /after/i });
+
+    before.focus();
+    await userEvent.tab();
+    await expect(cut).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect(paste).toHaveFocus();
+    await userEvent.tab();
+    await expect(after).toHaveFocus();
+  },
+};
+
+/* ─── 11. LinkAndInput ─────────────────────────────────────────────── */
+export const LinkAndInput: Story = {
+  name: "Link and input items",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Toolbar link and input"
+    >
+      <Toolbar loopFocus={false}>
+        <Toolbar.Button>Refresh</Toolbar.Button>
+        <Toolbar.Link href="https://example.com/docs">Docs</Toolbar.Link>
+        <Toolbar.Input aria-label="Filter rows" placeholder="Filter" />
+      </Toolbar>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const refresh = canvas.getByRole("button", { name: /refresh/i });
+    const docs = canvas.getByRole("link", { name: /docs/i });
+    const filter = canvas.getByRole("textbox", { name: /filter rows/i });
+
+    await expect(docs).toHaveAttribute("href", "https://example.com/docs");
+    await userEvent.tab();
+    await expect(refresh).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}{ArrowRight}");
+    await expect(filter).toHaveFocus();
+    await userEvent.type(filter, "deploys");
+    await expect(filter).toHaveValue("deploys");
+  },
 };
