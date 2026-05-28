@@ -34,6 +34,9 @@ const stories = [
   "components-toggle--with-label",
   "components-toggle--disabled-group",
   "components-toggle--rtl",
+  // Slice-5 review-fix regression targets (items 1 + 2).
+  "components-toggle--forced-colors-hover",
+  "components-toggle--role-toolbar-lock",
 ];
 
 const mimeMap = new Map([

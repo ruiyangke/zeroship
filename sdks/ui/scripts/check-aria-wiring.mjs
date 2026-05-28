@@ -1159,6 +1159,80 @@ await open("components-toggle--two-segments-single");
   );
 }
 
+/* ─── 35. Toggle.Group role lock — role="toolbar" regardless (review fix 2) ─
+ *
+ * Slice-5 review-fix item 2 locks `role="toolbar"` on the group. The
+ * runtime side puts the role attribute BEFORE the {...rest} spread so a
+ * future maintainer dropping the `Omit<…, "role">` from ToggleGroupProps
+ * can't accidentally let consumer props win. The type-level enforcement
+ * is verified by the `tsc` invocation in the build gate (see
+ * type-check-toggle-role-omit.ts below); this DOM assertion verifies
+ * the runtime defense. */
+await open("components-toggle--role-toolbar-lock");
+{
+  const group = page.locator('[data-testid="toggle-group-role-lock"]');
+  await group.waitFor({ state: "visible", timeout: 5000 });
+  const role = await group.getAttribute("role");
+  const ariaOrientation = await group.getAttribute("aria-orientation");
+  const ok = role === "toolbar";
+  report(
+    "Toggle.Group role lock — role=\"toolbar\" on the group root",
+    ok,
+    `role=${role} aria-orientation=${ariaOrientation}`,
+  );
+}
+
+/* ─── 36. Toggle.Group forced-colors hover (review fix 1) ───────────
+ *
+ * Slice-5 review-fix item 1 — mirrors every STATE selector inside
+ * `@media (forced-colors: active)` so the hover, active, and disabled
+ * surfaces map to system colors when high-contrast mode is on.
+ *
+ * Playwright's `emulateMedia({ forcedColors: 'active' })` enables this in
+ * Chromium 92+ (the @playwright/test version installed here is well
+ * above that). With the emulation active, hover the unpressed Toggle
+ * and read computed background-color. Pre-fix this returns a parsed
+ * oklch tone (e.g. `oklch(...)` or its sRGB-resolved rgb()); post-fix
+ * the system color `Canvas` resolves to `rgb(255, 255, 255)` in light
+ * mode or `rgb(0, 0, 0)` in dark mode — but always to a SOLID rgb()
+ * with no alpha, not the translucent token mix. We assert the resolved
+ * background is one of Canvas (rgb(255,255,255) / rgb(0,0,0)) — i.e. a
+ * fully-opaque system color, not a translucent oklch mix. */
+await page.emulateMedia({ forcedColors: "active" });
+await open("components-toggle--forced-colors-hover");
+{
+  const standalone = page.locator(
+    '[data-testid="toggle-forced-colors-standalone"]',
+  );
+  await standalone.waitFor({ state: "visible", timeout: 5000 });
+  await standalone.hover();
+  // Wait a tick for the hover state to settle. Chromium repaints on
+  // hover synchronously, but the forced-colors paint takes one extra
+  // frame in some builds.
+  await page.waitForTimeout(50);
+  const bg = await standalone.evaluate((el) =>
+    getComputedStyle(el).backgroundColor,
+  );
+  // Acceptable system-color rgb() resolutions for Canvas (the rule the
+  // mirrored block sets on hovered unpressed): rgb(255, 255, 255) in
+  // light forced-colors, rgb(0, 0, 0) in dark, or any solid rgb() with
+  // alpha 1. The fail mode is `oklch(...)` or `rgba(…, <1)` (translucent
+  // token mix). Use a heuristic that excludes any rgba() with alpha < 1
+  // and any non-rgb() value.
+  const isSystemColor =
+    /^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/.test(bg) ||
+    /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*1\s*\)$/.test(bg);
+  const isOklch = /oklch\(/i.test(bg);
+  const ok = isSystemColor && !isOklch;
+  report(
+    "Toggle forced-colors hover — paints with system color (Canvas)",
+    ok,
+    `bg="${bg}" isSystemColor=${isSystemColor} isOklch=${isOklch}`,
+  );
+}
+// Reset the emulation so subsequent navigations aren't affected.
+await page.emulateMedia({ forcedColors: "none" });
+
 await ctx.close();
 await browser.close();
 

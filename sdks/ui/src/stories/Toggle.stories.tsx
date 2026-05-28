@@ -299,7 +299,9 @@ export const TwoSegmentsSingle: Story = {
     },
   },
   render: function TwoSegmentsSingleRender() {
-    const [value, setValue] = useState<string[]>(["day"]);
+    // Item 3 fix: single-mode API now takes a scalar value, not an array.
+    // `useState<string | undefined>("day")` instead of `useState<string[]>(["day"])`.
+    const [value, setValue] = useState<string | undefined>("day");
     return (
       <div
         className="zs-story-row"
@@ -309,7 +311,7 @@ export const TwoSegmentsSingle: Story = {
         <div className="zs-story-cell">
           <Toggle.Group
             value={value}
-            onValueChange={(v: string[]) => setValue(v)}
+            onValueChange={(v) => setValue(v)}
             aria-label="Time range"
             data-testid="toggle-group-single"
           >
@@ -340,7 +342,8 @@ export const FiveSegmentsSingle: Story = {
     },
   },
   render: function FiveSegmentsRender() {
-    const [value, setValue] = useState<string[]>(["1y"]);
+    // Item 3 fix: scalar single-mode value.
+    const [value, setValue] = useState<string | undefined>("1y");
     return (
       <div
         className="zs-story-row"
@@ -350,15 +353,27 @@ export const FiveSegmentsSingle: Story = {
         <div className="zs-story-cell">
           <Toggle.Group
             value={value}
-            onValueChange={(v: string[]) => setValue(v)}
+            onValueChange={(v) => setValue(v)}
             aria-label="Range"
             data-testid="toggle-group-five"
           >
-            <Toggle value="1d">1D</Toggle>
-            <Toggle value="1w">1W</Toggle>
-            <Toggle value="1m">1M</Toggle>
-            <Toggle value="3m">3M</Toggle>
-            <Toggle value="1y">1Y</Toggle>
+            {/* Item 10 fix: stable data-testid per segment so the
+                aria-wiring assertions can reach each segment. */}
+            <Toggle value="1d" data-testid="toggle-five-1d">
+              1D
+            </Toggle>
+            <Toggle value="1w" data-testid="toggle-five-1w">
+              1W
+            </Toggle>
+            <Toggle value="1m" data-testid="toggle-five-1m">
+              1M
+            </Toggle>
+            <Toggle value="3m" data-testid="toggle-five-3m">
+              3M
+            </Toggle>
+            <Toggle value="1y" data-testid="toggle-five-1y">
+              1Y
+            </Toggle>
           </Toggle.Group>
         </div>
       </div>
@@ -444,9 +459,10 @@ export const AllSizesGroup: Story = {
       aria-label="All group sizes"
       style={{ flexDirection: "column", alignItems: "flex-start" }}
     >
+      {/* Item 3 fix: scalar defaultValue. */}
       <div className="zs-story-cell">
         <span className="zs-story-label">Small</span>
-        <Toggle.Group size="sm" defaultValue={["a"]} aria-label="Small group">
+        <Toggle.Group size="sm" defaultValue="a" aria-label="Small group">
           <Toggle value="a">Alpha</Toggle>
           <Toggle value="b">Bravo</Toggle>
           <Toggle value="c">Charlie</Toggle>
@@ -454,7 +470,7 @@ export const AllSizesGroup: Story = {
       </div>
       <div className="zs-story-cell">
         <span className="zs-story-label">Medium</span>
-        <Toggle.Group size="md" defaultValue={["b"]} aria-label="Medium group">
+        <Toggle.Group size="md" defaultValue="b" aria-label="Medium group">
           <Toggle value="a">Alpha</Toggle>
           <Toggle value="b">Bravo</Toggle>
           <Toggle value="c">Charlie</Toggle>
@@ -462,7 +478,7 @@ export const AllSizesGroup: Story = {
       </div>
       <div className="zs-story-cell">
         <span className="zs-story-label">Large</span>
-        <Toggle.Group size="lg" defaultValue={["c"]} aria-label="Large group">
+        <Toggle.Group size="lg" defaultValue="c" aria-label="Large group">
           <Toggle value="a">Alpha</Toggle>
           <Toggle value="b">Bravo</Toggle>
           <Toggle value="c">Charlie</Toggle>
@@ -477,25 +493,37 @@ export const Horizontal: Story = {
   parameters: {
     docs: {
       description: {
+        // Item 9 fix: Base UI ToggleGroup uses toolbar semantics — arrow
+        // keys move FOCUS, Space/Enter activates. NOT Radio-style
+        // roving where the arrow also flips selection.
         story:
           "Explicit `orientation=\"horizontal\"` (the default). Segments " +
-          "lay out as columns in a single grid row. Arrow-left / " +
-          "arrow-right move focus AND selection between siblings.",
+          "lay out as columns in a single grid row. Arrow keys move " +
+          "focus across segments; Space/Enter activates the focused " +
+          "segment. Toolbar semantics, not Radio-style selection.",
       },
     },
   },
+  // Item 3 fix: scalar defaultValue.
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Horizontal">
       <div className="zs-story-cell">
         <Toggle.Group
           orientation="horizontal"
-          defaultValue={["list"]}
+          defaultValue="list"
           aria-label="View mode"
           data-testid="toggle-group-horizontal"
         >
-          <Toggle value="list">List</Toggle>
-          <Toggle value="grid">Grid</Toggle>
-          <Toggle value="kanban">Kanban</Toggle>
+          {/* Item 10 fix: stable data-testids on every segment. */}
+          <Toggle value="list" data-testid="toggle-horizontal-list">
+            List
+          </Toggle>
+          <Toggle value="grid" data-testid="toggle-horizontal-grid">
+            Grid
+          </Toggle>
+          <Toggle value="kanban" data-testid="toggle-horizontal-kanban">
+            Kanban
+          </Toggle>
         </Toggle.Group>
       </div>
     </div>
@@ -515,18 +543,25 @@ export const Vertical: Story = {
       },
     },
   },
+  // Item 3 fix: scalar defaultValue. Item 10 fix: per-segment data-testids.
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Vertical">
       <div className="zs-story-cell">
         <Toggle.Group
           orientation="vertical"
-          defaultValue={["medium"]}
+          defaultValue="medium"
           aria-label="Density"
           data-testid="toggle-group-vertical"
         >
-          <Toggle value="compact">Compact</Toggle>
-          <Toggle value="medium">Medium</Toggle>
-          <Toggle value="comfortable">Comfortable</Toggle>
+          <Toggle value="compact" data-testid="toggle-vertical-compact">
+            Compact
+          </Toggle>
+          <Toggle value="medium" data-testid="toggle-vertical-medium">
+            Medium
+          </Toggle>
+          <Toggle value="comfortable" data-testid="toggle-vertical-comfortable">
+            Comfortable
+          </Toggle>
         </Toggle.Group>
       </div>
     </div>
@@ -546,6 +581,7 @@ export const EqualWidthOff: Story = {
       },
     },
   },
+  // Item 3 fix: scalar defaultValue.
   render: () => (
     <div
       className="zs-story-row"
@@ -555,7 +591,7 @@ export const EqualWidthOff: Story = {
       <div className="zs-story-cell">
         <Toggle.Group
           equalWidth={false}
-          defaultValue={["left"]}
+          defaultValue="left"
           aria-label="Alignment"
           data-testid="toggle-group-equalwidth-off"
         >
@@ -586,15 +622,26 @@ export const WithLabel: Story = {
       },
     },
   },
+  // Item 3 fix: scalar defaultValue. Item 10 fix: per-segment data-testids.
   render: () => (
     <div className="zs-story-row" role="group" aria-label="With label">
       <div className="zs-story-cell" style={{ maxWidth: "24rem" }}>
         <Field>
           <Field.Label>View</Field.Label>
-          <Toggle.Group defaultValue={["card"]} aria-label="View">
-            <Toggle value="list">List</Toggle>
-            <Toggle value="card">Card</Toggle>
-            <Toggle value="map">Map</Toggle>
+          <Toggle.Group
+            defaultValue="card"
+            aria-label="View"
+            data-testid="toggle-group-withlabel"
+          >
+            <Toggle value="list" data-testid="toggle-withlabel-list">
+              List
+            </Toggle>
+            <Toggle value="card" data-testid="toggle-withlabel-card">
+              Card
+            </Toggle>
+            <Toggle value="map" data-testid="toggle-withlabel-map">
+              Map
+            </Toggle>
           </Toggle.Group>
         </Field>
       </div>
@@ -616,18 +663,25 @@ export const DisabledGroup: Story = {
       },
     },
   },
+  // Item 3 fix: scalar defaultValue. Item 10 fix: per-segment data-testids.
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Disabled group">
       <div className="zs-story-cell">
         <Toggle.Group
           disabled
-          defaultValue={["week"]}
+          defaultValue="week"
           aria-label="Disabled range"
           data-testid="toggle-group-disabled"
         >
-          <Toggle value="day">Day</Toggle>
-          <Toggle value="week">Week</Toggle>
-          <Toggle value="month">Month</Toggle>
+          <Toggle value="day" data-testid="toggle-disabled-day">
+            Day
+          </Toggle>
+          <Toggle value="week" data-testid="toggle-disabled-week">
+            Week
+          </Toggle>
+          <Toggle value="month" data-testid="toggle-disabled-month">
+            Month
+          </Toggle>
         </Toggle.Group>
       </div>
     </div>
@@ -648,6 +702,7 @@ export const RTL: Story = {
       },
     },
   },
+  // Item 3 fix: scalar defaultValue. Item 10 fix: per-segment data-testids.
   render: () => (
     <div
       dir="rtl"
@@ -657,13 +712,117 @@ export const RTL: Story = {
     >
       <div className="zs-story-cell">
         <Toggle.Group
-          defaultValue={["שבוע"]}
+          defaultValue="שבוע"
           aria-label="טווח זמן"
           data-testid="toggle-group-rtl"
         >
-          <Toggle value="יום">יום</Toggle>
-          <Toggle value="שבוע">שבוע</Toggle>
-          <Toggle value="חודש">חודש</Toggle>
+          <Toggle value="יום" data-testid="toggle-rtl-day">
+            יום
+          </Toggle>
+          <Toggle value="שבוע" data-testid="toggle-rtl-week">
+            שבוע
+          </Toggle>
+          <Toggle value="חודש" data-testid="toggle-rtl-month">
+            חודש
+          </Toggle>
+        </Toggle.Group>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 17. ForcedColorsHover — regression for review-fix item 1 ────────
+ *
+ * Renders a single Toggle + a Toggle.Group so the Playwright assertion
+ * can flip Chromium into `emulateMedia({ forcedColors: 'active' })`,
+ * hover the unpressed segment, and verify computed background-color is
+ * the system value `Canvas` (rather than the oklch token mix that wins
+ * outside forced-colors). Pre-fix, the state selectors
+ * `.zs-toggle--default:not([data-disabled]):not([data-pressed]):hover`
+ * outranked the forced-colors `.zs-toggle` block and the hover would
+ * stay tinted with `--zs-label`. The mirrored selectors inside the
+ * `@media (forced-colors: active)` block restore the cascade. */
+export const ForcedColorsHover: Story = {
+  name: "Forced-colors hover (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression target for the forced-colors specificity fix. " +
+          "Playwright emulates `forced-colors: active`, hovers the " +
+          "unpressed segment, and asserts computed background paints " +
+          "with `Canvas` — the system color — not the token-derived " +
+          "oklch mix.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Forced colors hover regression"
+    >
+      <div className="zs-story-cell">
+        <span className="zs-story-label">Standalone</span>
+        <Toggle data-testid="toggle-forced-colors-standalone">Bold</Toggle>
+      </div>
+      <div className="zs-story-cell">
+        <span className="zs-story-label">Inside group</span>
+        <Toggle.Group
+          defaultValue="day"
+          aria-label="Range"
+          data-testid="toggle-group-forced-colors"
+        >
+          <Toggle value="day" data-testid="toggle-forced-colors-day">
+            Day
+          </Toggle>
+          <Toggle value="week" data-testid="toggle-forced-colors-week">
+            Week
+          </Toggle>
+        </Toggle.Group>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 18. RoleToolbarLock — regression for review-fix item 2 ─────────
+ *
+ * The Toggle.Group's public `ToggleGroupProps` now `Omit<…, "role">`s
+ * the role prop, so a consumer trying to override it fails at the type
+ * level. The runtime side keeps `role="toolbar"` defensively (spread
+ * order locked in Toggle.tsx) so the aria-wiring assertion can confirm
+ * the DOM role matches regardless of any future type-omit regression.
+ *
+ * This story renders a stock Toggle.Group; the aria-wiring assertion
+ * queries `role` on the root and verifies it is exactly "toolbar". */
+export const RoleToolbarLock: Story = {
+  name: "Role toolbar lock (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression target for the `role=\"toolbar\"` lock. The " +
+          "public ToggleGroupProps omits `role`, so a consumer cannot " +
+          "override it at the type level. Runtime defense pins the " +
+          "attribute via spread-order; the aria-wiring assertion " +
+          "verifies the DOM role is always `toolbar`.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Role toolbar lock">
+      <div className="zs-story-cell">
+        <Toggle.Group
+          defaultValue="list"
+          aria-label="View mode"
+          data-testid="toggle-group-role-lock"
+        >
+          <Toggle value="list" data-testid="toggle-role-lock-list">
+            List
+          </Toggle>
+          <Toggle value="grid" data-testid="toggle-role-lock-grid">
+            Grid
+          </Toggle>
         </Toggle.Group>
       </div>
     </div>

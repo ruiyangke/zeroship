@@ -323,15 +323,23 @@
 .zs-toggle-group .zs-toggle:not([data-pressed]) {
   background-color: transparent;
 }
-.zs-toggle-group .zs-toggle {
-  /* Slightly tighter radius than the standalone so the pressed pill
-   * nests inside the group's rim with a small breathing margin. */
-  border-radius: calc(var(--zs-toggle-radius-md) - 0.125rem);
-}
-.zs-toggle-group--sm .zs-toggle {
+
+/* Group child radius keys off the CHILD's resolved data-size, not the
+ * group modifier class. Item 4 fix: previously `.zs-toggle-group--sm
+ * .zs-toggle` overrode any child explicit `size="lg"`, breaking the
+ * documented cascade contract (child prop > group context > default).
+ * Both the default <button> and asChild Slot stamp `data-size={size}`
+ * (item 8 fix in Toggle.tsx) so these selectors catch every render path.
+ *
+ * The radius is slightly tighter than the standalone so the pressed pill
+ * nests inside the group's rim with a small breathing margin. */
+.zs-toggle-group .zs-toggle[data-size="sm"] {
   border-radius: calc(var(--zs-toggle-radius-sm) - 0.0625rem);
 }
-.zs-toggle-group--lg .zs-toggle {
+.zs-toggle-group .zs-toggle[data-size="md"] {
+  border-radius: calc(var(--zs-toggle-radius-md) - 0.125rem);
+}
+.zs-toggle-group .zs-toggle[data-size="lg"] {
   border-radius: calc(var(--zs-toggle-radius-lg) - 0.125rem);
 }
 
@@ -363,11 +371,16 @@
 
 /* Tinted group: track stays accent-tinted; unpressed segments are
  * transparent over it so the pressed pill reads as the saturation
- * step. */
+ * step.
+ *
+ * Item 4 fix: scope the unpressed-tint COLOR rule to children whose
+ * resolved variant is also `tinted` — without that, a tinted group with
+ * an explicit `<Toggle variant="plain">` child would still get the
+ * accent-tinted text from the group, breaking the prop-wins cascade. */
 .zs-toggle-group--tinted {
   background-color: color-mix(in oklch, var(--zs-accent) 10%, transparent);
 }
-.zs-toggle-group--tinted .zs-toggle:not([data-pressed]) {
+.zs-toggle-group--tinted .zs-toggle[data-variant="tinted"]:not([data-pressed]) {
   color: var(--zs-accent);
 }
 
@@ -435,5 +448,71 @@
    * carries the only visible edge. */
   .zs-toggle-group .zs-toggle:not([data-pressed]) {
     box-shadow: none;
+  }
+
+  /* ─── Item 1 fix: mirror every STATE selector inside forced-colors so
+   * the system colors win over the oklch token rules at every state.
+   *
+   * Pre-fix, selectors like `.zs-toggle--default:not([data-disabled])
+   * :not([data-pressed]):hover` had higher specificity than the bare
+   * `.zs-toggle` reset block above, so under high-contrast emulation,
+   * hovering an unpressed Toggle would re-paint the oklch label-tinted
+   * background. We re-emit each state selector with EQUAL specificity
+   * inside the forced-colors media so the system colors take the cascade.
+   *
+   * Verify with Playwright `emulateMedia({ forcedColors: 'active' })` —
+   * computed background-color must equal `Canvas` or `Highlight`. */
+  @media (hover: hover) {
+    .zs-toggle--default:not([data-disabled]):not([data-pressed]):hover,
+    .zs-toggle--plain:not([data-disabled]):not([data-pressed]):hover,
+    .zs-toggle--tinted:not([data-disabled]):not([data-pressed]):hover {
+      background-color: Canvas;
+      color: CanvasText;
+    }
+    .zs-toggle[data-pressed]:not([data-disabled]):hover {
+      background-color: Highlight;
+      color: HighlightText;
+    }
+    /* Group + per-variant hover surfaces — same equal-specificity dance.
+     * Without these the group descendant rules at `:339`/`:359` would
+     * outrank the forced-colors reset on `.zs-toggle`. */
+    .zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):hover,
+    .zs-toggle-group--plain .zs-toggle:not([data-disabled]):not([data-pressed]):hover {
+      background-color: Canvas;
+      color: CanvasText;
+    }
+  }
+
+  /* Active (mouse-down) states across every variant + the group track. */
+  .zs-toggle--default:not([data-disabled]):not([data-pressed]):active,
+  .zs-toggle--plain:not([data-disabled]):not([data-pressed]):active,
+  .zs-toggle--tinted:not([data-disabled]):not([data-pressed]):active {
+    background-color: Canvas;
+    color: CanvasText;
+  }
+  .zs-toggle[data-pressed]:not([data-disabled]):active {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):active {
+    background-color: Canvas;
+    color: CanvasText;
+  }
+
+  /* Group-disabled cascade — the original .zs-toggle-group[data-disabled]
+   * rule paints a faded oklch fill. Re-emit to Canvas under forced-colors
+   * so the rail reads system-neutral, and stamp GrayText on every child
+   * so the disabled cascade is visible. */
+  .zs-toggle-group[data-disabled] {
+    background-color: Canvas;
+  }
+  .zs-toggle-group[data-disabled] .zs-toggle {
+    background-color: Canvas;
+    color: GrayText;
+  }
+  .zs-toggle-group[data-disabled] .zs-toggle[data-pressed] {
+    background-color: Canvas;
+    color: GrayText;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
 }

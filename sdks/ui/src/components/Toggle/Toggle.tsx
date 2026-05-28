@@ -65,7 +65,7 @@ import {
 } from "react";
 import { Toggle as BaseToggle } from "@base-ui/react/toggle";
 import { ToggleGroup as BaseToggleGroup } from "@base-ui/react/toggle-group";
-import { Slot, composeRefs } from "../_slot";
+import { Slot } from "../_slot";
 import { classnames } from "../_classnames";
 
 export type ToggleSize = "sm" | "md" | "lg";
@@ -96,11 +96,28 @@ function useToggleGroupContext() {
 /* ─── ToggleGroup ───────────────────────────────────────────────────── */
 
 type BaseToggleGroupProps = ComponentPropsWithRef<typeof BaseToggleGroup>;
+type BaseToggleGroupChangeEventDetails = Parameters<
+  NonNullable<BaseToggleGroupProps["onValueChange"]>
+>[1];
 
-export interface ToggleGroupProps<Value extends string = string>
+/**
+ * Properties shared between single- and multiple-selection groups.
+ *
+ * `role` is intentionally omitted — the group LOCKS to `role="toolbar"`
+ * (the canonical semantic for a segmented control + the only role that
+ * permits `aria-orientation`). Consumers passing `role` get a TypeScript
+ * error at the call site so the contract is enforced at compile time.
+ */
+interface ToggleGroupBaseProps
   extends Omit<
     BaseToggleGroupProps,
-    "className" | "render" | "value" | "defaultValue" | "onValueChange"
+    | "className"
+    | "render"
+    | "role"
+    | "value"
+    | "defaultValue"
+    | "onValueChange"
+    | "multiple"
   > {
   /** Visual size — inherited by children unless they override. */
   size?: ToggleSize;
@@ -119,22 +136,69 @@ export interface ToggleGroupProps<Value extends string = string>
   /**
    * Equal-width segments (default `true`). When `false`, each Toggle
    * sizes to its own content — useful in toolbars where icon-only
-   * segments mix with text-only ones.
+   * segments mix with text-only ones. Setting `equalWidth={false}` also
+   * acts as an explicit opt-in to mixed icon/text content, so the mixed-
+   * content dev-warn skips for groups that have declared the layout.
    *
    * @default true
    */
   equalWidth?: boolean;
   /** Optional class hook on the group root. */
   className?: string;
-  /** Controlled value(s) of pressed segments. */
-  value?: readonly Value[];
-  /** Uncontrolled initial value(s). */
-  defaultValue?: readonly Value[];
-  /** Pressed-state change callback. */
-  onValueChange?: (value: Value[], eventDetails: unknown) => void;
   /** Toggle children — typically 2–5. */
   children?: ReactNode;
 }
+
+/**
+ * Single-selection variant — value is a scalar `Value` (or `undefined`).
+ * The discriminant is `multiple?: false | undefined` so the default
+ * `<Toggle.Group>` (no `multiple` prop) narrows to this branch.
+ */
+export interface ToggleGroupSingleProps<Value extends string = string>
+  extends ToggleGroupBaseProps {
+  /** When omitted or `false`, the group is single-selection. */
+  multiple?: false;
+  /** Controlled value of the single pressed segment. */
+  value?: Value;
+  /** Uncontrolled initial value of the single pressed segment. */
+  defaultValue?: Value;
+  /**
+   * Pressed-state change callback. Fires with the scalar value of the
+   * newly-pressed segment, or `undefined` when the press flips off.
+   */
+  onValueChange?: (
+    value: Value | undefined,
+    eventDetails: BaseToggleGroupChangeEventDetails,
+  ) => void;
+}
+
+/**
+ * Multiple-selection variant — value is an array of `Value`s. Discriminant
+ * is `multiple: true` (required, not optional).
+ */
+export interface ToggleGroupMultipleProps<Value extends string = string>
+  extends ToggleGroupBaseProps {
+  /** Required to enter multiple-selection mode. */
+  multiple: true;
+  /** Controlled set of pressed values. */
+  value?: readonly Value[];
+  /** Uncontrolled initial set of pressed values. */
+  defaultValue?: readonly Value[];
+  /** Pressed-state change callback. Fires with the next set. */
+  onValueChange?: (
+    value: Value[],
+    eventDetails: BaseToggleGroupChangeEventDetails,
+  ) => void;
+}
+
+/**
+ * Public `Toggle.Group` props — discriminated union over `multiple`. The
+ * default branch is single-selection so a stock `<Toggle.Group>` reads
+ * scalar `value`/`defaultValue`/`onValueChange`.
+ */
+export type ToggleGroupProps<Value extends string = string> =
+  | ToggleGroupSingleProps<Value>
+  | ToggleGroupMultipleProps<Value>;
 
 /**
  * Module-level dedup map for dev warnings. We key on a stable signature
@@ -145,7 +209,10 @@ export interface ToggleGroupProps<Value extends string = string>
 const groupWarned = new Set<string>();
 
 function ToggleGroupInner<Value extends string = string>(
-  {
+  props: ToggleGroupProps<Value>,
+  ref: React.ForwardedRef<HTMLDivElement>,
+) {
+  const {
     size,
     variant,
     equalWidth = true,
@@ -158,10 +225,18 @@ function ToggleGroupInner<Value extends string = string>(
     children,
     multiple,
     ...rest
-  }: ToggleGroupProps<Value>,
-  ref: React.ForwardedRef<HTMLDivElement>,
-) {
+  } = props as ToggleGroupBaseProps & {
+    multiple?: boolean;
+    value?: Value | readonly Value[];
+    defaultValue?: Value | readonly Value[];
+    onValueChange?: (
+      next: Value | Value[] | undefined,
+      details: BaseToggleGroupChangeEventDetails,
+    ) => void;
+  };
+
   const disabled = disabledProp ?? false;
+  const isMultiple = multiple === true;
 
   // Dev-warn guards (contingency: 6+ segments, mixed icon/text). Both
   // run via useEffect keyed by a content signature; module-level Set
@@ -192,7 +267,13 @@ function ToggleGroupInner<Value extends string = string>(
     // Mixed text + icon-only warn. Heuristic: `typeof children === "string"`
     // → text segment; `isValidElement(children)` with no string descendant
     // → icon segment. Anything else is ambiguous and skipped.
-    if (count >= 2) {
+    //
+    // Item 5 fix: `equalWidth={false}` is the documented opt-in for mixed
+    // icon + text segments (the EqualWidthOff story is exactly that
+    // pattern). Skip the mixed-content scan when the consumer has
+    // explicitly declared intrinsic-width layout — they've already opted
+    // out of the equal-rhythm constraint the warn is enforcing.
+    if (count >= 2 && equalWidth !== false) {
       let textCount = 0;
       let iconCount = 0;
       for (const toggle of childArray) {
@@ -209,41 +290,75 @@ function ToggleGroupInner<Value extends string = string>(
             `[Toggle.Group] Rendered with mixed content (${textCount} text + ` +
               `${iconCount} icon-only segments). Keep content types ` +
               "consistent — either all-text or all-icon — so the row " +
-              "reads coherent.",
+              "reads coherent. To intentionally mix, set " +
+              "`equalWidth={false}`.",
           );
         }
       }
     }
-  }, [children]);
+  }, [children, equalWidth]);
+
+  // Adapt scalar single-mode values into the always-array contract Base
+  // UI's ToggleGroup expects. Single-mode `undefined` becomes `[]` (Base
+  // UI's "nothing pressed" representation); multiple-mode arrays pass
+  // through. Item 3 fix.
+  const adaptedValue: readonly Value[] | undefined = isMultiple
+    ? (value as readonly Value[] | undefined)
+    : value != null
+      ? [value as Value]
+      : undefined;
+  const adaptedDefaultValue: readonly Value[] | undefined = isMultiple
+    ? (defaultValue as readonly Value[] | undefined)
+    : defaultValue != null
+      ? [defaultValue as Value]
+      : undefined;
+  const adaptedOnValueChange = (
+    next: Value[],
+    details: BaseToggleGroupChangeEventDetails,
+  ) => {
+    if (!onValueChange) return;
+    if (isMultiple) {
+      (onValueChange as ToggleGroupMultipleProps<Value>["onValueChange"])?.(
+        next,
+        details,
+      );
+    } else {
+      // Single mode: Base UI hands us a 0- or 1-element array; surface
+      // the scalar (or `undefined` when the press flips off).
+      (onValueChange as ToggleGroupSingleProps<Value>["onValueChange"])?.(
+        next.length > 0 ? next[0] : undefined,
+        details,
+      );
+    }
+  };
 
   return (
     <ToggleGroupContext.Provider
       value={{
         size,
         variant,
-        multiple: multiple === true,
+        multiple: isMultiple,
         disabled,
       }}
     >
       <BaseToggleGroup
+        // role="toolbar" is set BEFORE {...rest} so a future maintainer
+        // who drops the `Omit<…, "role">` from the public type can't
+        // accidentally let consumer props overwrite it via spread order.
+        // Belt-and-braces with the TypeScript omit above.
+        role="toolbar"
         {...rest}
         ref={ref}
-        // Base UI's value props are untyped (`unknown` at the public
-        // surface). The `as never` keeps our `<Value>` generic visible
-        // to TypeScript while threading through cleanly — no `any`.
-        value={value as never}
-        defaultValue={defaultValue as never}
-        onValueChange={onValueChange as never}
+        // Base UI's value props are typed as `readonly Value[]`; the
+        // scalar→array adaptation above made the shape match. The cast
+        // dance below keeps our `<Value>` generic visible through the
+        // forwardRef erasure without losing static safety on adaptedValue.
+        value={adaptedValue as never}
+        defaultValue={adaptedDefaultValue as never}
+        onValueChange={adaptedOnValueChange as never}
         orientation={orientation}
         disabled={disabled || undefined}
-        multiple={multiple}
-        // Base UI defaults `role="group"` which doesn't permit
-        // `aria-orientation` (axe `aria-allowed-attr`). The semantic
-        // fit for a segmented control is `role="toolbar"` (a row of
-        // pressable buttons that move via arrow keys) — that role
-        // DOES allow `aria-orientation`. Consumer can still override
-        // via `rest.role` since `{...rest}` is spread first.
-        role="toolbar"
+        multiple={isMultiple}
         className={classnames(
           "zs-toggle-group",
           variant ? `zs-toggle-group--${variant}` : null,
@@ -272,7 +387,15 @@ const ToggleGroup = forwardRef(ToggleGroupInner) as <Value extends string = stri
 type BaseToggleRootProps = ComponentPropsWithRef<typeof BaseToggle>;
 
 export interface ToggleProps<Value extends string = string>
-  extends Omit<BaseToggleRootProps, "className" | "render"> {
+  extends Omit<BaseToggleRootProps, "className" | "render" | "value"> {
+  /**
+   * The value this Toggle contributes when rendered inside a
+   * `Toggle.Group`. The `<Value>` generic narrows the literal string set
+   * so `<Toggle<"day" | "week"> value="month">` is a compile error.
+   * Outside a group the prop is decorative — Base UI still emits it as
+   * the `value` attribute for symmetry, but no state is keyed off it.
+   */
+  value?: Value;
   /**
    * Visual size — sm 32, md 40 (default), lg 48. Matches Button + Input
    * rhythm so a Toggle next to either reads coherent. Inherits from
@@ -340,6 +463,9 @@ function ToggleInner<Value extends string = string>(
   const nativeButton = asChild ? asChildIsNativeButton : true;
 
   if (process.env.NODE_ENV !== "production" && asChild && !isValidElement(children)) {
+    // Matches Dialog.Close convention (slice-3 review-fix item 2): the
+    // dev-error is NOT deduped across mounts — same shape Dialog.Close
+    // uses. Leaving undeduped keeps the misuse loud at dev time.
     // eslint-disable-next-line no-console
     console.error(
       "Toggle asChild expects a single React element child; received " +
@@ -356,6 +482,12 @@ function ToggleInner<Value extends string = string>(
   );
 
   return (
+    // Item 6 fix: pass the caller's `ref` ONLY to BaseToggle.Root. Base UI
+    // forwards it through its render callback as `baseProps.ref` so the
+    // child element (Slot or <button>) just spreads that single ref —
+    // no double-fan-out via composeRefs. Pre-fix, the caller ref was
+    // composed twice per mount which fired callback refs with the same
+    // DOM node twice.
     <BaseToggle
       {...(rest as BaseToggleRootProps)}
       ref={ref as unknown as Ref<HTMLButtonElement>}
@@ -365,23 +497,21 @@ function ToggleInner<Value extends string = string>(
       data-size={size}
       data-variant={variant}
       render={(baseProps) => {
-        const basePropsRef = (baseProps as { ref?: Ref<unknown> }).ref;
-
         if (asChild) {
           if (!isValidElement(children)) {
             // Render-prop must return a ReactElement; dev-error above
             // already flagged the misuse.
             return <></>;
           }
-          // Slot handles className / style / event composition AND ref
-          // fan-out for the React 19 `element.props.ref` location.
+          // Slot handles className / style / event composition. Item 8
+          // fix: stamp data-size / data-variant explicitly so the
+          // attribute-keyed group CSS (item 4) catches asChild targets,
+          // not just default <button>s.
           return (
             <Slot
-              {...baseProps}
-              ref={composeRefs(
-                ref as Ref<unknown>,
-                basePropsRef,
-              )}
+              {...(baseProps as Record<string, unknown>)}
+              data-size={size}
+              data-variant={variant}
             >
               {children as ReactElement}
             </Slot>
@@ -398,10 +528,6 @@ function ToggleInner<Value extends string = string>(
         return (
           <button
             {...(baseRest as Record<string, unknown>)}
-            ref={composeRefs(
-              ref as Ref<HTMLButtonElement>,
-              basePropsRef as Ref<HTMLButtonElement>,
-            ) as unknown as Ref<HTMLButtonElement>}
             type={bpType ?? "button"}
             className={composedClassName}
             data-size={size}
