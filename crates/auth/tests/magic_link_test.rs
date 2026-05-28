@@ -4,6 +4,8 @@
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row that test inserted.
 
+use std::time::Duration;
+
 use compio_postgres::{connect, Client, NoTls};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -81,10 +83,145 @@ async fn drop_magic_links_insert_delay(client: &Client) {
         .ok();
 }
 
+async fn install_magic_completion_reserve_delay(client: &Client) {
+    client
+        .execute(
+            "CREATE OR REPLACE FUNCTION auth.test_sleep_before_magic_completion_reserve() \
+             RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 IF NEW.consumed_pending_at IS NOT NULL \
+                    AND OLD.consumed_pending_at IS NULL THEN \
+                     PERFORM pg_sleep(0.2); \
+                 END IF; \
+                 RETURN NEW; \
+             END \
+             $$",
+            &[],
+        )
+        .await
+        .expect("create completion reserve delay function");
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_completion_reserve \
+             ON auth.magic_completions",
+            &[],
+        )
+        .await
+        .expect("drop stale completion reserve delay trigger");
+    client
+        .execute(
+            "CREATE TRIGGER test_sleep_before_magic_completion_reserve \
+             BEFORE UPDATE OF consumed_pending_at ON auth.magic_completions \
+             FOR EACH ROW EXECUTE FUNCTION auth.test_sleep_before_magic_completion_reserve()",
+            &[],
+        )
+        .await
+        .expect("create completion reserve delay trigger");
+}
+
+async fn drop_magic_completion_reserve_delay(client: &Client) {
+    client
+        .execute(
+            "DROP TRIGGER IF EXISTS test_sleep_before_magic_completion_reserve \
+             ON auth.magic_completions",
+            &[],
+        )
+        .await
+        .ok();
+}
+
 fn sha256(s: &str) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     h.finalize().into()
+}
+
+#[compio::test]
+async fn wrong_code_does_not_mutate_reserved_completion() {
+    let dsn = match std::env::var("AUTH_DB_URL") {
+        Ok(dsn) => dsn,
+        Err(_) => {
+            eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+            return;
+        }
+    };
+    let Some(client) = pg().await else {
+        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let csrf_nonce = format!("completion-reserved-{}", Uuid::new_v4().simple());
+    let email = format!("magic-reserved-{}@example.test", Uuid::new_v4().simple());
+    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
+    let code = "123456";
+
+    client
+        .execute(
+            "INSERT INTO auth.magic_completions \
+                (csrf_nonce, code, email, login_challenge, expires_at) \
+             VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
+            &[&csrf_nonce, &code, &email, &login_challenge],
+        )
+        .await
+        .expect("insert completion row");
+    install_magic_completion_reserve_delay(&client).await;
+
+    let correct_client = pg_connect(&dsn).await;
+    let wrong_client = pg_connect(&dsn).await;
+    let correct_nonce = csrf_nonce.clone();
+    let wrong_nonce = csrf_nonce.clone();
+    let correct = compio::runtime::spawn(async move {
+        completions_store::consume_pending(&correct_client, &correct_nonce, code).await
+    });
+    compio::time::sleep(Duration::from_millis(50)).await;
+    let wrong = compio::runtime::spawn(async move {
+        completions_store::consume_pending(&wrong_client, &wrong_nonce, "000000").await
+    });
+
+    let correct = correct
+        .await
+        .expect("join correct consume")
+        .expect("correct consume");
+    assert_eq!(correct.email, email);
+    let wrong = wrong
+        .await
+        .expect("join wrong consume")
+        .expect_err("wrong code must not consume reserved completion");
+    assert!(
+        matches!(wrong, ConsumeError::WrongCode),
+        "wrong code racing a reservation should return WrongCode, got {wrong:?}"
+    );
+
+    drop_magic_completion_reserve_delay(&client).await;
+
+    let row = client
+        .query_one(
+            "SELECT attempts, \
+                    consumed_pending_at IS NOT NULL AS pending, \
+                    consumed_at IS NOT NULL AS consumed \
+             FROM auth.magic_completions \
+             WHERE csrf_nonce = $1",
+            &[&csrf_nonce],
+        )
+        .await
+        .expect("load completion row");
+    let attempts: i16 = row.get("attempts");
+    let pending: bool = row.get("pending");
+    let consumed: bool = row.get("consumed");
+    assert_eq!(
+        attempts, 0,
+        "wrong-code update must not increment attempts on a reserved row"
+    );
+    assert!(pending, "correct code should reserve the completion");
+    assert!(!consumed, "completion should not be finalized by consume_pending");
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
+            &[&csrf_nonce],
+        )
+        .await
+        .ok();
 }
 
 #[compio::test]

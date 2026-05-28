@@ -1175,6 +1175,7 @@ pub mod completions_store {
                      END \
                  WHERE csrf_nonce = $1 \
                    AND consumed_at IS NULL \
+                   AND consumed_pending_at IS NULL \
                    AND expires_at > NOW() \
                  RETURNING attempts",
                 &[&csrf_nonce],
