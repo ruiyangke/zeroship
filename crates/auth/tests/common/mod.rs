@@ -317,6 +317,9 @@ impl Fixture {
             public_url: "http://localhost:0".to_string(),
             postmark_webhook_user: None,
             postmark_webhook_password: None,
+            jwk_rotation_days: 90,
+            jwk_retain_days: 31,
+            cron_tick_secs: 86400,
         });
         let admin_state = admin.clone();
         let cfg_state = cfg.clone();

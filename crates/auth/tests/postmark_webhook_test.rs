@@ -61,6 +61,9 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
         public_url: "http://localhost:0".to_string(),
         postmark_webhook_user: user.map(String::from),
         postmark_webhook_password: pass.map(String::from),
+        jwk_rotation_days: 90,
+        jwk_retain_days: 31,
+        cron_tick_secs: 86400,
     }
 }
 

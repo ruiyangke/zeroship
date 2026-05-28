@@ -13,6 +13,7 @@ use zeroship_core::oidc_verify::JwksCache;
 
 use zeroship_auth::bootstrap;
 use zeroship_auth::config::AuthConfig;
+use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::mailer::{
@@ -85,12 +86,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
     tracing::info!(driver = %cfg.mailer, "mailer ready");
 
-    // 6. Serve. `server::run` takes ownership of the PG client (it wraps
-    //    it in `Arc` internally) so the spawned connection task stays
-    //    live for the entire server lifetime — `Arc` keeps the client
-    //    alive across worker tasks; on shutdown the last `Arc` drop
-    //    unblocks the background connection driver.
-    server::run(cfg, admin, client, google_jwks, mailer).await?;
+    // 6. Spawn in-process cron tasks (P6-U1: JWK rotation). Detached on
+    //    the compio runtime — survives across server worker restarts.
+    //    Spawned BEFORE `server::run` so the loop is live as soon as
+    //    the listener is bound. `Arc<Client>` is shared with the server
+    //    so both drive I/O through the single compio-postgres connection.
+    let cfg = Arc::new(cfg);
+    let db = Arc::new(client);
+    cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
+    tracing::info!("cron tasks spawned");
+
+    // 7. Serve. `Arc`s keep the PG client + config alive across the
+    //    server worker tasks AND the detached cron tasks; on shutdown
+    //    the last `Arc` drop unblocks the background connection driver.
+    server::run(cfg, admin, db, google_jwks, mailer).await?;
     Ok(())
 }
 

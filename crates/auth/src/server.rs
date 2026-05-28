@@ -183,17 +183,15 @@ async fn style() -> web::HttpResponse {
 // property of `ntex::web::server`, not an actionable defect.
 #[allow(clippy::future_not_send)]
 pub async fn run(
-    cfg: AuthConfig,
+    cfg: Arc<AuthConfig>,
     admin: HydraAdmin,
-    db: compio_postgres::Client,
+    db: Arc<compio_postgres::Client>,
     google_jwks: Option<Arc<JwksCache>>,
     mailer: Arc<dyn Mailer>,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();
     let github_enabled = cfg.github_client_id.is_some();
-    let cfg = Arc::new(cfg);
-    let db = Arc::new(db);
 
     web::server(async move || {
         let mut app = web::App::new()

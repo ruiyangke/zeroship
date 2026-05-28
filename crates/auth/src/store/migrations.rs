@@ -162,6 +162,16 @@ const STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS auth_console_sessions_user_idx ON auth.console_sessions (user_id)",
     "CREATE INDEX IF NOT EXISTS auth_console_sessions_idle_idx ON auth.console_sessions (idle_expires_at) WHERE revoked_at IS NULL",
+
+    // 5.11 cron_state — durable "last-ran" anchors for in-process cron
+    // tasks (P6-U1: JWK rotation, keyed by hydra JWK set name). One row
+    // per cron-managed resource. Read on every tick; upserted when the
+    // task takes action (rotation/retirement etc.).
+    "CREATE TABLE IF NOT EXISTS auth.cron_state (
+        key             TEXT PRIMARY KEY,
+        last_rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        notes           TEXT
+    )",
 ];
 
 /// Apply all migrations in order. Each statement is idempotent and safe to

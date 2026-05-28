@@ -225,6 +225,28 @@ pub struct AuthConfig {
     /// See that field for the rationale.
     #[arg(long, env = "AUTH_POSTMARK_WEBHOOK_PASSWORD")]
     pub postmark_webhook_password: Option<String>,
+
+    // ─── Cron (P6-U1: jwk_rotation; future units add audit retention) ───
+    /// Days between JWK rotations. Once a set's `auth.cron_state` row is
+    /// older than this, the next cron tick prepends fresh keys and they
+    /// become the active signers (hydra signs with the head of the
+    /// list). 90 days mirrors the OIDC operator handbook default.
+    #[arg(long, env = "AUTH_JWK_ROTATION_DAYS", default_value = "90")]
+    pub jwk_rotation_days: i64,
+
+    /// Days to retain outgoing keys past their rotation. Old keys are
+    /// retired once `(rotation_days + retain_days)` has elapsed since
+    /// the most recent rotation — long enough for any access token
+    /// signed by the outgoing key to expire (default 31 ≫ 1 h access
+    /// token TTL, ≫ typical refresh window).
+    #[arg(long, env = "AUTH_JWK_RETAIN_DAYS", default_value = "31")]
+    pub jwk_retain_days: i64,
+
+    /// Cron tick interval in seconds. Default 86400 (24 h). Operators
+    /// drop this to seconds in staging/integration tests so a cron
+    /// behaviour change is observable inside a single test run.
+    #[arg(long, env = "AUTH_CRON_TICK_SECS", default_value = "86400")]
+    pub cron_tick_secs: u64,
 }
 
 impl AuthConfig {

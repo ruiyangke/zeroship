@@ -167,6 +167,9 @@ async fn google_federation_creates_new_user() {
         public_url: "http://localhost:0".to_string(),
         postmark_webhook_user: None,
         postmark_webhook_password: None,
+        jwk_rotation_days: 90,
+        jwk_retain_days: 31,
+        cron_tick_secs: 86400,
     });
     let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
 

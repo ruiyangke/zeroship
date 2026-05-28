@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod bootstrap;
 pub mod config;
+pub mod cron;
 pub mod csrf;
 pub mod error;
 pub mod headers;
