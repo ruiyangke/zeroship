@@ -106,10 +106,18 @@ pub fn configure(
             // registered — the handler 401s when
             // `postmark_webhook_user`/`postmark_webhook_password`
             // aren't configured so misrouted traffic doesn't silently
-            // succeed in dev. SES-SNS is deferred to Phase 6.
+            // succeed in dev.
             .service(
                 web::resource("/webhooks/postmark")
                     .route(web::post().to(ui::webhooks::postmark)),
+            )
+            // SES-SNS bounce/complaint webhook (P6-U3). Always
+            // registered — auth is by RSA-SHA1 signature against the
+            // SigningCertURL cert (anti-SSRF allowlist enforced), so
+            // there's no environment-level on/off switch.
+            .service(
+                web::resource("/webhooks/ses-sns")
+                    .route(web::post().to(ui::webhooks::ses_sns)),
             );
 
         if google_enabled {

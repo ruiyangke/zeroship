@@ -14,6 +14,7 @@
 pub mod bounce;
 pub mod resend;
 pub mod smtp;
+pub mod sns;
 pub mod stdout;
 pub mod templates;
 pub mod types;

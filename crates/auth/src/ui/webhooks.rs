@@ -1,10 +1,11 @@
-//! Webhook handlers — Postmark bounce/complaint today; SES-SNS deferred to Phase 6.
+//! Webhook handlers — Postmark + SES-SNS bounce/complaint.
 //!
-//! Postmark posts JSON to `POST /webhooks/postmark` for delivery events.
-//! Authentication is HTTP Basic (configured per-server in the Postmark
-//! dashboard; the user/password pair is matched against
-//! `AUTH_POSTMARK_WEBHOOK_USER` / `AUTH_POSTMARK_WEBHOOK_PASSWORD`). On
-//! every request we:
+//! ## Postmark (`POST /webhooks/postmark`)
+//!
+//! Postmark posts JSON for delivery events. Authentication is HTTP Basic
+//! (configured per-server in the Postmark dashboard; the user/password
+//! pair is matched against `AUTH_POSTMARK_WEBHOOK_USER` /
+//! `AUTH_POSTMARK_WEBHOOK_PASSWORD`). On every request we:
 //!
 //! 1. Reject 401 if credentials aren't configured or the supplied
 //!    `Authorization: Basic …` doesn't match.
@@ -19,6 +20,22 @@
 //! Postmark retries on non-2xx — so once we've validated and started
 //! processing we always return 200 (genuine 500s on DB failure are
 //! still surfaced; Postmark's retry then converges).
+//!
+//! ## SES-SNS (`POST /webhooks/ses-sns`)
+//!
+//! AWS SES bounce/complaint events arrive via an SNS topic. The handler:
+//!
+//! 1. Parses the SNS envelope.
+//! 2. Validates `SignatureVersion == "1"` and the `SigningCertURL` host
+//!    (`sns.<region>.amazonaws.com`, anti-SSRF).
+//! 3. Fetches the cert + RSA-SHA1 verifies the canonical string-to-sign.
+//! 4. On `SubscriptionConfirmation` — auto-confirms by GET-ing
+//!    `SubscribeURL` (ONLY after the signature verifies).
+//! 5. On `Notification` — parses the inner SES event (a JSON-encoded
+//!    STRING in `Message`) and adds Permanent bounces + Complaints to
+//!    `auth.email_suppressions`. Transient bounces log only.
+//!
+//! Reference: <https://docs.aws.amazon.com/sns/latest/dg/sns-verify-signature-of-message.html>
 
 use std::sync::Arc;
 
@@ -31,6 +48,7 @@ use ntex::web::{
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::mailer::bounce::{bounce_type_is_permanent, verify_basic_auth, PostmarkEvent};
+use crate::mailer::sns::{self, is_valid_sns_cert_url, SesEvent, SnsEnvelope};
 use crate::store::suppressions;
 
 /// `POST /webhooks/postmark`. Always registered; rejects 401 when
@@ -146,4 +164,175 @@ pub async fn postmark(
     }
 
     HttpResponse::Ok().finish()
+}
+
+/// `POST /webhooks/ses-sns`. Verifies the SNS signature, auto-confirms
+/// subscription requests, and adds permanent bounces + complaints to the
+/// suppression list.
+///
+/// Status codes:
+/// - `200` — accepted (notification processed, or unrecognised inner
+///   event type accepted-and-ignored, or `UnsubscribeConfirmation`)
+/// - `400` — malformed envelope, unsupported `SignatureVersion`, or
+///   `SigningCertURL` host not on the allowlist
+/// - `401` — RSA-SHA1 verify rejected the signature
+/// - `500` — auto-confirm GET to `SubscribeURL` failed (so the operator
+///   retries; SNS itself doesn't re-deliver the `SubscriptionConfirmation`,
+///   but a 500 surfaces in the dashboard)
+//
+// ntex's per-thread service futures are intentionally `!Send`.
+#[allow(clippy::future_not_send)]
+#[allow(clippy::too_many_lines)]
+pub async fn ses_sns(
+    _req: HttpRequest,
+    body: Json<serde_json::Value>,
+    db: State<Arc<compio_postgres::Client>>,
+) -> HttpResponse {
+    // 1. Parse outer SNS envelope.
+    let envelope: SnsEnvelope = match serde_json::from_value(body.into_inner()) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "sns webhook: bad envelope");
+            return HttpResponse::BadRequest().finish();
+        }
+    };
+
+    // 2. Validate SignatureVersion — we only support v1.
+    if envelope.signature_version != "1" {
+        tracing::warn!(
+            version = %envelope.signature_version,
+            "sns webhook: unsupported SignatureVersion (only v1 supported)"
+        );
+        return HttpResponse::BadRequest()
+            .body("only SignatureVersion 1 is supported");
+    }
+
+    // 3. Validate SigningCertURL host (anti-SSRF). Done BEFORE the
+    //    network fetch so a malicious URL can't be coerced into
+    //    triggering an outbound request.
+    if !is_valid_sns_cert_url(&envelope.signing_cert_url) {
+        tracing::warn!(
+            url = %envelope.signing_cert_url,
+            "sns webhook: rejecting bogus SigningCertURL"
+        );
+        return HttpResponse::BadRequest().finish();
+    }
+
+    // 4. Fetch cert + RSA-SHA1 verify the canonical string.
+    if let Err(e) = sns::verify(&envelope).await {
+        tracing::warn!(error = %e, "sns webhook: signature verification failed");
+        return HttpResponse::Unauthorized().finish();
+    }
+
+    // 5. Branch on Type.
+    match envelope.r#type.as_str() {
+        "SubscriptionConfirmation" => {
+            // Auto-confirm by GET-ing SubscribeURL — but only AFTER
+            // the signature is verified (otherwise we'd let attackers
+            // weaponize us into a GET reflector).
+            let Some(url) = envelope.subscribe_url.as_deref() else {
+                tracing::warn!("sns webhook: SubscriptionConfirmation without SubscribeURL");
+                return HttpResponse::BadRequest().finish();
+            };
+            if let Err(e) = sns::confirm_subscription(url).await {
+                tracing::warn!(error = %e, "sns webhook: subscribe confirm failed");
+                return HttpResponse::InternalServerError().finish();
+            }
+            tracing::info!(topic = %envelope.topic_arn, "sns: subscription confirmed");
+            HttpResponse::Ok().finish()
+        }
+        "Notification" => {
+            // The `Message` field of an SNS Notification is a JSON
+            // **string**, not an embedded object. Parse it as a fresh
+            // JSON document to recover the SES event.
+            let inner: SesEvent = match serde_json::from_str(&envelope.message) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(error = %e, "sns webhook: SES inner payload parse");
+                    // The SNS envelope itself is valid; we just don't
+                    // understand the inner. Accept so SNS doesn't retry.
+                    return HttpResponse::Ok().finish();
+                }
+            };
+            handle_ses_event(db.as_ref(), inner).await;
+            HttpResponse::Ok().finish()
+        }
+        _ => {
+            // `UnsubscribeConfirmation` — accept silently; an operator
+            // unsubscribed the topic in the AWS console, no platform
+            // action needed.
+            HttpResponse::Ok().finish()
+        }
+    }
+}
+
+/// Dispatch a parsed SES inner event. Suppression-list writes +
+/// audit emission only; never returns an error to the caller.
+async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent) {
+    match ev {
+        SesEvent::Bounce { bounce } if bounce.bounce_type == "Permanent" => {
+            for rec in &bounce.bounced_recipients {
+                if let Err(e) = suppressions::add(
+                    db,
+                    &rec.email_address,
+                    "ses_permanent_bounce",
+                    None,
+                )
+                .await
+                {
+                    tracing::error!(error = %e, email = %rec.email_address,
+                                    "ses-sns suppression add failed");
+                }
+            }
+            audit::emit(
+                db,
+                &AuditEvent {
+                    event_type: "mailer_bounce",
+                    outcome: "success",
+                    auth_method: Some("ses_sns"),
+                    detail: serde_json::json!({
+                        "count": bounce.bounced_recipients.len(),
+                        "kind": "permanent",
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        SesEvent::Bounce { bounce } => {
+            // Transient bounces (Transient, Undetermined, …) — log only.
+            tracing::info!(
+                kind = %bounce.bounce_type,
+                count = bounce.bounced_recipients.len(),
+                "ses transient bounce — not suppressed"
+            );
+        }
+        SesEvent::Complaint { complaint } => {
+            for rec in &complaint.complained_recipients {
+                if let Err(e) =
+                    suppressions::add(db, &rec.email_address, "ses_complaint", None).await
+                {
+                    tracing::error!(error = %e, email = %rec.email_address,
+                                    "ses-sns complaint suppression add failed");
+                }
+            }
+            audit::emit(
+                db,
+                &AuditEvent {
+                    event_type: "mailer_complaint",
+                    outcome: "success",
+                    auth_method: Some("ses_sns"),
+                    detail: serde_json::json!({
+                        "count": complaint.complained_recipients.len(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        SesEvent::Other => {
+            // Delivery / DeliveryDelay / Send / Open / Click — we never
+            // asked SES to post these but if they arrive, drop them.
+        }
+    }
 }

@@ -31,6 +31,12 @@ mimalloc = { workspace = true }
 # Mailer trait uses `async fn` in trait — `#[async_trait]` keeps the trait
 # object-safe (so we can store `Arc<dyn Mailer>` in `AppCtx`).
 async-trait = { workspace = true }
+# SES-SNS webhook signature verification (P6-U3). `x509-parser` is a
+# pure-nom X.509 reader — used to lift the SubjectPublicKeyInfo out
+# of the SigningCertURL PEM. The RSA-SHA1 verify itself goes through
+# `aws-lc-rs` (workspace pin, also our FIPS provider for rustls).
+x509-parser = "0.18"
+aws-lc-rs = { workspace = true }
 # SMTP mailer driver — BLOCKING `SmtpTransport` wrapped in
 # `compio::runtime::spawn_blocking` (no tokio in the event loop).
 # Crate-local pin, not workspace; the auth server is the only consumer.
