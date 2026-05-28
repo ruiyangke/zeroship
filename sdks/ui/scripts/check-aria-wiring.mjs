@@ -4803,6 +4803,32 @@ await open("components-previewcard--as-child");
   );
 }
 
+/* ─── Toast empty-root visible-height regression ────────────────────── *
+ *
+ * Without `min-block-size: var(--toast-height, …)` on `.zs-toast-root`
+ * an emitted Toast with no children (or one whose Title/Description
+ * haven't mounted yet) collapsed to 0×0 and read as "not visible" to
+ * @testing-library / Playwright even though its role + aria-live were
+ * correct. The Basic story emits a default-variant toast via the
+ * imperative hook; we assert the rendered Root reports a non-zero
+ * `block-size` (intrinsic OR `--toast-height` fallback). */
+await open("components-toast--basic");
+{
+  const trigger = page.locator('[data-testid="toast-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const root = page.locator(".zs-toast-root").first();
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const height = await root.evaluate(
+    (el) => el.getBoundingClientRect().height,
+  );
+  report(
+    "Toast.Root reports non-zero rendered height (min-block-size fallback)",
+    height > 0,
+    `bbox.height=${height}px`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

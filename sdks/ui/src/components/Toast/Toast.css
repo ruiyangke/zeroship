@@ -122,6 +122,16 @@
   grid-template-columns: auto 1fr auto;
   gap: var(--zs-space-3);
   align-items: start;
+  /* Base UI sets `--toast-height` to the measured content height after
+   * layout. Reading it back as `min-block-size` keeps the natural row
+   * height when content exists AND guarantees a non-zero rendered
+   * height for transient empty states (post-update, pre-children
+   * mount). Without this, an empty Root collapses to 0 rows × 0 px
+   * and Playwright / Testing Library see it as `not visible` even
+   * though it carries the correct role + aria-live + classes. The
+   * `--zs-space-12` fallback (3rem) covers the very first paint
+   * before Base UI's measurement runs. */
+  min-block-size: var(--toast-height, var(--zs-space-12));
   /* Logical padding so RTL flips for free. */
   padding-block: var(--zs-space-3);
   padding-inline: var(--zs-space-4);
