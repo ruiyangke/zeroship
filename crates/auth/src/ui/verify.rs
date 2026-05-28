@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::audit::{self, AuditEvent};
 use crate::identity::verification;
-use crate::ui::{ErrorPage, VerifyOkPage};
+use crate::ui::{ErrorPage, PublicErrorMessage, VerifyOkPage};
 
 #[derive(Debug, Deserialize)]
 pub struct VerifyQuery {
@@ -50,11 +50,11 @@ pub async fn get(
                 },
             )
             .await;
-            return render_error("verification link invalid or expired", None);
+            return render_error(PublicErrorMessage::SessionExpired);
         }
         Err(e) => {
             tracing::error!(error = %e, "verification redeem db error");
-            return render_error("internal error", Some("db"));
+            return render_error(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -71,7 +71,7 @@ pub async fn get(
         .await
     {
         tracing::error!(error = %e, user_id = %redeemed.user_id, "set email_verified_at failed");
-        return render_error("internal error", Some("update"));
+        return render_error(PublicErrorMessage::ContactSupport);
     }
 
     audit::emit(
@@ -96,14 +96,14 @@ pub async fn get(
     resp.body(body)
 }
 
-fn render_error(error: &str, error_description: Option<&str>) -> HttpResponse {
+fn render_error(message: PublicErrorMessage) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
     let body = page
         .render()
-        .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)

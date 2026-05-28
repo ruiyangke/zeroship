@@ -53,7 +53,9 @@ use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
-use crate::ui::{ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage, MagicShowCodePage};
+use crate::ui::{
+    ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage, MagicShowCodePage, PublicErrorMessage,
+};
 
 // ─── Cookie helpers ──────────────────────────────────────────────────
 
@@ -147,7 +149,7 @@ pub async fn start(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_error_page("invalid request", Some("csrf"));
+        return render_error_page(PublicErrorMessage::InvalidRequest);
     }
 
     let email_norm = form.email.trim().to_ascii_lowercase();
@@ -185,7 +187,7 @@ pub async fn start(
             }
             Err(e) => {
                 tracing::error!(error = %e, bucket = %key, "magic rate-limit consume failed");
-                return render_error_page("internal error", Some("rate limit"));
+                return render_error_page(PublicErrorMessage::ContactSupport);
             }
         }
     }
@@ -199,7 +201,7 @@ pub async fn start(
             Ok(i) => Some(i),
             Err(e) => {
                 tracing::error!(error = %e, "magic_link::issue failed");
-                return render_error_page("internal error", Some("issue"));
+                return render_error_page(PublicErrorMessage::ContactSupport);
             }
         }
     };
@@ -381,11 +383,11 @@ pub async fn verify(
                 },
             )
             .await;
-            return render_error_page("link invalid or expired", None);
+            return render_error_page(PublicErrorMessage::SessionExpired);
         }
         Err(e) => {
             tracing::error!(error = %e, "magic_link::redeem failed");
-            return render_error_page("internal error", Some("redeem"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
     if redeemed.purpose != magic_link::LOGIN_PURPOSE {
@@ -404,7 +406,7 @@ pub async fn verify(
             },
         )
         .await;
-        return render_error_page("link invalid or expired", None);
+        return render_error_page(PublicErrorMessage::SessionExpired);
     }
 
     // 2. Same-device predicate.
@@ -421,7 +423,7 @@ pub async fn verify(
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic_link find-or-create failed");
-            return render_error_page("internal error", Some("user lookup"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -464,7 +466,7 @@ async fn same_device_finish(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "magic sessions::create failed");
-            return render_error_page("internal error", Some("session"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -484,7 +486,7 @@ async fn same_device_finish(
         Ok(r) => r.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "magic accept_login failed");
-            return render_error_page("internal error", Some("hydra"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -531,7 +533,7 @@ async fn cross_device_show_code(
         completions_store::create(db, csrf_nonce, &code, email, login_challenge, 300).await
     {
         tracing::error!(error = %e, "magic_completions insert failed");
-        return render_error_page("internal error", Some("completion"));
+        return render_error_page(PublicErrorMessage::ContactSupport);
     }
 
     audit::emit(
@@ -587,7 +589,7 @@ pub async fn complete(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_error_page("invalid request", Some("csrf"));
+        return render_error_page(PublicErrorMessage::InvalidRequest);
     }
 
     // 2. Per-IP throttle before touching the completion row. This limits
@@ -613,14 +615,13 @@ pub async fn complete(
             )
             .await;
             return render_error_page_with_status(
-                "too many attempts, try again later",
-                None,
+                PublicErrorMessage::PleaseTryAgain,
                 StatusCode::TOO_MANY_REQUESTS,
             );
         }
         Err(e) => {
             tracing::error!(error = %e, bucket = %rate_key, "magic complete rate-limit consume failed");
-            return render_error_page("internal error", Some("rate limit"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     }
 
@@ -640,11 +641,11 @@ pub async fn complete(
                     },
                 )
                 .await;
-                return render_error_page("code invalid or expired", None);
+                return render_error_page(PublicErrorMessage::SessionExpired);
             }
             Err(completions_store::ConsumeError::Store(e)) => {
                 tracing::error!(error = %e, "magic_completions consume failed");
-                return render_error_page("internal error", Some("complete"));
+                return render_error_page(PublicErrorMessage::ContactSupport);
             }
         };
 
@@ -663,7 +664,7 @@ pub async fn complete(
             },
         )
         .await;
-        return render_error_page("session mismatch", None);
+        return render_error_page(PublicErrorMessage::SessionExpired);
     }
 
     // 5. Find-or-create the user (must succeed — the redeem path
@@ -672,7 +673,7 @@ pub async fn complete(
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic complete find-or-create failed");
-            return render_error_page("internal error", Some("user lookup"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -693,7 +694,7 @@ pub async fn complete(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "magic complete sessions::create failed");
-            return render_error_page("internal error", Some("session"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -713,7 +714,7 @@ pub async fn complete(
         Ok(r) => r.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "magic complete accept_login failed");
-            return render_error_page("internal error", Some("hydra"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -744,22 +745,21 @@ pub async fn complete(
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-fn render_error_page(error: &str, error_description: Option<&str>) -> HttpResponse {
-    render_error_page_with_status(error, error_description, StatusCode::OK)
+fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
+    render_error_page_with_status(message, StatusCode::OK)
 }
 
 fn render_error_page_with_status(
-    error: &str,
-    error_description: Option<&str>,
+    message: PublicErrorMessage,
     status: StatusCode,
 ) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
     let body = page
         .render()
-        .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)

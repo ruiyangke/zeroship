@@ -42,7 +42,7 @@ use crate::sessions::login as session_cookie;
 use crate::store::identities::Identity;
 use crate::store::{identities, sessions, users};
 use crate::store::users::UserRow;
-use crate::ui::{ErrorPage, LinkedIdentity, MePage};
+use crate::ui::{ErrorPage, LinkedIdentity, MePage, PublicErrorMessage};
 
 // ─── /me GET ─────────────────────────────────────────────────────────────
 
@@ -114,7 +114,7 @@ pub async fn unlink(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_error_page("invalid request", Some("csrf"));
+        return render_error_page(PublicErrorMessage::InvalidRequest);
     }
 
     // 2. Session.
@@ -127,7 +127,7 @@ pub async fn unlink(
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "identities::list_for_user failed");
-            return render_error_page("internal error", Some("db"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -176,7 +176,7 @@ pub async fn unlink(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "identities::unlink failed");
-            return render_error_page("internal error", Some("db"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -289,7 +289,7 @@ fn render_me(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "render me.html failed");
-            return render_error_page("internal error", Some("template render"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -305,12 +305,14 @@ fn redirect_to_login() -> HttpResponse {
     r.finish()
 }
 
-fn render_error_page(error: &str, error_description: Option<&str>) -> HttpResponse {
+fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
-    let body = page.render().unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+    let body = page
+        .render()
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut r = HttpResponse::Ok();
     r.content_type("text/html; charset=utf-8");
     r.body(body)

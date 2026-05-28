@@ -39,7 +39,7 @@ use crate::store::{sessions, users};
 use crate::ui::oauth_stash::{
     clear_stash_cookie, google_stash_cookie_name, parse_stash_cookie, set_stash_cookie, OAuthStash,
 };
-use crate::ui::ErrorPage;
+use crate::ui::{ErrorPage, PublicErrorMessage};
 
 const PROVIDER: &str = "google";
 const ACR_GOOGLE: &str = "urn:zeroship:google";
@@ -77,7 +77,7 @@ pub async fn start(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "google start_authorize_url failed");
-            return render_error("google sign-in unavailable", Some(&e.to_string()));
+            return render_error(PublicErrorMessage::PleaseTryAgain);
         }
     };
 
@@ -136,7 +136,7 @@ pub async fn callback(
             },
         )
         .await;
-        return render_error_clearing("invalid request", Some("stash missing"), &cfg);
+        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
     let Some(stash) = OAuthStash::decode(&stash_blob, cfg.stash_signing_key.as_bytes()) else {
         audit::emit(
@@ -150,7 +150,7 @@ pub async fn callback(
             },
         )
         .await;
-        return render_error_clearing("invalid request", Some("stash invalid"), &cfg);
+        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
 
     // Upstream rejection path — Google returned `?error=...` (e.g. user
@@ -172,18 +172,14 @@ pub async fn callback(
             },
         )
         .await;
-        return render_error_clearing(
-            "google sign-in cancelled",
-            query.error_description.as_deref(),
-            &cfg,
-        );
+        return render_error_clearing(PublicErrorMessage::PleaseTryAgain, &cfg);
     }
 
     let Some(code) = query.code.as_deref() else {
-        return render_error_clearing("invalid request", Some("code missing"), &cfg);
+        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
     let Some(state_param) = query.state.as_deref() else {
-        return render_error_clearing("invalid request", Some("state missing"), &cfg);
+        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
 
     // CSRF guard.
@@ -199,7 +195,7 @@ pub async fn callback(
             },
         )
         .await;
-        return render_error_clearing("invalid request", Some("state mismatch"), &cfg);
+        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     }
 
     // Token exchange + ID-token verify.
@@ -226,7 +222,7 @@ pub async fn callback(
                 },
             )
             .await;
-            return render_error_clearing("google sign-in failed", Some(&e.to_string()), &cfg);
+            return render_error_clearing(PublicErrorMessage::PleaseTryAgain, &cfg);
         }
     };
 
@@ -261,7 +257,7 @@ pub async fn callback(
                 },
             )
             .await;
-            return render_error_clearing("internal error", Some("link"), &cfg);
+            return render_error_clearing(PublicErrorMessage::ContactSupport, &cfg);
         }
     };
 
@@ -323,7 +319,7 @@ pub async fn callback(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "sessions::create failed");
-            return render_error_clearing("internal error", Some("session"), &cfg);
+            return render_error_clearing(PublicErrorMessage::ContactSupport, &cfg);
         }
     };
 
@@ -340,7 +336,7 @@ pub async fn callback(
         Ok(r) => r.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "accept_login failed");
-            return render_error_clearing("internal error", Some("hydra"), &cfg);
+            return render_error_clearing(PublicErrorMessage::ContactSupport, &cfg);
         }
     };
 
@@ -401,14 +397,14 @@ fn build_resolved_profile<'a>(
     }
 }
 
-fn render_error(error: &str, error_description: Option<&str>) -> HttpResponse {
+fn render_error(message: PublicErrorMessage) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
     let body = page
         .render()
-        .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
@@ -418,17 +414,16 @@ fn render_error(error: &str, error_description: Option<&str>) -> HttpResponse {
 /// callback path so an aborted dance doesn't leave a stale stash on the
 /// browser.
 fn render_error_clearing(
-    error: &str,
-    error_description: Option<&str>,
+    message: PublicErrorMessage,
     cfg: &AuthConfig,
 ) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
     let body = page
         .render()
-        .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.header(

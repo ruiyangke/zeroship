@@ -24,7 +24,7 @@ use crate::mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::store::users;
-use crate::ui::{ErrorPage, SignupPage};
+use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
 
 #[derive(Debug, Deserialize)]
 pub struct SignupQuery {
@@ -145,11 +145,11 @@ pub async fn post(
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             tracing::error!(error = %e, "signup password hash failed");
-            return render_error_page("internal error", Some("hash"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
         Err(_) => {
             tracing::error!("signup hash spawn_blocking panicked");
-            return render_error_page("internal error", Some("hash"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -274,14 +274,14 @@ fn render_signup_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResp
     resp.body(body)
 }
 
-fn render_error_page(error: &str, error_description: Option<&str>) -> HttpResponse {
+fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
     let body = page
         .render()
-        .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)

@@ -319,7 +319,7 @@ mod tests {
     /// test (no live server, no DB).
     #[test]
     fn reset_query_accepts_token_param_and_rejects_legacy_t_param() {
-        fn parse(q: &str) -> Result<ResetQuery, serde::de::value::Error> {
+        fn parse(q: &str) -> std::result::Result<ResetQuery, serde::de::value::Error> {
             use serde::Deserialize;
             // Mirror the way ntex's Query<T> extractor decodes the URL
             // query: pairs → MapDeserializer → T.

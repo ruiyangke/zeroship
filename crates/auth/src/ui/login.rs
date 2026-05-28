@@ -27,7 +27,7 @@ use crate::identity::password;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
-use crate::ui::LoginPage;
+use crate::ui::{LoginPage, PublicErrorMessage};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
@@ -52,7 +52,7 @@ pub async fn get(
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(error = %e, challenge = %challenge, "login challenge fetch failed");
-            return render_error("invalid login request", Some(&e.to_string()));
+            return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
 
@@ -68,7 +68,7 @@ pub async fn get(
             Ok(resp) => return redirect(&resp.redirect_to),
             Err(e) => {
                 tracing::error!(error = %e, "accept_login (skip path) failed");
-                return render_error("internal error", Some(&e.to_string()));
+                return render_error(PublicErrorMessage::ContactSupport);
             }
         }
     }
@@ -87,7 +87,7 @@ pub async fn get(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "render login.html failed");
-            return render_error("internal error", Some("template render"));
+            return render_error(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -106,10 +106,15 @@ fn redirect(to: &str) -> HttpResponse {
     resp.finish()
 }
 
-fn render_error(error: &str, error_description: Option<&str>) -> HttpResponse {
+fn render_error(message: PublicErrorMessage) -> HttpResponse {
     use crate::ui::ErrorPage;
-    let page = ErrorPage { error, error_description };
-    let body = page.render().unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+    let page = ErrorPage {
+        message,
+        error_code: message.error_code(),
+    };
+    let body = page
+        .render()
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
@@ -159,7 +164,7 @@ pub async fn post(
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(error = %e, challenge = %challenge, "POST /login: get_login failed");
-            return render_error("invalid login request", Some(&e.to_string()));
+            return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
     let client_id = info.client.client_id.clone();
@@ -227,7 +232,7 @@ pub async fn post(
             }
             Err(e) => {
                 tracing::error!(error = %e, bucket = %key, "rate-limit consume failed");
-                return render_error("internal error", Some("rate limit"));
+                return render_error(PublicErrorMessage::ContactSupport);
             }
         }
     }
@@ -237,7 +242,7 @@ pub async fn post(
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "users::find_by_email failed");
-            return render_error("internal error", Some("db"));
+            return render_error(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -335,7 +340,7 @@ pub async fn post(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "sessions::create failed");
-            return render_error("internal error", Some("session"));
+            return render_error(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -358,7 +363,7 @@ pub async fn post(
         Ok(resp) => resp.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "accept_login failed");
-            return render_error("internal error", Some("hydra"));
+            return render_error(PublicErrorMessage::ContactSupport);
         }
     };
 
