@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
     tracing::info!(driver = %cfg.mailer, "mailer ready");
 
-    // 6. Spawn in-process cron tasks (P6-U1: JWK rotation). Detached on
+    // 6. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
     //    the listener is bound. `Arc<Client>` is shared with the server

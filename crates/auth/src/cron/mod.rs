@@ -6,10 +6,12 @@
 //! `--cron-tick-secs` for staging environments) and coordinate via
 //! `auth.cron_state` rows when they need durable "last-ran" tracking.
 //!
-//! P6-U1 ships `jwk_rotation`; P6-U2 adds `audit_retention`.
+//! P6-U1 ships `jwk_rotation`; P6-U2 adds `audit_retention`;
+//! `token_sweep` drops expired one-shot token rows after their grace window.
 
 pub mod audit_retention;
 pub mod jwk_rotation;
+pub mod token_sweep;
 
 use std::sync::Arc;
 
@@ -33,10 +35,16 @@ pub fn spawn_all(
     })
     .detach();
 
-    let db_audit = db;
+    let db_audit = db.clone();
     let cfg_audit = cfg;
     compio::runtime::spawn(async move {
         audit_retention::run(db_audit, cfg_audit).await;
+    })
+    .detach();
+
+    let db_token_sweep = db;
+    compio::runtime::spawn(async move {
+        token_sweep::run(db_token_sweep).await;
     })
     .detach();
 }
