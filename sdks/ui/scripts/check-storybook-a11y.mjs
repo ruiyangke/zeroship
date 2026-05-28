@@ -341,6 +341,21 @@ const stories = [
   "components-navigationmenu--keyboard-nav",
   "components-navigationmenu--disabled",
   "components-navigationmenu--rtl",
+  // Slice 14: Accordion + Collapsible.
+  "components-accordion--basic",
+  "components-accordion--multiple-open",
+  "components-accordion--collapsible",
+  "components-accordion--controlled",
+  "components-accordion--with-default-value",
+  "components-accordion--disabled",
+  "components-accordion--horizontal",
+  "components-accordion--rtl",
+  "components-accordion--rich-content",
+  "components-collapsible--basic",
+  "components-collapsible--controlled",
+  "components-collapsible--disabled",
+  "components-collapsible--inside-card",
+  "components-collapsible--rtl",
 ];
 
 async function launchBrowser() {
