@@ -132,7 +132,10 @@ function priorityForVariant(variant: ToastVariant): "low" | "high" {
  * can call `manager.close(id)`; reusing the id Base UI mints internally
  * would require a second `add` round-trip. The counter is sufficient
  * for in-process uniqueness — toasts are short-lived UI state, not
- * cross-tab durable. */
+ * cross-tab durable. Module-level scope is intentional: ids stay unique
+ * across multiple `<Toast.Provider>` mounts inside the same process
+ * (which is what tests do when they tear down + re-mount providers per
+ * spec), without any cross-tab persistence claim. */
 let toastIdCounter = 0;
 function generateToastId(): string {
   toastIdCounter += 1;
