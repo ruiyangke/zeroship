@@ -13,11 +13,13 @@
 //!   code-entry form. The check-email page already embeds the same form
 //!   inside a `<details>` toggle; this route exists for direct entry.
 //!
-//! - **GET `/magic/verify?token=<token>&login_challenge=<…>`** — redeem the
-//!   magic-link token. If the redeeming browser presents the matching
+//! - **GET `/magic/verify?token=<token>&login_challenge=<…>`** — handle the
+//!   magic-link click. If the redeeming browser has no magic CSRF cookie,
+//!   render a continue interstitial without touching the token. Otherwise
+//!   redeem the token. If the redeeming browser presents the matching
 //!   `__Host-zsidp_magic_csrf` cookie (same-device path) → mint session,
 //!   `accept_login`, 302 to hydra. If the cookie is missing or different
-//!   (cross-device) → generate a 6-digit code, persist it under the
+//!   on POST, or different on GET (cross-device) → generate a 6-digit code, persist it under the
 //!   magic-link's CSRF nonce, render the code on the redeeming device.
 //!
 //! - **POST `/magic/complete`** — the cross-device completion form. The
@@ -353,9 +355,16 @@ pub struct MagicVerifyQuery {
     pub login_challenge: String,
 }
 
-/// `/magic/verify` — the link the user clicks in the email. Atomically
-/// redeem the token, then branch on whether the redeeming browser
-/// presents the matching `__Host-zsidp_magic_csrf` cookie:
+#[derive(Debug, Deserialize)]
+pub struct MagicVerifyContinueForm {
+    pub token: String,
+    pub login_challenge: String,
+}
+
+/// GET `/magic/verify` — the link the user clicks in the email. A
+/// cookie-less GET may be a mail-client scanner, so it returns an
+/// explicit continue interstitial without reserving or consuming the
+/// token. Browsers that present a magic CSRF cookie continue directly.
 ///
 /// - **Same-device**: mint a session, `accept_login`, 302 to hydra.
 /// - **Cross-device**: generate a 6-digit code, persist it in
@@ -369,12 +378,60 @@ pub async fn verify(
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     admin: ntex::web::types::State<HydraAdmin>,
 ) -> HttpResponse {
+    let cookie_nonce = magic_cookie_nonce(&req, cfg.insecure_dev);
+    if cookie_nonce.is_none() {
+        return render_verify_continue(&query.token, &query.login_challenge);
+    }
+
+    verify_redeem(
+        db.as_ref(),
+        &admin,
+        &cfg,
+        &query.token,
+        &query.login_challenge,
+        cookie_nonce,
+    )
+    .await
+}
+
+/// POST `/magic/verify` — user-confirmed continuation for a cookie-less
+/// magic-link click. This is the only cookie-less path allowed to reserve
+/// the token and create a cross-device completion row.
+#[allow(clippy::future_not_send)]
+pub async fn verify_post(
+    req: HttpRequest,
+    form: ntex::web::types::Form<MagicVerifyContinueForm>,
+    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    admin: ntex::web::types::State<HydraAdmin>,
+) -> HttpResponse {
+    let cookie_nonce = magic_cookie_nonce(&req, cfg.insecure_dev);
+    verify_redeem(
+        db.as_ref(),
+        &admin,
+        &cfg,
+        &form.token,
+        &form.login_challenge,
+        cookie_nonce,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn verify_redeem(
+    db: &compio_postgres::Client,
+    admin: &HydraAdmin,
+    cfg: &AuthConfig,
+    token: &str,
+    login_challenge: &str,
+    cookie_nonce: Option<String>,
+) -> HttpResponse {
     // 1. Redeem.
-    let redeemed = match magic_link::redeem_pending(db.as_ref(), &query.token).await {
+    let redeemed = match magic_link::redeem_pending(db, token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             audit::emit(
-                db.as_ref(),
+                db,
                 &AuditEvent {
                     event_type: "magic_redeem",
                     outcome: "failure",
@@ -388,7 +445,7 @@ pub async fn verify(
         }
         Err(magic_link::RedeemError::InFlight) => {
             audit::emit(
-                db.as_ref(),
+                db,
                 &AuditEvent {
                     event_type: "magic_redeem",
                     outcome: "failure",
@@ -410,12 +467,11 @@ pub async fn verify(
             purpose = %redeemed.purpose,
             "magic_link::redeem_pending returned non-login purpose"
         );
-        if let Err(e) = magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash).await
-        {
+        if let Err(e) = magic_link::clear_consume_pending(db, &redeemed.token_hash).await {
             tracing::warn!(error = %e, "magic_link clear pending after unexpected purpose failed");
         }
         audit::emit(
-            db.as_ref(),
+            db,
             &AuditEvent {
                 event_type: "magic_redeem",
                 outcome: "failure",
@@ -429,32 +485,22 @@ pub async fn verify(
     }
 
     // 2. Same-device predicate.
-    let cookie_header = req
-        .headers()
-        .get(COOKIE)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let cookie_nonce = parse_magic_csrf_cookie(cookie_header, cfg.insecure_dev);
     let same_device = cookie_nonce.as_deref() == Some(redeemed.csrf_nonce.as_str());
 
     // 3. Find-or-create the user.
-    let user_id = match find_or_create_magic_user(db.as_ref(), &redeemed.email).await {
+    let user_id = match find_or_create_magic_user(db, &redeemed.email).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic_link find-or-create failed");
-            if let Err(e) =
-                magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash).await
-            {
+            if let Err(e) = magic_link::clear_consume_pending(db, &redeemed.token_hash).await {
                 tracing::warn!(error = %e, "magic_link clear pending after user failure failed");
             }
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
-        if let Err(clear_err) =
-            magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash).await
-        {
+    if let Err(e) = eligibility::check_user_eligible(db, user_id).await {
+        if let Err(clear_err) = magic_link::clear_consume_pending(db, &redeemed.token_hash).await {
             tracing::warn!(error = %clear_err, "magic_link clear pending after eligibility failure failed");
         }
         if !e.is_account_state() {
@@ -462,7 +508,7 @@ pub async fn verify(
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
         audit::emit(
-            db.as_ref(),
+            db,
             &AuditEvent {
                 event_type: "magic_redeem",
                 outcome: "failure",
@@ -478,25 +524,67 @@ pub async fn verify(
 
     if same_device {
         same_device_finish(
-            db.as_ref(),
-            &admin,
-            &cfg,
+            db,
+            admin,
+            cfg,
             &redeemed.token_hash,
             user_id,
-            &query.login_challenge,
+            login_challenge,
         )
         .await
     } else {
         cross_device_show_code(
-            db.as_ref(),
+            db,
             &redeemed.token_hash,
             user_id,
             &redeemed.email,
             &redeemed.csrf_nonce,
-            &query.login_challenge,
+            login_challenge,
         )
         .await
     }
+}
+
+fn magic_cookie_nonce(req: &HttpRequest, insecure_dev: bool) -> Option<String> {
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    parse_magic_csrf_cookie(cookie_header, insecure_dev)
+}
+
+fn render_verify_continue(token: &str, login_challenge: &str) -> HttpResponse {
+    let token = html_attr_escape(token);
+    let login_challenge = html_attr_escape(login_challenge);
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Continue sign-in</title></head>\
+         <body><main><h1>Continue sign-in</h1>\
+         <p>Click Continue to complete sign-in on this device.</p>\
+         <form method=\"post\" action=\"/magic/verify\">\
+         <input type=\"hidden\" name=\"token\" value=\"{token}\">\
+         <input type=\"hidden\" name=\"login_challenge\" value=\"{login_challenge}\">\
+         <button type=\"submit\">Continue</button>\
+         </form></main></body></html>"
+    );
+    let mut resp = HttpResponse::Ok();
+    resp.content_type("text/html; charset=utf-8");
+    resp.body(body)
+}
+
+fn html_attr_escape(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Same-device path: mint session, `accept_login`, 302 to hydra.

@@ -101,7 +101,9 @@ pub fn configure(
                 web::resource("/magic/await").route(web::get().to(ui::magic::await_code)),
             )
             .service(
-                web::resource("/magic/verify").route(web::get().to(ui::magic::verify)),
+                web::resource("/magic/verify")
+                    .route(web::get().to(ui::magic::verify))
+                    .route(web::post().to(ui::magic::verify_post)),
             )
             .service(
                 web::resource("/magic/complete")
