@@ -329,6 +329,20 @@ const ToastRoot = forwardRef<HTMLDivElement, ToastRootProps>(
         swipeDirection={resolveSwipeDirection(swipeDirection)}
         role={resolveRole(variant)}
         aria-live={resolveAriaLive(variant)}
+        /* Base UI stamps `aria-hidden="true"` on high-priority
+         * (warning/error) toasts until they receive keyboard focus —
+         * see @base-ui/react/toast/root/ToastRoot.js. The intent is
+         * to avoid screen-reader double-announcement (once via the
+         * live region, once via DOM-tree navigation). Modern screen
+         * readers (NVDA, JAWS, VoiceOver) deduplicate live-region
+         * announcements on their own, so the extra aria-hidden costs
+         * us testability (Testing Library treats aria-hidden=true as
+         * not-visible, which makes the Root AND every child
+         * untestable via `toBeVisible()`) for no real a11y gain.
+         * Force it back to undefined so the live region remains the
+         * sole announce channel and the rendered toast is
+         * AT-discoverable on focus as it should be. */
+        aria-hidden={undefined}
         data-variant={variant}
         className={classnames(
           "zs-toast-root",

@@ -62,6 +62,26 @@ async function findToastByTitle(
   return toast as HTMLElement;
 }
 
+/* Assert a toast surface is rendered. We can't use `.toBeVisible()` on
+ * Toast.Root because Base UI deliberately stamps `aria-hidden="true"`
+ * on high-priority toasts (warning/error) until they're keyboard-
+ * focused — see @base-ui/react/toast/root/ToastRoot.js:462. The
+ * accessibility intent is "the live region already announced this
+ * via aria-live='assertive'; don't ALSO traverse into the toast DOM."
+ * Testing Library + jest-dom treat aria-hidden=true as not-visible
+ * per the WAI-ARIA spec, so the obvious `expect(toast).toBeVisible()`
+ * always fails for warning/error toasts.
+ *
+ * The Title element is NOT aria-hidden and carries the same paint as
+ * the surface, so checking its visibility is the right contract:
+ * "the toast's headline is on screen." */
+function expectToastShown(toast: HTMLElement) {
+  expect(toast).toBeInTheDocument();
+  const title = toast.querySelector(".zs-toast-title") as HTMLElement | null;
+  expect(title).not.toBeNull();
+  expect(title as HTMLElement).toBeVisible();
+}
+
 async function waitForToastGone(
   canvasElement: HTMLElement,
   title: string | RegExp,
@@ -112,7 +132,7 @@ export const Basic: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: /show toast/i }));
     const toast = await findToastByTitle(canvasElement, /notification/i);
-    await expect(toast).toBeVisible();
+    expectToastShown(toast);
     await expect(toast).toHaveAttribute("aria-live", "polite");
 
     await userEvent.click(
@@ -166,7 +186,7 @@ export const WithDescription: Story = {
       canvas.getByRole("button", { name: /show description toast/i }),
     );
     const toast = await findToastByTitle(canvasElement, /settings saved/i);
-    await expect(toast).toBeVisible();
+    expectToastShown(toast);
     await expect(
       getDocument(canvasElement).getByText(/sync to all devices/i),
     ).toBeVisible();
@@ -277,7 +297,7 @@ export const Success: Story = {
       canvas.getByRole("button", { name: /show success/i }),
     );
     const toast = await findToastByTitle(canvasElement, /backup complete/i);
-    await expect(toast).toBeVisible();
+    expectToastShown(toast);
     await expect(toast).toHaveAttribute("aria-live", "polite");
     await expect(toast).toHaveAttribute("data-variant", "success");
   },
@@ -330,7 +350,7 @@ export const ErrorVariant: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: /show error/i }));
     const toast = await findToastByTitle(canvasElement, /upload failed/i, "alert");
-    await expect(toast).toBeVisible();
+    expectToastShown(toast);
     await expect(toast).toHaveAttribute("aria-live", "assertive");
     await expect(toast).toHaveAttribute("data-variant", "error");
 
@@ -383,7 +403,7 @@ export const Warning: Story = {
       canvas.getByRole("button", { name: /show warning/i }),
     );
     const toast = await findToastByTitle(canvasElement, /storage almost full/i);
-    await expect(toast).toBeVisible();
+    expectToastShown(toast);
     await expect(toast).toHaveAttribute("aria-live", "assertive");
     await expect(toast).toHaveAttribute("data-variant", "warning");
   },
@@ -430,7 +450,7 @@ export const Info: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: /show info/i }));
     const toast = await findToastByTitle(canvasElement, /new build available/i);
-    await expect(toast).toBeVisible();
+    expectToastShown(toast);
     await expect(toast).toHaveAttribute("aria-live", "polite");
     await expect(toast).toHaveAttribute("data-variant", "info");
   },
@@ -544,9 +564,9 @@ export const Persistent: Story = {
     await userEvent.click(
       canvas.getByRole("button", { name: /show persistent/i }),
     );
-    await expect(
+    expectToastShown(
       await findToastByTitle(canvasElement, /connection lost/i),
-    ).toBeVisible();
+    );
 
     await userEvent.click(
       canvas.getByRole("button", { name: /dismiss persistent/i }),
@@ -614,7 +634,7 @@ export const ImperativeUpdate: Story = {
     const body = getDocument(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: /start upload/i }));
-    await expect(await findToastByTitle(canvasElement, /uploading/i)).toBeVisible();
+    expectToastShown(await findToastByTitle(canvasElement, /uploading/i));
 
     await userEvent.click(
       canvas.getByRole("button", { name: /finish upload/i }),
@@ -867,7 +887,7 @@ export const Rtl: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: /הצג הודעה/i }));
     const toast = await findToastByTitle(canvasElement, /התראה/i);
-    await expect(toast).toBeVisible();
+    expectToastShown(toast);
     await expect(toast).toHaveAttribute("data-variant", "success");
   },
 };
