@@ -39,6 +39,11 @@ impl Bucket {
         capacity: 30.0,
         refill_per_sec: 5.0 / 60.0,
     };
+    /// OAuth account-link password confirmation: 4 attempts / 15 minutes.
+    pub const LINK_ATTEMPT: Self = Self {
+        capacity: 4.0,
+        refill_per_sec: 4.0 / 900.0,
+    };
     /// Signup per-IP: 5 requests / minute, capacity 10.
     pub const SIGNUP_IP: Self = Self {
         capacity: 10.0,

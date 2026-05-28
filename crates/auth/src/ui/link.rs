@@ -41,6 +41,7 @@ use crate::hydra_client::HydraAdmin;
 use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{identities, sessions, users};
 use crate::ui::{ErrorPage, LinkPage, PublicErrorMessage};
@@ -157,6 +158,44 @@ pub async fn post(
     let Some(pending) = PendingLink::decode(&form.token, cfg.stash_signing_key.as_bytes()) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
+
+    let ip = req
+        .connection_info()
+        .remote()
+        .unwrap_or("0.0.0.0")
+        .to_string();
+    let link_attempt_key = format!("link_attempt:{}:{ip}", pending.user_id);
+    match ratelimit::consume(db.as_ref(), &link_attempt_key, Bucket::LINK_ATTEMPT).await {
+        Ok(RateLimitDecision::Allowed) => {}
+        Ok(RateLimitDecision::Throttled(_)) => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "oauth_link_failed",
+                    outcome: "failure",
+                    user_id: Some(&pending.user_id),
+                    auth_method: Some(&pending.provider),
+                    detail: json!({
+                        "reason": "rate_limited",
+                        "bucket": link_attempt_key,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return render_link_error_with_status(
+                &form.token,
+                &pending,
+                &cfg,
+                "too many attempts, try again later",
+                ntex::http::StatusCode::TOO_MANY_REQUESTS,
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, bucket = %link_attempt_key, "link rate-limit consume failed");
+            return render_error_page(PublicErrorMessage::ContactSupport);
+        }
+    }
 
     // 3. Look up the user. The pending token's HMAC guarantees the
     // `user_id` came from us — but the row might have been deleted between
@@ -382,6 +421,22 @@ fn render_link_error(
     cfg: &AuthConfig,
     err: &str,
 ) -> HttpResponse {
+    render_link_error_with_status(
+        token,
+        pending,
+        cfg,
+        err,
+        ntex::http::StatusCode::UNAUTHORIZED,
+    )
+}
+
+fn render_link_error_with_status(
+    token: &str,
+    pending: &PendingLink,
+    cfg: &AuthConfig,
+    err: &str,
+    status: ntex::http::StatusCode,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = LinkPage {
         token,
@@ -393,7 +448,7 @@ fn render_link_error(
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
-    let mut resp = HttpResponse::build(ntex::http::StatusCode::UNAUTHORIZED);
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
