@@ -139,6 +139,9 @@ pub struct AppState {
     /// client registration/deletion; Hydra remains the source of truth for
     /// generated client secrets.
     pub hydra_admin_url: String,
+    /// Expected audience for OAuth access tokens accepted by the control
+    /// plane's bearer-token introspection path.
+    pub expected_oauth_audience: String,
     /// Static Cedar policy bundle for control-plane authorization.
     /// Parsed once at boot; per-token policies are loaded by the authz
     /// evaluator only when a token-bearing request needs them.

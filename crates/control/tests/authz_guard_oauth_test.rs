@@ -59,13 +59,17 @@ struct MockHydra {
 
 impl MockHydra {
     fn active(sub: impl ToString, scope: &str) -> Self {
+        Self::active_with_aud(sub, scope, vec!["control.zeroship.ai"])
+    }
+
+    fn active_with_aud(sub: impl ToString, scope: &str, aud: Vec<&str>) -> Self {
         Self::fixed(
             200,
             json!({
                 "active": true,
                 "sub": sub.to_string(),
                 "scope": scope,
-                "aud": ["https://api.zeroship.ai"],
+                "aud": aud,
                 "client_id": "oauth-test-client",
                 "exp": unix_now_secs() + 3600,
             }),
@@ -243,6 +247,7 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         oidc_rp,
         auth_pg: Arc::new(auth_pg_client),
         hydra_admin_url: hydra.base.clone(),
+        expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
@@ -381,6 +386,28 @@ async fn inactive_oauth_token_returns_401() {
     let user_id = Uuid::new_v4();
     let hydra = MockHydra::inactive();
     let Some(fx) = fixture_with_hydra(&hydra, "inactive", user_id).await else {
+        return;
+    };
+    let app = init_control!(fx);
+
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let body: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("wrong audience json");
+    assert_eq!(body["error"], "wrong_audience");
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn oauth_token_wrong_audience_returns_401() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active_with_aud(user_id, "apps:read", vec!["gateway"]);
+    let Some(fx) = fixture_with_hydra(&hydra, "wrong-audience", user_id).await else {
         return;
     };
     let app = init_control!(fx);

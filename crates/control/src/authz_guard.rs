@@ -175,6 +175,13 @@ async fn oauth_guard_from_bearer(
     if !result.active {
         return Err(web::error::ErrorUnauthorized("inactive oauth token").into());
     }
+    if !result.aud.as_ref().is_some_and(|audiences| {
+        audiences
+            .iter()
+            .any(|audience| audience == &state.expected_oauth_audience)
+    }) {
+        return Err(unauthorized_json("wrong_audience"));
+    }
 
     let sub = result
         .sub
@@ -195,4 +202,12 @@ async fn oauth_guard_from_bearer(
         mfa_age_seconds: None,
         request_ip,
     }))
+}
+
+fn unauthorized_json(error: &'static str) -> web::Error {
+    web::error::InternalError::from_response(
+        error,
+        HttpResponse::Unauthorized().json(&json!({ "error": error })),
+    )
+    .into()
 }

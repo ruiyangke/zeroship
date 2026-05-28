@@ -239,6 +239,12 @@ async fn main() -> std::io::Result<()> {
             value
         }
     };
+    let expected_oauth_audience = arg_or_env(
+        &args,
+        "--oauth-audience",
+        "OAUTH_AUDIENCE",
+        "control.zeroship.ai",
+    );
 
     if !insecure_dev {
         let mut missing = Vec::new();
@@ -375,6 +381,7 @@ async fn main() -> std::io::Result<()> {
         oidc_rp,
         auth_pg,
         hydra_admin_url: hydra_admin_url_value,
+        expected_oauth_audience,
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
         pat_issuer,
