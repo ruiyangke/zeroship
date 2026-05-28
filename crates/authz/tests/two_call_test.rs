@@ -226,7 +226,7 @@ fn audit_decision_recorded() {
 
         let rows = pg
             .query(
-                "SELECT action, resource_type, resource_id, decision \
+                "SELECT action, resource_type, resource_id, decision, matched_policies \
              FROM control.authz_decisions \
              WHERE user_id = $1 AND action = $2 AND resource_type = 'app' AND resource_id = $3 \
              ORDER BY occurred_at DESC \
@@ -247,6 +247,11 @@ fn audit_decision_recorded() {
             Some(fixture.app_id.clone())
         );
         assert_eq!(row.get::<_, String>("decision"), "allow");
+        let matched_policies: Vec<String> = row.get("matched_policies");
+        assert!(
+            !matched_policies.is_empty(),
+            "audit row should record Cedar matched policy ids"
+        );
 
         fixture.cleanup(&pg).await;
     });
