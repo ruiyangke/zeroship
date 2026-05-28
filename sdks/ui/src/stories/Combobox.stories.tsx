@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useEffect, useRef, useState } from "react";
 import { Form } from "@base-ui/react/form";
 import { Button, Combobox, Field } from "../components";
@@ -47,6 +48,7 @@ export const Basic: Story = {
             value={value}
             onValueChange={(v) => setValue(v)}
             placeholder="Type a fruit"
+            aria-label="Fruit search"
             items={FRUITS as unknown as string[]}
             data-testid="combobox-basic"
           >
@@ -63,6 +65,19 @@ export const Basic: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const input = canvas.getByRole("combobox", { name: /fruit search/i });
+
+    await userEvent.click(input);
+    await userEvent.type(input, "man");
+    await waitFor(() =>
+      expect(body.getByRole("option", { name: /mango/i })).toBeVisible(),
+    );
+    await userEvent.click(body.getByRole("option", { name: /mango/i }));
+    await waitFor(() => expect(input).toHaveValue("mango"));
   },
 };
 
@@ -88,6 +103,7 @@ export const Multiple: Story = {
             value={value}
             onValueChange={(v) => setValue(v)}
             placeholder="Pick fruits"
+            aria-label="Fruit multiselect"
             items={FRUITS as unknown as string[]}
             data-testid="combobox-multiple"
           >
@@ -100,6 +116,26 @@ export const Multiple: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const input = canvas.getByRole("combobox", { name: /fruit multiselect/i });
+    const [removeApple] = canvas.getAllByRole("button", { name: /^remove$/i });
+
+    await expect(canvas.getByText("apple")).toBeVisible();
+    await userEvent.click(removeApple);
+    await waitFor(() =>
+      expect(canvas.queryByText("apple")).not.toBeInTheDocument(),
+    );
+
+    await userEvent.click(input);
+    await userEvent.type(input, "pea");
+    await waitFor(() =>
+      expect(body.getByRole("option", { name: /peach/i })).toBeVisible(),
+    );
+    await userEvent.click(body.getByRole("option", { name: /peach/i }));
+    await waitFor(() => expect(canvas.getByText("peach")).toBeVisible());
   },
 };
 
@@ -216,6 +252,7 @@ export const Empty: Story = {
             value={value}
             onValueChange={(v) => setValue(v)}
             placeholder="Type 'xyz'"
+            aria-label="Empty fruit search"
             items={FRUITS as unknown as string[]}
             data-testid="combobox-empty"
             empty={
@@ -233,6 +270,15 @@ export const Empty: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const input = canvas.getByRole("combobox", { name: /empty fruit search/i });
+
+    await userEvent.click(input);
+    await userEvent.type(input, "xyz");
+    await waitFor(() => expect(body.getByText(/no fruits match/i)).toBeVisible());
   },
 };
 
@@ -317,6 +363,13 @@ export const Required: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const submit = canvas.getByRole("button", { name: /submit/i });
+
+    await userEvent.click(submit);
+    await waitFor(() => expect(canvas.getByText("Pick a fruit.")).toBeVisible());
   },
 };
 
@@ -433,6 +486,7 @@ export const Disabled: Story = {
         <Combobox
           disabled
           placeholder="Disabled"
+          aria-label="Disabled fruit"
           items={FRUITS as unknown as string[]}
           data-testid="combobox-disabled"
         >
@@ -445,6 +499,15 @@ export const Disabled: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const input = canvas.getByRole("combobox", { name: /disabled fruit/i });
+
+    await expect(input).toBeDisabled();
+    await userEvent.click(input);
+    await expect(body.queryByRole("option", { name: /apple/i })).not.toBeInTheDocument();
+  },
 };
 
 /* ─── 10. RTL ───────────────────────────────────────────────────────── */
@@ -520,4 +583,11 @@ export const AriaPropagation: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("combobox", { name: /pick a fruit/i });
+
+    await userEvent.type(input, "ap");
+    await expect(input).toHaveValue("ap");
+  },
 };

@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useState } from "react";
 import { Field, Toggle } from "../components";
 
@@ -95,6 +96,30 @@ export const AllStates: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const [unpressed, pressed, disabled, disabledPressed] =
+      canvas.getAllByRole("button", { name: /^bold$/i });
+
+    await expect(unpressed).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(unpressed);
+    await waitFor(() =>
+      expect(unpressed).toHaveAttribute("aria-pressed", "true"),
+    );
+
+    await expect(pressed).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(pressed);
+    await waitFor(() =>
+      expect(pressed).toHaveAttribute("aria-pressed", "false"),
+    );
+
+    await expect(disabled).toHaveAttribute("data-disabled");
+    await expect(disabledPressed).toHaveAttribute("data-disabled");
+    await userEvent.click(disabled);
+    await userEvent.click(disabledPressed);
+    await expect(disabled).toHaveAttribute("aria-pressed", "false");
+    await expect(disabledPressed).toHaveAttribute("aria-pressed", "true");
+  },
 };
 
 /* ─── 2. AllSizes — pressed standalone in sm/md/lg ─────────────────── */
@@ -243,6 +268,53 @@ export const WithIconAndText: Story = {
   ),
 };
 
+/* ─── 5b. AsChild — host element swap ──────────────────────────────── */
+export const AsChild: Story = {
+  name: "As child",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "`asChild` swaps the host element while preserving Toggle state " +
+          "and styling. The anchor path exercises Base UI's non-native " +
+          "button handlers; the child-button path keeps native button " +
+          "semantics.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Toggle as child">
+      <div className="zs-story-cell">
+        <Toggle asChild>
+          <a href="#filters">Open filters</a>
+        </Toggle>
+      </div>
+      <div className="zs-story-cell">
+        <Toggle asChild>
+          <button type="button">Native child</button>
+        </Toggle>
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const anchorToggle = canvas.getByRole("button", { name: /open filters/i });
+    const nativeToggle = canvas.getByRole("button", { name: /native child/i });
+
+    await expect(anchorToggle.tagName).toBe("A");
+    await userEvent.click(anchorToggle);
+    await waitFor(() =>
+      expect(anchorToggle).toHaveAttribute("aria-pressed", "true"),
+    );
+
+    await expect(nativeToggle.tagName).toBe("BUTTON");
+    await userEvent.click(nativeToggle);
+    await waitFor(() =>
+      expect(nativeToggle).toHaveAttribute("aria-pressed", "true"),
+    );
+  },
+};
+
 /* ─── 6. Disabled — both states side by side ───────────────────────── */
 export const Disabled: Story = {
   parameters: {
@@ -325,6 +397,19 @@ export const TwoSegmentsSingle: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const day = canvas.getByRole("button", { name: /day/i });
+    const week = canvas.getByRole("button", { name: /week/i });
+
+    await expect(day).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(week);
+    await waitFor(() => expect(week).toHaveAttribute("aria-pressed", "true"));
+    await expect(day).toHaveAttribute("aria-pressed", "false");
+
+    await userEvent.click(week);
+    await waitFor(() => expect(week).toHaveAttribute("aria-pressed", "false"));
   },
 };
 
@@ -438,6 +523,25 @@ export const MultipleMode: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const bold = canvas.getByRole("button", { name: /bold/i });
+    const italic = canvas.getByRole("button", { name: /italic/i });
+    const underline = canvas.getByRole("button", { name: /underline/i });
+
+    await userEvent.click(bold);
+    await userEvent.click(italic);
+    await userEvent.click(underline);
+    await waitFor(() => expect(bold).toHaveAttribute("aria-pressed", "true"));
+    await expect(italic).toHaveAttribute("aria-pressed", "true");
+    await expect(underline).toHaveAttribute("aria-pressed", "true");
+
+    await userEvent.click(italic);
+    await waitFor(() =>
+      expect(italic).toHaveAttribute("aria-pressed", "false"),
+    );
+    await expect(bold).toHaveAttribute("aria-pressed", "true");
+  },
 };
 
 /* ─── 10. AllSizes (group) — sm / md / lg stacked groups ───────────── */
@@ -528,6 +632,17 @@ export const Horizontal: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const list = canvas.getByRole("button", { name: /list/i });
+    const grid = canvas.getByRole("button", { name: /grid/i });
+
+    await userEvent.click(list);
+    await userEvent.keyboard("{ArrowRight}");
+    await waitFor(() => expect(grid).toHaveFocus());
+    await userEvent.keyboard(" ");
+    await waitFor(() => expect(grid).toHaveAttribute("aria-pressed", "true"));
+  },
 };
 
 /* ─── 12. Vertical — stacked segments for settings panels ──────────── */
@@ -686,6 +801,17 @@ export const DisabledGroup: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const day = canvas.getByRole("button", { name: /day/i });
+    const week = canvas.getByRole("button", { name: /week/i });
+
+    await expect(day).toHaveAttribute("data-disabled");
+    await expect(week).toHaveAttribute("data-disabled");
+    await userEvent.click(day);
+    await expect(day).toHaveAttribute("aria-pressed", "false");
+    await expect(week).toHaveAttribute("aria-pressed", "true");
+  },
 };
 
 /* ─── 16. RTL — Hebrew labels, segments flow right-to-left ─────────── */
@@ -827,4 +953,13 @@ export const RoleToolbarLock: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const toolbar = canvas.getByRole("toolbar", { name: /view mode/i });
+    const grid = canvas.getByRole("button", { name: /grid/i });
+
+    await expect(toolbar).toHaveAttribute("role", "toolbar");
+    await userEvent.click(grid);
+    await waitFor(() => expect(grid).toHaveAttribute("aria-pressed", "true"));
+  },
 };

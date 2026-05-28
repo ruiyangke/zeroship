@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useEffect, useRef, useState } from "react";
 import { Form } from "@base-ui/react/form";
 import { Button, Field, Select } from "../components";
@@ -51,6 +52,18 @@ export const Basic: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("combobox", { name: /pick a fruit/i });
+
+    await userEvent.click(trigger);
+    await waitFor(() =>
+      expect(body.getByRole("option", { name: /orange/i })).toBeVisible(),
+    );
+    await userEvent.click(body.getByRole("option", { name: /orange/i }));
+    await waitFor(() => expect(trigger).toHaveTextContent(/orange/i));
+  },
 };
 
 /* ─── 2. WithGroups ─────────────────────────────────────────────────── */
@@ -90,6 +103,17 @@ export const WithGroups: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("combobox", { name: /pick a fruit/i });
+
+    await userEvent.click(trigger);
+    await waitFor(() => expect(body.getByText(/citrus/i)).toBeVisible());
+    await expect(body.getByText(/berries/i)).toBeVisible();
+    await userEvent.click(body.getByRole("option", { name: /lemon/i }));
+    await waitFor(() => expect(trigger).toHaveTextContent(/lemon/i));
   },
 };
 
@@ -223,6 +247,20 @@ export const Multiple: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("combobox", { name: /pick fruits/i });
+
+    await userEvent.click(trigger);
+    await waitFor(() =>
+      expect(body.getByRole("option", { name: /apple/i })).toBeVisible(),
+    );
+    await userEvent.click(body.getByRole("option", { name: /apple/i }));
+    await userEvent.click(body.getByRole("option", { name: /orange/i }));
+    await waitFor(() => expect(trigger).toHaveTextContent(/apple/i));
+    await expect(trigger).toHaveTextContent(/orange/i);
+  },
 };
 
 /* ─── 6. Disabled ───────────────────────────────────────────────────── */
@@ -250,6 +288,15 @@ export const Disabled: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("combobox", { name: /disabled/i });
+
+    await expect(trigger).toHaveAttribute("data-disabled");
+    await userEvent.click(trigger);
+    await expect(body.queryByRole("option", { name: /apple/i })).not.toBeInTheDocument();
+  },
 };
 
 /* ─── 7. WithLabel ──────────────────────────────────────────────────── */
@@ -332,6 +379,13 @@ export const Required: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const submit = canvas.getByRole("button", { name: /submit/i });
+
+    await userEvent.click(submit);
+    await waitFor(() => expect(canvas.getByText("Pick a fruit.")).toBeVisible());
   },
 };
 

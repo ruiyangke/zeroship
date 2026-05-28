@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Form } from "@base-ui/react/form";
 import { CheckboxGroup } from "@base-ui/react/checkbox-group";
@@ -62,6 +63,33 @@ export const AllStates: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const unchecked = canvas.getByRole("checkbox", { name: /^unchecked$/i });
+    const checked = canvas.getByRole("checkbox", { name: /^checked$/i });
+    const disabled = canvas.getByRole("checkbox", { name: /^disabled$/i });
+    const readOnly = canvas.getByRole("checkbox", { name: /^read only$/i });
+
+    await expect(unchecked).toHaveAttribute("aria-checked", "false");
+    await userEvent.click(unchecked);
+    await waitFor(() =>
+      expect(unchecked).toHaveAttribute("aria-checked", "true"),
+    );
+
+    await expect(checked).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(checked);
+    await waitFor(() =>
+      expect(checked).toHaveAttribute("aria-checked", "false"),
+    );
+
+    await expect(disabled).toHaveAttribute("data-disabled");
+    await userEvent.click(disabled);
+    await expect(disabled).toHaveAttribute("aria-checked", "false");
+
+    await expect(readOnly).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(readOnly);
+    await expect(readOnly).toHaveAttribute("aria-checked", "true");
+  },
 };
 
 /* ─── 2. All sizes ─────────────────────────────────────────────────── */
@@ -278,6 +306,19 @@ export const Required: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const terms = canvas.getByRole("checkbox", { name: /i agree/i });
+    const submit = canvas.getByRole("button", { name: /continue/i });
+
+    await userEvent.click(submit);
+    await waitFor(() =>
+      expect(canvas.getByText(/you must agree before continuing/i)).toBeVisible(),
+    );
+
+    await userEvent.click(terms);
+    await expect(terms).toHaveAttribute("aria-checked", "true");
+  },
 };
 
 /* ─── 6b. Required + Field.Error — POST-SUBMIT VISUAL EVIDENCE ────────
@@ -432,6 +473,25 @@ export const IndeterminateParent: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const allColors = canvas.getByRole("checkbox", { name: /all colors/i });
+    const green = canvas.getByRole("checkbox", { name: /green/i });
+    const blue = canvas.getByRole("checkbox", { name: /blue/i });
+
+    await expect(allColors).toHaveAttribute("aria-checked", "mixed");
+    await userEvent.click(allColors);
+    await waitFor(() =>
+      expect(allColors).toHaveAttribute("aria-checked", "true"),
+    );
+    await expect(green).toHaveAttribute("aria-checked", "true");
+    await expect(blue).toHaveAttribute("aria-checked", "true");
+
+    await userEvent.click(green);
+    await waitFor(() =>
+      expect(allColors).toHaveAttribute("aria-checked", "mixed"),
+    );
+  },
 };
 
 /* ─── 8. Inside a form ─────────────────────────────────────────────── */
@@ -475,6 +535,23 @@ export const InsideForm: Story = {
         </form>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const publicProfile = canvas.getByRole("checkbox", {
+      name: /make profile public/i,
+    });
+    const beta = canvas.getByRole("checkbox", { name: /enable beta features/i });
+    const save = canvas.getByRole("button", { name: /save/i });
+    const result = canvas.getByText(/^submitted:/i);
+
+    await expect(publicProfile).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(save);
+    await waitFor(() => expect(result).toHaveTextContent("public=on"));
+
+    await userEvent.click(beta);
+    await userEvent.click(save);
+    await waitFor(() => expect(result).toHaveTextContent("beta=on"));
   },
 };
 
@@ -596,6 +673,22 @@ export const IndeterminateFromGroup: Story = {
           </CheckboxGroup>
         </div>
       </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const allColors = canvas.getByRole("checkbox", { name: /all colors/i });
+    const green = canvas.getByRole("checkbox", { name: /green/i });
+    const blue = canvas.getByRole("checkbox", { name: /blue/i });
+
+    await expect(allColors).toHaveAttribute("aria-checked", "mixed");
+    await userEvent.click(green);
+    await waitFor(() =>
+      expect(allColors).toHaveAttribute("aria-checked", "mixed"),
+    );
+    await userEvent.click(blue);
+    await waitFor(() =>
+      expect(allColors).toHaveAttribute("aria-checked", "true"),
     );
   },
 };

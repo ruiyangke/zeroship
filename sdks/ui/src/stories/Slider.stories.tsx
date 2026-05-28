@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useState } from "react";
 import { Field, Slider } from "../components";
 
@@ -43,6 +44,16 @@ export const Basic: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const slider = canvas.getByRole("slider", { name: /volume/i });
+
+    await expect(slider).toHaveAttribute("aria-valuenow", "50");
+    await userEvent.tab();
+    await expect(slider).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}{ArrowRight}{ArrowRight}{ArrowRight}{ArrowRight}");
+    await waitFor(() => expect(slider).toHaveAttribute("aria-valuenow", "55"));
+  },
 };
 
 /* ─── 2. Range — two thumbs ────────────────────────────────────────── */
@@ -74,6 +85,25 @@ export const Range: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const minThumb = canvas.getByRole("slider", {
+      name: /price range \(1 of 2\)/i,
+    });
+    const maxThumb = canvas.getByRole("slider", {
+      name: /price range \(2 of 2\)/i,
+    });
+
+    await expect(minThumb).toHaveAttribute("aria-valuenow", "20");
+    await expect(maxThumb).toHaveAttribute("aria-valuenow", "60");
+    await userEvent.tab();
+    await expect(minThumb).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await waitFor(() =>
+      expect(minThumb).toHaveAttribute("aria-valuenow", "21"),
+    );
+    await expect(maxThumb).toHaveAttribute("aria-valuenow", "60");
+  },
 };
 
 /* ─── 3. All sizes ─────────────────────────────────────────────────── */
@@ -213,6 +243,17 @@ export const WithValue: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const slider = canvas.getByRole("slider", { name: /brightness/i });
+
+    await expect(slider).toHaveAttribute("aria-valuenow", "60");
+    await userEvent.tab();
+    await expect(slider).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await waitFor(() => expect(slider).toHaveAttribute("aria-valuenow", "61"));
+    await expect(canvas.getByText(/61%/i)).toBeVisible();
+  },
 };
 
 /* ─── 7. Disabled ──────────────────────────────────────────────────── */
@@ -236,6 +277,14 @@ export const Disabled: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const locked = canvas.getByRole("slider", { name: /locked slider/i });
+    const inherited = canvas.getByRole("slider", { name: /speed/i });
+
+    await expect(locked).toBeDisabled();
+    await expect(inherited).toBeDisabled();
+  },
 };
 
 /* ─── 8. With label (Field cascade) ────────────────────────────────── */
@@ -325,6 +374,16 @@ export const Vertical: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const slider = canvas.getByRole("slider", { name: /vertical volume/i });
+
+    await expect(slider).toHaveAttribute("aria-valuenow", "60");
+    await userEvent.tab();
+    await expect(slider).toHaveFocus();
+    await userEvent.keyboard("{ArrowUp}");
+    await waitFor(() => expect(slider).toHaveAttribute("aria-valuenow", "61"));
+  },
 };
 
 /* ─── 10. Aria propagation regression (Slice-7 review item 2) ──────── */
@@ -487,4 +546,14 @@ export const RTL: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const slider = canvas.getByRole("slider", { name: /עוצמת קול/i });
+
+    await expect(slider).toHaveAttribute("aria-valuenow", "60");
+    await userEvent.tab();
+    await expect(slider).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await waitFor(() => expect(slider).toHaveAttribute("aria-valuenow", "59"));
+  },
 };

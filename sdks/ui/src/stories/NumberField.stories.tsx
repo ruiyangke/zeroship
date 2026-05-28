@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { Field, NumberField } from "../components";
 
 const meta: Meta<typeof NumberField> = {
@@ -37,6 +38,21 @@ export const Basic: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("spinbutton", { name: /quantity/i });
+    const increment = canvas.getByRole("button", { name: /increment/i });
+    const decrement = canvas.getByRole("button", { name: /decrement/i });
+
+    await expect(input).toHaveAttribute("aria-valuenow", "42");
+    await userEvent.click(increment);
+    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "43"));
+    await userEvent.click(input);
+    await userEvent.keyboard("{ArrowDown}");
+    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "42"));
+    await userEvent.click(decrement);
+    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "41"));
+  },
 };
 
 /* ─── 2. AllSizes ──────────────────────────────────────────────────── */
@@ -140,6 +156,20 @@ export const MinMaxStep: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("spinbutton", { name: /bounded quantity/i });
+    const increment = canvas.getByRole("button", { name: /increment/i });
+    const decrement = canvas.getByRole("button", { name: /decrement/i });
+
+    await userEvent.click(increment);
+    await userEvent.click(increment);
+    await userEvent.click(increment);
+    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "65"));
+
+    await userEvent.click(decrement);
+    await waitFor(() => expect(input).toHaveAttribute("aria-valuenow", "60"));
+  },
 };
 
 /* ─── 5. Currency (snapOnStep + Intl format) ───────────────────────── */
@@ -314,6 +344,17 @@ export const Required: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("spinbutton", {
+      name: /required quantity \(empty on submit\)/i,
+    });
+
+    await waitFor(() =>
+      expect(canvas.getByText(/quantity is required/i)).toBeVisible(),
+    );
+    await expect(input).toHaveAttribute("aria-invalid", "true");
+  },
 };
 
 function RequiredInvalidInline() {
@@ -415,6 +456,16 @@ export const BareFocus: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const input = canvas.getByRole("spinbutton", { name: /quantity/i });
+    const root = input.closest(".zs-number-field");
+
+    await userEvent.click(input);
+    await waitFor(() => expect(root).toHaveAttribute("data-focused"));
+    await userEvent.tab();
+    await waitFor(() => expect(root).not.toHaveAttribute("data-focused"));
+  },
 };
 
 /* ─── 12. Forced-colors hover (Slice-7 review item 3) ──────────────── */
@@ -528,4 +579,3 @@ export const RTL: Story = {
     </div>
   ),
 };
-

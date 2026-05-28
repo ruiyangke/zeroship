@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useEffect, useRef, useState } from "react";
 import { Form } from "@base-ui/react/form";
 import { Button, Field, Radio } from "../components";
@@ -46,6 +47,19 @@ export const TwoOptions: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const email = canvas.getByRole("radio", { name: /email/i });
+    const sms = canvas.getByRole("radio", { name: /text message/i });
+
+    await expect(email).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(sms);
+    await waitFor(() => expect(sms).toHaveAttribute("aria-checked", "true"));
+    await expect(email).toHaveAttribute("aria-checked", "false");
+
+    await userEvent.keyboard("{ArrowUp}");
+    await waitFor(() => expect(email).toHaveAttribute("aria-checked", "true"));
   },
 };
 
@@ -247,6 +261,18 @@ export const Required: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const submit = canvas.getByRole("button", { name: /continue/i });
+    const business = canvas.getByRole("radio", { name: /business/i });
+
+    await userEvent.click(submit);
+    await waitFor(() =>
+      expect(canvas.getByText(/pick one to continue/i)).toBeVisible(),
+    );
+    await userEvent.click(business);
+    await expect(business).toHaveAttribute("aria-checked", "true");
+  },
 };
 
 /* ─── 7b. Required + Field.Error — POST-SUBMIT VISUAL EVIDENCE ────────
@@ -347,6 +373,17 @@ export const Disabled: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const free = canvas.getByRole("radio", { name: /^free$/i });
+    const pro = canvas.getByRole("radio", { name: /^pro$/i });
+
+    await expect(free).toHaveAttribute("data-disabled");
+    await expect(pro).toHaveAttribute("data-disabled");
+    await expect(pro).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(free);
+    await expect(pro).toHaveAttribute("aria-checked", "true");
+  },
 };
 
 /* ─── 9. Disabled item only ────────────────────────────────────────── */
@@ -382,6 +419,20 @@ export const DisabledItem: Story = {
         </div>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const free = canvas.getByRole("radio", { name: /^free$/i });
+    const pro = canvas.getByRole("radio", { name: /^pro$/i });
+    const enterprise = canvas.getByRole("radio", { name: /enterprise/i });
+
+    await expect(pro).toHaveAttribute("aria-checked", "true");
+    await expect(enterprise).toHaveAttribute("data-disabled");
+    await userEvent.click(enterprise);
+    await expect(pro).toHaveAttribute("aria-checked", "true");
+
+    await userEvent.click(free);
+    await waitFor(() => expect(free).toHaveAttribute("aria-checked", "true"));
   },
 };
 
