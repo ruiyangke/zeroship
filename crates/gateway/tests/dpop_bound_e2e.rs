@@ -242,6 +242,7 @@ fn build_state(
             // scheme `http` — matching what we sign client-side over
             // the loopback test server (which has no TLS).
             insecure_dev: true,
+            trust_proxy: false,
             public_url: GATEWAY_PUBLIC_URL.into(),
         },
         routes: RouteCache::new(),

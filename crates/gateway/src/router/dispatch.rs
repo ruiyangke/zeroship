@@ -94,9 +94,7 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 ///
 /// * `RateLimitPer::Ip` — request's client IP. Falls back to "unknown"
 ///   when the connection has no peer address (test fixtures, exotic
-///   transports). Reads from `connection_info().remote()` so a trusted
-///   proxy's `X-Forwarded-For` is honored when present (matches what
-///   the gateway already does for scheme detection a few lines below).
+///   transports). Uses the peer socket unless `trust_proxy` is enabled.
 /// * `RateLimitPer::Session` — the `__Host-zs_app_session` cookie
 ///   value (the per-origin session id the gateway mints on
 ///   `/__zs/auth/callback`). Anonymous callers (no cookie) fall back
@@ -109,28 +107,43 @@ pub(crate) fn compute_bucket_id(
     req: &HttpRequest,
     per: zeroship_bundle::RateLimitPer,
     insecure_dev: bool,
+    trust_proxy: bool,
 ) -> String {
     use zeroship_bundle::RateLimitPer;
     match per {
-        RateLimitPer::Ip => req
-            .connection_info()
-            .remote()
-            .unwrap_or("unknown")
-            .to_string(),
+        RateLimitPer::Ip => client_ip(req, trust_proxy),
         RateLimitPer::Session => {
             let cookie = req
                 .headers()
                 .get("cookie")
                 .and_then(|v| v.to_str().ok());
-            extract_session_cookie(cookie, insecure_dev).unwrap_or_else(|| {
-                req.connection_info()
-                    .remote()
-                    .unwrap_or("unknown")
-                    .to_string()
-            })
+            extract_session_cookie(cookie, insecure_dev)
+                .unwrap_or_else(|| client_ip(req, trust_proxy))
         }
         RateLimitPer::App => "app".to_string(),
     }
+}
+
+pub(crate) fn client_ip(req: &HttpRequest, trust_proxy: bool) -> String {
+    let peer_ip = req.peer_addr().map(|addr| addr.ip().to_string());
+    let conn = req.connection_info();
+    let proxy_remote = if trust_proxy { conn.remote() } else { None };
+    client_ip_from(peer_ip, proxy_remote, trust_proxy)
+}
+
+fn client_ip_from(
+    peer_ip: Option<String>,
+    proxy_remote: Option<&str>,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy {
+        if let Some(remote) = proxy_remote {
+            if !remote.is_empty() {
+                return remote.to_string();
+            }
+        }
+    }
+    peer_ip.unwrap_or_else(|| "unknown".to_string())
 }
 
 /// True when the request carries the RFC 6455 upgrade headers we
@@ -172,7 +185,11 @@ pub(crate) fn is_websocket_upgrade(req: &HttpRequest) -> bool {
 ///      always hashes to the same bucket; reconnects vary).
 ///   4. Client IP (last-resort fallback for unauthenticated callers
 ///      hitting subscriptions on `publicly_accessible` resources).
-pub(crate) fn subscription_affinity_key(req: &HttpRequest, insecure_dev: bool) -> String {
+pub(crate) fn subscription_affinity_key(
+    req: &HttpRequest,
+    insecure_dev: bool,
+    trust_proxy: bool,
+) -> String {
     if let Some(auth) = req.headers().get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(rest) = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")) {
             if let Some(sub) = jwt_subject_unverified(rest.trim()) {
@@ -194,11 +211,7 @@ pub(crate) fn subscription_affinity_key(req: &HttpRequest, insecure_dev: bool) -
     {
         return format!("wsk:{key}");
     }
-    let ip = req
-        .connection_info()
-        .remote()
-        .unwrap_or("unknown")
-        .to_string();
+    let ip = client_ip(req, trust_proxy);
     format!("ip:{ip}")
 }
 
@@ -542,7 +555,12 @@ async fn execute_resource_tree(
             .lookup_resource_key(dispatch_path)
             .unwrap_or_default();
         let rule_idx = resource_key_hash(&resource_key);
-        let bucket_id = compute_bucket_id(&req, rl.per, state.config.insecure_dev);
+        let bucket_id = compute_bucket_id(
+            &req,
+            rl.per,
+            state.config.insecure_dev,
+            state.config.trust_proxy,
+        );
         if let Err(resp) = state.per_rule_rate_limits.check(
             app_id,
             rule_idx,
@@ -1027,7 +1045,11 @@ async fn handle_subscription_dispatch(
     // Affinity selection — exercised even when the proxy itself
     // returns 501, so tests against this path can verify that the
     // hashing decision is correct.
-    let affinity = subscription_affinity_key(&_req, state.config.insecure_dev);
+    let affinity = subscription_affinity_key(
+        &_req,
+        state.config.insecure_dev,
+        state.config.trust_proxy,
+    );
     let (idx, _worker_url) = state.hash_ring.select_with_affinity(app_id, &affinity);
     state.hash_ring.acquire(idx);
     // Release immediately — see comment below; we never actually
@@ -1495,6 +1517,7 @@ mod tests {
                 hydra_public: String::new(),
                 auth_public: String::new(),
                 insecure_dev: true,
+                trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
             },
             routes: crate::sync::RouteCache::new(),
@@ -1532,7 +1555,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zs_app_session=abc")
             .to_http_request();
-        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false), "app");
+        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, false), "app");
     }
 
     #[test]
@@ -1540,8 +1563,29 @@ mod tests {
         // The TestRequest has no peer addr → "unknown" sentinel keeps
         // the bucket lookup well-defined instead of crashing.
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Ip, false);
+        let id = compute_bucket_id(&req, RateLimitPer::Ip, false, false);
         assert_eq!(id, "unknown");
+    }
+
+    #[test]
+    fn client_ip_ignores_forwarded_headers_without_trust_proxy() {
+        assert_eq!(
+            client_ip_from(Some("192.0.2.10".to_string()), Some("203.0.113.77"), false),
+            "192.0.2.10"
+        );
+    }
+
+    #[test]
+    fn client_ip_honors_proxy_headers_only_with_trust_proxy() {
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "203.0.113.77")
+            .to_http_request();
+
+        assert_eq!(client_ip(&req, true), "203.0.113.77");
+        assert_eq!(
+            compute_bucket_id(&req, RateLimitPer::Ip, false, true),
+            "203.0.113.77"
+        );
     }
 
     #[test]
@@ -1552,7 +1596,7 @@ mod tests {
                 "other=foo; __Host-zs_app_session=abc123; trailing=x",
             )
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session, false);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
         assert_eq!(id, "abc123");
     }
 
@@ -1563,7 +1607,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "other=foo")
             .to_http_request();
-        let id = compute_bucket_id(&req, RateLimitPer::Session, false);
+        let id = compute_bucket_id(&req, RateLimitPer::Session, false, false);
         assert_eq!(id, "unknown");
     }
 
@@ -1590,10 +1634,10 @@ mod tests {
         let app_id = uuid::Uuid::nil();
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
         let req = ntex::web::test::TestRequest::default().to_http_request();
-        let bucket_id = compute_bucket_id(&req, rl.per, false);
+        let bucket_id = compute_bucket_id(&req, rl.per, false, false);
         assert!(reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok());
         // Second call with the same request → same bucket id → drained.
-        let bucket_id2 = compute_bucket_id(&req, rl.per, false);
+        let bucket_id2 = compute_bucket_id(&req, rl.per, false, false);
         assert_eq!(bucket_id, bucket_id2, "bucket id is stable for same request");
         let err = reg
             .check(&app_id, 0, rl.per, &bucket_id2, &rl)
@@ -1616,8 +1660,8 @@ mod tests {
         let req_b = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zs_app_session=user-b")
             .to_http_request();
-        let bucket_a = compute_bucket_id(&req_a, rl.per, false);
-        let bucket_b = compute_bucket_id(&req_b, rl.per, false);
+        let bucket_a = compute_bucket_id(&req_a, rl.per, false, false);
+        let bucket_b = compute_bucket_id(&req_b, rl.per, false, false);
         assert_eq!(bucket_a, "user-a");
         assert_eq!(bucket_b, "user-b");
         assert!(reg.check(&app_id, 0, rl.per, &bucket_a, &rl).is_ok());
@@ -2089,7 +2133,7 @@ mod tests {
             .header("authorization", format!("Bearer {jwt}"))
             .header("cookie", "__Host-zs_app_session=cookieval")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req, false), "sub:alice");
+        assert_eq!(subscription_affinity_key(&req, false, false), "sub:alice");
     }
 
     #[test]
@@ -2097,7 +2141,7 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zs_app_session=tok123")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req, false), "sess:tok123");
+        assert_eq!(subscription_affinity_key(&req, false, false), "sess:tok123");
     }
 
     #[test]
@@ -2105,11 +2149,11 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("sec-websocket-key", "abc==")
             .to_http_request();
-        assert_eq!(subscription_affinity_key(&req, false), "wsk:abc==");
+        assert_eq!(subscription_affinity_key(&req, false, false), "wsk:abc==");
 
         let req = ntex::web::test::TestRequest::default().to_http_request();
         // No headers, no remote — falls back to "ip:unknown".
-        assert_eq!(subscription_affinity_key(&req, false), "ip:unknown");
+        assert_eq!(subscription_affinity_key(&req, false, false), "ip:unknown");
     }
 
     /// Session-affinity invariant: the same `(app_id, principal)` always

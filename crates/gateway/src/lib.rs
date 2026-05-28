@@ -62,6 +62,11 @@ pub struct GateConfig {
     /// / docker-compose. Production MUST set this to false — the
     /// `__Host-` cookie prefix RFC 6265bis §4.1.3 requires `Secure`.
     pub insecure_dev: bool,
+    /// Opt-in proxy header trust for client IP derivation. When false
+    /// (default), per-IP rate limits and subscription affinity ignore
+    /// `Forwarded` / `X-Forwarded-For` / similar headers and use only
+    /// the peer socket address. Set true only behind a trusted L7 proxy.
+    pub trust_proxy: bool,
     /// Public URL the gateway advertises as its own `iss` in
     /// gateway-issued wrapper tokens (Phase 8 U3). In production this is
     /// `https://api.zeroship.ai`; in dev it can be left at the default.

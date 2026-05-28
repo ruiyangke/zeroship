@@ -80,6 +80,9 @@ async fn main() -> std::io::Result<()> {
     );
     let insecure_dev = arg_or_env(&args, "--insecure-dev", "INSECURE_DEV", "false")
         .eq_ignore_ascii_case("true");
+    let trust_proxy =
+        args.iter().any(|a| a == "--trust-proxy")
+            || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
     let signing_key_path = arg_or_env(
         &args,
         "--signing-key-file",
@@ -249,6 +252,7 @@ async fn main() -> std::io::Result<()> {
             hydra_public,
             auth_public,
             insecure_dev,
+            trust_proxy,
             public_url,
         },
         routes: sync::RouteCache::new(),

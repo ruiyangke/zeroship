@@ -121,6 +121,7 @@ fn build_state_with_auth_public(with_issuer: bool, auth_public: &str) -> Arc<Gat
             hydra_public: String::new(),
             auth_public: auth_public.to_string(),
             insecure_dev: true,
+            trust_proxy: false,
             public_url: "https://api.zeroship.ai".into(),
         },
         routes: RouteCache::new(),
