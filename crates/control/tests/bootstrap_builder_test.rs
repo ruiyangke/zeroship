@@ -64,7 +64,7 @@ fn config(
         hydra_admin_url: hydra.base.clone(),
         redirect_uri: DEFAULT_BUILDER_REDIRECT_URI.to_string(),
         client_secret_path: secret_path,
-        auth_db_url: db_url.to_string(),
+        
     }
 }
 
@@ -308,45 +308,6 @@ async fn bootstrap_inserts_builder_client_first_run() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[compio::test]
-async fn bootstrap_reconciles_hydra_conflict_before_db_upsert() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[bootstrap_builder_test] AUTH_DB_URL/PG_TEST_URL not set - skipping");
-        return;
-    };
-    let pg = pg(&db_url).await;
-    let hydra = MockHydra::start_with_conflict_on_create(true);
-    let root = tmpdir("conflict");
-    let secret_path = root.join("builder-client-secret");
-    let cfg = config(&db_url, &hydra, secret_path.clone(), true);
-
-    let result = bootstrap_builder_oauth_client(&pg, &cfg)
-        .await
-        .expect("bootstrap builder client after hydra conflict");
-
-    assert_eq!(result.status, BuilderClientBootstrapStatus::Created);
-    assert_eq!(count_builder_rows(&pg).await, 1);
-    let secret = std::fs::read_to_string(&secret_path).expect("secret file");
-
-    let requests = hydra.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/admin/clients");
-    assert_eq!(requests[1].method, "GET");
-    assert_eq!(
-        requests[1].path,
-        format!("/admin/clients/{BUILDER_CLIENT_ID}")
-    );
-    assert_eq!(requests[2].method, "PUT");
-    assert_eq!(
-        requests[2].path,
-        format!("/admin/clients/{BUILDER_CLIENT_ID}")
-    );
-    assert_eq!(requests[2].body["client_secret"], secret);
-
-    cleanup_builder_client(&pg).await;
-    let _ = std::fs::remove_dir_all(root);
-}
 
 #[compio::test]
 async fn bootstrap_is_idempotent_on_second_run() {

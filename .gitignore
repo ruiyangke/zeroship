@@ -37,3 +37,6 @@ yarn.lock
 # Go build artefacts for nomad-driver-ch (the driver has its own .gitignore
 # but be defensive — `make build` drops binaries here).
 nomad-driver-ch/bin/
+
+# Claude Code local state
+.claude/
