@@ -1,109 +1,19 @@
-mod auth;
-mod backchannel_logout;
-mod blob_cache;
-mod compiled;
-mod dispatch;
-mod enforce;
-mod error;
-mod idempotency;
-mod oidc_rp;
-mod proxy;
-mod router;
-mod sessions;
-mod signing;
-mod sync;
-mod wrapper_token;
+//! `zeroship-gate` binary entry point. Thin shell over the
+//! [`zeroship_gateway`] library: parse flags, build [`GateState`],
+//! register routes, run.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntex::web;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_gateway::{
+    backchannel_logout, blob_cache, dpop_exchange, enforce, idempotency, oidc_rp, proxy, router,
+    signing, sync, wrapper_token, GateConfig, GateState,
+};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[allow(missing_debug_implementations)]
-pub struct GateConfig {
-    pub control_url: String,
-    pub control_key: String,
-    pub worker_urls: Vec<String>,
-    pub poll_interval_secs: u64,
-    pub auth_secret: String,
-    /// Shared secret between gateway and workers. Used to bearer-auth the
-    /// `/dispatch` endpoints and HMAC-sign the `ZeroShip-User` header so
-    /// workers can verify forwarded identity was not forged by an attacker
-    /// with direct network access. Empty disables both checks (dev only).
-    pub worker_key: String,
-    /// Upstream URL for Ory Hydra's public OIDC endpoints. The gateway
-    /// forwards `auth.zeroship.ai/{oauth2,.well-known}/*` (plus
-    /// `/userinfo`) here. Compose-internal default points at the
-    /// `hydra` service on its 4444 port.
-    pub hydra_public: String,
-    /// Upstream URL for `crates/auth` — the login/signup UI, OAuth2
-    /// consent handlers, and webhook surfaces. Everything on the
-    /// `auth.zeroship.ai` host that is NOT an OIDC protocol endpoint
-    /// is forwarded here. Defaults to the compose-internal `auth`
-    /// service; will be wired through once the service joins compose
-    /// (Phase 3 Unit U11).
-    pub auth_public: String,
-    /// Dev-only flag. When true the gateway emits cookies without the
-    /// `Secure` attribute so the localhost HTTP flow works in `pnpm dev`
-    /// / docker-compose. Production MUST set this to false — the
-    /// `__Host-` cookie prefix RFC 6265bis §4.1.3 requires `Secure`.
-    pub insecure_dev: bool,
-}
-
-#[allow(missing_debug_implementations)]
-pub struct GateState {
-    pub config: GateConfig,
-    pub routes: sync::RouteCache,
-    pub hash_ring: proxy::HashRing,
-    pub rate_limiters: enforce::RateLimitRegistry,
-    /// Per-rule rate limits declared in `Action::Worker.rate_limit`.
-    /// Layered on top of the global per-app `rate_limiters` — runs
-    /// FIRST in the request path so a rule that's already saturated
-    /// short-circuits without the global bucket lookup.
-    pub per_rule_rate_limits: enforce::PerRuleRateLimitRegistry,
-    pub concurrency: enforce::ConcurrencyRegistry,
-    /// Content-addressed blob store. The gateway fetches asset bytes
-    /// here directly instead of round-tripping through the control
-    /// plane.
-    pub blob_store: Arc<dyn BlobStore>,
-    /// In-memory LRU cache in front of `blob_store`.
-    pub blob_cache: blob_cache::BlobCache,
-    /// On-disk LRU cache underneath `blob_cache`. Large blobs that
-    /// do not fit in memory land here, and `serve_static_hit` mmaps
-    /// them on serve so the userspace → kernel copy goes away.
-    pub disk_cache: blob_cache::DiskBlobCache,
-    /// KV-backed dedupe table for idempotent RPC mutations. The
-    /// gateway consults this before forwarding `idempotent: true`
-    /// mutations to the worker; on a hit it returns the stored
-    /// response without touching V8.
-    pub idempotency_store: std::sync::Arc<dyn idempotency::IdempotencyStore>,
-    /// OIDC relying-party engine for hosted creator apps. Drives the
-    /// per-origin authorize-redirect → callback → session-mint flow
-    /// (proposal §2.2 + §10.2). One RP instance services every
-    /// `{app}.zeroship.ai` host — the per-app `redirect_uri` is the
-    /// only thing that changes per request.
-    pub oidc_rp: Arc<oidc_rp::OidcRp>,
-    /// Postgres client used by the gateway's per-origin session store
-    /// (`auth.gateway_sessions`). `Option` because the binary supports
-    /// a dev "no-DB" mode (when `--db` is empty); test fixtures also
-    /// rely on `None` to construct `GateState` without a live PG.
-    pub db: Option<Arc<compio_postgres::Client>>,
-    /// In-process replay cache for `DPoP` proof `jti` claims (RFC 9449
-    /// §11.1). Single-instance for now; once the gateway scales out
-    /// horizontally this becomes a redis-backed shared cache so a
-    /// replayed proof on a sibling gateway is still rejected.
-    pub dpop_jti_cache: Arc<zeroship_core::dpop::JtiCache>,
-    /// Gateway-issued wrapper-token signing key (Phase 8 U1). Loaded
-    /// from a PKCS#8 PEM/DER file at boot via `--signing-key-file`.
-    /// `None` when the operator runs without the flag — DPoP-exchange
-    /// endpoints return 503 in that mode, but every other gateway path
-    /// keeps working.
-    pub signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
-}
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
@@ -149,6 +59,12 @@ async fn main() -> std::io::Result<()> {
         "GATEWAY_SIGNING_KEY_FILE",
         "",
     );
+    let public_url = arg_or_env(
+        &args,
+        "--gateway-public-url",
+        "GATEWAY_PUBLIC_URL",
+        "https://api.zeroship.ai",
+    );
 
     if worker_key.is_empty() {
         tracing::warn!(
@@ -176,6 +92,16 @@ async fn main() -> std::io::Result<()> {
         );
         Some(Arc::new(key))
     };
+
+    // Phase 8 U3 — wrapper-token issuer. One-to-one with `signing_key`:
+    // both Some, or both None. Built once at boot so the per-request
+    // /__zs/auth/dpop-exchange path doesn't pay for PKCS#8 encoding +
+    // thumbprinting on every request.
+    let wrapper_issuer: Option<Arc<wrapper_token::Issuer>> = signing_key.as_ref().map(|sk| {
+        let issuer = wrapper_token::Issuer::new(sk.as_ref(), public_url.clone())
+            .expect("wrapper_token::Issuer construction");
+        Arc::new(issuer)
+    });
 
     let blob_cache_bytes: usize = blob_cache_mem_mb
         .parse::<usize>()
@@ -266,6 +192,7 @@ async fn main() -> std::io::Result<()> {
             hydra_public,
             auth_public,
             insecure_dev,
+            public_url,
         },
         routes: sync::RouteCache::new(),
         hash_ring,
@@ -280,6 +207,7 @@ async fn main() -> std::io::Result<()> {
         db,
         dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
         signing_key,
+        wrapper_issuer,
     });
 
     sync::start_sync(state.clone());
@@ -300,6 +228,16 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)
             })))
+            // Phase 8 U3 — DPoP token exchange. Registered BEFORE
+            // the subdomain catch-all so the path lands on the
+            // dedicated handler rather than being dispatched as a
+            // creator-app route. `cache-control: no-store` is set on
+            // every response so intermediaries don't keep wrapper
+            // tokens around.
+            .service(
+                web::resource("/__zs/auth/dpop-exchange")
+                    .route(web::post().to(dpop_exchange::handle)),
+            )
             // OIDC Back-Channel Logout 1.0 RP endpoint. Registered
             // at the gateway-host level (not per-app) because the
             // URI is stable across every `backchannel_logout_uri`

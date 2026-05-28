@@ -31,7 +31,14 @@ pub struct RouteCache {
     name_index: RwLock<HashMap<String, Uuid>>,
 }
 
+impl Default for RouteCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RouteCache {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             routes: RwLock::new(HashMap::new()),

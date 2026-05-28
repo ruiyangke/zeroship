@@ -885,6 +885,7 @@ mod tests {
                 hydra_public: String::new(),
                 auth_public: String::new(),
                 insecure_dev: true,
+                public_url: "https://api.zeroship.ai".into(),
             },
             routes: crate::sync::RouteCache::new(),
             hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
@@ -904,6 +905,7 @@ mod tests {
             db: None,
             dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
             signing_key: None,
+            wrapper_issuer: None,
         }
     }
 
