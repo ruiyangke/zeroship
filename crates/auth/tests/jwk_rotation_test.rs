@@ -200,3 +200,100 @@ async fn rotation_due_prepends_new_keys() {
         .await
         .ok();
 }
+
+#[compio::test]
+async fn stale_access_token_keys_are_retired_before_rotation() {
+    let _guard = JWK_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skip: AUTH_DB_URL unset");
+        return;
+    };
+    let Ok(admin_url) = std::env::var("AUTH_HYDRA_ADMIN") else {
+        eprintln!("skip: AUTH_HYDRA_ADMIN unset");
+        return;
+    };
+
+    let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    migrations::migrate(&client).await.expect("migrate");
+
+    let admin = HydraAdmin::new(&admin_url);
+    let access_set = "hydra.jwt.access-token";
+    let id_token_set = "hydra.openid.id-token";
+    let rotation_days = 90;
+    let retain_days = 31;
+    let retain_count = 1;
+    let seed_count = retain_count + 3;
+
+    // Keep the id-token set out of the assertion path. This test is
+    // about the access-token set, whose single signing alg makes the
+    // expected post-tick key count exact: retain one stale key, then
+    // prepend one rotated key.
+    client
+        .execute(
+            "INSERT INTO auth.cron_state (key, last_rotated_at) VALUES ($1, NOW()) \
+             ON CONFLICT (key) DO UPDATE SET last_rotated_at = NOW()",
+            &[&id_token_set],
+        )
+        .await
+        .expect("seed id-token cron_state");
+
+    for _ in 0..seed_count {
+        admin
+            .create_jwk(access_set, "EdDSA")
+            .await
+            .expect("seed access-token jwk");
+    }
+
+    let before = admin
+        .get_jwks(access_set)
+        .await
+        .expect("get_jwks before")
+        .expect("access-token set exists after seeding");
+    assert!(
+        before.keys.len() > retain_count,
+        "test requires more than retain_count keys before tick; before={}, retain_count={}",
+        before.keys.len(),
+        retain_count
+    );
+
+    client
+        .execute(
+            "INSERT INTO auth.cron_state (key, last_rotated_at) \
+             VALUES ($1, NOW() - (($2::INT + $3::INT + 1) * INTERVAL '1 day')) \
+             ON CONFLICT (key) DO UPDATE \
+             SET last_rotated_at = NOW() - (($2::INT + $3::INT + 1) * INTERVAL '1 day')",
+            &[&access_set, &rotation_days, &retain_days],
+        )
+        .await
+        .expect("seed stale access-token cron_state");
+
+    jwk_rotation::tick_once_for_test(&admin, &client, rotation_days.into(), retain_days.into())
+        .await
+        .expect("tick");
+
+    let after = admin
+        .get_jwks(access_set)
+        .await
+        .expect("get_jwks after")
+        .expect("access-token set still present");
+    assert!(
+        after.keys.len() <= retain_count + 1,
+        "stale keys must be retired before rotation resets cron_state; before={}, after={}, limit={}",
+        before.keys.len(),
+        after.keys.len(),
+        retain_count + 1
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.cron_state WHERE key LIKE 'hydra.%'",
+            &[],
+        )
+        .await
+        .ok();
+}
