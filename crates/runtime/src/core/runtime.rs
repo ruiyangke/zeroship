@@ -2705,7 +2705,7 @@ fn collect_settled_promises(
             let req = pending_requests.remove(&id)?;
             let result = match req.origin {
                 PendingOrigin::Fetch => http::extract_settled_result(scope, &req.promise),
-                PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise),
+                PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
             };
             Some((id, req, result))
         })
@@ -2719,6 +2719,7 @@ fn collect_settled_promises(
 fn settle_rpc_promise(
     scope: &mut v8::PinScope,
     promise: &v8::Global<v8::Promise>,
+    request_id: u64,
 ) -> SettledResult {
     let local = v8::Local::new(scope, promise);
     match local.state() {
