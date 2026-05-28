@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import { useState } from "react";
 import { Accordion } from "../components";
 
@@ -80,6 +81,26 @@ export const Basic: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const shipping = canvas.getByRole("button", {
+      name: /shipping & delivery/i,
+    });
+    const returns = canvas.getByRole("button", {
+      name: /returns & refunds/i,
+    });
+
+    await expect(shipping).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(shipping);
+    await expect(shipping).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      canvas.getByText(/orders ship within two business days/i),
+    ).toBeVisible();
+
+    await userEvent.click(returns);
+    await expect(returns).toHaveAttribute("aria-expanded", "true");
+    await expect(shipping).toHaveAttribute("aria-expanded", "false");
+  },
 };
 
 /* ─── 2. MultipleOpen — multiple mode ──────────────────────────────── */
@@ -106,6 +127,27 @@ export const MultipleOpen: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const shipping = canvas.getByRole("button", {
+      name: /shipping & delivery/i,
+    });
+    const returns = canvas.getByRole("button", {
+      name: /returns & refunds/i,
+    });
+    const warranty = canvas.getByRole("button", {
+      name: /warranty coverage/i,
+    });
+
+    await expect(shipping).toHaveAttribute("aria-expanded", "true");
+    await expect(warranty).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(returns);
+    await expect(returns).toHaveAttribute("aria-expanded", "true");
+    await expect(shipping).toHaveAttribute("aria-expanded", "true");
+
+    await userEvent.click(warranty);
+    await expect(warranty).toHaveAttribute("aria-expanded", "false");
+  },
 };
 
 /* ─── 3. Collapsible — single + collapsible:true ───────────────────── */
@@ -138,6 +180,18 @@ export const Collapsible: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const shipping = canvas.getByRole("button", {
+      name: /shipping & delivery/i,
+    });
+
+    await expect(shipping).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(shipping);
+    await expect(shipping).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(shipping);
+    await expect(shipping).toHaveAttribute("aria-expanded", "true");
+  },
 };
 
 /* ─── 4. Controlled — external state drives value ──────────────────── */
@@ -185,6 +239,25 @@ export const Controlled: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const returns = canvas.getByRole("button", {
+      name: /returns & refunds/i,
+    });
+    const warranty = canvas.getByRole("button", {
+      name: /warranty coverage/i,
+    });
+    const readout = canvas.getByText(/open: returns/i);
+
+    await expect(returns).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(warranty);
+    await expect(warranty).toHaveAttribute("aria-expanded", "true");
+    await expect(readout).toHaveTextContent("Open: warranty");
+
+    await userEvent.click(warranty);
+    await expect(warranty).toHaveAttribute("aria-expanded", "false");
+    await expect(readout).toHaveTextContent("Open: (none)");
+  },
 };
 
 /* ─── 5. WithDefaultValue — single mode pre-opened ─────────────────── */
@@ -214,6 +287,17 @@ export const WithDefaultValue: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const warranty = canvas.getByRole("button", {
+      name: /warranty coverage/i,
+    });
+
+    await expect(warranty).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      canvas.getByText(/all hardware ships with a one-year limited warranty/i),
+    ).toBeVisible();
+  },
 };
 
 /* ─── 6. Disabled — root cascade ───────────────────────────────────── */
@@ -235,6 +319,18 @@ export const Disabled: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const shipping = canvas.getByRole("button", {
+      name: /shipping & delivery/i,
+    });
+
+    await expect(shipping).toBeDisabled();
+    await expect(shipping).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(shipping);
+    await expect(shipping).toHaveAttribute("aria-expanded", "false");
+    await expect(shipping).not.toHaveFocus();
+  },
 };
 
 /* ─── 7. Horizontal — accordion in horizontal orientation ─────────── */
@@ -268,6 +364,27 @@ export const Horizontal: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const shipping = canvas.getByRole("button", {
+      name: /shipping & delivery/i,
+    });
+    const returns = canvas.getByRole("button", {
+      name: /returns & refunds/i,
+    });
+    const warranty = canvas.getByRole("button", {
+      name: /warranty coverage/i,
+    });
+
+    shipping.focus();
+    await expect(shipping).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect(returns).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect(warranty).toHaveFocus();
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect(returns).toHaveFocus();
+  },
 };
 
 /* ─── 8. RTL — mirrored layout ─────────────────────────────────────── */
@@ -329,6 +446,18 @@ export const RTL: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const returns = canvas.getByRole("button", {
+      name: /החזרות והחזרים/i,
+    });
+
+    await userEvent.click(returns);
+    await expect(returns).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      canvas.getByText(/ניתן להחזיר פריטים/i),
+    ).toBeVisible();
+  },
 };
 
 /* ─── 9. RichContent — panels with structured content ──────────────── */
@@ -403,4 +532,18 @@ export const RichContent: Story = {
       </Accordion>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const features = canvas.getByRole("button", {
+      name: /what's included/i,
+    });
+    const billing = canvas.getByRole("button", {
+      name: /how billing works/i,
+    });
+
+    await expect(features).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(billing);
+    await expect(billing).toHaveAttribute("aria-expanded", "true");
+    await expect(canvas.getByText(/creators take 85%/i)).toBeVisible();
+  },
 };

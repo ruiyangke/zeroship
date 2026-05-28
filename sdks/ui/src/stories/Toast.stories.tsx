@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useRef, type ReactNode } from "react";
 import { Button, Toast, useToast } from "../components";
 
@@ -36,6 +37,41 @@ export default meta;
 
 type Story = StoryObj<typeof Toast.Provider>;
 
+function getDocument(canvasElement: HTMLElement) {
+  return within(canvasElement.ownerDocument.body);
+}
+
+async function findToastByTitle(
+  canvasElement: HTMLElement,
+  title: string | RegExp,
+  role: "status" | "alert" = "status",
+) {
+  const body = getDocument(canvasElement);
+  let toast: HTMLElement | null = null;
+
+  await waitFor(() => {
+    const match = body
+      .getAllByText(title)
+      .map((node) => node.closest(`[role="${role}"]`))
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+
+    expect(match).toBeTruthy();
+    toast = match ?? null;
+  });
+
+  return toast as HTMLElement;
+}
+
+async function waitForToastGone(
+  canvasElement: HTMLElement,
+  title: string | RegExp,
+) {
+  const body = getDocument(canvasElement);
+  await waitFor(() => {
+    expect(body.queryByText(title)).not.toBeInTheDocument();
+  });
+}
+
 /* ─── 1. Basic ──────────────────────────────────────────────────────── */
 export const Basic: Story = {
   name: "Basic (default variant)",
@@ -69,6 +105,20 @@ export const Basic: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: /show toast/i }));
+    const toast = await findToastByTitle(canvasElement, /notification/i);
+    await expect(toast).toBeVisible();
+    await expect(toast).toHaveAttribute("aria-live", "polite");
+
+    await userEvent.click(
+      body.getByRole("button", { name: /dismiss notification/i }),
+    );
+    await waitForToastGone(canvasElement, /notification/i);
   },
 };
 
@@ -108,6 +158,18 @@ export const WithDescription: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show description toast/i }),
+    );
+    const toast = await findToastByTitle(canvasElement, /settings saved/i);
+    await expect(toast).toBeVisible();
+    await expect(
+      getDocument(canvasElement).getByText(/sync to all devices/i),
+    ).toBeVisible();
   },
 };
 
@@ -157,6 +219,19 @@ export const WithAction: Story = {
       </Wrap>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show action toast/i }),
+    );
+    await expect(
+      await findToastByTitle(canvasElement, /message deleted/i),
+    ).toBeVisible();
+    await userEvent.click(body.getByRole("button", { name: /undo/i }));
+    await waitForToastGone(canvasElement, /message deleted/i);
+  },
 };
 
 /* ─── 4. Success variant ────────────────────────────────────────────── */
@@ -194,6 +269,17 @@ export const Success: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show success/i }),
+    );
+    const toast = await findToastByTitle(canvasElement, /backup complete/i);
+    await expect(toast).toBeVisible();
+    await expect(toast).toHaveAttribute("aria-live", "polite");
+    await expect(toast).toHaveAttribute("data-variant", "success");
   },
 };
 
@@ -238,6 +324,19 @@ export const ErrorVariant: Story = {
       </Wrap>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: /show error/i }));
+    const toast = await findToastByTitle(canvasElement, /upload failed/i, "alert");
+    await expect(toast).toBeVisible();
+    await expect(toast).toHaveAttribute("aria-live", "assertive");
+    await expect(toast).toHaveAttribute("data-variant", "error");
+
+    await userEvent.click(body.getByRole("button", { name: /retry/i }));
+    await waitForToastGone(canvasElement, /upload failed/i);
+  },
 };
 
 /* ─── 6. Warning variant ────────────────────────────────────────────── */
@@ -277,6 +376,17 @@ export const Warning: Story = {
       </Wrap>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show warning/i }),
+    );
+    const toast = await findToastByTitle(canvasElement, /storage almost full/i);
+    await expect(toast).toBeVisible();
+    await expect(toast).toHaveAttribute("aria-live", "assertive");
+    await expect(toast).toHaveAttribute("data-variant", "warning");
+  },
 };
 
 /* ─── 7. Info variant ───────────────────────────────────────────────── */
@@ -314,6 +424,15 @@ export const Info: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: /show info/i }));
+    const toast = await findToastByTitle(canvasElement, /new build available/i);
+    await expect(toast).toBeVisible();
+    await expect(toast).toHaveAttribute("aria-live", "polite");
+    await expect(toast).toHaveAttribute("data-variant", "info");
   },
 };
 
@@ -355,6 +474,19 @@ export const LongDuration: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show 10s toast/i }),
+    );
+    await expect(
+      await findToastByTitle(canvasElement, /scheduled maintenance/i),
+    ).toBeVisible();
+    await expect(
+      getDocument(canvasElement).getByText(/workers will pause briefly/i),
+    ).toBeVisible();
   },
 };
 
@@ -405,6 +537,21 @@ export const Persistent: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show persistent/i }),
+    );
+    await expect(
+      await findToastByTitle(canvasElement, /connection lost/i),
+    ).toBeVisible();
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /dismiss persistent/i }),
+    );
+    await waitForToastGone(canvasElement, /connection lost/i);
   },
 };
 
@@ -462,6 +609,19 @@ export const ImperativeUpdate: Story = {
       </Wrap>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: /start upload/i }));
+    await expect(await findToastByTitle(canvasElement, /uploading/i)).toBeVisible();
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /finish upload/i }),
+    );
+    await expect(body.getByText(/upload complete/i)).toBeVisible();
+    await expect(body.queryByText(/processing 12 files/i)).not.toBeInTheDocument();
+  },
 };
 
 /* ─── 11. Stacked ───────────────────────────────────────────────────── */
@@ -498,6 +658,15 @@ export const Stacked: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: /show three/i }));
+    await expect(body.getByText("First")).toBeVisible();
+    await expect(body.getByText("Second")).toBeVisible();
+    await expect(body.getByText("Third")).toBeVisible();
   },
 };
 
@@ -537,6 +706,16 @@ export const PositionTop: Story = {
       </Wrap>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show top toast/i }),
+    );
+    await expect(
+      await findToastByTitle(canvasElement, /pinned to top/i),
+    ).toBeVisible();
+  },
 };
 
 /* ─── 13. PositionBottom ────────────────────────────────────────────── */
@@ -574,6 +753,16 @@ export const PositionBottom: Story = {
         <Trigger />
       </Wrap>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show bottom-start toast/i }),
+    );
+    await expect(
+      await findToastByTitle(canvasElement, /pinned to bottom-start/i),
+    ).toBeVisible();
   },
 };
 
@@ -616,6 +805,21 @@ export const SwipeToDismiss: Story = {
       </Wrap>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /show swipeable toast/i }),
+    );
+    await expect(
+      await findToastByTitle(canvasElement, /swipe me away/i),
+    ).toBeVisible();
+    await userEvent.click(
+      body.getByRole("button", { name: /dismiss notification/i }),
+    );
+    await waitForToastGone(canvasElement, /swipe me away/i);
+  },
 };
 
 /* ─── 15. RTL ───────────────────────────────────────────────────────── */
@@ -657,5 +861,13 @@ export const Rtl: Story = {
         </Wrap>
       </div>
     );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: /הצג הודעה/i }));
+    const toast = await findToastByTitle(canvasElement, /התראה/i);
+    await expect(toast).toBeVisible();
+    await expect(toast).toHaveAttribute("data-variant", "success");
   },
 };

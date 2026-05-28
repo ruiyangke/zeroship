@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useState } from "react";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Button, Drawer, Field, Input } from "../components";
@@ -14,6 +15,26 @@ const meta: Meta<typeof Drawer> = {
 export default meta;
 
 type Story = StoryObj<typeof Drawer>;
+
+function getDocument(canvasElement: HTMLElement) {
+  return within(canvasElement.ownerDocument.body);
+}
+
+async function openDrawer(canvasElement: HTMLElement, name: RegExp) {
+  const canvas = within(canvasElement);
+  await userEvent.click(canvas.getByRole("button", { name }));
+  return getDocument(canvasElement);
+}
+
+async function waitForDrawerClosed(
+  canvasElement: HTMLElement,
+  name: RegExp,
+) {
+  const body = getDocument(canvasElement);
+  await waitFor(() => {
+    expect(body.queryByRole("dialog", { name })).not.toBeInTheDocument();
+  });
+}
 
 /* ─── 1. Basic — right-side default ──────────────────────────────────── */
 export const Basic: Story = {
@@ -48,6 +69,14 @@ export const Basic: Story = {
       </Drawer>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /open drawer/i);
+    await expect(
+      await body.findByRole("dialog", { name: /notifications/i }),
+    ).toBeVisible();
+    await userEvent.click(body.getByRole("button", { name: /dismiss/i }));
+    await waitForDrawerClosed(canvasElement, /notifications/i);
+  },
 };
 
 /* ─── 2. Left side (logical start) ───────────────────────────────────── */
@@ -87,6 +116,14 @@ export const LeftSide: Story = {
       </Drawer>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /open navigation/i);
+    await expect(
+      await body.findByRole("dialog", { name: /navigation/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await waitForDrawerClosed(canvasElement, /navigation/i);
+  },
 };
 
 /* ─── 3. Top side ────────────────────────────────────────────────────── */
@@ -127,6 +164,17 @@ export const Top: Story = {
       </Drawer>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /open from top/i);
+    await expect(
+      await body.findByRole("dialog", { name: /quick search/i }),
+    ).toBeVisible();
+    const search = body.getByRole("textbox", { name: /search/i });
+    await userEvent.type(search, "logs");
+    await expect(search).toHaveValue("logs");
+    await userEvent.keyboard("{Escape}");
+    await waitForDrawerClosed(canvasElement, /quick search/i);
+  },
 };
 
 /* ─── 4. Bottom side ─────────────────────────────────────────────────── */
@@ -161,6 +209,14 @@ export const Bottom: Story = {
       </Drawer>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /open from bottom/i);
+    await expect(
+      await body.findByRole("dialog", { name: /share to/i }),
+    ).toBeVisible();
+    await userEvent.click(body.getByRole("button", { name: /cancel/i }));
+    await waitForDrawerClosed(canvasElement, /share to/i);
+  },
 };
 
 /* ─── 5. Sizes ───────────────────────────────────────────────────────── */
@@ -204,6 +260,26 @@ export const Sizes: Story = {
       ))}
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = getDocument(canvasElement);
+    const canvas = within(canvasElement);
+
+    for (const size of ["sm", "md", "lg", "full"]) {
+      await userEvent.click(
+        canvas.getByRole("button", { name: new RegExp(`open ${size}`, "i") }),
+      );
+      await expect(
+        await body.findByRole("dialog", {
+          name: new RegExp(`size: ${size}`, "i"),
+        }),
+      ).toBeVisible();
+      await userEvent.keyboard("{Escape}");
+      await waitForDrawerClosed(
+        canvasElement,
+        new RegExp(`size: ${size}`, "i"),
+      );
+    }
+  },
 };
 
 /* ─── 6. Controlled ──────────────────────────────────────────────────── */
@@ -252,6 +328,23 @@ function ControlledStory() {
 export const Controlled: Story = {
   name: "Controlled",
   render: () => <ControlledStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = getDocument(canvasElement);
+    const status = canvas.getByText(/status: closed/i);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open programmatically/i }),
+    );
+    await expect(status).toHaveTextContent("Status: open");
+    await expect(
+      await body.findByRole("dialog", { name: /controlled drawer/i }),
+    ).toBeVisible();
+
+    await userEvent.click(body.getByRole("button", { name: /done/i }));
+    await expect(status).toHaveTextContent("Status: closed");
+    await waitForDrawerClosed(canvasElement, /controlled drawer/i);
+  },
 };
 
 /* ─── 7. With form ───────────────────────────────────────────────────── */
@@ -302,6 +395,23 @@ export const WithForm: Story = {
       </Drawer>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /edit profile/i);
+    await expect(
+      await body.findByRole("dialog", { name: /edit profile/i }),
+    ).toBeVisible();
+
+    const displayName = body.getByRole("textbox", {
+      name: /display name/i,
+    });
+    await expect(displayName).toHaveValue("Ada Lovelace");
+    await userEvent.clear(displayName);
+    await userEvent.type(displayName, "Grace Hopper");
+    await expect(displayName).toHaveValue("Grace Hopper");
+
+    await userEvent.click(body.getByRole("button", { name: /cancel/i }));
+    await waitForDrawerClosed(canvasElement, /edit profile/i);
+  },
 };
 
 /* ─── 8. With long content (scroll) ──────────────────────────────────── */
@@ -346,6 +456,14 @@ export const WithLongContent: Story = {
       </Drawer>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /open terms/i);
+    await expect(
+      await body.findByRole("dialog", { name: /terms of service/i }),
+    ).toBeVisible();
+    await userEvent.click(body.getByRole("button", { name: /i.ve read it/i }));
+    await waitForDrawerClosed(canvasElement, /terms of service/i);
+  },
 };
 
 /* ─── 9. Nested ──────────────────────────────────────────────────────────
@@ -409,6 +527,14 @@ export const Nested: Story = {
       </main>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /open detail drawer/i);
+    await expect(
+      await body.findByRole("dialog", { name: /detail/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await waitForDrawerClosed(canvasElement, /detail/i);
+  },
 };
 
 /* ─── 10. RTL ────────────────────────────────────────────────────────────
@@ -479,6 +605,14 @@ export const RTL: Story = {
       </div>
     </DirectionProvider>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /פתח מגירה/i);
+    await expect(
+      await body.findByRole("dialog", { name: /ניווט/i }),
+    ).toBeVisible();
+    await userEvent.click(body.getByRole("button", { name: /אישור/i }));
+    await waitForDrawerClosed(canvasElement, /ניווט/i);
+  },
 };
 
 /* ─── 11. Close asChild ─────────────────────────────────────────────── */
@@ -521,4 +655,15 @@ export const CloseAsChild: Story = {
       </Drawer>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const body = await openDrawer(canvasElement, /^open$/i);
+    await expect(
+      await body.findByRole("dialog", { name: /custom close target/i }),
+    ).toBeVisible();
+
+    const done = body.getByRole("button", { name: /done/i });
+    await expect(done.tagName).toBe("BUTTON");
+    await userEvent.click(done);
+    await waitForDrawerClosed(canvasElement, /custom close target/i);
+  },
 };
