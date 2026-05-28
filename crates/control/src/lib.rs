@@ -135,6 +135,9 @@ pub struct AppState {
     /// because in multi-DB deployments the auth tables may live in a
     /// separate cluster. Mandatory post-U8.
     pub auth_pg: Arc<compio_postgres::Client>,
+    /// Connection URL for the auth/control auth schema. Used only for
+    /// short-lived dedicated sessions that need session-scoped advisory locks.
+    pub auth_db_url: String,
     /// Hydra admin API base URL. Control uses this for admin-owned OAuth
     /// client registration/deletion; Hydra remains the source of truth for
     /// generated client secrets.

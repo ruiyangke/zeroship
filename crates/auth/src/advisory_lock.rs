@@ -8,6 +8,8 @@ use crate::error::{AuthError, Result};
 
 /// Stable process-wide lock for first-boot hydra signing-key bootstrap.
 pub const BOOTSTRAP_SIGNING_KEYS_LOCK: i64 = 0x0042_B007_A071_0001;
+/// Stable process-wide lock for first-boot hydra OAuth client reconciliation.
+pub const BOOTSTRAP_CLIENTS_LOCK: i64 = 0x0042_B007_A071_0002;
 
 /// Run `f` while holding a session-scoped PostgreSQL advisory lock.
 ///
@@ -55,17 +57,34 @@ async fn release_advisory_lock(conn: &Client, key: i64) -> Result<()> {
 /// Stable i64 advisory-lock key for one hydra JWK set.
 #[must_use]
 pub fn jwk_set_lock_key(set: &str) -> i64 {
+    stable_lock_key(b"zeroship-auth:jwk-rotation:", &[set.as_bytes()])
+}
+
+/// Stable i64 advisory-lock key for one local/Hydra OAuth grant mutation.
+#[must_use]
+pub fn oauth_grant_lock_key(user_id: &uuid::Uuid, client_id: &str) -> i64 {
+    stable_lock_key(
+        b"zeroship-auth:oauth-grant:",
+        &[user_id.as_bytes(), client_id.as_bytes()],
+    )
+}
+
+fn stable_lock_key(prefix: &[u8], parts: &[&[u8]]) -> i64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
     let mut hash = FNV_OFFSET;
-    for byte in b"zeroship-auth:jwk-rotation:"
-        .iter()
-        .copied()
-        .chain(set.bytes())
-    {
-        hash ^= u64::from(byte);
+    for byte in prefix {
+        hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for part in parts {
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        for byte in *part {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
     }
     i64::from_ne_bytes(hash.to_ne_bytes())
 }

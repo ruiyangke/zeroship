@@ -1,7 +1,7 @@
 //! Library surface for integration tests. The binary is `main.rs`.
 
 #[doc(hidden)]
-pub(crate) mod advisory_lock;
+pub mod advisory_lock;
 pub mod audit;
 pub mod bootstrap;
 pub mod config;

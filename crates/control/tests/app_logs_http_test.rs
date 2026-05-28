@@ -98,6 +98,7 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             oidc_rp,
             auth_pg,
+            auth_db_url: db_url.to_string(),
             hydra_admin_url: "http://127.0.0.1:4445".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
