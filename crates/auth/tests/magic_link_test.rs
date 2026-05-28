@@ -17,6 +17,10 @@ use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
     let dsn = std::env::var("AUTH_DB_URL").ok()?;
+    Some(pg_connect(&dsn).await)
+}
+
+async fn pg_connect(dsn: &str) -> compio_postgres::Client {
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -25,7 +29,7 @@ async fn pg() -> Option<compio_postgres::Client> {
     })
     .detach();
     migrations::migrate(&client).await.expect("migrate");
-    Some(client)
+    client
 }
 
 fn sha256(s: &str) -> [u8; 32] {
@@ -411,6 +415,84 @@ async fn magic_completion_invalidates_after_five_wrong_codes() {
     );
 
     client
+        .execute(
+            "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
+            &[&csrf_nonce],
+        )
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
+    let Some(seed_client) = pg().await else {
+        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        return;
+    };
+    let dsn = std::env::var("AUTH_DB_URL").expect("AUTH_DB_URL present after pg");
+
+    let csrf_nonce = format!("completion-race-{}", Uuid::new_v4().simple());
+    let email = format!("magic-race-{}@example.test", Uuid::new_v4().simple());
+    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
+    let code = "123456";
+
+    seed_client
+        .execute(
+            "INSERT INTO auth.magic_completions \
+                (csrf_nonce, code, email, login_challenge, expires_at) \
+             VALUES ($1, $2, $3::citext, $4, NOW() + INTERVAL '5 minutes')",
+            &[&csrf_nonce, &code, &email, &login_challenge],
+        )
+        .await
+        .expect("insert completion row");
+
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let client = pg_connect(&dsn).await;
+        let csrf_nonce = csrf_nonce.clone();
+        handles.push(compio::runtime::spawn(async move {
+            completions_store::consume_pending(&client, &csrf_nonce, code).await
+        }));
+    }
+
+    let mut accepted = 0;
+    let mut in_flight = 0;
+    let mut wrong = 0;
+    for handle in handles {
+        match handle.await.expect("completion task panicked") {
+            Ok(_) => accepted += 1,
+            Err(ConsumeError::InFlight) => in_flight += 1,
+            Err(ConsumeError::WrongCode) => wrong += 1,
+            Err(ConsumeError::Store(err)) => panic!("completion store error: {err}"),
+        }
+    }
+
+    assert_eq!(accepted, 1, "one correct completion should reserve");
+    assert_eq!(in_flight, 4, "other correct completions should see in-flight");
+    assert_eq!(wrong, 0, "correct completions must not hit wrong-code path");
+
+    let rows = seed_client
+        .query(
+            "SELECT attempts, consumed_at IS NOT NULL AS consumed \
+             FROM auth.magic_completions \
+             WHERE csrf_nonce = $1",
+            &[&csrf_nonce],
+        )
+        .await
+        .expect("load completion row");
+    assert_eq!(rows.len(), 1, "completion row should still exist");
+    let attempts: i16 = rows[0].get("attempts");
+    let consumed: bool = rows[0].get("consumed");
+    assert_eq!(
+        attempts, 1,
+        "only the winning correct consume should increment attempts"
+    );
+    assert!(
+        !consumed,
+        "concurrent correct submissions must not consume before finalize"
+    );
+
+    seed_client
         .execute(
             "DELETE FROM auth.magic_completions WHERE csrf_nonce = $1",
             &[&csrf_nonce],

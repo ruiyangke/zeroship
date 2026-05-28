@@ -1046,26 +1046,6 @@ pub mod completions_store {
         csrf_nonce: &str,
         code: &str,
     ) -> std::result::Result<Completion, ConsumeError> {
-        let in_flight = db
-            .query(
-                "SELECT TRUE AS in_flight \
-                 FROM auth.magic_completions \
-                 WHERE csrf_nonce = $1 \
-                   AND consumed_at IS NULL \
-                   AND consumed_pending_at > NOW() - INTERVAL '60 seconds' \
-                   AND expires_at > NOW()",
-                &[&csrf_nonce],
-            )
-            .await
-            .map_err(|e| {
-                ConsumeError::Store(AuthError::Db(format!(
-                    "magic_completions consume in-flight: {e}"
-                )))
-            })?;
-        if in_flight.first().is_some() {
-            return Err(ConsumeError::InFlight);
-        }
-
         let rows = db
             .query(
                 "UPDATE auth.magic_completions \
@@ -1093,6 +1073,26 @@ pub mod completions_store {
             });
         }
 
+        let in_flight = db
+            .query(
+                "SELECT TRUE AS in_flight \
+                 FROM auth.magic_completions \
+                 WHERE csrf_nonce = $1 \
+                   AND consumed_at IS NULL \
+                   AND consumed_pending_at > NOW() - INTERVAL '60 seconds' \
+                   AND expires_at > NOW()",
+                &[&csrf_nonce],
+            )
+            .await
+            .map_err(|e| {
+                ConsumeError::Store(AuthError::Db(format!(
+                    "magic_completions consume in-flight: {e}"
+                )))
+            })?;
+        if in_flight.first().is_some() {
+            return Err(ConsumeError::InFlight);
+        }
+
         let wrong_rows = db
             .query(
                 "UPDATE auth.magic_completions \
@@ -1102,10 +1102,14 @@ pub mod completions_store {
                          ELSE consumed_at \
                      END \
                  WHERE csrf_nonce = $1 \
+                   AND code <> $2 \
+                   AND attempts < 5 \
                    AND consumed_at IS NULL \
+                   AND (consumed_pending_at IS NULL \
+                        OR consumed_pending_at <= NOW() - INTERVAL '60 seconds') \
                    AND expires_at > NOW() \
                  RETURNING attempts",
-                &[&csrf_nonce],
+                &[&csrf_nonce, &code],
             )
             .await
             .map_err(|e| {
