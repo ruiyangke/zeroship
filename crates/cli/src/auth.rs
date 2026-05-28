@@ -208,7 +208,8 @@ fn poll_for_token(
         }
 
         let err = serde_json::from_str::<TokenErrorResponse>(&resp.body).ok();
-        match err.as_ref().map(|e| e.error.as_str()) {
+        let kind = err.as_ref().map(|e| e.error.clone());
+        match kind.as_deref() {
             Some("authorization_pending") => {}
             Some("slow_down") => interval = interval.saturating_add(5),
             Some("expired_token") => return Err("device code expired".into()),
