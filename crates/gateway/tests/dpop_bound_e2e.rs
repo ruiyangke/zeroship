@@ -381,7 +381,11 @@ async fn dispatch_verify_handler(
         avatar: None,
         email_verified: claims.email_verified.unwrap_or(false),
     };
-    let header = encode_user_header(&user, &state.config.worker_key);
+    let header = encode_user_header(
+        &user,
+        &state.config.worker_key,
+        uuid::Uuid::new_v4(),
+    );
     HttpResponse::Ok()
         .header("ZeroShip-User", header)
         .body("ok")
@@ -688,11 +692,11 @@ async fn e2e_dpop_bound_happy_path() {
         !user_header.is_empty(),
         "ZeroShip-User must be non-empty (HMAC envelope)"
     );
-    // The envelope shape is base64(JSON).<hex-hmac> — assert the dot
-    // separator so a regression that drops the MAC half is caught.
+    // The envelope shape is base64(JSON).<request_id>.<iat>.<hex-hmac> —
+    // assert the segment count so a regression that drops the binding is caught.
     assert!(
-        user_header.contains('.'),
-        "ZeroShip-User must be `base64.hexmac`, got `{user_header}`"
+        user_header.split('.').count() == 4,
+        "ZeroShip-User must be `base64.request_id.iat.hexmac`, got `{user_header}`"
     );
 
     hydra.cleanup().await;

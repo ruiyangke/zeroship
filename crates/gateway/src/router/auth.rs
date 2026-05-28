@@ -56,6 +56,7 @@ pub(crate) async fn resolve_auth(
     state: &Arc<GateState>,
     policy: &crate::compiled::EffectivePolicy,
     app_id: &Uuid,
+    request_id: &Uuid,
 ) -> AuthOutcome {
     use zeroship_bundle::AuthLevel;
 
@@ -71,7 +72,7 @@ pub(crate) async fn resolve_auth(
     //    deferred — hydra doesn't currently issue `cnf.jkt` on access
     //    tokens, so Phase 7 ships proof-of-possession verification only.
     //    Phase 8+ adds the binding step.
-    let dpop_user_header = resolve_dpop_user_header(req, state).await;
+    let dpop_user_header = resolve_dpop_user_header(req, state, request_id).await;
     if let Some(header) = dpop_user_header {
         // DPoP succeeded — short-circuit. We treat a DPoP-authed request
         // as fully authenticated regardless of policy (anon or user).
@@ -89,7 +90,7 @@ pub(crate) async fn resolve_auth(
 
     let app_id_str = app_id.to_string();
     let session_user_header =
-        resolve_app_session_user_header_inner(req, state, &app_id_str).await;
+        resolve_app_session_user_header_inner(req, state, &app_id_str, request_id).await;
     match policy.auth {
         AuthLevel::Anon => AuthOutcome::Allowed {
             user_header: session_user_header,
@@ -183,6 +184,7 @@ fn looks_like_wrapper(token: &str) -> bool {
 async fn resolve_dpop_user_header(
     req: &HttpRequest,
     state: &Arc<GateState>,
+    request_id: &Uuid,
 ) -> Option<String> {
     // 1. Authorization: DPoP <token>
     let auth_header = req
@@ -272,6 +274,7 @@ async fn resolve_dpop_user_header(
                 return Some(oidc_rp::encode_user_header(
                     &user,
                     &state.config.worker_key,
+                    *request_id,
                 ));
             }
             Err(e) => {
@@ -314,6 +317,7 @@ async fn resolve_dpop_user_header(
     Some(oidc_rp::encode_user_header(
         &user,
         &state.config.worker_key,
+        *request_id,
     ))
 }
 
@@ -381,6 +385,7 @@ async fn resolve_app_session_user_header_inner(
     req: &HttpRequest,
     state: &Arc<GateState>,
     app_id_str: &str,
+    request_id: &Uuid,
 ) -> Option<String> {
     let cookie_header = req
         .headers()
@@ -410,6 +415,7 @@ async fn resolve_app_session_user_header_inner(
     Some(oidc_rp::encode_user_header(
         &user,
         &state.config.worker_key,
+        *request_id,
     ))
 }
 
@@ -931,7 +937,8 @@ mod tests {
             .header("dpop", proof)
             .to_http_request();
 
-        let header = resolve_dpop_user_header(&req, &state).await;
+        let request_id = Uuid::new_v4();
+        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
         assert!(header.is_some(), "wrapper path must accept matched jkt");
     }
 
@@ -970,7 +977,8 @@ mod tests {
             .header("dpop", proof)
             .to_http_request();
 
-        let header = resolve_dpop_user_header(&req, &state).await;
+        let request_id = Uuid::new_v4();
+        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
         assert!(
             header.is_none(),
             "wrapper path must reject when cnf.jkt does not match proof jkt"
@@ -1045,7 +1053,8 @@ mod tests {
             .header("dpop", proof)
             .to_http_request();
 
-        let header = resolve_dpop_user_header(&req, &state).await;
+        let request_id = Uuid::new_v4();
+        let header = resolve_dpop_user_header(&req, &state, &request_id).await;
         assert!(
             header.is_none(),
             "malformed wrapper must hard-reject instead of downgrading to introspection"

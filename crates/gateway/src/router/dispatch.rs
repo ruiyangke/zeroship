@@ -493,12 +493,14 @@ async fn execute_resource_tree(
     //    On miss for an HTML navigation we kick off the OIDC dance via
     //    a 302 → hydra; API clients see a 401 with a `WWW-Authenticate`
     //    challenge so they can prompt the user out-of-band.
-    let user_header_from_gate = match resolve_auth(&req, &state, policy, app_id).await {
-        AuthOutcome::Allowed { user_header } => user_header,
-        AuthOutcome::Unauthenticated => {
-            return unauthenticated_response(&req, &state);
-        }
-    };
+    let request_id = Uuid::new_v4();
+    let user_header_from_gate =
+        match resolve_auth(&req, &state, policy, app_id, &request_id).await {
+            AuthOutcome::Allowed { user_header } => user_header,
+            AuthOutcome::Unauthenticated => {
+                return unauthenticated_response(&req, &state);
+            }
+        };
 
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
     //    require the request's `Origin` to match.
@@ -620,6 +622,7 @@ async fn execute_resource_tree(
                     app_id,
                     &compiled_route.entry,
                     tail,
+                    request_id,
                     body,
                     user_header_from_gate.clone(),
                     wall_start,
@@ -650,6 +653,7 @@ async fn execute_resource_tree(
                 app_id,
                 &compiled_route.entry,
                 tail,
+                request_id,
                 body,
                 user_header_from_gate.clone(),
                 wall_start,
@@ -1060,6 +1064,7 @@ async fn handle_dispatch(
     app_id: &Uuid,
     route: &zeroship_core::types::RouteEntry,
     tail: &str,
+    request_id: Uuid,
     body: Bytes,
     user_header_value: Option<String>,
     wall_start: std::time::Instant,
@@ -1096,7 +1101,6 @@ async fn handle_dispatch(
     let body_str = String::from_utf8_lossy(&body);
 
     // Proxy to worker via CHWBL hash ring.
-    let request_id = Uuid::new_v4();
     let mut response = match proxy::forward_dispatch(
         &state.hash_ring,
         app_id,

@@ -303,6 +303,21 @@ impl Runtime {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::FetchOutcome {
+        self.call_fetch_handler_with_user(method, url, headers, body, env, ctx, None)
+    }
+
+    /// Variant of [`Runtime::call_fetch_handler`] used by the worker once it
+    /// has verified the gateway-issued `ZeroShip-User` envelope.
+    pub fn call_fetch_handler_with_user(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+        user_json: Option<String>,
+    ) -> crate::FetchOutcome {
         self.inner.borrow_mut().call_fetch_handler(
             self.modules.as_slice(),
             method,
@@ -311,6 +326,7 @@ impl Runtime {
             body,
             env,
             ctx,
+            user_json,
         )
     }
 
@@ -1395,6 +1411,7 @@ impl RuntimeInner {
         body: &str,
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
+        user_json: Option<String>,
     ) -> crate::FetchOutcome {
         // Reset the idle-GC clock — every request entry is "activity".
         self.last_request_ts.set(Instant::now());
@@ -1449,6 +1466,10 @@ impl RuntimeInner {
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
+
+        if user_json.is_some() {
+            crate::auth::set_request_user(&self.state, request_id, user_json);
+        }
 
         let wall_start = Instant::now();
 
