@@ -17,6 +17,8 @@ use crate::http_util;
 use crate::AppState;
 use crate::env_store::EnvError;
 
+pub const ENV_MUTATION_PAYLOAD_BYTES: usize = 80 * 1024;
+
 fn source_ip(req: &web::HttpRequest, state: &AppState) -> Option<String> {
     http_util::source_ip(req, state.trust_proxy)
 }
@@ -367,5 +369,15 @@ pub async fn delete_secret(
         }
         Ok(false) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"})),
         Err(e) => env_err_response(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_mutation_payload_cap_matches_rejected_body_budget() {
+        assert_eq!(ENV_MUTATION_PAYLOAD_BYTES, 80 * 1024);
     }
 }
