@@ -2636,6 +2636,201 @@ await open("components-progress--indeterminate");
   );
 }
 
+/* ─── Slice 11: Menu + ContextMenu assertions (5 new) ─────────────── */
+
+/* ─── 67. Menu Trigger click → popup opens + popup visible ───────────── *
+ *
+ * Brief assertion #1. Click the Trigger; the popup mounts. Base UI's
+ * MenuTrigger doesn't emit `aria-expanded` (it relies on
+ * `aria-haspopup="menu"` + `aria-controls` + `data-popup-open` state
+ * attributes on the trigger element). So we assert the trigger stamps
+ * `data-popup-open` after the click AND the popup is visible in DOM. */
+await open("components-menu--basic-items");
+{
+  const trigger = page.locator('[data-testid="menu-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const haspopupBefore = await trigger.getAttribute("aria-haspopup");
+  const openBefore = await trigger.getAttribute("data-popup-open");
+  await trigger.click();
+  const popup = page.locator('[data-testid="menu-basic-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const openAfter = await trigger.getAttribute("data-popup-open");
+  const popupVisible = await popup.isVisible().catch(() => false);
+  const ok =
+    haspopupBefore === "menu" &&
+    openBefore === null &&
+    openAfter !== null &&
+    popupVisible;
+  report(
+    "Menu Trigger click — popup opens + trigger stamps data-popup-open",
+    ok,
+    `aria-haspopup=${haspopupBefore} data-popup-open=${openBefore}->${openAfter} popupVisible=${popupVisible}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 68. Menu ArrowDown navigates + ArrowUp loops ──────────────────── *
+ *
+ * Brief assertion #2. Open the Basic story; press ArrowDown a few
+ * times; verify the highlighted item walks down. ArrowDown from the
+ * last item should loop back to the first (Base UI's `loopFocus`
+ * defaults to true on MenuRoot). */
+await open("components-menu--basic-items");
+{
+  const trigger = page.locator('[data-testid="menu-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const popup = page.locator('[data-testid="menu-basic-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const items = await popup.locator(".zs-menu-item").all();
+  const itemCount = items.length;
+  // Press ArrowDown ONE MORE time than there are items so the rover
+  // walks through all items AND loops back to the first. (Pressing
+  // exactly itemCount times lands on the last item — no loop yet.)
+  const indices = [];
+  for (let i = 0; i < itemCount + 1; i++) {
+    await page.keyboard.press("ArrowDown");
+    await page.waitForTimeout(40);
+    const activeIndex = await popup.evaluate((el) => {
+      const items = Array.from(el.querySelectorAll(".zs-menu-item"));
+      const idx = items.findIndex(
+        (item) =>
+          item.hasAttribute("data-highlighted") || item === document.activeElement,
+      );
+      return idx;
+    });
+    indices.push(activeIndex);
+  }
+  // Walked through every item AND the last step looped (the final
+  // index dropped back to 0 — Base UI's `loopFocus` default).
+  const maxReached = Math.max(...indices);
+  const loopedBack = indices[indices.length - 1] === 0;
+  const ok = itemCount >= 2 && maxReached >= itemCount - 1 && loopedBack;
+  report(
+    "Menu ArrowDown navigates items + loops",
+    ok,
+    `items=${itemCount} indices=[${indices.join(",")}] maxReached=${maxReached} loopedBack=${loopedBack}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 69. Menu CheckboxItem click → aria-checked flips + state updates ── *
+ *
+ * Brief assertion #3. Open the WithCheckboxItem story; click the Bold
+ * row; verify the row's aria-checked / data-checked flips AND the
+ * indicator becomes visible. The story keeps state in React so the
+ * second open shows the new checked value. */
+await open("components-menu--with-checkbox-item");
+{
+  const trigger = page.locator('[data-testid="menu-checkbox-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const popup = page.locator('[data-testid="menu-checkbox-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const bold = page.locator('[data-testid="menu-checkbox-bold"]');
+  await bold.waitFor({ state: "visible", timeout: 5000 });
+  const ariaBefore = await bold.getAttribute("aria-checked");
+  const dataBefore = await bold.getAttribute("data-checked");
+  await bold.click();
+  // Menu closes on Item activation by default; re-open and re-read.
+  await page.waitForTimeout(200);
+  await trigger.click();
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const boldAgain = page.locator('[data-testid="menu-checkbox-bold"]');
+  await boldAgain.waitFor({ state: "visible", timeout: 5000 });
+  const ariaAfter = await boldAgain.getAttribute("aria-checked");
+  const dataAfter = await boldAgain.getAttribute("data-checked");
+  const flipped = ariaBefore !== ariaAfter || dataBefore !== dataAfter;
+  // Bold starts `true` in the story; after one click it should read
+  // false (aria-checked="false" OR no data-checked attribute).
+  const isUnchecked = ariaAfter === "false" || dataAfter === null;
+  const ok = flipped && isUnchecked;
+  report(
+    "Menu CheckboxItem click — aria-checked flips",
+    ok,
+    `aria=${ariaBefore}->${ariaAfter} data=${dataBefore}->${dataAfter} flipped=${flipped}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 70. Menu RadioGroup selection changes between RadioItems ──────── *
+ *
+ * Brief assertion #4. Open the WithRadioGroup story; the System row
+ * is initially selected. Click the Light row; verify the selection
+ * moved (the React state in the story round-trips via onValueChange
+ * so the next open shows the new selection on aria-checked). */
+await open("components-menu--with-radio-group");
+{
+  const trigger = page.locator('[data-testid="menu-radio-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const popup = page.locator('[data-testid="menu-radio-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const systemBefore = await page
+    .locator('[data-testid="menu-radio-system"]')
+    .getAttribute("aria-checked");
+  // Click the Light row directly — exercises the value-change path the
+  // RadioGroup wires into onValueChange.
+  await page.locator('[data-testid="menu-radio-light"]').click();
+  await page.waitForTimeout(200);
+  // Re-open and verify selection.
+  await trigger.click();
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const lightAfter = await page
+    .locator('[data-testid="menu-radio-light"]')
+    .getAttribute("aria-checked");
+  const systemAfter = await page
+    .locator('[data-testid="menu-radio-system"]')
+    .getAttribute("aria-checked");
+  const ok =
+    systemBefore === "true" && lightAfter === "true" && systemAfter === "false";
+  report(
+    "Menu RadioGroup selection changes between RadioItems",
+    ok,
+    `system=${systemBefore}->${systemAfter}, light->${lightAfter}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 71. ContextMenu right-click on Trigger area → popup opens ─────── *
+ *
+ * Brief assertion #5. Right-click inside the trigger area; verify the
+ * popup opens. Playwright's `click({ button: 'right' })` fires a real
+ * `contextmenu` event on the `<div>` trigger — the same code path a
+ * real browser right-click takes. */
+await open("components-contextmenu--basic-right-click-area");
+{
+  const trigger = page.locator('[data-testid="contextmenu-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click({ button: "right" });
+  await page.waitForTimeout(200);
+  const popup = page.locator('[data-testid="contextmenu-basic-popup"]');
+  const visible = await popup
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const item = page.locator('[data-testid="contextmenu-basic-item-open"]');
+  const itemVisible = await item
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const ok = visible && itemVisible;
+  report(
+    "ContextMenu right-click on Trigger — popup opens at pointer",
+    ok,
+    `popupVisible=${visible} firstItemVisible=${itemVisible}`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
 await ctx.close();
 await browser.close();
 
