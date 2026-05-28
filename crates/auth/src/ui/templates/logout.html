@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Sign out · zeroship{% endblock %}
+{% block body %}
+<h2>Sign out{% if let Some(name) = client_name %} of {{ name }}{% endif %}?</h2>
+{% if let Some(err) = error %}
+  <div class="error">{{ err }}</div>
+{% endif %}
+<p>You are about to be signed out across every application that shares this session.</p>
+<form method="POST" action="/logout">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="logout_challenge" value="{{ challenge }}">
+  <button type="submit" class="primary">Sign out</button>
+</form>
+{% endblock %}

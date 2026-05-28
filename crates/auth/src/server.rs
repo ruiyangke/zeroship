@@ -52,6 +52,15 @@ pub fn configure(
                     .route(web::get().to(ui::consent::get))
                     .route(web::post().to(ui::consent::post)),
             )
+            // RP-initiated logout (OIDC Session Management §5). hydra's
+            // `urls.logout` config points here; the RP redirects to
+            // hydra's `end_session_endpoint`, hydra issues a
+            // `logout_challenge` and 302s to this route.
+            .service(
+                web::resource("/logout")
+                    .route(web::get().to(ui::logout::get))
+                    .route(web::post().to(ui::logout::post)),
+            )
             // `/link` is always registered — it's hit only via a pending
             // token issued by the federation callbacks, so a route that
             // exists without configured providers harms nothing and lets

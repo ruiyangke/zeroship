@@ -13,6 +13,7 @@ pub mod consent;
 pub mod forgot;
 pub mod link;
 pub mod login;
+pub mod logout;
 pub mod magic;
 pub mod me;
 pub mod oauth_github;
@@ -158,6 +159,23 @@ pub struct ForgotPage<'a> {
 pub struct ResetPage<'a> {
     pub token: &'a str,
     pub csrf: &'a str,
+    pub error: Option<&'a str>,
+}
+
+/// `/logout` GET page (RP-initiated logout, RFC OIDC §5 — RP redirects
+/// to hydra's `end_session_endpoint`, hydra issues a `logout_challenge`
+/// and 302s here). Renders a CSRF-protected confirm form; the POST
+/// handler calls hydra's `accept_logout` and redirects to the
+/// post-logout `redirect_to`.
+#[derive(Debug, Template)]
+#[template(path = "logout.html")]
+pub struct LogoutPage<'a> {
+    pub challenge: &'a str,
+    pub csrf: &'a str,
+    /// `Some(name)` when the RP that initiated logout published a
+    /// human-readable `client_name`. `None` for hydra-internal flows
+    /// (e.g. session-cleanup without a specific RP context).
+    pub client_name: Option<&'a str>,
     pub error: Option<&'a str>,
 }
 
