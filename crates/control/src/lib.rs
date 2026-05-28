@@ -17,6 +17,7 @@ pub mod http_util;
 pub mod internal;
 pub mod metering;
 pub mod oidc_rp;
+pub mod oauth_handlers;
 pub mod rate_limit;
 pub mod registry;
 pub mod stripe_handlers;
@@ -131,6 +132,10 @@ pub struct AppState {
     /// because in multi-DB deployments the auth tables may live in a
     /// separate cluster. Mandatory post-U8.
     pub auth_pg: Arc<compio_postgres::Client>,
+    /// Hydra admin API base URL. Control uses this for admin-owned OAuth
+    /// client registration/deletion; Hydra remains the source of truth for
+    /// generated client secrets.
+    pub hydra_admin_url: String,
     /// Static Cedar policy bundle for control-plane authorization.
     /// Parsed once at boot; per-token policies are loaded by the authz
     /// evaluator only when a token-bearing request needs them.

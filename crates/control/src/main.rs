@@ -8,7 +8,7 @@ use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     admin_handlers, api, backchannel_logout, env_handlers, internal, oidc_rp, stripe_handlers,
-    token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
+    oauth_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -191,6 +191,12 @@ async fn main() -> std::io::Result<()> {
     // (`--dev-insecure` permits the empty-stash-key shortcut for
     // localhost only).
     let auth_public = arg_or_env(&args, "--auth-public", "AUTH_PUBLIC", "");
+    let hydra_admin_url = arg_or_env(
+        &args,
+        "--hydra-admin",
+        "AUTH_HYDRA_ADMIN",
+        "http://127.0.0.1:4445",
+    );
     let console_oidc_secret =
         arg_or_env(&args, "--console-oidc-secret", "CONSOLE_OIDC_SECRET", "");
     let stash_signing_key = arg_or_env(
@@ -301,6 +307,7 @@ async fn main() -> std::io::Result<()> {
         deploy_tmp_dir,
         oidc_rp,
         auth_pg,
+        hydra_admin_url,
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
         pat_issuer,
@@ -314,6 +321,7 @@ async fn main() -> std::io::Result<()> {
         web::App::new()
             .state(state.clone())
             .configure(admin_handlers::configure)
+            .configure(oauth_handlers::configure)
             // --- Admin API ---
             .service(
                 web::resource("/api/apps")
