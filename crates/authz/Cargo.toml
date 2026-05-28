@@ -1,0 +1,12 @@
+[package]
+name = "zeroship-authz"
+version = "0.1.0"
+edition = "2021"
+description = "Authorization wrapper policy types for the zeroship platform"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

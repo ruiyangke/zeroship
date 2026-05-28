@@ -5874,6 +5874,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-authz"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "zeroship-bundle"
 version = "0.1.0"
 dependencies = [
