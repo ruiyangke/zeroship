@@ -42,7 +42,7 @@ futures = { workspace = true }
 # `zeroship-core` and its JWKS verify path from `zeroship-core`'s
 # `oidc_verify` module.
 base64 = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 jsonwebtoken = { workspace = true }
 rand = "0.8"
 cyper = { workspace = true }
