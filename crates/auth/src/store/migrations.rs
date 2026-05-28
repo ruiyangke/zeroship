@@ -60,8 +60,11 @@ const STATEMENTS: &[&str] = &[
         request_ua  TEXT,
         issued_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         expires_at  TIMESTAMPTZ NOT NULL,
+        consumed_pending_at TIMESTAMPTZ,
         consumed_at TIMESTAMPTZ
     )",
+    "ALTER TABLE auth.magic_links \
+        ADD COLUMN IF NOT EXISTS consumed_pending_at TIMESTAMPTZ",
     "CREATE INDEX IF NOT EXISTS auth_magic_email_idx ON auth.magic_links (email)",
 
     // 5.4b magic-link cross-device completions — when the redeeming device's
@@ -77,10 +80,13 @@ const STATEMENTS: &[&str] = &[
         login_challenge  TEXT NOT NULL,
         attempts         SMALLINT NOT NULL DEFAULT 0,
         expires_at       TIMESTAMPTZ NOT NULL,
+        consumed_pending_at TIMESTAMPTZ,
         consumed_at      TIMESTAMPTZ
     )",
     "ALTER TABLE auth.magic_completions \
         ADD COLUMN IF NOT EXISTS attempts SMALLINT NOT NULL DEFAULT 0",
+    "ALTER TABLE auth.magic_completions \
+        ADD COLUMN IF NOT EXISTS consumed_pending_at TIMESTAMPTZ",
     "CREATE INDEX IF NOT EXISTS auth_magic_completions_expires_idx \
         ON auth.magic_completions (expires_at) WHERE consumed_at IS NULL",
 
