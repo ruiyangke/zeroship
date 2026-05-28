@@ -151,3 +151,12 @@ Not fully audited (deferred / out of scope for one round): Nomad/CH backend disp
 - `crates/auth/src/mailer/` and `crates/auth/src/identity/oauth/` — federation providers' callback flows.
 - `crates/sandbox/src/backend/nomad_ch.rs` — full Nomad+CH dispatch path.
 - `crates/cli/` — `zeroship deploy` and `zeroship inspect`: how they talk to control during a deploy (auth, retry, error mapping).
+
+## Status
+
+- HIGH drained in `audit/r10-integration`:
+  - H1 fixed by `a52b485f` (`fix(gateway): gate proxy client IP trust`).
+  - H2 fixed by `688ec523` (`fix(sync): timeout control-plane fetches`).
+  - H3 fixed by `68c08cef` (`fix(startup): require control key outside dev`).
+  - H4 fixed by `6024b6f2` (`fix(builder): verify oauth access token subject`).
+- MEDIUM / LOW findings remain open for a follow-up drain.
