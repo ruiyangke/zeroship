@@ -12,10 +12,14 @@
  *     │       └─ .zs-accordion-panel-inner — content padding lives here
  *
  * The Panel uses Base UI's `--accordion-panel-height` custom property
- * (emitted on `[data-state="open"]` panels) to animate from `0` to the
- * measured natural block-size. `prefers-reduced-motion` flattens the
- * animation; the chevron rotation also drops in reduced motion so the
- * open-state cue arrives instantly without movement.
+ * (emitted on panels carrying `data-open` / `data-starting-style` /
+ * `data-ending-style`) to animate between `0` and the measured natural
+ * block-size. Open panels resolve to `var(--accordion-panel-height)`;
+ * panels in the starting-style / ending-style transition frames pin to
+ * `0`, so the transition runs in both directions. `prefers-reduced-
+ * motion` flattens the animation; the chevron rotation also drops in
+ * reduced motion so the open-state cue arrives instantly without
+ * movement.
  *
  * Logical properties everywhere — the chevron lives at `inset-inline-end`
  * so RTL flips it automatically without a manual mirror. Horizontal
@@ -166,7 +170,7 @@
 /* ─── chevron ───────────────────────────────────────────────────────── *
  *
  * Trailing glyph that rotates 180° on open. Base UI sets
- * `data-state="open"` on the trigger when its Item is expanded; we read
+ * `data-panel-open` on the trigger when its Item is expanded; we read
  * that and flip the rotation. `prefers-reduced-motion` drops the
  * transition (the flip still happens, just instantly). */
 .zs-accordion-trigger-chevron {
@@ -178,8 +182,7 @@
   transition: transform var(--zs-motion-fast) var(--zs-motion-ease);
 }
 
-.zs-accordion-trigger[data-panel-open] .zs-accordion-trigger-chevron,
-.zs-accordion-trigger[data-state="open"] .zs-accordion-trigger-chevron {
+.zs-accordion-trigger[data-panel-open] .zs-accordion-trigger-chevron {
   transform: rotate(0.5turn);
 }
 
@@ -190,8 +193,6 @@
   transform: rotate(-0.25turn);
 }
 .zs-accordion-trigger--horizontal[data-panel-open]
-  .zs-accordion-trigger-chevron,
-.zs-accordion-trigger--horizontal[data-state="open"]
   .zs-accordion-trigger-chevron {
   transform: rotate(0.25turn);
 }
@@ -199,25 +200,43 @@
 /* ─── panel ─────────────────────────────────────────────────────────── *
  *
  * The Panel animates `block-size: 0 ↔ var(--accordion-panel-height)`.
- * Base UI emits the natural block-size as a CSS custom property on the
- * panel element while it's measured; closed panels collapse to 0 with
- * overflow hidden. The inner wrapper carries the padding so the 0-height
- * state stays clean (padding on the outer would create a visible step
- * at the end of the transition). */
+ * Base UI emits the natural block-size on the panel element via the
+ * `--accordion-panel-height` CSS custom property (a pixel value during
+ * measurement / transition windows, `auto` while fully open) AND tags
+ * the element with the transient `data-starting-style` /
+ * `data-ending-style` attributes during the first / last paint of
+ * each transition.
+ *
+ * The pattern (matching Base UI's documented usage): keep block-size
+ * pinned to the var ALWAYS, then override to `0` only during the
+ * starting / ending style frames. This gives the browser:
+ *
+ *   - on OPEN: block-size flips from 0 (starting-style) to the
+ *     measured px (var resolves to px before becoming auto). The
+ *     transition runs from 0 to the px value.
+ *   - on CLOSE: Base UI re-renders with the measured px in the var,
+ *     adds `data-ending-style` for one frame. The block-size goes
+ *     from the px value to 0 — the transition runs in reverse.
+ *
+ * If we keyed block-size off `data-open` only, the close transition
+ * would start from `auto` (the open-state computed value) instead of
+ * px — and CSS does not interpolate from `auto`, so the panel would
+ * snap shut. That was the pre-fix regression.
+ *
+ * The inner wrapper carries the padding so the 0-height state stays
+ * clean (padding on the outer would create a visible step at the end
+ * of the transition). */
 .zs-accordion-panel {
   overflow: hidden;
-  block-size: var(--accordion-panel-height, 0);
+  block-size: var(--accordion-panel-height);
   transition: block-size var(--zs-motion-base) var(--zs-motion-ease);
   color: var(--zs-label-secondary);
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
 }
 
-/* Base UI sets `data-starting-style` while opening from 0 — leave the
-   transition alone so the open animation runs to the measured height.
-   The closing animation runs in reverse via the same transition. */
-
-.zs-accordion-panel[data-state="closed"] {
+.zs-accordion-panel[data-starting-style],
+.zs-accordion-panel[data-ending-style] {
   block-size: 0;
 }
 
@@ -228,13 +247,15 @@
 
 /* Horizontal orientation — the panel animates inline-size instead of
    block-size. Base UI emits `--accordion-panel-width` for horizontal
-   roots. */
+   roots. Same starting/ending-style pin keeps both directions
+   transitioning. */
 .zs-accordion-panel--horizontal {
   block-size: auto;
-  inline-size: var(--accordion-panel-width, 0);
+  inline-size: var(--accordion-panel-width);
   transition: inline-size var(--zs-motion-base) var(--zs-motion-ease);
 }
-.zs-accordion-panel--horizontal[data-state="closed"] {
+.zs-accordion-panel--horizontal[data-starting-style],
+.zs-accordion-panel--horizontal[data-ending-style] {
   inline-size: 0;
 }
 
@@ -251,7 +272,11 @@
 /* ─── forced colors ─────────────────────────────────────────────────── *
  *
  * Map the open-row and focus affordances to system colors so high-
- * contrast users can still see which row is current. */
+ * contrast users can still see which row is current. The hover/active
+ * rules mirror the base hover/active selector specificity inside the
+ * forced-colors gate — otherwise the token `color-mix(...)` background
+ * in the base layer would win the cascade over the system-color base
+ * rule (same fix pattern Toggle applied in Slice 5). */
 @media (forced-colors: active) {
   .zs-accordion-item {
     border-color: CanvasText;
@@ -264,16 +289,34 @@
     color: CanvasText;
     background-color: Canvas;
   }
+  @media (hover: hover) {
+    .zs-accordion-trigger:not([data-disabled]):hover {
+      color: CanvasText;
+      background-color: Canvas;
+    }
+  }
+  .zs-accordion-trigger:not([data-disabled]):active {
+    color: CanvasText;
+    background-color: Canvas;
+  }
   .zs-accordion-trigger[data-disabled] {
     color: GrayText;
   }
-  .zs-accordion-trigger[data-panel-open],
-  .zs-accordion-trigger[data-state="open"] {
+  .zs-accordion-trigger[data-panel-open] {
     color: HighlightText;
     background-color: Highlight;
   }
-  .zs-accordion-trigger[data-panel-open] .zs-accordion-trigger-chevron,
-  .zs-accordion-trigger[data-state="open"] .zs-accordion-trigger-chevron {
+  @media (hover: hover) {
+    .zs-accordion-trigger[data-panel-open]:not([data-disabled]):hover {
+      color: HighlightText;
+      background-color: Highlight;
+    }
+  }
+  .zs-accordion-trigger[data-panel-open]:not([data-disabled]):active {
+    color: HighlightText;
+    background-color: Highlight;
+  }
+  .zs-accordion-trigger[data-panel-open] .zs-accordion-trigger-chevron {
     color: HighlightText;
   }
   .zs-accordion-trigger:focus-visible {

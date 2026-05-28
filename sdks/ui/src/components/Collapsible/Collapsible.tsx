@@ -12,22 +12,29 @@
  *     wrap inline content.
  *
  *   - Collapsible.Trigger: a real `<button type="button">` with
- *     `aria-expanded` and `aria-controls` wired to its Panel. We stamp
- *     `type="button"` defensively so a Collapsible inside a Form doesn't
- *     accidentally submit. Disabled triggers don't respond to clicks
+ *     `aria-expanded` and `aria-controls` wired to its Panel. The
+ *     `type="button"` stamp is unconditional and not overridable
+ *     from the public prop surface, so a Collapsible inside a Form
+ *     never submits it. Disabled triggers don't respond to clicks
  *     and read inactive.
  *
- *   - Collapsible.Panel: a `<div>` carrying the matching `id`. Animates
- *     `block-size: 0 ↔ var(--collapsible-panel-height)` via Base UI's
- *     emitted CSS custom property. `prefers-reduced-motion: reduce`
- *     snaps without a transition. The Panel is `[hidden]` when closed
- *     so its content stays out of the tab order.
+ *   - Collapsible.Panel: a `<div>` carrying the matching `id`. Base
+ *     UI tags it with `data-open` / `data-closed` plus the transient
+ *     `data-starting-style` and `data-ending-style` attributes while
+ *     the panel animates in / out. Our CSS keys block-size off those
+ *     attributes — `0` when closed (and during the starting / ending
+ *     transition frames), `var(--collapsible-panel-height)` when open.
+ *     `prefers-reduced-motion: reduce` snaps without a transition. The
+ *     Panel is `[hidden]` when fully closed so its content stays out
+ *     of the tab order.
  *
  * Design guarantees encoded in source:
  *
- *   1. Trigger is ALWAYS a `<button type="button">`. Same defense
- *      Accordion / Tabs / Toggle apply — a Collapsible inside a Form
- *      must NOT submit.
+ *   1. Trigger is ALWAYS a `<button type="button">`. We stamp `type`
+ *      unconditionally on the JSX and omit it from the public props so
+ *      a consumer cannot spread `type="submit"`. Same defense Accordion
+ *      / Tabs / Toggle apply — a Collapsible inside a Form must NOT
+ *      submit.
  *
  *   2. `disabled` cascades to the Trigger so the affordance reads
  *      inactive without the consumer threading the prop through twice.
@@ -46,6 +53,14 @@
  *
  *   6. Compound namespace `Collapsible.{Root,Trigger,Panel}` — calling
  *      `<Collapsible>` directly mounts Root.
+ *
+ *   7. No `asChild` surface. Base UI's `render` prop is omitted from
+ *      every part — Collapsible's Trigger is a `<button>` with the
+ *      platform-managed `aria-controls`, so there is no customization
+ *      path the design system supports via a Slot. Composition is via
+ *      `children`. If a future slice needs `asChild` here, it must add
+ *      it explicitly through `_slot.ts` so the slot ref / event
+ *      composition stays consistent across the design system.
  */
 import {
   forwardRef,
@@ -148,25 +163,21 @@ export interface CollapsibleTriggerProps
   > {
   /** Optional class hook on the trigger button. */
   className?: string;
-  /**
-   * The trigger's HTML `type`. Default `"button"` defends against an
-   * accidental form submit when the Collapsible is inside a Form.
-   * Consumer override still wins.
-   *
-   * @default "button"
-   */
-  type?: "button" | "submit" | "reset";
 }
 
 const CollapsibleTrigger = forwardRef<
   HTMLButtonElement,
   CollapsibleTriggerProps
->(function CollapsibleTrigger({ className, type, children, ...rest }, ref) {
+>(function CollapsibleTrigger({ className, children, ...rest }, ref) {
   return (
     <BaseCollapsible.Trigger
       {...rest}
       ref={ref}
-      type={type ?? "button"}
+      // Stamp type="button" UNCONDITIONALLY. `type` is omitted from
+      // CollapsibleTriggerProps so a caller can't override the stamp
+      // by spreading `type="submit"` through `...rest`. Mirrors the
+      // Accordion / Tabs form-safety rule.
+      type="button"
       className={classnames("zs-collapsible-trigger", className)}
     >
       <span className="zs-collapsible-trigger-label">{children}</span>

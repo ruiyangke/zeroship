@@ -20,16 +20,22 @@
  *     navigation lands on each row.
  *
  *   - Accordion.Trigger: a real `<button type="button">` with
- *     `aria-expanded` and `aria-controls` wired to its Panel. We never
- *     attach a raw `onClick` that fights Base UI's controlled state —
- *     mode + value flow through the root. Disabled triggers are skipped
- *     by roving (ArrowDown/ArrowUp focus traversal).
+ *     `aria-expanded` and `aria-controls` wired to its Panel. The
+ *     `type="button"` stamp is unconditional and not overridable from
+ *     the prop surface, so an accordion inside a Form never submits
+ *     it. We never attach a raw `onClick` that fights Base UI's
+ *     controlled state — mode + value flow through the root. Disabled
+ *     triggers are skipped by roving (ArrowDown/ArrowUp focus
+ *     traversal).
  *
  *   - Accordion.Panel: a `<div>` carrying the matching `id` plus
- *     `aria-labelledby` pointing at its Trigger. Base UI animates the
- *     panel's block-size via the `--accordion-panel-height` CSS custom
- *     property; our CSS reads that var and transitions to/from `0`.
- *     `prefers-reduced-motion: reduce` snaps without a transition.
+ *     `aria-labelledby` pointing at its Trigger. Base UI emits the
+ *     panel's natural block-size on the `--accordion-panel-height` CSS
+ *     custom property and tags the panel with `data-open`,
+ *     `data-starting-style`, and `data-ending-style` while transitions
+ *     run; our CSS keys block-size off those attributes. The closed
+ *     panel resolves to `0`. `prefers-reduced-motion: reduce` snaps
+ *     without a transition.
  *
  * Design guarantees encoded in source (so they travel with the code):
  *
@@ -40,8 +46,10 @@
  *      mode has no `collapsible` knob because "no items open" is always
  *      reachable.
  *
- *   2. Trigger is ALWAYS a `<button type="button">`. Stamping `type`
- *      defends against Accordion inside a Form (no accidental submit).
+ *   2. Trigger is ALWAYS a `<button type="button">`. We stamp `type`
+ *      unconditionally on the JSX and omit it from the public props so
+ *      a consumer cannot spread `type="submit"` onto a disclosure
+ *      trigger — an accordion inside a Form must never submit it.
  *      Header wraps the trigger in an `<h3>` so the heading-level
  *      navigation works. We do NOT nest a `<button>` inside the Trigger
  *      content (it's already a button) — that would create an invalid
@@ -68,6 +76,16 @@
  *   7. Compound namespace exported as `Accordion.{Root,Item,Header,
  *      Trigger,Panel}`. The root is also the default entry — calling
  *      `<Accordion>` directly mounts Root.
+ *
+ *   8. No `asChild` surface. Base UI's `render` prop is omitted from
+ *      every part — Accordion's Trigger is invariably a heading-button
+ *      and the Panel carries the platform-managed `aria-labelledby`,
+ *      so there is no customization path the design system supports
+ *      via a Slot. Composition is via `children`. If a future slice
+ *      needs `asChild` here (e.g. wrapping the Trigger in a custom
+ *      button), it must add it explicitly through `_slot.ts` so the
+ *      slot ref / event composition stays consistent across the
+ *      design system.
  */
 import {
   createContext,
@@ -118,8 +136,12 @@ interface AccordionSingleProps {
   type: "single";
   /**
    * Controlled value — the `value` of the currently-open Item, or
-   * `undefined` when nothing is open. To leave the accordion
-   * uncontrolled, omit this and use `defaultValue`.
+   * `undefined` when nothing is open. Passing the prop (even as
+   * `undefined`) puts the accordion into controlled mode; OMIT the
+   * prop entirely to use `defaultValue` and stay uncontrolled. The
+   * wrapper detects prop presence and forwards an empty selection
+   * when `value === undefined`, so Base UI's `useControlled` semantics
+   * never silently flip the accordion to uncontrolled.
    */
   value?: string;
   /**
@@ -230,30 +252,57 @@ function AccordionRootInner(
   if (rest.type === "single") {
     const {
       type: _type,
-      value,
-      defaultValue,
       onValueChange,
       collapsible = false,
       ...baseRest
     } = rest;
     void _type;
+    // Detect controlled prop presence by inspecting the discriminator
+    // shape itself — `value === undefined` cannot be used as the
+    // signal because Base UI's `useControlled` treats `undefined` as
+    // "uncontrolled". When the consumer explicitly passes the prop
+    // (even as `undefined`), `'value' in rest` is true and we forward
+    // an empty array so Base UI stays in controlled mode.
+    const isControlled = "value" in rest;
+    const isDefaulted = "defaultValue" in rest;
+    const singleValue = isControlled
+      ? (rest as { value?: string }).value
+      : undefined;
+    const singleDefaultValue = isDefaulted
+      ? (rest as { defaultValue?: string }).defaultValue
+      : undefined;
     // Base UI expects an ARRAY value internally. In single mode we
     // normalize to a one-element array (or empty when undefined) on
     // the way in, and back to a string (or undefined) on the way out.
-    const baseValue =
-      value === undefined ? undefined : [value];
-    const baseDefaultValue =
-      defaultValue === undefined ? undefined : [defaultValue];
-    const baseOnValueChange = onValueChange
-      ? (next: unknown[]) => {
-          // Single mode: collapsing returns []; else the only element.
-          const first = next.length > 0 ? String(next[0]) : undefined;
-          // When `collapsible` is false Base UI never emits an empty
-          // array (the open item stays open), but defend defensively.
-          if (!collapsible && first === undefined) return;
-          onValueChange(first);
-        }
+    const baseValue = isControlled
+      ? singleValue === undefined
+        ? []
+        : [singleValue]
       : undefined;
+    const baseDefaultValue = isDefaulted
+      ? singleDefaultValue === undefined
+        ? []
+        : [singleDefaultValue]
+      : undefined;
+    // Install Base UI's handler UNCONDITIONALLY for single mode so we
+    // can call `eventDetails.cancel()` to enforce
+    // `collapsible: false` — Base UI emits `[]` when the open
+    // Trigger is re-clicked, and only an installed handler that
+    // cancels can stop the closure.
+    const baseOnValueChange = (
+      next: unknown[],
+      eventDetails: { cancel: () => void },
+    ) => {
+      const first = next.length > 0 ? String(next[0]) : undefined;
+      // RadioGroup semantics: when collapsible is false the open
+      // Trigger cannot close itself. Cancel the empty-array emit so
+      // Base UI's internal state stays at the previous value.
+      if (!collapsible && first === undefined) {
+        eventDetails.cancel();
+        return;
+      }
+      onValueChange?.(first);
+    };
     return (
       <AccordionContext.Provider value={{ orientation }}>
         <BaseAccordion.Root
@@ -282,12 +331,18 @@ function AccordionRootInner(
   // Multiple mode. Pass arrays through unchanged.
   const {
     type: _type,
-    value,
-    defaultValue,
     onValueChange,
     ...baseRest
   } = rest;
   void _type;
+  const isControlled = "value" in rest;
+  const isDefaulted = "defaultValue" in rest;
+  const multipleValue = isControlled
+    ? (rest as { value?: string[] }).value
+    : undefined;
+  const multipleDefaultValue = isDefaulted
+    ? (rest as { defaultValue?: string[] }).defaultValue
+    : undefined;
   const baseOnValueChange = onValueChange
     ? (next: unknown[]) => {
         onValueChange(next.map((v) => String(v)));
@@ -299,8 +354,8 @@ function AccordionRootInner(
         {...(baseRest as object)}
         ref={ref}
         multiple
-        value={value as never}
-        defaultValue={defaultValue as never}
+        value={multipleValue as never}
+        defaultValue={multipleDefaultValue as never}
         onValueChange={baseOnValueChange as never}
         orientation={orientation}
         disabled={disabled}
@@ -395,25 +450,20 @@ export interface AccordionTriggerProps
   extends Omit<BaseAccordionTriggerProps, "render" | "className" | "type"> {
   /** Optional class hook on the trigger button. */
   className?: string;
-  /**
-   * The trigger's HTML `type`. Default `"button"` defends against an
-   * accidental form submit when the accordion is inside a Form. Consumer
-   * override still wins — but the default keeps Forms safe.
-   *
-   * @default "button"
-   */
-  type?: "button" | "submit" | "reset";
 }
 
 const AccordionTrigger = forwardRef<HTMLButtonElement, AccordionTriggerProps>(
-  function AccordionTrigger({ className, type, children, ...rest }, ref) {
+  function AccordionTrigger({ className, children, ...rest }, ref) {
     const { orientation } = useAccordionContext();
     return (
       <BaseAccordion.Trigger
         {...rest}
         ref={ref as React.Ref<HTMLElement>}
-        // Stamp type="button" defensively. Same defense Tabs/Toggle apply.
-        type={type ?? "button"}
+        // Stamp type="button" UNCONDITIONALLY. `type` is omitted from
+        // AccordionTriggerProps so a caller can't override the stamp
+        // by spreading `type="submit"` through `...rest`. Mirrors the
+        // Tabs.Tab form-safety rule.
+        type="button"
         className={classnames(
           "zs-accordion-trigger",
           `zs-accordion-trigger--${orientation}`,

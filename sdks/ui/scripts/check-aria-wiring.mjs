@@ -58,6 +58,51 @@ async function open(storyId) {
     `${baseUrl}/iframe.html?id=${storyId}&globals=theme:Crystal`,
     { waitUntil: "networkidle" },
   );
+  // Storybook auto-runs each story's `play()` on iframe load. If a
+  // play() throws (e.g. the Dialog Default play asserts visibility
+  // before the `data-starting-style` opacity:0 frame clears), Storybook
+  // overlays an error display whose `data-base-ui-inert` wrapper
+  // intercepts pointer events. Even a SUCCESSFUL play() can leave the
+  // story in a post-play state — e.g. a Dialog Trigger that is now
+  // `data-popup-open`, with the popup portal mid-DOM, blocking the
+  // re-click this script's `openStoryAndTrigger` will attempt.
+  //
+  // The aria-wiring script drives its OWN interactions and does not
+  // need Storybook autoplay to have left the story in any particular
+  // state. We therefore reset to a clean baseline after each
+  // navigation: dismiss any error overlay, close any open Base UI
+  // popup via ESC, and let the script's per-block code do the
+  // real-path interaction itself.
+  await page
+    .evaluate(() => {
+      const body = document.body;
+      if (body.classList.contains("sb-show-errordisplay")) {
+        body.classList.remove("sb-show-errordisplay");
+        document
+          .querySelectorAll(".sb-errordisplay")
+          .forEach((el) => el.remove());
+        document
+          .querySelectorAll("[data-base-ui-inert]")
+          .forEach((el) => el.removeAttribute("data-base-ui-inert"));
+      }
+    })
+    .catch(() => {});
+  // Press ESC up to three times to dismiss any nested Base UI popup
+  // left open by a prior play(). Each ESC is a synchronous noop if
+  // nothing is open, so this is safe to run unconditionally.
+  for (let i = 0; i < 3; i += 1) {
+    const hasOpenPopup = await page
+      .evaluate(
+        () =>
+          document.querySelectorAll(
+            "[data-base-ui-portal] [data-open], [data-popup-open]",
+          ).length > 0,
+      )
+      .catch(() => false);
+    if (!hasOpenPopup) break;
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(120);
+  }
 }
 
 /*
@@ -73,9 +118,26 @@ async function openStoryAndTrigger(storyId, triggerSelectors) {
   for (const sel of selectors) {
     const trigger = page.locator(sel).first();
     await trigger.waitFor({ state: "visible", timeout: 5000 });
-    await trigger.click();
-    // Settle the open animation before the next interaction.
-    await page.waitForTimeout(300);
+    // If Storybook's autoplay already opened this popup, skip the
+    // extra click — the popup is already in the post-open state the
+    // test expects. (A non-dismissible Dialog story would otherwise
+    // block here because its play() leaves the popup open and we
+    // cannot ESC it shut between blocks.)
+    const alreadyOpen = await trigger
+      .evaluate(
+        (el) =>
+          el.hasAttribute("data-popup-open") ||
+          el.getAttribute("aria-expanded") === "true",
+      )
+      .catch(() => false);
+    if (!alreadyOpen) {
+      await trigger.click();
+      // Settle the open animation before the next interaction.
+      await page.waitForTimeout(300);
+    } else {
+      // Still settle in case the autoplay just kicked it open.
+      await page.waitForTimeout(300);
+    }
   }
 }
 
@@ -2107,6 +2169,7 @@ await page.emulateMedia({ forcedColors: "none" });
 /* ─── 61. Coarse-pointer hit-target — NumberField stepper ───────────── *
  *
  * Coarse-pointer touch-target floor: 44 device-units ≈ --zs-hit-min
+ * Coarse-pointer touch target floor: 44 device-units ≈ --zs-hit-min
  * 2.75rem. The 1rem root font-size means 2.75rem = 44px. Assert the
  * rendered stepper button's bounding rect is ≥ 44px on BOTH axes —
  * pre-fix only inline-size grew, leaving block-size at 2rem (32px) or
@@ -4074,6 +4137,312 @@ await open("components-accordion--basic");
     "Accordion — ArrowDown moves roving focus to next Trigger",
     ok,
     `firstFocused=${firstFocused} secondFocused=${secondFocused}`,
+  );
+}
+
+/* ─── 85a. Slice 14 review fix #1: Accordion Panel runs a real CSS
+ *                    block-size transition on close (not a snap).
+ *
+ * Pre-fix regression: the panel close rule was keyed off the
+ * never-emitted `[data-state="closed"]` attribute, so the panel
+ * snap-collapsed to 0 via `[hidden]` instead of running the
+ * `transition: block-size` declared on `.zs-accordion-panel`. This
+ * assertion samples the computed block-size mid-transition (60ms after
+ * the close click) and demands a value strictly BETWEEN `0` and the
+ * fully-open measurement. A snap-shut panel would read either
+ * `0px` immediately or stay at the open height with `[hidden]` flip
+ * only; only a live transition can land in between.
+ *
+ * Uses the dedicated regression story (no play() — see
+ * `Accordion.stories.tsx` `RegressionTransitions`) so Storybook
+ * autoplay doesn't race the click sequence. The story preopens
+ * `shipping` so the closing transition is one click away. */
+await open("components-accordion--regression-transitions");
+{
+  const trigger = page.locator(
+    '[data-testid="accordion-regression-transitions-trigger-shipping"]',
+  );
+  const panel = page.locator(
+    '[data-testid="accordion-regression-transitions-panel-shipping"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Wait for the initial mount-time enter transition (from
+  // `defaultValue="shipping"`) to settle so the open-height baseline
+  // is stable.
+  await page.waitForTimeout(400);
+  const openHeight = await panel
+    .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+    .catch(() => 0);
+  // Click to close — sample 60ms in while the transition is running.
+  await trigger.click();
+  await page.waitForTimeout(60);
+  const midHeight = await panel
+    .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+    .catch(() => 0);
+  // Allow the close to settle, then confirm we ended at 0 (or the
+  // panel unmounted — keepMounted=false, post-close Base UI removes
+  // the element. Either reads as "closed").
+  await page.waitForTimeout(500);
+  const closedHeight = await panel
+    .count()
+    .then(async (n) =>
+      n === 0
+        ? 0
+        : panel
+            .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+            .catch(() => 0),
+    );
+  const inFlight = midHeight > 0 && midHeight < openHeight;
+  const ok = openHeight > 0 && inFlight && closedHeight === 0;
+  report(
+    "Accordion Panel runs a real block-size transition on close (fix #1)",
+    ok,
+    `openHeight=${openHeight} midHeight=${midHeight} closedHeight=${closedHeight}`,
+  );
+}
+
+/* ─── 85b. Slice 14 review fix #1 mirror: Collapsible Panel runs a real
+ *                    CSS block-size transition on close (not a snap).
+ *
+ * Same regression as 85a but on the Collapsible primitive, which
+ * regressed independently on `Collapsible.css:126`. Uses the dedicated
+ * regression story (no play() — see `Collapsible.stories.tsx`
+ * `RegressionTransitions`) so Storybook autoplay doesn't race the
+ * click sequence. The story starts closed; we click once to open,
+ * settle, then click again to close and sample mid-transition. */
+await open("components-collapsible--regression-transitions");
+{
+  const trigger = page.locator(
+    '[data-testid="collapsible-regression-transitions-trigger"]',
+  );
+  const panel = page.locator(
+    '[data-testid="collapsible-regression-transitions-panel"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  // Open and let the open-transition settle so we have a reliable
+  // measured-open height baseline.
+  await trigger.click();
+  await page.waitForTimeout(600);
+  const openHeight = await panel
+    .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+    .catch(() => 0);
+  // Click to close — sample 60ms in while the transition is running.
+  await trigger.click();
+  await page.waitForTimeout(60);
+  const midHeight = await panel
+    .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+    .catch(() => 0);
+  await page.waitForTimeout(500);
+  const closedHeight = await panel
+    .count()
+    .then(async (n) =>
+      n === 0
+        ? 0
+        : panel
+            .evaluate((el) => parseFloat(getComputedStyle(el).blockSize) || 0)
+            .catch(() => 0),
+    );
+  const inFlight = midHeight > 0 && midHeight < openHeight;
+  const ok = openHeight > 0 && inFlight && closedHeight === 0;
+  report(
+    "Collapsible Panel runs a real block-size transition on close (fix #1)",
+    ok,
+    `openHeight=${openHeight} midHeight=${midHeight} closedHeight=${closedHeight}`,
+  );
+}
+
+/* ─── 85c. Slice 14 review fix #2: uncontrolled single Accordion with the
+ *                    default `collapsible: false` cannot be closed by
+ *                    re-clicking the open Trigger.
+ *
+ * Pre-fix regression: the `onValueChange` handler that enforced
+ * RadioGroup semantics was only installed when the consumer supplied
+ * one. Uncontrolled `type="single"` with default `collapsible: false`
+ * therefore let Base UI's internal state collapse to `[]` on
+ * re-click, leaving the accordion fully closed despite the documented
+ * "one item stays open" contract. Uses the dedicated regression
+ * story (no play()) so Storybook autoplay can't leave the accordion
+ * in a post-play state. */
+await open("components-accordion--regression-non-collapsible");
+{
+  const shipping = page.locator(
+    '[data-testid="accordion-regression-noncollapsible-trigger-shipping"]',
+  );
+  await shipping.waitFor({ state: "visible", timeout: 5000 });
+  await shipping.click();
+  await page.waitForTimeout(150);
+  const afterFirstClick = await shipping.getAttribute("aria-expanded");
+  // Re-click the same Trigger — `collapsible: false` (default) MUST
+  // hold it open. A pre-fix accordion would flip this to "false".
+  await shipping.click();
+  await page.waitForTimeout(150);
+  const afterReClick = await shipping.getAttribute("aria-expanded");
+  const ok = afterFirstClick === "true" && afterReClick === "true";
+  report(
+    "Accordion single + collapsible:false — re-click keeps the open Item open (fix #2)",
+    ok,
+    `afterFirstClick=${afterFirstClick} afterReClick=${afterReClick}`,
+  );
+}
+
+/* ─── 85d. Slice 14 review fix #4: controlled single Accordion never
+ *                    silently exits controlled mode.
+ *
+ * Pre-fix regression: the wrapper mapped `value === undefined → undefined`
+ * before forwarding to Base UI. Base UI's `useControlled` treats the
+ * `undefined` prop value as "uncontrolled", so a consumer who passed
+ * `value={state}` lost control of the Accordion the moment their state
+ * went falsy. The fix detects prop presence via `'value' in props` and
+ * forwards `[]` when the prop is present-but-undefined.
+ *
+ * The Controlled story renders an external readout (`Open: <value>`)
+ * sourced from React state — a desync between the readout and the
+ * accordion's expanded Trigger would prove Base UI took over. */
+await open("components-accordion--regression-controlled");
+{
+  const returns = page.locator(
+    '[data-testid="accordion-regression-controlled-trigger-returns"]',
+  );
+  const warranty = page.locator(
+    '[data-testid="accordion-regression-controlled-trigger-warranty"]',
+  );
+  const readout = page.locator(
+    '[data-testid="accordion-regression-controlled-readout"]',
+  );
+  await returns.waitFor({ state: "visible", timeout: 5000 });
+  // Story preopens `returns` via controlled `useState("returns")`.
+  const initialReturns = await returns.getAttribute("aria-expanded");
+  const initialReadout = (await readout.textContent()) ?? "";
+  // Open another Trigger — readout MUST flip to that value.
+  await warranty.click();
+  await page.waitForTimeout(150);
+  const warrantyOpenExpanded = await warranty.getAttribute("aria-expanded");
+  const returnsClosedExpanded = await returns.getAttribute("aria-expanded");
+  const readoutAfterWarranty = (await readout.textContent()) ?? "";
+  // Collapse via re-click (collapsible:true on the story). The readout
+  // MUST go to "(none)" and aria-expanded MUST flip false. The fix
+  // keeps Base UI in controlled mode so the readout drives the close.
+  await warranty.click();
+  await page.waitForTimeout(150);
+  const warrantyClosedExpanded = await warranty.getAttribute("aria-expanded");
+  const readoutAfterCollapse = (await readout.textContent()) ?? "";
+  // Open AGAIN after the (none) state — this is the round-trip that
+  // pre-fix code couldn't survive (Base UI had silently taken over).
+  await returns.click();
+  await page.waitForTimeout(150);
+  const returnsReopenedExpanded = await returns.getAttribute("aria-expanded");
+  const readoutAfterReopen = (await readout.textContent()) ?? "";
+  const ok =
+    initialReturns === "true" &&
+    /Open:\s*returns/i.test(initialReadout) &&
+    warrantyOpenExpanded === "true" &&
+    returnsClosedExpanded === "false" &&
+    /Open:\s*warranty/i.test(readoutAfterWarranty) &&
+    warrantyClosedExpanded === "false" &&
+    /Open:\s*\(none\)/i.test(readoutAfterCollapse) &&
+    returnsReopenedExpanded === "true" &&
+    /Open:\s*returns/i.test(readoutAfterReopen);
+  report(
+    "Accordion controlled single — full open/close/reopen cycle stays in controlled mode (fix #4)",
+    ok,
+    `initial=${initialReturns}|${initialReadout.trim()}; after-warranty=${warrantyOpenExpanded}/${returnsClosedExpanded}|${readoutAfterWarranty.trim()}; after-collapse=${warrantyClosedExpanded}|${readoutAfterCollapse.trim()}; after-reopen=${returnsReopenedExpanded}|${readoutAfterReopen.trim()}`,
+  );
+}
+
+/* ─── 85e. Slice 14 review fix #7: Accordion / Collapsible aria id
+ *                    wiring is correct end-to-end.
+ *
+ * Brief reviewer note: the original slice 14 blocks only verified
+ * `aria-expanded` and visibility — they never proved the
+ * `aria-controls -> panel.id` and Accordion panel `aria-labelledby ->
+ * trigger.id` round-trips. This block opens each Trigger, reads
+ * its `aria-controls`, and asserts that:
+ *
+ *   1. The referenced Panel actually carries that `id`.
+ *   2. The Panel's `aria-labelledby` references the Trigger's `id`
+ *      (Accordion only; Collapsible Panel does not require labelledby
+ *      because its Trigger sits at the same level).
+ *
+ * Plus a real `single` mutual-exclusion ID check: opening Returns
+ * after Shipping must hide the Shipping Panel (Base UI applies the
+ * `[hidden]` attribute when keepMounted is false). */
+await open("components-accordion--basic");
+{
+  const shipping = page.locator(
+    '[data-testid="accordion-basic-trigger-shipping"]',
+  );
+  const returns = page.locator(
+    '[data-testid="accordion-basic-trigger-returns"]',
+  );
+  const panelShipping = page.locator(
+    '[data-testid="accordion-basic-panel-shipping"]',
+  );
+  const panelReturns = page.locator(
+    '[data-testid="accordion-basic-panel-returns"]',
+  );
+  await shipping.waitFor({ state: "visible", timeout: 5000 });
+  await shipping.click();
+  await page.waitForTimeout(400);
+  const shippingTriggerId = await shipping.getAttribute("id");
+  const shippingAriaControls = await shipping.getAttribute("aria-controls");
+  const shippingPanelId = await panelShipping.getAttribute("id");
+  const shippingPanelLabelledBy = await panelShipping.getAttribute(
+    "aria-labelledby",
+  );
+  // Open returns — the single-mode mutual exclusion should now hide
+  // the shipping panel from the accessibility tree.
+  await returns.click();
+  await page.waitForTimeout(400);
+  const returnsTriggerId = await returns.getAttribute("id");
+  const returnsAriaControls = await returns.getAttribute("aria-controls");
+  const returnsPanelId = await panelReturns.getAttribute("id");
+  const returnsPanelLabelledBy = await panelReturns.getAttribute(
+    "aria-labelledby",
+  );
+  // After opening returns, the shipping panel either unmounts
+  // (keepMounted=false default) or carries a hidden / display:none
+  // signal. Either counts as "hidden from the a11y tree".
+  const shippingPanelHiddenAfter = await page
+    .evaluate(() => {
+      const el = document.querySelector(
+        '[data-testid="accordion-basic-panel-shipping"]',
+      );
+      if (!el) return true; // unmounted — hidden by removal
+      if (el.hasAttribute("hidden")) return true;
+      const style = getComputedStyle(el);
+      return style.display === "none" || style.visibility === "hidden";
+    });
+  const ok =
+    shippingTriggerId !== null &&
+    shippingAriaControls === shippingPanelId &&
+    shippingPanelLabelledBy === shippingTriggerId &&
+    returnsTriggerId !== null &&
+    returnsAriaControls === returnsPanelId &&
+    returnsPanelLabelledBy === returnsTriggerId &&
+    shippingPanelHiddenAfter === true;
+  report(
+    "Accordion — aria-controls + aria-labelledby + single-mode mutual exclusion (fix #7)",
+    ok,
+    `shipping ctrl=${shippingAriaControls}/panel=${shippingPanelId} labelledby=${shippingPanelLabelledBy}/trigger=${shippingTriggerId}; returns ctrl=${returnsAriaControls}/panel=${returnsPanelId} labelledby=${returnsPanelLabelledBy}/trigger=${returnsTriggerId}; shippingHiddenAfter=${shippingPanelHiddenAfter}`,
+  );
+}
+
+/* ─── 85f. Slice 14 review fix #7 mirror: Collapsible aria-controls. */
+await open("components-collapsible--basic");
+{
+  const trigger = page.locator('[data-testid="collapsible-basic-trigger"]');
+  const panel = page.locator('[data-testid="collapsible-basic-panel"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  await page.waitForTimeout(400);
+  const ariaControls = await trigger.getAttribute("aria-controls");
+  const panelId = await panel.getAttribute("id");
+  const ok =
+    ariaControls !== null && panelId !== null && ariaControls === panelId;
+  report(
+    "Collapsible — aria-controls references Panel id (fix #7)",
+    ok,
+    `aria-controls=${ariaControls} panelId=${panelId}`,
   );
 }
 
