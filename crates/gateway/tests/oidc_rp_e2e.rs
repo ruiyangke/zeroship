@@ -214,6 +214,10 @@ async fn gateway_oidc_rp_full_dance() {
         public_url: "http://localhost:9092".to_string(),
         postmark_webhook_user: None,
         postmark_webhook_password: None,
+        jwk_rotation_days: 90,
+        jwk_retain_days: 31,
+        cron_tick_secs: 86400,
+        audit_retention_check_secs: 3600,
     });
     let admin_state = admin.clone();
     let cfg_state = cfg.clone();
