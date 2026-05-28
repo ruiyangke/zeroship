@@ -14,12 +14,16 @@
 //!        domain-re-registration defence: someone who acquires a previously
 //!        owned email at a federation provider cannot quietly take over a
 //!        zeroship account that still has its original password.
-//!      - if the user is OAuth-only (no local credential) there's nothing
-//!        to defend; auto-link silently and return `Existing`.
-//!   3. Else if the provider is trusted for this email (verified) → create
+//!      - if the user is OAuth-only (no local credential) but the provider
+//!        is not trusted for this email, require confirmation too. A raw
+//!        `email_verified` bit from the upstream provider is not enough to
+//!        bind this local account to the provider identity.
+//!      - if the user is OAuth-only and the provider is trusted for this
+//!        email, auto-link silently and return `Existing`.
+//!   3. Else if the provider is trusted for this email → create
 //!      a fresh `auth.users` row and link the identity (`Created`).
-//!   4. Otherwise refuse — we won't auto-create an account on an unverified
-//!      provider email.
+//!   4. Otherwise refuse — we won't auto-create an account on an untrusted
+//!      provider email, even when the provider says it verified the address.
 //!
 //! `provider_trusted_for_email` is set by the per-provider HTTP handler.
 //! For Google: `email_verified == true` AND (consumer `@gmail.com` OR
@@ -173,8 +177,8 @@ impl PendingLink {
 /// # Errors
 ///
 /// [`AuthError::Db`] on PG failure;
-/// [`AuthError::Internal`] when the provider's email is unverified and we
-/// refuse to auto-create.
+/// [`AuthError::Internal`] when the provider is not trusted for the email
+/// and we refuse to auto-create.
 pub async fn resolve_or_link(
     db: &Client,
     profile: &ResolvedProfile<'_>,
@@ -190,33 +194,19 @@ pub async fn resolve_or_link(
 
     // 2. Email collision with an existing local user.
     if let Some(user) = users::find_by_email(db, profile.email).await? {
-        // 2a. Local credential present → require password-confirm.
-        if user.password_hash.is_some() {
-            let exp_unix = i64::try_from(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|e| AuthError::Internal(format!("clock: {e}")))?
-                    .as_secs()
-                    + PENDING_LINK_TTL_SECS,
-            )
-            .unwrap_or(i64::MAX);
-            let pending = PendingLink {
-                user_id: user.id,
-                provider: profile.provider.to_string(),
-                subject: profile.subject.to_string(),
-                email: profile.email.to_string(),
-                login_challenge: login_challenge.to_string(),
-                exp_unix,
-            };
-            return Ok(LinkOutcome::NeedsConfirmation {
-                pending_token: pending.encode(pending_signing_key),
-                existing_email: profile.email.to_string(),
-                provider: profile.provider.to_string(),
-            });
+        // 2a. Local credential present, or provider not trusted for this
+        // email → require explicit confirmation before creating the link.
+        if user.password_hash.is_some() || !profile.provider_trusted_for_email {
+            return pending_confirmation(
+                user.id,
+                profile,
+                login_challenge,
+                pending_signing_key,
+            );
         }
 
-        // 2b. OAuth-only existing user — nothing to defend, auto-link is
-        // safe.
+        // 2b. OAuth-only existing user + provider trusted for this email:
+        // auto-link is safe.
         identities::link(
             db,
             user.id,
@@ -229,10 +219,11 @@ pub async fn resolve_or_link(
         return Ok(LinkOutcome::Existing { user_id: user.id });
     }
 
-    // 3. Brand-new user — verified-email gate.
-    if !profile.provider_trusted_for_email && !profile.email_verified {
+    // 3. Brand-new user — trusted-provider gate. Do not substitute the
+    // upstream provider's raw `email_verified` bit for this policy.
+    if !profile.provider_trusted_for_email {
         return Err(AuthError::Internal(format!(
-            "refusing to auto-create account for unverified provider email: {}",
+            "refusing to auto-create account for untrusted provider email: {}",
             profile.email
         )));
     }
@@ -246,8 +237,9 @@ pub async fn resolve_or_link(
 
     let user = users::create(db, profile.email, name, None).await?;
 
-    // Mark email_verified_at since the provider claims verification.
-    if profile.email_verified {
+    // Mark email_verified_at only when this provider is trusted for this
+    // email. Raw provider `email_verified` is not enough.
+    if profile.provider_trusted_for_email {
         db.execute(
             "UPDATE auth.users SET email_verified_at = NOW() WHERE id = $1",
             &[&user.id],
@@ -278,6 +270,35 @@ pub async fn resolve_or_link(
     .await?;
 
     Ok(LinkOutcome::Created { user_id: user.id })
+}
+
+fn pending_confirmation(
+    user_id: Uuid,
+    profile: &ResolvedProfile<'_>,
+    login_challenge: &str,
+    pending_signing_key: &[u8],
+) -> Result<LinkOutcome> {
+    let exp_unix = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| AuthError::Internal(format!("clock: {e}")))?
+            .as_secs()
+            + PENDING_LINK_TTL_SECS,
+    )
+    .unwrap_or(i64::MAX);
+    let pending = PendingLink {
+        user_id,
+        provider: profile.provider.to_string(),
+        subject: profile.subject.to_string(),
+        email: profile.email.to_string(),
+        login_challenge: login_challenge.to_string(),
+        exp_unix,
+    };
+    Ok(LinkOutcome::NeedsConfirmation {
+        pending_token: pending.encode(pending_signing_key),
+        existing_email: profile.email.to_string(),
+        provider: profile.provider.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -494,5 +515,118 @@ mod tests {
             .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
             .await
             .ok();
+    }
+
+    #[compio::test]
+    async fn needs_confirmation_for_oauth_only_user_when_provider_untrusted_for_email() {
+        let Some(client) = pg().await else {
+            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            return;
+        };
+
+        let email = format!("linker-untrusted-{}@example.test", Uuid::new_v4().simple());
+        let row = client
+            .query_one(
+                "INSERT INTO auth.users (email, name, password_hash) \
+                 VALUES ($1::citext, $2, NULL) RETURNING id",
+                &[&email, &"Untrusted"],
+            )
+            .await
+            .expect("seed user");
+        let user_id: Uuid = row.get("id");
+
+        let subject = format!("sub-{}", Uuid::new_v4().simple());
+        let profile = ResolvedProfile {
+            provider: "google",
+            subject: &subject,
+            email: &email,
+            email_verified: true,
+            name: Some("Untrusted"),
+            avatar_url: None,
+            provider_trusted_for_email: false,
+            raw_profile: None,
+        };
+
+        let key = b"k".repeat(32);
+        let outcome = resolve_or_link(&client, &profile, "lc-test", &key)
+            .await
+            .expect("resolve_or_link");
+
+        match outcome {
+            LinkOutcome::NeedsConfirmation {
+                pending_token,
+                existing_email,
+                provider,
+            } => {
+                assert_eq!(existing_email, email);
+                assert_eq!(provider, "google");
+                let decoded = PendingLink::decode(&pending_token, &key)
+                    .expect("decode pending token");
+                assert_eq!(decoded.user_id, user_id);
+                assert_eq!(decoded.subject, subject);
+                assert_eq!(decoded.email, email);
+            }
+            other => panic!("expected NeedsConfirmation, got {other:?}"),
+        }
+
+        let found = identities::find_by_provider_subject(&client, "google", &subject)
+            .await
+            .expect("find link");
+        assert!(
+            found.is_none(),
+            "untrusted provider must not auto-link an OAuth-only account"
+        );
+
+        client
+            .execute("DELETE FROM auth.users WHERE id = $1", &[&user_id])
+            .await
+            .ok();
+    }
+
+    #[compio::test]
+    async fn rejects_new_user_when_provider_untrusted_for_email_even_if_email_verified() {
+        let Some(client) = pg().await else {
+            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            return;
+        };
+
+        let email = format!("linker-new-untrusted-{}@example.test", Uuid::new_v4().simple());
+        let subject = format!("sub-{}", Uuid::new_v4().simple());
+        let profile = ResolvedProfile {
+            provider: "google",
+            subject: &subject,
+            email: &email,
+            email_verified: true,
+            name: Some("Untrusted New"),
+            avatar_url: None,
+            provider_trusted_for_email: false,
+            raw_profile: None,
+        };
+
+        let err = resolve_or_link(&client, &profile, "lc-test", b"k")
+            .await
+            .expect_err("untrusted provider email must not auto-create");
+        assert!(
+            err.to_string().contains("untrusted provider email"),
+            "unexpected error: {err}"
+        );
+
+        let user_rows = client
+            .query(
+                "SELECT id FROM auth.users WHERE email = $1::citext",
+                &[&email],
+            )
+            .await
+            .expect("user select");
+        assert!(user_rows.is_empty(), "must not create user row");
+
+        let identity_rows = client
+            .query(
+                "SELECT id FROM auth.identities WHERE provider = $1 AND subject = $2",
+                &[&"google", &subject.as_str()],
+            )
+            .await
+            .expect("identity select");
+        assert!(identity_rows.is_empty(), "must not create identity row");
     }
 }

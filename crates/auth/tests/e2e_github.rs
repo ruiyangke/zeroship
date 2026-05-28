@@ -284,7 +284,7 @@ async fn github_federation_creates_new_user() {
     let user_rows = fx
         .pg
         .query(
-            "SELECT id, name FROM auth.users WHERE email = $1::citext",
+            "SELECT id, name, email_verified_at FROM auth.users WHERE email = $1::citext",
             &[&test_email.as_str()],
         )
         .await
@@ -292,7 +292,13 @@ async fn github_federation_creates_new_user() {
     assert_eq!(user_rows.len(), 1, "exactly one user row");
     let user_id: uuid::Uuid = user_rows[0].get("id");
     let user_name: String = user_rows[0].get("name");
+    let email_verified_at: Option<chrono::DateTime<chrono::Utc>> =
+        user_rows[0].try_get("email_verified_at").ok();
     assert_eq!(user_name, "E2E GitHub User");
+    assert!(
+        email_verified_at.is_some(),
+        "email_verified_at should be set because GitHub picker only returns trusted verified email"
+    );
 
     let identity_rows = fx
         .pg
@@ -454,6 +460,111 @@ async fn github_federation_rejects_noreply_only_email() {
         identity_rows.is_empty(),
         "noreply path must not create an identities row (got {} rows)",
         identity_rows.len()
+    );
+
+    fx.cleanup().await;
+    drop(mock);
+}
+
+#[ntex::test]
+async fn github_federation_rejects_unverified_primary_email() {
+    let test_email = format!(
+        "e2e-github-unverified-{}@example.test",
+        Uuid::new_v4().simple()
+    );
+    let mock_user = MockUser {
+        subject: "456789013".to_string(),
+        email: test_email.clone(),
+        email_verified: false,
+        name: Some("E2E Unverified".into()),
+        picture: None,
+        login: Some("unverified-e2e".into()),
+        additional_emails: Vec::new(),
+    };
+    let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
+    eprintln!("[e2e_github unverified] mock provider at {}", mock.base);
+
+    let Some(fx) = GithubFixture::boot(&mock).await else {
+        eprintln!("[e2e_github unverified] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        return;
+    };
+    eprintln!("[e2e_github unverified] auth server at {}", fx.auth_base);
+
+    let login_challenge = fx.fresh_login_challenge().await;
+
+    let start_url =
+        format!("{}/oauth/github/start?login_challenge={login_challenge}", fx.auth_base);
+    let resp = fx
+        .http
+        .request(http::Method::GET, &start_url)
+        .expect("build /oauth/github/start")
+        .send()
+        .await
+        .expect("send /oauth/github/start");
+    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
+        .expect("stash cookie on /oauth/github/start");
+    let mock_authorize_loc = location(&resp);
+
+    let resp = fx
+        .http
+        .request(http::Method::GET, &mock_authorize_loc)
+        .expect("build mock /authorize")
+        .send()
+        .await
+        .expect("send mock /authorize");
+    let callback_url = location(&resp);
+    let callback_with_local = callback_url.replace(
+        "http://placeholder/oauth/github/callback",
+        &format!("{}/oauth/github/callback", fx.auth_base),
+    );
+
+    let mut jar = CookieJar::default();
+    jar.set("zsidp_github_stash", &stash_cookie);
+    let resp = fx
+        .http
+        .request(http::Method::GET, &callback_with_local)
+        .expect("build /oauth/github/callback")
+        .header("cookie", jar.header())
+        .expect("cookie header")
+        .send()
+        .await
+        .expect("send /oauth/github/callback");
+
+    let status = resp.status().as_u16();
+    assert_eq!(
+        status, 200,
+        "unverified GitHub primary email should render an error page (got HTTP {status})"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.to_lowercase().contains("github") || body.to_lowercase().contains("sign-in failed"),
+        "error page should mention github or sign-in failed: body={body}"
+    );
+
+    let user_rows = fx
+        .pg
+        .query(
+            "SELECT id FROM auth.users WHERE email = $1::citext",
+            &[&test_email.as_str()],
+        )
+        .await
+        .expect("user select");
+    assert!(
+        user_rows.is_empty(),
+        "unverified GitHub email must not create a user row"
+    );
+
+    let identity_rows = fx
+        .pg
+        .query(
+            "SELECT id FROM auth.identities WHERE provider = $1 AND subject = $2",
+            &[&"github", &mock_user.subject.as_str()],
+        )
+        .await
+        .expect("identity select");
+    assert!(
+        identity_rows.is_empty(),
+        "unverified GitHub email must not create an identity row"
     );
 
     fx.cleanup().await;
