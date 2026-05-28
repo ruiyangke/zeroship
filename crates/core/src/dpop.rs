@@ -769,7 +769,7 @@ mod tests {
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 const PG_SWEEP_EVERY_INSERTS: u64 = 512;
 
@@ -782,13 +782,6 @@ const PG_SWEEP_EVERY_INSERTS: u64 = 512;
 /// This cache is process-local. Use [`TieredJtiCache`] for gateway replay
 /// protection so cross-node replays are checked against `auth.dpop_jti`.
 ///
-/// # Panics
-///
-/// The accessor methods (`insert`, `len`, `is_empty`) acquire an
-/// internal `Mutex` and will panic if the lock has been poisoned by
-/// another thread panicking while holding it. In practice that
-/// requires a panic inside the very small critical sections in this
-/// file, none of which can panic on well-formed input.
 #[derive(Debug)]
 pub struct JtiCache {
     inner: Mutex<HashMap<String, i64>>, // jti → expires_at_secs
@@ -807,6 +800,13 @@ impl JtiCache {
         }
     }
 
+    fn lock_inner(&self) -> MutexGuard<'_, HashMap<String, i64>> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("DPoP jti cache mutex poisoned; recovering cache");
+            poisoned.into_inner()
+        })
+    }
+
     /// Attempt to insert a fresh `jti`. Returns `true` if it is new and
     /// was inserted; `false` if the `jti` was already present (replay
     /// detected).
@@ -818,13 +818,8 @@ impl JtiCache {
     /// surface), and a `HashMap`-based "drop any" policy keeps the
     /// implementation contention-free.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal `Mutex` has been poisoned by another
-    /// thread panicking while holding the lock. The critical section
-    /// here cannot itself panic on well-formed input.
     pub fn insert(&self, jti: &str, now_secs: i64, ttl_secs: i64) -> bool {
-        let mut guard = self.inner.lock().expect("poisoned");
+        let mut guard = self.lock_inner();
         // 1. Evict expired entries.
         guard.retain(|_, expires_at| *expires_at > now_secs);
         // 2. Replay check.
@@ -844,22 +839,16 @@ impl JtiCache {
 
     /// Current live entry count (post-last-sweep). Useful for metrics.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal `Mutex` has been poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("poisoned").len()
+        self.lock_inner().len()
     }
 
     /// Whether the cache is currently empty.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal `Mutex` has been poisoned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().expect("poisoned").is_empty()
+        self.lock_inner().is_empty()
     }
 }
 
@@ -1107,6 +1096,20 @@ mod jti_cache_tests {
         let inserted = cache.insert("jti-2", 1000, 60);
         assert!(inserted);
         assert_eq!(cache.len(), 1, "zero-ttl entry should be swept on next insert");
+    }
+
+    #[test]
+    fn local_jti_cache_recovers_after_lock_poison() {
+        let cache = JtiCache::new(10);
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = cache.inner.lock().unwrap();
+            panic!("poison jti cache");
+        });
+        assert!(poisoned.is_err());
+
+        assert!(cache.insert("jti-1", 1000, 60));
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.is_empty());
     }
 
     #[test]
