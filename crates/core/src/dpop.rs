@@ -930,7 +930,7 @@ impl PgJtiCache {
     pub async fn insert(
         &self,
         jti: &str,
-        _ttl_secs: i64,
+        ttl_secs: i64,
     ) -> Result<bool, compio_postgres::Error> {
         let inserted = self
             .db
@@ -945,7 +945,7 @@ impl PgJtiCache {
             .is_some();
 
         if self.should_sweep() {
-            if let Err(e) = self.sweep().await {
+            if let Err(e) = self.sweep(ttl_secs).await {
                 tracing::warn!(error = %e, "DPoP jti sweep failed");
             }
         }
@@ -953,17 +953,18 @@ impl PgJtiCache {
         Ok(inserted)
     }
 
-    /// Delete stale rows older than the fixed replay-cache retention window.
+    /// Delete stale rows older than the caller's replay-cache retention
+    /// window.
     ///
     /// # Errors
     ///
     /// Returns the underlying PG error if the delete fails.
-    pub async fn sweep(&self) -> Result<u64, compio_postgres::Error> {
+    pub async fn sweep(&self, ttl_secs: i64) -> Result<u64, compio_postgres::Error> {
         self.db
             .execute(
                 "DELETE FROM auth.dpop_jti \
-                 WHERE inserted_at < NOW() - INTERVAL '5 minutes'",
-                &[],
+                 WHERE inserted_at < NOW() - make_interval(secs => $1::double precision)",
+                &[&ttl_secs],
             )
             .await
     }
@@ -1192,6 +1193,70 @@ mod jti_cache_tests {
                 .execute("DELETE FROM auth.dpop_jti WHERE jti = $1", &[&"abc"])
                 .await
                 .expect("cleanup after");
+        });
+    }
+
+    #[test]
+    fn pg_jti_sweep_uses_caller_ttl() {
+        let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async move {
+            let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
+                .await
+                .expect("connect");
+            compio::runtime::spawn(async move {
+                if let Err(e) = connection.run().await {
+                    eprintln!("connection error: {e}");
+                }
+            })
+            .detach();
+
+            client
+                .execute("CREATE SCHEMA IF NOT EXISTS auth", &[])
+                .await
+                .expect("create auth schema");
+            client
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS auth.dpop_jti ( \
+                         jti TEXT PRIMARY KEY, \
+                         inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW() \
+                     )",
+                    &[],
+                )
+                .await
+                .expect("create dpop_jti");
+            client
+                .execute("DELETE FROM auth.dpop_jti WHERE jti = $1", &[&"stale-m3"])
+                .await
+                .expect("cleanup before");
+            client
+                .execute(
+                    "INSERT INTO auth.dpop_jti (jti, inserted_at) \
+                     VALUES ($1, NOW() - INTERVAL '2 seconds')",
+                    &[&"stale-m3"],
+                )
+                .await
+                .expect("insert stale");
+
+            let client = Arc::new(client);
+            let cache = PgJtiCache::with_sweep_every(client.clone(), 0);
+            let deleted = cache.sweep(1).await.expect("sweep");
+            assert_eq!(deleted, 1, "1s TTL must delete a 2s-old row");
+
+            let still_there = client
+                .query_opt("SELECT 1 FROM auth.dpop_jti WHERE jti = $1", &[&"stale-m3"])
+                .await
+                .expect("lookup stale")
+                .is_some();
+            assert!(!still_there, "stale row must be deleted");
         });
     }
 }
