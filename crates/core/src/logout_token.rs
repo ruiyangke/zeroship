@@ -21,7 +21,8 @@
 //!
 //! Spec: <https://openid.net/specs/openid-connect-backchannel-1_0.html>
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 use jsonwebtoken::{decode, decode_header, Validation};
 use serde::{Deserialize, Serialize};
@@ -52,12 +53,11 @@ pub struct LogoutToken {
     /// Issue time (seconds since UNIX epoch).
     pub iat: i64,
     /// Unique token id — for replay defense at the RP. The verifier
-    /// surfaces this but does not itself track seen `jti`s; callers can
-    /// add a one-shot cache if they need stricter replay semantics.
+    /// surfaces this so receivers can enforce one-shot use with
+    /// [`LogoutJtiCache`].
     pub jti: String,
-    /// Event marker(s). Must contain [`BCL_EVENT`] with an empty-object
-    /// value. Use a [`HashSet`] of keys for cheap membership lookups —
-    /// the value shape (`{}`) isn't validated beyond "present".
+    /// Event marker. Must be exactly `{ BCL_EVENT: {} }`; extra event
+    /// keys or a non-empty BCL event payload are rejected.
     pub events: std::collections::BTreeMap<String, serde_json::Value>,
     /// Subject (end-user id). Either `sub` or `sid` (or both) MUST be
     /// present.
@@ -73,6 +73,96 @@ pub struct LogoutToken {
     pub nonce: Option<String>,
 }
 
+/// Replay-cache retention for OIDC Back-Channel Logout `jti` values.
+///
+/// BCL logout tokens commonly omit `exp` (the spec says they SHOULD NOT
+/// include it), so receivers need a bounded local memory window instead
+/// of deriving retention from token expiry. We retain a seen `jti` for
+/// 10 minutes: max(5 minutes of `iat` skew plus a reasonable 5 minute
+/// delivery window, 5 minutes minimum). This bounds memory while covering
+/// normal retry latency and prevents replayed captured tokens from
+/// repeatedly triggering revocation work.
+pub const LOGOUT_JTI_TTL_SECS: i64 = 600;
+
+/// Bounded in-process cache of OIDC BCL `logout_token` `jti` values.
+///
+/// Each entry stores its absolute `expires_at_secs`; expired entries are
+/// swept lazily on every [`LogoutJtiCache::insert`] call. There is no
+/// background task or timer thread, keeping the runtime tokio-free.
+///
+/// **Multi-instance caveat.** This cache is per-process. In a
+/// multi-node gateway/control deployment a replay landing on a different
+/// instance during the retention window will not be detected. A shared
+/// store is the post-launch hardening path once deployment topology
+/// requires cross-instance replay defense.
+#[derive(Debug)]
+pub struct LogoutJtiCache {
+    inner: Mutex<HashMap<String, i64>>, // jti -> expires_at_secs
+    max_entries: usize,
+}
+
+impl LogoutJtiCache {
+    /// Build a cache with the given maximum entries. Size this above
+    /// peak BCL webhook rate multiplied by [`LOGOUT_JTI_TTL_SECS`].
+    #[must_use]
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            max_entries,
+        }
+    }
+
+    /// Attempt to insert a fresh `jti`.
+    ///
+    /// Returns `true` if the `jti` was new and inserted, or `false` if
+    /// it was already present and should be treated as an idempotent
+    /// replay.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned.
+    pub fn insert(&self, jti: &str, now_secs: i64, ttl_secs: i64) -> bool {
+        let mut guard = self.inner.lock().expect("poisoned");
+        guard.retain(|_, expires_at| *expires_at > now_secs);
+        if guard.contains_key(jti) {
+            return false;
+        }
+        if guard.len() >= self.max_entries {
+            if let Some(victim) = guard.keys().next().cloned() {
+                guard.remove(&victim);
+            }
+        }
+        guard.insert(jti.to_string(), now_secs + ttl_secs);
+        true
+    }
+
+    /// Current live entry count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.lock().expect("poisoned").len()
+    }
+
+    /// Whether the cache is currently empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().expect("poisoned").is_empty()
+    }
+}
+
+impl Default for LogoutJtiCache {
+    fn default() -> Self {
+        Self::new(50_000)
+    }
+}
+
 /// Errors surfaced by [`verify`]. `Verify` wraps the shared
 /// [`OidcError`] from [`crate::oidc_verify`]; the rest are BCL-only
 /// claim-validation failures.
@@ -86,6 +176,9 @@ pub enum LogoutError {
 
     #[error("events claim missing the backchannel-logout marker")]
     EventsMissing,
+
+    #[error("events claim must be exactly {{ {BCL_EVENT}: {{}} }}")]
+    EventsShape,
 
     #[error("sub and sid both missing (BCL §2.4 requires at least one)")]
     SubjectMissing,
@@ -106,7 +199,7 @@ pub enum LogoutError {
 ///    default `validate_exp` is disabled accordingly.
 /// 3. Run the BCL-specific claim checks:
 ///    - `nonce` MUST NOT be present
-///    - `events` MUST contain the [`BCL_EVENT`] marker
+///    - `events` MUST be exactly `{ BCL_EVENT: {} }`
 ///    - at least one of `sub` / `sid` MUST be present
 ///    - `iat` MUST be within ±5 min of the verifier's clock
 ///
@@ -189,8 +282,15 @@ pub async fn verify(
     if claims.nonce.is_some() {
         return Err(LogoutError::NonceForbidden);
     }
-    if !claims.events.contains_key(BCL_EVENT) {
+    let Some(event_value) = claims.events.get(BCL_EVENT) else {
         return Err(LogoutError::EventsMissing);
+    };
+    if claims.events.len() != 1 {
+        return Err(LogoutError::EventsShape);
+    }
+    match event_value {
+        serde_json::Value::Object(map) if map.is_empty() => {}
+        _ => return Err(LogoutError::EventsShape),
     }
     if claims.sub.is_none() && claims.sid.is_none() {
         return Err(LogoutError::SubjectMissing);
@@ -308,6 +408,22 @@ mod tests {
     }
 
     #[compio::test]
+    async fn accepts_exact_events_claim_shape() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({ BCL_EVENT: {} });
+        let token = sign(&key, &c);
+        let claims = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect("exact BCL events shape must verify");
+        assert_eq!(
+            claims.events.get(BCL_EVENT),
+            Some(&json!({})),
+            "events must round-trip as the exact empty-object marker"
+        );
+    }
+
+    #[compio::test]
     async fn rejects_stale_iat() {
         let (key, cache) = make_key();
         let mut c = happy_claims();
@@ -338,6 +454,45 @@ mod tests {
             .await
             .expect_err("must reject missing BCL event");
         assert!(matches!(err, LogoutError::EventsMissing), "got: {err:?}");
+    }
+
+    #[compio::test]
+    async fn rejects_empty_events_claim() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({});
+        let token = sign(&key, &c);
+        let err = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect_err("must reject empty events");
+        assert!(matches!(err, LogoutError::EventsMissing), "got: {err:?}");
+    }
+
+    #[compio::test]
+    async fn rejects_extra_events_claim_keys() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({
+            BCL_EVENT: {},
+            "https://zeroship.ai/events/unexpected": {},
+        });
+        let token = sign(&key, &c);
+        let err = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect_err("must reject extra events");
+        assert!(matches!(err, LogoutError::EventsShape), "got: {err:?}");
+    }
+
+    #[compio::test]
+    async fn rejects_non_empty_backchannel_logout_event_payload() {
+        let (key, cache) = make_key();
+        let mut c = happy_claims();
+        c["events"] = json!({ BCL_EVENT: { "some": "data" } });
+        let token = sign(&key, &c);
+        let err = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+            .await
+            .expect_err("must reject non-empty BCL event payload");
+        assert!(matches!(err, LogoutError::EventsShape), "got: {err:?}");
     }
 
     #[compio::test]

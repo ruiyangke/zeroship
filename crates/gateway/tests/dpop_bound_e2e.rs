@@ -267,6 +267,7 @@ fn build_state(
         )),
         db: None,
         dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: Some(Arc::new(signing.clone())),
         wrapper_issuer: Some(Arc::new(issuer)),
         wrapper_verifier: Some(Arc::new(verifier)),

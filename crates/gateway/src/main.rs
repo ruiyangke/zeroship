@@ -218,6 +218,7 @@ async fn main() -> std::io::Result<()> {
         oidc_rp,
         db,
         dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key,
         wrapper_issuer,
         wrapper_verifier,

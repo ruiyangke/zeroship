@@ -128,4 +128,8 @@ pub struct AppState {
     /// because in multi-DB deployments the auth tables may live in a
     /// separate cluster. Mandatory post-U8.
     pub auth_pg: Arc<compio_postgres::Client>,
+    /// In-process replay cache for OIDC Back-Channel Logout
+    /// `logout_token.jti` claims. Replays are answered with 200 for
+    /// webhook idempotency but do not run session revocation again.
+    pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
 }

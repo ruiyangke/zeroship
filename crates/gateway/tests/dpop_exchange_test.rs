@@ -136,6 +136,7 @@ fn build_state(with_issuer: bool) -> Arc<GateState> {
         )),
         db: None,
         dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: signing_key_arc,
         wrapper_issuer,
         wrapper_verifier,

@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use ntex::web::{self, types::Form, types::State, HttpResponse};
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::console_sessions;
 use crate::AppState;
@@ -80,6 +81,23 @@ pub async fn handle(
         }
     };
 
+    let now_secs = unix_now_secs();
+    if !state.logout_jti_cache.insert(
+        &token.jti,
+        now_secs,
+        zeroship_core::logout_token::LOGOUT_JTI_TTL_SECS,
+    ) {
+        tracing::warn!(
+            jti = %token.jti,
+            sub = ?token.sub,
+            sid = ?token.sid,
+            "console backchannel_logout: replayed logout_token jti; skipping revocation"
+        );
+        return HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .finish();
+    }
+
     // Revoke. The verifier guarantees at least one of sub/sid is
     // present, but only sub maps to a row filter today (the
     // `console_sessions.user_id` column).
@@ -97,6 +115,15 @@ pub async fn handle(
                 revoked,
                 "console backchannel_logout: sessions revoked"
             );
+            emit_revocation_audit(
+                &state.auth_pg,
+                &aud,
+                sub,
+                token.sid.as_deref(),
+                &token.jti,
+                revoked,
+            )
+            .await;
         }
         None => {
             // sid-only path. Token verified fine but we can't map
@@ -123,4 +150,46 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/oidc/backchannel-logout").route(web::post().to(handle)),
     );
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+async fn emit_revocation_audit(
+    db: &compio_postgres::Client,
+    client_id: &str,
+    sub: &str,
+    sid: Option<&str>,
+    jti: &str,
+    revoked: u64,
+) {
+    let detail = json!({
+        "surface": "control",
+        "sub": sub,
+        "sid": sid,
+        "jti": jti,
+        "revoked": revoked,
+    });
+    if let Err(e) = db
+        .execute(
+            "INSERT INTO auth.audit_events \
+                (event_type, outcome, client_id, auth_method, detail) \
+             VALUES ($1, $2, $3, $4, $5)",
+            &[
+                &"backchannel_logout_revoke",
+                &"success",
+                &client_id,
+                &"oidc_backchannel_logout",
+                &detail,
+            ],
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "console backchannel_logout: audit insert failed");
+    }
 }

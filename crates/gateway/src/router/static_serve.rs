@@ -904,6 +904,7 @@ mod tests {
             )),
             db: None,
             dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+            logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             signing_key: None,
             wrapper_issuer: None,
             wrapper_verifier: None,
