@@ -92,6 +92,10 @@ const STATEMENTS: &[&str] = &[
     "ALTER TABLE auth.magic_links \
         ADD COLUMN IF NOT EXISTS consumed_pending_at TIMESTAMPTZ",
     "CREATE INDEX IF NOT EXISTS auth_magic_email_idx ON auth.magic_links (email)",
+    "CREATE INDEX IF NOT EXISTS auth_magic_links_expires_unconsumed_idx
+        ON auth.magic_links (expires_at) WHERE consumed_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS auth_magic_links_consumed_idx
+        ON auth.magic_links (consumed_at) WHERE consumed_at IS NOT NULL",
     "WITH ranked AS (
         SELECT token_hash,
                ROW_NUMBER() OVER (
@@ -131,6 +135,8 @@ const STATEMENTS: &[&str] = &[
         ADD COLUMN IF NOT EXISTS consumed_pending_at TIMESTAMPTZ",
     "CREATE INDEX IF NOT EXISTS auth_magic_completions_expires_idx \
         ON auth.magic_completions (expires_at) WHERE consumed_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS auth_magic_completions_consumed_idx \
+        ON auth.magic_completions (consumed_at) WHERE consumed_at IS NOT NULL",
 
     // 5.5 email verifications
     "CREATE TABLE IF NOT EXISTS auth.email_verifications (
@@ -143,6 +149,10 @@ const STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS auth_email_verifications_user_active_idx
         ON auth.email_verifications (user_id) WHERE consumed_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS auth_email_verifications_expires_unconsumed_idx
+        ON auth.email_verifications (expires_at) WHERE consumed_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS auth_email_verifications_consumed_idx
+        ON auth.email_verifications (consumed_at) WHERE consumed_at IS NOT NULL",
     "WITH ranked AS (
         SELECT token_hash,
                ROW_NUMBER() OVER (

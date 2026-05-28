@@ -34,6 +34,7 @@ async fn migrations_apply_cleanly() {
     assert_user_delete_cascades_session_state(&client).await;
     assert_hot_path_indexes(&client).await;
     assert_one_active_token_indexes(&client).await;
+    assert_token_sweep_indexes(&client).await;
 
     let owner_email = format!("authz-migration-owner-{}@zeroship.test", Uuid::new_v4().simple());
     let actor_email = format!("authz-migration-actor-{}@zeroship.test", Uuid::new_v4().simple());
@@ -122,6 +123,43 @@ async fn migrations_apply_cleanly() {
         .execute("DELETE FROM auth.users WHERE id IN ($1, $2)", &[&owner_id, &actor_id])
         .await
         .expect("cleanup users");
+}
+
+async fn assert_token_sweep_indexes(client: &compio_postgres::Client) {
+    for (index, table, column, predicate) in [
+        (
+            "auth_magic_links_expires_unconsumed_idx",
+            "auth.magic_links",
+            "expires_at",
+            "where (consumed_at is null)",
+        ),
+        (
+            "auth_magic_links_consumed_idx",
+            "auth.magic_links",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+        (
+            "auth_magic_completions_consumed_idx",
+            "auth.magic_completions",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+        (
+            "auth_email_verifications_expires_unconsumed_idx",
+            "auth.email_verifications",
+            "expires_at",
+            "where (consumed_at is null)",
+        ),
+        (
+            "auth_email_verifications_consumed_idx",
+            "auth.email_verifications",
+            "consumed_at",
+            "where (consumed_at is not null)",
+        ),
+    ] {
+        assert_index_def_contains(client, "auth", index, &[table, column, predicate]).await;
+    }
 }
 
 async fn assert_one_active_token_indexes(client: &compio_postgres::Client) {
