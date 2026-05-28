@@ -12,6 +12,9 @@ path = "src/main.rs"
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-authz = { workspace = true }
+# Builder OAuth bootstrap reuses auth/control migrations for
+# `control.oauth_clients` in dev-mode startup.
+zeroship-auth = { workspace = true }
 # `with-chrono-0_4` so the console_sessions store can pull
 # `TIMESTAMPTZ` columns into `chrono::DateTime<Utc>` directly.
 compio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
@@ -62,12 +65,5 @@ zstd = { workspace = true }
 # inputs. The production helper is generic over `B: AsRef<[u8]>` so
 # `bytes` itself isn't a runtime dep.
 bytes = { workspace = true }
-# Phase 3 U7 console_sessions smoke test runs
-# `zeroship_auth::store::migrations::migrate` against a live PG to
-# guarantee the `auth.console_sessions` table exists before the CRUD
-# round-trip. NOT a runtime dep — the control bin never imports
-# `zeroship-auth`.
-zeroship-auth = { workspace = true }
-
 [lints]
 workspace = true

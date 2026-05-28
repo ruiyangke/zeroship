@@ -245,9 +245,10 @@ const STATEMENTS: &[&str] = &[
         scopes               TEXT[] NOT NULL,
         skip_consent         BOOLEAN NOT NULL DEFAULT FALSE,
         created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_by           UUID NOT NULL REFERENCES auth.users(id),
+        created_by           UUID REFERENCES auth.users(id),
         hydra_client_id      TEXT NOT NULL
     )",
+    "ALTER TABLE control.oauth_clients ALTER COLUMN created_by DROP NOT NULL",
     "CREATE TABLE IF NOT EXISTS control.authz_decisions (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         occurred_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

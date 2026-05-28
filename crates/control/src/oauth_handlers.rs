@@ -39,7 +39,7 @@ struct OauthClientRow {
     scopes: Vec<String>,
     skip_consent: bool,
     created_at: DateTime<Utc>,
-    created_by: Uuid,
+    created_by: Option<Uuid>,
     hydra_client_id: String,
 }
 

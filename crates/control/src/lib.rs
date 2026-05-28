@@ -9,6 +9,7 @@ pub mod admin_handlers;
 pub mod audit;
 pub mod authz_guard;
 pub mod backchannel_logout;
+pub mod bootstrap_builder;
 pub mod console_sessions;
 pub mod deploy;
 pub mod env_handlers;

@@ -18,6 +18,7 @@ perf-compio.data
 # (`./.zeroship/kv.redb` + lock) and the storage root (`.zeroship/storage`)
 # here. Never tracked.
 .zeroship/
+data/builder-client-secret
 
 # Never commit dotenv files — only the .example templates
 .env
