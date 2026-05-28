@@ -29,6 +29,7 @@ struct MockHydraState {
     request: Value,
     accept_records: Vec<HydraRecord>,
     reject_records: Vec<HydraRecord>,
+    fail_accept: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +119,7 @@ impl ConsentTestApp {
             request: consent_request(user_id, &client_id, scopes, skip),
             accept_records: Vec::new(),
             reject_records: Vec::new(),
+            fail_accept: false,
         }));
         let hydra_state_for_srv = hydra_state.clone();
         let hydra_srv = web::test::server(move || {
@@ -312,6 +314,20 @@ impl ConsentTestApp {
             granted_at: row.get("granted_at"),
             last_used_at: row.get("last_used_at"),
         }
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn oauth_grant_count(&self) -> i64 {
+        self.pg
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS n \
+                 FROM control.oauth_grants \
+                 WHERE user_id = $1 AND client_id = $2",
+                &[&self.user_id, &self.client_id],
+            )
+            .await
+            .expect("count oauth grant")
+            .get("n")
     }
 }
 
@@ -539,6 +555,28 @@ async fn allow_button_writes_oauth_grants_row() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn allow_button_does_not_write_oauth_grant_when_hydra_accept_fails() {
+    let app = ConsentTestApp::boot(&["apps:read"], Some("admin"), None, false).await;
+    app.hydra_state
+        .lock()
+        .expect("lock hydra state")
+        .fail_accept = true;
+    let get_resp = app.get_consent().await;
+    let csrf = read_set_cookie(&get_resp, "zsidp_csrf").expect("csrf cookie");
+
+    let resp = app.post_accept(Some(&csrf)).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        app.oauth_grant_count().await,
+        0,
+        "failed hydra accept must not leave a local grant"
+    );
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn allow_button_extends_existing_oauth_grants_row() {
     let app = ConsentTestApp::boot(&["apps:read", "apps:write"], Some("admin"), None, true).await;
     app.insert_oauth_grant(&["apps:read"]).await;
@@ -573,6 +611,10 @@ async fn mock_accept_consent(
     body: web::types::Json<Value>,
     state: web::types::State<Arc<Mutex<MockHydraState>>>,
 ) -> web::HttpResponse {
+    let fail_accept = state.lock().expect("lock hydra state").fail_accept;
+    if fail_accept {
+        return web::HttpResponse::Conflict().body("challenge already used");
+    }
     state
         .lock()
         .expect("lock hydra state")

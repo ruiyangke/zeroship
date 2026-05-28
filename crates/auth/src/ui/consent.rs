@@ -72,6 +72,10 @@ pub async fn get_consent(
     if info.client.skip_consent {
         match prior_grant {
             None => {
+                let redirect_to = match silent_accept(&admin, challenge, &info, db.as_ref()).await {
+                    Ok(redirect_to) => redirect_to,
+                    Err(resp) => return resp,
+                };
                 if let Err(e) = upsert_oauth_grant(
                     db.as_ref(),
                     subject,
@@ -81,20 +85,26 @@ pub async fn get_consent(
                 .await
                 {
                     tracing::error!(error = %e, challenge = %challenge, "oauth grant insert failed");
+                    revoke_hydra_consent_sessions(&admin, subject, &info.client.client_id).await;
                     return render_error(PublicErrorMessage::ContactSupport);
                 }
-                return silent_accept(&admin, challenge, &info, db.as_ref()).await;
+                return redirect(&redirect_to);
             }
             Some(previously_granted)
                 if scopes_are_subset(&requested_scopes, &previously_granted) =>
             {
+                let redirect_to = match silent_accept(&admin, challenge, &info, db.as_ref()).await {
+                    Ok(redirect_to) => redirect_to,
+                    Err(resp) => return resp,
+                };
                 if let Err(e) =
                     touch_oauth_grant(db.as_ref(), subject, &info.client.client_id).await
                 {
                     tracing::error!(error = %e, challenge = %challenge, "oauth grant last_used update failed");
+                    revoke_hydra_consent_sessions(&admin, subject, &info.client.client_id).await;
                     return render_error(PublicErrorMessage::ContactSupport);
                 }
-                return silent_accept(&admin, challenge, &info, db.as_ref()).await;
+                return redirect(&redirect_to);
             }
             Some(_) => {}
         }
@@ -164,14 +174,6 @@ pub async fn post_consent_accept(
             return render_error(PublicErrorMessage::ContactSupport);
         }
     };
-    let requested_scopes = sort_dedup_scopes(&info.requested_scope);
-    if let Err(e) =
-        upsert_oauth_grant(db.as_ref(), subject, &info.client.client_id, &requested_scopes).await
-    {
-        tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept oauth grant upsert failed");
-        return render_error(PublicErrorMessage::ContactSupport);
-    }
-
     let id_token_claims =
         build_id_token_claims(db.as_ref(), &info.subject, &info.requested_scope).await;
     let remember = form.remember.is_some();
@@ -187,13 +189,24 @@ pub async fn post_consent_accept(
         }),
     };
 
-    match admin.accept_consent(challenge, &accept).await {
-        Ok(resp) => redirect(&resp.redirect_to),
+    let redirect_to = match admin.accept_consent(challenge, &accept).await {
+        Ok(resp) => resp.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "accept_consent failed");
-            render_error(PublicErrorMessage::ContactSupport)
+            return render_error(PublicErrorMessage::ContactSupport);
         }
+    };
+
+    let requested_scopes = sort_dedup_scopes(&info.requested_scope);
+    if let Err(e) =
+        upsert_oauth_grant(db.as_ref(), subject, &info.client.client_id, &requested_scopes).await
+    {
+        tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept oauth grant upsert failed");
+        revoke_hydra_consent_sessions(&admin, subject, &info.client.client_id).await;
+        return render_error(PublicErrorMessage::ContactSupport);
     }
+
+    redirect(&redirect_to)
 }
 
 /// `/consent/deny` POST — validates CSRF, re-fetches the hydra challenge, and
@@ -312,7 +325,7 @@ async fn silent_accept(
     challenge: &str,
     info: &ConsentRequest,
     db: &compio_postgres::Client,
-) -> HttpResponse {
+) -> std::result::Result<String, HttpResponse> {
     let id_token_claims = build_id_token_claims(db, &info.subject, &info.requested_scope).await;
     let accept = AcceptConsentRequest {
         grant_scope: info.requested_scope.clone(),
@@ -326,11 +339,29 @@ async fn silent_accept(
     };
 
     match admin.accept_consent(challenge, &accept).await {
-        Ok(resp) => redirect(&resp.redirect_to),
+        Ok(resp) => Ok(resp.redirect_to),
         Err(e) => {
             tracing::error!(error = %e, "accept_consent (silent) failed");
-            render_error(PublicErrorMessage::ContactSupport)
+            Err(render_error(PublicErrorMessage::ContactSupport))
         }
+    }
+}
+
+async fn revoke_hydra_consent_sessions(admin: &HydraAdmin, subject: Uuid, client_id: &str) {
+    let subject = subject.to_string();
+    if let Err(e) = admin
+        .delete(
+            "/admin/oauth2/auth/sessions/consent",
+            &[("subject", subject.as_str()), ("client", client_id)],
+        )
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            subject = %subject,
+            client_id = %client_id,
+            "consent: failed to compensate hydra consent accept after local grant write failure"
+        );
     }
 }
 
