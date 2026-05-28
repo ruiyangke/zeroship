@@ -74,8 +74,12 @@
   transition:
     transform var(--zs-motion-base) var(--zs-motion-ease),
     opacity var(--zs-motion-base) var(--zs-motion-ease);
-  /* Default visible transform — overridden by data-starting/ending. */
-  transform: translate(0, 0);
+  /* Steady-open state needs no transform — per-side data-starting /
+   * data-ending rules supply their own translate. We deliberately set
+   * `none` (not `translate(0,0)`) because any non-`none` transform
+   * spawns a stacking context, which can break position:fixed
+   * descendants inside .zs-drawer__body. */
+  transform: none;
 }
 
 /* ─── side="start" (left in LTR, right in RTL) ─────────────────────────── */
@@ -175,28 +179,60 @@
  * (translateX). When the viewport flipped, a closed start-drawer needs
  * to fly off to the RIGHT, not the left. We invert the X component
  * under [dir="rtl"] so the panel slides off the correct edge.
+ *
+ * BOTH ancestor and self selectors are listed because Drawer.Content
+ * portals to document.body — which is LTR — so the [dir="rtl"]
+ * descendant form misses the portaled node. The RTL story stamps
+ * `dir="rtl"` directly on the Content (see Drawer.stories.tsx RTL),
+ * and the SELF selector catches that path.
  */
+.zs-drawer-content[dir="rtl"][data-side="start"][data-starting-style],
+.zs-drawer-content[dir="rtl"][data-side="start"][data-ending-style],
 [dir="rtl"] .zs-drawer-content[data-side="start"][data-starting-style],
 [dir="rtl"] .zs-drawer-content[data-side="start"][data-ending-style] {
   transform: translateX(100%);
 }
+.zs-drawer-content[dir="rtl"][data-side="end"][data-starting-style],
+.zs-drawer-content[dir="rtl"][data-side="end"][data-ending-style],
 [dir="rtl"] .zs-drawer-content[data-side="end"][data-starting-style],
 [dir="rtl"] .zs-drawer-content[data-side="end"][data-ending-style] {
   transform: translateX(-100%);
 }
 
-/* ─── Reduced motion ───────────────────────────────────────────────────── */
+/* ─── Reduced motion ───────────────────────────────────────────────────── *
+ *
+ * The per-side `data-side + data-starting-style` rules above are
+ * (0,0,3,0) specificity; the LTR/RTL mirror selectors below them are
+ * (0,0,3,1) thanks to the `[dir="rtl"]` attribute selector. A bare
+ * `.zs-drawer-content[data-starting-style]` rule at (0,0,2,0) inside
+ * the reduced-motion media block LOSES to both. So we mirror each
+ * side/state selector at matching specificity inside the media query
+ * and set `transform: none` — the slide disappears regardless of
+ * direction, and we fall back to opacity-only transition.
+ */
 @media (prefers-reduced-motion: reduce) {
-  .zs-drawer-content,
-  .zs-drawer-content[data-starting-style],
-  .zs-drawer-content[data-ending-style] {
+  .zs-drawer-content {
     transition: none;
-    /* Skip the slide entirely — show/hide via opacity only so the
-     * panel doesn't jump across the viewport. */
-    transform: none;
   }
-  .zs-drawer-content[data-starting-style],
-  .zs-drawer-content[data-ending-style] {
+  .zs-drawer-content[data-side="start"][data-starting-style],
+  .zs-drawer-content[data-side="start"][data-ending-style],
+  .zs-drawer-content[data-side="end"][data-starting-style],
+  .zs-drawer-content[data-side="end"][data-ending-style],
+  .zs-drawer-content[data-side="top"][data-starting-style],
+  .zs-drawer-content[data-side="top"][data-ending-style],
+  .zs-drawer-content[data-side="bottom"][data-starting-style],
+  .zs-drawer-content[data-side="bottom"][data-ending-style],
+  .zs-drawer-content[dir="rtl"][data-side="start"][data-starting-style],
+  .zs-drawer-content[dir="rtl"][data-side="start"][data-ending-style],
+  .zs-drawer-content[dir="rtl"][data-side="end"][data-starting-style],
+  .zs-drawer-content[dir="rtl"][data-side="end"][data-ending-style],
+  [dir="rtl"] .zs-drawer-content[data-side="start"][data-starting-style],
+  [dir="rtl"] .zs-drawer-content[data-side="start"][data-ending-style],
+  [dir="rtl"] .zs-drawer-content[data-side="end"][data-starting-style],
+  [dir="rtl"] .zs-drawer-content[data-side="end"][data-ending-style] {
+    transform: none;
+    /* Show/hide via opacity only so the panel doesn't jump across the
+     * viewport. */
     opacity: 0;
   }
   .zs-drawer-backdrop {
@@ -213,7 +249,17 @@
   padding-block-end: var(--zs-space-3);
   /* Notch-friendly: safe-area-aware on top + sides for side="top" and
    * the start/end orientations. The mask resolves the larger of the
-   * intrinsic space and the env() inset. */
+   * intrinsic space and the env() inset.
+   *
+   * NOTE: env(safe-area-inset-left/right) are PHYSICAL-axis tokens, not
+   * logical — there is no safe-area-inset-inline-start/end in any
+   * shipping UA today. Under RTL on a notched device with a physical-
+   * LEFT cutout, `padding-inline-start` will absorb the physical-RIGHT
+   * inset (the wrong edge). The mismatch is intentional until UAs
+   * expose logical safe-area variants; flipping by hand requires
+   * direction-aware blocks that don't survive container-query / nested
+   * `dir` flips reliably. Same caveat applies to .zs-drawer__body /
+   * .zs-drawer__footer below. */
   padding-block-start: max(var(--zs-space-6), env(safe-area-inset-top));
   padding-inline-start: max(var(--zs-space-6), env(safe-area-inset-left));
   padding-inline-end: max(var(--zs-space-6), env(safe-area-inset-right));
@@ -350,6 +396,13 @@
     -webkit-backdrop-filter: none;
   }
   .zs-drawer__header-close {
+    color: CanvasText;
+  }
+  /* Hover state is painted at higher specificity than the base above
+   * (`:hover` adds an (0,0,1,0) selector unit); mirror it here so the
+   * authored hover colors don't survive the forced-colors pass. */
+  .zs-drawer__header-close:hover {
+    background-color: Canvas;
     color: CanvasText;
   }
   .zs-drawer__header-close:focus-visible {

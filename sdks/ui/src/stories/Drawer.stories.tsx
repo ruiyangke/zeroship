@@ -282,6 +282,109 @@ export const Sizes: Story = {
   },
 };
 
+/* ─── 5b. SizesVertical ──────────────────────────────────────────────── *
+ *
+ * Sizes (above) pins side="end" for all four sizes, so the cross-axis
+ * `inline-size` rules get exercised but the vertical (top/bottom)
+ * `block-size` rules at Drawer.css [data-side="top"|"bottom"] are
+ * untested. SizesVertical covers `top × sm` and `bottom × lg` — the
+ * minimum pair that touches the data-side="top" sm block and the
+ * data-side="bottom" lg block independently.
+ */
+export const SizesVertical: Story = {
+  name: "Sizes (vertical: top × sm, bottom × lg)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Vertical drawer sizes"
+    >
+      <Drawer>
+        <Drawer.Trigger
+          render={
+            <Button variant="tinted" data-testid="drawer-trigger-top-sm">
+              Open top sm
+            </Button>
+          }
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content
+            side="top"
+            size="sm"
+            data-testid="drawer-size-top-sm"
+          >
+            <Drawer.Header>
+              <Drawer.Title>Top × sm</Drawer.Title>
+              <Drawer.Description>
+                Block-size preset for the top-anchored sheet.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              <p>Block-axis size is constrained to the `sm` preset.</p>
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Close</Drawer.Close>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+      <Drawer>
+        <Drawer.Trigger
+          render={
+            <Button variant="tinted" data-testid="drawer-trigger-bottom-lg">
+              Open bottom lg
+            </Button>
+          }
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content
+            side="bottom"
+            size="lg"
+            data-testid="drawer-size-bottom-lg"
+          >
+            <Drawer.Header>
+              <Drawer.Title>Bottom × lg</Drawer.Title>
+              <Drawer.Description>
+                Block-size preset for the bottom-anchored sheet.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              <p>Block-axis size is constrained to the `lg` preset.</p>
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Close</Drawer.Close>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const body = getDocument(canvasElement);
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open top sm/i }),
+    );
+    await expect(
+      await body.findByRole("dialog", { name: /top × sm/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await waitForDrawerClosed(canvasElement, /top × sm/i);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open bottom lg/i }),
+    );
+    await expect(
+      await body.findByRole("dialog", { name: /bottom × lg/i }),
+    ).toBeVisible();
+    await userEvent.keyboard("{Escape}");
+    await waitForDrawerClosed(canvasElement, /bottom × lg/i);
+  },
+};
+
 /* ─── 6. Controlled ──────────────────────────────────────────────────── */
 function ControlledStory() {
   const [open, setOpen] = useState(false);
@@ -615,15 +718,31 @@ export const RTL: Story = {
   },
 };
 
-/* ─── 11. Close asChild ─────────────────────────────────────────────── */
-export const CloseAsChild: Story = {
-  name: "Close — asChild (Slot)",
-  render: () => (
+/* ─── 11. Close asChild ─────────────────────────────────────────────── *
+ *
+ * Proves the full asChild contract that aria-wiring #87 measures:
+ *   - the wrapper's `...rest` (className, data-*, aria-*, style)
+ *     reaches the child via Slot;
+ *   - the wrapper's onClick AND the child's onClick BOTH run, in
+ *     order: child first → wrapper → Base UI close;
+ *   - a status side-effect mutation proves both handlers fired before
+ *     the dialog tore down.
+ */
+function CloseAsChildStory() {
+  const [clicked, setClicked] = useState<string>("not-clicked");
+  return (
     <div
       className="zs-story-row"
       role="group"
       aria-label="Drawer close asChild"
     >
+      <p
+        role="status"
+        aria-label="Drawer close asChild status"
+        data-testid="drawer-close-aschild-status"
+      >
+        Status: {clicked}
+      </p>
       <Drawer>
         <Drawer.Trigger
           render={<Button data-testid="drawer-trigger">Open</Button>}
@@ -634,17 +753,31 @@ export const CloseAsChild: Story = {
             <Drawer.Header>
               <Drawer.Title>Custom close target</Drawer.Title>
               <Drawer.Description>
-                The asChild Slot routes className, style, refs, and
+                The asChild Slot routes className, style, refs, AND
                 onClick composition through the shared `_slot.ts`
-                helper (mirrors Dialog.Close `3a64a726`).
+                helper. Wrapper `...rest` + child onClick BOTH reach
+                the child.
               </Drawer.Description>
             </Drawer.Header>
             <Drawer.Footer>
-              <Drawer.Close asChild>
+              <Drawer.Close
+                asChild
+                // Wrapper `...rest` props that MUST forward to the
+                // child via Slot (review-fix item 4): a custom
+                // className suffix and a data-* hook.
+                className="zs-drawer-close-aschild-extra"
+                data-side-effect="wrapper-rest-forwarded"
+                // Wrapper-level onClick — composes with the child's
+                // own onClick below and with Base UI's close handler.
+                onClick={() => setClicked((s) =>
+                  s === "child-onclick-ran" ? "both-handlers-ran" : "wrapper-only"
+                )}
+              >
                 <button
                   type="button"
                   className="zs-button zs-button--gray zs-button--medium"
                   data-testid="drawer-close-aschild-target"
+                  onClick={() => setClicked("child-onclick-ran")}
                 >
                   Done
                 </button>
@@ -654,7 +787,11 @@ export const CloseAsChild: Story = {
         </Drawer.Portal>
       </Drawer>
     </div>
-  ),
+  );
+}
+export const CloseAsChild: Story = {
+  name: "Close — asChild (Slot)",
+  render: () => <CloseAsChildStory />,
   play: async ({ canvasElement }) => {
     const body = await openDrawer(canvasElement, /^open$/i);
     await expect(
@@ -663,7 +800,19 @@ export const CloseAsChild: Story = {
 
     const done = body.getByRole("button", { name: /done/i });
     await expect(done.tagName).toBe("BUTTON");
+    // Wrapper rest props forwarded by Slot.
+    await expect(done).toHaveAttribute(
+      "data-side-effect",
+      "wrapper-rest-forwarded",
+    );
+    await expect(done).toHaveClass("zs-drawer-close-aschild-extra");
     await userEvent.click(done);
     await waitForDrawerClosed(canvasElement, /custom close target/i);
+    // Both child + wrapper onClick fired and composed in order.
+    const canvas = within(canvasElement);
+    const status = canvas.getByRole("status", {
+      name: /drawer close aschild status/i,
+    });
+    await expect(status).toHaveTextContent("Status: both-handlers-ran");
   },
 };
