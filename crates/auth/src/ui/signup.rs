@@ -15,6 +15,7 @@ use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use std::sync::Arc;
+use url::form_urlencoded;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
@@ -25,6 +26,8 @@ use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
+
+const MAX_LOGIN_CHALLENGE_BYTES: usize = 256;
 
 #[derive(Debug, Deserialize)]
 pub struct SignupQuery {
@@ -52,7 +55,7 @@ pub async fn get(
     query: ntex::web::types::Query<SignupQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let challenge = query.login_challenge.as_deref().unwrap_or("");
+    let challenge = bounded_login_challenge(query.login_challenge.as_deref());
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
         challenge,
@@ -78,7 +81,7 @@ pub async fn post(
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     mailer: ntex::web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
-    let challenge = query.login_challenge.clone().unwrap_or_default();
+    let challenge = bounded_login_challenge(query.login_challenge.as_deref()).to_string();
 
     // 1. CSRF.
     let cookie_header = req
@@ -245,10 +248,12 @@ pub async fn post(
 }
 
 fn redirect_to_login(challenge: &str) -> HttpResponse {
-    let to = if challenge.is_empty() {
+    let to = if challenge.is_empty() || challenge.len() > MAX_LOGIN_CHALLENGE_BYTES {
         "/login".to_string()
     } else {
-        format!("/login?login_challenge={challenge}")
+        let challenge_enc: String =
+            form_urlencoded::byte_serialize(challenge.as_bytes()).collect();
+        format!("/login?login_challenge={challenge_enc}")
     };
     let mut resp = HttpResponse::Found();
     resp.header(
@@ -256,6 +261,12 @@ fn redirect_to_login(challenge: &str) -> HttpResponse {
         HeaderValue::from_str(&to).unwrap_or_else(|_| HeaderValue::from_static("/login")),
     );
     resp.finish()
+}
+
+fn bounded_login_challenge(challenge: Option<&str>) -> &str {
+    challenge
+        .filter(|value| value.len() <= MAX_LOGIN_CHALLENGE_BYTES)
+        .unwrap_or("")
 }
 
 fn render_signup_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
@@ -285,4 +296,32 @@ fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn location(resp: &HttpResponse) -> &str {
+        resp.headers()
+            .get(LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .expect("location header")
+    }
+
+    #[test]
+    fn redirect_to_login_url_encodes_challenge() {
+        let resp = redirect_to_login("foo&malicious=value");
+        assert_eq!(
+            location(&resp),
+            "/login?login_challenge=foo%26malicious%3Dvalue"
+        );
+    }
+
+    #[test]
+    fn redirect_to_login_drops_oversized_challenge() {
+        let challenge = "a".repeat(257);
+        let resp = redirect_to_login(&challenge);
+        assert_eq!(location(&resp), "/login");
+    }
 }
