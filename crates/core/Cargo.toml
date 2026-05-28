@@ -34,6 +34,10 @@ tracing-bunyan-formatter = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true }
+# Phase 7 U1 — sign synthetic BCL `logout_token` JWTs in the
+# `logout_token` verifier's unit tests. PKCS#8 encoding is needed
+# because `jsonwebtoken::EncodingKey::from_ed_der` takes the DER form.
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 
 [lints]
 workspace = true

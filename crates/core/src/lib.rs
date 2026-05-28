@@ -5,6 +5,7 @@ pub mod auth;
 pub mod typed_id;
 pub mod crypto;
 pub mod observability;
+pub mod logout_token;
 pub mod oidc_verify;
 pub mod pkce;
 pub mod preview_ports;

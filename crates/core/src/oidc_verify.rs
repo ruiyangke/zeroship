@@ -123,6 +123,24 @@ impl JwksCache {
         Ok(self.inner.read().keys.clone())
     }
 
+    /// Construct a cache pre-loaded with the given keys, marked
+    /// freshly fetched. Used by unit tests in this crate (and downstream
+    /// crates like `logout_token`) to short-circuit the network fetch.
+    /// `url` is set to a sentinel that won't resolve so a stray
+    /// `refresh()` call in production code wouldn't accidentally pick
+    /// up real keys.
+    #[cfg(test)]
+    pub(crate) fn for_test(keys: Vec<CachedKey>) -> Self {
+        Self {
+            url: "http://invalid.test/jwks.json".into(),
+            inner: Arc::new(RwLock::new(JwksState {
+                keys,
+                fetched_at: Some(Instant::now()),
+            })),
+            ttl: Duration::from_secs(300),
+        }
+    }
+
     /// Force-refresh the cache. Call after a signature-verification
     /// failure (e.g. JWKS rotated under us).
     ///
