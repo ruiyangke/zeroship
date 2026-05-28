@@ -6,7 +6,6 @@
 use compio_postgres::Client;
 use serde_json::{json, Value};
 
-use crate::error::Result;
 use crate::store::audit as store;
 
 #[derive(Debug, Default)]
@@ -56,34 +55,4 @@ pub async fn emit(conn: &Client, ev: &AuditEvent<'_>) {
     {
         tracing::error!(error = %e, event_type = ev.event_type, "audit PG insert failed");
     }
-}
-
-/// Convenience: a `Result`-returning variant for cases where audit failure
-/// IS a real error (e.g., admin-grade events that absolutely need a row).
-/// Phase 2 doesn't use this; reserved for later.
-///
-/// # Errors
-///
-/// Returns `AuthError::Db` on PG insert failure.
-pub async fn emit_strict(conn: &Client, ev: &AuditEvent<'_>) -> Result<()> {
-    let stdout_payload = json!({
-        "type": ev.event_type, "outcome": ev.outcome,
-        "user_id": ev.user_id, "client_id": ev.client_id,
-        "detail": ev.detail,
-    });
-    tracing::info!(target: "auth.audit", payload = %stdout_payload, "audit event (strict)");
-
-    store::insert(
-        conn,
-        ev.event_type,
-        ev.outcome,
-        ev.user_id,
-        ev.client_id,
-        ev.request_id,
-        ev.ip,
-        ev.user_agent,
-        ev.auth_method,
-        &ev.detail,
-    )
-    .await
 }

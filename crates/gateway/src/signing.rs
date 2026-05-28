@@ -29,6 +29,7 @@ use crate::error::{GatewayError, Result};
 ///
 /// [`GatewayError::Config`] on:
 /// - I/O failure reading the file
+/// - insecure Unix file permissions (any group/world bits set)
 /// - PEM parse failure
 /// - DER parse failure
 /// - Wrong key type (file holds an RSA/ECDSA key)
@@ -36,6 +37,7 @@ pub fn load_from_path(path: &Path) -> Result<SigningKey> {
     let bytes = std::fs::read(path).map_err(|e| {
         GatewayError::Config(format!("read signing key {}: {e}", path.display()))
     })?;
+    reject_insecure_permissions(path)?;
 
     // PEM is ASCII; DER is binary. The `-----BEGIN PRIVATE KEY-----`
     // armor is unambiguous, so a successful UTF-8 decode + that header
@@ -49,6 +51,29 @@ pub fn load_from_path(path: &Path) -> Result<SigningKey> {
         }
     }
     parse_pkcs8_der(&bytes)
+}
+
+#[cfg(unix)]
+fn reject_insecure_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = path
+        .metadata()
+        .map_err(|e| GatewayError::Config(format!("stat signing key {}: {e}", path.display())))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err(GatewayError::InsecurePermissions {
+            path: path.to_path_buf(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_insecure_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn parse_pkcs8_pem(pem: &str) -> Result<SigningKey> {
@@ -105,6 +130,18 @@ pub fn jwk_thumbprint(key: &SigningKey) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(mode);
+        std::fs::set_permissions(path, perms).expect("set permissions");
+    }
+
+    #[cfg(not(unix))]
+    fn set_mode(_path: &Path, _mode: u32) {}
+
     #[test]
     fn jwk_thumbprint_is_stable_across_calls() {
         // Computing the thumbprint twice from the same key must yield
@@ -141,6 +178,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("test.key");
         std::fs::write(&path, pem.as_bytes()).expect("write");
+        set_mode(&path, 0o600);
         let loaded = load_from_path(&path).expect("load");
         assert_eq!(loaded.to_bytes(), key.to_bytes());
     }
@@ -156,6 +194,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("test.der");
         std::fs::write(&path, der.as_bytes()).expect("write");
+        set_mode(&path, 0o600);
         let loaded = load_from_path(&path).expect("load");
         assert_eq!(loaded.to_bytes(), key.to_bytes());
     }
@@ -168,7 +207,49 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("garbage.key");
         std::fs::write(&path, b"not a real key").expect("write");
+        set_mode(&path, 0o600);
         let err = load_from_path(&path).expect_err("should reject garbage");
         assert!(matches!(err, GatewayError::Config(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_group_or_world_readable_key_file() {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let key = SigningKey::from_bytes(&[13u8; 32]);
+        let der = key.to_pkcs8_der().expect("to_pkcs8_der");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("insecure.der");
+        std::fs::write(&path, der.as_bytes()).expect("write");
+        set_mode(&path, 0o644);
+
+        let err = load_from_path(&path).expect_err("should reject insecure permissions");
+        assert!(
+            matches!(
+                err,
+                GatewayError::InsecurePermissions {
+                    ref path,
+                    mode
+                } if path.ends_with("insecure.der") && mode & 0o077 != 0
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_accepts_owner_only_key_file() {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let key = SigningKey::from_bytes(&[17u8; 32]);
+        let der = key.to_pkcs8_der().expect("to_pkcs8_der");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secure.der");
+        std::fs::write(&path, der.as_bytes()).expect("write");
+        set_mode(&path, 0o600);
+
+        let loaded = load_from_path(&path).expect("secure permissions should load");
+        assert_eq!(loaded.to_bytes(), key.to_bytes());
     }
 }
