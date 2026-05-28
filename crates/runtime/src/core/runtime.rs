@@ -1729,7 +1729,13 @@ impl RuntimeInner {
             return crate::FetchOutcome::Response {
                 status: 503,
                 headers: vec![("content-type".into(), "application/json".into())],
-                body: r#"{"message":"CPU time limit exceeded","name":"Error"}"#.into(),
+                body: crate::dispatch::build_error_body(
+                    503,
+                    request_id,
+                    "CPU time limit exceeded",
+                    "Error",
+                    crate::dispatch::ErrorExtras::default(),
+                ),
                 logs: vec![],
             };
         }
@@ -1741,7 +1747,15 @@ impl RuntimeInner {
                 self.clear_executing_request();
                 self.build_fetch_outcome(request_id, info, cpu_elapsed)
             }
-            Ok(DispatchResult::ErrorValue { message, name, stack, status, code, details_json, retryable }) => {
+            Ok(DispatchResult::ErrorValue {
+                message,
+                name,
+                stack,
+                status,
+                code,
+                details_json,
+                retryable,
+            }) => {
                 // Handler threw (or returned a rejected promise). Honor
                 // `err.status` so `throw new HttpError(404)` yields 404,
                 // not the previous hardcoded 500. Forward any structured-
@@ -1757,7 +1771,9 @@ impl RuntimeInner {
                 crate::FetchOutcome::Response {
                     status,
                     headers: vec![("content-type".into(), "application/json".into())],
-                    body: crate::dispatch::build_error_body(&message, &name, extras),
+                    body: crate::dispatch::build_error_body(
+                        status, request_id, &message, &name, extras,
+                    ),
                     logs: vec![],
                 }
             }
@@ -1770,7 +1786,13 @@ impl RuntimeInner {
                 crate::FetchOutcome::Response {
                     status: 500,
                     headers: vec![("content-type".into(), "application/json".into())],
-                    body: crate::dispatch::build_error_body(&msg, "Error", crate::dispatch::ErrorExtras::default()),
+                    body: crate::dispatch::build_error_body(
+                        500,
+                        request_id,
+                        &msg,
+                        "Error",
+                        crate::dispatch::ErrorExtras::default(),
+                    ),
                     logs: vec![],
                 }
             }
@@ -2743,7 +2765,15 @@ fn settle_rpc_promise(
         v8::PromiseState::Rejected => {
             let exc = local.result(scope);
             match crate::dispatch::v8_exception_to_error_value(scope, exc) {
-                DispatchResult::ErrorValue { message, name, stack, status, code, details_json, retryable } => {
+                DispatchResult::ErrorValue {
+                    message,
+                    name,
+                    stack,
+                    status,
+                    code,
+                    details_json,
+                    retryable,
+                } => {
                     let extras = crate::dispatch::ErrorExtras {
                         stack: stack.as_deref(),
                         code: code.as_deref(),
@@ -2753,7 +2783,9 @@ fn settle_rpc_promise(
                     SettledResult::Http(Ok(http::ResponseInfo::Complete {
                         status,
                         headers: vec![("content-type".into(), "application/json".into())],
-                        body: crate::dispatch::build_error_body(&message, &name, extras),
+                        body: crate::dispatch::build_error_body(
+                            status, request_id, &message, &name, extras,
+                        ),
                     }))
                 }
                 _ => SettledResult::Http(Err("rpc rejected".to_string())),
