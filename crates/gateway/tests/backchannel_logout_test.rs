@@ -329,7 +329,7 @@ fn build_handler_state(db: Arc<Client>, auth_base: &str) -> Arc<GateState> {
             b"test-stash-key-32-bytes-long----".to_vec(),
         )),
         db: Some(db),
-        dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+        dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: None,
         wrapper_issuer: None::<Arc<wrapper_token::Issuer>>,

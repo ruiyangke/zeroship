@@ -232,9 +232,16 @@ async fn resolve_dpop_user_header(
 
     // 5. jti replay protection — 120 s freshness window matches the
     //    accepted clock skew on the proof's iat claim.
-    if !state.dpop_jti_cache.insert(&verified.jti, now, 120) {
-        tracing::warn!(jti = %verified.jti, "DPoP jti replay detected");
-        return None;
+    match state.dpop_jti_cache.insert(&verified.jti, now, 120).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(jti = %verified.jti, "DPoP jti replay detected");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "DPoP jti replay check failed");
+            return None;
+        }
     }
 
     // 6a. Wrapper-token fast path (Phase 8 U4). Try to verify the
@@ -786,7 +793,7 @@ mod tests {
                 b"test-stash-key-32-bytes-long----".to_vec(),
             )),
             db: None,
-            dpop_jti_cache: StdArc::new(zeroship_core::dpop::JtiCache::default()),
+            dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: StdArc::new(
                 zeroship_core::logout_token::LogoutJtiCache::default(),
             ),

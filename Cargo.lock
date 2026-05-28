@@ -5940,6 +5940,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "compio",
+ "compio-postgres",
  "cyper",
  "ed25519-dalek",
  "hex",

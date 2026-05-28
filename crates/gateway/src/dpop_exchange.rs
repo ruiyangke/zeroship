@@ -161,11 +161,24 @@ pub async fn handle(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRespo
 
     // 6. jti replay check. Proofs are single-use; a duplicate within
     //    the TTL window is rejected outright.
-    if !state.dpop_jti_cache.insert(&verified.jti, now, JTI_TTL_SECS) {
-        tracing::warn!(jti = %verified.jti, "dpop-exchange: jti replay");
-        return HttpResponse::Unauthorized()
-            .header("cache-control", CACHE_NO_STORE)
-            .json(&json!({"error": "dpop_jti_replay"}));
+    match state
+        .dpop_jti_cache
+        .insert(&verified.jti, now, JTI_TTL_SECS)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(jti = %verified.jti, "dpop-exchange: jti replay");
+            return HttpResponse::Unauthorized()
+                .header("cache-control", CACHE_NO_STORE)
+                .json(&json!({"error": "dpop_jti_replay"}));
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "dpop-exchange: jti replay check failed");
+            return HttpResponse::ServiceUnavailable()
+                .header("cache-control", CACHE_NO_STORE)
+                .json(&json!({"error": "dpop_jti_cache_unavailable"}));
+        }
     }
 
     // 7. Introspect the hydra token to confirm it's still active and

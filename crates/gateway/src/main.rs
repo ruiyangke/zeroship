@@ -193,6 +193,14 @@ async fn main() -> std::io::Result<()> {
         stash_signing_key.into_bytes(),
     ));
 
+    let dpop_jti_cache = db
+        .as_ref()
+        .map(|client| {
+            let pg = zeroship_core::dpop::PgJtiCache::new(client.clone());
+            zeroship_core::dpop::TieredJtiCache::with_pg(pg)
+        })
+        .unwrap_or_else(zeroship_core::dpop::TieredJtiCache::default);
+
     let state = Arc::new(GateState {
         config: GateConfig {
             control_url,
@@ -217,7 +225,7 @@ async fn main() -> std::io::Result<()> {
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp,
         db,
-        dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+        dpop_jti_cache: Arc::new(dpop_jti_cache),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key,
         wrapper_issuer,

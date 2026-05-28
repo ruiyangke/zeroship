@@ -110,11 +110,10 @@ pub struct GateState {
     /// a dev "no-DB" mode (when `--db` is empty); test fixtures also
     /// rely on `None` to construct `GateState` without a live PG.
     pub db: Option<Arc<compio_postgres::Client>>,
-    /// In-process replay cache for `DPoP` proof `jti` claims (RFC 9449
-    /// §11.1). Single-instance for now; once the gateway scales out
-    /// horizontally this becomes a redis-backed shared cache so a
-    /// replayed proof on a sibling gateway is still rejected.
-    pub dpop_jti_cache: Arc<zeroship_core::dpop::JtiCache>,
+    /// Tiered replay cache for `DPoP` proof `jti` claims (RFC 9449
+    /// §11.1). The local tier rejects hot repeats without a DB round-trip;
+    /// the PG tier rejects replays that land on a sibling gateway process.
+    pub dpop_jti_cache: Arc<zeroship_core::dpop::TieredJtiCache>,
     /// In-process replay cache for OIDC Back-Channel Logout
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.

@@ -764,15 +764,14 @@ mod tests {
 
 // ─── jti replay protection ─────────────────────────────────────────────
 //
-// Bounded in-process LRU-ish cache for DPoP `jti` values. Phase 7 v1
-// ships this as a per-instance cache; for multi-instance gateway
-// deployments, a replay-across-instances attack is possible during the
-// freshness window (±60s by default). A PG-backed `auth.dpop_jti` table
-// sweep'd by the same retention pattern as `audit_retention` is the
-// Phase 8+ hardening path.
+// DPoP `jti` replay protection. The local tier catches hot replays without
+// a database round-trip; the PG tier is the cross-gateway source of truth.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+const PG_SWEEP_EVERY_INSERTS: u64 = 512;
 
 /// Bounded in-process cache of `DPoP` `jti` values for replay protection.
 ///
@@ -780,11 +779,8 @@ use std::sync::Mutex;
 /// swept lazily on every [`JtiCache::insert`] call (no background task,
 /// no separate timer thread — keeps the runtime tokio-free).
 ///
-/// **Multi-instance caveat.** This cache is per-process. In a multi-node
-/// gateway deployment a replay landing on a different instance during
-/// the ±60 s freshness window will NOT be detected. The Phase 8+ plan
-/// promotes the cache to a shared PG-backed `auth.dpop_jti` table
-/// (sweep'd by the same retention pattern as `audit_retention`).
+/// This cache is process-local. Use [`TieredJtiCache`] for gateway replay
+/// protection so cross-node replays are checked against `auth.dpop_jti`.
 ///
 /// # Panics
 ///
@@ -875,6 +871,188 @@ impl Default for JtiCache {
     }
 }
 
+/// PG-backed `DPoP` `jti` replay cache shared by all gateway processes.
+///
+/// The table is intentionally tiny: `jti` is the primary key and
+/// `inserted_at` is used only for retention sweeps. A successful insert means
+/// the proof has not been seen by any gateway using the same auth database;
+/// a conflict means replay.
+#[derive(Clone)]
+pub struct PgJtiCache {
+    db: Arc<compio_postgres::Client>,
+    sweep_every: u64,
+    insert_attempts: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for PgJtiCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgJtiCache")
+            .field("sweep_every", &self.sweep_every)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PgJtiCache {
+    /// Build a PG replay cache backed by an existing compio Postgres client.
+    #[must_use]
+    pub fn new(db: Arc<compio_postgres::Client>) -> Self {
+        Self {
+            db,
+            sweep_every: PG_SWEEP_EVERY_INSERTS,
+            insert_attempts: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Build a PG replay cache with a custom opportunistic sweep interval.
+    ///
+    /// A value of `0` disables opportunistic sweeps. This is useful for tests
+    /// that want to exercise only the insert/conflict path.
+    #[must_use]
+    pub fn with_sweep_every(db: Arc<compio_postgres::Client>, sweep_every: u64) -> Self {
+        Self {
+            db,
+            sweep_every,
+            insert_attempts: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Insert a `jti` into `auth.dpop_jti`.
+    ///
+    /// Returns `Ok(true)` when the row was inserted and `Ok(false)` when the
+    /// primary key already exists, which means a replay was detected on this
+    /// or another gateway process.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying PG error if the insert fails. Opportunistic
+    /// sweep errors are logged and ignored because retention cleanup should
+    /// not turn an otherwise valid first-use proof into an auth failure.
+    pub async fn insert(
+        &self,
+        jti: &str,
+        _ttl_secs: i64,
+    ) -> Result<bool, compio_postgres::Error> {
+        let inserted = self
+            .db
+            .query_opt(
+                "INSERT INTO auth.dpop_jti (jti) \
+                 VALUES ($1) \
+                 ON CONFLICT DO NOTHING \
+                 RETURNING jti",
+                &[&jti],
+            )
+            .await?
+            .is_some();
+
+        if self.should_sweep() {
+            if let Err(e) = self.sweep().await {
+                tracing::warn!(error = %e, "DPoP jti sweep failed");
+            }
+        }
+
+        Ok(inserted)
+    }
+
+    /// Delete stale rows older than the fixed replay-cache retention window.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying PG error if the delete fails.
+    pub async fn sweep(&self) -> Result<u64, compio_postgres::Error> {
+        self.db
+            .execute(
+                "DELETE FROM auth.dpop_jti \
+                 WHERE inserted_at < NOW() - INTERVAL '5 minutes'",
+                &[],
+            )
+            .await
+    }
+
+    fn should_sweep(&self) -> bool {
+        if self.sweep_every == 0 {
+            return false;
+        }
+        let attempt = self.insert_attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        attempt.is_multiple_of(self.sweep_every)
+    }
+}
+
+/// Two-tier `DPoP` `jti` replay cache.
+///
+/// The local tier is checked first. A local hit rejects immediately and skips
+/// PG. A local miss is inserted locally, then checked against the shared PG
+/// table so another gateway process can still reject the replay.
+pub struct TieredJtiCache {
+    local: JtiCache,
+    pg: Option<PgJtiCache>,
+}
+
+impl std::fmt::Debug for TieredJtiCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TieredJtiCache")
+            .field("local", &self.local)
+            .field("pg", &self.pg)
+            .finish()
+    }
+}
+
+impl TieredJtiCache {
+    /// Build a local-only cache for tests and explicit no-DB dev mode.
+    #[must_use]
+    pub fn local_only(max_entries: usize) -> Self {
+        Self {
+            local: JtiCache::new(max_entries),
+            pg: None,
+        }
+    }
+
+    /// Build a tiered cache using the default local capacity.
+    #[must_use]
+    pub fn with_pg(pg: PgJtiCache) -> Self {
+        Self::with_pg_and_local_capacity(pg, 50_000)
+    }
+
+    /// Build a tiered cache with an explicit local capacity.
+    #[must_use]
+    pub fn with_pg_and_local_capacity(pg: PgJtiCache, max_entries: usize) -> Self {
+        Self {
+            local: JtiCache::new(max_entries),
+            pg: Some(pg),
+        }
+    }
+
+    /// Attempt to insert a fresh `jti`.
+    ///
+    /// Returns `Ok(false)` on either a local hit or a PG conflict. Returns an
+    /// error only when the PG tier is configured and the insert query fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying PG error if the shared cache insert fails.
+    pub async fn insert(
+        &self,
+        jti: &str,
+        now_secs: i64,
+        ttl_secs: i64,
+    ) -> Result<bool, compio_postgres::Error> {
+        if !self.local.insert(jti, now_secs, ttl_secs) {
+            return Ok(false);
+        }
+
+        let Some(pg) = self.pg.as_ref() else {
+            return Ok(true);
+        };
+
+        pg.insert(jti, ttl_secs).await
+    }
+}
+
+impl Default for TieredJtiCache {
+    fn default() -> Self {
+        Self::local_only(50_000)
+    }
+}
+
 #[cfg(test)]
 mod jti_cache_tests {
     use super::*;
@@ -948,5 +1126,72 @@ mod jti_cache_tests {
         let all_ok = handles.into_iter().all(|h| h.join().unwrap());
         assert!(all_ok, "all unique jti inserts should return true");
         assert_eq!(cache.len(), 50);
+    }
+
+    #[test]
+    fn pg_jti_cache_detects_cross_instance_replay() {
+        let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+            eprintln!("skipping (no AUTH_DB_URL)");
+            return;
+        };
+
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async move {
+            let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
+                .await
+                .expect("connect");
+            compio::runtime::spawn(async move {
+                if let Err(e) = connection.run().await {
+                    eprintln!("connection error: {e}");
+                }
+            })
+            .detach();
+
+            client
+                .execute("CREATE SCHEMA IF NOT EXISTS auth", &[])
+                .await
+                .expect("create auth schema");
+            client
+                .execute(
+                    "CREATE TABLE IF NOT EXISTS auth.dpop_jti ( \
+                         jti TEXT PRIMARY KEY, \
+                         inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW() \
+                     )",
+                    &[],
+                )
+                .await
+                .expect("create dpop_jti");
+            client
+                .execute(
+                    "CREATE INDEX IF NOT EXISTS auth_dpop_jti_inserted_idx \
+                     ON auth.dpop_jti (inserted_at)",
+                    &[],
+                )
+                .await
+                .expect("create inserted_at index");
+            client
+                .execute("DELETE FROM auth.dpop_jti WHERE jti = $1", &[&"abc"])
+                .await
+                .expect("cleanup before");
+
+            let client = Arc::new(client);
+            let instance_a = PgJtiCache::with_sweep_every(client.clone(), 0);
+            let instance_b = PgJtiCache::with_sweep_every(client.clone(), 0);
+
+            assert!(instance_a.insert("abc", 120).await.expect("insert A"));
+            assert!(
+                !instance_b.insert("abc", 120).await.expect("insert B"),
+                "second instance must detect replay through PG primary-key conflict"
+            );
+
+            client
+                .execute("DELETE FROM auth.dpop_jti WHERE jti = $1", &[&"abc"])
+                .await
+                .expect("cleanup after");
+        });
     }
 }

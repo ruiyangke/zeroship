@@ -266,7 +266,7 @@ fn build_state(
             b"test-stash-key-32-bytes-long----".to_vec(),
         )),
         db: None,
-        dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+        dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         signing_key: Some(Arc::new(signing.clone())),
         wrapper_issuer: Some(Arc::new(issuer)),
@@ -348,8 +348,10 @@ async fn dispatch_verify_handler(
     };
 
     // 5. Replay defense (matches dispatch).
-    if !state.dpop_jti_cache.insert(&verified.jti, now, 120) {
-        return HttpResponse::Unauthorized().body("jti replay");
+    match state.dpop_jti_cache.insert(&verified.jti, now, 120).await {
+        Ok(true) => {}
+        Ok(false) => return HttpResponse::Unauthorized().body("jti replay"),
+        Err(e) => return HttpResponse::ServiceUnavailable().body(format!("jti cache: {e}")),
     }
 
     // 6. Verify the wrapper token + enforce cnf.jkt binding.
