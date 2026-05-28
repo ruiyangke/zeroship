@@ -19,12 +19,12 @@
 //!   of a leaked email link far more than the user-experience cost of
 //!   re-typing an email if the link expired.
 //!
-//! - **One-active-per-email**: at issue time, all unconsumed rows with
-//!   the same email are pre-emptively marked `consumed_at = NOW()`.
-//!   Multiple in-flight magic-link issues for one address would
-//!   otherwise let an attacker reuse an earlier (less-defended) token
-//!   even after the user has clicked a newer one. Keep the active set
-//!   at most one.
+//! - **One-active-per-(email,purpose)**: at issue time, all unconsumed
+//!   rows with the same email and purpose are pre-emptively marked
+//!   `consumed_at = NOW()`. Multiple in-flight magic-link issues for one
+//!   address/purpose would otherwise let an attacker reuse an earlier
+//!   token even after the user has clicked a newer one. Keep the active
+//!   set at most one per purpose.
 
 use compio_postgres::Client;
 use rand::RngCore;
@@ -78,8 +78,8 @@ pub enum RedeemError {
 ///
 /// Side effects:
 ///
-/// 1. All previous unconsumed rows for the same `email` are marked
-///    `consumed_at = NOW()` (one-active-per-email invariant).
+/// 1. All previous unconsumed rows for the same `email` + `purpose` are
+///    marked `consumed_at = NOW()` (one-active-per-purpose invariant).
 /// 2. A fresh row is inserted with `expires_at = NOW() + 15 min`.
 ///
 /// Both writes happen in one transaction while holding a transaction-
@@ -116,11 +116,11 @@ pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedTo
         .map_err(|e| AuthError::Db(format!("magic_link issue advisory lock: {e}")))?;
 
         // 2. Invalidate any previously unconsumed tokens for this email
-        //    so only the most recent token can be redeemed.
+        //    and purpose so only the most recent token can be redeemed.
         conn.execute(
             "UPDATE auth.magic_links SET consumed_at = NOW() \
-             WHERE email = $1::citext AND consumed_at IS NULL",
-            &[&email],
+             WHERE email = $1::citext AND purpose = $2 AND consumed_at IS NULL",
+            &[&email, &purpose],
         )
         .await
         .map_err(|e| AuthError::Db(format!("magic_link supersede previous: {e}")))?;

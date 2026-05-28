@@ -10,7 +10,7 @@ use compio_postgres::{connect, Client, NoTls};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use zeroship_auth::identity::magic_link;
+use zeroship_auth::identity::{magic_link, password_reset};
 use zeroship_auth::store::migrations;
 use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 
@@ -579,6 +579,38 @@ async fn new_issue_supersedes_previous_unconsumed() {
     assert!(
         attempt.is_none(),
         "previous unconsumed token must be invalidated by a fresh issue"
+    );
+
+    client
+        .execute(
+            "DELETE FROM auth.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .ok();
+}
+
+#[compio::test]
+async fn login_issue_does_not_supersede_reset_token() {
+    let Some(client) = pg().await else {
+        eprintln!("skipping magic_link_test (no AUTH_DB_URL)");
+        return;
+    };
+
+    let email = format!("magic-reset-kept-{}@example.test", Uuid::new_v4().simple());
+    let reset = password_reset::issue(&client, &email)
+        .await
+        .expect("issue reset token");
+    let _login = magic_link::issue(&client, &email, "login")
+        .await
+        .expect("issue login token");
+
+    let redeemed_reset = password_reset::redeem(&client, &reset.raw)
+        .await
+        .expect("redeem reset token after login issue");
+    assert!(
+        redeemed_reset.is_some(),
+        "login-purpose magic issue must not consume reset-purpose tokens"
     );
 
     client
