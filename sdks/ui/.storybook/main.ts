@@ -1,4 +1,5 @@
 import type { StorybookConfig } from "@storybook/react-vite";
+import istanbul from "vite-plugin-istanbul";
 import { createStorybookMcpMiddleware } from "./mcp-server";
 
 const config: StorybookConfig = {
@@ -7,7 +8,12 @@ const config: StorybookConfig = {
     "@storybook/addon-docs",
     "@storybook/addon-a11y",
     "@storybook/addon-themes",
-    "@storybook/addon-coverage",
+    /* addon-coverage 1.0.5's preset re-pushes vite-plugin-istanbul
+     * with stripped options (the spread order overwrites whatever we
+     * pass back via `istanbul.include`). We bypass it entirely and
+     * register vite-plugin-istanbul directly in `viteFinal` below —
+     * that's the only configuration path with full control over the
+     * forceBuildInstrument / include / exclude / cwd inputs. */
   ],
   framework: {
     name: "@storybook/react-vite",
@@ -47,8 +53,26 @@ const config: StorybookConfig = {
     const mcpMiddleware = await createStorybookMcpMiddleware();
     return {
       ...viteConfig,
+      build: { ...(viteConfig.build ?? {}), sourcemap: true },
       plugins: [
         ...(viteConfig.plugins ?? []),
+        istanbul({
+          include: ["src/**/*.ts", "src/**/*.tsx"],
+          exclude: [
+            "src/**/*.stories.tsx",
+            "src/**/*.test.ts",
+            "src/stories/**",
+            "src/index.ts",
+            "src/theme.tsx",
+            "src/components/index.ts",
+            "src/components/_slot.ts",
+            "src/components/_classnames.ts",
+          ],
+          extension: [".ts", ".tsx"],
+          requireEnv: false,
+          forceBuildInstrument: true,
+          checkProd: false,
+        }),
         {
           name: "zeroship-ui-mcp",
           configureServer(server) {

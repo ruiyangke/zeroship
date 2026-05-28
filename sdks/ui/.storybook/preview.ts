@@ -44,17 +44,6 @@ const preview: Preview = {
       toc: true,
     },
     layout: "fullscreen",
-    /* addon-coverage instruments component sources via vite-plugin-istanbul
-     * at preview build time. Stories and tests are excluded so coverage
-     * % reflects the actual surface under test, not story scaffolding. */
-    coverage: {
-      include: ["src/**/*.{ts,tsx}"],
-      exclude: [
-        "src/**/*.stories.tsx",
-        "src/**/*.test.ts",
-        "src/stories/**",
-      ],
-    },
   },
 };
 
