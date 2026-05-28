@@ -38,7 +38,8 @@ pub struct AuthConfig {
     /// federation stash cookie (`__Host-zsidp_google_stash` etc.). A weak
     /// or default value lets an attacker forge stash cookies and bypass
     /// the OAuth state/PKCE check, so production deployments MUST set
-    /// this explicitly. The dev default loudly warns at boot.
+    /// this explicitly. The dev default is accepted only with
+    /// `--insecure-dev=true`.
     #[arg(
         long,
         env = "AUTH_STASH_SIGNING_KEY",
@@ -268,5 +269,72 @@ impl AuthConfig {
     #[must_use]
     pub fn public_url(&self) -> String {
         self.public_url.trim_end_matches('/').to_string()
+    }
+}
+
+pub fn validate_stash_key(cfg: &AuthConfig) -> Result<(), String> {
+    if cfg.insecure_dev {
+        if cfg.stash_signing_key.starts_with("dev-only-") {
+            tracing::warn!(
+                "AUTH_STASH_SIGNING_KEY is the dev default — OK only because --insecure-dev=true"
+            );
+        }
+        return Ok(());
+    }
+
+    if cfg.stash_signing_key.starts_with("dev-only-") {
+        return Err(
+            "AUTH_STASH_SIGNING_KEY is the dev default; refusing to boot without --insecure-dev=true. Set a strong (≥32 byte) value."
+                .to_string(),
+        );
+    }
+
+    if cfg.stash_signing_key.len() < 32 {
+        return Err(format!(
+            "AUTH_STASH_SIGNING_KEY is too short ({} bytes); minimum 32 bytes. Set a stronger key or pass --insecure-dev=true.",
+            cfg.stash_signing_key.len()
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> AuthConfig {
+        AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"])
+    }
+
+    #[test]
+    fn stash_key_default_rejected_in_production() {
+        let cfg = test_config();
+
+        assert!(validate_stash_key(&cfg).is_err());
+    }
+
+    #[test]
+    fn stash_key_default_accepted_in_dev() {
+        let mut cfg = test_config();
+        cfg.insecure_dev = true;
+
+        assert!(validate_stash_key(&cfg).is_ok());
+    }
+
+    #[test]
+    fn stash_key_short_rejected_in_production() {
+        let mut cfg = test_config();
+        cfg.stash_signing_key = "a".repeat(20);
+
+        assert!(validate_stash_key(&cfg).is_err());
+    }
+
+    #[test]
+    fn stash_key_strong_accepted_in_production() {
+        let mut cfg = test_config();
+        cfg.stash_signing_key = "0123456789abcdef0123456789abcdef".to_string();
+
+        assert!(validate_stash_key(&cfg).is_ok());
     }
 }
