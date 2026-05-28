@@ -25,7 +25,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-space-2);
+  /* Slot↔label gap tightened from --zs-space-2 → --zs-space-1 so icons
+     no longer feel mechanically spaced from the label (button-polish
+     item 9). Slot sizing is capped on .zs-button__start / __end below. */
+  gap: var(--zs-space-1);
   border: 0;
   cursor: pointer;
   user-select: none;
@@ -61,7 +64,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--zs-space-2);
+  /* Mirrors .zs-button's tightened slot↔label gap (button-polish item 9). */
+  gap: var(--zs-space-1);
   /* Allow the label child to shrink and ellipsize inside this flex
      container — without min-width:0 the inner asserts its content's
      intrinsic size and the label's overflow: hidden never engages. */
@@ -91,10 +95,28 @@
   display: inline-flex;
   align-items: center;
   pointer-events: none;
+  /* Slot sizing — button-polish item 9. Cap slot text to subheadline
+     size (0.875rem ≈ 14pt) with line-height 1 so icons sit optically
+     centered with the label baseline instead of inflating to the
+     headline size on .large. Slotted <svg> children inherit `1em` so
+     the icon scales with the slot's font-size, not the button's. */
+  font-size: 0.875rem;
+  line-height: 1;
+}
+
+.zs-button__start svg,
+.zs-button__end svg {
+  inline-size: 1em;
+  block-size: 1em;
 }
 
 .zs-button:focus-visible {
-  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  /* Button-polish item 3. Narrower outline (0.125rem vs the foundation
+     --zs-focus-ring-width 0.1875rem) + Button-specific quieter alpha
+     (--zs-button-focus-ring-color, 0.28 vs the foundation 0.35) so the
+     ring no longer reads as a chunky decoration. Offset stays on the
+     foundation token. */
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
   outline-offset: var(--zs-focus-ring-offset);
 }
 
@@ -163,40 +185,52 @@
 }
 
 .zs-button--tinted {
-  background: color-mix(in oklch, var(--zs-accent) 18%, transparent);
-  /* Tinted text uses the deeper accent variant so contrast against the
-     tinted fill clears 4.5:1 — the regular --zs-accent fails at ~3.8:1. */
+  /* Button-polish item 4. Resting alpha dropped 18% → 14% so the wash
+     reads gentler — the previous 18% felt candy-bright over crystal's
+     near-white surface. Hover/active step the alpha proportionally so
+     the state delta stays legible. Tinted text uses the deeper accent
+     variant so contrast against the (now lighter) tinted fill clears
+     4.5:1 — the regular --zs-accent failed at ~3.8:1 on the previous
+     fill and the lighter 14% fill makes that gap larger, so keeping
+     --zs-accent-active is non-negotiable. */
+  background: color-mix(in oklch, var(--zs-accent) 14%, transparent);
   color: var(--zs-accent-active);
 }
 @media (hover: hover) {
   .zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
-    background: color-mix(in oklch, var(--zs-accent) 28%, transparent);
+    background: color-mix(in oklch, var(--zs-accent) 22%, transparent);
   }
 }
 .zs-button--tinted:active:not(:disabled):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-accent) 36%, transparent);
+  background: color-mix(in oklch, var(--zs-accent) 30%, transparent);
 }
 .zs-button--tinted:disabled,
 .zs-button--tinted[aria-busy="true"] {
-  background: color-mix(in oklch, var(--zs-accent) 10%, transparent);
+  background: color-mix(in oklch, var(--zs-accent) 8%, transparent);
   color: color-mix(in oklch, var(--zs-accent) 55%, var(--zs-label-tertiary));
 }
 
 .zs-button--gray {
-  background: var(--zs-fill-secondary);
+  /* Button-polish item 5. The fill-secondary (≈ 13% label-alpha) gray
+     read as disabled-adjacent in grouped layouts. A direct label-tinted
+     mix at 8% reads as a deliberate "neutral action" rather than a
+     missing-state. Hover/active deepen the mix instead of stepping into
+     --zs-fill, which previously sat on the same neutral and lost
+     state-step legibility. */
+  background: color-mix(in oklch, var(--zs-label) 8%, transparent);
   color: var(--zs-label);
 }
 @media (hover: hover) {
   .zs-button--gray:hover:not(:disabled):not([aria-busy="true"]) {
-    background: var(--zs-fill);
+    background: color-mix(in oklch, var(--zs-label) 12%, transparent);
   }
 }
 .zs-button--gray:active:not(:disabled):not([aria-busy="true"]) {
-  background: var(--zs-fill);
+  background: color-mix(in oklch, var(--zs-label) 16%, transparent);
 }
 .zs-button--gray:disabled,
 .zs-button--gray[aria-busy="true"] {
-  background: var(--zs-fill-quaternary);
+  background: color-mix(in oklch, var(--zs-label) 4%, transparent);
   color: var(--zs-label-tertiary);
 }
 
@@ -207,6 +241,17 @@
 @media (hover: hover) {
   .zs-button--plain:hover:not(:disabled):not([aria-busy="true"]) {
     background: var(--zs-fill-tertiary);
+    /* Button-polish item 6. Plain buttons floated in grouped layouts
+       (Footer/row beside filled). A hover-only underline anchors the
+       action without making the rest state busy. Thickness pinned to
+       a hairline (one device unit at default zoom) and offset so it
+       doesn't crowd the descenders. The decoration color rides
+       currentColor at 35% so it stays in family with the accent ink
+       on default plain AND the system-red ink on destructive-plain. */
+    text-decoration: underline;
+    text-decoration-color: color-mix(in oklch, currentColor 35%, transparent);
+    text-decoration-thickness: 0.0625rem;
+    text-underline-offset: 0.125rem;
   }
 }
 .zs-button--plain:active:not(:disabled):not([aria-busy="true"]) {
@@ -233,25 +278,56 @@
 }
 .zs-button--destructive.zs-button--filled:disabled,
 .zs-button--destructive.zs-button--filled[aria-busy="true"] {
-  background: color-mix(in oklch, var(--zs-system-red) 42%, transparent);
+  /* Button-polish item 1. Previously mixed the system-red at 42% over
+     transparent, leaving a saturated faded-red that still read as
+     "tappable danger". Mixing toward --zs-fill-secondary (a neutral)
+     at 22% red lands a gray-with-a-red-hint: still legibly destructive
+     in intent but visibly NOT actionable.
+
+     The label drops from accent-ink (near-white) to label-tertiary
+     (the established neutral disabled label). The brief proposed
+     accent-ink 65% / label-tertiary 35% so a hint of white remained
+     in the disabled label — but the resulting near-white text on the
+     light fill-secondary-tinged background measured invisible at
+     glance (label and fill end up at near-identical L values). Pulled
+     fully to label-tertiary so the disabled state stays legibly muted
+     instead of legibly blank. Label-tertiary is the same color the
+     gray/plain disabled destructive cells use, so the four destructive
+     disabled variants now share label hierarchy.
+
+     The gray-and-red-hint signal also survives forced-colors (the
+     forced-colors block below maps disabled to GrayText regardless). */
+  background: color-mix(in oklch, var(--zs-system-red) 22%, var(--zs-fill-secondary));
+  color: var(--zs-label-tertiary);
 }
 
 .zs-button--destructive.zs-button--tinted {
-  background: color-mix(in oklch, var(--zs-system-red) 18%, transparent);
+  /* Button-polish item 4 (destructive half). Mixed with --zs-system-red-active
+     instead of --zs-system-red so the resting wash is muted-red, not
+     dusty-pink. Alpha held at 18% (vs accent-tinted's 14%) because the
+     deeper base needs more presence to register as destructive; lowering
+     it further visually drained the intent. Hover/active climb the alpha
+     so progression is still legible against the deeper base. */
+  background: color-mix(in oklch, var(--zs-system-red-active) 18%, transparent);
   /* Same pattern as tinted-accent: use the deeper red so contrast holds. */
   color: var(--zs-system-red-active);
 }
 @media (hover: hover) {
   .zs-button--destructive.zs-button--tinted:hover:not(:disabled):not([aria-busy="true"]) {
-    background: color-mix(in oklch, var(--zs-system-red) 28%, transparent);
+    background: color-mix(in oklch, var(--zs-system-red-active) 28%, transparent);
   }
 }
 .zs-button--destructive.zs-button--tinted:active:not(:disabled):not([aria-busy="true"]) {
-  background: color-mix(in oklch, var(--zs-system-red) 36%, transparent);
+  background: color-mix(in oklch, var(--zs-system-red-active) 36%, transparent);
 }
 .zs-button--destructive.zs-button--tinted:disabled,
 .zs-button--destructive.zs-button--tinted[aria-busy="true"] {
-  background: color-mix(in oklch, var(--zs-system-red) 10%, transparent);
+  /* Item 1 (destructive-tinted half). Mix toward --zs-fill-secondary
+     (neutral) instead of transparent so disabled destructive-tinted
+     reads as gray-with-red-hint instead of faded-pink. Alpha lowered
+     to 8% on the red side, with the remainder pulled into the neutral
+     fill, so the cell loses its tappable-red signal. */
+  background: color-mix(in oklch, var(--zs-system-red-active) 8%, var(--zs-fill-secondary));
   color: color-mix(in oklch, var(--zs-system-red) 55%, var(--zs-label-tertiary));
 }
 
@@ -308,6 +384,21 @@
   pointer-events: none;
 }
 
+/* Button-polish item 2. Loading destructive (and any loading button)
+   appeared visibly wider than its idle counterpart in side-by-side
+   stories — the absolutely-positioned spinner is layered ON TOP of the
+   inner, but flex-shrink + the opacity-0 label can let the browser
+   recalculate the inner's intrinsic width slightly differently between
+   states. Pinning inline-size to max-content guarantees the loading
+   button measures the SAME natural width as the idle button (the label
+   still contributes its measured width because opacity:0 preserves the
+   box). Excluded buttons that intentionally constrain width via
+   max-inline-size on the long-label story by only applying when the
+   author has NOT overridden width. */
+.zs-button[aria-busy="true"] {
+  inline-size: max-content;
+}
+
 .zs-button__spinner {
   position: absolute;
   inset: 0;
@@ -329,6 +420,23 @@
   stroke-width: 2;
   stroke-linecap: round;
   stroke-dasharray: 30 50;
+}
+
+/* Button-polish item 8. Destructive spinner intent. The default
+   `stroke: currentColor` on the circle follows the spinner's `color`
+   (inherited from the button's text color), which is correct for
+   filled (white-on-red stays white) but drifts purple/mauve on
+   destructive-tinted (tinted text is --zs-system-red-active) and on
+   destructive-gray (gray label color has no red signal). Override the
+   spinner's `color` (not the circle's stroke directly) so the existing
+   `stroke: currentColor` rule keeps composing — destructive-non-filled
+   spinners pick up --zs-system-red; filled destructive re-pins to the
+   accent-ink so white-on-red doesn't get a red spinner over a red fill. */
+.zs-button--destructive .zs-button__spinner {
+  color: var(--zs-system-red);
+}
+.zs-button--destructive.zs-button--filled .zs-button__spinner {
+  color: var(--zs-accent-ink);
 }
 
 @keyframes zs-button-spin {

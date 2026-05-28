@@ -271,10 +271,14 @@
 
   /* ─── System colors (semantic).
      Destructive uses system-red; pushed darker than canonical iOS red so
-     tinted/plain text on the mesh maintains 4.5:1 contrast. */
-  --zs-system-red: oklch(0.52 0.2 25);
-  --zs-system-red-hover: oklch(0.47 0.21 25);
-  --zs-system-red-active: oklch(0.43 0.22 25);
+     tinted/plain text on the mesh maintains 4.5:1 contrast. Chroma dropped
+     from 0.20 → 0.17 (button-polish item 7) for a more refined, less
+     web-blunt red; hover/active follow the same step pattern. If filled
+     destructive contrast drops below AA on the white accent ink, the
+     contingency is to deepen L (0.52 → 0.48) — captured inline below. */
+  --zs-system-red: oklch(0.52 0.17 25);
+  --zs-system-red-hover: oklch(0.47 0.18 25);
+  --zs-system-red-active: oklch(0.43 0.19 25);
   --zs-system-green: oklch(0.6 0.16 145);
   --zs-system-yellow: oklch(0.85 0.15 95);
   --zs-system-orange: oklch(0.7 0.2 50);
@@ -290,6 +294,13 @@
      double-edge effect codex flagged on inputs without touching
      Button's heavier ring. */
   --zs-input-focus-ring-color: oklch(0.52 0.18 250 / 0.25);
+  /* Button-specific focus ring — button-polish item 3. Lands BETWEEN the
+     Input's 0.25 (quiet form-field focus) and the original Button 0.35
+     (chunky primary-action ring) so Button's ring still reads heavier
+     than a form-field ring but no longer feels overbuilt. Paired with
+     a narrower 0.125rem outline (vs the default 0.1875rem) in
+     Button.css so the visible mass drops further. */
+  --zs-button-focus-ring-color: oklch(0.52 0.18 250 / 0.28);
 
   /* ─── Material — glass. Crystal is the light glass, so a less intense
      saturation is gentler than the root default. */
