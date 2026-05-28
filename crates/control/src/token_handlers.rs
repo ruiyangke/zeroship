@@ -210,10 +210,6 @@ fn reject_insecure_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn valid_pat_name(name: &str) -> bool {
-    !name.trim().is_empty() && name.chars().count() <= MAX_PAT_NAME_CHARS
-}
-
 pub async fn create_token(
     guard: AuthzGuard,
     state: State<Arc<AppState>>,

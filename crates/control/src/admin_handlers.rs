@@ -619,7 +619,7 @@ async fn audit_event(
         ..Default::default()
     };
 
-    if let Err(err) = auth_audit::emit_strict(&state.auth_pg, &ev)
+    if let Err(err) = auth_audit::emit_strict(state.auth_pg.as_ref(), &ev)
         .await
     {
         tracing::error!(error = %err, event_type, "control: platform admin audit insert failed");

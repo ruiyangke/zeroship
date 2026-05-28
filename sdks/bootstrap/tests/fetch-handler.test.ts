@@ -63,6 +63,48 @@ describe("createFetchHandler — superjson wire", () => {
     });
   });
 
+  test("sanitizes 5xx RPC errors before serializing to the client", async () => {
+    await withDispatch(async () => {
+      const handler = createFetchHandler(async () => ({
+        userDefault: {},
+        fetch: undefined,
+        rpc: {
+          fail() {
+            const err = new Error("postgres://internal/schema");
+            Object.assign(err, {
+              status: 500,
+              code: "INTERNAL",
+              details: { host: "db.internal" },
+            });
+            throw err;
+          },
+        },
+      }));
+      const log = console.error;
+      console.error = () => {};
+      try {
+        const res = await handler(
+          new Request("https://app.test/_zs/v1/fail", {
+            method: "POST",
+            body: JSON.stringify({ json: null }),
+          }),
+          {},
+          {},
+        );
+        const body = (await res.json()) as Record<string, unknown>;
+
+        assert.equal(res.status, 500);
+        assert.equal(body.message, "internal error");
+        assert.equal(body.name, "Error");
+        assert.equal(typeof body.request_id, "string");
+        assert.equal(JSON.stringify(body).includes("postgres://internal"), false);
+        assert.equal(JSON.stringify(body).includes("db.internal"), false);
+      } finally {
+        console.error = log;
+      }
+    });
+  });
+
   test("serializes rich output values with meta", async () => {
     await withDispatch(async () => {
       const handler = createFetchHandler(async () => ({

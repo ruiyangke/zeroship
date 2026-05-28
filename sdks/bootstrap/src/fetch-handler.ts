@@ -189,14 +189,10 @@ async function rpcAndRespond(
               }
             }
           } catch (e) {
-            const err = e as { message?: string; name?: string; code?: unknown; details?: unknown; retryable?: unknown };
-            const env: Record<string, unknown> = {
-              message: err?.message ?? String(e),
-              name: err?.name ?? "Error",
-            };
-            if (typeof err?.code === "string") env.code = err.code;
-            if (err?.details !== undefined) env.details = err.details;
-            if (typeof err?.retryable === "boolean") env.retryable = err.retryable;
+            const env = errorBodyFromThrown(
+              e,
+              statusFromError(e as { status?: unknown }),
+            );
             controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\n"));
             controller.enqueue(encoder.encode("d:{}\n"));
           } finally {
@@ -221,15 +217,9 @@ async function rpcAndRespond(
       { status: 200, headers: { "content-type": "application/json" } },
     );
   } catch (e) {
-    const err = e as { message?: string; name?: string; status?: number; code?: unknown; details?: unknown; retryable?: unknown };
+    const err = e as { status?: number };
     const status = statusFromError(err);
-    const body: Record<string, unknown> = {
-      message: err?.message ?? String(e),
-      name: err?.name ?? "Error",
-    };
-    if (typeof err?.code === "string") body.code = err.code;
-    if (err?.details !== undefined) body.details = err.details;
-    if (typeof err?.retryable === "boolean") body.retryable = err.retryable;
+    const body = errorBodyFromThrown(e, status);
     return new Response(
       JSON.stringify(body),
       { status, headers: { "content-type": "application/json" } },
@@ -253,10 +243,100 @@ function statusFromError(e: { status?: unknown } | null | undefined): number {
 }
 
 function errResponse(status: number, code: string, message: string, details?: unknown) {
+  if (status >= 500 && !insecureDevErrorsEnabled()) {
+    const requestId = newRequestId();
+    logRawError(requestId, status, "Error", message, { code, details });
+    return new Response(JSON.stringify({
+      message: "internal error",
+      name: "Error",
+      code,
+      request_id: requestId,
+    }), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
   const body: Record<string, unknown> = { message, name: "Error", code };
   if (details !== undefined) body.details = details;
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
+  });
+}
+
+function errorBodyFromThrown(e: unknown, status: number): Record<string, unknown> {
+  const err = e as {
+    message?: string;
+    name?: string;
+    code?: unknown;
+    details?: unknown;
+    retryable?: unknown;
+    request_id?: unknown;
+  } | null | undefined;
+  if (status >= 500 && !insecureDevErrorsEnabled()) {
+    const requestId = typeof err?.request_id === "string" ? err.request_id : newRequestId();
+    logRawError(
+      requestId,
+      status,
+      err?.name ?? "Error",
+      err?.message ?? String(e),
+      {
+        code: err?.code,
+        details: err?.details,
+        retryable: err?.retryable,
+      },
+    );
+    const body: Record<string, unknown> = {
+      message: "internal error",
+      name: "Error",
+      request_id: requestId,
+    };
+    if (typeof err?.code === "string") body.code = err.code;
+    return body;
+  }
+
+  const body: Record<string, unknown> = {
+    message: err?.message ?? String(e),
+    name: err?.name ?? "Error",
+  };
+  if (typeof err?.code === "string") body.code = err.code;
+  if (err?.details !== undefined) body.details = err.details;
+  if (typeof err?.retryable === "boolean") body.retryable = err.retryable;
+  if (typeof err?.request_id === "string") body.request_id = err.request_id;
+  return body;
+}
+
+function insecureDevErrorsEnabled(): boolean {
+  const proc = (globalThis as {
+    process?: { env?: Record<string, string | undefined> };
+  }).process;
+  const value =
+    proc?.env?.AUTH_INSECURE_DEV ??
+    proc?.env?.INSECURE_DEV ??
+    (globalThis as { env?: Record<string, string | undefined> }).env?.AUTH_INSECURE_DEV;
+  return value === "1" || value === "true" || value === "TRUE";
+}
+
+function newRequestId(): string {
+  const cryptoLike = (globalThis as {
+    crypto?: { randomUUID?: () => string };
+  }).crypto;
+  if (typeof cryptoLike?.randomUUID === "function") return cryptoLike.randomUUID();
+  return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
+
+function logRawError(
+  requestId: string,
+  status: number,
+  name: string,
+  message: string,
+  extras: Record<string, unknown>,
+): void {
+  console.error("[zeroship:rpc] sanitized error", {
+    request_id: requestId,
+    status,
+    name,
+    message,
+    ...extras,
   });
 }

@@ -4,6 +4,7 @@ import { refreshAccessToken } from "./oauth.js";
 import { loadTokens, saveTokens } from "./oauth-store.js";
 import { getRequest } from "./internal/request-context.js";
 import { userIdFromRequest } from "./session.js";
+import { UpstreamServiceError } from "./internal/upstream-error.js";
 
 export interface ControlClientOptions {
   userId: string;
@@ -39,15 +40,16 @@ export class OauthExpiredError extends Error {
   }
 }
 
-export class ControlApiError extends Error {
-  readonly status: number;
-  readonly body: string;
-
-  constructor(status: number, body: string) {
-    super(body || `control API failed (${status})`);
+export class ControlApiError extends UpstreamServiceError {
+  constructor(status: number, body: string, operation: string) {
+    super({
+      service: "control",
+      operation,
+      status,
+      body,
+      publicMessage: "control request failed",
+    });
     this.name = "ControlApiError";
-    this.status = status;
-    this.body = body;
   }
 }
 
@@ -198,7 +200,9 @@ export class ControlClient {
       }
     }
 
-    if (!resp.ok) throw new ControlApiError(resp.status, await responseText(resp));
+    if (!resp.ok) {
+      throw new ControlApiError(resp.status, await responseText(resp), `${method} ${path}`);
+    }
     if (resp.status === 204) return undefined as T;
 
     const contentType = resp.headers.get("content-type") ?? "";

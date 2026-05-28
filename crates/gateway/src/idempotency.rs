@@ -36,7 +36,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -232,11 +232,32 @@ impl InMemoryIdempotencyStore {
         }
     }
 
+    fn lock_entries(&self) -> MutexGuard<'_, HashMap<String, EntryRecord>> {
+        self.entries.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("idempotency entries mutex poisoned; recovering map");
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_locks(&self) -> MutexGuard<'_, HashMap<String, LockRecord>> {
+        self.locks.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("idempotency locks mutex poisoned; recovering map");
+            poisoned.into_inner()
+        })
+    }
+
+    fn lock_fifo(&self) -> MutexGuard<'_, HashMap<Uuid, Vec<String>>> {
+        self.fifo.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("idempotency fifo mutex poisoned; recovering map");
+            poisoned.into_inner()
+        })
+    }
+
     /// Test-only: total number of live entries across all apps. Useful
     /// for the cap-eviction tests.
     #[cfg(test)]
     pub fn entry_count(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.lock_entries().len()
     }
 }
 
@@ -250,7 +271,7 @@ impl Default for InMemoryIdempotencyStore {
 impl IdempotencyStore for InMemoryIdempotencyStore {
     async fn get_entry(&self, key: &str) -> Result<Option<StoredResponse>, String> {
         let now = now_ms();
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self.lock_entries();
         match map.get(key) {
             Some(rec) if rec.expires_at_ms > now => Ok(Some(rec.value.clone())),
             Some(_) => {
@@ -267,8 +288,8 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
             expires_at_ms: value.ttl_until,
         };
         let evicted_key: Option<String> = {
-            let mut entries = self.entries.lock().unwrap();
-            let mut fifo = self.fifo.lock().unwrap();
+            let mut entries = self.lock_entries();
+            let mut fifo = self.lock_fifo();
 
             // Track this key in the per-app FIFO queue. Inserting an
             // existing key counts once: we only push if it's not
@@ -304,7 +325,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     async fn try_acquire_lock(&self, key: &str, ttl_ms: u64) -> Result<bool, String> {
         let now = now_ms();
         let expires_at_ms = now.saturating_add(ttl_ms);
-        let mut map = self.locks.lock().unwrap();
+        let mut map = self.lock_locks();
         match map.get(key) {
             Some(rec) if rec.expires_at_ms > now => Ok(false),
             _ => {
@@ -315,7 +336,7 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
     }
 
     async fn release_lock(&self, key: &str) -> Result<(), String> {
-        self.locks.lock().unwrap().remove(key);
+        self.lock_locks().remove(key);
         Ok(())
     }
 }
@@ -538,6 +559,21 @@ mod tests {
         compio::runtime::Runtime::new().unwrap().block_on(f)
     }
 
+    fn run_ready<F: std::future::Future>(future: F) -> F::Output {
+        struct NoopWake;
+        impl std::task::Wake for NoopWake {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(output) => output,
+            std::task::Poll::Pending => panic!("future unexpectedly pending"),
+        }
+    }
+
     #[test]
     fn hash_body_is_byte_exact_not_canonical() {
         // {"a":1,"b":2} and {"b":2,"a":1} hash differently. The spec
@@ -602,6 +638,44 @@ mod tests {
                 }
                 other => panic!("expected Proceed, got {other:?}"),
             }
+        });
+    }
+
+    #[test]
+    fn in_memory_store_recovers_after_poisoned_maps() {
+        let store = InMemoryIdempotencyStore::new();
+        let entries_poisoned = std::panic::catch_unwind(|| {
+            let _guard = store.entries.lock().unwrap();
+            panic!("poison entries");
+        });
+        let locks_poisoned = std::panic::catch_unwind(|| {
+            let _guard = store.locks.lock().unwrap();
+            panic!("poison locks");
+        });
+        let fifo_poisoned = std::panic::catch_unwind(|| {
+            let _guard = store.fifo.lock().unwrap();
+            panic!("poison fifo");
+        });
+        assert!(entries_poisoned.is_err());
+        assert!(locks_poisoned.is_err());
+        assert!(fifo_poisoned.is_err());
+
+        run_ready(async {
+            let app = fixture_app();
+            let key = entry_key(&app, "todos.add", "k1");
+            let stored = StoredResponse {
+                input_hash: hash_body(b"{}"),
+                status: 200,
+                headers: HashMap::new(),
+                body_b64: String::new(),
+                completed_at: now_ms(),
+                ttl_until: now_ms() + 60_000,
+            };
+
+            store.put_entry(&app, &key, &stored).await.unwrap();
+            assert_eq!(store.get_entry(&key).await.unwrap(), Some(stored));
+            assert!(store.try_acquire_lock("lock", 1_000).await.unwrap());
+            store.release_lock("lock").await.unwrap();
         });
     }
 

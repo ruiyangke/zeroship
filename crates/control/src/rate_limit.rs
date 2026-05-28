@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// Idle bucket TTL — buckets older than this are dropped on next access.
@@ -61,7 +61,10 @@ impl RateLimiter {
     /// false if the bucket was empty.
     pub fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().expect("rate-limiter lock poisoned");
+        let mut buckets = match self.buckets.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         // Lazy GC: evict idle buckets so the map can't grow unbounded.
         // O(N) per call but N is bounded by the number of distinct
@@ -93,7 +96,7 @@ impl RateLimiter {
     /// `capacity` if the IP has never been seen.
     #[cfg(test)]
     pub fn tokens_for(&self, ip: IpAddr) -> f64 {
-        let buckets = self.buckets.lock().unwrap();
+        let buckets = self.lock_buckets();
         buckets.get(&ip).map(|b| b.tokens).unwrap_or(self.quota.capacity)
     }
 }
@@ -155,5 +158,18 @@ mod tests {
         assert!(rl.check(addr));
         assert!(rl.check(addr));
         assert!(!rl.check(addr));
+    }
+
+    #[test]
+    fn check_recovers_after_bucket_lock_poison() {
+        let rl = RateLimiter::new(Quota::per_minute(1, 60));
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = rl.buckets.lock().unwrap();
+            panic!("poison rate limiter");
+        });
+        assert!(poisoned.is_err());
+
+        assert!(rl.check(ip("203.0.113.4")));
+        assert_eq!(rl.tokens_for(ip("203.0.113.4")), 0.0);
     }
 }

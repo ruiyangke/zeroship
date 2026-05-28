@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::str::FromStr;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use cedar_policy::{Entities, Entity, EntityUid, RestrictedExpression};
@@ -21,6 +21,13 @@ static ENTITY_CACHE: LazyLock<Mutex<LruCache<EntityCacheKey, CacheEntry>>> =
         ))
     });
 
+fn lock_entity_cache() -> MutexGuard<'static, LruCache<EntityCacheKey, CacheEntry>> {
+    ENTITY_CACHE.lock().unwrap_or_else(|poisoned| {
+        tracing::error!("authz entity cache mutex poisoned; recovering cache");
+        poisoned.into_inner()
+    })
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct EntityCacheKey {
     principal_id: Uuid,
@@ -38,7 +45,7 @@ pub struct EntityCache;
 
 impl EntityCache {
     pub fn invalidate(principal_id: Uuid) {
-        let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+        let mut cache = lock_entity_cache();
         let keys = cache
             .iter()
             .filter(|(key, _)| key.principal_id == principal_id)
@@ -51,7 +58,7 @@ impl EntityCache {
 
     pub fn invalidate_resource(resource: &Resource) {
         let resource_key = resource_cache_key(resource);
-        let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+        let mut cache = lock_entity_cache();
         let keys = cache
             .iter()
             .filter(|(key, _)| key.resource_key == resource_key)
@@ -304,7 +311,7 @@ fn resource_cache_key(resource: &Resource) -> String {
 }
 
 fn cache_get(key: &EntityCacheKey) -> Option<Entities> {
-    let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+    let mut cache = lock_entity_cache();
     let entry = cache.get(key)?;
     if entry.inserted_at.elapsed() <= ENTITY_CACHE_TTL {
         Some(entry.entities.clone())
@@ -315,7 +322,7 @@ fn cache_get(key: &EntityCacheKey) -> Option<Entities> {
 }
 
 fn cache_put(key: EntityCacheKey, entities: Entities) {
-    let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+    let mut cache = lock_entity_cache();
     cache.put(
         key,
         CacheEntry {
@@ -323,4 +330,21 @@ fn cache_put(key: EntityCacheKey, entities: Entities) {
             entities,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_cache_invalidation_recovers_after_poison() {
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = ENTITY_CACHE.lock().unwrap();
+            panic!("poison entity cache");
+        });
+        assert!(poisoned.is_err());
+
+        EntityCache::invalidate(Uuid::new_v4());
+        EntityCache::invalidate_resource(&Resource::Any);
+    }
 }

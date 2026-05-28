@@ -135,8 +135,10 @@ pub async fn create_oauth_client(
     let persisted = match persisted {
         Ok(row) => row,
         Err(resp) => {
-            let _ = hydra_delete_client(&state.hydra_admin_url, &body.client_id).await;
-            return resp;
+            match hydra_delete_client(&state.hydra_admin_url, &body.client_id).await {
+                Ok(()) => return resp,
+                Err(err) => return oauth_rollback_failed_response(&body.client_id, err),
+            }
         }
     };
     if let Err(resp) = auth_audit::emit_guard_event(
@@ -523,6 +525,18 @@ fn hydra_error_response(
     }))
 }
 
+fn oauth_rollback_failed_response(client_id: &str, err: HydraAdminError) -> web::HttpResponse {
+    tracing::error!(
+        error = %err,
+        client_id,
+        "control: oauth client create rollback failed; manual cleanup required"
+    );
+    web::HttpResponse::BadGateway().json(&json!({
+        "error": "oauth_client_cleanup_required",
+        "message": "oauth client create failed and cleanup is required",
+    }))
+}
+
 fn bad_request(error: &str, message: &str) -> web::HttpResponse {
     web::HttpResponse::BadRequest().json(&json!({
         "error": error,
@@ -532,4 +546,44 @@ fn bad_request(error: &str, message: &str) -> web::HttpResponse {
 
 fn db_error() -> web::HttpResponse {
     web::HttpResponse::InternalServerError().json(&json!({"error": "database error"}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ntex::http::StatusCode;
+    use ntex::util::{stream_recv, BytesMut};
+
+    async fn body_json(mut resp: web::HttpResponse) -> serde_json::Value {
+        let mut body = resp.take_body();
+        let mut buf = BytesMut::new();
+        while let Some(item) = stream_recv(&mut body).await {
+            buf.extend_from_slice(&item.expect("body chunk"));
+        }
+        serde_json::from_slice(&buf).expect("body is JSON")
+    }
+
+    #[compio::test]
+    async fn oauth_rollback_failure_response_is_sanitized_and_actionable() {
+        let resp = oauth_rollback_failed_response(
+            "oauth-r9",
+            HydraAdminError::Response {
+                status: 503,
+                body: "driver failed: dsn=postgres://internal/path".to_string(),
+            },
+        );
+
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body,
+            json!({
+                "error": "oauth_client_cleanup_required",
+                "message": "oauth client create failed and cleanup is required",
+            })
+        );
+        let rendered = body.to_string();
+        assert!(!rendered.contains("driver failed"));
+        assert!(!rendered.contains("postgres://internal"));
+    }
 }

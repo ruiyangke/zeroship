@@ -1270,7 +1270,10 @@ async fn handle_auth_callback(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "gateway: oidc callback failed");
-            return render_callback_error(state.config.insecure_dev, &e.to_string());
+            return render_callback_error(
+                state.config.insecure_dev,
+                oidc_callback_public_error(&e),
+            );
         }
     };
 
@@ -1331,6 +1334,15 @@ fn render_callback_error(_insecure_dev: bool, msg: &str) -> HttpResponse {
     HttpResponse::BadRequest()
         .content_type("text/html; charset=utf-8")
         .body(body)
+}
+
+fn oidc_callback_public_error(e: &oidc_rp::OidcRpError) -> &'static str {
+    match e {
+        oidc_rp::OidcRpError::StashInvalid
+        | oidc_rp::OidcRpError::StateMismatch
+        | oidc_rp::OidcRpError::TokenExchange(_)
+        | oidc_rp::OidcRpError::VerifyIdToken(_) => "sign-in could not be completed",
+    }
 }
 
 /// Minimal HTML-escape — enough to make the rendered error page safe
@@ -2423,6 +2435,17 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(ct.starts_with("text/html"), "got content-type {ct:?}");
+    }
+
+    #[test]
+    fn oidc_callback_token_exchange_error_is_generic() {
+        let err = oidc_rp::OidcRpError::TokenExchange(
+            "HTTP 500: hydra says postgres://internal".into(),
+        );
+        assert_eq!(
+            oidc_callback_public_error(&err),
+            "sign-in could not be completed",
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@ pub async fn emit_guard_event(
         ..Default::default()
     };
 
-    audit::emit_strict(&state.auth_pg, &ev).await.map_err(|err| {
+    audit::emit_strict(state.auth_pg.as_ref(), &ev).await.map_err(|err| {
         tracing::error!(
             error = %err,
             event_type,

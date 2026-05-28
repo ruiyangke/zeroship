@@ -164,6 +164,23 @@ describe("ControlClient", () => {
       expect(mocks.saveTokens).not.toHaveBeenCalled();
     },
   );
+
+  it("does not expose upstream response bodies in ControlApiError.message", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      "{\"error\":\"internal\",\"detail\":\"postgres://internal\"}",
+      { status: 503 },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(newClient().getAppLogs("app_one")).rejects.toMatchObject({
+      name: "ControlApiError",
+      status: 503,
+      message: "control request failed",
+    } satisfies Partial<ControlApiError>);
+
+    await expect(newClient().getAppLogs("app_one")).rejects.not.toThrow("postgres://internal");
+  });
 });
 
 function newClient(): ControlClient {

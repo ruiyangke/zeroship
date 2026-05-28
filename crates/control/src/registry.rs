@@ -2,10 +2,13 @@
 
 use std::collections::HashMap;
 
-use zeroship_core::auth::hash_api_key;
-use zeroship_core::types::{AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap};
+use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::auth::hash_api_key;
+use zeroship_core::types::{
+    AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap,
+};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -32,15 +35,14 @@ impl std::fmt::Display for RegistryError {
 
 impl From<compio_postgres::Error> for RegistryError {
     fn from(e: compio_postgres::Error) -> Self {
-        let msg = e.to_string();
-        // compio-postgres's Error is opaque — peek at the full chain (the
-        // underlying DbError's SQLSTATE or message) via the Display/source
-        // fallback. UNIQUE violations flow through the chain as "23505 /
-        // duplicate key value violates unique constraint".
-        let full = format!("{msg}: {}", source_chain(&e));
-        if full.contains("duplicate key") || full.contains("unique") || full.contains("23505") {
-            Self::AlreadyExists(full)
+        if matches!(e.code(), Some(code) if code == &SqlState::UNIQUE_VIOLATION) {
+            Self::AlreadyExists("resource already exists".into())
         } else {
+            let msg = e.to_string();
+            let full = match source_chain(&e) {
+                Some(chain) => format!("{msg}: {chain}"),
+                None => msg,
+            };
             Self::Database(full)
         }
     }
@@ -49,7 +51,7 @@ impl From<compio_postgres::Error> for RegistryError {
 /// Walk an error's `source()` chain and concatenate the messages. Useful for
 /// reaching through the opaque `compio_postgres::Error` wrapper to the
 /// `DbError` inside.
-fn source_chain(err: &dyn std::error::Error) -> String {
+fn source_chain(err: &dyn std::error::Error) -> Option<String> {
     let mut out = String::new();
     let mut cur: Option<&dyn std::error::Error> = err.source();
     while let Some(e) = cur {
@@ -59,7 +61,11 @@ fn source_chain(err: &dyn std::error::Error) -> String {
         out.push_str(&e.to_string());
         cur = e.source();
     }
-    out
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 // ---------------------------------------------------------------------------

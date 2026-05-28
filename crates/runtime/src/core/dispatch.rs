@@ -90,7 +90,7 @@ struct DispatchKeysLocal<'s> {
 /// Optional structured-error extras forwarded from a thrown JS error.
 /// `details_json` is pre-serialized so the splicer doesn't have to know
 /// the shape (it's any JSON value).
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct ErrorExtras<'a> {
     pub stack: Option<&'a str>,
     pub code: Option<&'a str>,
@@ -106,10 +106,54 @@ pub struct ErrorExtras<'a> {
 /// throw produces the same body whether the kernel's RPC fast path
 /// caught the exception or the slow path's JS handler did.
 ///
-/// Status is carried separately by the caller — streaming HTTP paths
-/// emit it on the status line.
+/// 5xx errors are a public boundary: production clients get a fixed
+/// response body while raw diagnostics are emitted to server logs with the
+/// request id. `AUTH_INSECURE_DEV=true` (or `1`) preserves the old verbose
+/// body for local debugging.
 #[inline]
-pub fn build_error_body(message: &str, name: &str, extras: ErrorExtras<'_>) -> String {
+pub fn build_error_body(
+    status: u16,
+    request_id: u64,
+    message: &str,
+    name: &str,
+    extras: ErrorExtras<'_>,
+) -> String {
+    if (500..=599).contains(&status) {
+        tracing::error!(
+            request_id,
+            status,
+            error.name = %name,
+            error.message = %message,
+            error.stack = ?extras.stack,
+            error.code = ?extras.code,
+            error.details = ?extras.details_json,
+            error.retryable = ?extras.retryable,
+            "creator app dispatch error"
+        );
+        if !expose_internal_dispatch_errors() {
+            return build_internal_error_body(request_id);
+        }
+    }
+
+    build_verbose_error_body(message, name, extras)
+}
+
+fn expose_internal_dispatch_errors() -> bool {
+    matches!(
+        std::env::var("AUTH_INSECURE_DEV").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") | Ok("on") | Ok("ON")
+    )
+}
+
+fn build_internal_error_body(request_id: u64) -> String {
+    let mut out = String::with_capacity(64);
+    out.push_str(r#"{"message":"internal error","name":"Error","request_id":""#);
+    out.push_str(&request_id.to_string());
+    out.push_str(r#""}"#);
+    out
+}
+
+fn build_verbose_error_body(message: &str, name: &str, extras: ErrorExtras<'_>) -> String {
     let cap = 40
         + message.len()
         + name.len()
@@ -432,4 +476,3 @@ pub fn fire_timer_callback(
         }
     }
 }
-
