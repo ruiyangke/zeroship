@@ -29,6 +29,8 @@
 @import "./components/Autocomplete/Autocomplete.css";
 @import "./components/NumberField/NumberField.css";
 @import "./components/Slider/Slider.css";
+@import "./components/Popover/Popover.css";
+@import "./components/Tooltip/Tooltip.css";
 
 *,
 *::before,

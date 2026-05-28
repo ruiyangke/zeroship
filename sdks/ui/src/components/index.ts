@@ -158,3 +158,32 @@ export type {
   AlertDialogCancelProps,
   AlertDialogActionProps,
 } from "./AlertDialog";
+
+export { Popover, createPopoverHandle } from "./Popover";
+export type {
+  PopoverProps,
+  PopoverSide,
+  PopoverAlign,
+  PopoverTriggerProps,
+  PopoverPortalProps,
+  PopoverBackdropProps,
+  PopoverPopupProps,
+  PopoverTitleProps,
+  PopoverDescriptionProps,
+  PopoverArrowProps,
+  PopoverCloseProps,
+  PopoverComponent,
+} from "./Popover";
+
+export { Tooltip, createTooltipHandle } from "./Tooltip";
+export type {
+  TooltipProps,
+  TooltipSide,
+  TooltipAlign,
+  TooltipProviderProps,
+  TooltipTriggerProps,
+  TooltipPortalProps,
+  TooltipPopupProps,
+  TooltipArrowProps,
+  TooltipComponent,
+} from "./Tooltip";

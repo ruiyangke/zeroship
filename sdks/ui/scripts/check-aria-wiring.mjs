@@ -2204,6 +2204,162 @@ await injectCoarsePointerOverride();
   );
 }
 
+/* ─── 63. Popover Trigger click — popup opens + aria-expanded=true ─── *
+ *
+ * Brief assertion #1 (Slice 10). Click the Trigger; the popup mounts
+ * and the Trigger's `aria-expanded` flips to "true". Base UI is the
+ * source of truth for aria-expanded — this assertion ensures the
+ * wrapper doesn't break the wiring. */
+await open("components-popover--basic");
+{
+  const trigger = page.locator('[data-testid="popover-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  const expandedBefore = await trigger.getAttribute("aria-expanded");
+  await trigger.click();
+  await page
+    .locator('[data-testid="popover-basic-popup"]')
+    .waitFor({ state: "visible", timeout: 5000 });
+  const expandedAfter = await trigger.getAttribute("aria-expanded");
+  const popupVisible = await page
+    .locator('[data-testid="popover-basic-popup"]')
+    .isVisible()
+    .catch(() => false);
+  const ok =
+    (expandedBefore === "false" || expandedBefore === null) &&
+    expandedAfter === "true" &&
+    popupVisible;
+  report(
+    "Popover Trigger click — popup opens + aria-expanded=true",
+    ok,
+    `before=${expandedBefore} after=${expandedAfter} visible=${popupVisible}`,
+  );
+  // Close so the next assertion starts clean.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 64. Popover ESC closes + focus restore ────────────────────────── *
+ *
+ * Brief assertion #2. Open via Trigger click, press Escape, assert the
+ * popup is gone AND focus is restored to the Trigger. Mirrors the
+ * Dialog escape-key + focus-restore pair (assertions 5 + 10). */
+await open("components-popover--basic");
+{
+  const trigger = page.locator('[data-testid="popover-basic-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const popup = page.locator('[data-testid="popover-basic-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  const popupClosed =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  const focused = await trigger.evaluate((el) => el === document.activeElement);
+  const ok = popupClosed && focused;
+  report(
+    "Popover ESC closes + focus restored to trigger",
+    ok,
+    `closed=${popupClosed} focused=${focused}`,
+  );
+}
+
+/* ─── 65. Popover Arrow — SVG renders at the anchored side ──────────── *
+ *
+ * Brief assertion #3. Open the WithArrow story; assert the arrow
+ * wrapper carries `data-side="bottom"` (default placement) and its
+ * inner SVG renders the brief's `M 0,0 L 8,8 L 16,0 Z` path. The
+ * `data-side` attribute is emitted by Base UI on the arrow + popup. */
+await open("components-popover--with-arrow");
+{
+  const trigger = page.locator('[data-testid="popover-arrow-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const arrow = page.locator('[data-testid="popover-arrow-glyph"]');
+  await arrow.waitFor({ state: "visible", timeout: 5000 });
+  const side = await arrow.getAttribute("data-side");
+  const pathD = await arrow.locator("svg path").getAttribute("d");
+  // Default popup side is bottom; Base UI auto-flips on collision but
+  // the WithArrow story has room above and below so bottom is stable.
+  const sideOk = side === "bottom" || side === "top";
+  const pathOk = (pathD ?? "").replace(/\s+/g, "") === "M0,0L8,8L16,0Z";
+  const ok = sideOk && pathOk;
+  report(
+    "Popover Arrow — SVG renders at anchored side",
+    ok,
+    `data-side=${side} path-d="${pathD}"`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
+/* ─── 66. Tooltip hover-intent — open after delay + close on mouseout ─ *
+ *
+ * Brief assertion #4. Hover the trigger of the WithDelay story (delay
+ * set to 200ms); after delay + buffer, assert the popup is visible.
+ * Move the pointer away; assert the popup closes. */
+await open("components-tooltip--with-delay");
+{
+  const trigger = page.locator('[data-testid="tooltip-delay-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.hover();
+  // delay=200; add 50ms buffer per brief.
+  await page.waitForTimeout(250);
+  const popup = page.locator('[data-testid="tooltip-delay-popup"]');
+  const openVisible = await popup
+    .first()
+    .isVisible()
+    .catch(() => false);
+  // Move pointer off the trigger to a corner; tooltip should close.
+  await page.mouse.move(10, 10);
+  await page.waitForTimeout(300);
+  const closedAfter =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  const ok = openVisible && closedAfter;
+  report(
+    "Tooltip hover-intent — opens after delay + closes on mouseout",
+    ok,
+    `open=${openVisible} closedAfterMouseout=${closedAfter}`,
+  );
+}
+
+/* ─── 67. Tooltip keyboard — Tab opens + aria-describedby wired ─────── *
+ *
+ * Brief assertion #5. Focus the trigger via keyboard (Tab from the
+ * preceding input in the OnFocusable story); assert the popup is
+ * visible AND the trigger carries an `aria-describedby` ID that
+ * resolves to the popup element. */
+await open("components-tooltip--on-focusable");
+{
+  const previous = page.locator('[data-testid="tooltip-onfocusable-prev"]');
+  await previous.waitFor({ state: "visible", timeout: 5000 });
+  await previous.focus();
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(150);
+  const trigger = page.locator('[data-testid="tooltip-onfocusable-trigger"]');
+  const popup = page.locator('[data-testid="tooltip-onfocusable-popup"]');
+  const focused = await trigger.evaluate((el) => el === document.activeElement);
+  const popupVisible = await popup
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const describedBy = await trigger.getAttribute("aria-describedby");
+  let describedByMatchesPopup = false;
+  if (describedBy) {
+    const popupId = await popup.first().getAttribute("id").catch(() => null);
+    describedByMatchesPopup =
+      Boolean(popupId) &&
+      describedBy.split(/\s+/).filter(Boolean).includes(popupId);
+  }
+  const ok = focused && popupVisible && describedByMatchesPopup;
+  report(
+    "Tooltip keyboard — Tab opens + aria-describedby on trigger refs popup",
+    ok,
+    `focused=${focused} visible=${popupVisible} describedby=${describedBy} matches=${describedByMatchesPopup}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

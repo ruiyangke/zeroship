@@ -1,0 +1,127 @@
+/*
+ * Tooltip — anchored label.
+ *
+ * Anatomy:
+ *   .zs-tooltip-positioner    Floating UI anchored layer (no paint)
+ *     └─ .zs-tooltip-popup    inverted-surface chip
+ *           ├─ .zs-tooltip-arrow    SVG triangle pointed at trigger
+ *           └─ children             label text
+ *
+ * Inverted surface — Tooltips read as system labels, so the popup paints
+ * with `--zs-label` background + `--zs-surface` text (the inverse of the
+ * usual content surface). High contrast at small sizes; doesn't compete
+ * with the page chrome for attention.
+ *
+ * Glass-surface invariant: even though the popup paints with a label-
+ * tone fill (not the page surface), it stays OPAQUE so axe-core's
+ * color-contrast walk terminates inside the popup. No backdrop-filter
+ * — the tooltip is a chip, not a sheet.
+ *
+ * Forced-colors mirror: every painted selector is re-emitted inside
+ * `@media (forced-colors: active)` at equal specificity.
+ *
+ * RTL: layout-affecting padding uses `padding-inline` / `padding-block`.
+ * Base UI flips `start` / `end` alignment under `direction: rtl`.
+ */
+
+/* ─── Positioner ────────────────────────────────────────────────────── */
+.zs-tooltip-positioner {
+  /* Tooltips stack above popovers AND dialogs — the topmost surface
+   * for transient labels. */
+  z-index: calc(var(--zs-z-modal) + 20);
+  outline: none;
+  /* Tooltips never trap pointer events — they're labels, not panels. */
+  pointer-events: none;
+}
+
+/* ─── Popup ─────────────────────────────────────────────────────────── */
+.zs-tooltip-popup {
+  /* Inverted surface — label-tone fill, surface-tone text. */
+  background-color: var(--zs-label);
+  color: var(--zs-surface);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+  font-weight: var(--zs-text-footnote-weight);
+  /* Logical sizing for RTL. */
+  max-inline-size: 18rem;
+  padding-block: var(--zs-space-1);
+  padding-inline: var(--zs-space-2);
+  border-radius: var(--zs-radius-2);
+  box-shadow:
+    0 var(--zs-space-1) var(--zs-space-3)
+      color-mix(in oklch, var(--zs-label) 32%, transparent),
+    0 0 0 0.0625rem color-mix(in oklch, var(--zs-label) 12%, transparent);
+  /* Opaque background guarantees axe contrast walk terminates here. */
+  opacity: 1;
+  outline: none;
+  isolation: isolate;
+  transition:
+    transform var(--zs-motion-fast) var(--zs-motion-ease),
+    opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* enter/leave — Base UI emits data-starting-style / data-ending-style.
+ * Transform origin reflects the anchored side. */
+.zs-tooltip-popup[data-side="top"] {
+  transform-origin: bottom center;
+}
+.zs-tooltip-popup[data-side="bottom"] {
+  transform-origin: top center;
+}
+.zs-tooltip-popup[data-side="left"] {
+  transform-origin: center right;
+}
+.zs-tooltip-popup[data-side="right"] {
+  transform-origin: center left;
+}
+.zs-tooltip-popup[data-starting-style],
+.zs-tooltip-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.92);
+}
+@media (prefers-reduced-motion: reduce) {
+  .zs-tooltip-popup,
+  .zs-tooltip-popup[data-starting-style],
+  .zs-tooltip-popup[data-ending-style] {
+    transition: none;
+  }
+}
+
+/* ─── Arrow ─────────────────────────────────────────────────────────── *
+ *
+ * Base UI rotates the wrapping div per side; SVG triangle inside paints
+ * with `currentColor`, which we pin to the popup's --zs-label fill so
+ * arrow + popup read as one shape. */
+.zs-tooltip-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 0.75rem;
+  block-size: 0.375rem;
+  color: var(--zs-label);
+}
+.zs-tooltip-arrow > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+/* ─── forced-colors mirror ─────────────────────────────────────────── *
+ *
+ * Inverted surfaces collapse to Canvas/CanvasText under forced-colors —
+ * the inversion isn't meaningful when the user has overridden the
+ * palette. Equal specificity to the base selectors so the system colors
+ * win. */
+@media (forced-colors: active) {
+  .zs-tooltip-popup {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-tooltip-arrow {
+    color: Canvas;
+    filter: drop-shadow(0 0 0.0625rem CanvasText);
+  }
+}

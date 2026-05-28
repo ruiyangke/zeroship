@@ -1,0 +1,199 @@
+/*
+ * Popover — anchored panel.
+ *
+ * Anatomy:
+ *   .zs-popover-backdrop      optional scrim layer (opt-in only).
+ *   .zs-popover-positioner    Base UI's Floating UI anchored layer
+ *     └─ .zs-popover-popup    opaque sheet with --zs-shadow-dialog
+ *           ├─ .zs-popover-arrow         optional 16x8 SVG triangle
+ *           ├─ .zs-popover__title        Title heading
+ *           ├─ .zs-popover__description  Description paragraph
+ *           └─ children                  user content + Close
+ *
+ * Base UI emits `data-starting-style` / `data-ending-style` on Popup
+ * (and Backdrop, when present) during the open/close transitions —
+ * we hook the visible state off those so motion is declarative and
+ * reduced-motion respectful.
+ *
+ * Glass-surface invariant: the Popup declares an opaque `background-
+ * color` (--zs-surface) so axe-core's color-contrast walk terminates
+ * inside the popup. The optional `backdrop-filter` (gated by
+ * --zs-dialog-backdrop-filter, falling back to --zs-material-regular)
+ * gives themes a frosted look when --zs-surface is translucent.
+ *
+ * Forced-colors mirror (Slice-5/6/7 lesson): every state selector below
+ * gets re-emitted inside `@media (forced-colors: active)` at equal or
+ * higher specificity, so the system palette wins over the oklch token
+ * tints.
+ *
+ * RTL: layout-affecting axes use logical properties (`inline-size`,
+ * `padding-inline`, `padding-block`). Floating UI handles the side
+ * anchoring physically — `start` / `end` are flipped by Base UI when
+ * `direction: rtl` is in effect.
+ */
+
+/* ─── Backdrop (opt-in) ─────────────────────────────────────────────── */
+.zs-popover-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--zs-z-modal);
+  background-color: var(--zs-scrim);
+  opacity: 1;
+  transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-popover-backdrop[data-starting-style],
+.zs-popover-backdrop[data-ending-style] {
+  opacity: 0;
+}
+
+/* ─── Positioner ────────────────────────────────────────────────────── *
+ *
+ * Base UI's Positioner is the Floating UI anchored layer — we don't
+ * paint it; it carries Floating UI's transform / x / y inline styles.
+ * Stack above modal sheets via the same `--zs-z-modal` token plus a
+ * small bump so popovers float over an open dialog when both mount. */
+.zs-popover-positioner {
+  z-index: calc(var(--zs-z-modal) + 10);
+  outline: none;
+}
+
+/* ─── Popup ─────────────────────────────────────────────────────────── */
+.zs-popover-popup {
+  /* Glass-surface invariant: opaque background-color + optional
+   * backdrop-filter. Themes that swap --zs-surface to translucent get
+   * the frosted look automatically. */
+  background-color: var(--zs-surface);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  /* Logical sizing so RTL flows naturally. */
+  min-inline-size: 14rem;
+  max-inline-size: min(24rem, calc(100dvw - var(--zs-space-6) * 2));
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  border-radius: var(--zs-radius-5);
+  box-shadow:
+    var(--zs-shadow-dialog),
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
+  -webkit-backdrop-filter: var(
+    --zs-dialog-backdrop-filter,
+    var(--zs-material-regular)
+  );
+  /* Explicit baseline opacity so the open/close transition origin is
+   * portable across reduced-motion + animation library overrides. */
+  opacity: 1;
+  outline: none;
+  isolation: isolate;
+  transition:
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* ─── enter/leave transitions ──────────────────────────────────────── *
+ *
+ * The transform-origin reflects the anchored side so the popup grows
+ * out of the trigger edge, not out of its own centre. Base UI sets
+ * `data-side` on the popup automatically. */
+.zs-popover-popup[data-side="top"] {
+  transform-origin: bottom center;
+}
+.zs-popover-popup[data-side="bottom"] {
+  transform-origin: top center;
+}
+.zs-popover-popup[data-side="left"] {
+  transform-origin: center right;
+}
+.zs-popover-popup[data-side="right"] {
+  transform-origin: center left;
+}
+.zs-popover-popup[data-starting-style],
+.zs-popover-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.96);
+}
+@media (prefers-reduced-motion: reduce) {
+  .zs-popover-popup,
+  .zs-popover-popup[data-starting-style],
+  .zs-popover-popup[data-ending-style] {
+    transition: none;
+  }
+  .zs-popover-backdrop {
+    transition: none;
+  }
+}
+
+/* ─── Title / Description ──────────────────────────────────────────── */
+.zs-popover__title {
+  margin: 0;
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
+  font-weight: var(--zs-text-headline-weight);
+  letter-spacing: var(--zs-text-headline-tracking);
+  color: var(--zs-label);
+}
+.zs-popover__description {
+  margin: 0;
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+  color: var(--zs-label-secondary);
+}
+
+/* ─── Arrow ────────────────────────────────────────────────────────── *
+ *
+ * Base UI rotates the wrapping div per side automatically; the inner
+ * SVG is a fixed 16×8 downward triangle. `color` paints the SVG `fill`
+ * via `currentColor`, so the arrow always picks up the popup's themed
+ * surface color. */
+.zs-popover-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1rem;
+  block-size: 0.5rem;
+  color: var(--zs-surface);
+  /* Drop-shadow gives the arrow tip the same edge the popup shadow
+   * paints — without it the triangle reads as a flat sticker on the
+   * page. The filter is the only way to get the shadow to follow the
+   * triangle outline (box-shadow paints on the rect, not the path). */
+  filter: drop-shadow(0 0 0.0625rem color-mix(in oklch, var(--zs-label) 18%, transparent));
+}
+.zs-popover-arrow > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+/* ─── forced-colors mirror ─────────────────────────────────────────── *
+ *
+ * Mirror every painted selector inside the forced-colors media so the
+ * system palette wins over the oklch token mixes. Slice-5/6/7 lesson:
+ * the per-state selectors must match the specificity of their base
+ * counterpart, otherwise the high-contrast mode leaks. */
+@media (forced-colors: active) {
+  .zs-popover-popup {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    forced-color-adjust: none;
+  }
+  .zs-popover__title {
+    color: CanvasText;
+  }
+  .zs-popover__description {
+    color: CanvasText;
+  }
+  .zs-popover-backdrop {
+    background-color: color-mix(in oklch, CanvasText 40%, transparent);
+  }
+  .zs-popover-arrow {
+    color: Canvas;
+    filter: drop-shadow(0 0 0.0625rem CanvasText);
+  }
+}

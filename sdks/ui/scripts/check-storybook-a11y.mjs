@@ -225,6 +225,25 @@ const stories = [
   "components-slider--forced-colors-outline",
   "components-slider--coarse-pointer",
   "components-slider--rtl",
+  // Slice 10: Popover + Tooltip. 10 Popover + 8 Tooltip = 18 new entries.
+  "components-popover--basic",
+  "components-popover--with-title-description",
+  "components-popover--with-arrow",
+  "components-popover--with-backdrop",
+  "components-popover--with-close",
+  "components-popover--placement-side",
+  "components-popover--align-start-center-end",
+  "components-popover--nested-in-dialog",
+  "components-popover--disabled",
+  "components-popover--rtl",
+  "components-tooltip--basic",
+  "components-tooltip--with-delay",
+  "components-tooltip--with-arrow",
+  "components-tooltip--placement-side",
+  "components-tooltip--on-focusable",
+  "components-tooltip--rich-content",
+  "components-tooltip--disabled",
+  "components-tooltip--rtl",
 ];
 
 async function launchBrowser() {
