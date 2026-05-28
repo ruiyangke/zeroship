@@ -15,8 +15,12 @@ use zeroship_control::{
 };
 use zeroship_core::oidc_verify::TokenClaims;
 
+mod common;
+
 fn db_url() -> Option<String> {
-    std::env::var("AUTH_DB_URL").ok()
+    std::env::var("AUTH_DB_URL")
+        .or_else(|_| std::env::var("PG_TEST_URL"))
+        .ok()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -393,34 +397,40 @@ async fn using_revoked_pat_returns_401() {
     };
     let fx = Fixture::new(&db_url, "revoked-use", Some("admin")).await;
     let app = init_control!(fx);
-
-    let created = create_pat!(app, &fx.cookie, "CI deploy");
-    let id = created.get("id").and_then(Value::as_str).expect("id");
-    let token = created.get("token").and_then(Value::as_str).expect("token");
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
 
     let req = test::TestRequest::get()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", format!("Bearer {token}"))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let req = test::TestRequest::delete()
-        .uri(&format!("/me/tokens/{id}"))
-        .header("accept", "application/json")
-        .header("cookie", fx.cookie.as_str())
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let req = test::TestRequest::get()
-        .uri("/me/tokens")
-        .header("accept", "application/json")
-        .header("authorization", format!("Bearer {token}"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
+    let req = test::TestRequest::get()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("authorization", pat.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    fx.state
+        .auth_pg
+        .execute(
+            "UPDATE control.permission_tokens SET revoked_at = NOW() WHERE id = $1",
+            &[&pat.token_id],
+        )
+        .await
+        .expect("revoke PAT");
+
+    let req = test::TestRequest::get()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("authorization", pat.bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    pat.cleanup(&fx.state).await;
     fx.cleanup().await;
 }

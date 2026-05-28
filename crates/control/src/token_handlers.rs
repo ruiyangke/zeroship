@@ -106,7 +106,7 @@ impl PatIssuer {
         Self::new(&key).expect("static dev PAT key is valid")
     }
 
-    fn issue(
+    pub fn issue(
         &self,
         token_id: Uuid,
         owner_id: Uuid,

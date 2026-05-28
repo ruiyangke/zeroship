@@ -1,8 +1,8 @@
 //! Live-PG regression tests for platform admin handlers.
 //!
-//! Skips when `AUTH_DB_URL` is unset. The handlers use console-session
-//! auth plus the authz guard, so the tests create real `auth.users`,
-//! `auth.console_sessions`, `platform.roles`, and policy rows.
+//! Skips when no test Postgres URL is set. The handlers use AuthzGuard,
+//! so the tests create real `auth.users`, `auth.console_sessions`,
+//! `platform.roles`, permission tokens, and policy rows.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,15 +13,19 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    admin_handlers, oidc_rp, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
-    StripeStore,
+    admin_handlers, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    SecretString, StripeStore,
 };
 use zeroship_core::oidc_verify::TokenClaims;
+
+mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    std::env::var("AUTH_DB_URL").ok()
+    std::env::var("AUTH_DB_URL")
+        .or_else(|_| std::env::var("PG_TEST_URL"))
+        .ok()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -95,6 +99,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         auth_pg: Arc::new(auth_pg_client),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
+        pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
@@ -150,18 +155,6 @@ async fn session_cookie(pg: &Client, user_id: Uuid) -> String {
     oidc_rp::set_console_session_cookie(&session.id, false)
 }
 
-async fn grant_admin(pg: &Client, user_id: Uuid) {
-    pg.execute(
-        "INSERT INTO platform.roles (user_id, role, granted_by) \
-         VALUES ($1, 'admin', $1) \
-         ON CONFLICT (user_id) DO UPDATE \
-         SET role = 'admin', granted_by = $1, granted_at = NOW()",
-        &[&user_id],
-    )
-    .await
-    .expect("grant admin");
-}
-
 async fn count_role(pg: &Client, user_id: Uuid, role: &str) -> i64 {
     let rows = pg
         .query(
@@ -187,6 +180,12 @@ async fn count_audit(pg: &Client, event_type: &str, target: Uuid) -> i64 {
 }
 
 async fn cleanup_user(pg: &Client, user_id: Uuid) {
+    let _ = pg
+        .execute(
+            "DELETE FROM control.authz_decisions WHERE user_id = $1",
+            &[&user_id],
+        )
+        .await;
     let _ = pg
         .execute("DELETE FROM auth.audit_events WHERE user_id = $1", &[&user_id])
         .await;
@@ -223,6 +222,17 @@ async fn non_admin_cannot_grant_platform_role() {
             .configure(admin_handlers::configure),
     )
     .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/admin/users/{target}/role"))
+        .set_json(&serde_json::json!({"role": "admin"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        matches!(resp.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+        "unauthenticated admin role grant should be rejected"
+    );
+
     let req = test::TestRequest::post()
         .uri(&format!("/admin/users/{target}/role"))
         .header("cookie", cookie)
@@ -244,10 +254,8 @@ async fn admin_can_grant_platform_role() {
         return;
     };
     let fx = build_test_state(&db_url, "grant").await;
-    let actor = insert_user(&fx.state.auth_pg, "grant-actor").await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let target = insert_user(&fx.state.auth_pg, "grant-target").await;
-    grant_admin(&fx.state.auth_pg, actor).await;
-    let cookie = session_cookie(&fx.state.auth_pg, actor).await;
 
     let app = test::init_service(
         web::App::new()
@@ -257,7 +265,7 @@ async fn admin_can_grant_platform_role() {
     .await;
     let req = test::TestRequest::post()
         .uri(&format!("/admin/users/{target}/role"))
-        .header("cookie", cookie)
+        .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({"role": "support"}))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -269,8 +277,8 @@ async fn admin_can_grant_platform_role() {
         1
     );
 
-    cleanup_user(&fx.state.auth_pg, actor).await;
     cleanup_user(&fx.state.auth_pg, target).await;
+    pat.cleanup(&fx.state).await;
 }
 
 #[compio::test]
@@ -280,19 +288,17 @@ async fn admin_can_revoke_platform_role() {
         return;
     };
     let fx = build_test_state(&db_url, "revoke").await;
-    let actor = insert_user(&fx.state.auth_pg, "revoke-actor").await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let target = insert_user(&fx.state.auth_pg, "revoke-target").await;
-    grant_admin(&fx.state.auth_pg, actor).await;
     fx.state
         .auth_pg
         .execute(
             "INSERT INTO platform.roles (user_id, role, granted_by) \
              VALUES ($1, 'support', $2)",
-            &[&target, &actor],
+            &[&target, &pat.user_id],
         )
         .await
         .expect("seed support role");
-    let cookie = session_cookie(&fx.state.auth_pg, actor).await;
 
     let app = test::init_service(
         web::App::new()
@@ -302,15 +308,15 @@ async fn admin_can_revoke_platform_role() {
     .await;
     let req = test::TestRequest::delete()
         .uri(&format!("/admin/users/{target}/role"))
-        .header("cookie", cookie)
+        .header("authorization", pat.bearer())
         .to_request();
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     assert_eq!(count_role(&fx.state.auth_pg, target, "support").await, 0);
 
-    cleanup_user(&fx.state.auth_pg, actor).await;
     cleanup_user(&fx.state.auth_pg, target).await;
+    pat.cleanup(&fx.state).await;
 }
 
 #[compio::test]
@@ -320,9 +326,7 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
         return;
     };
     let fx = build_test_state(&db_url, "policy-valid").await;
-    let actor = insert_user(&fx.state.auth_pg, "policy-valid-actor").await;
-    grant_admin(&fx.state.auth_pg, actor).await;
-    let cookie = session_cookie(&fx.state.auth_pg, actor).await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let policy_id = "lock_writes";
     let _ = fx
         .state
@@ -338,7 +342,7 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
     .await;
     let req = test::TestRequest::put()
         .uri(&format!("/admin/platform-policies/{policy_id}"))
-        .header("cookie", cookie)
+        .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({
             "cedar_source": valid_cedar_source(),
             "enabled": true
@@ -365,7 +369,7 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
         .auth_pg
         .execute("DELETE FROM control.platform_policies WHERE id = $1", &[&policy_id])
         .await;
-    cleanup_user(&fx.state.auth_pg, actor).await;
+    pat.cleanup(&fx.state).await;
 }
 
 #[compio::test]
@@ -375,9 +379,7 @@ async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
         return;
     };
     let fx = build_test_state(&db_url, "policy-invalid").await;
-    let actor = insert_user(&fx.state.auth_pg, "policy-invalid-actor").await;
-    grant_admin(&fx.state.auth_pg, actor).await;
-    let cookie = session_cookie(&fx.state.auth_pg, actor).await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
     let policy_id = "invalid_cedar";
     let _ = fx
         .state
@@ -393,7 +395,7 @@ async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
     .await;
     let req = test::TestRequest::put()
         .uri(&format!("/admin/platform-policies/{policy_id}"))
-        .header("cookie", cookie)
+        .header("authorization", pat.bearer())
         .set_json(&serde_json::json!({
             "cedar_source": "this is not cedar",
             "enabled": true
@@ -413,5 +415,5 @@ async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
         .expect("count invalid policy");
     assert_eq!(rows[0].get::<_, i64>("n"), 0);
 
-    cleanup_user(&fx.state.auth_pg, actor).await;
+    pat.cleanup(&fx.state).await;
 }

@@ -18,10 +18,14 @@ use zeroship_control::{
     StripeStore,
 };
 
+mod common;
+
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    std::env::var("CONTROL_TEST_DB").ok()
+    std::env::var("CONTROL_TEST_DB")
+        .or_else(|_| std::env::var("PG_TEST_URL"))
+        .ok()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -59,12 +63,6 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
         LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
     );
 
-    // Post-U8 the OIDC RP + auth-pg are non-Optional on AppState. This
-    // test never exercises /auth/callback or `require_console_session`,
-    // so we wire in a hermetic dev stub and reuse the control PG client
-    // for `auth_pg` — neither field is touched by the code path under
-    // test (`/api/apps/{id}/logs` reaches the worker via master-key
-    // Bearer auth).
     let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
         "http://localhost:4444",
         "console.zeroship.ai",
@@ -146,7 +144,15 @@ async fn app_logs_route_proxies_worker_lines() {
 
     let response = control
         .get(format!("/api/apps/{app_id}/logs"))
-        .header("authorization", format!("Bearer {TEST_MASTER_KEY}"))
+        .send()
+        .await
+        .expect("unauthenticated control response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let pat = common::authz_fixture::admin_pat(&fixture.state).await;
+    let response = control
+        .get(format!("/api/apps/{app_id}/logs"))
+        .header("authorization", pat.bearer())
         .send()
         .await
         .expect("control response");
@@ -156,4 +162,5 @@ async fn app_logs_route_proxies_worker_lines() {
     let lines: Vec<String> = serde_json::from_slice(&body).expect("logs json");
     eprintln!("[app_logs_http_test] captured logs: {lines:?}");
     assert_eq!(lines, vec![format!("b2-control-route-log {app_id}")]);
+    pat.cleanup(&fixture.state).await;
 }
