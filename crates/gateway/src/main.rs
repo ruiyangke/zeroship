@@ -12,6 +12,7 @@ mod router;
 mod sessions;
 mod signing;
 mod sync;
+mod wrapper_token;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -63,11 +63,13 @@ fn parse_pkcs8_der(der: &[u8]) -> Result<SigningKey> {
         .map_err(|e| GatewayError::Config(format!("Ed25519 PKCS#8 DER: {e}")))
 }
 
-/// Compute the RFC 7638 JWK thumbprint of the signing key's public half.
+/// Compute the RFC 7638 JWK thumbprint of an Ed25519 public key.
 ///
-/// This is the value the gateway emits as `kid` in wrapper-token
-/// headers so `DPoP`-aware relying parties can fetch the matching JWK
-/// from the gateway's JWKS endpoint.
+/// This is the underlying computation used to produce the `kid` the
+/// gateway emits in wrapper-token headers. Both the Issuer (signing
+/// side, has a [`SigningKey`]) and the Verifier (verification side,
+/// has only a [`ed25519_dalek::VerifyingKey`]) reach the same `kid`
+/// via this single function.
 ///
 /// The canonical JSON for an Ed25519/OKP key per RFC 8037 §2 is
 /// `{"crv":"Ed25519","kty":"OKP","x":"<base64url-no-pad>"}` with members
@@ -78,14 +80,25 @@ fn parse_pkcs8_der(der: &[u8]) -> Result<SigningKey> {
 /// requires lexicographic ordering, which `serde_json` does not
 /// guarantee.
 #[must_use]
-pub fn jwk_thumbprint(key: &SigningKey) -> String {
+pub fn jwk_thumbprint_public(public: &ed25519_dalek::VerifyingKey) -> String {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
-    let public = key.verifying_key();
     let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.to_bytes());
     let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
     let digest = Sha256::digest(canonical.as_bytes());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+/// Compute the RFC 7638 JWK thumbprint of the signing key's public half.
+///
+/// This is the value the gateway emits as `kid` in wrapper-token
+/// headers so `DPoP`-aware relying parties can fetch the matching JWK
+/// from the gateway's JWKS endpoint. Delegates to
+/// [`jwk_thumbprint_public`] after extracting the public half so the
+/// canonical-JSON encoding lives in exactly one place.
+#[must_use]
+pub fn jwk_thumbprint(key: &SigningKey) -> String {
+    jwk_thumbprint_public(&key.verifying_key())
 }
 
 #[cfg(test)]
