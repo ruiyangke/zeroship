@@ -54,6 +54,8 @@ pub async fn handle(
     form: Form<LogoutForm>,
     state: State<Arc<AppState>>,
 ) -> HttpResponse {
+    // Internal endpoint, no user authz: Hydra authenticates by sending
+    // a signed logout_token and there is no interactive user principal.
     // The expected ID-token `iss` claim. `ConsoleOidcRp` derives this
     // inline in `finish_callback` from `auth_public` with a trailing
     // slash — match the same shape here so the verifier accepts the

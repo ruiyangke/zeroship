@@ -1,6 +1,6 @@
 //! HTTP handlers for Stripe Connect onboarding + webhook ingest.
 //!
-//! Public (master-key auth):
+//! User-facing (AuthzGuard):
 //!   POST   /api/creators/:id/stripe/onboard    → return onboarding URL
 //!   POST   /api/creators/:id/stripe/callback   → link acct_xxx
 //!   GET    /api/creators/:id/earnings          → totals + recent payouts
@@ -17,8 +17,10 @@ use ntex::web::{self, types::{Path, State}};
 use serde::Deserialize;
 use sha2::Sha256;
 use uuid::Uuid;
+use zeroship_authz::{Action as AuthzAction, Resource};
 
 use crate::audit::{self, Action, AuditEntry};
+use crate::authz_guard::AuthzGuard;
 use crate::http_util;
 use crate::AppState;
 use crate::stripe_store::{self, StripeError};
@@ -73,10 +75,13 @@ fn bad_creator_id() -> web::HttpResponse { err_json(400, "bad creator_id") }
 pub async fn onboard(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
     if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     // Placeholder — real impl goes to api.stripe.com/v1/account_links.
@@ -97,11 +102,14 @@ pub struct CallbackBody {
 pub async fn callback(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     body: web::types::Json<CallbackBody>,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
     if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.link_account(creator_id, &body.stripe_account_id).await {
@@ -125,10 +133,13 @@ pub async fn callback(
 pub async fn earnings(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
     if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingRead, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     let totals = match state.stripe_store.total_earnings(creator_id).await {
@@ -163,10 +174,13 @@ pub async fn earnings(
 pub async fn unlink(
     req: web::HttpRequest,
     path: Path<String>,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(r) = crate::api::check_admin_auth(&req, &state) { return r; }
     if let Some(r) = rate_limit(&req, &state.admin_limiter, &state) { return r; }
+    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
+        return resp;
+    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     match state.stripe_store.unlink_account(creator_id).await {
@@ -359,6 +373,8 @@ pub async fn webhook(
     body: Bytes,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    // Internal endpoint, no user authz: Stripe authenticates with the
+    // webhook signature and this route has no user principal.
     // Rate limit FIRST — body cap second. Cheap-to-reject things go
     // before expensive ones (parsing 256 KiB, HMAC, DB write).
     if let Some(r) = rate_limit(&req, &state.webhook_limiter, &state) {

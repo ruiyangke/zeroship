@@ -9,7 +9,9 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
+use zeroship_authz::{Action, Resource};
 
+use crate::authz_guard::AuthzGuard;
 use crate::deploy::{self, IngestError};
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -32,41 +34,6 @@ fn default_plan() -> String {
 #[derive(Deserialize)]
 pub struct SetPlanBody {
     pub plan_id: String,
-}
-
-// ---------------------------------------------------------------------------
-// Admin auth — require master key on all mutating endpoints
-// ---------------------------------------------------------------------------
-
-pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
-    // Dev-insecure opt-in: skip auth entirely. Production startup
-    // (main.rs) refuses to boot with empty master_key unless this flag
-    // is on. No implicit bypass.
-    if state.insecure_dev {
-        return None;
-    }
-
-    // Master-key Bearer header — the canonical path for tooling
-    // (CLI, agents, builder service). Dashboard sessions go through
-    // the async `require_console_session` helper (U7); the legacy
-    // JWT-cookie session that U8 retired was the only reason this
-    // sync helper ever needed a cookie path.
-    let header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let token = zeroship_core::auth::extract_bearer(header);
-    match token {
-        Some(key) if zeroship_core::auth::validate_control_key(key, state.master_key.expose_secret()) => None,
-        _ => {
-            tracing::warn!(method = %req.method(), path = %req.path(), "control: auth rejected");
-            Some(
-                web::HttpResponse::Unauthorized()
-                    .json(&serde_json::json!({"error":"unauthorized"})),
-            )
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -94,11 +61,13 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 // ---------------------------------------------------------------------------
 
 pub async fn create_app(
-    req: web::HttpRequest,
+    authz: AuthzGuard,
     state: State<Arc<AppState>>,
     body: Json<CreateAppBody>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+    if let Err(resp) = authz.require(Action::AppsWrite, Resource::Any, &state).await {
+        return resp;
+    }
     match state.registry.create_app(&body.name, &body.plan_id).await {
         Ok(record) => {
             // Include api_key in the create response (it's skipped from normal serialization)
@@ -110,7 +79,13 @@ pub async fn create_app(
     }
 }
 
-pub async fn list_apps(state: State<Arc<AppState>>) -> web::HttpResponse {
+pub async fn list_apps(
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Err(resp) = authz.require(Action::AppsRead, Resource::Any, &state).await {
+        return resp;
+    }
     match state.registry.list_apps().await {
         Ok(apps) => web::HttpResponse::Ok().json(&apps),
         Err(e) => error_response(e),
@@ -118,9 +93,9 @@ pub async fn list_apps(state: State<Arc<AppState>>) -> web::HttpResponse {
 }
 
 pub async fn get_app(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
@@ -129,20 +104,14 @@ pub async fn get_app(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
-    // Admin auth surfaces the app's api_key in the response (the same
-    // bearer-master-key gate that allows create/delete). Anonymous reads
-    // get the public AppRecord without the secret.
-    let is_admin = check_admin_auth(&req, &state).is_none();
+    if let Err(resp) = authz
+        .require(Action::AppsRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.registry.get_app(&uid).await {
-        Ok(Some(record)) => {
-            if is_admin {
-                let mut json = serde_json::to_value(&record).unwrap();
-                json["api_key"] = serde_json::Value::String(record.api_key.clone());
-                web::HttpResponse::Ok().json(&json)
-            } else {
-                web::HttpResponse::Ok().json(&record)
-            }
-        }
+        Ok(Some(record)) => web::HttpResponse::Ok().json(&record),
         Ok(None) => {
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
@@ -150,8 +119,11 @@ pub async fn get_app(
     }
 }
 
-pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: Path<String>) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+pub async fn delete_app(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -159,6 +131,12 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::AppsDelete, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     // Delete from VFS first (ignore NotFound — bundle may not exist yet).
     let app_id_str = uid.to_string();
     if let Err(e) = state.vfs.delete(&app_id_str) {
@@ -186,14 +164,13 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
 /// algorithm.
 pub async fn deploy(
     req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
     mut body: web::types::Payload,
 ) -> web::HttpResponse {
-    // Auth + uuid + content-type rejections happen BEFORE any body byte
-    // is consumed — so an unauthenticated/malformed caller can't tie up
-    // tmp file slots without first satisfying these gates.
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
+    // Authz + uuid + content-type rejections happen BEFORE any body byte
+    // is consumed, so rejected callers cannot tie up tmp file slots.
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -201,6 +178,12 @@ pub async fn deploy(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::AppsDeploy, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
 
     // Hard cut: only `application/x-zship` is accepted. The legacy
     // raw `.appbundle` and `application/javascript` paths are gone.
@@ -353,14 +336,11 @@ fn ingest_error_to_response(e: IngestError) -> web::HttpResponse {
 }
 
 pub async fn set_plan(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
     body: Json<SetPlanBody>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) {
-        return resp;
-    }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -368,6 +348,12 @@ pub async fn set_plan(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.registry.set_plan(&uid, &body.plan_id).await {
         Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
         Ok(false) => {
@@ -377,7 +363,11 @@ pub async fn set_plan(
     }
 }
 
-pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::HttpResponse {
+pub async fn get_usage(
+    id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -385,6 +375,12 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
     match state.registry.get_usage(&uid).await {
         Ok(usage) => web::HttpResponse::Ok().json(&usage),
         Err(e) => error_response(e),
@@ -392,11 +388,10 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
 }
 
 pub async fn get_app_logs(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
     id: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => {
@@ -404,6 +399,12 @@ pub async fn get_app_logs(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    if let Err(resp) = authz
+        .require(Action::DeploymentsRead, Resource::App { id: uid.to_string() }, &state)
+        .await
+    {
+        return resp;
+    }
 
     let mut lines = Vec::new();
     let mut errors = Vec::new();
