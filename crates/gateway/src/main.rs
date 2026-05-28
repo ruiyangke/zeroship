@@ -17,6 +17,21 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const DEV_STASH_SIGNING_KEY: &str = "dev-stash-key-please-rotate";
 
+fn dev_insecure_enabled(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--dev-insecure")
+        || std::env::var("ZEROSHIP_DEV_INSECURE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        || arg_or_env(args, "--insecure-dev", "INSECURE_DEV", "false").eq_ignore_ascii_case("true")
+}
+
+fn validate_gateway_control_key(value: &str, insecure_dev: bool) -> Result<(), String> {
+    if insecure_dev || !value.is_empty() {
+        return Ok(());
+    }
+    Err("CONTROL_KEY / --control-key is required outside --dev-insecure".to_string())
+}
+
 fn validate_gateway_stash_key(value: &str, insecure_dev: bool) -> Result<(), String> {
     if insecure_dev {
         return Ok(());
@@ -78,8 +93,7 @@ async fn main() -> std::io::Result<()> {
         "STASH_SIGNING_KEY",
         "",
     );
-    let insecure_dev = arg_or_env(&args, "--insecure-dev", "INSECURE_DEV", "false")
-        .eq_ignore_ascii_case("true");
+    let insecure_dev = dev_insecure_enabled(&args);
     let trust_proxy =
         args.iter().any(|a| a == "--trust-proxy")
             || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
@@ -95,6 +109,11 @@ async fn main() -> std::io::Result<()> {
         "GATEWAY_PUBLIC_URL",
         "https://api.zeroship.ai",
     );
+
+    if let Err(message) = validate_gateway_control_key(&control_key, insecure_dev) {
+        tracing::error!(error = %message, "gateway: refusing to start without control key");
+        std::process::exit(1);
+    }
 
     if let Err(message) = validate_gateway_stash_key(&stash_signing_key, insecure_dev) {
         tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
@@ -337,6 +356,22 @@ mod tests {
     fn gateway_stash_key_rejects_missing_in_non_dev() {
         let err = validate_gateway_stash_key("", false).unwrap_err();
         assert!(err.contains("required"), "{err}");
+    }
+
+    #[test]
+    fn gateway_control_key_rejects_missing_in_non_dev() {
+        let err = validate_gateway_control_key("", false).unwrap_err();
+        assert!(err.contains("CONTROL_KEY"), "{err}");
+    }
+
+    #[test]
+    fn gateway_control_key_accepts_nonempty_in_non_dev() {
+        assert!(validate_gateway_control_key("secret", false).is_ok());
+    }
+
+    #[test]
+    fn gateway_control_key_allows_missing_in_insecure_dev() {
+        assert!(validate_gateway_control_key("", true).is_ok());
     }
 
     #[test]
