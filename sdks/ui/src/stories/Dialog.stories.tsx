@@ -238,8 +238,10 @@ function InitialFocusStory() {
   const usernameRef = useRef<HTMLInputElement | null>(null);
   return (
     <div className="zs-story-row" role="group" aria-label="Initial focus dialog">
-      <Dialog defaultOpen>
-        <Dialog.Trigger render={<Button>Open</Button>} />
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Sign in</Button>}
+        />
         <Dialog.Portal>
           <Dialog.Backdrop />
           <Dialog.Popup
@@ -286,8 +288,10 @@ export const Nested: Story = {
   name: "Nested",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Nested dialogs">
-      <Dialog defaultOpen>
-        <Dialog.Trigger render={<Button>Open outer</Button>} />
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger-outer">Open outer</Button>}
+        />
         <Dialog.Portal>
           <Dialog.Backdrop />
           <Dialog.Popup data-testid="dialog-nested-outer">
@@ -304,8 +308,10 @@ export const Nested: Story = {
             </Dialog.Body>
             <Dialog.Footer>
               <Dialog.Close>Cancel</Dialog.Close>
-              <Dialog defaultOpen>
-                <Dialog.Trigger render={<Button>Open inner</Button>} />
+              <Dialog>
+                <Dialog.Trigger
+                  render={<Button data-testid="dialog-trigger-inner">Open inner</Button>}
+                />
                 <Dialog.Portal>
                   <Dialog.Backdrop />
                   <Dialog.Popup data-testid="dialog-nested-inner">

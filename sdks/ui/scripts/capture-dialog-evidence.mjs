@@ -6,9 +6,10 @@
  * Self-contained: serves on a random free port, then cleans up the
  * server + browser whether the run succeeds or fails.
  *
- * Dialog stories use `defaultOpen` so the popup is rendered on load —
- * for stories that gate behind a trigger, this script clicks the
- * trigger so the popup screenshot is meaningful.
+ * Every Dialog story starts CLOSED with a real Trigger button (matches
+ * real-world usage, and the autodocs page no longer stacks a dozen
+ * modals on first paint). This script clicks the per-story trigger
+ * testid before screenshotting so the popup is visible.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -25,15 +26,28 @@ const outDir = process.env.THEME_EVIDENCE_DIR
 
 const themes = [{ label: "Crystal", value: "crystal" }];
 
+// Per-story trigger plan. Default is to click the unique
+// [data-testid="dialog-trigger"] and screenshot.
+//   - sizes / backdrop-tints have one trigger per variant; we click
+//     the canonical "md" / "scrim" representative so the docs page is
+//     readable without flicker.
+//   - nested needs two clicks: outer trigger, wait, then the inner
+//     trigger that lives inside the outer popup.
 const stories = [
-  { id: "components-dialog--default", openTrigger: false },
-  { id: "components-dialog--sizes", openTrigger: true },
-  { id: "components-dialog--placement-top", openTrigger: false },
-  { id: "components-dialog--backdrop-tints", openTrigger: true },
-  { id: "components-dialog--with-form", openTrigger: false },
-  { id: "components-dialog--non-dismissible", openTrigger: false },
-  { id: "components-dialog--initial-focus", openTrigger: false },
-  { id: "components-dialog--nested", openTrigger: false },
+  { id: "components-dialog--default", triggers: ['[data-testid="dialog-trigger"]'] },
+  { id: "components-dialog--sizes", triggers: ['[data-testid="dialog-trigger-md"]'] },
+  { id: "components-dialog--placement-top", triggers: ['[data-testid="dialog-trigger"]'] },
+  { id: "components-dialog--backdrop-tints", triggers: ['[data-testid="dialog-trigger-scrim"]'] },
+  { id: "components-dialog--with-form", triggers: ['[data-testid="dialog-trigger"]'] },
+  { id: "components-dialog--non-dismissible", triggers: ['[data-testid="dialog-trigger"]'] },
+  { id: "components-dialog--initial-focus", triggers: ['[data-testid="dialog-trigger"]'] },
+  {
+    id: "components-dialog--nested",
+    triggers: [
+      '[data-testid="dialog-trigger-outer"]',
+      '[data-testid="dialog-trigger-inner"]',
+    ],
+  },
 ];
 
 const mimeMap = new Map([
@@ -107,20 +121,20 @@ try {
   await mkdir(outDir, { recursive: true });
 
   for (const theme of themes) {
-    for (const { id: storyId, openTrigger } of stories) {
+    for (const { id: storyId, triggers } of stories) {
       const themeGlobal = encodeURIComponent(theme.label);
       const target = `${baseUrl}/iframe.html?id=${storyId}&globals=theme:${themeGlobal}`;
       await page.goto(target, { waitUntil: "networkidle" });
       await page.evaluate(() => document.fonts && document.fonts.ready);
-      if (openTrigger) {
-        const firstTrigger = page.locator(".zs-button").first();
-        await firstTrigger.waitFor({ state: "visible", timeout: 5000 });
-        await firstTrigger.click();
+      for (const selector of triggers) {
+        const trigger = page.locator(selector).first();
+        await trigger.waitFor({ state: "visible", timeout: 5000 });
+        await trigger.click();
+        // Let the open animation settle before clicking the next
+        // trigger (relevant for the nested two-step flow).
+        await page.waitForTimeout(300);
       }
-      // Wait for either the popup or, if no popup was opened, the
-      // trigger. Multi-popup stories (sizes, tints) only show one
-      // popup at a time post-click.
-      await page.locator(".zs-dialog-popup, .zs-button").first().waitFor({
+      await page.locator(".zs-dialog-popup").last().waitFor({
         state: "visible",
         timeout: 5000,
       });

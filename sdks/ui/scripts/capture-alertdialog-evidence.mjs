@@ -3,8 +3,11 @@
  * storybook-static, loads each AlertDialog story under the Crystal
  * theme, and writes a 2x PNG to storybook-static/theme-evidence/.
  *
- * All AlertDialog stories use `defaultOpen` so the popup is rendered
- * on load — no trigger click needed.
+ * Every AlertDialog story starts CLOSED with a real Trigger button
+ * (matches real-world usage, and the autodocs page no longer stacks
+ * a stack of alerts on first paint). This script clicks the per-story
+ * [data-testid="alertdialog-trigger"] before screenshotting so the
+ * popup is visible.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -106,6 +109,10 @@ try {
       const target = `${baseUrl}/iframe.html?id=${storyId}&globals=theme:${themeGlobal}`;
       await page.goto(target, { waitUntil: "networkidle" });
       await page.evaluate(() => document.fonts && document.fonts.ready);
+      const trigger = page.locator('[data-testid="alertdialog-trigger"]').first();
+      await trigger.waitFor({ state: "visible", timeout: 5000 });
+      await trigger.click();
+      await page.waitForTimeout(300);
       await page.locator(".zs-alertdialog-popup").first().waitFor({
         state: "visible",
         timeout: 5000,

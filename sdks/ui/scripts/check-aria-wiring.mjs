@@ -47,6 +47,25 @@ async function open(storyId) {
   );
 }
 
+/*
+ * Dialog + AlertDialog stories start CLOSED with a real Trigger button —
+ * tests that interact with the popup must click the trigger first.
+ * Pass a selector (string CSS) or click sequence (array) to open.
+ */
+async function openStoryAndTrigger(storyId, triggerSelectors) {
+  await open(storyId);
+  const selectors = Array.isArray(triggerSelectors)
+    ? triggerSelectors
+    : [triggerSelectors];
+  for (const sel of selectors) {
+    const trigger = page.locator(sel).first();
+    await trigger.waitFor({ state: "visible", timeout: 5000 });
+    await trigger.click();
+    // Settle the open animation before the next interaction.
+    await page.waitForTimeout(300);
+  }
+}
+
 /* ─── 1. Input WithExternalDescription (slice 2) ────────────────────── */
 await open("components-input--with-external-description");
 {
@@ -78,7 +97,10 @@ await open("components-input--input-ref-integration");
 }
 
 /* ─── 3. Dialog default: role + aria-labelledby + aria-describedby ──── */
-await open("components-dialog--default");
+await openStoryAndTrigger(
+  "components-dialog--default",
+  '[data-testid="dialog-trigger"]',
+);
 {
   const popup = page.locator('[data-testid="dialog-default-popup"]');
   await popup.waitFor({ state: "visible", timeout: 5000 });
@@ -113,7 +135,10 @@ await open("components-dialog--default");
  * actually matters is that focus is RE-CAPTURED into the popup after
  * a wrap. We Tab from the last focusable and verify focus lands back
  * inside within a few keypresses; same for Shift+Tab from the first. */
-await open("components-dialog--with-form");
+await openStoryAndTrigger(
+  "components-dialog--with-form",
+  '[data-testid="dialog-trigger"]',
+);
 {
   const popup = page.locator('[data-testid="dialog-with-form"]');
   await popup.waitFor({ state: "visible", timeout: 5000 });
@@ -167,7 +192,10 @@ await open("components-dialog--with-form");
 }
 
 /* ─── 5. Dialog ESC closes when dismissible ─────────────────────────── */
-await open("components-dialog--with-form");
+await openStoryAndTrigger(
+  "components-dialog--with-form",
+  '[data-testid="dialog-trigger"]',
+);
 {
   const popup = page.locator('[data-testid="dialog-with-form"]');
   await popup.waitFor({ state: "visible", timeout: 5000 });
@@ -179,7 +207,10 @@ await open("components-dialog--with-form");
 }
 
 /* ─── 6. Dialog ESC does NOT close when dismissible=false ───────────── */
-await open("components-dialog--non-dismissible");
+await openStoryAndTrigger(
+  "components-dialog--non-dismissible",
+  '[data-testid="dialog-trigger"]',
+);
 {
   const popup = page.locator('[data-testid="dialog-non-dismissible"]');
   await popup.waitFor({ state: "visible", timeout: 5000 });
@@ -190,7 +221,10 @@ await open("components-dialog--non-dismissible");
 }
 
 /* ─── 7. AlertDialog role + labelling ───────────────────────────────── */
-await open("components-alertdialog--two-buttons");
+await openStoryAndTrigger(
+  "components-alertdialog--two-buttons",
+  '[data-testid="alertdialog-trigger"]',
+);
 {
   const popup = page.locator('[data-testid="alertdialog-two-buttons"]');
   await popup.waitFor({ state: "visible", timeout: 5000 });
@@ -207,7 +241,10 @@ await open("components-alertdialog--two-buttons");
 }
 
 /* ─── 8. AlertDialog outside-click does NOT dismiss ─────────────────── */
-await open("components-alertdialog--outside-click-ignored");
+await openStoryAndTrigger(
+  "components-alertdialog--outside-click-ignored",
+  '[data-testid="alertdialog-trigger"]',
+);
 {
   const popup = page.locator('[data-testid="alertdialog-outside-click"]');
   await popup.waitFor({ state: "visible", timeout: 5000 });
@@ -219,7 +256,10 @@ await open("components-alertdialog--outside-click-ignored");
 }
 
 /* ─── 9. AlertDialog ESC closes (via Cancel) ────────────────────────── */
-await open("components-alertdialog--two-buttons");
+await openStoryAndTrigger(
+  "components-alertdialog--two-buttons",
+  '[data-testid="alertdialog-trigger"]',
+);
 {
   const popup = page.locator('[data-testid="alertdialog-two-buttons"]');
   await popup.waitFor({ state: "visible", timeout: 5000 });
@@ -351,7 +391,9 @@ await open("components-card--as-child-ref-composition");
 // can deterministically open + close + verify the trigger is focused.
 await open("components-dialog--sizes");
 {
-  const trigger = page.getByRole("button", { name: "md" });
+  // Per-size testid (since labels are now "Open md" etc., and there's
+  // one trigger per size in this story).
+  const trigger = page.locator('[data-testid="dialog-trigger-md"]');
   await trigger.waitFor({ state: "visible", timeout: 5000 });
   await trigger.click();
   const popup = page.locator('[data-testid="dialog-size-md"]');

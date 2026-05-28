@@ -18,8 +18,10 @@ export const OneButton: Story = {
   name: "One button",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="AlertDialog one button">
-      <AlertDialog defaultOpen>
-        <AlertDialog.Trigger render={<Button>Open alert</Button>} />
+      <AlertDialog>
+        <AlertDialog.Trigger
+          render={<Button data-testid="alertdialog-trigger">Show confirmation</Button>}
+        />
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
           <AlertDialog.Popup data-testid="alertdialog-one-button">
@@ -44,8 +46,10 @@ export const TwoButtons: Story = {
   name: "Two buttons",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="AlertDialog two buttons">
-      <AlertDialog defaultOpen>
-        <AlertDialog.Trigger render={<Button>Open alert</Button>} />
+      <AlertDialog>
+        <AlertDialog.Trigger
+          render={<Button data-testid="alertdialog-trigger">Discard changes</Button>}
+        />
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
           <AlertDialog.Popup data-testid="alertdialog-two-buttons">
@@ -71,9 +75,13 @@ export const Destructive: Story = {
   name: "Destructive",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Destructive AlertDialog">
-      <AlertDialog defaultOpen>
+      <AlertDialog>
         <AlertDialog.Trigger
-          render={<Button intent="destructive">Delete account</Button>}
+          render={
+            <Button intent="destructive" data-testid="alertdialog-trigger">
+              Delete account
+            </Button>
+          }
         />
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
@@ -103,8 +111,10 @@ export const ThreeButtons: Story = {
   name: "Three buttons",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="AlertDialog three buttons">
-      <AlertDialog defaultOpen>
-        <AlertDialog.Trigger render={<Button>Open</Button>} />
+      <AlertDialog>
+        <AlertDialog.Trigger
+          render={<Button data-testid="alertdialog-trigger">Review unsaved changes</Button>}
+        />
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
           <AlertDialog.Popup data-testid="alertdialog-three-buttons">
@@ -134,9 +144,13 @@ export const WithBody: Story = {
   name: "With body",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="AlertDialog with body input">
-      <AlertDialog defaultOpen>
+      <AlertDialog>
         <AlertDialog.Trigger
-          render={<Button intent="destructive">Delete project</Button>}
+          render={
+            <Button intent="destructive" data-testid="alertdialog-trigger">
+              Delete project
+            </Button>
+          }
         />
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
@@ -189,8 +203,10 @@ export const OutsideClickIgnored: Story = {
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="AlertDialog outside click ignored">
-      <AlertDialog defaultOpen>
-        <AlertDialog.Trigger render={<Button>Open</Button>} />
+      <AlertDialog>
+        <AlertDialog.Trigger
+          render={<Button data-testid="alertdialog-trigger">Confirm exit</Button>}
+        />
         <AlertDialog.Portal>
           <AlertDialog.Backdrop />
           <AlertDialog.Popup data-testid="alertdialog-outside-click">
