@@ -115,6 +115,7 @@ fn admin_policy() -> Policy {
                 Action::TeamWrite,
                 Action::AccountRead,
                 Action::AccountWrite,
+                Action::PlatformPoliciesWrite,
             ],
             resources: vec![Resource::Any],
             conditions: Vec::new(),

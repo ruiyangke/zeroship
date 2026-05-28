@@ -10,6 +10,7 @@ pub mod error;
 pub mod lower;
 pub mod policy;
 pub mod resource;
+pub mod scope;
 pub mod statement;
 
 pub use action::Action;
@@ -23,4 +24,5 @@ pub use error::{AuthzError, ValidationError};
 pub use lower::lower;
 pub use policy::Policy;
 pub use resource::Resource;
+pub use scope::{Scope, ScopeParseError};
 pub use statement::Statement;

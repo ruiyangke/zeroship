@@ -18,6 +18,7 @@ pub enum Action {
     TeamWrite,
     AccountRead,
     AccountWrite,
+    PlatformPoliciesWrite,
 }
 
 impl Action {
@@ -40,10 +41,12 @@ impl Action {
             Self::TeamWrite => "team:write",
             Self::AccountRead => "account:read",
             Self::AccountWrite => "account:write",
+            Self::PlatformPoliciesWrite => "platform_policies:write",
         }
     }
 
-    fn from_wire(value: &str) -> Option<Self> {
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
         Some(match value {
             "apps:read" => Self::AppsRead,
             "apps:write" => Self::AppsWrite,
@@ -61,6 +64,7 @@ impl Action {
             "team:write" => Self::TeamWrite,
             "account:read" => Self::AccountRead,
             "account:write" => Self::AccountWrite,
+            "platform_policies:write" => Self::PlatformPoliciesWrite,
             _ => return None,
         })
     }
@@ -101,6 +105,7 @@ impl<'de> Deserialize<'de> for Action {
                     "team:write",
                     "account:read",
                     "account:write",
+                    "platform_policies:write",
                 ],
             )
         })

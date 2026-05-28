@@ -97,6 +97,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         oidc_rp,
         auth_pg: Arc::new(auth_pg_client),
+        hydra_admin_url: "http://127.0.0.1:4445".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),

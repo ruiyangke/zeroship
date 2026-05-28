@@ -61,6 +61,7 @@ fn action_cedar_ids_are_canonical() {
         (Action::TeamWrite, "team:write"),
         (Action::AccountRead, "account:read"),
         (Action::AccountWrite, "account:write"),
+        (Action::PlatformPoliciesWrite, "platform_policies:write"),
     ];
 
     for (action, cedar_id) in cases {
@@ -90,4 +91,12 @@ fn resource_cedar_uids_are_canonical() {
 #[test]
 fn unknown_action_is_rejected() {
     assert!(serde_json::from_str::<Action>("\"foo_bar\"").is_err());
+}
+
+#[test]
+fn scopes_parse_from_action_vocabulary() {
+    let scope = zeroship_authz::Scope::parse("apps:deploy").expect("known scope");
+    assert_eq!(scope.action(), Action::AppsDeploy);
+    assert_eq!(scope.as_str(), "apps:deploy");
+    assert!(zeroship_authz::Scope::parse("bogus:scope").is_err());
 }

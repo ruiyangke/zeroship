@@ -236,6 +236,18 @@ const STATEMENTS: &[&str] = &[
         updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_by   UUID REFERENCES auth.users(id)
     )",
+    "CREATE TABLE IF NOT EXISTS control.oauth_clients (
+        client_id            TEXT PRIMARY KEY,
+        client_name          TEXT NOT NULL,
+        client_uri           TEXT,
+        logo_uri             TEXT,
+        redirect_uris        TEXT[] NOT NULL,
+        scopes               TEXT[] NOT NULL,
+        skip_consent         BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_by           UUID NOT NULL REFERENCES auth.users(id),
+        hydra_client_id      TEXT NOT NULL
+    )",
     "CREATE TABLE IF NOT EXISTS control.authz_decisions (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         occurred_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
