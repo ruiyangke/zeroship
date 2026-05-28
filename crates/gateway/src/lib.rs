@@ -7,3 +7,4 @@
 pub mod error;
 pub mod oidc_rp;
 pub mod sessions;
+pub mod signing;

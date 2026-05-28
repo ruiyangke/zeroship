@@ -1333,6 +1333,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -3350,6 +3351,15 @@ checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
 dependencies = [
  "base64",
  "serde_core",
+]
+
+[[package]]
+name = "pem-rfc7468"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
+dependencies = [
+ "base64ct",
 ]
 
 [[package]]
@@ -5955,6 +5965,7 @@ dependencies = [
  "compio",
  "compio-postgres",
  "cyper",
+ "ed25519-dalek",
  "hex",
  "http",
  "httparse",
@@ -5967,6 +5978,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "url",

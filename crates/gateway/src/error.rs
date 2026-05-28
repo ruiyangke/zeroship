@@ -10,6 +10,12 @@ use thiserror::Error;
 pub enum GatewayError {
     #[error("database: {0}")]
     Db(String),
+    /// Boot-time configuration error — bad CLI flag, unreadable file,
+    /// malformed key, etc. Surfaced by `signing::load_from_path` when
+    /// the `--signing-key-file` argument points at something we can't
+    /// parse as a PKCS#8 Ed25519 private key (Phase 8 U1).
+    #[error("config: {0}")]
+    Config(String),
 }
 
 pub type Result<T> = std::result::Result<T, GatewayError>;

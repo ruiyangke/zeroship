@@ -10,6 +10,7 @@ mod oidc_rp;
 mod proxy;
 mod router;
 mod sessions;
+mod signing;
 mod sync;
 
 use std::path::PathBuf;
@@ -95,6 +96,12 @@ pub struct GateState {
     /// horizontally this becomes a redis-backed shared cache so a
     /// replayed proof on a sibling gateway is still rejected.
     pub dpop_jti_cache: Arc<zeroship_core::dpop::JtiCache>,
+    /// Gateway-issued wrapper-token signing key (Phase 8 U1). Loaded
+    /// from a PKCS#8 PEM/DER file at boot via `--signing-key-file`.
+    /// `None` when the operator runs without the flag — DPoP-exchange
+    /// endpoints return 503 in that mode, but every other gateway path
+    /// keeps working.
+    pub signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 }
 
 #[ntex::main]
@@ -135,12 +142,39 @@ async fn main() -> std::io::Result<()> {
     );
     let insecure_dev = arg_or_env(&args, "--insecure-dev", "INSECURE_DEV", "false")
         .eq_ignore_ascii_case("true");
+    let signing_key_path = arg_or_env(
+        &args,
+        "--signing-key-file",
+        "GATEWAY_SIGNING_KEY_FILE",
+        "",
+    );
 
     if worker_key.is_empty() {
         tracing::warn!(
             "WORKER_KEY not set — worker endpoints are unauthenticated"
         );
     }
+
+    // Phase 8 U1 — load the gateway's wrapper-token signing key. The
+    // flag is optional: when empty, the boot succeeds but DPoP-exchange
+    // endpoints (added in U2/U3) will 503. We log a clear warning so
+    // operators don't get a surprise during DPoP rollout.
+    let signing_key: Option<Arc<ed25519_dalek::SigningKey>> = if signing_key_path.is_empty() {
+        tracing::warn!(
+            "GATEWAY_SIGNING_KEY_FILE not set — DPoP token-exchange endpoints will 503"
+        );
+        None
+    } else {
+        let key = signing::load_from_path(std::path::Path::new(&signing_key_path))
+            .expect("gateway: load signing key");
+        let kid = signing::jwk_thumbprint(&key);
+        tracing::info!(
+            path = %signing_key_path,
+            kid = %kid,
+            "gateway signing key loaded"
+        );
+        Some(Arc::new(key))
+    };
 
     let blob_cache_bytes: usize = blob_cache_mem_mb
         .parse::<usize>()
@@ -244,6 +278,7 @@ async fn main() -> std::io::Result<()> {
         oidc_rp,
         db,
         dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+        signing_key,
     });
 
     sync::start_sync(state.clone());

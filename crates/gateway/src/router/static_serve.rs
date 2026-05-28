@@ -903,6 +903,7 @@ mod tests {
             )),
             db: None,
             dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
+            signing_key: None,
         }
     }
 
