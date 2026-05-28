@@ -23,7 +23,10 @@
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "test:a11y": "node scripts/check-storybook-a11y.mjs",
-    "capture:themes": "node scripts/capture-theme-evidence.mjs"
+    "capture:themes": "node scripts/capture-theme-evidence.mjs",
+    "test-storybook": "test-storybook --config-dir .storybook --url http://127.0.0.1:6119 --maxWorkers=2",
+    "test-storybook:ci": "concurrently -k -s first -n \"sb,test\" \"http-server storybook-static -p 6119 --silent\" \"wait-on tcp:6119 && test-storybook --config-dir .storybook --url http://127.0.0.1:6119\"",
+    "test-storybook:coverage": "concurrently -k -s first -n \"sb,test\" \"http-server storybook-static -p 6119 --silent\" \"wait-on tcp:6119 && test-storybook --config-dir .storybook --url http://127.0.0.1:6119 --coverage\" && nyc report --temp-dir=coverage/storybook --reporter=text-summary --reporter=lcov --reporter=html --report-dir=coverage"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",
@@ -37,20 +40,29 @@
     "@axe-core/playwright": "^4.11.0",
     "@playwright/test": "1.58.2",
     "@storybook/addon-a11y": "^8.6.14",
+    "@storybook/addon-coverage": "1.0.5",
     "@storybook/addon-docs": "^8.6.14",
     "@storybook/addon-themes": "^8.6.14",
     "@storybook/blocks": "^8.6.14",
+    "@storybook/mcp": "0.7.0",
     "@storybook/react": "^8.6.14",
     "@storybook/react-vite": "^8.6.14",
+    "@storybook/test": "^8.6.14",
+    "@storybook/test-runner": "0.22.0",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
+    "axe-playwright": "^2.2.2",
+    "concurrently": "^9.2.1",
+    "http-server": "^14.1.1",
+    "nyc": "^18.0.0",
     "react": "catalog:",
     "react-dom": "catalog:",
     "storybook": "^8.6.14",
     "tsup": "^8.5.1",
     "tsx": "catalog:",
     "typescript": "catalog:",
-    "vite": "^6.4.1"
+    "vite": "^6.4.1",
+    "wait-on": "^9.0.0"
   }
 }
