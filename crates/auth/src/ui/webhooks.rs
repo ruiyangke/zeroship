@@ -175,7 +175,7 @@ pub async fn postmark(
 ///   event type accepted-and-ignored, or `UnsubscribeConfirmation`)
 /// - `400` — malformed envelope, unsupported `SignatureVersion`, or
 ///   `SigningCertURL` host not on the allowlist
-/// - `401` — RSA-SHA1 verify rejected the signature
+/// - `401` — RSA verify rejected the signature
 /// - `500` — auto-confirm GET to `SubscribeURL` failed (so the operator
 ///   retries; SNS itself doesn't re-deliver the `SubscriptionConfirmation`,
 ///   but a 500 surfaces in the dashboard)
@@ -197,14 +197,15 @@ pub async fn ses_sns(
         }
     };
 
-    // 2. Validate SignatureVersion — we only support v1.
-    if envelope.signature_version != "1" {
+    // 2. Validate SignatureVersion — support SNS v1 (RSA-SHA1 legacy)
+    //    and v2 (RSA-SHA256).
+    if !matches!(envelope.signature_version.as_str(), "1" | "2") {
         tracing::warn!(
             version = %envelope.signature_version,
-            "sns webhook: unsupported SignatureVersion (only v1 supported)"
+            "sns webhook: unsupported SignatureVersion"
         );
         return HttpResponse::BadRequest()
-            .body("only SignatureVersion 1 is supported");
+            .body("only SignatureVersion 1 or 2 is supported");
     }
 
     // 3. Validate SigningCertURL host (anti-SSRF). Done BEFORE the
@@ -218,7 +219,7 @@ pub async fn ses_sns(
         return HttpResponse::BadRequest().finish();
     }
 
-    // 4. Fetch cert + RSA-SHA1 verify the canonical string.
+    // 4. Fetch cert + RSA verify the canonical string.
     if let Err(e) = sns::verify(&envelope).await {
         tracing::warn!(error = %e, "sns webhook: signature verification failed");
         return HttpResponse::Unauthorized().finish();

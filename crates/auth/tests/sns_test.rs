@@ -13,6 +13,9 @@
 //! base64 -w0 signature.bin
 //! ```
 //!
+//! For SignatureVersion 2, use `openssl dgst -sha256 -sign ...` with
+//! the same `canonical.txt`.
+//!
 //! The exact `canonical.txt` shape MUST match what
 //! `sns::canonical_string` produces for the same envelope; if you tweak
 //! the field order or add a field, regenerate the fixture.
@@ -46,6 +49,29 @@ Fw==
 /// Real RSA-SHA1 signature (base64) over the canonical string emitted by
 /// `canonical_string` for the envelope in [`fixture_envelope`].
 const FIXTURE_SIGNATURE_B64: &str = "juExdxQuCUsuYOiB+cjWm4yw2Gqy59eFTp4fZaFPg1BSnCfbaScDEY1dSjNnI9YELGbdSvmCLCFkkA3FAaDKpzDedNedjaCyTv6FZ7EXbnYAL+PoIlDz43YRCE8lclNGudMJiHtNO0+UCOo0FbzOvDAuf7kfX7buwl3wapV8Gf/dd3pYe8klln8Fkk0dS4qjRyigx6qaRc+wwwvbY4WTRJjypAB3y39BZWNUFJbrQy2HfUbdYdiq+08Gnh+1ABsFbuM76A09p29DD8zP6P1BosOIDH9AoihreEnzxIV4ATplxii43GSlPX2n8jFpfufXi4GiVBjaXEGolSNrHpaPmQ==";
+
+const FIXTURE_V2_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIDLTCCAhWgAwIBAgIUWIbxWicKhwSCFh+VRG1JjjXE9JswDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbc25zLnVzLWVhc3QtMS5hbWF6b25hd3MuY29tMB4XDTI2
+MDUyODIxMDUwNFoXDTM2MDUyNTIxMDUwNFowJjEkMCIGA1UEAwwbc25zLnVzLWVh
+c3QtMS5hbWF6b25hd3MuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
+AQEAqfj3hAbwLJbzTa1d8IAKl1rGY2Rji37c6O0ZjrtzDm/LfX8575s+6qMxAMY+
+XXfBnxuH65bfD9X5MCyT6eSG6GcE3vQaylfY6ZmsYuhD3O9TrMIKfwOpxW0PbbFQ
+kE3LJ5isrVTtCZYQ0ay0wc5RCKsLjirqz1mIEwOd4XXmfhx/HsGjYVEQB2ewksrb
+oMCX68EeHexcvZFv9ofvzMX3ncUofsXeL2LrSkonJnT87I3e29isqT5P9mXPTwfo
+x9/z16F2SYKFi8aPRdqoI1i8W5UEfrhsvYZqknE84zUA+45VQQXLm7aoPe3phvQG
+JI/P3NdSRW0A5iOhBv3uibRy4QIDAQABo1MwUTAdBgNVHQ4EFgQUVURFmqYghUa3
+R4csjky5E1gX190wHwYDVR0jBBgwFoAUVURFmqYghUa3R4csjky5E1gX190wDwYD
+VR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAUhr56zra15FZN53tz4Dz
+6tfjJVxuAfJctyD1Id5PuoC4ifrrwe859/d4UHKetUQldrT8bgUjS9sgTD0xkBeo
+maYJcwhSwOND3g3sLowbFTmb7Y/iyQewnjLswk1sPG+dRtXdn23PzzWR/ny2PxaU
+3ynrZ9MX0uUDPy4e7els8gnfkZTeePY8nfLGNx5aE7RD4FqViI08GSTJBbtR55g5
+bArdu2DxZE6oabLXqlkPybDur/Uhdjc5kePKa4Wvwh8sjKJwhXLwm8D/0ynX1TXk
+E2PjBhFBxQWzIncHeka8ZMBH8otokEjz/5b9S3pLMPuSf8z/q71fQXrg6bQ7S/RC
+Kg==
+-----END CERTIFICATE-----";
+
+const FIXTURE_V2_SIGNATURE_B64: &str = "bg9u688AXrzxGw2E7u3bDQhbuI9cL66j6E3p2R1NjB1qPjeW05HTjGMYXG3M6JU1GNf+fJGqKtUArQa1OnwL8o4E1wCOJhK3b/AtRncjX9sykLLtUbnVdlUhsEO6x5J3tJC8P+l/3nyqVr702W92G+cJApnqVDYB8qNdHZFW+V81M9Oc9LMhVG8Lcg51I3+UXrkKcf1Agw4nK/pIwBhd8F+6hPbMw+eY7TJlxeP8zOQRO94hrxuRX5uZRWP0uJu63WeE6DgIkmbewL3GUrN76MVXt1PTkj/VuCC7aGBvE5A2f2LDRhgZ9Yi2s8ojVQgfdO3KNaza6sLM6Q6XXR5pnA==";
 
 /// The Notification envelope the fixture was signed against. No
 /// `Subject`, no `UnsubscribeURL` — matches the canonical string used
@@ -82,6 +108,15 @@ fn verify_accepts_valid_signature() {
     );
     verify_with_cert(&env, FIXTURE_CERT_PEM)
         .expect("fixture signature must verify against fixture cert");
+}
+
+#[test]
+fn verify_accepts_signature_version_2() {
+    let mut env = fixture_envelope();
+    env.signature_version = "2".into();
+    env.signature = FIXTURE_V2_SIGNATURE_B64.to_string();
+    verify_with_cert(&env, FIXTURE_V2_CERT_PEM)
+        .expect("v2 fixture signature must verify against fixture cert");
 }
 
 #[test]
