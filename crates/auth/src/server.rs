@@ -49,8 +49,15 @@ pub fn configure(
             )
             .service(
                 web::resource("/consent")
-                    .route(web::get().to(ui::consent::get))
-                    .route(web::post().to(ui::consent::post)),
+                    .route(web::get().to(ui::consent::get_consent)),
+            )
+            .service(
+                web::resource("/consent/accept")
+                    .route(web::post().to(ui::consent::post_consent_accept)),
+            )
+            .service(
+                web::resource("/consent/deny")
+                    .route(web::post().to(ui::consent::post_consent_deny)),
             )
             .service(
                 web::resource("/device")

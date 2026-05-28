@@ -103,9 +103,9 @@ pub struct LinkPage<'a> {
     pub error: Option<&'a str>,
 }
 
-/// `/consent` GET page — third-party RP consent form (P4-U5). The handler
-/// translates each requested scope into a human-readable string via
-/// `consent::translate_scope` before constructing this struct.
+/// `/consent` GET page — third-party RP consent form. The handler translates
+/// each requested scope into a human-readable string before constructing this
+/// struct.
 #[derive(Debug, Template)]
 #[template(path = "consent.html")]
 pub struct ConsentPage<'a> {
@@ -113,8 +113,16 @@ pub struct ConsentPage<'a> {
     pub csrf: &'a str,
     pub client_id: &'a str,
     pub client_name: &'a str,
-    pub scopes: Vec<&'a str>,
-    pub error: Option<&'a str>,
+    pub client_logo_uri: Option<&'a str>,
+    pub scopes: Vec<ConsentScopeView>,
+    pub can_grant: bool,
+    pub grant_error: Option<&'a str>,
+}
+
+#[derive(Debug)]
+pub struct ConsentScopeView {
+    pub label: String,
+    pub unrecognized: bool,
 }
 
 /// One row in the linked-identities list on `/me`. Mirrors

@@ -87,6 +87,28 @@ impl Scope {
         }
     }
 
+    #[must_use]
+    pub const fn human_label(self) -> &'static str {
+        match self {
+            Self::AppsRead => "View your apps",
+            Self::AppsWrite => "Create and modify your apps",
+            Self::AppsDeploy => "Deploy code to your apps",
+            Self::AppsDelete => "Delete your apps",
+            Self::EnvRead => "Read environment variables",
+            Self::EnvWrite => "Modify environment variables",
+            Self::SecretsRead => "Read secrets (names only)",
+            Self::SecretsWrite => "Set and rotate secrets",
+            Self::BillingRead => "View billing and earnings",
+            Self::BillingWrite => "Manage payouts and billing",
+            Self::TeamRead => "View team members",
+            Self::TeamWrite => "Invite or remove team members",
+            Self::AccountRead => "View your account profile",
+            Self::AccountWrite => "Update your account profile",
+            Self::DeploymentsRead => "List deployment history",
+            Self::DeploymentsRollback => "Roll back deployments",
+        }
+    }
+
     /// Parses a scope token from the Phase 10 OAuth scope vocabulary.
     ///
     /// # Errors
@@ -181,6 +203,15 @@ mod tests {
         for s in Scope::ALL {
             assert_eq!(Scope::parse(s.as_str()).unwrap(), *s);
         }
+    }
+
+    #[test]
+    fn human_labels_are_consent_copy() {
+        assert_eq!(Scope::AppsDeploy.human_label(), "Deploy code to your apps");
+        assert_eq!(
+            Scope::SecretsRead.human_label(),
+            "Read secrets (names only)"
+        );
     }
 
     #[test]
