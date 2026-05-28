@@ -116,6 +116,36 @@ fn has_dpop_authorization(req: &HttpRequest) -> bool {
         .is_some_and(|s| s.starts_with("DPoP "))
 }
 
+/// Cheap JWT-header discriminator for gateway wrapper tokens.
+///
+/// This intentionally does not verify the signature; it only answers
+/// whether a token is shaped like a wrapper so the dispatch path can
+/// distinguish "raw hydra opaque token" from "malformed wrapper" before
+/// deciding whether introspection fallback is allowed.
+fn looks_like_wrapper(token: &str) -> bool {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+
+    let mut parts = token.split('.');
+    let (header_b64, payload_b64, sig_b64) =
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(h), Some(p), Some(s), None) => (h, p, s),
+            _ => return false,
+        };
+    if header_b64.is_empty() || payload_b64.is_empty() || sig_b64.is_empty() {
+        return false;
+    }
+
+    let Ok(header_bytes) = URL_SAFE_NO_PAD.decode(header_b64) else {
+        return false;
+    };
+    let Ok(header) = serde_json::from_slice::<serde_json::Value>(&header_bytes) else {
+        return false;
+    };
+
+    header.get("typ").and_then(|v| v.as_str()) == Some("at+jwt")
+}
+
 /// Resolve the `ZeroShip-User` header from a DPoP-bound access token.
 ///
 /// Returns `Some(header)` when:
@@ -127,9 +157,9 @@ fn has_dpop_authorization(req: &HttpRequest) -> bool {
 ///   5. EITHER the access token verifies as a gateway-issued wrapper
 ///      AND `wrapper.aud == Host` AND `wrapper.cnf.jkt == proof.jkt`
 ///      (Phase 8 U4 fast path — self-contained, no introspection),
-///      OR the wrapper verification fails / no verifier configured AND
-///      hydra's `/oauth2/introspect` returns `active: true` (P7-U5
-///      fallback, no `cnf.jkt` enforcement).
+///      OR the token does not look like a wrapper / no verifier is
+///      configured AND hydra's `/oauth2/introspect` returns
+///      `active: true` (P7-U5 fallback, no `cnf.jkt` enforcement).
 ///
 /// Returns `None` for "no `DPoP` token in this request" AND for every
 /// failure mode above. The caller distinguishes the two via
@@ -145,12 +175,11 @@ fn has_dpop_authorization(req: &HttpRequest) -> bool {
 /// (no fallback). On a wrapper hit we build the worker user from the
 /// embedded claims and skip the introspection round-trip entirely.
 ///
-/// A wrapper-verify FAILURE (token isn't a wrapper, or is malformed) is
-/// treated as "not a wrapper, try raw hydra path". This is the v1
-/// fallback the plan calls for: clients that haven't migrated to
-/// wrapper tokens still work with their raw hydra tokens + `DPoP`, just
-/// without `cnf.jkt` binding. A future `--strict-dpop` flag would
-/// disable this fallback.
+/// A token that does not look like a wrapper is treated as "raw hydra
+/// token, try introspection". A token that does look like a wrapper but
+/// fails wrapper verification is a hard reject. Falling through would
+/// let a forged or tampered wrapper dodge `cnf.jkt` enforcement by using
+/// the unbound introspection path.
 async fn resolve_dpop_user_header(
     req: &HttpRequest,
     state: &Arc<GateState>,
@@ -212,6 +241,7 @@ async fn resolve_dpop_user_header(
     //     access token as a gateway-issued wrapper. On success we
     //     enforce `cnf.jkt == proof.jkt` and build the worker user
     //     from the embedded claims — no hydra round-trip required.
+    let token_looks_like_wrapper = looks_like_wrapper(access_token);
     if let Some(verifier) = state.wrapper_verifier.as_ref() {
         match verifier.verify(access_token, host) {
             Ok(claims) => {
@@ -238,16 +268,13 @@ async fn resolve_dpop_user_header(
                 ));
             }
             Err(e) => {
-                // Wrapper verification failed. Could be:
-                //   (a) not a wrapper token (regular hydra opaque
-                //       access token — fall through to introspection),
-                //   (b) a malformed/forged wrapper (would also fail
-                //       introspection — fall through is safe).
-                //
-                // Phase 8 v1 falls through silently. A future
-                // `--strict-dpop` flag would log+reject here so a
-                // malformed wrapper can't silently downgrade to the
-                // unbound introspection path.
+                if token_looks_like_wrapper {
+                    tracing::warn!(
+                        error = %e,
+                        "wrapper-shaped DPoP token failed verification — rejecting"
+                    );
+                    return None;
+                }
                 tracing::debug!(
                     error = %e,
                     "wrapper verify failed; falling back to hydra introspect"
@@ -703,6 +730,13 @@ mod tests {
     fn build_state_with_wrapper(
         signing: ed25519_dalek::SigningKey,
     ) -> std::sync::Arc<crate::GateState> {
+        build_state_with_wrapper_and_auth_public(signing, "http://127.0.0.1:1")
+    }
+
+    fn build_state_with_wrapper_and_auth_public(
+        signing: ed25519_dalek::SigningKey,
+        auth_public: &str,
+    ) -> std::sync::Arc<crate::GateState> {
         use std::sync::Arc as StdArc;
 
         let mut tmp = std::env::temp_dir();
@@ -730,10 +764,7 @@ mod tests {
                 auth_secret: String::new(),
                 worker_key: "wk".into(),
                 hydra_public: String::new(),
-                // Dead URL — a fallthrough to introspection here would
-                // surface as a connection-refused error in the test.
-                // The wrapper-path success test must NOT touch this.
-                auth_public: "http://127.0.0.1:1".into(),
+                auth_public: auth_public.into(),
                 insecure_dev: true,
                 public_url: "https://api.zeroship.ai".into(),
             },
@@ -838,6 +869,29 @@ mod tests {
             .expect("issue wrapper")
     }
 
+    fn issue_wrapper_with_signing_key(
+        signing: &ed25519_dalek::SigningKey,
+        proof_jkt: &str,
+        aud: &str,
+    ) -> String {
+        let issuer =
+            crate::wrapper_token::Issuer::new(signing, "https://api.zeroship.ai".into())
+                .expect("issuer");
+        let intro = crate::oidc_rp::IntrospectionResponse {
+            active: true,
+            sub: Some("usr_test".into()),
+            client_id: Some("gateway".into()),
+            email: Some("test@example.com".into()),
+            email_verified: Some(true),
+            name: Some("Test".into()),
+            scope: Some("openid".into()),
+            exp: None,
+        };
+        issuer
+            .issue(aud, &intro, proof_jkt, "hydra-token-shadow")
+            .expect("issue wrapper")
+    }
+
     #[compio::test]
     async fn resolve_dpop_accepts_wrapper_when_jkt_matches() {
         // Happy path: client signs the DPoP proof with key A, wrapper
@@ -911,5 +965,87 @@ mod tests {
             header.is_none(),
             "wrapper path must reject when cnf.jkt does not match proof jkt"
         );
+    }
+
+    #[ntex::test]
+    async fn e2e_rejects_malformed_wrapper_no_downgrade() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
+        async fn active_introspection(
+            hits: ntex::web::types::State<StdArc<AtomicUsize>>,
+        ) -> ntex::web::HttpResponse {
+            hits.fetch_add(1, Ordering::SeqCst);
+            ntex::web::HttpResponse::Ok().json(&serde_json::json!({
+                "active": true,
+                "sub": "usr_from_introspection",
+                "client_id": "gateway",
+                "email": "fallback@example.com",
+                "email_verified": true,
+                "name": "Fallback User",
+                "scope": "openid"
+            }))
+        }
+
+        let hits = StdArc::new(AtomicUsize::new(0));
+        let hits_for_server = hits.clone();
+        let srv = ntex::web::test::server(move || {
+            let hits = hits_for_server.clone();
+            async move {
+                ntex::web::App::new().state(hits).service(
+                    ntex::web::resource("/oauth2/introspect")
+                        .route(ntex::web::post().to(active_introspection)),
+                )
+            }
+        })
+        .await;
+        let auth_public = srv.url("").trim_end_matches('/').to_string();
+
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let forged_signing = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let state =
+            build_state_with_wrapper_and_auth_public(gateway_signing, &auth_public);
+
+        let aud = "myapp.zeroship.ai";
+        let jkt = client_jkt(&client_key);
+        let malformed_wrapper = issue_wrapper_with_signing_key(&forged_signing, &jkt, aud);
+        assert!(
+            looks_like_wrapper(&malformed_wrapper),
+            "fixture must be wrapper-shaped"
+        );
+
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        let htu = format!("http://{aud}/api/me");
+        let proof = sign_dpop_proof(&client_key, "GET", &htu, &malformed_wrapper, now);
+
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, aud)
+            .header(
+                http::header::AUTHORIZATION,
+                format!("DPoP {malformed_wrapper}"),
+            )
+            .header("dpop", proof)
+            .to_http_request();
+
+        let header = resolve_dpop_user_header(&req, &state).await;
+        assert!(
+            header.is_none(),
+            "malformed wrapper must hard-reject instead of downgrading to introspection"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "malformed wrapper must not call hydra introspection"
+        );
+
+        drop(srv);
     }
 }
