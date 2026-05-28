@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "crates/authz"]
 resolver = "3"
 exclude = [
     "crates/platform",
@@ -177,6 +177,7 @@ zeroship-plugin-kv = { path = "crates/plugin-kv" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-auth = { path = "crates/auth" }
+zeroship-authz = { path = "crates/authz" }
 
 # ---------------------------------------------------------------------------
 # Shared lints
