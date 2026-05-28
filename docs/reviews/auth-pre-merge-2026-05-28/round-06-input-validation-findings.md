@@ -433,3 +433,18 @@ bad_request(...); }` next to the `expires_in_days` validation.
   change lands in `crates/control/src/oauth_handlers.rs`, which this round's
   instructions identify as a likely R4/R1 overlap file. No code was changed
   for H2 in this pass.
+
+## Status
+
+- H1: CLOSED (`236d3328`)
+- H2: DEFERRED (`c0cc22e1`) — blocked by the R4/R1 overlap rule for
+  `crates/control/src/oauth_handlers.rs`.
+- M1: CLOSED (`6034de2f`)
+- M2: CLOSED (`1437ce29`)
+- M3: CLOSED (`660276b2`)
+- M4: CLOSED (`3bce2b66`)
+- M5: CLOSED (`919fa73f`)
+- L1: CLOSED (`ae2d0696`)
+- L2: CLOSED (`4c610041`)
+- L3: CLOSED (`de7d0603`)
+- L4: CLOSED (`3befb589`)
