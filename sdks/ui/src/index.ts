@@ -177,6 +177,19 @@ export {
   type TooltipPopupProps,
   type TooltipArrowProps,
   type TooltipComponent,
+  OtpField,
+  type OtpFieldProps,
+  type OtpFieldSize,
+  type OtpFieldVariant,
+  type OtpFieldInputProps,
+  Meter,
+  meterStatus,
+  type MeterProps,
+  type MeterSize,
+  type MeterIntent,
+  Progress,
+  type ProgressProps,
+  type ProgressSize,
 } from "./components";
 
 // Temporary placeholders — see ./placeholders.tsx for migration tracking.

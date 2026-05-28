@@ -33,6 +33,9 @@
 @import "./components/Tooltip/Tooltip.css";
 @import "./components/Form/Form.css";
 @import "./components/Fieldset/Fieldset.css";
+@import "./components/OtpField/OtpField.css";
+@import "./components/Meter/Meter.css";
+@import "./components/Progress/Progress.css";
 
 *,
 *::before,
