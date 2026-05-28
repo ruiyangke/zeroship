@@ -23,6 +23,7 @@
 @import "./components/Checkbox/Checkbox.css";
 @import "./components/Switch/Switch.css";
 @import "./components/Radio/Radio.css";
+@import "./components/Toggle/Toggle.css";
 
 *,
 *::before,

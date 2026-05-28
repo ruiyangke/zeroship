@@ -134,6 +134,27 @@ const stories = [
   "components-radio--disabled",
   "components-radio--disabled-item",
   "components-radio--rtl",
+  // Slice 5: Toggle + Toggle.Group (segmented control). Sixteen stories
+  // mirroring the standalone + group axes: state grid, sizes, variants,
+  // icon-only / icon+text, group two/five/multiple, sizes (group),
+  // orientation (horizontal/vertical), equalWidth=false, Field-wrap,
+  // disabled group, RTL.
+  "components-toggle--all-states",
+  "components-toggle--all-sizes",
+  "components-toggle--all-variants",
+  "components-toggle--with-icon-only",
+  "components-toggle--with-icon-and-text",
+  "components-toggle--disabled",
+  "components-toggle--two-segments-single",
+  "components-toggle--five-segments-single",
+  "components-toggle--multiple-mode",
+  "components-toggle--all-sizes-group",
+  "components-toggle--horizontal",
+  "components-toggle--vertical",
+  "components-toggle--equal-width-off",
+  "components-toggle--with-label",
+  "components-toggle--disabled-group",
+  "components-toggle--rtl",
 ];
 
 if (themes.length === 0 || stories.length === 0) {

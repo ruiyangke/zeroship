@@ -1,0 +1,439 @@
+/*
+ * Toggle + ToggleGroup — pressable two-state button + segmented control.
+ *
+ * Anatomy:
+ *   .zs-toggle-group               — Base UI's <div>, segmented track
+ *     ├─ .zs-toggle (data-pressed) — pressed segment / standalone Toggle
+ *     ├─ .zs-toggle                — unpressed segment
+ *     └─ … repeated …
+ *
+ * Modifier classes (group):
+ *   --horizontal | --vertical
+ *   --sm | --md | --lg
+ *   --default | --plain | --tinted
+ * Modifier classes (toggle):
+ *   --sm | --md | --lg
+ *   --default | --plain | --tinted
+ *
+ * State surface (driven by data-* Base UI emits on the toggle button):
+ *   data-pressed | data-disabled
+ *
+ * Design guarantees in CSS:
+ *
+ *   1. Pressed segment paints with accent fill + accent-ink text — the
+ *      same combo Button's `filled` uses. Reads as a button that stays
+ *      "in".
+ *
+ *   2. Group track + segment seam: the group carries a unified track
+ *      via `--zs-fill-secondary` (default variant). Unpressed segments
+ *      are transparent over that track so the pressed pill reads as a
+ *      lit-up rectangle within the rail.
+ *
+ *   3. Standalone Toggle (no group) hovers like Button's `--gray`. The
+ *      `.zs-toggle-group .zs-toggle` selector strips the standalone
+ *      surface so inside-a-group renders the unified track, not a row
+ *      of independent buttons.
+ *
+ *   4. Focus ring uses `outline` (not `box-shadow` on the segment) so
+ *      the ring escapes the group's inset rim and surrounding overflow
+ *      (brief principle 6).
+ *
+ *   5. Equal-width via `grid-template-columns: repeat(n, 1fr)` on the
+ *      group. `data-equal-width="false"` flips to `auto` columns so
+ *      icon-only segments size to content.
+ *
+ *   6. Icons inside Toggle are sized to `1em` (currentColor) so the
+ *      glyph scales with the segment's font-size — contingency from
+ *      the brief: SVG with intrinsic dimensions gets forced to 1em
+ *      square so all variants stay consistent across sizes.
+ *
+ *   7. Vertical groups stack segments in `grid-template-rows`; each
+ *      segment forces `inline-size: max-content` so vertical groups
+ *      don't stretch unnaturally wide (brief contingency).
+ *
+ *   8. RTL stays automatic via logical properties — the grid lays out
+ *      in the writing direction without manual flips.
+ *
+ *   9. `forced-colors`: pressed maps to `Highlight` + `HighlightText`;
+ *      unpressed to `Canvas` + `CanvasText`; disabled to `GrayText`.
+ *      Focus uses `Highlight` outline so the ring stays visible.
+ */
+
+/* ─── component-local tokens ────────────────────────────────────────── *
+ *
+ * Heights mirror the Button/Input rhythm via the foundation
+ * --zs-control-h-* tokens so a Toggle next to either reads coherent.
+ * Inline padding matches the Button equivalents so icon-only toggles
+ * end up square (h == padded-w with a 1em glyph). */
+.zs-toggle {
+  --zs-toggle-h-sm: var(--zs-control-h-sm);          /* 2rem */
+  --zs-toggle-h-md: var(--zs-control-h-md);          /* 2.5rem (default) */
+  --zs-toggle-h-lg: var(--zs-control-h-lg);          /* 3rem */
+
+  --zs-toggle-px-sm: var(--zs-control-px-sm);        /* 12 */
+  --zs-toggle-px-md: var(--zs-control-px-md);        /* 16 */
+  --zs-toggle-px-lg: var(--zs-control-px-lg);        /* 20 */
+
+  --zs-toggle-radius-sm: var(--zs-control-radius-sm);  /* 6 */
+  --zs-toggle-radius-md: var(--zs-control-radius-md);  /* 8 */
+  --zs-toggle-radius-lg: var(--zs-control-radius-lg);  /* 10 */
+
+  /* Match Button's per-size type rhythm so a Toggle next to a Button
+   * reads coherent. Button uses subheadline-size on sm, body-size on
+   * md, headline-size on lg. */
+  --zs-toggle-font-sm: var(--zs-text-subheadline-size);
+  --zs-toggle-line-sm: var(--zs-text-subheadline-line);
+  --zs-toggle-font-md: var(--zs-text-body-size);
+  --zs-toggle-line-md: var(--zs-text-body-line);
+  --zs-toggle-font-lg: var(--zs-text-headline-size);
+  --zs-toggle-line-lg: var(--zs-text-headline-line);
+
+  --zs-toggle-gap-sm: var(--zs-space-1);             /* 4 */
+  --zs-toggle-gap-md: var(--zs-space-2);             /* 8 */
+  --zs-toggle-gap-lg: var(--zs-space-2);             /* 8 */
+}
+
+/* ─── the standalone toggle ─────────────────────────────────────────── */
+.zs-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-toggle-gap-md);
+  block-size: var(--zs-toggle-h-md);
+  padding-block: 0;
+  padding-inline: var(--zs-toggle-px-md);
+  border: 0;
+  border-radius: var(--zs-toggle-radius-md);
+  background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+  color: var(--zs-label);
+  font-family: var(--zs-font-system);
+  font-size: var(--zs-toggle-font-md);
+  line-height: 1;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Icon sizing — force consumer-supplied SVG to a 1em square so glyphs
+ * stay coherent across sizes. Brief contingency: SVGs with intrinsic
+ * width/height attributes otherwise pop out of scale at sm vs lg. */
+.zs-toggle > svg {
+  inline-size: 1em;
+  block-size: 1em;
+  flex: 0 0 auto;
+}
+
+/* ─── sizes ─────────────────────────────────────────────────────────── */
+.zs-toggle--sm {
+  block-size: var(--zs-toggle-h-sm);
+  padding-inline: var(--zs-toggle-px-sm);
+  border-radius: var(--zs-toggle-radius-sm);
+  font-size: var(--zs-toggle-font-sm);
+  line-height: 1;
+  gap: var(--zs-toggle-gap-sm);
+}
+.zs-toggle--lg {
+  block-size: var(--zs-toggle-h-lg);
+  padding-inline: var(--zs-toggle-px-lg);
+  border-radius: var(--zs-toggle-radius-lg);
+  font-size: var(--zs-toggle-font-lg);
+  line-height: 1;
+  gap: var(--zs-toggle-gap-lg);
+}
+
+/* ─── default variant (standalone) ──────────────────────────────────── *
+ *
+ * Matches Button's `--gray` rest surface (8% label-tinted mix). Hover
+ * deepens to 12%, active to 16%. */
+.zs-toggle--default {
+  background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+  color: var(--zs-label);
+}
+@media (hover: hover) {
+  .zs-toggle--default:not([data-disabled]):not([data-pressed]):hover {
+    background-color: color-mix(in oklch, var(--zs-label) 12%, transparent);
+  }
+}
+.zs-toggle--default:not([data-disabled]):not([data-pressed]):active {
+  background-color: color-mix(in oklch, var(--zs-label) 16%, transparent);
+}
+
+/* ─── plain variant ─────────────────────────────────────────────────── *
+ *
+ * No surface at rest. Hover paints the same 8% wash `default` rests on
+ * — i.e. a plain Toggle "fills in" to default on hover, then to accent
+ * on press. */
+.zs-toggle--plain {
+  background-color: transparent;
+  color: var(--zs-label);
+}
+@media (hover: hover) {
+  .zs-toggle--plain:not([data-disabled]):not([data-pressed]):hover {
+    background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+  }
+}
+.zs-toggle--plain:not([data-disabled]):not([data-pressed]):active {
+  background-color: color-mix(in oklch, var(--zs-label) 12%, transparent);
+}
+
+/* ─── tinted variant ────────────────────────────────────────────────── *
+ *
+ * Translucent accent tint at rest — loud, signals interactivity. Mirrors
+ * Button's `--tinted` rest tone, slightly deepened (18% accent mix) so
+ * the rest-state text-on-tint contrast lands ≥ 4.5:1 against the
+ * accent-active ink. Button's 14% mix paired with `--zs-accent` text
+ * landed at 4.08:1 — just under AA for the 1.0625rem label size (axe-core
+ * confirmed during slice-5 review). `--zs-accent-active` is the deeper
+ * accent step on the same hue ladder; using it as the rest-state ink
+ * preserves the variant's "loud accent" read while satisfying AA.
+ *
+ * Hover / active deepen the surface in step with Button's hover/active
+ * mix (22% / 30%); the pressed state inherits the standalone pressed
+ * pill above (solid `--zs-accent` + `--zs-accent-ink`). */
+.zs-toggle--tinted {
+  background-color: color-mix(in oklch, var(--zs-accent) 18%, transparent);
+  color: var(--zs-accent-active);
+}
+@media (hover: hover) {
+  .zs-toggle--tinted:not([data-disabled]):not([data-pressed]):hover {
+    background-color: color-mix(in oklch, var(--zs-accent) 22%, transparent);
+  }
+}
+.zs-toggle--tinted:not([data-disabled]):not([data-pressed]):active {
+  background-color: color-mix(in oklch, var(--zs-accent) 30%, transparent);
+}
+
+/* ─── pressed state — accent fill across all variants ──────────────── *
+ *
+ * The pressed pill paints the same in default / plain / tinted: solid
+ * accent fill, accent-ink text. Two visual signals so the pressed
+ * state survives `forced-colors` and reduced-color displays.
+ *
+ * Pressed-fill contrast (brief contingency): default-variant pressed
+ * pill uses `--zs-accent` + `--zs-accent-ink` (white-on-indigo). The
+ * combination measures ≥ AA at all three sizes — verified against the
+ * Card.primary-fill which uses the same pair. If a future palette pushes
+ * the ratio below AA the rule below can deepen to `--zs-accent-hover`
+ * without changing the rest of the surface. */
+.zs-toggle[data-pressed] {
+  background-color: var(--zs-accent);
+  color: var(--zs-accent-ink);
+}
+@media (hover: hover) {
+  .zs-toggle[data-pressed]:not([data-disabled]):hover {
+    background-color: var(--zs-accent-hover);
+  }
+}
+.zs-toggle[data-pressed]:not([data-disabled]):active {
+  background-color: var(--zs-accent-active);
+}
+
+/* ─── focus ring (outline, not box-shadow) ──────────────────────────── *
+ *
+ * Brief principle 6: the ring must escape the group's inset rim and
+ * surrounding overflow. `outline` does that for free; `box-shadow`
+ * would clip. */
+.zs-toggle:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+/* ─── disabled ──────────────────────────────────────────────────────── */
+.zs-toggle[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-tertiary);
+  background-color: color-mix(in oklch, var(--zs-label) 4%, transparent);
+}
+.zs-toggle[data-disabled][data-pressed] {
+  /* Disabled-pressed keeps the accent fill but desaturates via mix
+   * toward the fill-secondary neutral. Reads "yes, this WAS selected"
+   * without claiming actionability. Same shape Button's destructive-
+   * disabled uses. */
+  background-color: color-mix(in oklch, var(--zs-accent) 30%, var(--zs-fill-secondary));
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── group container ───────────────────────────────────────────────── */
+.zs-toggle-group {
+  display: inline-grid;
+  grid-auto-flow: column;
+  /* Equal-width default — the children fill the grid track. */
+  grid-auto-columns: 1fr;
+  align-items: stretch;
+  padding: var(--zs-space-1);
+  border-radius: var(--zs-toggle-radius-md);
+  background-color: var(--zs-fill-secondary);
+  /* Inset hairline rim — sits inside the group, no bleed past the
+   * outer radius. */
+  box-shadow: inset 0 0 0 0.0625rem var(--zs-separator);
+  isolation: isolate;
+  min-inline-size: 0;
+}
+
+.zs-toggle-group--vertical {
+  grid-auto-flow: row;
+  grid-auto-rows: minmax(0, auto);
+  grid-auto-columns: auto;
+}
+
+.zs-toggle-group--sm {
+  border-radius: var(--zs-toggle-radius-sm);
+}
+.zs-toggle-group--lg {
+  border-radius: var(--zs-toggle-radius-lg);
+}
+
+/* equalWidth=false → intrinsic-width columns / rows. Useful in
+ * toolbars where icon-only segments mix with text-only ones (brief
+ * principle 3). The columns become `auto` so each segment sizes to
+ * its own content. */
+.zs-toggle-group[data-equal-width="false"]:not(.zs-toggle-group--vertical) {
+  grid-auto-columns: auto;
+}
+
+/* Vertical groups force each segment to fit its content (brief
+ * contingency: avoid unnatural stretching). */
+.zs-toggle-group--vertical .zs-toggle {
+  inline-size: max-content;
+  justify-self: stretch;
+}
+/* When equalWidth is true on a vertical group, segments share a column
+ * width via 100% so the rail reads as one rail. */
+.zs-toggle-group--vertical[data-equal-width="true"] .zs-toggle {
+  inline-size: 100%;
+}
+
+/* Inside a group, the unpressed segment loses its standalone surface
+ * — the group track owns the visible rail. Hover paints a per-segment
+ * tint so the segment-under-cursor reads, but no rest-state surface.
+ *
+ * NB: rules below restrict to `:not([data-pressed])` so the pressed-
+ * pill rule defined ABOVE retains the accent fill regardless of group
+ * specificity. Without that guard, the descendant selector
+ * `.zs-toggle-group .zs-toggle` would override the standalone pressed
+ * rule (same specificity, later wins) and leave pressed segments
+ * painted transparent over the rail — exactly the axe color-contrast
+ * failure caught during slice-5 review. */
+.zs-toggle-group .zs-toggle:not([data-pressed]) {
+  background-color: transparent;
+}
+.zs-toggle-group .zs-toggle {
+  /* Slightly tighter radius than the standalone so the pressed pill
+   * nests inside the group's rim with a small breathing margin. */
+  border-radius: calc(var(--zs-toggle-radius-md) - 0.125rem);
+}
+.zs-toggle-group--sm .zs-toggle {
+  border-radius: calc(var(--zs-toggle-radius-sm) - 0.0625rem);
+}
+.zs-toggle-group--lg .zs-toggle {
+  border-radius: calc(var(--zs-toggle-radius-lg) - 0.125rem);
+}
+
+@media (hover: hover) {
+  .zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):hover {
+    background-color: color-mix(in oklch, var(--zs-label) 6%, transparent);
+  }
+}
+.zs-toggle-group .zs-toggle:not([data-disabled]):not([data-pressed]):active {
+  background-color: color-mix(in oklch, var(--zs-label) 10%, transparent);
+}
+
+/* Plain group: drop the track surface; segments become a row of
+ * independent (but still focus-grouped) buttons. */
+.zs-toggle-group--plain {
+  background-color: transparent;
+  box-shadow: none;
+  padding: 0;
+  gap: var(--zs-space-1);
+}
+.zs-toggle-group--plain .zs-toggle:not([data-pressed]) {
+  background-color: transparent;
+}
+@media (hover: hover) {
+  .zs-toggle-group--plain .zs-toggle:not([data-disabled]):not([data-pressed]):hover {
+    background-color: color-mix(in oklch, var(--zs-label) 8%, transparent);
+  }
+}
+
+/* Tinted group: track stays accent-tinted; unpressed segments are
+ * transparent over it so the pressed pill reads as the saturation
+ * step. */
+.zs-toggle-group--tinted {
+  background-color: color-mix(in oklch, var(--zs-accent) 10%, transparent);
+}
+.zs-toggle-group--tinted .zs-toggle:not([data-pressed]) {
+  color: var(--zs-accent);
+}
+
+/* Pressed segments inside a group keep the accent fill (the standalone
+ * `.zs-toggle[data-pressed]` rule above already paints accent on the
+ * pill — same specificity, but the unpressed-only group rule above
+ * lets it win). z-index lifts the pill over the group's track so the
+ * focus outline isn't clipped. */
+.zs-toggle-group .zs-toggle[data-pressed] {
+  z-index: 1;
+}
+
+/* Group disabled cascade — Base UI propagates disabled to each child,
+ * but the group root also paints a faded surface so the rail itself
+ * reads inactive. */
+.zs-toggle-group[data-disabled] {
+  background-color: color-mix(in oklch, var(--zs-fill-secondary) 60%, transparent);
+}
+
+/* ─── reduced motion ────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-toggle {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors ─────────────────────────────────────────────────── *
+ *
+ * Map pressed/unpressed/focused/disabled to the standard system
+ * colors. Brief contingency: don't bleach focused state — keep the
+ * Highlight outline so the ring stays visible against either Canvas
+ * or Highlight backgrounds. */
+@media (forced-colors: active) {
+  .zs-toggle {
+    background-color: Canvas;
+    color: CanvasText;
+    forced-color-adjust: none;
+    /* Hairline border so unpressed segments stay visible against
+     * Canvas — accent-derived rest tints become transparent under
+     * forced-colors. */
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+  }
+  .zs-toggle[data-pressed] {
+    background-color: Highlight;
+    color: HighlightText;
+    box-shadow: inset 0 0 0 0.0625rem Highlight;
+  }
+  .zs-toggle:focus-visible {
+    outline-color: Highlight;
+  }
+  .zs-toggle[data-disabled] {
+    color: GrayText;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-toggle[data-disabled][data-pressed] {
+    background-color: Canvas;
+    color: GrayText;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-toggle-group {
+    background-color: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+  }
+  /* Inside a group, suppress the per-segment border so the group rim
+   * carries the only visible edge. */
+  .zs-toggle-group .zs-toggle:not([data-pressed]) {
+    box-shadow: none;
+  }
+}

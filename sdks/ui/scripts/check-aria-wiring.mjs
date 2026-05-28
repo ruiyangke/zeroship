@@ -1030,6 +1030,135 @@ await open("components-checkbox--indeterminate-from-group");
   );
 }
 
+/* ─── 31. Toggle standalone — click flips aria-pressed (slice 5) ────── *
+ *
+ * The AllStates story renders four bare Toggles with deterministic
+ * data-testid hooks. We pick the unpressed one and verify a click flips
+ * `aria-pressed` from "false" to "true". Base UI emits `aria-pressed`
+ * on the rendered <button> (default tag); the test reads the attribute
+ * directly so the assertion survives any future shape change. */
+await open("components-toggle--all-states");
+{
+  const toggle = page.locator('[data-testid="toggle-state-unpressed"]');
+  await toggle.waitFor({ state: "visible", timeout: 5000 });
+  const before = await toggle.getAttribute("aria-pressed");
+  await toggle.click();
+  await page.waitForTimeout(100);
+  const after = await toggle.getAttribute("aria-pressed");
+  const ok = before === "false" && after === "true";
+  report(
+    "Toggle standalone — click flips aria-pressed",
+    ok,
+    `before=${before} after=${after}`,
+  );
+}
+
+/* ─── 32. Toggle.Group single — selecting flips others off (slice 5) ── *
+ *
+ * TwoSegmentsSingle: `day` is the initial value. Click the `week`
+ * segment and verify it flips to aria-pressed="true" while `day` drops
+ * to "false" — the mutually-exclusive default. */
+await open("components-toggle--two-segments-single");
+{
+  const day = page.locator('[data-testid="toggle-single-day"]');
+  const week = page.locator('[data-testid="toggle-single-week"]');
+  await day.waitFor({ state: "visible", timeout: 5000 });
+  await week.waitFor({ state: "visible", timeout: 5000 });
+  const dayBefore = await day.getAttribute("aria-pressed");
+  const weekBefore = await week.getAttribute("aria-pressed");
+  await week.click();
+  await page.waitForTimeout(100);
+  const dayAfter = await day.getAttribute("aria-pressed");
+  const weekAfter = await week.getAttribute("aria-pressed");
+  const ok =
+    dayBefore === "true" &&
+    weekBefore === "false" &&
+    dayAfter === "false" &&
+    weekAfter === "true";
+  report(
+    "Toggle.Group single — selecting flips others off",
+    ok,
+    `dayBefore=${dayBefore} weekBefore=${weekBefore} → dayAfter=${dayAfter} weekAfter=${weekAfter}`,
+  );
+}
+
+/* ─── 33. Toggle.Group multiple — selections are independent (slice 5) *
+ *
+ * MultipleMode: press bold / italic / underline in sequence, expect all
+ * three aria-pressed="true". Then press italic again — italic flips back
+ * to "false" while bold and underline stay "true". */
+await open("components-toggle--multiple-mode");
+{
+  const bold = page.locator('[data-testid="toggle-multi-bold"]');
+  const italic = page.locator('[data-testid="toggle-multi-italic"]');
+  const underline = page.locator('[data-testid="toggle-multi-underline"]');
+  await bold.waitFor({ state: "visible", timeout: 5000 });
+  await bold.click();
+  await italic.click();
+  await underline.click();
+  await page.waitForTimeout(100);
+  const allOn =
+    (await bold.getAttribute("aria-pressed")) === "true" &&
+    (await italic.getAttribute("aria-pressed")) === "true" &&
+    (await underline.getAttribute("aria-pressed")) === "true";
+  // Toggle italic off, leaving bold + underline pressed.
+  await italic.click();
+  await page.waitForTimeout(100);
+  const afterUnpress = {
+    bold: await bold.getAttribute("aria-pressed"),
+    italic: await italic.getAttribute("aria-pressed"),
+    underline: await underline.getAttribute("aria-pressed"),
+  };
+  const independence =
+    afterUnpress.bold === "true" &&
+    afterUnpress.italic === "false" &&
+    afterUnpress.underline === "true";
+  const ok = allOn && independence;
+  report(
+    "Toggle.Group multiple — selections are independent",
+    ok,
+    `allOn=${allOn} afterUnpress=${JSON.stringify(afterUnpress)}`,
+  );
+}
+
+/* ─── 34. Toggle.Group arrow-key roving (slice 5) ────────────────────── *
+ *
+ * Focus the first segment then press ArrowRight; Base UI's roving
+ * tabindex + `loopFocus={true}` default move focus to the next segment.
+ * We assert focus landed on the 2nd segment AND a follow-up Space
+ * keypress activates that segment.
+ *
+ * Discrepancy with the brief: the brief expected "arrow moves selection"
+ * (Radio-style roving). Base UI's ToggleGroup is a `toolbar`-style
+ * widget where arrows move FOCUS only — selection is gated on Space /
+ * Enter / click. We assert the correct shape (focus on arrow, then
+ * Space activates) rather than fudging the brief's text. */
+await open("components-toggle--two-segments-single");
+{
+  const day = page.locator('[data-testid="toggle-single-day"]');
+  const week = page.locator('[data-testid="toggle-single-week"]');
+  await day.waitFor({ state: "visible", timeout: 5000 });
+  await day.focus();
+  await page.waitForTimeout(50);
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(150);
+  const weekFocused = await week.evaluate(
+    (el) => el === document.activeElement,
+  );
+  // Activate the focused segment to verify the arrow → focus → space
+  // chain ends up flipping selection.
+  await page.keyboard.press(" ");
+  await page.waitForTimeout(150);
+  const weekPressed = (await week.getAttribute("aria-pressed")) === "true";
+  const dayPressed = (await day.getAttribute("aria-pressed")) === "true";
+  const ok = weekFocused && weekPressed && !dayPressed;
+  report(
+    "Toggle.Group arrow-key roving — ArrowRight moves focus; Space activates",
+    ok,
+    `weekFocused=${weekFocused} weekPressed=${weekPressed} dayPressed=${dayPressed}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

@@ -36,6 +36,15 @@ export type {
   RadioOrientation,
 } from "./Radio";
 
+export { Toggle, ToggleGroup } from "./Toggle";
+export type {
+  ToggleProps,
+  ToggleGroupProps,
+  ToggleSize,
+  ToggleVariant,
+  ToggleOrientation,
+} from "./Toggle";
+
 export { Input } from "./Input";
 export type { InputProps, InputSize, InputVariant } from "./Input";
 
