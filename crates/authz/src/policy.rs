@@ -17,7 +17,7 @@ impl Policy {
     /// wrapper policy shape.
     pub fn from_json_value(v: &serde_json::Value) -> Result<Self, ValidationError> {
         serde_json::from_value(v.clone())
-            .map_err(|err| ValidationError::Validation(err.to_string()))
+            .map_err(|err| ValidationError::PolicyJsonShape(err.to_string()))
     }
 
     /// Converts this policy to the wrapper JSON representation.
