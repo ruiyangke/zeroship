@@ -90,6 +90,11 @@ pub struct GateState {
     /// a dev "no-DB" mode (when `--db` is empty); test fixtures also
     /// rely on `None` to construct `GateState` without a live PG.
     pub db: Option<Arc<compio_postgres::Client>>,
+    /// In-process replay cache for `DPoP` proof `jti` claims (RFC 9449
+    /// §11.1). Single-instance for now; once the gateway scales out
+    /// horizontally this becomes a redis-backed shared cache so a
+    /// replayed proof on a sibling gateway is still rejected.
+    pub dpop_jti_cache: Arc<zeroship_core::dpop::JtiCache>,
 }
 
 #[ntex::main]
@@ -238,6 +243,7 @@ async fn main() -> std::io::Result<()> {
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp,
         db,
+        dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
     });
 
     sync::start_sync(state.clone());

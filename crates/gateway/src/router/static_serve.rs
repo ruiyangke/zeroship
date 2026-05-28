@@ -902,6 +902,7 @@ mod tests {
                 b"test-stash-key-32-bytes-long----".to_vec(),
             )),
             db: None,
+            dpop_jti_cache: Arc::new(zeroship_core::dpop::JtiCache::default()),
         }
     }
 

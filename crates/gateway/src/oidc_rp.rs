@@ -232,6 +232,103 @@ impl OidcRp {
 
         Ok((claims, stash.original_path))
     }
+
+    /// Introspect an access token at hydra's `/oauth2/introspect`
+    /// endpoint (RFC 7662). Returns the parsed response; callers MUST
+    /// check `.active` before trusting any other field — hydra emits a
+    /// 200 with `{"active": false}` for revoked/expired/unknown tokens.
+    ///
+    /// Used by the gateway's DPoP-bound resource-server path: a worker
+    /// request carrying `Authorization: DPoP <access_token>` triggers
+    /// proof verification (`core::dpop::verify`) followed by this
+    /// introspection call so the gateway can resolve `sub`/`email`
+    /// from a hydra-issued opaque access token without a local JWT.
+    ///
+    /// # Errors
+    ///
+    /// [`OidcRpError::TokenExchange`] on transport error, non-2xx
+    /// status, or JSON parse failure. (`active: false` is NOT an error
+    /// — that's a valid response indicating the token isn't usable.)
+    pub async fn introspect_token(
+        &self,
+        access_token: &str,
+    ) -> Result<IntrospectionResponse, OidcRpError> {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", access_token)
+            .finish();
+        let url = format!(
+            "{}/oauth2/introspect",
+            self.auth_public.trim_end_matches('/')
+        );
+
+        // Basic auth header — hydra requires confidential-client auth on
+        // /oauth2/introspect regardless of the token's own client_id.
+        let creds = format!("{}:{}", self.client_id, self.client_secret);
+        let auth = format!("Basic {}", B64.encode(&creds));
+
+        let client = cyper::Client::new();
+        let resp = client
+            .request(http::Method::POST, &url)
+            .map_err(|e| OidcRpError::TokenExchange(format!("introspect build: {e}")))?
+            .header("content-type", "application/x-www-form-urlencoded")
+            .map_err(|e| OidcRpError::TokenExchange(format!("introspect ct: {e}")))?
+            .header("authorization", &auth)
+            .map_err(|e| OidcRpError::TokenExchange(format!("introspect auth: {e}")))?
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| OidcRpError::TokenExchange(format!("introspect send: {e}")))?;
+
+        let status = resp.status().as_u16();
+        let resp_body = resp
+            .text()
+            .await
+            .map_err(|e| OidcRpError::TokenExchange(format!("introspect read: {e}")))?;
+        if !(200..300).contains(&status) {
+            return Err(OidcRpError::TokenExchange(format!(
+                "introspect HTTP {status}: {resp_body}"
+            )));
+        }
+        serde_json::from_str(&resp_body).map_err(|e| {
+            OidcRpError::TokenExchange(format!("introspect parse: {e}\nbody: {resp_body}"))
+        })
+    }
+}
+
+/// Subset of an RFC 7662 introspection response (hydra's
+/// `/oauth2/introspect`). Only `active` is mandatory; everything else
+/// is `Option` because hydra omits fields when the token is inactive
+/// or when no value is bound. Callers MUST gate on `.active` before
+/// reading any other field.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntrospectionResponse {
+    /// `true` iff the access token is currently valid (not revoked, not
+    /// expired, recognised by the AS).
+    pub active: bool,
+    /// Subject (user id) the access token represents.
+    #[serde(default)]
+    pub sub: Option<String>,
+    /// `OAuth2` `client_id` the token was issued to.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// User's email address (when the `email` scope was granted).
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Whether the user's email is verified at the `IdP`.
+    #[serde(default)]
+    pub email_verified: Option<bool>,
+    /// User's display name (when the `profile` scope was granted).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Space-separated list of granted scopes.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Absolute expiry (UNIX seconds).
+    #[serde(default)]
+    pub exp: Option<i64>,
 }
 
 #[derive(Debug, thiserror::Error)]
