@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, within } from "@storybook/test";
 import { Button } from "../components/Button";
 
 const meta: Meta<typeof Button> = {
@@ -303,6 +304,28 @@ export const FocusVisible: Story = {
       </div>
     </div>
   ),
+};
+
+export const ClickInteraction: Story = {
+  name: "Click interaction (play)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Exemplar `play()` story. Demonstrates the convention for " +
+          "interaction tests: query by accessible name via " +
+          "`within(canvasElement).getByRole`, drive with `userEvent`, " +
+          "assert with `expect`. See `.storybook/CONVENTIONS.md`.",
+      },
+    },
+  },
+  render: () => <Button variant="filled">Click me</Button>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const button = canvas.getByRole("button", { name: /click me/i });
+    await userEvent.click(button);
+    await expect(button).toHaveFocus();
+  },
 };
 
 export const AsChild: Story = {

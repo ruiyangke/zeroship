@@ -1,4 +1,5 @@
 import type { StorybookConfig } from "@storybook/react-vite";
+import { createStorybookMcpMiddleware } from "./mcp-server";
 
 const config: StorybookConfig = {
   stories: ["../src/**/*.mdx", "../src/**/*.stories.@(ts|tsx)"],
@@ -6,6 +7,7 @@ const config: StorybookConfig = {
     "@storybook/addon-docs",
     "@storybook/addon-a11y",
     "@storybook/addon-themes",
+    "@storybook/addon-coverage",
   ],
   framework: {
     name: "@storybook/react-vite",
@@ -36,6 +38,28 @@ const config: StorybookConfig = {
         (!/node_modules/.test(prop.parent.fileName) &&
           !/\bReact\./.test(prop.parent.name)),
     },
+  },
+  /* Mount the MCP HTTP handler at `/mcp` on the Storybook dev server.
+   * AI agents discover components, story IDs, and prop tables via the
+   * standard Storybook MCP tools. The Test Runner exposes its own
+   * tool surface to the same server. */
+  async viteFinal(viteConfig) {
+    const mcpMiddleware = await createStorybookMcpMiddleware();
+    return {
+      ...viteConfig,
+      plugins: [
+        ...(viteConfig.plugins ?? []),
+        {
+          name: "zeroship-ui-mcp",
+          configureServer(server) {
+            server.middlewares.use(mcpMiddleware);
+          },
+          configurePreviewServer(server) {
+            server.middlewares.use(mcpMiddleware);
+          },
+        },
+      ],
+    };
   },
 };
 

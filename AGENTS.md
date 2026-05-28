@@ -289,6 +289,34 @@ Detailed setup: `docs/runbooks/local-dev.md`. Multi-node: `docs/runbooks/docker-
 
 ---
 
+## @zeroship/ui — Storybook MCP
+
+When working on @zeroship/ui components, an MCP server is available at
+`http://127.0.0.1:6006/mcp` while `pnpm --filter @zeroship/ui storybook`
+is running. It exposes the standard Storybook MCP tools:
+
+- `list-all-documentation` — every documented component
+- `get-documentation` — props + examples for a specific component
+- `get-story-documentation` — single-story detail
+- Test Runner integration — execute the `play()` + a11y suite
+
+Before referencing any @zeroship/ui prop in generated code, call
+`get-documentation` to verify it exists. Do not assume props by
+naming convention.
+
+Tests for the UI library run via Storybook Test Runner:
+
+```bash
+pnpm --filter @zeroship/ui test-storybook          # against a running storybook
+pnpm --filter @zeroship/ui test-storybook:ci       # boots http-server + runs runner
+pnpm --filter @zeroship/ui test-storybook:coverage # + Istanbul report at sdks/ui/coverage/
+```
+
+Conventions for writing `play()` interactions and using
+@storybook/test live in `sdks/ui/.storybook/CONVENTIONS.md`.
+
+---
+
 ## Revenue model
 
 ```
