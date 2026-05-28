@@ -824,6 +824,7 @@ mod tests {
                 hydra_public: String::new(),
                 auth_public: auth_public.into(),
                 insecure_dev: true,
+                trust_proxy: false,
                 public_url: "https://api.zeroship.ai".into(),
             },
             routes: crate::sync::RouteCache::new(),

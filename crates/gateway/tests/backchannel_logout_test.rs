@@ -319,6 +319,7 @@ fn build_handler_state(db: Arc<Client>, auth_base: &str) -> Arc<GateState> {
             hydra_public: String::new(),
             auth_public: auth_base.to_string(),
             insecure_dev: true,
+            trust_proxy: false,
             public_url: "https://api.zeroship.ai".into(),
         },
         routes: RouteCache::new(),

@@ -8,6 +8,8 @@ use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
 use crate::{cache, WorkerConfig};
 
+const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Resolve the worker-entry blob hash from a manifest. Returns `None` for
 /// SSG-only deploys (worker missing) and logs+returns `None` if the
 /// manifest is malformed (entry not in modules) so the worker stays
@@ -398,6 +400,19 @@ fn this_thread_control_client() -> cyper::Client {
 /// come from `BlobStore` directly — see `reconcile_once` and
 /// `handler::load_on_demand`.
 async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
+    compio::time::timeout(CONTROL_REQUEST_TIMEOUT, http_get_bytes_inner(url, auth_key))
+        .await
+        .map_err(|_| control_timeout_error())?
+}
+
+fn control_timeout_error() -> String {
+    format!(
+        "control request timed out after {}s",
+        CONTROL_REQUEST_TIMEOUT.as_secs()
+    )
+}
+
+async fn http_get_bytes_inner(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
     let client = this_thread_control_client();
     let mut builder = client
         .get(url)
@@ -427,4 +442,15 @@ async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
         .await
         .map(|b| b.to_vec())
         .map_err(|e| format!("read body: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_timeout_defaults_to_five_seconds() {
+        assert_eq!(CONTROL_REQUEST_TIMEOUT, std::time::Duration::from_secs(5));
+        assert_eq!(control_timeout_error(), "control request timed out after 5s");
+    }
 }

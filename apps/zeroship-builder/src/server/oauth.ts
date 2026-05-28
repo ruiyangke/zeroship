@@ -2,12 +2,16 @@
 
 import { Buffer } from "node:buffer";
 import crypto from "node:crypto";
+import { createRemoteJWKSet, jwtVerify, type JWTVerifyOptions } from "jose";
 
 const DEFAULT_HYDRA_AUTHORIZE_URL = "http://localhost:4444/oauth2/auth";
 const DEFAULT_HYDRA_TOKEN_URL = "http://localhost:4444/oauth2/token";
 const DEFAULT_HYDRA_REVOKE_URL = "http://localhost:4444/oauth2/revoke";
+const DEFAULT_HYDRA_JWKS_URL = "http://localhost:4444/.well-known/jwks.json";
 const DEFAULT_BUILDER_CLIENT_ID = "zeroship-builder";
 const DEFAULT_BUILDER_REDIRECT_URI = "http://localhost:3001/auth/callback";
+
+const jwksByUrl = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 // Default scopes the builder needs.
 export const BUILDER_SCOPES = [
@@ -96,18 +100,32 @@ export async function revokeToken(
   }
 }
 
-export function subjectFromAccessToken(accessToken: string): string | null {
-  const [, payload] = accessToken.split(".");
-  if (!payload) return null;
-
+export async function subjectFromAccessToken(accessToken: string): Promise<string | null> {
   try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
-      sub?: unknown;
-    };
-    return typeof claims.sub === "string" && claims.sub.length > 0 ? claims.sub : null;
+    const { payload } = await jwtVerify(accessToken, hydraJwks(), accessTokenVerifyOptions());
+    return typeof payload.sub === "string" && payload.sub.length > 0 ? payload.sub : null;
   } catch {
     return null;
   }
+}
+
+function hydraJwks(): ReturnType<typeof createRemoteJWKSet> {
+  const url = readEnv("HYDRA_JWKS_URL", DEFAULT_HYDRA_JWKS_URL);
+  let jwks = jwksByUrl.get(url);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(url));
+    jwksByUrl.set(url, jwks);
+  }
+  return jwks;
+}
+
+function accessTokenVerifyOptions(): JWTVerifyOptions {
+  const options: JWTVerifyOptions = {};
+  const issuer = readEnv("HYDRA_ISSUER", "");
+  if (issuer) options.issuer = issuer;
+  const audience = readEnv("BUILDER_ACCESS_TOKEN_AUDIENCE", "");
+  if (audience) options.audience = audience;
+  return options;
 }
 
 async function tokenRequest(body: URLSearchParams): Promise<TokenResponse> {

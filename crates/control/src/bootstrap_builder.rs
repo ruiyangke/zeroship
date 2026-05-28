@@ -8,7 +8,6 @@ use compio_postgres::Client;
 use rand::RngCore as _;
 use serde::Serialize;
 use uuid::Uuid;
-use zeroship_auth::advisory_lock::{with_advisory_lock, BOOTSTRAP_CLIENTS_LOCK};
 use zeroship_authz::Scope;
 
 use crate::trusted_clients;
@@ -36,7 +35,6 @@ pub struct BuilderClientBootstrapConfig {
     pub hydra_admin_url: String,
     pub redirect_uri: String,
     pub client_secret_path: PathBuf,
-    pub auth_db_url: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,7 +90,7 @@ struct HydraCreateClientRequest<'a> {
 }
 
 pub async fn bootstrap_builder_oauth_client(
-    _pg: &Client,
+    pg: &Client,
     cfg: &BuilderClientBootstrapConfig,
 ) -> Result<BuilderClientBootstrapResult, BuilderClientBootstrapError> {
     if !cfg.enabled {
@@ -102,7 +100,7 @@ pub async fn bootstrap_builder_oauth_client(
         });
     }
 
-    if expected_oauth_client_present(pg, cfg).await? {
+    if oauth_client_exists(pg).await? {
         read_existing_client_secret(&cfg.client_secret_path)?;
         tracing::info!(
             client_id = BUILDER_CLIENT_ID,
@@ -117,14 +115,7 @@ pub async fn bootstrap_builder_oauth_client(
 
     let client_secret = ensure_client_secret(&cfg.client_secret_path)?;
     create_hydra_client(cfg, &client_secret).await?;
-    let inserted = insert_oauth_client(pg, cfg).await?;
-    if !inserted {
-        expected_oauth_client_present(pg, cfg).await?;
-        return Ok(BuilderClientBootstrapResult {
-            status: BuilderClientBootstrapStatus::AlreadyPresent,
-            client_secret_path: cfg.client_secret_path.clone(),
-        });
-    }
+    insert_oauth_client(pg, cfg).await?;
 
     tracing::info!(
         client_id = BUILDER_CLIENT_ID,
@@ -137,49 +128,21 @@ pub async fn bootstrap_builder_oauth_client(
     })
 }
 
-async fn expected_oauth_client_present(
-    pg: &Client,
-    cfg: &BuilderClientBootstrapConfig,
-) -> Result<bool, BuilderClientBootstrapError> {
+async fn oauth_client_exists(pg: &Client) -> Result<bool, BuilderClientBootstrapError> {
     let rows = pg
         .query(
-            "SELECT client_name, redirect_uris, scopes, skip_consent, hydra_client_id
-             FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT 1 FROM control.oauth_clients WHERE client_id = $1",
             &[&BUILDER_CLIENT_ID],
         )
         .await
         .map_err(|err| BuilderClientBootstrapError::Db(err.to_string()))?;
-    let Some(row) = rows.first() else {
-        return Ok(false);
-    };
-
-    let redirect_uris: Vec<String> = row.get("redirect_uris");
-    let scopes: Vec<String> = row.get("scopes");
-    let expected_redirect_uris = vec![cfg.redirect_uri.clone()];
-    let expected_scopes = BUILDER_SCOPES
-        .iter()
-        .map(|scope| scope.as_str().to_string())
-        .collect::<Vec<_>>();
-    let matches_expected =
-        row.get::<_, String>("client_name") == BUILDER_CLIENT_NAME
-            && redirect_uris == expected_redirect_uris
-            && scopes == expected_scopes
-            && row.get::<_, bool>("skip_consent") == trusted_clients::is_trusted(BUILDER_CLIENT_ID)
-            && row.get::<_, String>("hydra_client_id") == BUILDER_CLIENT_ID;
-    if matches_expected {
-        Ok(true)
-    } else {
-        Err(BuilderClientBootstrapError::Db(
-            "existing zeroship-builder OAuth client does not match expected trusted-builder shape"
-                .into(),
-        ))
-    }
+    Ok(!rows.is_empty())
 }
 
-async fn upsert_oauth_client(
+async fn insert_oauth_client(
     pg: &Client,
     cfg: &BuilderClientBootstrapConfig,
-) -> Result<bool, BuilderClientBootstrapError> {
+) -> Result<(), BuilderClientBootstrapError> {
     let redirect_uris = vec![cfg.redirect_uri.as_str()];
     let scopes = BUILDER_SCOPES
         .iter()
@@ -187,14 +150,11 @@ async fn upsert_oauth_client(
         .collect::<Vec<_>>();
     let created_by: Option<Uuid> = None;
     let skip_consent = trusted_clients::is_trusted(BUILDER_CLIENT_ID);
-    let rows = pg
-        .query(
-            "INSERT INTO control.oauth_clients \
+    pg.execute(
+        "INSERT INTO control.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1)
-         ON CONFLICT (client_id) DO NOTHING
-         RETURNING client_id",
+         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1)",
         &[
             &BUILDER_CLIENT_ID,
             &BUILDER_CLIENT_NAME,
@@ -203,25 +163,10 @@ async fn upsert_oauth_client(
             &skip_consent,
             &created_by,
         ],
-        )
-        .await
-        .map_err(|err| BuilderClientBootstrapError::Db(err.to_string()))?;
-    Ok(!rows.is_empty())
-}
-
-async fn open_dedicated_auth_pg(
-    db_url: &str,
-) -> Result<compio_postgres::Client, BuilderClientBootstrapError> {
-    let (client, connection) = compio_postgres::connect(db_url, compio_postgres::NoTls)
-        .await
-        .map_err(|err| BuilderClientBootstrapError::Db(format!("lock connect: {err}")))?;
-    compio::runtime::spawn(async move {
-        if let Err(err) = connection.run().await {
-            tracing::error!(error = %err, "control: builder bootstrap lock connection ended");
-        }
-    })
-    .detach();
-    Ok(client)
+    )
+    .await
+    .map_err(|err| BuilderClientBootstrapError::Db(err.to_string()))?;
+    Ok(())
 }
 
 fn ensure_client_secret(path: &Path) -> Result<String, BuilderClientBootstrapError> {
@@ -284,7 +229,7 @@ fn is_valid_client_secret(secret: &str) -> bool {
     secret.len() == 64 && secret.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-async fn reconcile_hydra_client(
+async fn create_hydra_client(
     cfg: &BuilderClientBootstrapConfig,
     client_secret: &str,
 ) -> Result<(), BuilderClientBootstrapError> {
@@ -308,57 +253,10 @@ async fn reconcile_hydra_client(
         subject_type: "public",
         skip_consent: trusted_clients::is_trusted(BUILDER_CLIENT_ID),
     };
-    match send_hydra_client_request(
-        http::Method::POST,
-        &hydra_url(&cfg.hydra_admin_url, "/admin/clients"),
-        &body,
-    )
-    .await?
-    {
-        HydraStatus::Success => Ok(()),
-        HydraStatus::Conflict => {
-            ensure_hydra_client_exists(cfg).await?;
-            send_hydra_client_request(
-                http::Method::PUT,
-                &hydra_url(
-                    &cfg.hydra_admin_url,
-                    &format!("/admin/clients/{BUILDER_CLIENT_ID}"),
-                ),
-                &body,
-            )
-            .await?
-            .into_result("PUT /admin/clients/{client_id}")
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HydraStatus {
-    Success,
-    Conflict,
-}
-
-impl HydraStatus {
-    fn into_result(self, op: &str) -> Result<(), BuilderClientBootstrapError> {
-        match self {
-            Self::Success => Ok(()),
-            Self::Conflict => Err(BuilderClientBootstrapError::Hydra(format!(
-                "{op} returned unexpected 409"
-            ))),
-        }
-    }
-}
-
-async fn send_hydra_client_request(
-    method: http::Method,
-    url: &str,
-    body: &HydraCreateClientRequest<'_>,
-) -> Result<HydraStatus, BuilderClientBootstrapError> {
-    let body_bytes = serde_json::to_vec(body)
+    let body_bytes = serde_json::to_vec(&body)
         .map_err(|err| BuilderClientBootstrapError::Encode(err.to_string()))?;
-    let method_label = method.as_str().to_string();
     let res = cyper::Client::new()
-        .request(method, url)
+        .request(http::Method::POST, hydra_url(&cfg.hydra_admin_url, "/admin/clients"))
         .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
         .header("content-type", "application/json")
         .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
@@ -371,40 +269,11 @@ async fn send_hydra_client_request(
         .text()
         .await
         .map_err(|err| BuilderClientBootstrapError::Hydra(format!("read response: {err}")))?;
-    if (200..300).contains(&status) {
-        Ok(HydraStatus::Success)
-    } else if status == 409 {
-        Ok(HydraStatus::Conflict)
-    } else {
-        Err(BuilderClientBootstrapError::Hydra(format!(
-            "{method_label} {url} returned {status}: {response_body}"
-        )))
-    }
-}
-
-async fn ensure_hydra_client_exists(
-    cfg: &BuilderClientBootstrapConfig,
-) -> Result<(), BuilderClientBootstrapError> {
-    let url = hydra_url(
-        &cfg.hydra_admin_url,
-        &format!("/admin/clients/{BUILDER_CLIENT_ID}"),
-    );
-    let res = cyper::Client::new()
-        .request(http::Method::GET, url.clone())
-        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
-        .send()
-        .await
-        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("transport: {err}")))?;
-    let status = res.status().as_u16();
-    let response_body = res
-        .text()
-        .await
-        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("read response: {err}")))?;
-    if (200..300).contains(&status) {
+    if (200..300).contains(&status) || status == 409 {
         Ok(())
     } else {
         Err(BuilderClientBootstrapError::Hydra(format!(
-            "GET {url} returned {status}: {response_body}"
+            "POST /admin/clients returned {status}: {response_body}"
         )))
     }
 }
@@ -422,58 +291,5 @@ mod tests {
         assert!(is_valid_client_secret(&"0".repeat(64)));
         assert!(!is_valid_client_secret(&"0".repeat(63)));
         assert!(!is_valid_client_secret(&"g".repeat(64)));
-    }
-
-    #[compio::test]
-    async fn insert_oauth_client_conflict_is_idempotent_if_shape_matches() {
-        let Ok(dsn) = std::env::var("AUTH_DB_URL").or_else(|_| std::env::var("PG_TEST_URL")) else {
-            eprintln!("skipping (no AUTH_DB_URL/PG_TEST_URL)");
-            return;
-        };
-        let (pg, conn) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
-            .await
-            .expect("pg connect");
-        compio::runtime::spawn(async move {
-            let _ = conn.run().await;
-        })
-        .detach();
-        zeroship_auth::store::migrations::migrate(&pg)
-            .await
-            .expect("migrate");
-        pg.execute(
-            "DELETE FROM control.oauth_clients WHERE client_id = $1",
-            &[&BUILDER_CLIENT_ID],
-        )
-        .await
-        .expect("cleanup builder client");
-
-        let cfg = BuilderClientBootstrapConfig {
-            enabled: true,
-            hydra_admin_url: "http://127.0.0.1:4445".to_string(),
-            redirect_uri: DEFAULT_BUILDER_REDIRECT_URI.to_string(),
-            client_secret_path: std::env::temp_dir().join("unused-builder-secret"),
-        };
-
-        assert!(
-            insert_oauth_client(&pg, &cfg).await.expect("first insert"),
-            "first insert should create the local builder row"
-        );
-        assert!(
-            !insert_oauth_client(&pg, &cfg).await.expect("second insert"),
-            "second insert should be an idempotent conflict"
-        );
-        assert!(
-            expected_oauth_client_present(&pg, &cfg)
-                .await
-                .expect("expected shape"),
-            "existing local builder row should match the trusted shape"
-        );
-
-        pg.execute(
-            "DELETE FROM control.oauth_clients WHERE client_id = $1",
-            &[&BUILDER_CLIENT_ID],
-        )
-        .await
-        .ok();
     }
 }
