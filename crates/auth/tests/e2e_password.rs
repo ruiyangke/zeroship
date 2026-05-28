@@ -124,6 +124,8 @@ async fn e2e_password_flow() {
         mail_from_email: "test@zeroship.test".to_string(),
         mail_from_name: "Test".to_string(),
         public_url: "http://localhost:0".to_string(),
+        postmark_webhook_user: None,
+        postmark_webhook_password: None,
     });
 
     // 2. Boot the auth server via `ntex::web::test::server` — runs the

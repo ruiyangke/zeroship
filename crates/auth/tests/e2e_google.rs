@@ -165,6 +165,8 @@ async fn google_federation_creates_new_user() {
         mail_from_email: "test@zeroship.test".to_string(),
         mail_from_name: "Test".to_string(),
         public_url: "http://localhost:0".to_string(),
+        postmark_webhook_user: None,
+        postmark_webhook_password: None,
     });
     let google_jwks = Arc::new(JwksCache::new(&cfg.google_jwks_url));
 

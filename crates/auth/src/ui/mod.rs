@@ -21,6 +21,7 @@ pub mod oauth_stash;
 pub mod reset;
 pub mod signup;
 pub mod verify;
+pub mod webhooks;
 
 use askama::Template;
 

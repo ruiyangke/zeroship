@@ -211,6 +211,20 @@ pub struct AuthConfig {
         default_value = "http://localhost:9092"
     )]
     pub public_url: String,
+
+    // ─── Postmark webhook (bounce/complaint receiver, P5-U7) ─────────────
+    /// HTTP Basic-auth username Postmark must present on every
+    /// `POST /webhooks/postmark` request. Configured per-server in the
+    /// Postmark dashboard's webhook settings. When unset, the webhook
+    /// handler responds with 401 so misrouted traffic doesn't silently
+    /// succeed.
+    #[arg(long, env = "AUTH_POSTMARK_WEBHOOK_USER")]
+    pub postmark_webhook_user: Option<String>,
+
+    /// HTTP Basic-auth password paired with [`Self::postmark_webhook_user`].
+    /// See that field for the rationale.
+    #[arg(long, env = "AUTH_POSTMARK_WEBHOOK_PASSWORD")]
+    pub postmark_webhook_password: Option<String>,
 }
 
 impl AuthConfig {

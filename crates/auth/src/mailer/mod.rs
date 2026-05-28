@@ -11,6 +11,7 @@
 //! mechanically enforceable: the suppression check is a SQL query, so the
 //! trait demands a connection handle alongside the message.
 
+pub mod bounce;
 pub mod resend;
 pub mod smtp;
 pub mod stdout;

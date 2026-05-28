@@ -101,6 +101,15 @@ pub fn configure(
                 web::resource("/reset")
                     .route(web::get().to(ui::reset::get))
                     .route(web::post().to(ui::reset::post)),
+            )
+            // Postmark bounce/complaint webhook (P5-U7). Always
+            // registered — the handler 401s when
+            // `postmark_webhook_user`/`postmark_webhook_password`
+            // aren't configured so misrouted traffic doesn't silently
+            // succeed in dev. SES-SNS is deferred to Phase 6.
+            .service(
+                web::resource("/webhooks/postmark")
+                    .route(web::post().to(ui::webhooks::postmark)),
             );
 
         if google_enabled {
