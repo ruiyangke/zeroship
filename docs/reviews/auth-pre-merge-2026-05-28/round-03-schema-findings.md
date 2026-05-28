@@ -197,3 +197,19 @@ CREATE TABLE auth.users (id UUID PRIMARY KEY DEFAULT gen_random_uuid());
 - `control.permission_tokens`: PAT validation and revoke paths are primary-key driven; the owner list index gap is covered in H2.
 - `usage`, `app_vars`, `app_secrets`, and `app_env_expose`: current predicates are covered by composite primary keys.
 - `app_audit` and `payouts`: current read paths have covering app/creator time indexes, aside from the ledger CHECK constraints noted above.
+
+## Status
+
+CLOSED:
+- H1 — `329d5aa8` audit R3.H1: cascade auth session user deletion
+- H2 — `3ff078f6` audit R3.H2: add auth hot path indexes
+- H3 — `165d84d9` audit R3.H3: enforce one active auth token
+- H4 — `2ba89d45` audit R3.H4: serialize stripe relink history
+- H5 — `dd9c3a50` audit R3.H5: make builder oauth bootstrap idempotent
+- M1 — `5a2ca2cf` audit R3.M1: qualify control schema tables
+- M2 — `bfc1f0f6` audit R3.M2: enforce payout ledger checks
+- M4 — `a1a9f04c` audit R3.M4: index auth token sweeps
+- L1 — `6eebd137` audit R3.L1: tighten auth migration idempotency
+
+DEFERRED:
+- M3 — Creator/app ownership FKs. `control.app_members` is currently created by auth migrations, while its intended parent `control.apps` is created by control registry migrations. Adding the FK in auth would require duplicating or moving `control.apps` DDL across crate ownership boundaries. Defer until the authorization/control migration ownership is consolidated.
