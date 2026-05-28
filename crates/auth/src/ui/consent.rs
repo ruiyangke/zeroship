@@ -261,6 +261,7 @@ async fn grantor_can_grant_requested_scopes(
         let ctx = AuthzContext {
             principal_id,
             token_id: None,
+            token_policy: None,
             action: scope.action(),
             resource: Resource::Any,
             request_ip: None,

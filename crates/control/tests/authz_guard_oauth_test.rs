@@ -242,6 +242,7 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         oidc_rp,
         auth_pg: Arc::new(auth_pg_client),
+        hydra_admin_url: hydra.base.clone(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
