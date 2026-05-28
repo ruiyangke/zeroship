@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import type { ReactNode } from "react";
 import { Button, Input, Tooltip } from "../components";
 
@@ -8,6 +9,12 @@ import { Button, Input, Tooltip } from "../components";
  * concern so we never forget the Provider in a story. */
 function Wrap({ children }: { children: ReactNode }) {
   return <Tooltip.Provider>{children}</Tooltip.Provider>;
+}
+
+function pause(ms: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 const meta: Meta<typeof Tooltip> = {
@@ -58,6 +65,18 @@ export const Basic: Story = {
       </div>
     </Wrap>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /tooltip basic/i });
+
+    await userEvent.hover(trigger);
+    await expect(await body.findByText("Quick label")).toBeInTheDocument();
+    await userEvent.unhover(trigger);
+    await waitFor(() =>
+      expect(body.queryByText("Quick label")).not.toBeInTheDocument(),
+    );
+  },
 };
 
 /* ─── 2. WithDelay ──────────────────────────────────────────────────── */
@@ -95,6 +114,16 @@ export const WithDelay: Story = {
       </div>
     </Wrap>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", {
+      name: /tooltip delay 200ms/i,
+    });
+
+    await userEvent.hover(trigger);
+    await expect(await body.findByText("Opens after 200ms")).toBeInTheDocument();
+  },
 };
 
 /* ─── 3. WithArrow ──────────────────────────────────────────────────── */
@@ -133,6 +162,17 @@ export const WithArrow: Story = {
       </div>
     </Wrap>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /tooltip with arrow/i });
+
+    await userEvent.hover(trigger);
+    await expect(await body.findByText("With arrow pointer")).toBeInTheDocument();
+    await expect(
+      canvasElement.ownerDocument.body.querySelector(".zs-tooltip-arrow"),
+    ).toBeInTheDocument();
+  },
 };
 
 /* ─── 4. PlacementSide ──────────────────────────────────────────────── */
@@ -182,6 +222,26 @@ export const PlacementSide: Story = {
       </div>
     </Wrap>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    for (const side of ["top", "right", "bottom", "left"]) {
+      const trigger = canvas.getByRole("button", {
+        name: new RegExp(`tooltip ${side}`, "i"),
+      });
+      await userEvent.hover(trigger);
+      await expect(
+        await body.findByText(new RegExp(`${side} side`, "i")),
+      ).toBeInTheDocument();
+      await userEvent.unhover(trigger);
+      await waitFor(() =>
+        expect(
+          body.queryByText(new RegExp(`${side} side`, "i")),
+        ).not.toBeInTheDocument(),
+      );
+    }
+  },
 };
 
 /* ─── 5. OnFocusable ────────────────────────────────────────────────── */
@@ -230,6 +290,23 @@ export const OnFocusable: Story = {
       </div>
     </Wrap>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const previous = canvas.getByRole("textbox", { name: /previous input/i });
+    const trigger = canvas.getByRole("button", {
+      name: /tooltip on focusable/i,
+    });
+
+    await userEvent.tab();
+    await expect(previous).toHaveFocus();
+    await userEvent.tab();
+    await expect(trigger).toHaveFocus();
+    await expect(
+      await body.findByText("Visible on keyboard focus"),
+    ).toBeInTheDocument();
+    await expect(trigger.getAttribute("aria-describedby") ?? "").not.toBe("");
+  },
 };
 
 /* ─── 6. RichContent ────────────────────────────────────────────────── */
@@ -268,6 +345,15 @@ export const RichContent: Story = {
       </div>
     </Wrap>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /tooltip rich content/i });
+
+    await userEvent.hover(trigger);
+    await expect(await body.findByText(/heads up:/i)).toBeInTheDocument();
+    await expect(body.getByText(/cannot be undone/i)).toBeInTheDocument();
+  },
 };
 
 /* ─── 7. Disabled ───────────────────────────────────────────────────── */
@@ -305,6 +391,82 @@ export const Disabled: Story = {
       </div>
     </Wrap>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /tooltip disabled/i });
+
+    await userEvent.hover(trigger);
+    await pause(250);
+    await expect(
+      body.queryByText("This should never appear."),
+    ).not.toBeInTheDocument();
+    await userEvent.click(trigger);
+    await expect(trigger).toHaveFocus();
+  },
+};
+
+/* ─── 9. Composed describedby + custom arrow ───────────────────────── */
+export const ComposedDescribedBy: Story = {
+  name: "Composed describedby + custom arrow",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Consumer aria-describedby composes with Tooltip's popup id, " +
+          "and Tooltip.Arrow accepts custom children instead of the " +
+          "default glyph.",
+      },
+    },
+  },
+  render: () => (
+    <Wrap>
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Composed tooltip describedby"
+      >
+        <span id="tooltip-external-description" className="zs-story-label">
+          External trigger description
+        </span>
+        <Tooltip delay={0}>
+          <Tooltip.Trigger
+            aria-describedby="tooltip-external-description"
+            render={
+              <Button aria-label="Tooltip composed describedby">
+                Composed
+              </Button>
+            }
+          />
+          <Tooltip.Portal>
+            <Tooltip.Popup side="bottom" align="start">
+              <Tooltip.Arrow>
+                <span aria-hidden="true">^</span>
+              </Tooltip.Arrow>
+              Composed tooltip body
+            </Tooltip.Popup>
+          </Tooltip.Portal>
+        </Tooltip>
+      </div>
+    </Wrap>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", {
+      name: /tooltip composed describedby/i,
+    });
+
+    const describedBy = trigger.getAttribute("aria-describedby") ?? "";
+    await expect(describedBy).toContain("tooltip-external-description");
+    await expect(describedBy.split(/\s+/).length).toBeGreaterThan(1);
+
+    await userEvent.hover(trigger);
+    await expect(
+      await body.findByText("Composed tooltip body"),
+    ).toBeInTheDocument();
+    await expect(body.getByText("^")).toBeInTheDocument();
+  },
 };
 
 /* ─── 8. RTL ────────────────────────────────────────────────────────── */

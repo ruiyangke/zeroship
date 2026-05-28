@@ -1,4 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
+import { useState } from "react";
 import { Button, Dialog, Popover } from "../components";
 
 const meta: Meta<typeof Popover> = {
@@ -40,6 +42,17 @@ export const Basic: Story = {
       </Popover>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /open popover/i }));
+    await expect(await body.findByRole("dialog")).toHaveTextContent(
+      "A short helper hint anchored below the trigger.",
+    );
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(body.queryByRole("dialog")).not.toBeInTheDocument());
+  },
 };
 
 /* ─── 2. WithTitleDescription ───────────────────────────────────────── */
@@ -75,6 +88,18 @@ export const WithTitleDescription: Story = {
       </Popover>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /show details/i }));
+    const dialog = await body.findByRole("dialog", {
+      name: /account settings/i,
+    });
+    await expect(dialog).toHaveTextContent(
+      /configure how the platform handles deploys/i,
+    );
+  },
 };
 
 /* ─── 3. WithArrow ──────────────────────────────────────────────────── */
@@ -111,6 +136,17 @@ export const WithArrow: Story = {
       </Popover>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open with arrow/i }),
+    );
+    const dialog = await body.findByRole("dialog", { name: /tip/i });
+    await expect(dialog).toHaveTextContent(/relationship reads/i);
+    await expect(dialog.querySelector(".zs-popover-arrow")).toBeInTheDocument();
+  },
 };
 
 /* ─── 4. WithBackdrop ───────────────────────────────────────────────── */
@@ -148,6 +184,23 @@ export const WithBackdrop: Story = {
       </Popover>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open modal popover/i }),
+    );
+    await expect(
+      await body.findByRole("dialog", { name: /confirm change/i }),
+    ).toBeInTheDocument();
+    await userEvent.click(body.getByRole("button", { name: /got it/i }));
+    await waitFor(() =>
+      expect(
+        body.queryByRole("dialog", { name: /confirm change/i }),
+      ).not.toBeInTheDocument(),
+    );
+  },
 };
 
 /* ─── 5. WithClose ──────────────────────────────────────────────────── */
@@ -184,6 +237,23 @@ export const WithClose: Story = {
       </Popover>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open with close/i }),
+    );
+    await expect(
+      await body.findByRole("dialog", { name: /quick action/i }),
+    ).toBeInTheDocument();
+    await userEvent.click(body.getByRole("button", { name: /^close$/i }));
+    await waitFor(() =>
+      expect(
+        body.queryByRole("dialog", { name: /quick action/i }),
+      ).not.toBeInTheDocument(),
+    );
+  },
 };
 
 /* ─── 6. PlacementSide ──────────────────────────────────────────────── */
@@ -233,6 +303,25 @@ export const PlacementSide: Story = {
       ))}
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    for (const side of ["top", "right", "bottom", "left"]) {
+      await userEvent.click(
+        canvas.getByRole("button", { name: new RegExp(`open ${side}`, "i") }),
+      );
+      await expect(
+        await body.findByText(new RegExp(`anchored to the ${side} side`, "i")),
+      ).toBeInTheDocument();
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() =>
+        expect(
+          body.queryByText(new RegExp(`anchored to the ${side} side`, "i")),
+        ).not.toBeInTheDocument(),
+      );
+    }
+  },
 };
 
 /* ─── 7. AlignStartCenterEnd ────────────────────────────────────────── */
@@ -281,6 +370,16 @@ export const AlignStartCenterEnd: Story = {
       ))}
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /align start/i }));
+    await expect(
+      await body.findByText(/align="start" on the trigger axis/i),
+    ).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+  },
 };
 
 /* ─── 8. NestedInDialog ─────────────────────────────────────────────── */
@@ -346,6 +445,26 @@ export const NestedInDialog: Story = {
       </Dialog>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /open dialog/i }));
+    await expect(
+      await body.findByRole("dialog", { name: /dialog with nested popover/i }),
+    ).toBeInTheDocument();
+    await userEvent.click(body.getByRole("button", { name: /open popover/i }));
+    await expect(
+      await body.findByRole("dialog", { name: /^nested$/i }),
+    ).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByRole("dialog", { name: /^nested$/i })).not.toBeInTheDocument(),
+    );
+    await expect(
+      body.getByRole("dialog", { name: /dialog with nested popover/i }),
+    ).toBeInTheDocument();
+  },
 };
 
 /* ─── 9. Disabled ───────────────────────────────────────────────────── */
@@ -384,6 +503,15 @@ export const Disabled: Story = {
       </Popover>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByRole("button", { name: /disabled/i });
+
+    await expect(trigger).toBeDisabled();
+    await userEvent.click(trigger);
+    await expect(body.queryByRole("dialog")).not.toBeInTheDocument();
+  },
 };
 
 /* ─── 10. RTL ───────────────────────────────────────────────────────── */
@@ -424,4 +552,84 @@ export const Rtl: Story = {
       </Popover>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /פתח חלון/i }));
+    await expect(
+      await body.findByRole("dialog", { name: /הגדרות/i }),
+    ).toBeInTheDocument();
+  },
+};
+
+/* ─── 11. Close asChild composition ────────────────────────────────── */
+export const CloseAsChildComposition: Story = {
+  name: "Close asChild composition",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Two asChild close paths: a native button whose caller onClick " +
+          "prevents dismissal, and a link that lets Base UI's close " +
+          "handler proceed.",
+      },
+    },
+  },
+  render: function CloseAsChildCompositionRender() {
+    const [prevented, setPrevented] = useState(false);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Close asChild">
+        <Popover>
+          <Popover.Trigger render={<Button>Open child close</Button>} />
+          <Popover.Portal>
+            <Popover.Popup>
+              <Popover.Title>Child close</Popover.Title>
+              <Popover.Description>
+                Custom elements receive the close behavior through Slot.
+              </Popover.Description>
+              <Popover.Close
+                asChild
+                onClick={(event) => {
+                  event.preventDefault();
+                  setPrevented(true);
+                }}
+              >
+                <button type="button">Keep open</button>
+              </Popover.Close>
+              <Popover.Close asChild>
+                <a href="#popover-child-closed">Close link</a>
+              </Popover.Close>
+              <span style={{ fontSize: "0.8125rem" }}>
+                prevented: {prevented ? "yes" : "no"}
+              </span>
+            </Popover.Popup>
+          </Popover.Portal>
+        </Popover>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /open child close/i }),
+    );
+    await expect(
+      await body.findByRole("dialog", { name: /child close/i }),
+    ).toBeInTheDocument();
+    await userEvent.click(body.getByRole("button", { name: /keep open/i }));
+    await expect(body.getByText("prevented: yes")).toBeInTheDocument();
+    await expect(
+      body.getByRole("dialog", { name: /child close/i }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(body.getByRole("link", { name: /close link/i }));
+    await waitFor(() =>
+      expect(
+        body.queryByRole("dialog", { name: /child close/i }),
+      ).not.toBeInTheDocument(),
+    );
+  },
 };

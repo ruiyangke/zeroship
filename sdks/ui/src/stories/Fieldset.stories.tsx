@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, userEvent, waitFor, within } from "@storybook/test";
 import {
   Button,
   Checkbox,
@@ -49,6 +50,15 @@ export const BasicWithLegend: Story = {
       </Fieldset>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const fieldset = canvas.getByRole("group", { name: /mailing address/i });
+    const street = canvas.getByRole("textbox", { name: /street/i });
+
+    await expect(fieldset.tagName).toBe("FIELDSET");
+    await userEvent.type(street, "42 Launch Way");
+    await expect(street).toHaveValue("42 Launch Way");
+  },
 };
 
 /* ─── 2. All sizes ────────────────────────────────────────────────── */
@@ -71,6 +81,14 @@ export const AllSizes: Story = {
       ))}
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    for (const size of ["sm", "md", "lg"]) {
+      await expect(
+        canvas.getByRole("group", { name: new RegExp(`size ${size}`, "i") }),
+      ).toBeInTheDocument();
+    }
+  },
 };
 
 /* ─── 3. Nested Fields ────────────────────────────────────────────── */
@@ -159,6 +177,26 @@ export const DisabledCascade: Story = {
       </Fieldset>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const email = canvas.getByRole("textbox", { name: /^email$/i });
+    const phone = canvas.getByRole("textbox", { name: /^phone$/i });
+    const checkbox = canvas.getByRole("checkbox", {
+      name: /subscribe to newsletter/i,
+    });
+    const notifications = canvas.getByRole("switch", {
+      name: /notifications/i,
+    });
+    const button = canvas.getByRole("button", { name: /locked button/i });
+
+    await expect(email).toBeDisabled();
+    await expect(phone).toBeDisabled();
+    await expect(checkbox).toHaveAttribute("aria-disabled", "true");
+    await expect(notifications).toHaveAttribute("aria-disabled", "true");
+    await expect(button).toBeDisabled();
+    await userEvent.click(checkbox);
+    await expect(checkbox).toHaveAttribute("aria-checked", "false");
+  },
 };
 
 /* ─── 5. With Form integration ────────────────────────────────────── */
@@ -210,6 +248,20 @@ export const WithFormIntegration: Story = {
       </Button>
     </Form>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const password = canvas.getByLabelText(/password/i);
+    await userEvent.type(password, "short");
+    await userEvent.click(
+      canvas.getByRole("button", { name: /create account/i }),
+    );
+    await waitFor(() =>
+      expect(password).toHaveAttribute("aria-invalid", "true"),
+    );
+    await expect(
+      canvas.getByText("Use at least 8 characters."),
+    ).toBeInTheDocument();
+  },
 };
 
 /* ─── 6. Nested Fieldset ──────────────────────────────────────────── */
@@ -254,6 +306,22 @@ export const NestedFieldset: Story = {
       </Fieldset>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("group", { name: /payment method/i }),
+    ).toBeInTheDocument();
+    await expect(
+      canvas.getByRole("group", { name: /card details/i }),
+    ).toBeInTheDocument();
+    await userEvent.type(
+      canvas.getByRole("textbox", { name: /cardholder name/i }),
+      "Ada Lovelace",
+    );
+    await expect(
+      canvas.getByRole("textbox", { name: /cardholder name/i }),
+    ).toHaveValue("Ada Lovelace");
+  },
 };
 
 /* ─── 7. Custom legend position (bottom) ──────────────────────────── */

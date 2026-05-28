@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect, within } from "@storybook/test";
 import { Meter, meterStatus } from "../components";
 
 const meta: Meta<typeof Meter> = {
@@ -36,6 +37,14 @@ export const Basic: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const meter = canvas.getByRole("meter", { name: /disk usage/i });
+
+    await expect(meter).toHaveAttribute("aria-valuemin", "0");
+    await expect(meter).toHaveAttribute("aria-valuemax", "100");
+    await expect(meter).toHaveAttribute("aria-valuenow", "60");
+  },
 };
 
 /* ─── 2. AllIntents — 4 colors at the same value ──────────────────── */
@@ -96,6 +105,14 @@ export const AllIntents: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    for (const intent of ["neutral", "success", "warning", "danger"]) {
+      await expect(
+        canvas.getByRole("meter", { name: new RegExp(`${intent} meter`, "i") }),
+      ).toHaveAttribute("data-intent", intent);
+    }
+  },
 };
 
 /* ─── 3. AllSizes — sm / md / lg ───────────────────────────────────── */
@@ -137,6 +154,13 @@ export const AllSizes: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const meter = canvas.getByRole("meter", { name: /storage used/i });
+
+    await expect(meter).toHaveAttribute("aria-valuenow", "72");
+    await expect(canvas.getByText("72%")).toBeInTheDocument();
+  },
 };
 
 /* ─── 4. WithValue — label + percent ───────────────────────────────── */
@@ -208,6 +232,23 @@ export const Ranges: Story = {
       </div>
     );
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await expect(meterStatus(15)).toBe("danger");
+    await expect(meterStatus(50)).toBe("warning");
+    await expect(meterStatus(85)).toBe("success");
+    await expect(meterStatus(10, 10, 10)).toBe("neutral");
+    await expect(
+      canvas.getByRole("meter", { name: /battery \(danger\)/i }),
+    ).toHaveAttribute("data-intent", "danger");
+    await expect(
+      canvas.getByRole("meter", { name: /battery \(warning\)/i }),
+    ).toHaveAttribute("data-intent", "warning");
+    await expect(
+      canvas.getByRole("meter", { name: /battery \(success\)/i }),
+    ).toHaveAttribute("data-intent", "success");
+  },
 };
 
 /* ─── 6. Disabled ──────────────────────────────────────────────────── */
@@ -237,6 +278,60 @@ export const Disabled: Story = {
       </div>
     </div>
   ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const meter = canvas.getByRole("meter", { name: /signal/i });
+
+    await expect(meter).toHaveAttribute("aria-valuenow", "42");
+    await expect(meter).toHaveAttribute("aria-disabled", "true");
+  },
+};
+
+/* ─── 8. External aria labelling ───────────────────────────────────── */
+export const ExternalAriaLabelling: Story = {
+  name: "External aria labelling",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "External aria-labelledby and aria-describedby forwarded " +
+          "directly to the meter root while showValue renders the " +
+          "standalone numeric badge.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Meter external aria">
+      <div className="zs-story-cell" style={{ inlineSize: "24rem" }}>
+        <span id="meter-incidents-label" className="zs-story-label">
+          Incident budget
+        </span>
+        <span id="meter-incidents-description" style={{ fontSize: "0.8125rem" }}>
+          Current incidents out of the weekly cap.
+        </span>
+        <Meter
+          value={3}
+          min={0}
+          max={5}
+          showValue
+          aria-labelledby="meter-incidents-label"
+          aria-describedby="meter-incidents-description"
+          aria-valuetext="Three of five incidents"
+        />
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const meter = canvas.getByRole("meter", { name: /incident budget/i });
+
+    await expect(meter).toHaveAttribute("aria-valuenow", "3");
+    await expect(meter).toHaveAttribute("aria-valuetext", "Three of five incidents");
+    await expect(meter).toHaveAttribute(
+      "aria-describedby",
+      "meter-incidents-description",
+    );
+  },
 };
 
 /* ─── 7. RTL ──────────────────────────────────────────────────────── */
