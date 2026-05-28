@@ -17,6 +17,19 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_HYDRA_ADMIN", default_value = "http://127.0.0.1:4445")]
     pub hydra_admin: String,
 
+    /// Permit a non-loopback Hydra admin URL. Production deployments that
+    /// enable this must protect Hydra admin externally with mTLS, firewall
+    /// rules, or equivalent network policy.
+    #[arg(
+        long,
+        env = "AUTH_ALLOW_REMOTE_HYDRA_ADMIN",
+        action = clap::ArgAction::Set,
+        default_value_t = false,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub allow_remote_hydra_admin: bool,
+
     /// Hydra public base URL (issuer).
     #[arg(long, env = "AUTH_HYDRA_PUBLIC", default_value = "https://auth.zeroship.ai")]
     pub hydra_public: String,
@@ -336,5 +349,29 @@ mod tests {
         cfg.stash_signing_key = "0123456789abcdef0123456789abcdef".to_string();
 
         assert!(validate_stash_key(&cfg).is_ok());
+    }
+
+    #[test]
+    fn allow_remote_hydra_admin_flag_accepts_bare_switch() {
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--allow-remote-hydra-admin",
+        ]);
+
+        assert!(cfg.allow_remote_hydra_admin);
+    }
+
+    #[test]
+    fn allow_remote_hydra_admin_flag_accepts_true_value() {
+        let cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--allow-remote-hydra-admin=true",
+        ]);
+
+        assert!(cfg.allow_remote_hydra_admin);
     }
 }

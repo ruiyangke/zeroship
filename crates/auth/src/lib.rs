@@ -14,4 +14,5 @@ pub mod ratelimit;
 pub mod server;
 pub mod sessions;
 pub mod store;
+pub mod startup_validation;
 pub mod ui;
