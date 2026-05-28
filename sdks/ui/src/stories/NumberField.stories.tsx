@@ -352,7 +352,144 @@ function RequiredInvalidInline() {
   );
 }
 
-/* ─── 10. RTL ──────────────────────────────────────────────────────── */
+/* ─── 10. Aria propagation regression (Slice-7 review item 2) ──────── */
+export const AriaPropagation: Story = {
+  name: "Aria propagation (aria-describedby)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the Slice-7 review: `aria-describedby` must " +
+          "land on the focusable <input> (the spinbutton), not the Root " +
+          "wrapper div. The aria-wiring suite asserts the inner input " +
+          "carries the caller's id so a screen reader announces the " +
+          "external help text against the value-emitting element.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Aria propagation"
+    >
+      <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
+        <span id="numberfield-aria-help" className="zs-story-label">
+          Min 0, max 100, step 1.
+        </span>
+        <NumberField
+          defaultValue={50}
+          aria-label="Quantity"
+          aria-describedby="numberfield-aria-help"
+          data-testid="numberfield-aria-prop"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 11. Bare focus ring (Slice-7 review item 1) ──────────────────── */
+export const BareFocus: Story = {
+  name: "Bare focus ring",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Bare (Field-less) NumberField — the focus ring must light " +
+          "the shell. Pre-fix Base UI's `data-focused` only fired inside " +
+          "Field.Root because the default field context's `setFocused` " +
+          "is NOOP; we now stamp `data-focused` via the Root's render " +
+          "callback. The aria-wiring suite focuses the input and " +
+          "asserts the attribute is present on the Root.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Bare focus">
+      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+        <NumberField
+          defaultValue={42}
+          aria-label="Quantity"
+          data-testid="numberfield-bare-focus"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 12. Forced-colors hover (Slice-7 review item 3) ──────────────── */
+export const ForcedColorsHover: Story = {
+  name: "Forced-colors hover",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Hover assertion under `prefers-forced-colors: active`. The " +
+          "aria-wiring suite hovers the group and asserts the computed " +
+          "background resolves to a system color (Field), not an oklch " +
+          "token mix — catches Slice 5/6 specificity regressions where a " +
+          "variant or per-state rule outranks the forced-colors reset.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Forced-colors hover"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
+    >
+      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+        <span className="zs-story-label">Default variant</span>
+        <NumberField
+          variant="default"
+          defaultValue={50}
+          aria-label="Default forced-colors"
+          data-testid="numberfield-forced-default"
+        />
+      </div>
+      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+        <span className="zs-story-label">Outline variant</span>
+        <NumberField
+          variant="outline"
+          defaultValue={50}
+          aria-label="Outline forced-colors"
+          data-testid="numberfield-forced-outline"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 13. Coarse pointer hit-target (Slice-7 review item 4) ────────── */
+export const CoarsePointer: Story = {
+  name: "Coarse pointer hit-target",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Under `pointer: coarse` the stepper buttons grow to the " +
+          "Apple HIG floor (44 device-units ≈ `--zs-hit-min`) on BOTH " +
+          "axes so a finger lands. The aria-wiring suite emulates a " +
+          "coarse pointer and asserts the button's bounding rect ≥ " +
+          "2.75rem in inline and block.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Coarse pointer">
+      <div className="zs-story-cell" style={{ maxWidth: "16rem" }}>
+        <NumberField
+          defaultValue={42}
+          aria-label="Coarse quantity"
+          data-testid="numberfield-coarse"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 14. RTL ──────────────────────────────────────────────────────── */
 export const RTL: Story = {
   name: "RTL",
   parameters: {

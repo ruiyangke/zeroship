@@ -207,6 +207,10 @@ const stories = [
   "components-numberfield--disabled",
   "components-numberfield--with-label",
   "components-numberfield--required",
+  "components-numberfield--aria-propagation",
+  "components-numberfield--bare-focus",
+  "components-numberfield--forced-colors-hover",
+  "components-numberfield--coarse-pointer",
   "components-numberfield--rtl",
   "components-slider--basic",
   "components-slider--range",
@@ -217,6 +221,9 @@ const stories = [
   "components-slider--disabled",
   "components-slider--with-label",
   "components-slider--vertical",
+  "components-slider--aria-propagation",
+  "components-slider--forced-colors-outline",
+  "components-slider--coarse-pointer",
   "components-slider--rtl",
 ];
 

@@ -27,6 +27,9 @@ const stories = [
   "components-slider--disabled",
   "components-slider--with-label",
   "components-slider--vertical",
+  "components-slider--aria-propagation",
+  "components-slider--forced-colors-outline",
+  "components-slider--coarse-pointer",
   "components-slider--rtl",
 ];
 

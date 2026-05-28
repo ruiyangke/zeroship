@@ -27,6 +27,10 @@ const stories = [
   "components-numberfield--disabled",
   "components-numberfield--with-label",
   "components-numberfield--required",
+  "components-numberfield--aria-propagation",
+  "components-numberfield--bare-focus",
+  "components-numberfield--forced-colors-hover",
+  "components-numberfield--coarse-pointer",
   "components-numberfield--rtl",
 ];
 

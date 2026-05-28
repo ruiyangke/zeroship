@@ -61,8 +61,11 @@
  */
 import {
   forwardRef,
+  useState,
   type AriaAttributes,
   type ComponentPropsWithoutRef,
+  type FocusEvent as ReactFocusEvent,
+  type HTMLAttributes,
   type Ref,
 } from "react";
 import { NumberField as BaseNumberField } from "@base-ui/react/number-field";
@@ -73,6 +76,25 @@ export type NumberFieldSize = "sm" | "md" | "lg";
 export type NumberFieldVariant = "default" | "outline";
 
 type BaseRootProps = ComponentPropsWithoutRef<typeof BaseNumberField.Root>;
+
+/**
+ * Shape of `state` Base UI's NumberField.Root render callback hands us.
+ * Mirrors `NumberFieldRootState` (which extends `FieldRootState`); we
+ * subset to the flags we actually stamp as data-* on the rendered Root.
+ *
+ * Sourced from `@base-ui/react/number-field/root/NumberFieldRoot.d.ts`.
+ * Re-declared here (rather than imported) because Base UI doesn't
+ * publish this as a named export and we only need the read-only shape.
+ */
+type NumberFieldRootRenderState = {
+  disabled: boolean;
+  focused: boolean;
+  filled: boolean;
+  readOnly: boolean;
+  /** `true` valid · `false` invalid · `null` not-yet-validated */
+  valid: boolean | null;
+  scrubbing: boolean;
+};
 
 /* ─── public API ────────────────────────────────────────────────────── */
 
@@ -95,12 +117,15 @@ export interface NumberFieldProps
   /** Class hook for the bordered shell. */
   className?: string;
   /**
-   * `aria-label` / `aria-labelledby` forwarded to the inner <input>
-   * (NOT the Root). Slice-6 Combobox lesson: data-testid and aria-* live
-   * on the actually-focusable element.
+   * `aria-label` / `aria-labelledby` / `aria-describedby` forwarded to
+   * the inner <input> (NOT the Root). Slice-6 Combobox lesson:
+   * data-testid and aria-* live on the actually-focusable element so
+   * screen readers announce help text against the spinbutton, not a
+   * decorative wrapper div.
    */
   "aria-label"?: AriaAttributes["aria-label"];
   "aria-labelledby"?: AriaAttributes["aria-labelledby"];
+  "aria-describedby"?: AriaAttributes["aria-describedby"];
   /** Optional `data-testid` forwarded to the inner <input>. */
   "data-testid"?: string;
   /** Optional `name` attribute forwarded to the form-submitting hidden input. */
@@ -121,6 +146,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
       disabled: disabledProp,
       "aria-label": ariaLabel,
       "aria-labelledby": ariaLabelledBy,
+      "aria-describedby": ariaDescribedBy,
       "data-testid": dataTestId,
       ...rest
     },
@@ -133,20 +159,96 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
     const required = requiredProp ?? fieldCtx?.required ?? false;
     const disabled = disabledProp ?? fieldCtx?.disabled ?? false;
 
+    // ─────────────────────────────────────────────────────────────────
+    // BARE focus tracking.
+    //
+    // Base UI's `NumberField.Root` reads `focused` from
+    // `useFieldRootContext()`. When mounted OUTSIDE a `Field.Root` the
+    // default field context's `setFocused` is NOOP, so `state.focused`
+    // stays `false` regardless of where focus actually lives — meaning
+    // the focus ring never fires for bare (Field-less) usage (the
+    // Slice-7 review finding).
+    //
+    // Mirror what Field.Root would do: track focus via focusin /
+    // focusout on the rendered Root and union with Base UI's state at
+    // render time. When the component IS wrapped in a Field, Base UI's
+    // state.focused will already be true on focus; our local flag is
+    // additive and harmless.
+    const [bareFocused, setBareFocused] = useState(false);
+    const handleFocus = (event: ReactFocusEvent<HTMLDivElement>) => {
+      // React's onFocus bubbles (it's the focusin synthetic), so any
+      // descendant gaining focus flips us on.
+      if (event.currentTarget.contains(event.target)) setBareFocused(true);
+    };
+    const handleBlur = (event: ReactFocusEvent<HTMLDivElement>) => {
+      // focusout-equivalent: relatedTarget is the node receiving focus.
+      // If that's still inside the Root, the focus didn't leave — ignore.
+      const next = event.relatedTarget as Node | null;
+      if (next && event.currentTarget.contains(next)) return;
+      setBareFocused(false);
+    };
+
     return (
       <BaseNumberField.Root
         {...(rest as BaseRootProps)}
         ref={ref as Ref<HTMLDivElement>}
         required={required || undefined}
         disabled={disabled || undefined}
-        className={classnames(
-          "zs-number-field",
-          `zs-number-field--${variant}`,
-          `zs-number-field--${size}`,
-          className,
-        )}
-        data-variant={variant}
-        data-size={size}
+        // ─────────────────────────────────────────────────────────────
+        // Render-callback: stamp data-focused / data-filled / data-invalid
+        // on the Root manually. Base UI emits these from its
+        // `useFieldRootContext()` lookup — when NumberField is mounted
+        // BARE (outside Field.Root), the default context's `setFocused`
+        // is NOOP and `focused` stays `false`, so the focus ring never
+        // fires (Slice-7 review). By accepting Base UI's `state` and
+        // re-stamping the attributes ourselves, the rest-state focus ring
+        // works for bare NumberField (Basic / MinMaxStep / Currency /
+        // ScrubArea stories) as well as Field-wrapped usage.
+        //
+        // Mirrors Input.tsx:234-269. `data-disabled` already lands via
+        // the `disabled={disabled || undefined}` HTML attribute on the
+        // div, but we re-stamp explicitly so the CSS attribute selector
+        // `.zs-number-field[data-disabled]` fires whether disabled
+        // comes from a bare prop, the Field cascade, or Base UI's
+        // internal disabled flow.
+        render={(
+          rootProps: HTMLAttributes<HTMLDivElement>,
+          state: NumberFieldRootRenderState,
+        ) => {
+          // Union Base UI's state (which goes true under Field cascade)
+          // with our local focusin/focusout flag (which goes true under
+          // bare usage). Either path lights the ring.
+          const isFocused = state.focused || bareFocused;
+          const dataFocused = isFocused ? "" : undefined;
+          const dataFilled = state.filled ? "" : undefined;
+          const dataDisabled = state.disabled ? "" : undefined;
+          const dataReadonly = state.readOnly ? "" : undefined;
+          // `valid` is null until the field has been touched/submitted;
+          // surface `data-invalid` only when explicitly false so the
+          // styling-only invalid path matches Input's contract.
+          const dataInvalid = state.valid === false ? "" : undefined;
+          return (
+            <div
+              {...rootProps}
+              className={classnames(
+                "zs-number-field",
+                `zs-number-field--${variant}`,
+                `zs-number-field--${size}`,
+                className,
+                rootProps.className,
+              )}
+              data-variant={variant}
+              data-size={size}
+              data-focused={dataFocused}
+              data-filled={dataFilled}
+              data-disabled={dataDisabled}
+              data-readonly={dataReadonly}
+              data-invalid={dataInvalid}
+              onFocus={handleFocus}
+              onBlur={handleBlur}
+            />
+          );
+        }}
       >
         {showScrub ? (
           <BaseNumberField.ScrubArea className="zs-number-field__scrub">
@@ -194,6 +296,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
             placeholder={placeholder}
             aria-label={ariaLabel}
             aria-labelledby={ariaLabelledBy}
+            aria-describedby={ariaDescribedBy}
             data-testid={dataTestId}
           />
           <BaseNumberField.Increment

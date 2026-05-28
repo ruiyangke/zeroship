@@ -220,9 +220,36 @@
   min-inline-size: 2rem;
 }
 
+/* Coarse-pointer hit-target floor (Apple HIG: 44 device-units ≈
+   --zs-hit-min 2.75rem). Pre-fix only inline-size grew, leaving
+   block-size at 2rem/2.5rem — a stylus or finger could land off the
+   target's vertical centre. Slice-7 review item 4: expand BOTH axes
+   under pointer:coarse. The Root grows together via min-block-size on
+   the group so the shell follows the buttons.
+
+   Specificity note: the `--sm` / `--md` / `--lg` size variants above
+   set `min-inline-size` at TWO-class specificity
+   (`.zs-number-field--md .zs-number-field__step`), so the coarse-
+   pointer mirror MUST also be two-class — otherwise the variant rule
+   pins the per-size floor (1.75rem / 2rem) and the HIG floor never
+   applies. We re-emit per variant to match. */
 @media (pointer: coarse) {
-  .zs-number-field__step {
+  .zs-number-field--sm .zs-number-field__step,
+  .zs-number-field--md .zs-number-field__step,
+  .zs-number-field--lg .zs-number-field__step {
     min-inline-size: var(--zs-hit-min);
+    min-block-size: var(--zs-hit-min);
+  }
+  /* The group is the box that owns block-size; relax its fixed size to
+     let the coarse-pointer hit floor on the buttons take precedence
+     (`min-block-size` here is a floor, not a clamp). The native input
+     fills the group via flex stretch so it grows in lock-step. Match
+     the variant + size combination's specificity for the same reason
+     the step rule does. */
+  .zs-number-field--sm .zs-number-field__group,
+  .zs-number-field--md .zs-number-field__group,
+  .zs-number-field--lg .zs-number-field__group {
+    min-block-size: var(--zs-hit-min);
   }
 }
 
@@ -299,10 +326,20 @@
 
 /* ─── forced-colors / Windows High Contrast ────────────────────────── *
  *
- * Slice 5/6 lesson: every state selector mirrored inside the @media
- * block at EQUAL specificity so the system palette wins the cascade.
- * Without this, the per-state oklch rules above would outrank the bare
- * `.zs-number-field__group` reset and bleed brand color through. */
+ * Slice 5/6 lesson reapplied (Slice-7 review item 3): every non-forced
+ * state selector mirrored inside the @media block at EQUAL specificity
+ * so the system palette wins the cascade. The bare `.zs-number-field__
+ * group` reset is single-class — variant (`--default` / `--outline`)
+ * and per-state (`[data-readonly]`) rules above are double-class and
+ * would otherwise outrank the reset.
+ *
+ * `forced-color-adjust: none` opts the GROUP surface out of automatic
+ * platform re-tinting so the explicit Field / CanvasText / Highlight
+ * mappings below survive Chromium's forced-colors emulation pass. We
+ * keep it on `.zs-number-field__group` and `.zs-number-field__step`
+ * (both have explicit system-token mappings) but NOT on variant
+ * selectors — those should inherit the parent's adjusted paint, not
+ * blanket-lock another color. */
 @media (forced-colors: active) {
   .zs-number-field__group {
     background: Field;
@@ -311,6 +348,19 @@
       inset 0 0 0 0.0625rem CanvasText,
       0 0 0 0 transparent;
     forced-color-adjust: none;
+  }
+  /* Variant mirror — equal-specificity (2 classes) so the `--default`
+     and `--outline` rules above don't paint over the system surface.
+     Both variants collapse to the same Field/CanvasText canvas under
+     forced-colors; the variant distinction is a brand-tone choice that
+     has no equivalent in the system palette. */
+  .zs-number-field--default .zs-number-field__group,
+  .zs-number-field--outline .zs-number-field__group {
+    background: Field;
+    color: FieldText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
   }
   .zs-number-field[data-focused] .zs-number-field__group {
     background: Field;
@@ -328,6 +378,13 @@
       inset 0 0 0 0.0625rem Mark,
       0 0 0 0.125rem Highlight;
   }
+  /* Readonly mirror — the base-block readonly rule
+     (`.zs-number-field[data-readonly] .zs-number-field__group`) is
+     double-spec and would otherwise outrank the single-class reset. */
+  .zs-number-field[data-readonly] .zs-number-field__group {
+    background: Field;
+    color: GrayText;
+  }
   .zs-number-field[data-disabled] .zs-number-field__group {
     color: GrayText;
     box-shadow:
@@ -339,6 +396,15 @@
   }
   .zs-number-field__step {
     color: CanvasText;
+    background-color: Field;
+    forced-color-adjust: none;
+  }
+  /* Per-button-disabled mirror — `.zs-number-field__step[data-disabled]`
+     in the non-forced block is double-spec (class + attribute) and
+     paints `color: var(--zs-label-tertiary)`. Mirror at equal spec so
+     GrayText wins. */
+  .zs-number-field__step[data-disabled] {
+    color: GrayText;
     background-color: Field;
   }
   .zs-number-field[data-disabled] .zs-number-field__step {

@@ -163,15 +163,21 @@
    absolutely-positioned, no pointer-events override so the parent
    absorbs the click). The center anchors via inset:50%; translation
    to negative-half via the margin-inline+margin-block trick so we
-   don't fight Base UI's `transform: scale(...)` on hover/drag. */
+   don't fight Base UI's `transform: scale(...)` on hover/drag.
+   `--zs-slider-hit` defaults to 1.75rem; coarse pointer overrides it
+   to `--zs-hit-min` (2.75rem ≈ Apple HIG 44 device-units) below so
+   a finger lands the thumb. */
+.zs-slider__thumb {
+  --zs-slider-hit: 1.75rem;
+}
 .zs-slider__thumb::after {
   content: "";
   position: absolute;
   inset: 50%;
-  inline-size: 1.75rem;
-  block-size: 1.75rem;
-  margin-inline: -0.875rem;
-  margin-block: -0.875rem;
+  inline-size: var(--zs-slider-hit);
+  block-size: var(--zs-slider-hit);
+  margin-inline: calc(-1 * var(--zs-slider-hit) / 2);
+  margin-block: calc(-1 * var(--zs-slider-hit) / 2);
   border-radius: inherit;
   background: transparent;
 }
@@ -287,6 +293,30 @@
    The hover/drag scale rules above apply to both orientations (transform
    is independent of Base UI's translate property). */
 
+/* ─── Coarse pointer hit-target floor ──────────────────────────────── *
+ *
+ * Slice-7 review item 4: pre-fix the thumb halo was 1.75rem on every
+ * pointer surface — fine for a mouse, undersized for a finger (Apple
+ * HIG floor is 44 device-units ≈ --zs-hit-min 2.75rem). Expand both
+ * the halo via the local custom property AND the control row so the
+ * touch surface gets the full hit floor on coarse devices. The visible
+ * knob stays at its design size; only the transparent ::after grows. */
+@media (pointer: coarse) {
+  .zs-slider__thumb {
+    --zs-slider-hit: var(--zs-hit-min);
+  }
+  .zs-slider__control {
+    min-block-size: var(--zs-hit-min);
+  }
+  .zs-slider--vertical .zs-slider__control {
+    /* Vertical orientation: the control's inline-axis is the cross
+       axis; the brief floor applies to whatever axis the user touches.
+       Grow both so the vertical thumb has a coarse-pointer reachable
+       strip too. */
+    min-inline-size: var(--zs-hit-min);
+  }
+}
+
 /* ─── Reduced motion ───────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .zs-slider__thumb {
@@ -302,10 +332,22 @@
 
 /* ─── forced-colors / Windows High Contrast ────────────────────────── *
  *
- * Slice 5/6 lesson: mirror every state selector at equal specificity so
- * the system palette wins. The aria-wiring suite asserts the thumb's
- * computed background-color is a system color (Highlight) under
- * forced-colors emulation, not an oklch token mix. */
+ * Slice 5/6 lesson reapplied (Slice-7 review item 3): mirror every state
+ * selector at EQUAL specificity so the system palette wins. The bare
+ * `.zs-slider__track / __indicator / __thumb` resets are single-class —
+ * variant rules (`.zs-slider--outline .zs-slider__thumb`) and
+ * per-state-with-variant (`.zs-slider--outline[data-disabled]
+ * .zs-slider__thumb`) above are higher-spec and would otherwise paint
+ * the accent-derived background through. The aria-wiring suite asserts
+ * the thumb's computed background resolves to a system color
+ * (Highlight) under forced-colors emulation, not an oklch token mix.
+ *
+ * `forced-color-adjust: none` stays on the surface-token elements only
+ * (track / thumb / indicator) where we explicitly map system tokens.
+ * Variant mirrors below DO NOT re-declare `forced-color-adjust` —
+ * inheriting the parent's `none` is what we want; re-declaring would
+ * blanket-lock the variant rule from any future user-stylesheet
+ * adjustment. */
 @media (forced-colors: active) {
   .zs-slider__track {
     background: Canvas;
@@ -314,6 +356,7 @@
   }
   .zs-slider__indicator {
     background: Highlight;
+    forced-color-adjust: none;
   }
   .zs-slider__thumb {
     background: Highlight;
@@ -328,8 +371,22 @@
        thumb's solid fill. */
     forced-color-adjust: none;
   }
-  .zs-slider__indicator {
-    forced-color-adjust: none;
+  /* Variant mirror — equal-specificity (2 classes) so the outline-track
+     transparent-background rule doesn't bleed accent-token border
+     through. Under forced-colors both variants collapse to the same
+     Canvas/CanvasText system surface. */
+  .zs-slider--outline .zs-slider__track {
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+  }
+  .zs-slider--outline .zs-slider__indicator {
+    background: Highlight;
+  }
+  .zs-slider--outline .zs-slider__thumb {
+    background: Highlight;
+    box-shadow:
+      0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
   }
   .zs-slider__thumb:focus-within {
     box-shadow:
@@ -341,6 +398,17 @@
     background: GrayText;
   }
   .zs-slider[data-disabled] .zs-slider__thumb {
+    background: GrayText;
+    box-shadow:
+      0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  /* Outline-variant disabled — triple-spec (2 classes + 1 attribute) so
+     mirror at equal spec or higher. Without this the
+     `.zs-slider--outline[data-disabled] .zs-slider__thumb` rule above
+     re-paints with the accent-derived surface-raised background under
+     forced-colors. */
+  .zs-slider--outline[data-disabled] .zs-slider__thumb {
     background: GrayText;
     box-shadow:
       0 0 0 0.0625rem GrayText,

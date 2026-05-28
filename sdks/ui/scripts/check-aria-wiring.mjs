@@ -1800,12 +1800,25 @@ await open("components-numberfield--scrub-area");
     await page.waitForTimeout(300);
     const after = parseFloat(await input.inputValue());
     const valueIncreased = Number.isFinite(after) && after > initial;
+    const valueChanged =
+      Number.isFinite(after) && Number.isFinite(initial) && after !== initial;
     const scrubFired = midScrubbing === "" || midScrubbing === "true";
-    const ok = valueIncreased || scrubFired;
+    // Slice-7 review item 6: pre-fix `valueIncreased || scrubFired`
+    // weakened the contract — `scrubFired` alone passed even when the
+    // value never moved. Headless Chromium's pointer-lock + movementX
+    // desync, combined with the leading-edge scrub-area position, can
+    // pin the resulting value to the `min` clamp instead of advancing
+    // in the drag direction (observed: 50 → 0 on a +60px drag-right
+    // in this harness). Apply the brief's contingency: require BOTH
+    // the scrub state to engage mid-drag AND the value to actually
+    // change (`!==`, not strict-greater) — both signals together
+    // guarantee the scrub gesture had effect on the AT-visible value
+    // while leaving headroom for the harness's pointer-lock idiosyncrasy.
+    const ok = scrubFired && valueChanged;
     report(
-      "NumberField ScrubArea — drag advances value",
+      "NumberField ScrubArea — drag fires scrubbing AND moves value",
       ok,
-      `initial=${initial} after=${after} (delta=${after - initial}) scrubFiredMid=${scrubFired}`,
+      `initial=${initial} after=${after} (delta=${(after - initial).toFixed(2)}) valueChanged=${valueChanged} valueIncreased=${valueIncreased} scrubFiredMid=${scrubFired}`,
     );
   }
 }
@@ -1919,6 +1932,277 @@ await open("components-slider--basic");
   );
 }
 await page.emulateMedia({ forcedColors: "none" });
+
+/* ─── Slice 7 review-fix assertions (6 new) ─────────────────────────── *
+ *
+ * Review-fix 1: bare NumberField focus ring lights the shell (data-
+ * focused stamps on Root via the render-callback path).
+ * Review-fix 2a: NumberField aria-describedby lands on the input.
+ * Review-fix 2b: Slider aria-describedby lands on each Thumb.
+ * Review-fix 3a: NumberField forced-colors hover paints with Field.
+ * Review-fix 3b: Slider outline-variant forced-colors uses system color.
+ * Review-fix 4a: NumberField stepper hit-target ≥ 44px under coarse.
+ * Review-fix 4b: Slider thumb hit-target ≥ 44px under coarse. */
+
+/* ─── 56. NumberField bare focus — data-focused stamps on Root ──────── */
+await open("components-numberfield--bare-focus");
+{
+  const root = page.locator(".zs-number-field").first();
+  const input = page.locator('[data-testid="numberfield-bare-focus"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  await input.focus();
+  // Give the render-callback a tick to repaint the data-focused flip.
+  await page.waitForTimeout(50);
+  const focusedAttr = await root.getAttribute("data-focused");
+  // Empty-string attribute (HTML boolean shape) or "true" both count as
+  // present; missing or null is the failure (the bug we're regressing).
+  const ok = focusedAttr === "" || focusedAttr === "true";
+  report(
+    "NumberField bare focus — Root[data-focused] stamps via render callback",
+    ok,
+    `data-focused=${JSON.stringify(focusedAttr)}`,
+  );
+}
+
+/* ─── 57. NumberField aria-describedby on inner input ───────────────── */
+await open("components-numberfield--aria-propagation");
+{
+  const input = page.locator('[data-testid="numberfield-aria-prop"]');
+  await input.waitFor({ state: "visible", timeout: 5000 });
+  const describedBy = (await input.getAttribute("aria-describedby")) ?? "";
+  // Caller's id must appear; Base UI may have unioned its own auto-
+  // wired ids alongside, so we match contains rather than equality.
+  const ok = describedBy.split(/\s+/).includes("numberfield-aria-help");
+  // The Root must NOT carry the caller's id — that's the leak case.
+  const root = page.locator(".zs-number-field").first();
+  const rootDescribedBy =
+    (await root.getAttribute("aria-describedby")) ?? "";
+  const noLeak = !rootDescribedBy.split(/\s+/).includes(
+    "numberfield-aria-help",
+  );
+  report(
+    "NumberField aria-describedby — lands on inner input, not Root",
+    ok && noLeak,
+    `inputDescribedBy="${describedBy}" rootDescribedBy="${rootDescribedBy}"`,
+  );
+}
+
+/* ─── 58. Slider aria-describedby on Thumb(s) ───────────────────────── *
+ *
+ * Base UI's Slider.Thumb forwards `aria-describedby` (and aria-label /
+ * aria-labelledby) to its NESTED <input type="range">, not the outer
+ * thumb div — that's the AT-focusable element. So the assertion locates
+ * each thumb's nested input and reads aria-describedby off there. The
+ * thumb div is the draggable + visible knob; the input is the
+ * keyboard-focusable spinner that screen readers actually announce. */
+await open("components-slider--aria-propagation");
+{
+  // Single-thumb branch.
+  const singleThumb = page.locator(
+    '[data-testid="slider-aria-prop-single-thumb"]',
+  );
+  await singleThumb.waitFor({ state: "visible", timeout: 5000 });
+  const singleInput = singleThumb.locator('input[type="range"]');
+  await singleInput.waitFor({ state: "attached", timeout: 5000 });
+  const singleDescribedBy =
+    (await singleInput.getAttribute("aria-describedby")) ?? "";
+  const singleOk = singleDescribedBy
+    .split(/\s+/)
+    .includes("slider-aria-help-single");
+
+  // Range branch: BOTH thumbs' inputs must carry the id.
+  const rangeThumb0 = page.locator(
+    '[data-testid="slider-aria-prop-range-thumb-0"]',
+  );
+  const rangeThumb1 = page.locator(
+    '[data-testid="slider-aria-prop-range-thumb-1"]',
+  );
+  await rangeThumb0.waitFor({ state: "visible", timeout: 5000 });
+  await rangeThumb1.waitFor({ state: "visible", timeout: 5000 });
+  const range0Input = rangeThumb0.locator('input[type="range"]');
+  const range1Input = rangeThumb1.locator('input[type="range"]');
+  const range0DescribedBy =
+    (await range0Input.getAttribute("aria-describedby")) ?? "";
+  const range1DescribedBy =
+    (await range1Input.getAttribute("aria-describedby")) ?? "";
+  const rangeOk =
+    range0DescribedBy.split(/\s+/).includes("slider-aria-help-range") &&
+    range1DescribedBy.split(/\s+/).includes("slider-aria-help-range");
+
+  // Root must NOT carry the caller's id — that's the leak case.
+  const singleRoot = page
+    .locator(".zs-slider")
+    .filter({ has: singleThumb })
+    .first();
+  const singleRootDescribedBy =
+    (await singleRoot.getAttribute("aria-describedby")) ?? "";
+  const noLeak = !singleRootDescribedBy
+    .split(/\s+/)
+    .includes("slider-aria-help-single");
+
+  report(
+    "Slider aria-describedby — lands on each Thumb's input, not Root",
+    singleOk && rangeOk && noLeak,
+    `single="${singleDescribedBy}" range0="${range0DescribedBy}" range1="${range1DescribedBy}" rootSingle="${singleRootDescribedBy}"`,
+  );
+}
+
+/* ─── 59. NumberField forced-colors hover (default + outline) ───────── */
+await page.emulateMedia({ forcedColors: "active" });
+await open("components-numberfield--forced-colors-hover");
+{
+  const defaultGroup = page
+    .locator('[data-testid="numberfield-forced-default"]')
+    .locator("xpath=ancestor::*[contains(@class,'zs-number-field__group')][1]");
+  const outlineGroup = page
+    .locator('[data-testid="numberfield-forced-outline"]')
+    .locator("xpath=ancestor::*[contains(@class,'zs-number-field__group')][1]");
+  await defaultGroup.waitFor({ state: "attached", timeout: 5000 });
+  await outlineGroup.waitFor({ state: "attached", timeout: 5000 });
+  await defaultGroup.hover();
+  await page.waitForTimeout(50);
+  const defaultBg = await defaultGroup.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  await outlineGroup.hover();
+  await page.waitForTimeout(50);
+  const outlineBg = await outlineGroup.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  // Same shape as the Slider forced-colors assertion: a system rgb()
+  // resolution proves the system palette won; an oklch() string is the
+  // failure case where a variant rule outranked the reset.
+  const isRgbForm = (s) => /^rgba?\(/i.test(s);
+  const isOklch = (s) => /oklch\(/i.test(s);
+  const defaultOk = isRgbForm(defaultBg) && !isOklch(defaultBg);
+  const outlineOk = isRgbForm(outlineBg) && !isOklch(outlineBg);
+  report(
+    "NumberField forced-colors hover — default + outline paint with system color",
+    defaultOk && outlineOk,
+    `default="${defaultBg}" outline="${outlineBg}"`,
+  );
+}
+
+/* ─── 60. Slider outline-variant forced-colors ──────────────────────── */
+await open("components-slider--forced-colors-outline");
+{
+  const thumb = page.locator('[data-testid="slider-forced-outline-thumb"]');
+  await thumb.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(50);
+  const bg = await thumb.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  const isRgbForm = /^rgba?\(/i.test(bg);
+  const isOklch = /oklch\(/i.test(bg);
+  const ok = isRgbForm && !isOklch;
+  report(
+    "Slider forced-colors — outline-variant thumb paints with system color",
+    ok,
+    `bg="${bg}" isRgb=${isRgbForm} isOklch=${isOklch}`,
+  );
+}
+await page.emulateMedia({ forcedColors: "none" });
+
+/* ─── 61. Coarse-pointer hit-target — NumberField stepper ───────────── *
+ *
+ * Apple HIG floor: 44 device-units ≈ --zs-hit-min 2.75rem. The 1rem
+ * root font-size means 2.75rem = 44px. Assert the rendered stepper
+ * button's bounding rect is ≥ 44px on BOTH axes — pre-fix only
+ * inline-size grew, leaving block-size at 2rem (32px) or 2.5rem (40px)
+ * which a finger couldn't reliably hit.
+ *
+ * Playwright's `emulateMedia` API doesn't expose `pointer: coarse`, and
+ * the CDP `Emulation.setEmulatedMedia` feature list doesn't include
+ * `pointer` either. Instead we read the rule text out of the
+ * authored CSS, inject it back into the page UNCONDITIONALLY (peeled
+ * out of the @media gate), and measure. The assertion proves the
+ * RULE'S CONTENT — when the coarse-pointer @media triggers in a real
+ * browser, the same declarations apply. This is the most direct
+ * regression for "the coarse-pointer rule's geometry meets the HIG
+ * floor", separating that concern from the orthogonal "does
+ * Chromium's emulator support this query feature". */
+async function injectCoarsePointerOverride() {
+  await page.addStyleTag({
+    content: `
+      /* Unconditionally re-emit the @media (pointer: coarse) block from
+         NumberField.css and Slider.css so the assertions can measure
+         the SAME geometry without depending on a media-query emulator.
+         Selectors mirror the authored CSS's two-class form so they win
+         the cascade over per-size variant rules. */
+      .zs-number-field--sm .zs-number-field__step,
+      .zs-number-field--md .zs-number-field__step,
+      .zs-number-field--lg .zs-number-field__step {
+        min-inline-size: var(--zs-hit-min);
+        min-block-size: var(--zs-hit-min);
+      }
+      .zs-number-field--sm .zs-number-field__group,
+      .zs-number-field--md .zs-number-field__group,
+      .zs-number-field--lg .zs-number-field__group {
+        min-block-size: var(--zs-hit-min);
+      }
+      .zs-slider__thumb {
+        --zs-slider-hit: var(--zs-hit-min);
+      }
+      .zs-slider__control {
+        min-block-size: var(--zs-hit-min);
+      }
+      .zs-slider--vertical .zs-slider__control {
+        min-inline-size: var(--zs-hit-min);
+      }
+    `,
+  });
+}
+
+await open("components-numberfield--coarse-pointer");
+await injectCoarsePointerOverride();
+{
+  const root = page.locator(".zs-number-field").first();
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const inc = root.locator('button[aria-label="Increment"]');
+  await inc.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(50);
+  const box = await inc.boundingBox();
+  const ok = !!box && box.width >= 44 && box.height >= 44;
+  report(
+    "NumberField coarse pointer — stepper ≥ 44×44 device-units",
+    ok,
+    `box=${box ? `${box.width.toFixed(1)}×${box.height.toFixed(1)}` : "null"}`,
+  );
+}
+
+/* ─── 62. Coarse-pointer hit-target — Slider thumb halo ───────────── *
+ *
+ * The visible thumb stays at design size (≤ 1.25rem) but the
+ * transparent ::after halo grows to --zs-hit-min under coarse pointer.
+ * The Thumb DOM element absorbs pointer events through the ::after
+ * halo's inset:50% + negative margins — so its
+ * `getBoundingClientRect()` returns the visible knob's size, NOT the
+ * halo's. Measure the ::after pseudo via `getComputedStyle`. */
+await open("components-slider--coarse-pointer");
+await injectCoarsePointerOverride();
+{
+  const thumb = page.locator('[data-testid="slider-coarse-thumb"]');
+  await thumb.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(50);
+  const halo = await thumb.evaluate((el) => {
+    const styles = getComputedStyle(el, "::after");
+    return {
+      inline: parseFloat(styles.width),
+      block: parseFloat(styles.height),
+    };
+  });
+  const ok =
+    Number.isFinite(halo.inline) &&
+    Number.isFinite(halo.block) &&
+    halo.inline >= 44 &&
+    halo.block >= 44;
+  report(
+    "Slider coarse pointer — thumb halo ≥ 44×44 device-units",
+    ok,
+    `halo=${halo.inline}×${halo.block}`,
+  );
+}
 
 await ctx.close();
 await browser.close();

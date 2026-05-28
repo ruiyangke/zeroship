@@ -151,10 +151,13 @@ export const Steps: Story = {
     docs: {
       description: {
         story:
-          "step=25 — the slider snaps to 0 / 25 / 50 / 75 / 100. " +
+          "step=25 — the value snaps to 0 / 25 / 50 / 75 / 100. " +
           "Discrete stops let the user pick a coarse setting (e.g. quality " +
           "level / poll grade) without needing the precision of a numeric " +
-          "input.",
+          "input. Note: this slice ships value-snapping only; visual tick " +
+          "marks at each step are deferred to a future Slider.Indicator " +
+          "story (Base UI has no native tick part — they're rendered ad-" +
+          "hoc against the track).",
       },
     },
   },
@@ -181,7 +184,7 @@ export const WithValue: Story = {
       description: {
         story:
           "`showValue` renders a Base UI `<output>` next to the track that " +
-          "auto-updates as the value changes. Use formatOptions to spell " +
+          "auto-updates as the value changes. Use `format` to spell " +
           "out percent / currency / units.",
       },
     },
@@ -324,7 +327,129 @@ export const Vertical: Story = {
   ),
 };
 
-/* ─── 10. RTL ──────────────────────────────────────────────────────── */
+/* ─── 10. Aria propagation regression (Slice-7 review item 2) ──────── */
+export const AriaPropagation: Story = {
+  name: "Aria propagation (aria-describedby)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the Slice-7 review: `aria-describedby` must " +
+          "land on each Thumb (the AT-focusable element via its nested " +
+          "<input type=range>), not the Root. Mirrors `aria-label` and " +
+          "`aria-labelledby` forwarding. The aria-wiring suite asserts " +
+          "the thumb (and BOTH thumbs in range mode) carries the " +
+          "caller's id.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Aria propagation"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "1.5rem" }}
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "22rem" }}>
+        <span id="slider-aria-help-single" className="zs-story-label">
+          0–100, drag or arrow.
+        </span>
+        <Slider
+          defaultValue={50}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Volume"
+          aria-describedby="slider-aria-help-single"
+          data-testid="slider-aria-prop-single"
+        />
+      </div>
+      <div className="zs-story-cell" style={{ inlineSize: "22rem" }}>
+        <span id="slider-aria-help-range" className="zs-story-label">
+          0–100, two thumbs.
+        </span>
+        <Slider
+          defaultValue={[20, 60]}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Price range"
+          aria-describedby="slider-aria-help-range"
+          data-testid="slider-aria-prop-range"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 11. Forced-colors outline (Slice-7 review item 3) ────────────── */
+export const ForcedColorsOutline: Story = {
+  name: "Forced-colors outline variant",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Outline-variant assertion under `prefers-forced-colors: " +
+          "active`. The aria-wiring suite checks the outline thumb's " +
+          "computed background is Highlight (a system color), not the " +
+          "accent-derived oklch the rest paint uses. Catches Slice 5/6 " +
+          "specificity regressions on variant rules.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Forced-colors outline"
+    >
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Slider
+          variant="outline"
+          defaultValue={50}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Outline forced-colors"
+          data-testid="slider-forced-outline"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 12. Coarse pointer hit-target (Slice-7 review item 4) ────────── */
+export const CoarsePointer: Story = {
+  name: "Coarse pointer hit-target",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Under `pointer: coarse` the thumb's transparent ::after halo " +
+          "expands to the Apple HIG floor (`--zs-hit-min` 44 device-" +
+          "units) on BOTH axes so a finger lands. The aria-wiring suite " +
+          "emulates a coarse pointer and asserts the thumb's bounding " +
+          "rect ≥ 2.75rem in inline and block.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Coarse pointer">
+      <div className="zs-story-cell" style={{ inlineSize: "20rem" }}>
+        <Slider
+          defaultValue={50}
+          min={0}
+          max={100}
+          step={1}
+          aria-label="Coarse volume"
+          data-testid="slider-coarse"
+        />
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 13. RTL ──────────────────────────────────────────────────────── */
 export const RTL: Story = {
   name: "RTL",
   parameters: {

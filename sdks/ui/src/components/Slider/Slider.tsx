@@ -72,7 +72,9 @@
 import {
   forwardRef,
   type ComponentPropsWithoutRef,
+  type JSX,
   type ReactNode,
+  type RefAttributes,
 } from "react";
 import { Slider as BaseSlider } from "@base-ui/react/slider";
 import { useFieldContext } from "../Field";
@@ -172,9 +174,28 @@ export type SliderProps =
   | SliderRangeProps
   | SliderRangeUncontrolledProps;
 
-/* ─── component ─────────────────────────────────────────────────────── */
+/* ─── component ─────────────────────────────────────────────────────── *
+ *
+ * `SliderComponent` is a call-signature overload pair so the consumer's
+ * `onValueChange` parameter narrows from the value/defaultValue shape at
+ * the call site. Pre-fix: the single `SliderProps` union signature locked
+ * the callback to `(number | number[]) => void`, so a story shape
+ * `<Slider value={[20, 60]} onValueChange={(next) => …}>` left `next`
+ * typed implicit-any (TypeScript can't narrow a unionised callback
+ * parameter by the discriminant). Post-fix: TS tries the Single branch
+ * first, fails when `value` / `defaultValue` is an array, then tries
+ * Range with `Value=number[]` narrowing intact. Same shape as the
+ * Slice-6 Select discriminated-union fix. */
+export interface SliderComponent {
+  (props: SliderSingleProps & RefAttributes<HTMLDivElement>): JSX.Element;
+  (props: SliderRangeProps & RefAttributes<HTMLDivElement>): JSX.Element;
+  (
+    props: SliderRangeUncontrolledProps & RefAttributes<HTMLDivElement>,
+  ): JSX.Element;
+  displayName?: string;
+}
 
-export const Slider = forwardRef<HTMLDivElement, SliderProps>(function Slider(
+const SliderForward = forwardRef<HTMLDivElement, SliderProps>(function Slider(
   props,
   ref,
 ) {
@@ -192,12 +213,17 @@ export const Slider = forwardRef<HTMLDivElement, SliderProps>(function Slider(
     onValueCommitted,
     format,
     "data-testid": dataTestId,
-    // The forwarded `aria-label` / `aria-labelledby` belong on the THUMB's
-    // nested <input type="range"> (that's the AT-focusable element), not
-    // on the Root <div>. Pull them out of `rest` so the Root spread
-    // doesn't double-label.
+    // The forwarded `aria-label` / `aria-labelledby` / `aria-describedby`
+    // belong on the THUMB's nested <input type="range"> (that's the
+    // AT-focusable element), not on the Root <div>. Pull them out of
+    // `rest` so the Root spread doesn't double-label / leak the
+    // description onto a non-focusable wrapper.
+    //
+    // Slice-7 review (codex) item 2: pre-fix only aria-label /
+    // aria-labelledby were sifted; aria-describedby leaked onto Root.
     "aria-label": rootAriaLabel,
     "aria-labelledby": rootAriaLabelledBy,
+    "aria-describedby": rootAriaDescribedBy,
     ...rest
   } = props as SliderBaseProps & {
     orientation?: SliderOrientation;
@@ -214,6 +240,7 @@ export const Slider = forwardRef<HTMLDivElement, SliderProps>(function Slider(
     ) => void;
     "aria-label"?: string;
     "aria-labelledby"?: string;
+    "aria-describedby"?: string;
   };
 
   const fieldCtx = useFieldContext();
@@ -279,6 +306,7 @@ export const Slider = forwardRef<HTMLDivElement, SliderProps>(function Slider(
                 className="zs-slider__thumb"
                 aria-label={thumbAriaLabel}
                 aria-labelledby={rootAriaLabelledBy}
+                aria-describedby={rootAriaDescribedBy}
                 data-testid={
                   dataTestId
                     ? thumbCount > 1
@@ -294,4 +322,9 @@ export const Slider = forwardRef<HTMLDivElement, SliderProps>(function Slider(
     </BaseSlider.Root>
   );
 });
-Slider.displayName = "Slider";
+SliderForward.displayName = "Slider";
+
+// Cast to the overloaded shape. forwardRef's inferred signature is the
+// unionised one; the SliderComponent interface re-exposes it as two
+// (or three) overloads so call-site type-narrowing works.
+export const Slider = SliderForward as unknown as SliderComponent;
