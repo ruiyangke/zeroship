@@ -1,15 +1,21 @@
 /*
  * Dialog — modal sheet.
  *
- * Anatomy:
- *   .zs-dialog-backdrop          fixed-position overlay; tinted via
- *                                  data-tint="scrim|material|none".
- *     └─ .zs-dialog-popup        the sheet — opaque surface; rounded;
- *                                  shadow; scrolls internally; data-
- *                                  size="sm|md|lg|full", data-placement.
- *         ├─ .zs-dialog__header  Title + Description + close button.
- *         ├─ .zs-dialog__body    scroll container.
- *         └─ .zs-dialog__footer  button row (right-aligned by default).
+ * Anatomy (review-fix item 19 — Backdrop and Popup are SIBLINGS under
+ * Portal, not parent/child; the previous tree comment was misleading):
+ *   .zs-dialog-backdrop        fixed-position overlay; tinted via
+ *                                data-tint="scrim|material|invisible".
+ *   .zs-dialog-popup           the sheet — opaque surface; rounded;
+ *                                shadow; scrolls internally; data-
+ *                                size="sm|md|lg|full", data-placement.
+ *   (Backdrop and Popup render as SIBLINGS inside Portal — neither
+ *   contains the other. The Popup positions itself directly on the
+ *   viewport while the Backdrop overlays the document underneath.)
+ *
+ *   .zs-dialog-popup
+ *     ├─ .zs-dialog__header    Title + Description + close button.
+ *     ├─ .zs-dialog__body      scroll container.
+ *     └─ .zs-dialog__footer    button row (right-aligned by default).
  *
  * Base UI emits `data-starting-style` and `data-ending-style` on
  * Popup and Backdrop while the open/close transitions are running.
@@ -32,6 +38,10 @@
   inset: 0;
   z-index: var(--zs-z-modal);
   background-color: var(--zs-scrim);
+  /* Explicit baseline opacity (review-fix item 23): the open/close
+   * transition goes auto → 0 → auto; declaring the visible end-state
+   * directly keeps the transition origin portable. */
+  opacity: 1;
   transition: opacity var(--zs-motion-base) var(--zs-motion-ease);
 }
 .zs-dialog-backdrop[data-tint="material"] {
@@ -39,7 +49,7 @@
   backdrop-filter: var(--zs-material-thick);
   -webkit-backdrop-filter: var(--zs-material-thick);
 }
-.zs-dialog-backdrop[data-tint="none"] {
+.zs-dialog-backdrop[data-tint="invisible"] {
   background-color: transparent;
 }
 .zs-dialog-backdrop[data-starting-style],
@@ -50,10 +60,20 @@
 /* ─── Popup ────────────────────────────────────────────────────────────── */
 .zs-dialog-popup {
   /* Popup positions itself — Base UI's DOM puts Backdrop and Popup as
-   * siblings, so we center the Popup directly on the viewport. */
+   * siblings, so we center the Popup directly on the viewport.
+   *
+   * Centering uses PHYSICAL `top` + `left` (not `inset-block-start` /
+   * `inset-inline-start`) paired with a physical `translate(-50%, -50%)`
+   * (review-fix item 4). In RTL, `inset-inline-start: 50%` flips to
+   * `right: 50%` while the physical `translate(-50%)` keeps moving
+   * left — net result is a popup shifted off-center. Physical anchors
+   * keep the centering math invariant under direction changes; the
+   * inner content (Header/Title/Body etc.) uses logical properties so
+   * Hebrew/Arabic flow still flips naturally.
+   */
   position: fixed;
-  inset-block-start: 50%;
-  inset-inline-start: 50%;
+  top: 50%;
+  left: 50%;
   /* Translate -50%, -50% to centre, then layer in the nested-scale
    * + enter/leave deltas. The base transform sets the origin so
    * sizing math works regardless of nesting depth. */
@@ -71,7 +91,7 @@
   background-color: var(--zs-surface);
   /* Themes set --zs-dialog-backdrop-filter to `none` when the surface
    * is opaque (no visual contribution; skip compositing cost). Same
-   * gate pattern as Card; review-fix item 18. */
+   * gate pattern as Card. */
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(
     --zs-dialog-backdrop-filter,
@@ -82,6 +102,8 @@
   color: var(--zs-label);
   font-family: var(--zs-font-system);
   overflow: hidden;
+  /* Explicit baseline opacity (review-fix item 23). */
+  opacity: 1;
   transition:
     transform var(--zs-motion-base) var(--zs-motion-ease),
     opacity var(--zs-motion-base) var(--zs-motion-ease);
@@ -95,20 +117,70 @@
   max-inline-size: var(--zs-dialog-max-width-lg);
 }
 .zs-dialog-popup[data-size="full"] {
-  /* Full takeover — anchor to the inset edges instead of centering. */
-  inset-block-start: 0;
-  inset-inline-start: 0;
+  /* Full takeover — anchor to the inset edges instead of centering.
+   *
+   * Replaces the earlier 100dvw × 100dvh sizing (review-fix item 12):
+   *   - `100dvw` on macOS/Chrome includes the scrollbar gutter,
+   *     producing a horizontal overflow strip.
+   *   - Pinning via `inset: 0` lets the layout engine derive both
+   *     dimensions from the viewport without needing to consult dvw/dvh.
+   *   - Safe-area insets are applied to the inner layout
+   *     (header/body/footer padding extends to respect notch + home
+   *     indicator); see the safe-area rules further down. */
+  top: 0;
+  left: 0;
+  inset: 0;
   transform: none;
   max-inline-size: none;
-  inline-size: 100dvw;
-  max-block-size: 100dvh;
-  block-size: 100dvh;
+  inline-size: auto;
+  block-size: auto;
+  max-block-size: none;
   border-radius: 0;
 }
+/* Safe-area-aware padding on the inner layout sections when size=full
+ * (review-fix item 12). Apply to Header (top inset), Body (sides), and
+ * Footer (bottom inset) so content clears notches and the home bar. */
+.zs-dialog-popup[data-size="full"] .zs-dialog__header {
+  padding-block-start: max(var(--zs-dialog-padding), env(safe-area-inset-top));
+  padding-inline-start: max(
+    var(--zs-dialog-padding),
+    env(safe-area-inset-left)
+  );
+  padding-inline-end: max(
+    var(--zs-dialog-padding),
+    env(safe-area-inset-right)
+  );
+}
+.zs-dialog-popup[data-size="full"] .zs-dialog__body {
+  padding-inline-start: max(
+    var(--zs-dialog-padding),
+    env(safe-area-inset-left)
+  );
+  padding-inline-end: max(
+    var(--zs-dialog-padding),
+    env(safe-area-inset-right)
+  );
+}
+.zs-dialog-popup[data-size="full"] .zs-dialog__footer {
+  padding-block-end: max(var(--zs-dialog-padding), env(safe-area-inset-bottom));
+  padding-inline-start: max(
+    var(--zs-dialog-padding),
+    env(safe-area-inset-left)
+  );
+  padding-inline-end: max(
+    var(--zs-dialog-padding),
+    env(safe-area-inset-right)
+  );
+}
 
-/* placement */
+/* placement
+ *
+ * Keep the physical centering math (top/left + translate(-50%, -50%))
+ * intact when placement="top" only swaps the vertical anchor —
+ * matching the centering convention above so RTL doesn't shift the
+ * popup off-center (review-fix item 4). */
 .zs-dialog-popup[data-placement="top"] {
-  inset-block-start: max(var(--zs-space-9), env(safe-area-inset-top));
+  top: max(var(--zs-space-9), env(safe-area-inset-top));
   transform: translate(-50%, calc(var(--zs-nested-offset)))
     scale(var(--zs-nested-scale));
 }
@@ -200,10 +272,13 @@
 }
 @media (pointer: coarse) {
   .zs-dialog__header-close::before {
+    /* Use logical inset properties for consistency with the rest of
+     * the file (review-fix item 24). Geometry is identical for
+     * centering. */
     content: "";
     position: absolute;
-    top: 50%;
-    left: 50%;
+    inset-block-start: 50%;
+    inset-inline-start: 50%;
     transform: translate(-50%, -50%);
     inline-size: max(100%, var(--zs-hit-min));
     block-size: max(100%, var(--zs-hit-min));
@@ -215,7 +290,10 @@
   margin: 0;
   font-size: var(--zs-text-title-3-size);
   line-height: var(--zs-text-title-3-line);
-  font-weight: 600;
+  /* Use the shared headline-weight token (review-fix item 18) — same
+   * resolution as Card.Title; keeps the typography promise consistent
+   * across surfaces. */
+  font-weight: var(--zs-text-headline-weight);
   letter-spacing: var(--zs-text-title-3-tracking);
   color: var(--zs-label);
 }
@@ -237,13 +315,41 @@
   font-size: var(--zs-text-body-size);
   line-height: var(--zs-text-body-line);
 }
+/* Normalise direct-child prose margins so a single `<p>` slotted into
+ * Body doesn't double-up with the dialog padding (review-fix item 9 —
+ * matches the Card.css pattern). */
+.zs-dialog__body > p:first-child,
+.zs-dialog__body > ul:first-child,
+.zs-dialog__body > ol:first-child {
+  margin-block-start: 0;
+}
+.zs-dialog__body > p:last-child,
+.zs-dialog__body > ul:last-child,
+.zs-dialog__body > ol:last-child {
+  margin-block-end: 0;
+}
 .zs-dialog__footer {
   display: flex;
+  /* Allow wrapping so a footer with many buttons or a long-label
+   * cluster doesn't overflow its dialog (review-fix item 8). With
+   * justify-content: flex-end the wrapped buttons still trail the
+   * row, and row-gap keeps the wrapped rows visually grouped. */
+  flex-wrap: wrap;
   gap: var(--zs-space-2);
+  row-gap: var(--zs-space-2);
   align-items: center;
   justify-content: flex-end;
   padding: var(--zs-dialog-padding);
   padding-block-start: var(--zs-space-4);
+}
+
+/* ─── Viewport (Base UI positioning / scroll boundary) ───────────────── */
+.zs-dialog-viewport {
+  /* Base UI's Viewport is a scroll/positioning container that wraps
+   * the Popup. We don't impose layout — consumers position relative
+   * to it. Keep it as a no-op styled passthrough so the data attrs
+   * Base UI emits are available for consumer-side selectors. */
+  display: contents;
 }
 
 /* ─── forced-colors ────────────────────────────────────────────────────── */

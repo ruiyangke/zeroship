@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Button, Dialog, Field, Input } from "../components";
 
 const meta: Meta<typeof Dialog> = {
@@ -124,8 +124,8 @@ export const BackdropTints: Story = {
   name: "Backdrop tints",
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Backdrop tints">
-      {(["scrim", "material", "none"] as const).map((tint) => (
-        <Dialog key={tint}>
+      {(["scrim", "material", "invisible"] as const).map((tint) => (
+        <Dialog key={tint} modal={tint === "invisible" ? false : true}>
           <Dialog.Trigger
             render={
               <Button
@@ -142,8 +142,9 @@ export const BackdropTints: Story = {
               <Dialog.Header>
                 <Dialog.Title>Backdrop tint = {tint}</Dialog.Title>
                 <Dialog.Description>
-                  scrim is the default; material is glass; none is
-                  a transparent click-blocker.
+                  scrim is the default; material is glass; invisible is
+                  a transparent click-blocker (paired with modal=false
+                  to avoid the invisible-trap dev-warn).
                 </Dialog.Description>
               </Dialog.Header>
               <Dialog.Footer>
@@ -283,7 +284,280 @@ export const InitialFocus: Story = {
   render: () => <InitialFocusStory />,
 };
 
-/* ─── 8. Nested ──────────────────────────────────────────────────────── */
+/* ─── 8a. Close with caller onClick — composes side-effect + close ──── */
+function CloseWithSaveOnClickStory() {
+  // Status lives OUTSIDE the dialog so it survives the close animation
+  // — letting the aria-wiring assertion verify the side-effect ran
+  // AFTER the dialog closed.
+  const [saved, setSaved] = useState<string>("not-saved");
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog close with caller onClick"
+    >
+      <p data-testid="dialog-close-onclick-status">Status: {saved}</p>
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Open save form</Button>}
+        />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup data-testid="dialog-close-onclick-popup">
+            <Dialog.Header>
+              <Dialog.Title>Save changes</Dialog.Title>
+              <Dialog.Description>
+                Pressing Save fires the caller onClick AND closes the
+                dialog. Both must happen — clobbering one is a bug
+                Dialog.Close now guards against (review-fix item 1).
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Body>
+              <p>
+                After pressing Save, the outer status line flips to
+                &ldquo;saved&rdquo; AND this popup closes.
+              </p>
+            </Dialog.Body>
+            <Dialog.Footer>
+              <Dialog.Close>Cancel</Dialog.Close>
+              <Dialog.Close
+                variant="filled"
+                data-testid="dialog-close-save"
+                onClick={() => setSaved("saved")}
+              >
+                Save
+              </Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  );
+}
+export const CloseWithSaveOnClick: Story = {
+  name: "Close — onClick composes with close",
+  render: () => <CloseWithSaveOnClickStory />,
+};
+
+/* ─── 8b. Close asChild — Slot routing ───────────────────────────────── */
+export const CloseAsChild: Story = {
+  name: "Close — asChild (Slot)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog close asChild"
+    >
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Open</Button>}
+        />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup data-testid="dialog-close-aschild-popup">
+            <Dialog.Header>
+              <Dialog.Title>Custom close target</Dialog.Title>
+              <Dialog.Description>
+                The asChild Slot routes className, style, refs, and
+                onClick composition through the shared `_slot.ts`
+                helper (review-fix item 3).
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Footer>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="zs-button zs-button--gray zs-button--md"
+                  data-testid="dialog-close-aschild-target"
+                >
+                  Done
+                </button>
+              </Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  ),
+};
+
+/* ─── 8c. RTL — popup stays centred in right-to-left ─────────────────── */
+export const RTL: Story = {
+  name: "RTL",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Hebrew / Arabic right-to-left. The Popup centers via " +
+          "PHYSICAL `top` + `left` paired with `translate(-50%, -50%)` " +
+          "(review-fix item 4) — logical inset-inline-start flips in " +
+          "RTL and shifts the popup off-center, so we anchor in " +
+          "physical coordinates while the inner content uses logical " +
+          "properties for natural flip.",
+      },
+    },
+  },
+  render: () => (
+    <div dir="rtl" className="zs-story-row" role="group" aria-label="Dialog RTL">
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">פתח דיאלוג</Button>}
+        />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup data-testid="dialog-rtl-popup">
+            <Dialog.Header>
+              <Dialog.Title>שינויים נשמרו</Dialog.Title>
+              <Dialog.Description>
+                הדיאלוג ממורכז גם בכיוון מימין לשמאל.
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Body>
+              The popup must remain centred horizontally — physical
+              `left: 50%` + `translateX(-50%)` keeps the centring math
+              direction-invariant.
+            </Dialog.Body>
+            <Dialog.Footer>
+              <Dialog.Close>ביטול</Dialog.Close>
+              <Dialog.Close variant="filled">אישור</Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  ),
+};
+
+/* ─── 8d. Long footer labels — wraps gracefully ──────────────────────── */
+export const LongFooterLabels: Story = {
+  name: "Long footer labels (wrap)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Dialog long footer labels"
+    >
+      <Dialog>
+        <Dialog.Trigger
+          render={<Button data-testid="dialog-trigger">Open verbose</Button>}
+        />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup
+            size="sm"
+            data-testid="dialog-long-footer-popup"
+          >
+            <Dialog.Header>
+              <Dialog.Title>Review your reservation</Dialog.Title>
+              <Dialog.Description>
+                Footer wraps when many or long-labelled action buttons
+                exceed the popup width (review-fix item 8).
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Footer>
+              <Dialog.Close>Dismiss</Dialog.Close>
+              <Dialog.Close>Save for later</Dialog.Close>
+              <Dialog.Close variant="filled">
+                Confirm reservation now
+              </Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  ),
+};
+
+/* ─── 8e. Unlabeled Popup — dev-warn (negative test) ─────────────────── */
+export const UnlabeledPopupWarns: Story = {
+  name: "Unlabeled Popup (dev warns)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Popup without Dialog.Title and without aria-label fires a " +
+          "dev console.warn (review-fix item 7). This story exists so " +
+          "we can verify the warning behavior end-to-end; the missing " +
+          "label is INTENTIONAL.",
+      },
+    },
+    // axe will rightly flag this story; disable the a11y check on it.
+    a11y: { disable: true },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Unlabeled popup dev warn"
+    >
+      <Dialog>
+        <Dialog.Trigger
+          render={
+            <Button data-testid="dialog-trigger">Open unlabeled</Button>
+          }
+        />
+        <Dialog.Portal>
+          <Dialog.Backdrop />
+          <Dialog.Popup data-testid="dialog-unlabeled-popup">
+            <Dialog.Body>
+              No Title, no aria-label — Dialog.Popup logs a console
+              warning in dev so this gap doesn't ship silently.
+            </Dialog.Body>
+            <Dialog.Footer>
+              <Dialog.Close>Close</Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  ),
+};
+
+/* ─── 8f. Non-modal — outside interaction allowed ────────────────────── */
+export const NonModal: Story = {
+  name: "Non-modal",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "modal={false} keeps the dialog open but does NOT trap focus " +
+          "or lock scroll. Outside interactions remain active — useful " +
+          "for floating tool palettes alongside primary content.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Non-modal dialog"
+    >
+      <Dialog modal={false}>
+        <Dialog.Trigger
+          render={
+            <Button data-testid="dialog-trigger">Open non-modal</Button>
+          }
+        />
+        <Dialog.Portal>
+          <Dialog.Backdrop tint="invisible" />
+          <Dialog.Popup data-testid="dialog-non-modal-popup">
+            <Dialog.Header>
+              <Dialog.Title>Floating tool</Dialog.Title>
+              <Dialog.Description>
+                Background content remains scrollable and clickable.
+              </Dialog.Description>
+            </Dialog.Header>
+            <Dialog.Footer>
+              <Dialog.Close>Close</Dialog.Close>
+            </Dialog.Footer>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog>
+    </div>
+  ),
+};
+
+/* ─── 9. Nested ──────────────────────────────────────────────────────── */
 export const Nested: Story = {
   name: "Nested",
   render: () => (

@@ -66,6 +66,16 @@ const stories = [
   "components-dialog--non-dismissible",
   "components-dialog--initial-focus",
   "components-dialog--nested",
+  // Phase 2.B Dialog review-fix additions (item 21).
+  "components-dialog--close-with-save-on-click",
+  "components-dialog--close-as-child",
+  "components-dialog--rtl",
+  "components-dialog--long-footer-labels",
+  // UnlabeledPopupWarns is intentionally missing a label (negative
+  // test for the dev-warn) — its meta sets `a11y: { disable: true }`
+  // so axe never runs against it. We keep it out of the a11y list
+  // entirely to avoid spurious failures.
+  "components-dialog--non-modal",
   "components-alertdialog--one-button",
   "components-alertdialog--two-buttons",
   "components-alertdialog--destructive",

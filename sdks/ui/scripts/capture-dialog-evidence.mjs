@@ -48,6 +48,27 @@ const stories = [
       '[data-testid="dialog-trigger-inner"]',
     ],
   },
+  // Phase 2.B Dialog review-fix additions (item 21).
+  {
+    id: "components-dialog--close-with-save-on-click",
+    triggers: ['[data-testid="dialog-trigger"]'],
+  },
+  {
+    id: "components-dialog--close-as-child",
+    triggers: ['[data-testid="dialog-trigger"]'],
+  },
+  {
+    id: "components-dialog--rtl",
+    triggers: ['[data-testid="dialog-trigger"]'],
+  },
+  {
+    id: "components-dialog--long-footer-labels",
+    triggers: ['[data-testid="dialog-trigger"]'],
+  },
+  {
+    id: "components-dialog--non-modal",
+    triggers: ['[data-testid="dialog-trigger"]'],
+  },
 ];
 
 const mimeMap = new Map([

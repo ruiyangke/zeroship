@@ -386,6 +386,104 @@ await open("components-card--as-child-ref-composition");
   );
 }
 
+/* ─── 15. Dialog.Close onClick composes with close (Phase 2.B fix 1) ─
+ *
+ * The CloseWithSaveOnClick story has a Save button whose onClick flips
+ * an outer status line to "saved" AND must close the dialog. Before
+ * the spread-order fix, only the caller onClick ran and the popup
+ * stayed open. */
+await openStoryAndTrigger(
+  "components-dialog--close-with-save-on-click",
+  '[data-testid="dialog-trigger"]',
+);
+{
+  const popup = page.locator('[data-testid="dialog-close-onclick-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const statusBefore = (
+    await page.locator('[data-testid="dialog-close-onclick-status"]').innerText()
+  ).trim();
+  const save = page.locator('[data-testid="dialog-close-save"]');
+  await save.waitFor({ state: "visible", timeout: 5000 });
+  await save.click();
+  // Allow the close animation to finish so we can see popup is gone.
+  await page.waitForTimeout(500);
+  const popupHidden =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  const statusAfter = (
+    await page.locator('[data-testid="dialog-close-onclick-status"]').innerText()
+  ).trim();
+  const sideEffectRan =
+    statusBefore !== statusAfter && statusAfter.includes("saved");
+  report(
+    "Dialog.Close onClick composes (side-effect AND close)",
+    popupHidden && sideEffectRan,
+    `popupHidden=${popupHidden} statusBefore="${statusBefore}" statusAfter="${statusAfter}"`,
+  );
+}
+
+/* ─── 16. Dismissible Dialog closes on backdrop click (Phase 2.B fix 5) */
+await openStoryAndTrigger(
+  "components-dialog--with-form",
+  '[data-testid="dialog-trigger"]',
+);
+{
+  const popup = page.locator('[data-testid="dialog-with-form"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  // Click the corner of the viewport so we hit the backdrop, not the
+  // popup. dismissible defaults to true; this should close.
+  await page.mouse.click(10, 10);
+  await page.waitForTimeout(500);
+  const popupHidden =
+    (await popup.count()) === 0 ||
+    !(await popup.first().isVisible().catch(() => false));
+  report(
+    "Dialog backdrop click closes (dismissible=true)",
+    popupHidden,
+  );
+}
+
+/* ─── 17. Unlabeled Dialog.Popup emits a dev-warn (Phase 2.B fix 7) ──
+ *
+ * Same DCE caveat as the Card dev-warn assertion above: storybook-
+ * static is built with NODE_ENV=production, which strips the warn.
+ * Spin a dev-server page (STORYBOOK_DEV_URL) for this assertion. */
+if (devUrl) {
+  const devCtx = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+  });
+  const devPage = await devCtx.newPage();
+  const warnings = [];
+  devPage.on("console", (msg) => {
+    if (msg.type() === "warning" || msg.type() === "warn") {
+      warnings.push(msg.text());
+    }
+  });
+  await devPage.goto(
+    `${devUrl}/iframe.html?id=components-dialog--unlabeled-popup-warns&globals=theme:Crystal`,
+    { waitUntil: "networkidle" },
+  );
+  const trigger = devPage.locator('[data-testid="dialog-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 10000 });
+  await trigger.click();
+  await devPage.waitForTimeout(500);
+  const warned = warnings.some((text) =>
+    text.includes("Dialog.Popup has no accessible name"),
+  );
+  report(
+    "Dialog.Popup unlabeled — dev warning",
+    warned,
+    warned
+      ? `captured ${warnings.length} console.warn(s) on dev server`
+      : `no matching warning in ${warnings.length} dev-server messages`,
+  );
+  await devCtx.close();
+} else {
+  console.log(
+    `[Dialog.Popup unlabeled — dev warning] SKIP — set STORYBOOK_DEV_URL to enable (warn code present in Dialog.tsx but DCE'd in static build)`,
+  );
+}
+
 /* ─── 10. Dialog focus restore: trigger gets focus back on close ───── */
 // Use the Sizes story: it has triggers that do NOT auto-open, so we
 // can deterministically open + close + verify the trigger is focused.

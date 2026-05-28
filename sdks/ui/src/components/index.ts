@@ -34,7 +34,7 @@ export type {
   CardContentProps,
 } from "./Card";
 
-export { Dialog } from "./Dialog";
+export { Dialog, createDialogHandle } from "./Dialog";
 export type {
   DialogProps,
   DialogSize,
@@ -43,9 +43,14 @@ export type {
   DialogBackdropProps,
   DialogPopupProps,
   DialogHeaderProps,
+  DialogTitleProps,
+  DialogDescriptionProps,
+  DialogBodyProps,
+  DialogFooterProps,
   DialogCloseProps,
   DialogTriggerProps,
   DialogPortalProps,
+  DialogViewportProps,
 } from "./Dialog";
 
 export { AlertDialog } from "./AlertDialog";
