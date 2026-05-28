@@ -81,7 +81,7 @@ pub async fn post(
         //    must NOT change the response, only emit logs.
         match password_reset::issue(db.as_ref(), &u.email).await {
             Ok(issued) => {
-                let link = format!("{}/reset?t={}", cfg.public_url(), issued.raw);
+                let link = format!("{}/reset?token={}", cfg.public_url(), issued.raw);
                 let name_hint = u.name.split_whitespace().next().unwrap_or("there");
                 let html = PasswordResetHtml {
                     name: name_hint,

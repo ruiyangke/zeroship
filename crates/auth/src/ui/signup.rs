@@ -149,7 +149,7 @@ pub async fn post(
         match verification::issue(db.as_ref(), user.id, &user.email).await {
             Ok(issued) => {
                 let link = format!(
-                    "{}/verify?t={}",
+                    "{}/verify?token={}",
                     cfg.public_url(),
                     issued.raw,
                 );

@@ -124,12 +124,12 @@ mod tests {
     fn renders_verify_email_html() {
         let tpl = VerifyEmailHtml {
             name: "Alice",
-            link: "https://auth.zeroship.ai/verify?t=abc123",
+            link: "https://auth.zeroship.ai/verify?token=abc123",
             expires_in: "24 hours",
         };
         let html = tpl.render().expect("render");
         assert!(html.contains("Alice"));
-        assert!(html.contains("https://auth.zeroship.ai/verify?t=abc123"));
+        assert!(html.contains("https://auth.zeroship.ai/verify?token=abc123"));
         assert!(html.contains("24 hours"));
     }
 
@@ -137,7 +137,7 @@ mod tests {
     fn renders_magic_link_txt() {
         let tpl = MagicLinkText {
             name: "Bob",
-            link: "https://auth.zeroship.ai/magic/verify?t=xyz",
+            link: "https://auth.zeroship.ai/magic/verify?token=xyz",
             expires_in: "15 minutes",
             requesting_device: "Chrome on macOS",
             requesting_location: "San Francisco, CA",

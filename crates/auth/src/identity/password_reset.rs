@@ -4,7 +4,7 @@
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token, store its SHA-256
 //!   in `auth.magic_links` keyed by `(email, purpose='reset')`. Returns
-//!   the raw token to the caller, which embeds it in the `/reset?t=`
+//!   the raw token to the caller, which embeds it in the `/reset?token=`
 //!   email link.
 //!
 //! - **Redeem**: SHA-256 the raw token, atomically `UPDATE … RETURNING`
@@ -55,7 +55,7 @@ const PURPOSE: &str = "reset";
 #[derive(Debug, Clone)]
 pub struct IssuedToken {
     /// Raw token (base64url, no padding). Embedded in the email link's
-    /// `?t=` parameter. Never logged.
+    /// `?token=` parameter. Never logged.
     pub raw: String,
 }
 

@@ -45,7 +45,7 @@ const CSRF_NONCE_LEN_BYTES: usize = 16;
 #[derive(Debug, Clone)]
 pub struct IssuedToken {
     /// Raw token (base64url, no padding). Embedded in the email link's
-    /// `?t=` parameter. Never logged.
+    /// `?token=` parameter. Never logged.
     pub raw: String,
     /// CSRF nonce (base64url, no padding). Set as the
     /// `__Host-zsidp_magic_csrf` cookie on the requesting device.

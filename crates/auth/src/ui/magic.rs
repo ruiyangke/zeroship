@@ -13,7 +13,7 @@
 //!   code-entry form. The check-email page already embeds the same form
 //!   inside a `<details>` toggle; this route exists for direct entry.
 //!
-//! - **GET `/magic/verify?t=<token>&login_challenge=<…>`** — redeem the
+//! - **GET `/magic/verify?token=<token>&login_challenge=<…>`** — redeem the
 //!   magic-link token. If the redeeming browser presents the matching
 //!   `__Host-zsidp_magic_csrf` cookie (same-device path) → mint session,
 //!   `accept_login`, 302 to hydra. If the cookie is missing or different
@@ -210,7 +210,7 @@ pub async fn start(
         let lc_escaped: String =
             form_urlencoded::byte_serialize(login_challenge.as_bytes()).collect();
         let link = format!(
-            "{}/magic/verify?t={}&login_challenge={}",
+            "{}/magic/verify?token={}&login_challenge={}",
             cfg.public_url(),
             issued.raw,
             lc_escaped,
@@ -345,7 +345,7 @@ pub async fn await_code(
 
 #[derive(Debug, Deserialize)]
 pub struct MagicVerifyQuery {
-    pub t: String,
+    pub token: String,
     pub login_challenge: String,
 }
 
@@ -366,7 +366,7 @@ pub async fn verify(
     admin: ntex::web::types::State<HydraAdmin>,
 ) -> HttpResponse {
     // 1. Redeem.
-    let redeemed = match magic_link::redeem(db.as_ref(), &query.t).await {
+    let redeemed = match magic_link::redeem(db.as_ref(), &query.token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             audit::emit(

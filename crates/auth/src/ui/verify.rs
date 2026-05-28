@@ -23,10 +23,10 @@ use crate::ui::{ErrorPage, VerifyOkPage};
 #[derive(Debug, Deserialize)]
 pub struct VerifyQuery {
     /// Raw verification token. base64url, no padding (32-byte CSPRNG).
-    pub t: String,
+    pub token: String,
 }
 
-/// `/verify?t=<token>` — atomically redeem the verification token, set
+/// `/verify?token=<token>` — atomically redeem the verification token, set
 /// `email_verified_at = NOW()` on the user, render the success page.
 ///
 /// Invalid/expired tokens render the generic [`ErrorPage`]; the user can
@@ -37,7 +37,7 @@ pub async fn get(
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     // 1. Redeem atomically.
-    let redeemed = match verification::redeem(db.as_ref(), &query.t).await {
+    let redeemed = match verification::redeem(db.as_ref(), &query.token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             audit::emit(

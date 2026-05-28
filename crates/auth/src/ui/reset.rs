@@ -34,7 +34,7 @@ use crate::ui::ResetPage;
 #[derive(Debug, Deserialize)]
 pub struct ResetQuery {
     /// Raw reset token. base64url, no padding (32-byte CSPRNG).
-    pub t: String,
+    pub token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,12 +44,12 @@ pub struct ResetForm {
     pub password: String,
 }
 
-/// `/reset?t=<token>` GET — render the new-password form.
+/// `/reset?token=<token>` GET — render the new-password form.
 //
 // ntex's per-thread service futures are intentionally `!Send`.
 #[allow(clippy::unused_async, clippy::future_not_send)]
 pub async fn get(query: Query<ResetQuery>, cfg: State<Arc<AuthConfig>>) -> HttpResponse {
-    render_form(&cfg, &query.t, None)
+    render_form(&cfg, &query.token, None)
 }
 
 /// `/reset` POST — validate token + length, atomically redeem the
@@ -181,4 +181,45 @@ fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpRespon
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the `/reset?t=…` → `/reset?token=…` rename
+    /// (the auth handlers were inconsistent: `/link` used `?token=`,
+    /// every other token-redeem handler used `?t=`). The query struct
+    /// MUST reject the old name — otherwise we'd silently keep a
+    /// back-compat alias in place.
+    ///
+    /// `ResetQuery` is a serde-derived struct deserialised from
+    /// `application/x-www-form-urlencoded` query strings. We exercise it
+    /// directly with `url::form_urlencoded` so the test stays a unit
+    /// test (no live server, no DB).
+    #[test]
+    fn reset_query_accepts_token_param_and_rejects_legacy_t_param() {
+        fn parse(q: &str) -> Result<ResetQuery, serde::de::value::Error> {
+            use serde::Deserialize;
+            // Mirror the way ntex's Query<T> extractor decodes the URL
+            // query: pairs → MapDeserializer → T.
+            let pairs: Vec<(String, String)> =
+                url::form_urlencoded::parse(q.as_bytes())
+                    .into_owned()
+                    .collect();
+            let de = serde::de::value::MapDeserializer::new(pairs.into_iter());
+            ResetQuery::deserialize(de)
+        }
+
+        // `?token=…` parses.
+        let q = parse("token=abc").expect("token= must parse");
+        assert_eq!(q.token, "abc");
+
+        // The legacy `?t=…` must NOT parse — the field is `token`, not `t`.
+        let legacy = parse("t=abc");
+        assert!(
+            legacy.is_err(),
+            "legacy ?t= must not deserialize into ResetQuery; got {legacy:?}"
+        );
+    }
 }

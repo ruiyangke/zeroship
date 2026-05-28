@@ -4,7 +4,7 @@
 //!
 //! - **Issue**: generate a 32-byte CSPRNG random token, store its SHA-256
 //!   in `auth.email_verifications` keyed to `(user_id, email)`. Return
-//!   the raw token to the caller (embedded in the `/verify?t=` link).
+//!   the raw token to the caller (embedded in the `/verify?token=` link).
 //!
 //! - **Redeem**: SHA-256 the raw token, atomically `UPDATE … RETURNING`
 //!   keyed by `token_hash` with the predicates `consumed_at IS NULL` AND
@@ -41,7 +41,7 @@ const TOKEN_LEN_BYTES: usize = 32;
 #[derive(Debug, Clone)]
 pub struct IssuedToken {
     /// Raw token (base64url, no padding). Embedded in the email link's
-    /// `?t=` parameter. Never logged.
+    /// `?token=` parameter. Never logged.
     pub raw: String,
 }
 
