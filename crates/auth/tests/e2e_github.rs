@@ -335,6 +335,95 @@ async fn github_federation_creates_new_user() {
     drop(mock);
 }
 
+#[ntex::test]
+async fn github_callback_invalid_hydra_challenge_has_no_local_side_effects() {
+    let test_email = format!("e2e-github-invalid-{}@zeroship.test", Uuid::new_v4().simple());
+    let mock_user = MockUser {
+        subject: format!("invalid-{}", Uuid::new_v4().simple()),
+        email: test_email.clone(),
+        email_verified: true,
+        name: Some("Invalid Challenge User".into()),
+        picture: Some("https://avatars.githubusercontent.com/invalid.png".into()),
+        login: Some("invalid-challenge-login".into()),
+        additional_emails: Vec::new(),
+    };
+    let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
+
+    let Some(fx) = GithubFixture::boot(&mock).await else {
+        eprintln!("[e2e_github invalid challenge] skip (need AUTH_DB_URL + AUTH_HYDRA_ADMIN)");
+        return;
+    };
+
+    let bogus_challenge = format!("bogus-{}", Uuid::new_v4().simple());
+    let start_url =
+        format!("{}/oauth/github/start?login_challenge={bogus_challenge}", fx.auth_base);
+    let resp = fx
+        .http
+        .request(http::Method::GET, &start_url)
+        .expect("build /oauth/github/start")
+        .send()
+        .await
+        .expect("send /oauth/github/start");
+    assert_eq!(resp.status().as_u16(), 302);
+    let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
+        .expect("zsidp_github_stash on /oauth/github/start");
+
+    let mock_authorize_loc = location(&resp);
+    let resp = fx
+        .http
+        .request(http::Method::GET, &mock_authorize_loc)
+        .expect("build mock /authorize")
+        .send()
+        .await
+        .expect("send mock /authorize");
+    assert_eq!(resp.status().as_u16(), 302);
+    let callback_url = location(&resp);
+    let callback_with_local = callback_url.replace(
+        "http://placeholder/oauth/github/callback",
+        &format!("{}/oauth/github/callback", fx.auth_base),
+    );
+
+    let mut jar = CookieJar::default();
+    jar.set("zsidp_github_stash", &stash_cookie);
+    let resp = fx
+        .http
+        .request(http::Method::GET, &callback_with_local)
+        .expect("build /oauth/github/callback")
+        .header("cookie", jar.header())
+        .expect("cookie header")
+        .send()
+        .await
+        .expect("send /oauth/github/callback");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let user_count: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*) FROM auth.users WHERE email = $1::citext",
+            &[&test_email.as_str()],
+        )
+        .await
+        .expect("count users")
+        .get(0);
+    let identity_count: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*) FROM auth.identities WHERE provider = $1 AND subject = $2",
+            &[&"github", &mock_user.subject.as_str()],
+        )
+        .await
+        .expect("count identities")
+        .get(0);
+    assert_eq!(user_count, 0, "invalid hydra challenge must not create user rows");
+    assert_eq!(
+        identity_count, 0,
+        "invalid hydra challenge must not create identity rows"
+    );
+
+    fx.cleanup().await;
+    drop(mock);
+}
+
 // ─── Reject noreply-only ─────────────────────────────────────────────────
 
 #[ntex::test]

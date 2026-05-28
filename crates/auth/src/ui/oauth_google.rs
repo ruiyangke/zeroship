@@ -199,6 +199,22 @@ pub async fn callback(
         return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     }
 
+    if let Err(e) = admin.get_login(&stash.login_challenge).await {
+        tracing::warn!(error = %e, challenge = %stash.login_challenge, "google callback hydra challenge validation failed");
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_callback_failure",
+                outcome: "failure",
+                auth_method: Some(PROVIDER),
+                detail: json!({ "reason": "login_challenge_invalid" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
+    }
+
     // Token exchange + ID-token verify.
     let id = match google::complete_callback(
         &cfg,

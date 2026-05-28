@@ -159,6 +159,23 @@ pub async fn post(
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
 
+    if let Err(e) = admin.get_login(&pending.login_challenge).await {
+        tracing::warn!(error = %e, challenge = %pending.login_challenge, "link hydra challenge validation failed");
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_link_failed",
+                outcome: "failure",
+                user_id: Some(&pending.user_id),
+                auth_method: Some(&pending.provider),
+                detail: json!({ "reason": "login_challenge_invalid" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_page(PublicErrorMessage::InvalidRequest);
+    }
+
     let ip = req
         .connection_info()
         .remote()
