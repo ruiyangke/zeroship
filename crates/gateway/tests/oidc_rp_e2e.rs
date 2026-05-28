@@ -202,6 +202,18 @@ async fn gateway_oidc_rp_full_dance() {
         github_token_url: "https://github.com/login/oauth/access_token".to_string(),
         github_user_url: "https://api.github.com/user".to_string(),
         github_emails_url: "https://api.github.com/user/emails".to_string(),
+        mailer: "stdout".to_string(),
+        smtp_host: None,
+        smtp_port: 587,
+        smtp_username: None,
+        smtp_password: None,
+        smtp_starttls: true,
+        resend_api_key: None,
+        mail_from_email: "auth@zeroship.ai".to_string(),
+        mail_from_name: "zeroship".to_string(),
+        public_url: "http://localhost:9092".to_string(),
+        postmark_webhook_user: None,
+        postmark_webhook_password: None,
     });
     let admin_state = admin.clone();
     let cfg_state = cfg.clone();
