@@ -1,7 +1,7 @@
 //! `zeroship secret` / `zeroship var` subcommands.
 //!
 //! Shape:
-//!   zeroship secret set  KEY=value   --app=<uuid> [--control=URL] [--key=MASTER]
+//!   zeroship secret set  KEY=value   --app=<uuid> [--control=URL] [--token=PAT]
 //!   zeroship secret list             --app=<uuid> [...]
 //!   zeroship secret rm   KEY         --app=<uuid> [...]
 //!   zeroship var    set  KEY=value   --app=<uuid> [...]
@@ -13,7 +13,7 @@
 
 use std::process::{Command, Stdio};
 
-use crate::flag_str;
+use crate::{flag_str, resolve_bearer_token};
 
 pub fn cmd_secret(args: &[String]) {
     run("secrets", args);
@@ -31,7 +31,12 @@ fn run(resource: &str, args: &[String]) {
         "rm" | "del" | "delete" => cmd_rm(resource, args),
         _ => {
             eprintln!(
-                "Usage:\n  zeroship {s} set  KEY=value --app=<uuid>\n  zeroship {s} list          --app=<uuid>\n  zeroship {s} rm   KEY       --app=<uuid>",
+                concat!(
+                    "Usage:\n",
+                    "  zeroship {s} set  KEY=value --app=<uuid> [--control=URL] [--token=PAT]\n",
+                    "  zeroship {s} list          --app=<uuid> [--control=URL] [--token=PAT]\n",
+                    "  zeroship {s} rm   KEY       --app=<uuid> [--control=URL] [--token=PAT]"
+                ),
                 s = if resource == "secrets" { "secret" } else { "var" },
             );
             std::process::exit(1);
@@ -39,15 +44,19 @@ fn run(resource: &str, args: &[String]) {
     }
 }
 
-fn common(args: &[String]) -> (String, String, String) {
+fn common(resource: &str, args: &[String]) -> (String, String, String) {
     let app = flag_str(args, "--app=").expect("--app=<uuid> is required");
     let control_url = flag_str(args, "--control=")
         .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
         .unwrap_or_else(|| "http://localhost:9090".into());
-    let master_key = flag_str(args, "--key=")
-        .or_else(|| std::env::var("ZEROSHIP_MASTER_KEY").ok())
-        .unwrap_or_default();
-    (app, control_url, master_key)
+    let token = resolve_bearer_token(args).unwrap_or_else(|e| {
+        eprintln!(
+            "zeroship {}: {e}",
+            if resource == "secrets" { "secret" } else { "var" }
+        );
+        std::process::exit(1);
+    });
+    (app, control_url, token)
 }
 
 fn cmd_set(resource: &str, args: &[String]) {
@@ -61,12 +70,12 @@ fn cmd_set(resource: &str, args: &[String]) {
             std::process::exit(1);
         }
     };
-    let (app, control_url, master_key) = common(args);
+    let (app, control_url, token) = common(resource, args);
 
     let url = format!("{control_url}/api/apps/{app}/{resource}");
     let body = serde_json::json!({ "key": key, "value": value }).to_string();
 
-    let (status, body_out) = curl_json("POST", &url, &master_key, Some(&body));
+    let (status, body_out) = curl_json("POST", &url, &token, Some(&body));
     if (200..300).contains(&status) {
         eprintln!("{resource}: set {key} on {app}");
     } else {
@@ -76,9 +85,9 @@ fn cmd_set(resource: &str, args: &[String]) {
 }
 
 fn cmd_list(resource: &str, args: &[String]) {
-    let (app, control_url, master_key) = common(args);
+    let (app, control_url, token) = common(resource, args);
     let url = format!("{control_url}/api/apps/{app}/{resource}");
-    let (status, body) = curl_json("GET", &url, &master_key, None);
+    let (status, body) = curl_json("GET", &url, &token, None);
     if (200..300).contains(&status) {
         println!("{}", body);
     } else {
@@ -90,13 +99,15 @@ fn cmd_list(resource: &str, args: &[String]) {
 fn cmd_rm(resource: &str, args: &[String]) {
     let key = args.get(3).cloned().unwrap_or_default();
     if key.is_empty() {
-        eprintln!("error: missing KEY (e.g. `zeroship {} rm FOO --app=<uuid>`)",
-            if resource == "secrets" { "secret" } else { "var" });
+        eprintln!(
+            "error: missing KEY (e.g. `zeroship {} rm FOO --app=<uuid>`)",
+            if resource == "secrets" { "secret" } else { "var" }
+        );
         std::process::exit(1);
     }
-    let (app, control_url, master_key) = common(args);
+    let (app, control_url, token) = common(resource, args);
     let url = format!("{control_url}/api/apps/{app}/{resource}/{key}");
-    let (status, body) = curl_json("DELETE", &url, &master_key, None);
+    let (status, body) = curl_json("DELETE", &url, &token, None);
     match status {
         204 => eprintln!("{resource}: removed {key} from {app}"),
         404 => {
@@ -112,7 +123,7 @@ fn cmd_rm(resource: &str, args: &[String]) {
 
 /// Run curl with the given method + URL + optional JSON body, returning
 /// `(status, body)`. Matches the pattern used by `cmd_deploy`.
-fn curl_json(method: &str, url: &str, master_key: &str, body: Option<&str>) -> (u16, String) {
+fn curl_json(method: &str, url: &str, token: &str, body: Option<&str>) -> (u16, String) {
     let mut cmd = Command::new("curl");
     cmd.args([
         "-s",
@@ -122,7 +133,7 @@ fn curl_json(method: &str, url: &str, master_key: &str, body: Option<&str>) -> (
         method,
         url,
         "-H",
-        &format!("Authorization: Bearer {master_key}"),
+        &format!("Authorization: Bearer {token}"),
     ]);
     if body.is_some() {
         cmd.args(["-H", "Content-Type: application/json", "--data-binary", "@-"]);

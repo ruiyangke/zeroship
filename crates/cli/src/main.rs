@@ -2,12 +2,13 @@
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   zeroship deploy  <path-to-.zship> --app=<id> [--control=URL] [--key=KEY]
+//!   zeroship deploy  <path-to-.zship> --app=<id> [--control=URL] [--token=PAT]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
 //! `.zship` archives. `deploy` uploads those archives directly to the
-//! control plane.
+//! control plane. Deploy/secret/var commands read the bearer token from
+//! `--token=PAT`, `ZS_TOKEN`, or credentials saved by `zeroship login`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -197,15 +198,16 @@ fn cmd_serve(args: &[String]) {
 // `zeroship build` command later.
 fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
-        "Usage: zeroship deploy <path-to-.zship> --app=<name-or-id> [--control=http://localhost:9090] [--key=<master-key>]",
+        "Usage: zeroship deploy <path-to-.zship> --app=<name-or-id> [--control=http://localhost:9090] [--token=<PAT>]",
     );
     let app = flag_str(args, "--app=").expect("--app=<name-or-id> is required");
     let control_url = flag_str(args, "--control=")
         .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
         .unwrap_or_else(|| "http://localhost:9090".into());
-    let master_key = flag_str(args, "--key=")
-        .or_else(|| std::env::var("ZEROSHIP_MASTER_KEY").ok())
-        .unwrap_or_default();
+    let token = resolve_bearer_token(args).unwrap_or_else(|e| {
+        eprintln!("zeroship deploy: {e}");
+        std::process::exit(1);
+    });
 
     let input_path = PathBuf::from(input);
     let body = std::fs::read(&input_path).unwrap_or_else(|e| {
@@ -230,7 +232,7 @@ fn cmd_deploy(args: &[String]) {
             "POST",
             &deploy_url,
             "-H",
-            &format!("Authorization: Bearer {master_key}"),
+            &format!("Authorization: Bearer {token}"),
             "-H",
             "Content-Type: application/x-zship",
             "--data-binary",
@@ -288,16 +290,17 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
-    eprintln!("  zeroship deploy   <path-to-.zship> --app=<id> [--control=URL] [--key=KEY]");
+    eprintln!("  zeroship deploy   <path-to-.zship> --app=<id> [--control=URL] [--token=PAT]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
+    eprintln!("                   Token source: --token, ZS_TOKEN, or zeroship login.");
     eprintln!("  zeroship login    [--auth-url=https://auth.zeroship.ai]");
     eprintln!("                   Sign in with OAuth Device Authorization Grant.");
     eprintln!("  zeroship whoami");
     eprintln!("                   Show the signed-in account.");
     eprintln!("  zeroship logout");
     eprintln!("                   Revoke and delete local CLI credentials.");
-    eprintln!("  zeroship secret   set|list|rm  --app=<uuid>");
-    eprintln!("  zeroship var      set|list|rm  --app=<uuid>");
+    eprintln!("  zeroship secret   set|list|rm  --app=<uuid> [--control=URL] [--token=PAT]");
+    eprintln!("  zeroship var      set|list|rm  --app=<uuid> [--control=URL] [--token=PAT]");
     eprintln!();
     eprintln!("Builds go through @zeroship/vite-plugin. There is no `zeroship build`.");
 }
@@ -321,4 +324,109 @@ pub(crate) fn flag_str(args: &[String], prefix: &str) -> Option<String> {
         .find(|a| a.starts_with(prefix))
         .and_then(|a| a.strip_prefix(prefix))
         .map(|s| s.to_string())
+}
+
+const MISSING_TOKEN_HINT: &str =
+    "no API token found; run `zeroship login`, pass `--token=<PAT>`, or set ZS_TOKEN";
+
+pub(crate) fn resolve_bearer_token(args: &[String]) -> Result<String, String> {
+    resolve_bearer_token_from(
+        args,
+        || std::env::var("ZS_TOKEN").ok(),
+        crate::auth::load_credentials,
+    )
+}
+
+fn resolve_bearer_token_from<EnvToken, LoadCredentials>(
+    args: &[String],
+    env_token: EnvToken,
+    load_credentials: LoadCredentials,
+) -> Result<String, String>
+where
+    EnvToken: FnOnce() -> Option<String>,
+    LoadCredentials: FnOnce() -> Result<auth::Credentials, String>,
+{
+    if let Some(token) = flag_str(args, "--token=").and_then(non_empty_token) {
+        return Ok(token);
+    }
+    if let Some(token) = env_token().and_then(non_empty_token) {
+        return Ok(token);
+    }
+
+    let creds = load_credentials().map_err(|e| format!("{MISSING_TOKEN_HINT}: {e}"))?;
+    non_empty_token(creds.access_token).ok_or_else(|| MISSING_TOKEN_HINT.to_string())
+}
+
+fn non_empty_token(token: String) -> Option<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_bearer_token_from_flag_env_then_credentials() {
+        let args = vec![
+            "zeroship".to_string(),
+            "deploy".to_string(),
+            "app.zship".to_string(),
+            "--token=flag-token".to_string(),
+        ];
+        let token = resolve_bearer_token_from(
+            &args,
+            || panic!("env token should not be read when --token is present"),
+            || panic!("credentials should not be read when --token is present"),
+        )
+        .expect("flag token");
+        assert_eq!(token, "flag-token");
+
+        let args = vec![
+            "zeroship".to_string(),
+            "deploy".to_string(),
+            "app.zship".to_string(),
+        ];
+        let token = resolve_bearer_token_from(
+            &args,
+            || Some("env-token".to_string()),
+            || panic!("credentials should not be read when ZS_TOKEN is present"),
+        )
+        .expect("env token");
+        assert_eq!(token, "env-token");
+
+        let token = resolve_bearer_token_from(
+            &args,
+            || None,
+            || {
+                Ok(auth::Credentials {
+                    access_token: "credential-token".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                    expires_at: u64::MAX,
+                    auth_url: "http://auth.test".to_string(),
+                    client_id: "zeroship-cli".to_string(),
+                })
+            },
+        )
+        .expect("credential token");
+        assert_eq!(token, "credential-token");
+    }
+
+    #[test]
+    fn missing_bearer_token_explains_login_and_token_flag() {
+        let args = vec![
+            "zeroship".to_string(),
+            "deploy".to_string(),
+            "app.zship".to_string(),
+        ];
+        let err = resolve_bearer_token_from(&args, || None, || Err("not signed in".to_string()))
+            .expect_err("missing token should fail");
+
+        assert!(err.contains("zeroship login"), "{err}");
+        assert!(err.contains("--token=<PAT>"), "{err}");
+    }
 }
