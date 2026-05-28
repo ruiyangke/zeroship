@@ -31,6 +31,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::error::{AuthError, Result};
+use crate::identity::email as email_validation;
 
 /// Lifetime of a magic-link token from issue to expiry.
 pub const TTL_MINUTES: i64 = 15;
@@ -95,6 +96,9 @@ pub enum RedeemError {
 /// [`AuthError::Db`] on PG failure.
 pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedToken> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    email_validation::validate_email(email)
+        .map_err(|_| AuthError::Internal("invalid email".into()))?;
 
     // 1. Generate token + nonce.
     let mut token_bytes = [0u8; TOKEN_LEN_BYTES];

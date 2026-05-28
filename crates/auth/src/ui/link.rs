@@ -38,7 +38,7 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
-use crate::identity::linker::PendingLink;
+use crate::identity::{email as email_validation, linker::PendingLink};
 use crate::identity::password;
 use crate::sessions::login as session_cookie;
 use crate::store::{identities, sessions, users};
@@ -82,6 +82,9 @@ pub async fn get(
     let Some(pending) = PendingLink::decode(&query.token, cfg.stash_signing_key.as_bytes()) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
+    if email_validation::validate_email(&pending.email).is_err() {
+        return render_error_page(PublicErrorMessage::SessionExpired);
+    }
 
     let csrf_token = csrf::generate_token();
     let page = LinkPage {
@@ -156,6 +159,9 @@ pub async fn post(
     let Some(pending) = PendingLink::decode(&form.token, cfg.stash_signing_key.as_bytes()) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
+    if email_validation::validate_email(&pending.email).is_err() {
+        return render_error_page(PublicErrorMessage::SessionExpired);
+    }
 
     // 3. Look up the user. The pending token's HMAC guarantees the
     // `user_id` came from us — but the row might have been deleted between

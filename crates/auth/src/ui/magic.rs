@@ -50,7 +50,7 @@ use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
-use crate::identity::magic_link;
+use crate::identity::{email as email_validation, magic_link};
 use crate::mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
 use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
@@ -164,6 +164,12 @@ pub async fn start(
     }
 
     let email_norm = form.email.trim().to_ascii_lowercase();
+    if email_validation::validate_email(&email_norm).is_err() {
+        return render_error_page_with_status(
+            PublicErrorMessage::InvalidRequest,
+            StatusCode::BAD_REQUEST,
+        );
+    }
     let login_challenge = form.login_challenge.clone();
 
     // 2. Rate-limit per-email + per-IP. On throttle, render the
@@ -962,6 +968,9 @@ fn render_error_page_with_status(
 /// if absent (clicking the magic link is itself proof of email
 /// ownership).
 async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) -> Result<Uuid> {
+    email_validation::validate_email(email)
+        .map_err(|_| AuthError::Internal("invalid email".into()))?;
+
     if let Some(user) = users::find_by_email(db, email).await? {
         if user.email_verified_at.is_none() {
             // Magic-link click counts as email verification — make
@@ -1024,6 +1033,9 @@ pub mod completions_store {
         login_challenge: &str,
         expires_secs: i64,
     ) -> crate::error::Result<()> {
+        super::email_validation::validate_email(email)
+            .map_err(|_| AuthError::Internal("invalid email".into()))?;
+
         db.execute(
             "INSERT INTO auth.magic_completions \
                 (csrf_nonce, code, email, login_challenge, expires_at) \

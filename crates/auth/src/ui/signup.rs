@@ -12,6 +12,7 @@
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
+use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use url::form_urlencoded;
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::identity::{password, verification};
+use crate::identity::{email as email_validation, password, verification};
 use crate::mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use crate::mailer::{Address, Mailer};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
@@ -107,11 +108,10 @@ pub async fn post(
         );
     }
 
-    // 3. Email basic sanity. Full validation belongs at the SMTP-verify
-    // layer (Phase 5); this is just a typo-catch.
+    // 3. Email sanity before we enter rate limits, hashing, or storage.
     let email = form.email.trim().to_ascii_lowercase();
-    if !email.contains('@') || email.len() < 3 {
-        return render_signup_error(&challenge, &cfg, "enter a valid email");
+    if email_validation::validate_email(&email).is_err() {
+        return render_signup_bad_request(&challenge, &cfg, "enter a valid email");
     }
 
     // 4. Rate-limit per IP before entering the CPU-bound password hash.
@@ -270,6 +270,19 @@ fn bounded_login_challenge(challenge: Option<&str>) -> &str {
 }
 
 fn render_signup_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
+    render_signup_error_with_status(challenge, cfg, err, StatusCode::OK)
+}
+
+fn render_signup_bad_request(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
+    render_signup_error_with_status(challenge, cfg, err, StatusCode::BAD_REQUEST)
+}
+
+fn render_signup_error_with_status(
+    challenge: &str,
+    cfg: &AuthConfig,
+    err: &str,
+    status: StatusCode,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
         challenge,
@@ -279,7 +292,7 @@ fn render_signup_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResp
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
-    let mut resp = HttpResponse::Ok();
+    let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)

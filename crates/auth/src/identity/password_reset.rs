@@ -40,6 +40,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 
 use crate::error::{AuthError, Result};
+use crate::identity::email as email_validation;
 
 /// Lifetime of a reset token from issue to expiry.
 pub const TTL_MINUTES: i64 = 60;
@@ -78,6 +79,9 @@ pub struct RedeemedToken {
 ///
 /// Returns [`AuthError::Db`] on PG failure.
 pub async fn issue(db: &Client, email: &str) -> Result<IssuedToken> {
+    email_validation::validate_email(email)
+        .map_err(|_| AuthError::Internal("invalid email".into()))?;
+
     // 1. Invalidate any previously unconsumed reset tokens for this
     //    email. Scoped to `purpose = 'reset'` so a pending magic-link
     //    login on the same address is left alone.
