@@ -1,0 +1,426 @@
+//! HTTP regression tests for creator-console PAT handlers.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use ntex::http::StatusCode;
+use ntex::web::{self, test};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
+use zeroship_control::{
+    console_sessions, oidc_rp, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    SecretString, StripeStore,
+};
+use zeroship_core::oidc_verify::TokenClaims;
+
+fn db_url() -> Option<String> {
+    std::env::var("AUTH_DB_URL").ok()
+}
+
+fn tmpdir(label: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "zs-token-handlers-{label}-{}",
+        Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&path).expect("mkdir tmp");
+    path
+}
+
+struct Fixture {
+    state: Arc<AppState>,
+    user_id: Uuid,
+    session_id: Uuid,
+    cookie: String,
+    blob_root: PathBuf,
+    deploy_tmp_dir: PathBuf,
+}
+
+impl Fixture {
+    async fn new(db_url: &str, label: &str, platform_role: Option<&str>) -> Self {
+        let blob_root = tmpdir(&format!("blob-{label}"));
+        let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
+
+        let registry = Registry::new(db_url).await.expect("registry");
+
+        let env_store = EnvStore::new(registry.clone(), "test-master-key", false)
+            .expect("env store");
+        let stripe_store = StripeStore::new(registry.clone());
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+        let vfs: Arc<dyn BundleStore + Send + Sync> = Arc::new(
+            LocalFs::new(blob_root.join("legacy-bundles")).expect("vfs"),
+        );
+
+        let oidc_rp = Arc::new(oidc_rp::ConsoleOidcRp::new(
+            "http://localhost:4444",
+            "console.zeroship.ai",
+            "test-oidc-secret".to_string(),
+            b"test-stash-key".to_vec(),
+        ));
+        let (auth_pg_client, auth_pg_conn) =
+            compio_postgres::connect(db_url, compio_postgres::NoTls)
+                .await
+                .expect("auth-pg connect");
+        compio::runtime::spawn(async move {
+            let _ = auth_pg_conn.run().await;
+        })
+        .detach();
+        let auth_pg = Arc::new(auth_pg_client);
+        zeroship_auth::store::migrations::migrate(&auth_pg)
+            .await
+            .expect("migrate auth-pg");
+
+        let state = Arc::new(AppState {
+            registry,
+            env_store,
+            stripe_store,
+            vfs,
+            blob_store,
+            control_key: SecretString::new("test-control-key".to_string()),
+            master_key: SecretString::new("test-master-key".to_string()),
+            stripe_webhook_secret: SecretString::new(String::new()),
+            worker_urls: Vec::new(),
+            worker_key: SecretString::new(String::new()),
+            admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+            webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
+            insecure_dev: false,
+            trust_proxy: false,
+            deploy_tmp_dir: deploy_tmp_dir.clone(),
+            oidc_rp,
+            auth_pg,
+            static_policies: zeroship_authz::load_platform_policies()
+                .expect("bundled authz policies parse"),
+            pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
+            logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
+        });
+
+        let user_id = Uuid::new_v4();
+        let email = format!("{label}-{user_id}@zeroship.test");
+        state
+            .auth_pg
+            .execute(
+                "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+                &[&user_id, &email, &label],
+            )
+            .await
+            .expect("insert user");
+        if let Some(role) = platform_role {
+            state
+                .auth_pg
+                .execute(
+                    "INSERT INTO platform.roles (user_id, role) VALUES ($1, $2)",
+                    &[&user_id, &role],
+                )
+                .await
+                .expect("insert platform role");
+        }
+
+        let claims = claims_for(user_id, &email);
+        let session = console_sessions::create(&state.auth_pg, &claims)
+            .await
+            .expect("create console session");
+        let cookie = format!(
+            "{}={}",
+            oidc_rp::console_session_cookie_name(state.insecure_dev),
+            session.id
+        );
+
+        Self {
+            state,
+            user_id,
+            session_id: session.id,
+            cookie,
+            blob_root,
+            deploy_tmp_dir,
+        }
+    }
+
+    async fn cleanup(&self) {
+        let token_rows = self
+            .state
+            .auth_pg
+            .query(
+                "SELECT id FROM control.permission_tokens WHERE owner_id = $1",
+                &[&self.user_id],
+            )
+            .await
+            .unwrap_or_default();
+        for row in token_rows {
+            let id: Uuid = row.get("id");
+            let _ = self
+                .state
+                .auth_pg
+                .execute("DELETE FROM control.authz_decisions WHERE token_id = $1", &[&id])
+                .await;
+        }
+        let _ = self
+            .state
+            .auth_pg
+            .execute(
+                "DELETE FROM control.authz_decisions WHERE user_id = $1",
+                &[&self.user_id],
+            )
+            .await;
+        let _ = self
+            .state
+            .auth_pg
+            .execute(
+                "DELETE FROM control.permission_tokens WHERE owner_id = $1",
+                &[&self.user_id],
+            )
+            .await;
+        let _ = self
+            .state
+            .auth_pg
+            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .await;
+        let _ = self
+            .state
+            .auth_pg
+            .execute("DELETE FROM auth.console_sessions WHERE id = $1", &[&self.session_id])
+            .await;
+        let _ = self
+            .state
+            .auth_pg
+            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .await;
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.blob_root);
+        let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
+    }
+}
+
+fn claims_for(user_id: Uuid, email: &str) -> TokenClaims {
+    TokenClaims {
+        sub: user_id.to_string(),
+        iss: "https://auth.zeroship.test/".to_string(),
+        aud: Value::String("console.zeroship.ai".to_string()),
+        exp: 9_999_999_999,
+        iat: 0,
+        nbf: None,
+        nonce: None,
+        at_hash: None,
+        c_hash: None,
+        email: Some(email.to_string()),
+        email_verified: Some(true),
+        name: Some("Token Test User".to_string()),
+        picture: None,
+        acr: None,
+        amr: None,
+        other: Default::default(),
+    }
+}
+
+fn deploy_policy() -> Value {
+    json!({
+        "name": "CI deploy",
+        "statements": [{
+            "effect": "allow",
+            "actions": ["apps:deploy"],
+            "resources": [{"type": "any"}]
+        }]
+    })
+}
+
+macro_rules! create_pat {
+    ($app:expr, $cookie:expr, $name:expr) => {{
+        let body = json!({
+            "name": $name,
+            "policies": deploy_policy(),
+            "expires_in_days": 90
+        });
+        let req = test::TestRequest::post()
+            .uri("/me/tokens")
+            .header("accept", "application/json")
+            .header("cookie", $cookie)
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&$app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = test::read_body(resp).await;
+        serde_json::from_slice::<Value>(&bytes).expect("create PAT JSON")
+    }};
+}
+
+macro_rules! init_control {
+    ($fx:expr) => {{
+        test::init_service(
+            web::App::new()
+                .state($fx.state.clone())
+                .configure(token_handlers::configure),
+        )
+        .await
+    }};
+}
+
+#[compio::test]
+async fn create_pat_with_valid_policy_returns_jwt() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "valid", Some("admin")).await;
+    let app = init_control!(fx);
+
+    let json = create_pat!(app, &fx.cookie, "CI deploy");
+    let id = json.get("id").and_then(Value::as_str).expect("id");
+    let token = json
+        .get("token")
+        .and_then(Value::as_str)
+        .expect("token");
+    let claims = fx.state.pat_issuer.verify(token).expect("verify PAT");
+
+    assert_eq!(claims.jti, id);
+    assert_eq!(claims.owner, fx.user_id.to_string());
+    assert_eq!(claims.aud, "control.zeroship.ai");
+    let exp = claims.exp;
+    let now = chrono::Utc::now().timestamp();
+    assert!(exp > now + 89 * 86_400, "exp should be about 90 days out");
+    assert!(exp <= now + 91 * 86_400, "exp should be about 90 days out");
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn create_pat_with_policy_exceeding_user_returns_400() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "viewer", Some("readonly")).await;
+    let app = init_control!(fx);
+
+    let req = test::TestRequest::post()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("cookie", fx.cookie.as_str())
+        .set_json(&json!({
+            "name": "too broad",
+            "policies": deploy_policy(),
+            "expires_in_days": 90
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = test::read_body(resp).await;
+    let body: Value = serde_json::from_slice(&bytes).expect("error body");
+    assert_eq!(body.get("error").and_then(Value::as_str), Some("excess_permissions"));
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn list_pats_returns_user_tokens_without_secret() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "list", Some("admin")).await;
+    let app = init_control!(fx);
+
+    create_pat!(app, &fx.cookie, "CI deploy A");
+    create_pat!(app, &fx.cookie, "CI deploy B");
+
+    let req = test::TestRequest::get()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("cookie", fx.cookie.as_str())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = test::read_body(resp).await;
+    let body: Value = serde_json::from_slice(&bytes).expect("list JSON");
+    let entries = body.as_array().expect("array");
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| entry.get("token").is_none()));
+    assert!(entries.iter().all(|entry| entry.get("name").is_some()));
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn delete_pat_marks_revoked() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "delete", Some("admin")).await;
+    let app = init_control!(fx);
+
+    let created = create_pat!(app, &fx.cookie, "CI deploy");
+    let id = created.get("id").and_then(Value::as_str).expect("id");
+    let req = test::TestRequest::delete()
+        .uri(&format!("/me/tokens/{id}"))
+        .header("accept", "application/json")
+        .header("cookie", fx.cookie.as_str())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = test::read_body(resp).await;
+    let deleted: Value = serde_json::from_slice(&bytes).expect("delete JSON");
+    assert!(deleted.get("revoked_at").and_then(Value::as_str).is_some());
+
+    let req = test::TestRequest::get()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("cookie", fx.cookie.as_str())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bytes = test::read_body(resp).await;
+    let body: Value = serde_json::from_slice(&bytes).expect("list JSON");
+    let entry = body
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+        .expect("revoked token listed");
+    assert!(entry.get("revoked_at").and_then(Value::as_str).is_some());
+
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn using_revoked_pat_returns_401() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[token_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "revoked-use", Some("admin")).await;
+    let app = init_control!(fx);
+
+    let created = create_pat!(app, &fx.cookie, "CI deploy");
+    let id = created.get("id").and_then(Value::as_str).expect("id");
+    let token = created.get("token").and_then(Value::as_str).expect("token");
+
+    let req = test::TestRequest::get()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/me/tokens/{id}"))
+        .header("accept", "application/json")
+        .header("cookie", fx.cookie.as_str())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::get()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    fx.cleanup().await;
+}

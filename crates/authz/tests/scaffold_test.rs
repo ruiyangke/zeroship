@@ -28,7 +28,7 @@ fn policy_roundtrips_through_wrapper_json_shape() {
             "name": "test",
             "statements": [{
                 "effect": "allow",
-                "actions": ["apps_deploy", "env_read"],
+                "actions": ["apps:deploy", "env:read"],
                 "resources": [{"type": "app", "id": "blog"}],
                 "conditions": [
                     {"kind": "ip_range", "cidrs": ["10.0.0.0/8"]},

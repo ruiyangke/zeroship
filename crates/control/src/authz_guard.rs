@@ -1,10 +1,8 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use base64::Engine as _;
 use ntex::http::Payload;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
-use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
@@ -100,17 +98,29 @@ async fn guard_from_bearer(
     let Some(raw) = zeroship_core::auth::extract_bearer(header) else {
         return Ok(None);
     };
-    let token_id = extract_token_id(raw)
-        .ok_or_else(|| web::error::ErrorUnauthorized("invalid bearer token"))?;
+    let claims = state
+        .pat_issuer
+        .verify(raw)
+        .map_err(|err| {
+            tracing::warn!(error = %err, "control: PAT verify failed");
+            web::error::ErrorUnauthorized("invalid bearer token")
+        })?;
+    let token_id = Uuid::parse_str(&claims.jti)
+        .map_err(|_| web::error::ErrorUnauthorized("invalid bearer token id"))?;
+    let owner_id = Uuid::parse_str(&claims.owner)
+        .map_err(|_| web::error::ErrorUnauthorized("invalid bearer owner"))?;
 
     let rows = state
         .auth_pg
         .query(
             "SELECT owner_id FROM control.permission_tokens \
              WHERE id = $1 \
+               AND owner_id = $2 \
+               AND policy_hash = $3 \
+               AND kind = 'pat' \
                AND revoked_at IS NULL \
                AND (expires_at IS NULL OR expires_at > NOW())",
-            &[&token_id],
+            &[&token_id, &owner_id, &claims.policy_hash],
         )
         .await
         .map_err(|err| {
@@ -122,6 +132,17 @@ async fn guard_from_bearer(
         .ok_or_else(|| web::error::ErrorUnauthorized("permission token not active"))?;
     let principal_id: Uuid = row.get("owner_id");
 
+    if let Err(err) = state
+        .auth_pg
+        .execute(
+            "UPDATE control.permission_tokens SET last_used_at = NOW() WHERE id = $1",
+            &[&token_id],
+        )
+        .await
+    {
+        tracing::warn!(error = %err, "control: permission token last_used_at update failed");
+    }
+
     Ok(Some(AuthzGuard {
         principal_id,
         token_id: Some(token_id),
@@ -129,22 +150,4 @@ async fn guard_from_bearer(
         mfa_age_seconds: None,
         request_ip,
     }))
-}
-
-fn extract_token_id(raw: &str) -> Option<Uuid> {
-    if let Ok(id) = Uuid::parse_str(raw) {
-        return Some(id);
-    }
-
-    let claims_segment = raw.split('.').nth(1)?;
-    let claims_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(claims_segment)
-        .ok()?;
-    let claims: BearerClaims = serde_json::from_slice(&claims_bytes).ok()?;
-    Uuid::parse_str(&claims.tid).ok()
-}
-
-#[derive(Deserialize)]
-struct BearerClaims {
-    tid: String,
 }

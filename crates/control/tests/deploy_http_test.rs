@@ -264,6 +264,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         auth_pg,
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
+        pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
