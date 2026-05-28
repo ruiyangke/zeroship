@@ -100,7 +100,7 @@ pub async fn bootstrap_builder_oauth_client(
         });
     }
 
-    if oauth_client_exists(pg).await? {
+    if expected_oauth_client_present(pg, cfg).await? {
         read_existing_client_secret(&cfg.client_secret_path)?;
         tracing::info!(
             client_id = BUILDER_CLIENT_ID,
@@ -115,7 +115,14 @@ pub async fn bootstrap_builder_oauth_client(
 
     let client_secret = ensure_client_secret(&cfg.client_secret_path)?;
     create_hydra_client(cfg, &client_secret).await?;
-    insert_oauth_client(pg, cfg).await?;
+    let inserted = insert_oauth_client(pg, cfg).await?;
+    if !inserted {
+        expected_oauth_client_present(pg, cfg).await?;
+        return Ok(BuilderClientBootstrapResult {
+            status: BuilderClientBootstrapStatus::AlreadyPresent,
+            client_secret_path: cfg.client_secret_path.clone(),
+        });
+    }
 
     tracing::info!(
         client_id = BUILDER_CLIENT_ID,
@@ -128,21 +135,49 @@ pub async fn bootstrap_builder_oauth_client(
     })
 }
 
-async fn oauth_client_exists(pg: &Client) -> Result<bool, BuilderClientBootstrapError> {
+async fn expected_oauth_client_present(
+    pg: &Client,
+    cfg: &BuilderClientBootstrapConfig,
+) -> Result<bool, BuilderClientBootstrapError> {
     let rows = pg
         .query(
-            "SELECT 1 FROM control.oauth_clients WHERE client_id = $1",
+            "SELECT client_name, redirect_uris, scopes, skip_consent, hydra_client_id
+             FROM control.oauth_clients WHERE client_id = $1",
             &[&BUILDER_CLIENT_ID],
         )
         .await
         .map_err(|err| BuilderClientBootstrapError::Db(err.to_string()))?;
-    Ok(!rows.is_empty())
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+
+    let redirect_uris: Vec<String> = row.get("redirect_uris");
+    let scopes: Vec<String> = row.get("scopes");
+    let expected_redirect_uris = vec![cfg.redirect_uri.clone()];
+    let expected_scopes = BUILDER_SCOPES
+        .iter()
+        .map(|scope| scope.as_str().to_string())
+        .collect::<Vec<_>>();
+    let matches_expected =
+        row.get::<_, String>("client_name") == BUILDER_CLIENT_NAME
+            && redirect_uris == expected_redirect_uris
+            && scopes == expected_scopes
+            && row.get::<_, bool>("skip_consent") == trusted_clients::is_trusted(BUILDER_CLIENT_ID)
+            && row.get::<_, String>("hydra_client_id") == BUILDER_CLIENT_ID;
+    if matches_expected {
+        Ok(true)
+    } else {
+        Err(BuilderClientBootstrapError::Db(
+            "existing zeroship-builder OAuth client does not match expected trusted-builder shape"
+                .into(),
+        ))
+    }
 }
 
 async fn insert_oauth_client(
     pg: &Client,
     cfg: &BuilderClientBootstrapConfig,
-) -> Result<(), BuilderClientBootstrapError> {
+) -> Result<bool, BuilderClientBootstrapError> {
     let redirect_uris = vec![cfg.redirect_uri.as_str()];
     let scopes = BUILDER_SCOPES
         .iter()
@@ -150,11 +185,14 @@ async fn insert_oauth_client(
         .collect::<Vec<_>>();
     let created_by: Option<Uuid> = None;
     let skip_consent = trusted_clients::is_trusted(BUILDER_CLIENT_ID);
-    pg.execute(
-        "INSERT INTO control.oauth_clients \
+    let rows = pg
+        .query(
+            "INSERT INTO control.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1)",
+         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1)
+         ON CONFLICT (client_id) DO NOTHING
+         RETURNING client_id",
         &[
             &BUILDER_CLIENT_ID,
             &BUILDER_CLIENT_NAME,
@@ -163,10 +201,10 @@ async fn insert_oauth_client(
             &skip_consent,
             &created_by,
         ],
-    )
-    .await
-    .map_err(|err| BuilderClientBootstrapError::Db(err.to_string()))?;
-    Ok(())
+        )
+        .await
+        .map_err(|err| BuilderClientBootstrapError::Db(err.to_string()))?;
+    Ok(!rows.is_empty())
 }
 
 fn ensure_client_secret(path: &Path) -> Result<String, BuilderClientBootstrapError> {
@@ -291,5 +329,58 @@ mod tests {
         assert!(is_valid_client_secret(&"0".repeat(64)));
         assert!(!is_valid_client_secret(&"0".repeat(63)));
         assert!(!is_valid_client_secret(&"g".repeat(64)));
+    }
+
+    #[compio::test]
+    async fn insert_oauth_client_conflict_is_idempotent_if_shape_matches() {
+        let Ok(dsn) = std::env::var("AUTH_DB_URL").or_else(|_| std::env::var("PG_TEST_URL")) else {
+            eprintln!("skipping (no AUTH_DB_URL/PG_TEST_URL)");
+            return;
+        };
+        let (pg, conn) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
+            .await
+            .expect("pg connect");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        zeroship_auth::store::migrations::migrate(&pg)
+            .await
+            .expect("migrate");
+        pg.execute(
+            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            &[&BUILDER_CLIENT_ID],
+        )
+        .await
+        .expect("cleanup builder client");
+
+        let cfg = BuilderClientBootstrapConfig {
+            enabled: true,
+            hydra_admin_url: "http://127.0.0.1:4445".to_string(),
+            redirect_uri: DEFAULT_BUILDER_REDIRECT_URI.to_string(),
+            client_secret_path: std::env::temp_dir().join("unused-builder-secret"),
+        };
+
+        assert!(
+            insert_oauth_client(&pg, &cfg).await.expect("first insert"),
+            "first insert should create the local builder row"
+        );
+        assert!(
+            !insert_oauth_client(&pg, &cfg).await.expect("second insert"),
+            "second insert should be an idempotent conflict"
+        );
+        assert!(
+            expected_oauth_client_present(&pg, &cfg)
+                .await
+                .expect("expected shape"),
+            "existing local builder row should match the trusted shape"
+        );
+
+        pg.execute(
+            "DELETE FROM control.oauth_clients WHERE client_id = $1",
+            &[&BUILDER_CLIENT_ID],
+        )
+        .await
+        .ok();
     }
 }
