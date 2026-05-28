@@ -6,10 +6,18 @@ description = "Authorization wrapper policy types for the zeroship platform"
 
 [dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }
+compio-postgres = { workspace = true, features = ["with-serde_json-1", "with-uuid-1"] }
 hex = { workspace = true }
+lru = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+compio = { workspace = true }
+zeroship-auth = { workspace = true }
 
 [lints]
 workspace = true

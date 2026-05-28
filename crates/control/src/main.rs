@@ -282,6 +282,8 @@ async fn main() -> std::io::Result<()> {
         deploy_tmp_dir,
         oidc_rp,
         auth_pg,
+        static_policies: zeroship_authz::load_platform_policies()
+            .expect("control: bundled authz policies parse"),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 

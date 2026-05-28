@@ -5,6 +5,14 @@ use sha2::{Digest, Sha256};
 
 use crate::{lower, AuthzError, Policy};
 
+const STATIC_POLICY_SOURCES: &[&str] = &[
+    include_str!("../policies/platform/admin.cedar"),
+    include_str!("../policies/platform/billing.cedar"),
+    include_str!("../policies/platform/readonly.cedar"),
+    include_str!("../policies/platform/support.cedar"),
+    include_str!("../policies/creator/app-members.cedar"),
+];
+
 #[derive(Debug)]
 pub struct Authorizer {
     policies: PolicySet,
@@ -67,6 +75,18 @@ pub fn policy_hash(wrapper_json: &serde_json::Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Load the built-in platform + creator authorization policies.
+///
+/// These policies are static repo assets parsed once by services at boot.
+///
+/// # Errors
+///
+/// Returns [`AuthzError::CedarParse`] if any bundled Cedar source is invalid.
+pub fn load_platform_policies() -> Result<PolicySet, AuthzError> {
+    PolicySet::from_str(&STATIC_POLICY_SOURCES.join("\n"))
+        .map_err(|err| AuthzError::CedarParse(err.to_string()))
 }
 
 fn canonical_json(value: &serde_json::Value) -> String {

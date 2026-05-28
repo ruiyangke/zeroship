@@ -1,0 +1,289 @@
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
+use std::str::FromStr;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+use cedar_policy::{Entities, Entity, EntityUid, RestrictedExpression};
+use compio_postgres::Client;
+use lru::LruCache;
+use uuid::Uuid;
+
+use crate::{Action, AuthzError, Resource};
+
+const ENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
+const ENTITY_CACHE_CAPACITY: usize = 1024;
+
+static ENTITY_CACHE: LazyLock<Mutex<LruCache<EntityCacheKey, CacheEntry>>> =
+    LazyLock::new(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(ENTITY_CACHE_CAPACITY).expect("non-zero cache capacity"),
+        ))
+    });
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct EntityCacheKey {
+    principal_id: Uuid,
+    resource_key: String,
+}
+
+#[derive(Clone)]
+struct CacheEntry {
+    inserted_at: Instant,
+    entities: Entities,
+}
+
+#[derive(Default)]
+struct Memberships {
+    owner: Vec<String>,
+    editor: Vec<String>,
+    viewer: Vec<String>,
+}
+
+/// Assemble Cedar entities for a principal/resource authorization request.
+///
+/// The store contains the principal `User`, all app membership targets, the
+/// requested resource entity, and the P11 placeholder org when needed.
+pub async fn assemble_entities(
+    pg: &Client,
+    principal_id: Uuid,
+    _action: Action,
+    resource: Resource,
+) -> Result<Entities, AuthzError> {
+    let key = EntityCacheKey {
+        principal_id,
+        resource_key: resource_cache_key(&resource),
+    };
+
+    if let Some(entities) = cache_get(&key) {
+        return Ok(entities);
+    }
+
+    let user = load_user(pg, principal_id).await?;
+    let memberships = load_memberships(pg, principal_id).await?;
+    let mut app_ids = memberships
+        .owner
+        .iter()
+        .chain(memberships.editor.iter())
+        .chain(memberships.viewer.iter())
+        .cloned()
+        .collect::<HashSet<_>>();
+    if let Resource::App { id } = &resource {
+        app_ids.insert(id.clone());
+    }
+
+    let mut entities = Vec::new();
+    entities.push(user_entity(principal_id, &user, &memberships)?);
+
+    for app_id in app_ids {
+        let suspended = load_app_suspended(pg, &app_id).await.unwrap_or(false);
+        entities.push(app_entity(&app_id, suspended)?);
+    }
+
+    if let Resource::Org { id } = &resource {
+        entities.push(empty_entity("Org", id)?);
+    }
+
+    let entities = Entities::from_entities(entities, None)
+        .map_err(|err| AuthzError::CedarEntities(err.to_string()))?;
+    cache_put(key, entities.clone());
+    Ok(entities)
+}
+
+struct UserAttrs {
+    email_verified: bool,
+    account_locked: bool,
+    platform_role: String,
+}
+
+async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzError> {
+    let rows = pg
+        .query(
+            "SELECT \
+                u.email_verified_at IS NOT NULL AS email_verified, \
+                (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked, \
+                COALESCE(r.role, 'readonly') AS platform_role \
+             FROM auth.users u \
+             LEFT JOIN platform.roles r ON r.user_id = u.id \
+             WHERE u.id = $1",
+            &[&principal_id],
+        )
+        .await
+        .map_err(|err| AuthzError::Db(format!("load user entities: {err}")))?;
+
+    let row = rows
+        .first()
+        .ok_or_else(|| AuthzError::Validation(format!("principal not found: {principal_id}")))?;
+
+    Ok(UserAttrs {
+        email_verified: row.get("email_verified"),
+        account_locked: row.get("account_locked"),
+        platform_role: row.get("platform_role"),
+    })
+}
+
+async fn load_memberships(pg: &Client, principal_id: Uuid) -> Result<Memberships, AuthzError> {
+    let rows = pg
+        .query(
+            "SELECT app_id, role FROM control.app_members WHERE user_id = $1",
+            &[&principal_id],
+        )
+        .await
+        .map_err(|err| AuthzError::Db(format!("load app memberships: {err}")))?;
+
+    let mut memberships = Memberships::default();
+    for row in rows {
+        let app_id: String = row.get("app_id");
+        let role: String = row.get("role");
+        match role.as_str() {
+            "owner" => memberships.owner.push(app_id),
+            "editor" => memberships.editor.push(app_id),
+            "viewer" => memberships.viewer.push(app_id),
+            other => {
+                return Err(AuthzError::Validation(format!(
+                    "unknown app member role: {other}"
+                )))
+            }
+        }
+    }
+    Ok(memberships)
+}
+
+async fn load_app_suspended(pg: &Client, app_id: &str) -> Result<bool, AuthzError> {
+    for table in ["control.apps", "apps"] {
+        let sql = format!("SELECT COALESCE(suspended, false) AS suspended FROM {table} WHERE id::text = $1");
+        match pg.query(&sql, &[&app_id]).await {
+            Ok(rows) => return Ok(rows.first().map(|row| row.get("suspended")).unwrap_or(false)),
+            Err(err) if missing_relation_or_column(&err) => continue,
+            Err(err) => return Err(AuthzError::Db(format!("load app entity: {err}"))),
+        }
+    }
+    Ok(false)
+}
+
+fn missing_relation_or_column(err: &compio_postgres::Error) -> bool {
+    let text = err.to_string();
+    text.contains("does not exist")
+        || text.contains("undefined_column")
+        || text.contains("42P01")
+        || text.contains("42703")
+}
+
+fn user_entity(
+    principal_id: Uuid,
+    user: &UserAttrs,
+    memberships: &Memberships,
+) -> Result<Entity, AuthzError> {
+    let attrs = HashMap::from([
+        (
+            "platform_role".to_owned(),
+            restricted_string(&user.platform_role)?,
+        ),
+        (
+            "email_verified".to_owned(),
+            restricted_bool(user.email_verified)?,
+        ),
+        (
+            "account_locked".to_owned(),
+            restricted_bool(user.account_locked)?,
+        ),
+        (
+            "app_owner_of".to_owned(),
+            restricted_app_set(&memberships.owner)?,
+        ),
+        (
+            "app_editor_of".to_owned(),
+            restricted_app_set(&memberships.editor)?,
+        ),
+        (
+            "app_viewer_of".to_owned(),
+            restricted_app_set(&memberships.viewer)?,
+        ),
+    ]);
+    Entity::new(uid("User", &principal_id.to_string())?, attrs, HashSet::new())
+        .map_err(|err| AuthzError::CedarEntities(err.to_string()))
+}
+
+fn app_entity(app_id: &str, suspended: bool) -> Result<Entity, AuthzError> {
+    let attrs = HashMap::from([("suspended".to_owned(), restricted_bool(suspended)?)]);
+    Entity::new(uid("App", app_id)?, attrs, HashSet::new())
+        .map_err(|err| AuthzError::CedarEntities(err.to_string()))
+}
+
+fn empty_entity(entity_type: &str, id: &str) -> Result<Entity, AuthzError> {
+    Ok(Entity::new_no_attrs(uid(entity_type, id)?, HashSet::new()))
+}
+
+fn restricted_app_set(app_ids: &[String]) -> Result<RestrictedExpression, AuthzError> {
+    let apps = app_ids
+        .iter()
+        .map(|id| format!("App::{}", cedar_string(id)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    restricted(&format!("[{apps}]"))
+}
+
+fn restricted_bool(value: bool) -> Result<RestrictedExpression, AuthzError> {
+    restricted(if value { "true" } else { "false" })
+}
+
+fn restricted_string(value: &str) -> Result<RestrictedExpression, AuthzError> {
+    restricted(&cedar_string(value))
+}
+
+fn restricted(source: &str) -> Result<RestrictedExpression, AuthzError> {
+    RestrictedExpression::from_str(source)
+        .map_err(|err| AuthzError::CedarEntities(err.to_string()))
+}
+
+pub(crate) fn uid(entity_type: &str, id: &str) -> Result<EntityUid, AuthzError> {
+    EntityUid::from_str(&format!("{entity_type}::{}", cedar_string(id)))
+        .map_err(|err| AuthzError::CedarEntities(err.to_string()))
+}
+
+pub(crate) fn cedar_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn resource_cache_key(resource: &Resource) -> String {
+    match resource {
+        Resource::App { id } => format!("app:{id}"),
+        Resource::Org { id } => format!("org:{id}"),
+        Resource::Any => "any:*".to_owned(),
+    }
+}
+
+fn cache_get(key: &EntityCacheKey) -> Option<Entities> {
+    let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+    let entry = cache.get(key)?;
+    if entry.inserted_at.elapsed() <= ENTITY_CACHE_TTL {
+        Some(entry.entities.clone())
+    } else {
+        cache.pop(key);
+        None
+    }
+}
+
+fn cache_put(key: EntityCacheKey, entities: Entities) {
+    let mut cache = ENTITY_CACHE.lock().expect("entity cache mutex poisoned");
+    cache.put(
+        key,
+        CacheEntry {
+            inserted_at: Instant::now(),
+            entities,
+        },
+    );
+}

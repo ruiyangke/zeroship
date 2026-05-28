@@ -2,7 +2,10 @@ use std::str::FromStr;
 
 use cedar_policy::PolicySet;
 use serde_json::json;
-use zeroship_authz::{lower, policy_hash, Action, Condition, Effect, Policy, Resource, Statement};
+use zeroship_authz::{
+    load_platform_policies, lower, policy_hash, Action, Condition, Effect, Policy, Resource,
+    Statement,
+};
 
 #[test]
 fn wrapper_lowers_to_valid_cedar_source() {
@@ -21,6 +24,11 @@ fn wrapper_lowers_to_valid_cedar_source() {
     let source = lower(&policy);
 
     PolicySet::from_str(&source).expect("lowered policy should parse as Cedar");
+}
+
+#[test]
+fn bundled_platform_policies_parse() {
+    load_platform_policies().expect("bundled platform policies should parse");
 }
 
 #[test]

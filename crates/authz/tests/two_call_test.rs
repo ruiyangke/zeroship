@@ -1,0 +1,280 @@
+use compio_postgres::{connect, Client, NoTls};
+use std::future::Future;
+use uuid::Uuid;
+use zeroship_authz::{
+    enforce, load_platform_policies, policy_hash, Action, AuthzContext, AuthzDecision, Effect,
+    Policy, Resource, Statement,
+};
+
+#[test]
+fn owner_authorized_token_authorized_returns_allow() {
+    run_db_test(|pg| async move {
+        let mut fixture = Fixture::new(&pg, "admin_allow", Some("admin"), None).await;
+        let token_id = fixture
+            .insert_token(
+                &pg,
+                Policy {
+                    name: "deploy token".to_owned(),
+                    statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
+                },
+            )
+            .await;
+
+        let decision =
+            enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(Some(token_id)))
+                .await
+                .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Allow);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn owner_unauthorized_returns_deny_even_if_token_grants() {
+    run_db_test(|pg| async move {
+        let mut fixture = Fixture::new(&pg, "viewer_token_grants", None, Some("viewer")).await;
+        let token_id = fixture
+            .insert_token(
+                &pg,
+                Policy {
+                    name: "overbroad token".to_owned(),
+                    statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
+                },
+            )
+            .await;
+
+        let decision =
+            enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(Some(token_id)))
+                .await
+                .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Deny);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn token_denies_returns_deny_even_if_owner_allowed() {
+    run_db_test(|pg| async move {
+        let mut fixture = Fixture::new(&pg, "admin_token_denies", Some("admin"), None).await;
+        let token_id = fixture
+            .insert_token(
+                &pg,
+                Policy {
+                    name: "read env token".to_owned(),
+                    statements: vec![allow(vec![Action::EnvRead], vec![fixture.app()])],
+                },
+            )
+            .await;
+
+        let decision =
+            enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(Some(token_id)))
+                .await
+                .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Deny);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn no_token_uses_owner_policies_only() {
+    run_db_test(|pg| async move {
+        let fixture = Fixture::new(&pg, "admin_no_token", Some("admin"), None).await;
+
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+            .await
+            .unwrap();
+
+        assert_eq!(decision, AuthzDecision::Allow);
+        fixture.cleanup(&pg).await;
+    });
+}
+
+#[test]
+fn audit_decision_recorded() {
+    run_db_test(|pg| async move {
+        let fixture = Fixture::new(&pg, "audit", Some("admin"), None).await;
+
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+            .await
+            .unwrap();
+        assert_eq!(decision, AuthzDecision::Allow);
+
+        let rows = pg
+            .query(
+                "SELECT action, resource_type, resource_id, decision \
+             FROM control.authz_decisions \
+             WHERE user_id = $1 AND action = $2 AND resource_type = 'app' AND resource_id = $3 \
+             ORDER BY occurred_at DESC \
+             LIMIT 1",
+                &[
+                    &fixture.user_id,
+                    &Action::AppsDeploy.cedar_id(),
+                    &fixture.app_id,
+                ],
+            )
+            .await
+            .expect("select audit row");
+        let row = rows.first().expect("audit row exists");
+        assert_eq!(row.get::<_, String>("action"), "apps:deploy");
+        assert_eq!(row.get::<_, String>("resource_type"), "app");
+        assert_eq!(
+            row.get::<_, Option<String>>("resource_id"),
+            Some(fixture.app_id.clone())
+        );
+        assert_eq!(row.get::<_, String>("decision"), "allow");
+
+        fixture.cleanup(&pg).await;
+    });
+}
+
+fn run_db_test<F, Fut>(test: F)
+where
+    F: FnOnce(Client) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping (no AUTH_DB_URL)");
+        return;
+    };
+    compio::runtime::Runtime::new()
+        .expect("create compio runtime")
+        .block_on(async move {
+            let pg = pg(&dsn).await;
+            test(pg).await;
+        });
+}
+
+async fn pg(dsn: &str) -> Client {
+    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+    zeroship_auth::store::migrations::migrate(&client)
+        .await
+        .expect("migrate auth/control authz tables");
+    client
+}
+
+struct Fixture {
+    user_id: Uuid,
+    app_id: String,
+    token_ids: Vec<Uuid>,
+}
+
+impl Fixture {
+    async fn new(
+        pg: &Client,
+        label: &str,
+        platform_role: Option<&str>,
+        app_role: Option<&str>,
+    ) -> Self {
+        let user_id = Uuid::new_v4();
+        let app_id = format!("blog-{label}-{user_id}");
+        let email = format!("{label}-{user_id}@example.com");
+
+        pg.execute(
+            "INSERT INTO auth.users (id, email, name) VALUES ($1, $2::citext, $3)",
+            &[&user_id, &email, &label],
+        )
+        .await
+        .expect("insert user");
+
+        if let Some(role) = platform_role {
+            pg.execute(
+                "INSERT INTO platform.roles (user_id, role) VALUES ($1, $2)",
+                &[&user_id, &role],
+            )
+            .await
+            .expect("insert platform role");
+        }
+
+        if let Some(role) = app_role {
+            pg.execute(
+                "INSERT INTO control.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
+                &[&app_id, &user_id, &role],
+            )
+            .await
+            .expect("insert app member");
+        }
+
+        Self {
+            user_id,
+            app_id,
+            token_ids: Vec::new(),
+        }
+    }
+
+    async fn insert_token(&mut self, pg: &Client, policy: Policy) -> Uuid {
+        let token_id = Uuid::new_v4();
+        let policies = policy.to_json_value();
+        let hash = policy_hash(&policies);
+        pg.execute(
+            "INSERT INTO control.permission_tokens \
+                (id, owner_id, kind, name, policies, policy_hash) \
+             VALUES ($1, $2, 'pat', $3, $4, $5)",
+            &[&token_id, &self.user_id, &"test token", &policies, &hash],
+        )
+        .await
+        .expect("insert permission token");
+        self.token_ids.push(token_id);
+        token_id
+    }
+
+    fn app(&self) -> Resource {
+        Resource::App {
+            id: self.app_id.clone(),
+        }
+    }
+
+    fn ctx(&self, token_id: Option<Uuid>) -> AuthzContext<'_> {
+        AuthzContext {
+            principal_id: self.user_id,
+            token_id,
+            action: Action::AppsDeploy,
+            resource: self.app(),
+            request_ip: None,
+            mfa_verified: false,
+            mfa_age_seconds: None,
+            request_id: None,
+        }
+    }
+
+    async fn cleanup(&self, pg: &Client) {
+        let _ = pg
+            .execute(
+                "DELETE FROM control.authz_decisions WHERE user_id = $1",
+                &[&self.user_id],
+            )
+            .await;
+        for token_id in &self.token_ids {
+            let _ = pg
+                .execute("DELETE FROM control.permission_tokens WHERE id = $1", &[token_id])
+                .await;
+        }
+        let _ = pg
+            .execute(
+                "DELETE FROM control.app_members WHERE user_id = $1",
+                &[&self.user_id],
+            )
+            .await;
+        let _ = pg
+            .execute("DELETE FROM platform.roles WHERE user_id = $1", &[&self.user_id])
+            .await;
+        let _ = pg
+            .execute("DELETE FROM auth.users WHERE id = $1", &[&self.user_id])
+            .await;
+    }
+}
+
+fn allow(actions: Vec<Action>, resources: Vec<Resource>) -> Statement {
+    Statement {
+        effect: Effect::Allow,
+        actions,
+        resources,
+        conditions: Vec::new(),
+    }
+}

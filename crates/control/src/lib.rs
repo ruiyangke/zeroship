@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod audit;
+pub mod authz_guard;
 pub mod backchannel_logout;
 pub mod console_sessions;
 pub mod deploy;
@@ -128,6 +129,10 @@ pub struct AppState {
     /// because in multi-DB deployments the auth tables may live in a
     /// separate cluster. Mandatory post-U8.
     pub auth_pg: Arc<compio_postgres::Client>,
+    /// Static Cedar policy bundle for control-plane authorization.
+    /// Parsed once at boot; per-token policies are loaded by the authz
+    /// evaluator only when a token-bearing request needs them.
+    pub static_policies: zeroship_authz::PolicySet,
     /// In-process replay cache for OIDC Back-Channel Logout
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
