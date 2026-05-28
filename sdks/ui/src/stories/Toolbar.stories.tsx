@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { Button, Toggle, Toolbar } from "../components";
+import { Toggle, Toolbar } from "../components";
 
 const meta: Meta<typeof Toolbar> = {
   title: "Components/Toolbar",
@@ -85,18 +85,21 @@ export const Basic: Story = {
     docs: {
       description: {
         story:
-          "Plain button row. The Toolbar renders `role=\"toolbar\"` + " +
-          "`aria-orientation=\"horizontal\"`; arrow-left/right roves between " +
-          "items via Base UI's roving tabindex.",
+          "Plain `Toolbar.Button` row. The Toolbar renders " +
+          "`role=\"toolbar\"` + `aria-orientation=\"horizontal\"`; " +
+          "arrow-left/right roves between items via Base UI's roving " +
+          "tabindex. Use `Toolbar.Button` (not the bare `Button` from " +
+          "the package) so each item registers with Base UI's composite " +
+          "context — that's what enables roving and disabled-skip.",
       },
     },
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Basic toolbar">
       <Toolbar data-testid="toolbar-basic">
-        <Button variant="gray">Cut</Button>
-        <Button variant="gray">Copy</Button>
-        <Button variant="gray">Paste</Button>
+        <Toolbar.Button data-testid="toolbar-basic-cut">Cut</Toolbar.Button>
+        <Toolbar.Button data-testid="toolbar-basic-copy">Copy</Toolbar.Button>
+        <Toolbar.Button data-testid="toolbar-basic-paste">Paste</Toolbar.Button>
       </Toolbar>
     </div>
   ),
@@ -119,12 +122,12 @@ export const WithSeparator: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="With separator">
       <Toolbar data-testid="toolbar-with-separator">
-        <Button variant="gray">Cut</Button>
-        <Button variant="gray">Copy</Button>
-        <Button variant="gray">Paste</Button>
+        <Toolbar.Button>Cut</Toolbar.Button>
+        <Toolbar.Button>Copy</Toolbar.Button>
+        <Toolbar.Button>Paste</Toolbar.Button>
         <Toolbar.Separator data-testid="toolbar-separator-1" />
-        <Button variant="gray">Undo</Button>
-        <Button variant="gray">Redo</Button>
+        <Toolbar.Button>Undo</Toolbar.Button>
+        <Toolbar.Button>Redo</Toolbar.Button>
       </Toolbar>
     </div>
   ),
@@ -153,8 +156,8 @@ export const WithToggleGroup: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="With Toggle.Group">
       <Toolbar data-testid="toolbar-with-togglegroup">
-        <Button variant="gray">Cut</Button>
-        <Button variant="gray">Copy</Button>
+        <Toolbar.Button>Cut</Toolbar.Button>
+        <Toolbar.Button>Copy</Toolbar.Button>
         <Toolbar.Separator />
         <Toggle.Group
           defaultValue="center"
@@ -183,7 +186,7 @@ export const WithIconButtons: Story = {
     docs: {
       description: {
         story:
-          "Icon-only Buttons inside a Toolbar. Each Button carries an " +
+          "Icon-only `Toolbar.Button` entries. Each item carries an " +
           "`aria-label` so the icon-only affordance reads the same to " +
           "AT users as it does visually.",
       },
@@ -192,15 +195,15 @@ export const WithIconButtons: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="With icon-only buttons">
       <Toolbar data-testid="toolbar-with-icon-buttons">
-        <Button variant="gray" aria-label="Bold">
+        <Toolbar.Button aria-label="Bold">
           <BoldGlyph />
-        </Button>
-        <Button variant="gray" aria-label="Italic">
+        </Toolbar.Button>
+        <Toolbar.Button aria-label="Italic">
           <ItalicGlyph />
-        </Button>
-        <Button variant="gray" aria-label="Underline">
+        </Toolbar.Button>
+        <Toolbar.Button aria-label="Underline">
           <UnderlineGlyph />
-        </Button>
+        </Toolbar.Button>
       </Toolbar>
     </div>
   ),
@@ -226,19 +229,19 @@ export const Vertical: Story = {
         orientation="vertical"
         data-testid="toolbar-vertical"
       >
-        <Button variant="gray" aria-label="Bold">
+        <Toolbar.Button aria-label="Bold">
           <BoldGlyph />
-        </Button>
-        <Button variant="gray" aria-label="Italic">
+        </Toolbar.Button>
+        <Toolbar.Button aria-label="Italic">
           <ItalicGlyph />
-        </Button>
+        </Toolbar.Button>
         <Toolbar.Separator />
-        <Button variant="gray" aria-label="Align left">
+        <Toolbar.Button aria-label="Align left">
           <AlignLeftGlyph />
-        </Button>
-        <Button variant="gray" aria-label="Align center">
+        </Toolbar.Button>
+        <Toolbar.Button aria-label="Align center">
           <AlignCenterGlyph />
-        </Button>
+        </Toolbar.Button>
       </Toolbar>
     </div>
   ),
@@ -309,25 +312,19 @@ export const Disabled: Story = {
     docs: {
       description: {
         story:
-          "`disabled` on the root disables every child Button / Toggle. " +
-          "Base UI emits `aria-disabled` on the disabled descendants and " +
-          "skips them in roving-tabindex navigation.",
+          "`disabled` on the root disables every child `Toolbar.Button` " +
+          "/ `Toggle`. Base UI emits `aria-disabled` on the disabled " +
+          "descendants and skips them in roving-tabindex navigation.",
       },
     },
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Disabled toolbar">
       <Toolbar disabled data-testid="toolbar-disabled">
-        <Button variant="gray" disabled>
-          Cut
-        </Button>
-        <Button variant="gray" disabled>
-          Copy
-        </Button>
+        <Toolbar.Button disabled>Cut</Toolbar.Button>
+        <Toolbar.Button disabled>Copy</Toolbar.Button>
         <Toolbar.Separator />
-        <Button variant="gray" disabled>
-          Undo
-        </Button>
+        <Toolbar.Button disabled>Undo</Toolbar.Button>
       </Toolbar>
     </div>
   ),
@@ -354,13 +351,99 @@ export const Rtl: Story = {
       dir="rtl"
     >
       <Toolbar data-testid="toolbar-rtl">
-        <Button variant="gray">قص</Button>
-        <Button variant="gray">نسخ</Button>
-        <Button variant="gray">لصق</Button>
+        <Toolbar.Button>قص</Toolbar.Button>
+        <Toolbar.Button>نسخ</Toolbar.Button>
+        <Toolbar.Button>لصق</Toolbar.Button>
         <Toolbar.Separator />
-        <Button variant="gray">تراجع</Button>
-        <Button variant="gray">إعادة</Button>
+        <Toolbar.Button>تراجع</Toolbar.Button>
+        <Toolbar.Button>إعادة</Toolbar.Button>
       </Toolbar>
+    </div>
+  ),
+};
+
+/* ─── 9. RoleLockRegression — Slice 12 review fix #3 ────────────────── *
+ *
+ * Defensive coverage for the `role` lock. The component's public type
+ * `Omit<…, "role">` already rejects a literal `<Toolbar role="…">`, but
+ * a caller could still bypass via a `{...untypedProps}` spread. The
+ * Toolbar wrapper strips `role` at runtime so the rendered element is
+ * always `role="toolbar"`. This story passes a `role="navigation"`
+ * via a spread so the aria-wiring runner can confirm the strip
+ * survives the type bypass. */
+export const RoleLockRegression: Story = {
+  name: "Role lock — caller-passed role is stripped",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for Slice 12 review fix #3. The wrapper strips a " +
+          "user-passed `role` at runtime so a `{...spread}` injection " +
+          "cannot override `role=\"toolbar\"`. The aria-wiring runner " +
+          "checks the rendered DOM stays `role=\"toolbar\"`.",
+      },
+    },
+  },
+  render: () => {
+    // Type-bypass via a spread. The `Omit<…, "role">` rejects a direct
+    // `<Toolbar role="navigation">`, so we route through an untyped
+    // bag. The wrapper's runtime strip MUST drop this before forward.
+    const bypass = { role: "navigation" } as Record<string, unknown>;
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Role lock regression"
+      >
+        <Toolbar data-testid="toolbar-role-lock" {...bypass}>
+          <Toolbar.Button>Cut</Toolbar.Button>
+          <Toolbar.Button>Copy</Toolbar.Button>
+        </Toolbar>
+      </div>
+    );
+  },
+};
+
+/* ─── 10. Roving — regression for Slice 12 review fix #1 ────────────── *
+ *
+ * Story dedicated to the roving-tabindex contract. Tab enters at the
+ * first focusable item; ArrowRight advances and SKIPS the disabled
+ * item; Tab leaves the cluster. The aria-wiring runner drives this
+ * story directly so the assertion fails pre-fix (when plain `Button`
+ * children break the composite-item registration). */
+export const Roving: Story = {
+  name: "Roving tabindex + disabled skip",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression coverage for the roving-tabindex contract: Tab " +
+          "lands on the first item, ArrowRight advances and skips the " +
+          "disabled item, then Tab leaves the cluster. Built with " +
+          "`Toolbar.Button` so each item registers as a composite item " +
+          "with Base UI's roving context.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Roving toolbar">
+      <button type="button" data-testid="toolbar-roving-before">
+        Before
+      </button>
+      <Toolbar data-testid="toolbar-roving">
+        <Toolbar.Button data-testid="toolbar-roving-cut">Cut</Toolbar.Button>
+        <Toolbar.Button
+          data-testid="toolbar-roving-copy"
+          disabled
+          focusableWhenDisabled={false}
+        >
+          Copy
+        </Toolbar.Button>
+        <Toolbar.Button data-testid="toolbar-roving-paste">Paste</Toolbar.Button>
+      </Toolbar>
+      <button type="button" data-testid="toolbar-roving-after">
+        After
+      </button>
     </div>
   ),
 };

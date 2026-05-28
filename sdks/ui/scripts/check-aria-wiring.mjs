@@ -3682,11 +3682,10 @@ await open("components-menubar--keyboard-nav");
  * the `orientation` prop. Verify both the horizontal default story and
  * the vertical story.
  *
- * Implementation note: Base UI's `Toolbar.Root` sets the role on the
- * underlying `<div>`; the `aria-orientation` is implied by the role +
- * the `orientation` prop. Some Base UI builds attach the attribute
- * explicitly via `data-orientation` only; assert both styles so the
- * wiring is captured regardless. */
+ * Implementation note: Base UI's `Toolbar.Root` always sets BOTH
+ * `aria-orientation` and `data-orientation`. The previous null
+ * fallback was dead-permissive (Slice 12 fix #9) and is removed —
+ * the value must be exactly the expected orientation. */
 await open("components-toolbar--basic");
 {
   const toolbar = page.locator('[data-testid="toolbar-basic"]');
@@ -3696,7 +3695,7 @@ await open("components-toolbar--basic");
   const dataOrient = await toolbar.getAttribute("data-orientation");
   const horizOk =
     role === "toolbar" &&
-    (ariaOrient === "horizontal" || ariaOrient == null) &&
+    ariaOrient === "horizontal" &&
     dataOrient === "horizontal";
   await open("components-toolbar--vertical");
   const vToolbar = page.locator('[data-testid="toolbar-vertical"]');
@@ -3713,6 +3712,134 @@ await open("components-toolbar--basic");
     "Toolbar — role=toolbar + orientation prop drives aria/data-orientation",
     ok,
     `horizontal: role=${role} aria=${ariaOrient} data=${dataOrient}; vertical: role=${vRole} aria=${vAriaOrient} data=${vDataOrient}`,
+  );
+}
+
+/* ─── 79b. Slice 12 fix #3: Toolbar role lock — user-passed `role`
+ *           does NOT override the contract.
+ *
+ * Regression for review fix #3. Before the fix, `<Toolbar role="…">`
+ * could win because Base UI's `mergeProps` puts caller-passed element
+ * props last (rightmost-wins). We now `Omit<…, "role">` at the type
+ * layer AND strip `role` at runtime before forwarding into Base UI.
+ *
+ * The RoleLockRegression story type-bypasses the `Omit` via a
+ * `{...spread}` injection that passes `role="navigation"`. If the
+ * runtime strip is missing, the rendered DOM would carry
+ * `role="navigation"` and this assertion fails. */
+await open("components-toolbar--role-lock-regression");
+{
+  const toolbar = page.locator('[data-testid="toolbar-role-lock"]');
+  await toolbar.waitFor({ state: "visible", timeout: 5000 });
+  const role = await toolbar.getAttribute("role");
+  const ariaRoleDesc = await toolbar.getAttribute("aria-roledescription");
+  const cls = (await toolbar.getAttribute("class")) ?? "";
+  const ok =
+    role === "toolbar" &&
+    ariaRoleDesc == null &&
+    cls.includes("zs-toolbar");
+  report(
+    "Toolbar — role lock strips caller-passed role=navigation at runtime",
+    ok,
+    `role=${role} aria-roledescription=${ariaRoleDesc} class=${cls}`,
+  );
+}
+
+/* ─── 79d. Slice 12 fix #1: Toolbar roving + disabled skip
+ *
+ * Regression for review fix #1. Before the fix, plain `<Button>`
+ * children did NOT register with Base UI's composite-item context, so
+ * Tab landed on every button (no roving) and disabled items still
+ * grabbed focus. Now stories use `Toolbar.Button` (wrapping Base UI's
+ * `Toolbar.Button` part) so each item becomes a composite item: Tab
+ * enters the cluster once, ArrowRight roves and SKIPS the disabled
+ * middle item, then Tab leaves the cluster. */
+await open("components-toolbar--roving");
+{
+  const before = page.locator('[data-testid="toolbar-roving-before"]');
+  const cut = page.locator('[data-testid="toolbar-roving-cut"]');
+  const copy = page.locator('[data-testid="toolbar-roving-copy"]');
+  const paste = page.locator('[data-testid="toolbar-roving-paste"]');
+  const after = page.locator('[data-testid="toolbar-roving-after"]');
+  await before.waitFor({ state: "visible", timeout: 5000 });
+  await before.focus();
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(50);
+  const cutFocused = await cut.evaluate((el) => el === document.activeElement);
+  // ArrowRight advances. With Toolbar.Button registered as composite
+  // items, the disabled middle (Copy, focusableWhenDisabled=false) is
+  // skipped — focus jumps straight to Paste.
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(50);
+  const copyFocused = await copy.evaluate(
+    (el) => el === document.activeElement,
+  );
+  const pasteFocused = await paste.evaluate(
+    (el) => el === document.activeElement,
+  );
+  // Tab leaves the cluster — focus lands on the "After" button (the
+  // canonical composite-roving exit behavior).
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(50);
+  const afterFocused = await after.evaluate(
+    (el) => el === document.activeElement,
+  );
+  const tabEntered = cutFocused;
+  const skippedDisabled = !copyFocused && pasteFocused;
+  const tabExited = afterFocused;
+  const ok = tabEntered && skippedDisabled && tabExited;
+  report(
+    "Toolbar — Tab enters cluster, ArrowRight skips disabled, Tab exits",
+    ok,
+    `tabEnteredCut=${tabEntered} skippedCopy=${skippedDisabled} tabExited=${tabExited}`,
+  );
+}
+
+/* ─── 79da. Slice 12 fix #3: Menubar role lock — strip at runtime
+ *
+ * Regression for review fix #3 applied to Menubar. Like Toolbar,
+ * Menubar `Omit<…, "role">` at the type layer AND strips `role` at
+ * runtime so a `{...untypedProps}` bypass cannot override the
+ * `role="menubar"` contract. */
+await open("components-menubar--role-lock-regression");
+{
+  const menubar = page.locator('[data-testid="menubar-role-lock"]');
+  await menubar.waitFor({ state: "visible", timeout: 5000 });
+  const role = await menubar.getAttribute("role");
+  const cls = (await menubar.getAttribute("class")) ?? "";
+  const ok = role === "menubar" && cls.includes("zs-menubar");
+  report(
+    "Menubar — role lock strips caller-passed role=presentation at runtime",
+    ok,
+    `role=${role} class=${cls}`,
+  );
+}
+
+/* ─── 79e. Slice 12 fix #4: Menubar popup shares Menu.css classes
+ *
+ * Regression for review fix #4. Before the fix, Menubar.css shipped a
+ * `.zs-menubar-menu*` rule set that byte-duplicated `Menu.css`'s
+ * `.zs-menu-popup` / `.zs-menu-item`. Stories also imported Base UI's
+ * Menu directly (`@base-ui/react/menu`). Now stories use the project
+ * `Menu` wrapper, so the Menubar's popout paints via `.zs-menu-popup`
+ * (same surface as a stand-alone Menu). We assert the opened popup
+ * element carries the `zs-menu-popup` class, NOT `zs-menubar-menu`. */
+await open("components-menubar--basic");
+{
+  const file = page.locator('[data-testid="menubar-basic-file"]');
+  await file.waitFor({ state: "visible", timeout: 5000 });
+  await file.click();
+  await page.waitForTimeout(300);
+  const popup = page.locator('[data-testid="menubar-basic-file-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const cls = (await popup.getAttribute("class")) ?? "";
+  const sharesMenuClass = cls.split(/\s+/).includes("zs-menu-popup");
+  const noDupClass = !cls.split(/\s+/).includes("zs-menubar-menu");
+  const ok = sharesMenuClass && noDupClass;
+  report(
+    "Menubar — popup uses .zs-menu-popup (Menu.css), not duplicated .zs-menubar-menu",
+    ok,
+    `class="${cls}" sharesMenuClass=${sharesMenuClass} noDup=${noDupClass}`,
   );
 }
 

@@ -1,20 +1,17 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { useState } from "react";
-import { Menu } from "@base-ui/react/menu";
-import { Menubar } from "../components";
+import { Menu, Menubar } from "../components";
 
 /* ─── Menu wiring note ──────────────────────────────────────────────
  *
- * Menubar wraps `Menu.Root` siblings. Slice 11 ships our wrapped
- * `@zeroship/ui` Menu component; until then these stories compose Base
- * UI's `Menu.*` namespace directly with the `.zs-menubar-menu*` classes
- * declared in Menubar.css. The composition pattern is identical either
- * way — Menubar only enforces structure at the root level.
- *
- * When Slice 11 lands, the imports above flip to
- * `import { Menu } from "../components";` and the className props on
- * Menu.Trigger/Popup/Item disappear (Menu.* will apply the styling
- * automatically). The Menubar wrapper itself does not change. */
+ * Menubar wraps `Menu` siblings from `@zeroship/ui`. Each `Menu.Trigger`
+ * inside a Menubar carries `data-chrome="menubar"` so the menubar-flavored
+ * trigger paint (defined in Menubar.css) kicks in without leaking into
+ * stand-alone Menus elsewhere on the page. The popup chrome itself is
+ * owned by Menu.css — Menubar instances pass `data-chrome="menubar"` on
+ * their `Menu.Popup` so Menu.css can scope any menubar-specific deltas
+ * off that attribute (rather than duplicating the popup CSS in
+ * Menubar.css). */
 
 const meta: Meta<typeof Menubar> = {
   title: "Components/Menubar",
@@ -56,23 +53,9 @@ function FolderGlyph() {
     </svg>
   );
 }
-function ChevronRightGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M5.5 3l5 5-5 5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 /* ─── helpers for the repeated Menu structure ──────────────────────── */
-function MenuTrigger({
+function MenubarMenuTrigger({
   label,
   testId,
   disabled,
@@ -83,7 +66,7 @@ function MenuTrigger({
 }) {
   return (
     <Menu.Trigger
-      className="zs-menubar-trigger"
+      data-chrome="menubar"
       data-testid={testId}
       disabled={disabled}
     >
@@ -92,7 +75,7 @@ function MenuTrigger({
   );
 }
 
-function MenuPopupShell({
+function MenubarMenuPopup({
   testId,
   children,
 }: {
@@ -101,14 +84,9 @@ function MenuPopupShell({
 }) {
   return (
     <Menu.Portal>
-      <Menu.Positioner className="zs-menubar-menu-positioner" sideOffset={6}>
-        <Menu.Popup
-          className="zs-menubar-menu"
-          data-testid={testId}
-        >
-          {children}
-        </Menu.Popup>
-      </Menu.Positioner>
+      <Menu.Popup data-chrome="menubar" data-testid={testId} sideOffset={6}>
+        {children}
+      </Menu.Popup>
     </Menu.Portal>
   );
 }
@@ -130,39 +108,37 @@ export const Basic: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Basic menubar">
       <Menubar data-testid="menubar-basic">
-        <Menu.Root>
-          <MenuTrigger label="File" testId="menubar-basic-file" />
-          <MenuPopupShell testId="menubar-basic-file-popup">
-            <Menu.Item className="zs-menubar-menu-item">New</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Open…</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Save</Menu.Item>
-            <Menu.Separator className="zs-menubar-menu-separator" />
-            <Menu.Item className="zs-menubar-menu-item">Quit</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+        <Menu>
+          <MenubarMenuTrigger label="File" testId="menubar-basic-file" />
+          <MenubarMenuPopup testId="menubar-basic-file-popup">
+            <Menu.Item>New</Menu.Item>
+            <Menu.Item>Open…</Menu.Item>
+            <Menu.Item>Save</Menu.Item>
+            <Menu.Separator />
+            <Menu.Item>Quit</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
 
-        <Menu.Root>
-          <MenuTrigger label="Edit" testId="menubar-basic-edit" />
-          <MenuPopupShell testId="menubar-basic-edit-popup">
-            <Menu.Item className="zs-menubar-menu-item">Undo</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Redo</Menu.Item>
-            <Menu.Separator className="zs-menubar-menu-separator" />
-            <Menu.Item className="zs-menubar-menu-item">Cut</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Copy</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Paste</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+        <Menu>
+          <MenubarMenuTrigger label="Edit" testId="menubar-basic-edit" />
+          <MenubarMenuPopup testId="menubar-basic-edit-popup">
+            <Menu.Item>Undo</Menu.Item>
+            <Menu.Item>Redo</Menu.Item>
+            <Menu.Separator />
+            <Menu.Item>Cut</Menu.Item>
+            <Menu.Item>Copy</Menu.Item>
+            <Menu.Item>Paste</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
 
-        <Menu.Root>
-          <MenuTrigger label="View" testId="menubar-basic-view" />
-          <MenuPopupShell testId="menubar-basic-view-popup">
-            <Menu.Item className="zs-menubar-menu-item">Zoom in</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Zoom out</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">
-              Reset zoom
-            </Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+        <Menu>
+          <MenubarMenuTrigger label="View" testId="menubar-basic-view" />
+          <MenubarMenuPopup testId="menubar-basic-view-popup">
+            <Menu.Item>Zoom in</Menu.Item>
+            <Menu.Item>Zoom out</Menu.Item>
+            <Menu.Item>Reset zoom</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
       </Menubar>
     </div>
   ),
@@ -175,56 +151,31 @@ export const WithSubmenus: Story = {
     docs: {
       description: {
         story:
-          "Menu items can nest submenus via `Menu.SubmenuRoot` + " +
-          "`Menu.SubmenuTrigger`. Hovering the parent item opens the " +
-          "submenu after a small delay; arrow-right opens it via the " +
-          "keyboard, arrow-left closes it.",
+          "Menu items can nest submenus via `Menu.Submenu`. Hovering the " +
+          "parent item opens the submenu after a small delay; arrow-right " +
+          "opens it via the keyboard, arrow-left closes it.",
       },
     },
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="With submenus">
       <Menubar data-testid="menubar-submenus">
-        <Menu.Root>
-          <MenuTrigger label="File" testId="menubar-submenus-file" />
-          <MenuPopupShell testId="menubar-submenus-file-popup">
-            <Menu.Item className="zs-menubar-menu-item">New</Menu.Item>
-            <Menu.SubmenuRoot>
-              <Menu.SubmenuTrigger
-                className="zs-menubar-menu-item"
-                data-testid="menubar-submenus-recent"
-              >
-                Open recent
-                <span style={{ marginInlineStart: "auto" }}>
-                  <ChevronRightGlyph />
-                </span>
-              </Menu.SubmenuTrigger>
-              <Menu.Portal>
-                <Menu.Positioner
-                  className="zs-menubar-menu-positioner"
-                  sideOffset={6}
-                >
-                  <Menu.Popup
-                    className="zs-menubar-menu"
-                    data-testid="menubar-submenus-recent-popup"
-                  >
-                    <Menu.Item className="zs-menubar-menu-item">
-                      project-alpha
-                    </Menu.Item>
-                    <Menu.Item className="zs-menubar-menu-item">
-                      builder.zship
-                    </Menu.Item>
-                    <Menu.Item className="zs-menubar-menu-item">
-                      sandbox.zship
-                    </Menu.Item>
-                  </Menu.Popup>
-                </Menu.Positioner>
-              </Menu.Portal>
-            </Menu.SubmenuRoot>
-            <Menu.Separator className="zs-menubar-menu-separator" />
-            <Menu.Item className="zs-menubar-menu-item">Quit</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+        <Menu>
+          <MenubarMenuTrigger label="File" testId="menubar-submenus-file" />
+          <MenubarMenuPopup testId="menubar-submenus-file-popup">
+            <Menu.Item>New</Menu.Item>
+            <Menu.Submenu
+              trigger="Open recent"
+              data-testid="menubar-submenus-recent"
+            >
+              <Menu.Item>project-alpha</Menu.Item>
+              <Menu.Item>builder.zship</Menu.Item>
+              <Menu.Item>sandbox.zship</Menu.Item>
+            </Menu.Submenu>
+            <Menu.Separator />
+            <Menu.Item>Quit</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
       </Menubar>
     </div>
   ),
@@ -254,38 +205,32 @@ export const WithCheckboxItem: Story = {
         aria-label="With checkbox items"
       >
         <Menubar data-testid="menubar-checkbox">
-          <Menu.Root>
-            <MenuTrigger label="View" testId="menubar-checkbox-view" />
-            <MenuPopupShell testId="menubar-checkbox-view-popup">
+          <Menu>
+            <MenubarMenuTrigger label="View" testId="menubar-checkbox-view" />
+            <MenubarMenuPopup testId="menubar-checkbox-view-popup">
               <Menu.CheckboxItem
-                className="zs-menubar-menu-item"
                 checked={showRuler}
                 onCheckedChange={setShowRuler}
                 data-testid="menubar-checkbox-ruler"
               >
-                <Menu.CheckboxItemIndicator className="zs-menubar-menu-indicator">
-                  <CheckGlyph />
-                </Menu.CheckboxItemIndicator>
                 Show ruler
               </Menu.CheckboxItem>
               <Menu.CheckboxItem
-                className="zs-menubar-menu-item"
                 checked={showGrid}
                 onCheckedChange={setShowGrid}
                 data-testid="menubar-checkbox-grid"
               >
-                <Menu.CheckboxItemIndicator className="zs-menubar-menu-indicator">
-                  <CheckGlyph />
-                </Menu.CheckboxItemIndicator>
                 Show grid
               </Menu.CheckboxItem>
-            </MenuPopupShell>
-          </Menu.Root>
+            </MenubarMenuPopup>
+          </Menu>
         </Menubar>
       </div>
     );
   },
 };
+void CheckGlyph;
+void DotGlyph;
 
 /* ─── 4. WithRadioGroup ────────────────────────────────────────────── */
 export const WithRadioGroup: Story = {
@@ -305,43 +250,31 @@ export const WithRadioGroup: Story = {
     return (
       <div className="zs-story-row" role="group" aria-label="With radio group">
         <Menubar data-testid="menubar-radio">
-          <Menu.Root>
-            <MenuTrigger label="Theme" testId="menubar-radio-theme" />
-            <MenuPopupShell testId="menubar-radio-theme-popup">
+          <Menu>
+            <MenubarMenuTrigger label="Theme" testId="menubar-radio-theme" />
+            <MenubarMenuPopup testId="menubar-radio-theme-popup">
               <Menu.RadioGroup value={theme} onValueChange={setTheme}>
                 <Menu.RadioItem
                   value="light"
-                  className="zs-menubar-menu-item"
                   data-testid="menubar-radio-light"
                 >
-                  <Menu.RadioItemIndicator className="zs-menubar-menu-indicator">
-                    <DotGlyph />
-                  </Menu.RadioItemIndicator>
                   Light
                 </Menu.RadioItem>
                 <Menu.RadioItem
                   value="dark"
-                  className="zs-menubar-menu-item"
                   data-testid="menubar-radio-dark"
                 >
-                  <Menu.RadioItemIndicator className="zs-menubar-menu-indicator">
-                    <DotGlyph />
-                  </Menu.RadioItemIndicator>
                   Dark
                 </Menu.RadioItem>
                 <Menu.RadioItem
                   value="system"
-                  className="zs-menubar-menu-item"
                   data-testid="menubar-radio-system"
                 >
-                  <Menu.RadioItemIndicator className="zs-menubar-menu-indicator">
-                    <DotGlyph />
-                  </Menu.RadioItemIndicator>
                   System
                 </Menu.RadioItem>
               </Menu.RadioGroup>
-            </MenuPopupShell>
-          </Menu.Root>
+            </MenubarMenuPopup>
+          </Menu>
         </Menubar>
       </div>
     );
@@ -365,27 +298,27 @@ export const KeyboardNav: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Keyboard navigation">
       <Menubar data-testid="menubar-keyboard">
-        <Menu.Root>
-          <MenuTrigger label="File" testId="menubar-keyboard-file" />
-          <MenuPopupShell testId="menubar-keyboard-file-popup">
-            <Menu.Item className="zs-menubar-menu-item">New</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Open</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
-        <Menu.Root>
-          <MenuTrigger label="Edit" testId="menubar-keyboard-edit" />
-          <MenuPopupShell testId="menubar-keyboard-edit-popup">
-            <Menu.Item className="zs-menubar-menu-item">Undo</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Redo</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
-        <Menu.Root>
-          <MenuTrigger label="Help" testId="menubar-keyboard-help" />
-          <MenuPopupShell testId="menubar-keyboard-help-popup">
-            <Menu.Item className="zs-menubar-menu-item">Docs</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">About</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+        <Menu>
+          <MenubarMenuTrigger label="File" testId="menubar-keyboard-file" />
+          <MenubarMenuPopup testId="menubar-keyboard-file-popup">
+            <Menu.Item>New</Menu.Item>
+            <Menu.Item>Open</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+        <Menu>
+          <MenubarMenuTrigger label="Edit" testId="menubar-keyboard-edit" />
+          <MenubarMenuPopup testId="menubar-keyboard-edit-popup">
+            <Menu.Item>Undo</Menu.Item>
+            <Menu.Item>Redo</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+        <Menu>
+          <MenubarMenuTrigger label="Help" testId="menubar-keyboard-help" />
+          <MenubarMenuPopup testId="menubar-keyboard-help-popup">
+            <Menu.Item>Docs</Menu.Item>
+            <Menu.Item>About</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
       </Menubar>
     </div>
   ),
@@ -406,29 +339,29 @@ export const Disabled: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="Disabled trigger">
       <Menubar data-testid="menubar-disabled">
-        <Menu.Root>
-          <MenuTrigger label="File" testId="menubar-disabled-file" />
-          <MenuPopupShell testId="menubar-disabled-file-popup">
-            <Menu.Item className="zs-menubar-menu-item">New</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">Open</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
-        <Menu.Root>
-          <MenuTrigger
+        <Menu>
+          <MenubarMenuTrigger label="File" testId="menubar-disabled-file" />
+          <MenubarMenuPopup testId="menubar-disabled-file-popup">
+            <Menu.Item>New</Menu.Item>
+            <Menu.Item>Open</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+        <Menu>
+          <MenubarMenuTrigger
             label="Edit"
             testId="menubar-disabled-edit"
             disabled
           />
-          <MenuPopupShell>
-            <Menu.Item className="zs-menubar-menu-item">Undo</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
-        <Menu.Root>
-          <MenuTrigger label="Help" testId="menubar-disabled-help" />
-          <MenuPopupShell testId="menubar-disabled-help-popup">
-            <Menu.Item className="zs-menubar-menu-item">Docs</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+          <MenubarMenuPopup>
+            <Menu.Item>Undo</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+        <Menu>
+          <MenubarMenuTrigger label="Help" testId="menubar-disabled-help" />
+          <MenubarMenuPopup testId="menubar-disabled-help-popup">
+            <Menu.Item>Docs</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
       </Menubar>
     </div>
   ),
@@ -443,17 +376,17 @@ export const WithIcons: Story = {
         story:
           "Menu items can carry a leading icon for a stronger affordance. " +
           "Icons sit inside the item as a child; the gap is owned by " +
-          ".zs-menubar-menu-item so spacing stays consistent.",
+          ".zs-menu-item so spacing stays consistent.",
       },
     },
   },
   render: () => (
     <div className="zs-story-row" role="group" aria-label="With icons">
       <Menubar data-testid="menubar-icons">
-        <Menu.Root>
-          <MenuTrigger label="File" testId="menubar-icons-file" />
-          <MenuPopupShell testId="menubar-icons-file-popup">
-            <Menu.Item className="zs-menubar-menu-item">
+        <Menu>
+          <MenubarMenuTrigger label="File" testId="menubar-icons-file" />
+          <MenubarMenuPopup testId="menubar-icons-file-popup">
+            <Menu.Item>
               <span
                 aria-hidden="true"
                 style={{
@@ -466,7 +399,7 @@ export const WithIcons: Story = {
               </span>
               Open project…
             </Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">
+            <Menu.Item>
               <span
                 aria-hidden="true"
                 style={{
@@ -479,14 +412,55 @@ export const WithIcons: Story = {
               </span>
               Open recent…
             </Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+          </MenubarMenuPopup>
+        </Menu>
       </Menubar>
     </div>
   ),
 };
 
-/* ─── 8. Rtl ───────────────────────────────────────────────────────── */
+/* ─── 8. RoleLockRegression — Slice 12 review fix #3 ───────────────── *
+ *
+ * Defensive coverage for the `role` lock. The public type
+ * `Omit<…, "role">` already rejects a literal `<Menubar role="…">`, but
+ * a caller could still bypass via a `{...untypedProps}` spread. The
+ * Menubar wrapper strips `role` at runtime so the rendered element is
+ * always `role="menubar"`. The aria-wiring runner checks the rendered
+ * DOM stays `role="menubar"`. */
+export const RoleLockRegression: Story = {
+  name: "Role lock — caller-passed role is stripped",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for Slice 12 review fix #3. The Menubar wrapper " +
+          "strips a user-passed `role` at runtime so a `{...spread}` " +
+          "injection cannot override `role=\"menubar\"`.",
+      },
+    },
+  },
+  render: () => {
+    const bypass = { role: "presentation" } as Record<string, unknown>;
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Menubar role lock regression"
+      >
+        <Menubar data-testid="menubar-role-lock" {...bypass}>
+          <Menu>
+            <MenubarMenuTrigger label="File" />
+            <MenubarMenuPopup>
+              <Menu.Item>New</Menu.Item>
+            </MenubarMenuPopup>
+          </Menu>
+        </Menubar>
+      </div>
+    );
+  },
+};
+
+/* ─── 9. Rtl ───────────────────────────────────────────────────────── */
 export const Rtl: Story = {
   name: "RTL — right-to-left direction",
   parameters: {
@@ -507,21 +481,21 @@ export const Rtl: Story = {
       dir="rtl"
     >
       <Menubar data-testid="menubar-rtl">
-        <Menu.Root>
-          <MenuTrigger label="ملف" testId="menubar-rtl-file" />
-          <MenuPopupShell testId="menubar-rtl-file-popup">
-            <Menu.Item className="zs-menubar-menu-item">جديد</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">فتح…</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">حفظ</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
-        <Menu.Root>
-          <MenuTrigger label="تحرير" testId="menubar-rtl-edit" />
-          <MenuPopupShell testId="menubar-rtl-edit-popup">
-            <Menu.Item className="zs-menubar-menu-item">تراجع</Menu.Item>
-            <Menu.Item className="zs-menubar-menu-item">إعادة</Menu.Item>
-          </MenuPopupShell>
-        </Menu.Root>
+        <Menu>
+          <MenubarMenuTrigger label="ملف" testId="menubar-rtl-file" />
+          <MenubarMenuPopup testId="menubar-rtl-file-popup">
+            <Menu.Item>جديد</Menu.Item>
+            <Menu.Item>فتح…</Menu.Item>
+            <Menu.Item>حفظ</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
+        <Menu>
+          <MenubarMenuTrigger label="تحرير" testId="menubar-rtl-edit" />
+          <MenubarMenuPopup testId="menubar-rtl-edit-popup">
+            <Menu.Item>تراجع</Menu.Item>
+            <Menu.Item>إعادة</Menu.Item>
+          </MenubarMenuPopup>
+        </Menu>
       </Menubar>
     </div>
   ),

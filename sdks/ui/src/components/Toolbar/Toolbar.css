@@ -3,7 +3,9 @@
  *
  * Anatomy:
  *   .zs-toolbar              flex row (or column) of controls
- *     └─ children (Button / Toggle.Group / Toolbar.Separator / …)
+ *     ├─ .zs-toolbar-button  Toolbar.Button / Toolbar.Link items
+ *     ├─ .zs-toolbar-input   Toolbar.Input items
+ *     └─ .zs-toolbar-separator
  *
  * Visual rhythm:
  *   - Horizontal toolbars sit on a translucent fill so the cluster reads
@@ -11,12 +13,12 @@
  *     flow rotated.
  *   - Gap rhythm = --zs-space-1 between adjacent items so segmented
  *     groups don't feel crowded next to plain buttons.
- *   - Hit-target minimum lives on the children (Button + Toggle min 1.75rem
- *     intrinsic). Toolbar itself adds no extra padding around items.
+ *   - Hit-target minimum lives on the children (Toolbar.Button + Toggle
+ *     min 1.75rem intrinsic). Toolbar itself adds no extra padding
+ *     around items.
  *
  * Forced-colors mirror: Canvas/CanvasText for the base; ButtonText for
- * separators. Reduced-motion: nothing to do — the toolbar surface has
- * no transitions of its own.
+ * separators. Reduced-motion: disable the button hover transition.
  *
  * RTL: flex flows with the document direction automatically; we use
  * logical `padding-inline` + `padding-block`. Separators get their
@@ -42,6 +44,70 @@
 .zs-toolbar--vertical {
   flex-direction: column;
   align-items: stretch;
+}
+
+/* ─── Button / Link items ──────────────────────────────────────────── *
+ *
+ * The canonical Toolbar item. Paints label-only at rest (no surface)
+ * and lights up on hover / focus / open so the cluster chrome stays
+ * low until the user is actively engaging. */
+.zs-toolbar-button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zs-space-1);
+  block-size: 1.75rem;
+  min-inline-size: 1.75rem;
+  padding-inline: var(--zs-space-3);
+  border: 0;
+  border-radius: var(--zs-radius-2);
+  background-color: transparent;
+  color: var(--zs-label);
+  font: inherit;
+  font-weight: var(--zs-text-body-weight);
+  letter-spacing: var(--zs-text-body-tracking);
+  cursor: default;
+  user-select: none;
+  text-decoration: none;
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+.zs-toolbar-button:hover:not([data-disabled]) {
+  background-color: var(--zs-fill-tertiary);
+}
+
+.zs-toolbar-button:active:not([data-disabled]) {
+  background-color: var(--zs-fill-secondary);
+}
+
+.zs-toolbar-button:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
+.zs-toolbar-button[data-disabled] {
+  color: var(--zs-label-tertiary);
+  cursor: not-allowed;
+}
+
+/* ─── Input items ──────────────────────────────────────────────────── */
+.zs-toolbar-input {
+  appearance: none;
+  block-size: 1.75rem;
+  padding-block: 0;
+  padding-inline: var(--zs-space-2);
+  border: 0;
+  border-radius: var(--zs-radius-2);
+  background-color: var(--zs-surface);
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  color: var(--zs-label);
+  font: inherit;
+}
+
+.zs-toolbar-input:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring);
+  outline-offset: var(--zs-focus-ring-offset);
 }
 
 /* ─── Separator ─────────────────────────────────────────────────────── *
@@ -71,22 +137,61 @@
 /* ─── focus visibility ─────────────────────────────────────────────── *
  *
  * The roving-tabindex item carries the focus; child components paint
- * their own focus ring (Button outline, Toggle outline). Toolbar itself
- * never receives focus (`tabindex="-1"` on the root), so there's nothing
- * to paint here. We only neutralise the default outline on the
- * container so Safari doesn't paint a stray ring when items briefly
- * hand focus back to the root during arrow-key roving. */
+ * their own focus ring (Toolbar.Button outline, Toggle outline).
+ * Toolbar itself never receives focus (`tabindex="-1"` on the root),
+ * so there's nothing to paint here. We only neutralise the default
+ * outline on the container so Safari doesn't paint a stray ring when
+ * items briefly hand focus back to the root during arrow-key roving. */
 .zs-toolbar:focus {
   outline: none;
 }
 
-/* ─── forced-colors mirror ─────────────────────────────────────────── */
+/* ─── reduced-motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-toolbar-button {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors mirror ─────────────────────────────────────────── *
+ *
+ * Mirror EVERY interactive selector inside the media block at equal
+ * specificity (matching the Slice 5 Toggle pattern). Without the
+ * mirrors, the oklch hover/active fills above can outrank the bare
+ * `.zs-toolbar-button` reset under high-contrast emulation. */
 @media (forced-colors: active) {
   .zs-toolbar {
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
+  }
+  .zs-toolbar-button {
+    color: CanvasText;
+    background-color: Canvas;
+    forced-color-adjust: none;
+  }
+  .zs-toolbar-button:hover:not([data-disabled]) {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-toolbar-button:active:not([data-disabled]) {
+    background-color: Highlight;
+    color: HighlightText;
+  }
+  .zs-toolbar-button:focus-visible {
+    outline-color: Highlight;
+  }
+  .zs-toolbar-button[data-disabled] {
+    color: GrayText;
+  }
+  .zs-toolbar-input {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+  }
+  .zs-toolbar-input:focus-visible {
+    outline-color: Highlight;
   }
   .zs-toolbar-separator {
     background-color: CanvasText;
