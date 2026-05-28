@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Form } from "@base-ui/react/form";
 import { CheckboxGroup } from "@base-ui/react/checkbox-group";
 import { Button, Checkbox, Field } from "../components";
@@ -110,27 +110,80 @@ export const AllVariants: Story = {
   ),
 };
 
-/* ─── 4. With label (Field integration) ─────────────────────────────── */
-export const WithLabel: Story = {
-  name: "With label",
+/* ─── 4. With external label (Field integration) ─────────────────────
+ *
+ * Renamed from `WithLabel` (slice-4 visual-polish item 6) — the
+ * original name read like a single canonical pattern, but composing
+ * Field.Label ABOVE a chip is one of two valid layouts. For a single
+ * boolean, the inline `label` prop story (`Inline`, below) is the
+ * visually-recommended default; this story documents the external-
+ * label pattern that the Required + RequiredInvalid stories build on
+ * (they need the Field.Label for the `<Field.Required />` indicator).
+ * Renaming makes both stories self-describe their intent.
+ *
+ * The aria-wiring assertion now references
+ * `components-checkbox--with-external-label`. */
+export const WithExternalLabel: Story = {
+  name: "With external label",
   parameters: {
     docs: {
       description: {
         story:
-          "A bare Checkbox inside a Field. The Field.Label wires htmlFor " +
-          "to the hidden input Base UI emits, so clicking the label text " +
-          "toggles the chip. The `data-testid` hook drives the aria-wiring " +
-          "assertion that verifies label-click activates the checkbox.",
+          "A bare Checkbox inside a Field with the Field.Label rendered " +
+          "ABOVE the chip. Base UI wires `htmlFor` to the hidden input the " +
+          "CheckboxRoot emits, so clicking the label text toggles the chip. " +
+          "Use this pattern when the boolean needs a `<Field.Required />` " +
+          "indicator or a Field.Description block — both compose cleanly " +
+          "above the chip. For a single boolean with no required indicator, " +
+          "prefer the inline `label` prop pattern (see the `Inline` story).",
       },
     },
   },
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Checkbox with label">
+    <div className="zs-story-row" role="group" aria-label="Checkbox with external label">
       <div className="zs-story-cell" style={{ maxWidth: "20rem" }}>
         <Field>
           <Field.Label>Subscribe to product emails</Field.Label>
           <Checkbox data-testid="checkbox-with-label" name="subscribe" />
         </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 4b. Inline label (recommended default for single booleans) ─────
+ *
+ * Slice-4 visual-polish item 6. Codex flagged the `WithLabel` story's
+ * external-label pattern as composing a bold Field.Label above a lone
+ * chip — visually it read like a section title with an orphaned
+ * control underneath. The Checkbox component already exposes an
+ * inline `label` prop that wraps chip + text into one click surface
+ * via the SelectionRow helper — that's the right visual default for a
+ * single boolean. This story makes the pattern discoverable. */
+export const Inline: Story = {
+  name: "Inline label (recommended default)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Single-boolean default: the inline `label` prop wraps chip + " +
+          "text into one `<label>` so the whole row is a click surface, " +
+          "and the label sits at the chip's inline-end at the same type " +
+          "size as the surrounding body. Use this for terms-acceptance, " +
+          "settings toggles, anything where the boolean and its meaning " +
+          "live as a single row. Reach for `WithExternalLabel` only when " +
+          "you need `<Field.Required />`, a Field.Description, or another " +
+          "block-level element above the chip.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Checkbox inline label">
+      <div className="zs-story-cell">
+        <Checkbox label="Subscribe to product emails" name="subscribe-inline" />
+      </div>
+      <div className="zs-story-cell">
+        <Checkbox label="Make profile public" name="public-inline" defaultChecked />
       </div>
     </div>
   ),
@@ -218,6 +271,96 @@ export const Required: Story = {
             type="submit"
             variant="filled"
             data-testid="checkbox-required-submit"
+          >
+            Continue
+          </Button>
+        </Form>
+      </div>
+    );
+  },
+};
+
+/* ─── 6b. Required + Field.Error — POST-SUBMIT VISUAL EVIDENCE ────────
+ *
+ * Slice-4 visual-polish item 1. The Required story above lands in the
+ * pre-submit state — the chip looks innocent, no red error text below,
+ * so the screenshot capture doesn't actually evidence the validation
+ * UI a real user would see. The aria-wiring assertion verifies the
+ * aria-invalid + Field.Error wiring already, but a screenshot reviewer
+ * has no visual confirmation that the error state is built.
+ *
+ * This companion story renders the same form but auto-fires submit on
+ * mount via a one-shot useEffect → ref.current.click(). The capture
+ * script photographs the post-submit DOM: aria-invalid is on the
+ * hidden input, Field.Error has rendered the "You must agree" copy.
+ *
+ * We use the useEffect approach rather than Storybook's `play` because
+ * `play` runs after the iframe is interactable but isn't guaranteed to
+ * fire during a `build-storybook` static capture across every
+ * Storybook setup; an effect-driven submit is observable from the
+ * very first render after mount, which is what the capture script
+ * sees. The Form's onSubmit still preventDefault's so nothing
+ * navigates. */
+export const RequiredInvalid: Story = {
+  name: "Required — post-submit (invalid)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Companion to `Required` that auto-submits on mount so the " +
+          "capture lands in the validation-failed state. Red error text " +
+          "appears below the chip; the hidden input carries `aria-" +
+          "invalid=\"true\"`. The auto-submit fires once via useEffect " +
+          "and the Form's onSubmit preventDefault's, so the page never " +
+          "navigates. Visual-polish item 1.",
+      },
+    },
+  },
+  render: function RequiredInvalidRender() {
+    // Button forwards an `HTMLElement` ref (so it stays compatible
+    // with the `asChild` slot route which can render an <a> etc.). The
+    // story default renders a <button>, but typing the ref as
+    // HTMLElement matches the component's forwardRef signature.
+    const submitRef = useRef<HTMLElement>(null);
+    useEffect(() => {
+      // Two RAFs so Base UI's Field state machine sees the React
+      // mount commit before the click — one frame for layout, one
+      // for the validation callbacks to subscribe. This was robust
+      // enough across the Storybook 8 capture targets we tested.
+      const id = requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          submitRef.current?.click();
+        });
+      });
+      return () => cancelAnimationFrame(id);
+    }, []);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Required checkbox (invalid)">
+        <Form
+          className="zs-story-cell"
+          style={{ maxWidth: "22rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
+          onSubmit={(e) => {
+            e.preventDefault();
+          }}
+          data-testid="checkbox-required-invalid-form"
+        >
+          <Field required>
+            <Field.Label>
+              I agree to the terms <Field.Required />
+            </Field.Label>
+            <Checkbox
+              data-testid="checkbox-required-invalid"
+              name="agree"
+            />
+            <Field.Error match="valueMissing">
+              You must agree before continuing.
+            </Field.Error>
+          </Field>
+          <Button
+            ref={submitRef}
+            type="submit"
+            variant="filled"
+            data-testid="checkbox-required-invalid-submit"
           >
             Continue
           </Button>

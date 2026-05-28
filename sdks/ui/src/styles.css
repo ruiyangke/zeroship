@@ -149,6 +149,19 @@
      these gaps so consumers can sub-theme spacing in one place. */
   --zs-field-gap: var(--zs-space-2);           /* 8 — label/control/desc/err stack gap */
   --zs-field-label-gap: var(--zs-space-1);     /* 4 — inline label↔required indicator gap */
+
+  /* ─── Selection primitives — readonly + hairline. The selection family
+     (Checkbox / Switch / Radio) needed a quiet "presented, not editable"
+     treatment so readonly states stop reading as enabled (slice-4 visual-
+     polish item 2). The hairline width is shared with Input's inset
+     border so the three primitives align with the form-control rhythm.
+     `--zs-selection-bg-readonly` / `--zs-selection-ink-readonly` re-use
+     the per-theme Input readonly tokens via composition — themes that
+     override `--zs-input-bg-readonly` automatically restyle the
+     selection primitives' readonly chips too. */
+  --zs-selection-hairline: 0.0625rem;          /* 1 — same as input edge */
+  --zs-selection-bg-readonly: var(--zs-input-bg-readonly);
+  --zs-selection-ink-readonly: var(--zs-input-ink-readonly);
   /* Horizontal Field label cell width. Promoted to a foundation token
      (rather than only an inline `var(...)` fallback) so per-form-section
      overrides via CSS or inline `--zs-field-horizontal-label-w: …` are

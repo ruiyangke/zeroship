@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Form } from "@base-ui/react/form";
 import { Button, Field, Radio } from "../components";
 
@@ -240,6 +240,77 @@ export const Required: Story = {
             type="submit"
             variant="filled"
             data-testid="radio-required-submit"
+          >
+            Continue
+          </Button>
+        </Form>
+      </div>
+    );
+  },
+};
+
+/* ─── 7b. Required + Field.Error — POST-SUBMIT VISUAL EVIDENCE ────────
+ *
+ * Slice-4 visual-polish item 1. Companion to `Required` that auto-
+ * submits on mount so the screenshot lands in the validation-failed
+ * state. Red error text appears below the group; the hidden inputs
+ * carry `aria-invalid="true"`. Same useEffect → ref.current.click()
+ * pattern the Checkbox RequiredInvalid story uses — robust across
+ * Storybook 8 dev + static captures. */
+export const RequiredInvalid: Story = {
+  name: "Required — post-submit (invalid)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Companion to `Required` that auto-submits on mount so the " +
+          "capture lands in the validation-failed state. Red error text " +
+          "renders below the radio group and each radio's hidden input " +
+          "carries `aria-invalid=\"true\"`. The Form's onSubmit " +
+          "preventDefault's so nothing navigates. Visual-polish item 1.",
+      },
+    },
+  },
+  render: function RequiredInvalidRender() {
+    const submitRef = useRef<HTMLElement>(null);
+    useEffect(() => {
+      const id = requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          submitRef.current?.click();
+        });
+      });
+      return () => cancelAnimationFrame(id);
+    }, []);
+    return (
+      <div className="zs-story-row" role="group" aria-label="Required radio (invalid)">
+        <Form
+          className="zs-story-cell"
+          style={{ maxWidth: "24rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}
+          onSubmit={(e) => {
+            e.preventDefault();
+          }}
+          data-testid="radio-required-invalid-form"
+        >
+          <Field required>
+            <Field.Label>
+              Account type <Field.Required />
+            </Field.Label>
+            <Radio.Group
+              name="account-type-invalid"
+              data-testid="radio-required-invalid-group"
+            >
+              <Radio value="personal" label="Personal" />
+              <Radio value="business" label="Business" />
+            </Radio.Group>
+            <Field.Error match="valueMissing">
+              Pick one to continue.
+            </Field.Error>
+          </Field>
+          <Button
+            ref={submitRef}
+            type="submit"
+            variant="filled"
+            data-testid="radio-required-invalid-submit"
           >
             Continue
           </Button>

@@ -55,10 +55,17 @@
 
 /* ─── component-local tokens (consumer override hooks) ──────────────── */
 .zs-checkbox {
-  /* Visual chip sizes — smaller than the control row but proportional. */
-  --zs-checkbox-size-sm: 1rem;       /* 16 */
-  --zs-checkbox-size-md: 1.125rem;   /* 18 — default */
-  --zs-checkbox-size-lg: 1.25rem;    /* 20 */
+  /* Visual chip sizes — derive from the control-rhythm tokens so the
+     selection chip sizes track the Input family (slice-4 visual-polish
+     item 5). Half the per-size control height keeps the chip
+     proportional to the row it sits inside: a 2rem (sm) Input row pairs
+     with a 1rem chip, 2.5rem (md) with 1.25rem, 3rem (lg) with 1.5rem.
+     Earlier the chip sizes were hand-tuned constants that read nearly
+     identical across sm/md/lg — codex flagged the family as visually
+     indistinguishable from the size capture. */
+  --zs-checkbox-size-sm: calc(var(--zs-control-h-sm) / 2);   /* 1rem    — half of 2rem */
+  --zs-checkbox-size-md: calc(var(--zs-control-h-md) / 2);   /* 1.25rem — half of 2.5rem (default) */
+  --zs-checkbox-size-lg: calc(var(--zs-control-h-lg) / 2);   /* 1.5rem  — half of 3rem */
 
   /* Default palette: accent fill when checked, label-mix border when
      unchecked. Override --zs-checkbox-fill-checked to recolor (rare). */
@@ -71,9 +78,14 @@
   --zs-checkbox-border-checked: var(--zs-accent);
 
   /* Tinted variant softens the unchecked surface so it reads as
-     "secondary affordance" on loud parents. */
+     "secondary affordance" on loud parents. Border tokens (slice-4
+     visual-polish item 3) restore a hairline edge — earlier the tinted
+     unchecked chip dropped its border entirely and on the crystal
+     surface read close to disabled. */
   --zs-checkbox-bg-tinted: var(--zs-fill-tertiary);
   --zs-checkbox-bg-tinted-hover: var(--zs-fill-secondary);
+  --zs-checkbox-border-tinted: var(--zs-fill-secondary);
+  --zs-checkbox-border-tinted-hover: var(--zs-fill);
 }
 
 /* ─── the visible chip (.zs-checkbox) ──────────────────────────────── */
@@ -138,11 +150,18 @@
   border-radius: var(--zs-radius-2);
 }
 
-/* ─── variants ──────────────────────────────────────────────────────── */
+/* ─── variants ──────────────────────────────────────────────────────── *
+ *
+ * Tinted variant — softer surface, but the unchecked state still wears a
+ * hairline edge so it doesn't read as disabled-adjacent on glass
+ * surfaces. Slice-4 visual-polish item 3: codex measured the original
+ * borderless tinted unchecked checkbox landing visually between the
+ * default unchecked (with hairline) and the disabled state on crystal,
+ * making it unclear which affordance the user was looking at. */
 .zs-checkbox--tinted {
   background-color: var(--zs-checkbox-bg-tinted);
   box-shadow:
-    inset 0 0 0 0.0625rem transparent,
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-tinted),
     0 0 0 0 transparent;
 }
 
@@ -151,13 +170,13 @@
   .zs-checkbox:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
     background-color: var(--zs-checkbox-bg-hover);
     box-shadow:
-      inset 0 0 0 0.0625rem var(--zs-checkbox-border-hover),
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-hover),
       0 0 0 0 transparent;
   }
   .zs-checkbox--tinted:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
     background-color: var(--zs-checkbox-bg-tinted-hover);
     box-shadow:
-      inset 0 0 0 0.0625rem transparent,
+      inset 0 0 0 var(--zs-selection-hairline) var(--zs-checkbox-border-tinted-hover),
       0 0 0 0 transparent;
   }
 }
@@ -198,11 +217,34 @@
   color: var(--zs-label-tertiary);
 }
 
-/* ─── readonly — distinct from disabled: the chip looks live but the
-   row stops accepting toggle clicks (the underlying input handles
-   that). Same surface as default unchecked plus a softer cursor. */
+/* ─── readonly — distinct from disabled: the value is presented but
+ * not editable. Earlier the chip was identical to the enabled state
+ * with only the cursor changing — codex measured a real-form user
+ * having no visual signal that the chip was non-interactive until
+ * they tried clicking it. Slice-4 visual-polish item 2 introduces a
+ * quiet "presented, not editable" treatment built on the same
+ * readonly-surface palette Input already exposes:
+ *   - unchecked: readonly surface tone (one step up from default fill)
+ *     so the chip recedes without going greyed-out.
+ *   - checked / indeterminate: same readonly surface, accent ink for
+ *     the glyph, plus a HAIRLINE accent ring (not the full accent
+ *     fill the editable checked state uses). The ring keeps the
+ *     "yes, this is currently selected" signal while the fill
+ *     softening keeps the "you can't edit this" signal. */
 .zs-checkbox[data-readonly] {
   cursor: default;
+}
+.zs-checkbox[data-readonly]:not([data-checked]):not([data-indeterminate]) {
+  background-color: var(--zs-selection-bg-readonly);
+  color: var(--zs-selection-ink-readonly);
+}
+.zs-checkbox[data-readonly][data-checked],
+.zs-checkbox[data-readonly][data-indeterminate] {
+  background-color: var(--zs-selection-bg-readonly);
+  color: var(--zs-accent);
+  box-shadow:
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-accent),
+    0 0 0 0 transparent;
 }
 
 /* ─── the indicator glyph ───────────────────────────────────────────── */

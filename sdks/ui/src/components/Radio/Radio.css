@@ -46,9 +46,15 @@
 
 /* ─── component-local tokens ────────────────────────────────────────── */
 .zs-radio {
-  --zs-radio-size-sm: 1rem;       /* 16 */
-  --zs-radio-size-md: 1.125rem;   /* 18 */
-  --zs-radio-size-lg: 1.25rem;    /* 20 */
+  /* Derived from --zs-control-h-{sm,md,lg} (half-height) so the chip
+     scales with the Input rhythm rather than living as a separate
+     hand-tuned scale — slice-4 visual-polish item 5. Earlier the chip
+     sizes were three nearly-identical hand-tuned values and the
+     family read as one control with a slightly bigger chip; codex
+     flagged the lack of clear visual differentiation. */
+  --zs-radio-size-sm: calc(var(--zs-control-h-sm) / 2);   /* 1rem */
+  --zs-radio-size-md: calc(var(--zs-control-h-md) / 2);   /* 1.25rem (default) */
+  --zs-radio-size-lg: calc(var(--zs-control-h-lg) / 2);   /* 1.5rem */
 
   --zs-radio-bg: var(--zs-input-bg);
   --zs-radio-bg-hover: var(--zs-input-bg-hover);
@@ -161,15 +167,45 @@
     inset 0 0 0 0.0625rem var(--zs-radio-border),
     0 0 0 0 transparent;
 }
+/* Disabled-selected ring + dot lean on `--zs-label-quaternary` so the
+ * "yes, this WAS selected" signal still reads at glance instead of
+ * disappearing into the disabled chip. Earlier the disabled-selected
+ * Radio used `--zs-fill-secondary` and codex measured the ring + dot
+ * landing visually weaker than the disabled-selected Checkbox / Switch
+ * — the family's three disabled-selected states should be
+ * approximately balanced. Slice-4 visual-polish item 4.
+ *
+ * Contingency (item 4 of the visual-polish brief): if `--zs-label-
+ * quaternary` still reads too faint after capture, escalate one step
+ * to `--zs-label-tertiary` (the same strength the disabled Checkbox
+ * glyph uses). The escalation is local to this rule and the dot
+ * rule below. */
 .zs-radio[data-disabled][data-checked] {
   box-shadow:
-    inset 0 0 0 0.125rem var(--zs-fill-secondary),
+    inset 0 0 0 0.125rem var(--zs-label-quaternary),
     0 0 0 0 transparent;
 }
 
-/* ─── readonly ──────────────────────────────────────────────────────── */
+/* ─── readonly ──────────────────────────────────────────────────────── *
+ *
+ * Same quiet "presented, not editable" treatment Checkbox + Switch
+ * use — readonly-surface tone behind the chip, accent hairline ring +
+ * accent dot when checked (no full accent fill). Slice-4 visual-
+ * polish item 2. */
 .zs-radio[data-readonly] {
   cursor: default;
+}
+.zs-radio[data-readonly]:not([data-checked]) {
+  background-color: var(--zs-selection-bg-readonly);
+}
+.zs-radio[data-readonly][data-checked] {
+  background-color: var(--zs-selection-bg-readonly);
+  box-shadow:
+    inset 0 0 0 var(--zs-selection-hairline) var(--zs-accent),
+    0 0 0 0 transparent;
+}
+.zs-radio[data-readonly][data-checked] .zs-radio__indicator {
+  background-color: var(--zs-accent);
 }
 
 /* ─── the inner dot ─────────────────────────────────────────────────── *
@@ -193,8 +229,14 @@
 .zs-radio[data-checked] .zs-radio__indicator {
   scale: 1;
 }
+/* Same strengthening as the disabled-selected ring above — the dot
+ * now sits on --zs-label-quaternary (matched to the ring) instead of
+ * --zs-fill-secondary, which was the faintest of the three primitives'
+ * disabled-selected indicators. Contingency: escalate to --zs-label-
+ * tertiary in lockstep with the ring if capture shows it still too
+ * faint. Slice-4 visual-polish item 4. */
 .zs-radio[data-disabled] .zs-radio__indicator {
-  background-color: var(--zs-fill-secondary);
+  background-color: var(--zs-label-quaternary);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */

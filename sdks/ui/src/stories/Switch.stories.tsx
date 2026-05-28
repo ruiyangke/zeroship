@@ -74,16 +74,62 @@ export const AllSizes: Story = {
   ),
 };
 
-/* ─── 3. With label (Field integration) ────────────────────────────── */
-export const WithLabel: Story = {
-  name: "With label",
+/* ─── 3. With external label (Field integration) ─────────────────────
+ *
+ * Renamed from `WithLabel` (slice-4 visual-polish item 6). Composing
+ * Field.Label ABOVE the switch is one valid layout; the inline
+ * `label` prop pattern (see the `Inline` story below) is the
+ * visually-recommended default for a single boolean. Naming this
+ * story `WithExternalLabel` makes the choice between the two patterns
+ * self-describing. The aria-wiring assertion (`Switch bare track
+ * focus ring`) and the capture-script entry both follow this name.
+ *
+ * Note: the aria-wiring suite does NOT have a `WithLabel — label
+ * click toggles` assertion for Switch (only Checkbox has that one),
+ * so the rename here is story-local and doesn't require updating any
+ * existing assertion. */
+export const WithExternalLabel: Story = {
+  name: "With external label",
   render: () => (
-    <div className="zs-story-row" role="group" aria-label="Switch with label">
+    <div className="zs-story-row" role="group" aria-label="Switch with external label">
       <div className="zs-story-cell" style={{ maxWidth: "22rem" }}>
         <Field>
           <Field.Label>Notifications</Field.Label>
           <Switch data-testid="switch-with-label" name="notifications" />
         </Field>
+      </div>
+    </div>
+  ),
+};
+
+/* ─── 3b. Inline label (recommended default for single booleans) ─────
+ *
+ * Slice-4 visual-polish item 6. Codex flagged the lone-switch-under-
+ * a-Field.Label pattern as visually orphaned. The Switch component's
+ * inline `label` prop wraps track + text into one click surface via
+ * SelectionRow — this is the right visual default for a settings-
+ * style toggle. */
+export const Inline: Story = {
+  name: "Inline label (recommended default)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Single-boolean default: the inline `label` prop wraps the " +
+          "track + label text into one `<label>` so the whole row is the " +
+          "click surface. Use this for settings rows; reach for " +
+          "`WithExternalLabel` only when you need a Field.Description " +
+          "or another block-level element above the switch.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Switch inline label">
+      <div className="zs-story-cell">
+        <Switch label="Notifications" name="notifications-inline" defaultChecked />
+      </div>
+      <div className="zs-story-cell">
+        <Switch label="Public profile" name="public-inline" />
       </div>
     </div>
   ),

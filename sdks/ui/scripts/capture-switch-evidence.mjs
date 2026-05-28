@@ -20,7 +20,11 @@ const themes = [{ label: "Crystal", value: "crystal" }];
 const stories = [
   "components-switch--all-states",
   "components-switch--all-sizes",
-  "components-switch--with-label",
+  // Slice-4 visual-polish item 6: WithLabel renamed → WithExternalLabel,
+  // plus a new `Inline` story documenting the inline-label pattern as
+  // the visually-recommended default for a single boolean.
+  "components-switch--with-external-label",
+  "components-switch--inline",
   "components-switch--with-description",
   "components-switch--immediate-effect",
   "components-switch--inside-form",

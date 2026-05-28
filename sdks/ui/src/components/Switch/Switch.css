@@ -175,9 +175,27 @@
   background-color: color-mix(in oklch, var(--zs-accent) 45%, var(--zs-fill-secondary));
 }
 
-/* ─── readonly ──────────────────────────────────────────────────────── */
+/* ─── readonly ──────────────────────────────────────────────────────── *
+ *
+ * Quiet "presented, not editable" treatment — codex flagged the
+ * readonly track looking identical to the editable track. The track
+ * shifts to the shared readonly surface tone; the on-state still
+ * paints an accent hairline + accent thumb so the value remains
+ * readable, but the heavier accent fill of the editable on-state is
+ * traded for the same hairline-on-readonly-surface signal the
+ * Checkbox uses (slice-4 visual-polish item 2). */
 .zs-switch[data-readonly] {
   cursor: default;
+}
+.zs-switch[data-readonly]:not([data-checked]) {
+  background-color: var(--zs-selection-bg-readonly);
+}
+.zs-switch[data-readonly][data-checked] {
+  background-color: var(--zs-selection-bg-readonly);
+  box-shadow: inset 0 0 0 var(--zs-selection-hairline) var(--zs-accent);
+}
+.zs-switch[data-readonly][data-checked] .zs-switch__thumb {
+  background-color: var(--zs-accent);
 }
 
 /* ─── thumb ─────────────────────────────────────────────────────────── *

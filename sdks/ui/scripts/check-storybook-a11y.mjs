@@ -95,12 +95,20 @@ const stories = [
   //   components-alertdialog--three-buttons-destructive-misplaced
   //   components-alertdialog--destructive-without-cancel-warns
   // Slice 4: Checkbox / Switch / Radio (selection primitives).
+  // Slice-4 visual-polish additions:
+  //   - WithLabel → WithExternalLabel (item 6 rename) for Checkbox + Switch.
+  //   - `Inline` (item 6 new story) for Checkbox + Switch.
+  //   - `RequiredInvalid` (item 1 new story, auto-submits on mount) for
+  //     Checkbox + Radio so a screenshot reviewer sees the post-submit
+  //     red-error visual evidence the original Required story lacked.
   "components-checkbox--all-states",
   "components-checkbox--all-sizes",
   "components-checkbox--all-variants",
-  "components-checkbox--with-label",
+  "components-checkbox--with-external-label",
+  "components-checkbox--inline",
   "components-checkbox--with-description",
   "components-checkbox--required",
+  "components-checkbox--required-invalid",
   "components-checkbox--indeterminate-parent",
   "components-checkbox--indeterminate-from-group",
   "components-checkbox--inside-form",
@@ -108,7 +116,8 @@ const stories = [
   "components-checkbox--rtl",
   "components-switch--all-states",
   "components-switch--all-sizes",
-  "components-switch--with-label",
+  "components-switch--with-external-label",
+  "components-switch--inline",
   "components-switch--with-description",
   "components-switch--immediate-effect",
   "components-switch--inside-form",
@@ -121,6 +130,7 @@ const stories = [
   "components-radio--with-label",
   "components-radio--with-description",
   "components-radio--required",
+  "components-radio--required-invalid",
   "components-radio--disabled",
   "components-radio--disabled-item",
   "components-radio--rtl",

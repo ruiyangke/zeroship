@@ -656,8 +656,14 @@ await open("components-dialog--sizes");
   report("Dialog focus restore on close", restored);
 }
 
-/* ─── 18. Checkbox WithLabel — clicking label toggles the chip (slice 4) ── */
-await open("components-checkbox--with-label");
+/* ─── 18. Checkbox WithExternalLabel — clicking label toggles the chip (slice 4) ──
+ *
+ * Story renamed from `WithLabel` to `WithExternalLabel` in slice-4
+ * visual-polish item 6 — the storyId became `components-checkbox--
+ * with-external-label`. The assertion text + data-testid hook are
+ * unchanged; the test id (`checkbox-with-label`) still works because
+ * it lives on the chip element itself, not on the storyId. */
+await open("components-checkbox--with-external-label");
 {
   const chip = page.locator('[data-testid="checkbox-with-label"]');
   await chip.waitFor({ state: "attached", timeout: 5000 });
@@ -679,7 +685,7 @@ await open("components-checkbox--with-label");
     const input = parent.querySelector("input[type=\"checkbox\"]");
     return input instanceof HTMLInputElement ? input.checked : false;
   });
-  report("Checkbox WithLabel — label click toggles", isChecked, `checked=${isChecked}`);
+  report("Checkbox WithExternalLabel — label click toggles", isChecked, `checked=${isChecked}`);
 }
 
 /* ─── 19. Checkbox WithDescription — aria-describedby refs description ── */
@@ -895,14 +901,16 @@ async function focusRingAssertion(label, storyId, chipSelector) {
   );
 }
 
+// Story IDs picked up the `--external-label` suffix in slice-4 visual-
+// polish item 6 (Checkbox + Switch); the chip data-testid is unchanged.
 await focusRingAssertion(
   "Checkbox bare chip focus ring (2px outline)",
-  "components-checkbox--with-label",
+  "components-checkbox--with-external-label",
   '[data-testid="checkbox-with-label"]',
 );
 await focusRingAssertion(
   "Switch bare track focus ring (2px outline)",
-  "components-switch--with-label",
+  "components-switch--with-external-label",
   '[data-testid="switch-with-label"]',
 );
 await focusRingAssertion(
@@ -964,15 +972,18 @@ async function hitTargetAssertion(label, storyId, chipSelector, hiddenInputType)
   );
 }
 
+// Same `--external-label` rename — these hit-target assertions
+// reference the renamed Checkbox/Switch stories. The chip data-testid
+// is unchanged.
 await hitTargetAssertion(
   "Checkbox hit-target overlay — click at +0.6rem flips state",
-  "components-checkbox--with-label",
+  "components-checkbox--with-external-label",
   '[data-testid="checkbox-with-label"]',
   "checkbox",
 );
 await hitTargetAssertion(
   "Switch hit-target overlay — click at +0.6rem flips state",
-  "components-switch--with-label",
+  "components-switch--with-external-label",
   '[data-testid="switch-with-label"]',
   "checkbox",
 );

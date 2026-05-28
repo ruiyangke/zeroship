@@ -35,7 +35,8 @@
 
 /* The shared inline label text. Each primitive uses the same class
  * shape (`zs-X-field__text`) so the row layout and the chip stay
- * decoupled. */
+ * decoupled. Default sits at body-text size so a default-sized row
+ * matches the surrounding body type rhythm. */
 .zs-checkbox-field__text,
 .zs-switch-field__text,
 .zs-radio-field__text {
@@ -43,4 +44,40 @@
   line-height: var(--zs-text-body-line);
   color: inherit;
   user-select: none;
+}
+
+/* ─── Row size variants — slice-4 visual-polish item 5 ──────────────── *
+ *
+ * SelectionRow already receives `--sm` / `--md` / `--lg` classes from
+ * its TS helper, but the shared row CSS wasn't consuming them: only
+ * the chip changed size, so sm / md / lg read as the same control at a
+ * glance. Wire the SIZE class through to:
+ *   - row gap (sm tightens to 0.25rem, lg loosens to 0.75rem so the
+ *     row breathes proportionally to the chip + label),
+ *   - the inline label text size (sm drops to subheadline 0.9375rem,
+ *     lg rises to headline 1.0625rem+semibold; md keeps body 1.0625rem
+ *     regular — see styles.css for the type-scale tokens).
+ * That makes the size axis a real "scale the WHOLE control" axis, not
+ * a "swap a slightly bigger chip" cosmetic. */
+.zs-checkbox-field--sm,
+.zs-switch-field--sm,
+.zs-radio-field--sm {
+  gap: var(--zs-space-1);
+}
+.zs-checkbox-field--lg,
+.zs-switch-field--lg,
+.zs-radio-field--lg {
+  gap: var(--zs-space-3);
+}
+.zs-checkbox-field--sm .zs-checkbox-field__text,
+.zs-switch-field--sm .zs-switch-field__text,
+.zs-radio-field--sm .zs-radio-field__text {
+  font-size: var(--zs-text-subheadline-size);
+  line-height: var(--zs-text-subheadline-line);
+}
+.zs-checkbox-field--lg .zs-checkbox-field__text,
+.zs-switch-field--lg .zs-switch-field__text,
+.zs-radio-field--lg .zs-radio-field__text {
+  font-size: var(--zs-text-headline-size);
+  line-height: var(--zs-text-headline-line);
 }

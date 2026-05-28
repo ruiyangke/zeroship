@@ -25,6 +25,10 @@ const stories = [
   "components-radio--with-label",
   "components-radio--with-description",
   "components-radio--required",
+  // Slice-4 visual-polish item 1: RequiredInvalid auto-submits on
+  // mount so the capture shows the red Field.Error text below the
+  // group instead of only the pre-submit state.
+  "components-radio--required-invalid",
   "components-radio--disabled",
   "components-radio--disabled-item",
   "components-radio--rtl",
@@ -107,7 +111,10 @@ try {
       await page.goto(target, { waitUntil: "networkidle" });
       await page.evaluate(() => document.fonts && document.fonts.ready);
       await page.locator(".zs-radio").first().waitFor({ state: "visible", timeout: 5000 });
-      await page.waitForTimeout(200);
+      // Same 400ms settle as the Checkbox capture — RequiredInvalid
+      // auto-submits on mount so the post-submit DOM (aria-invalid +
+      // Field.Error) needs to land before the screenshot.
+      await page.waitForTimeout(400);
       const file = join(outDir, `${theme.value}-radio-${storyId}.png`);
       await page.screenshot({ path: file, fullPage: true });
       evidence.push({ theme: theme.value, storyId, screenshot: file });

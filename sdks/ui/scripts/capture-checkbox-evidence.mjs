@@ -23,9 +23,17 @@ const stories = [
   "components-checkbox--all-states",
   "components-checkbox--all-sizes",
   "components-checkbox--all-variants",
-  "components-checkbox--with-label",
+  // Slice-4 visual-polish item 6: WithLabel renamed → WithExternalLabel,
+  // plus a new `Inline` story documenting the inline-label pattern as
+  // the visually-recommended default for a single boolean.
+  "components-checkbox--with-external-label",
+  "components-checkbox--inline",
   "components-checkbox--with-description",
   "components-checkbox--required",
+  // Slice-4 visual-polish item 1: RequiredInvalid renders the post-
+  // submit (validation-failed) state so the capture evidences the red
+  // Field.Error text below the chip.
+  "components-checkbox--required-invalid",
   "components-checkbox--indeterminate-parent",
   "components-checkbox--indeterminate-from-group",
   "components-checkbox--inside-form",
@@ -110,7 +118,13 @@ try {
       await page.goto(target, { waitUntil: "networkidle" });
       await page.evaluate(() => document.fonts && document.fonts.ready);
       await page.locator(".zs-checkbox").first().waitFor({ state: "visible", timeout: 5000 });
-      await page.waitForTimeout(200);
+      // The RequiredInvalid story auto-submits the form on mount via
+      // two RAFs → ref.click(); the Field state machine then flips
+      // aria-invalid + renders the Field.Error subtree on the next
+      // commit. 400ms is enough headroom for that chain to settle
+      // across CI runners; the rest of the stories simply pay an
+      // extra ~200ms of settle time per capture (acceptable).
+      await page.waitForTimeout(400);
       const file = join(outDir, `${theme.value}-checkbox-${storyId}.png`);
       await page.screenshot({ path: file, fullPage: true });
       evidence.push({ theme: theme.value, storyId, screenshot: file });
