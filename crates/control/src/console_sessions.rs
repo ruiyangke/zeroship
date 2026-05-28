@@ -134,6 +134,36 @@ pub async fn revoke(conn: &Client, id: Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Revoke every still-active console session belonging to `user_id`.
+///
+/// Returns the count of rows updated — useful for log/debug visibility
+/// ("BCL logout revoked N console sessions for user X").
+///
+/// Used by the back-channel logout handler (`POST /oidc/backchannel-logout`,
+/// Phase 7 U2): when hydra notifies us that a user signed out we revoke
+/// every console session the user holds. Hydra emits a session id
+/// (`sid`) but we don't currently correlate hydra's sid to
+/// `console_sessions.id`, so revoke-by-user is the minimum-viable
+/// semantics — same trade-off as the gateway's `revoke_all_for_user`.
+///
+/// Idempotent — already-revoked rows are skipped via the
+/// `revoked_at IS NULL` filter.
+///
+/// # Errors
+///
+/// [`ConsoleSessionError::Db`] on PG failure.
+pub async fn revoke_all_for_user(conn: &Client, user_id: &str) -> Result<u64> {
+    let affected = conn
+        .execute(
+            "UPDATE auth.console_sessions SET revoked_at = NOW() \
+             WHERE user_id = $1 AND revoked_at IS NULL",
+            &[&user_id],
+        )
+        .await
+        .map_err(|e| ConsoleSessionError::Db(format!("console_sessions revoke_all_for_user: {e}")))?;
+    Ok(affected)
+}
+
 fn row_to_session(row: &compio_postgres::Row) -> ConsoleSession {
     ConsoleSession {
         id: row.get("id"),

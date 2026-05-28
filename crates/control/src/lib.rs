@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod audit;
+pub mod backchannel_logout;
 pub mod console_sessions;
 pub mod deploy;
 pub mod env_handlers;

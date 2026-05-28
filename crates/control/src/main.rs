@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
-    api, env_handlers, internal, oidc_rp, stripe_handlers,
+    api, backchannel_logout, env_handlers, internal, oidc_rp, stripe_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -358,6 +358,13 @@ async fn main() -> std::io::Result<()> {
             // with `auth_service` / `auth_handlers`; this is now the
             // only console-auth surface.
             .service(web::resource("/auth/callback").route(web::get().to(api::auth_callback)))
+            // OIDC Back-Channel Logout 1.0 RP endpoint. Hydra POSTs
+            // here on user sign-out; we verify the logout_token and
+            // revoke the user's console sessions. The URI must match
+            // `backchannel_logout_uri` on the `console.zeroship.ai`
+            // client in `ops/auth-clients.example.toml`. Mounted via
+            // `.configure(...)` to mirror the gateway pattern.
+            .configure(backchannel_logout::configure)
             // --- Stripe Connect ---
             .service(
                 web::resource("/api/creators/{id}/stripe/onboard")
