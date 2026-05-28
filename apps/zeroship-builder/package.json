@@ -61,6 +61,7 @@
     "@vitejs/plugin-react": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
+    "vitest": "^4.1.7",
     "zeroship": "workspace:*"
   }
 }

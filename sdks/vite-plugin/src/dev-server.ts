@@ -513,6 +513,8 @@ export function devServerPlugin(
       // prefixes:
       //   - /_zs/v1/<id>   ← spec wire (production + dev parity)
       //   - /api/*         ← raw HTTP routes the user app exposes
+      //   - /auth/login, /auth/callback, /auth/logout
+      //                     ← builder OAuth code-flow routes
       //   - /rpc, /_rpc    ← legacy wires kept for in-flight migrations
       server.middlewares.use(
         (
@@ -525,7 +527,10 @@ export function devServerPlugin(
             !url.startsWith("/_zs/v1/") &&
             !url.startsWith("/_rpc") &&
             !url.startsWith("/rpc") &&
-            !url.startsWith("/api/")
+            !url.startsWith("/api/") &&
+            !url.startsWith("/auth/login") &&
+            !url.startsWith("/auth/callback") &&
+            !url.startsWith("/auth/logout")
           ) {
             return next();
           }
