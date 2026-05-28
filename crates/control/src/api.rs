@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Stream;
+use ntex::http::StatusCode;
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
@@ -51,9 +52,29 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
         RegistryError::InvalidInput(msg) => {
             web::HttpResponse::BadRequest().json(&serde_json::json!({ "error": msg }))
         }
-        RegistryError::Database(msg) => web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({ "error": msg })),
+        RegistryError::Database(msg) => {
+            infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "registry database error",
+                msg,
+            )
+        }
     }
+}
+
+fn infrastructure_error_response(
+    status: StatusCode,
+    context: &'static str,
+    detail: impl std::fmt::Display,
+) -> web::HttpResponse {
+    let request_id = Uuid::new_v4();
+    tracing::error!(
+        request_id = %request_id,
+        context,
+        error = %detail,
+        "control-plane infrastructure error"
+    );
+    web::HttpResponse::build(status).json(&serde_json::json!({"error": "internal error"}))
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +164,11 @@ pub async fn delete_app(
         match e {
             zeroship_bundle::VfsError::NotFound(_) => { /* ok */ }
             other => {
-                return web::HttpResponse::InternalServerError()
-                    .json(&serde_json::json!({"error": other.to_string()}));
+                return infrastructure_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "delete app bundle",
+                    other,
+                );
             }
         }
     }
@@ -233,10 +257,11 @@ pub async fn deploy(
             }));
         }
         Err(e) => {
-            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: streaming to tmp failed");
-            return web::HttpResponse::InternalServerError().json(&serde_json::json!({
-                "error": "deploy temp storage unavailable",
-            }));
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy stream to tmp failed",
+                format_args!("{e}; path={}", tmp_path.display()),
+            );
         }
     }
 
@@ -247,10 +272,12 @@ pub async fn deploy(
     let file = match std::fs::File::open(&tmp_path) {
         Ok(f) => f,
         Err(e) => {
-            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: tmp re-open failed");
             let _ = compio::fs::remove_file(&tmp_path).await;
-            return web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error":"deploy temp readback failed"}));
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy tmp re-open failed",
+                format_args!("{e}; path={}", tmp_path.display()),
+            );
         }
     };
     // SAFETY: tmp file is owned by this handler, written exclusively by
@@ -260,11 +287,13 @@ pub async fn deploy(
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(m) => m,
         Err(e) => {
-            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: mmap failed");
             drop(file);
             let _ = compio::fs::remove_file(&tmp_path).await;
-            return web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error":"deploy temp mmap failed"}));
+            return infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy mmap failed",
+                format_args!("{e}; path={}", tmp_path.display()),
+            );
         }
     };
 
@@ -325,13 +354,20 @@ fn ingest_error_to_response(e: IngestError) -> web::HttpResponse {
                 "error": "unsupported content type",
                 "detail": "expected application/x-zship",
             })),
-        IngestError::BlobStoreUnavailable(detail) => web::HttpResponse::ServiceUnavailable()
-            .json(&serde_json::json!({
-                "error": "blob store unavailable",
-                "detail": detail,
-            })),
-        IngestError::Internal(detail) => web::HttpResponse::InternalServerError()
-            .json(&serde_json::json!({"error": "internal", "detail": detail})),
+        IngestError::BlobStoreUnavailable(detail) => {
+            infrastructure_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "deploy blob store unavailable",
+                detail,
+            )
+        }
+        IngestError::Internal(detail) => {
+            infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy ingest internal error",
+                detail,
+            )
+        }
     }
 }
 
@@ -424,10 +460,11 @@ pub async fn get_app_logs(
     }
 
     if lines.is_empty() && !errors.is_empty() && errors.len() == state.worker_urls.len() {
-        return web::HttpResponse::BadGateway().json(&serde_json::json!({
-            "error": "worker logs unavailable",
-            "details": errors,
-        }));
+        return infrastructure_error_response(
+            StatusCode::BAD_GATEWAY,
+            "worker logs unavailable",
+            errors.join(" | "),
+        );
     }
 
     web::HttpResponse::Ok().json(&lines)
@@ -937,6 +974,61 @@ where
     }
     drop(file);
     Ok(written)
+}
+
+#[cfg(test)]
+mod error_response_tests {
+    use super::*;
+    use ntex::http::StatusCode;
+    use ntex::util::{stream_recv, BytesMut};
+
+    async fn body_json(mut resp: web::HttpResponse) -> serde_json::Value {
+        let mut body = resp.take_body();
+        let mut buf = BytesMut::new();
+        while let Some(item) = stream_recv(&mut body).await {
+            buf.extend_from_slice(&item.expect("body chunk"));
+        }
+        serde_json::from_slice(&buf).expect("body is JSON")
+    }
+
+    #[compio::test]
+    async fn registry_database_error_response_is_sanitized() {
+        let resp = error_response(RegistryError::Database(
+            "db connect failed: postgres://internal/schema".into(),
+        ));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+    }
+
+    #[compio::test]
+    async fn ingest_infrastructure_error_response_is_sanitized() {
+        let resp = ingest_error_to_response(IngestError::BlobStoreUnavailable(
+            "put_blob_stream(abc): /var/private/blob path".into(),
+        ));
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+
+        let resp = ingest_error_to_response(IngestError::Internal(
+            "put_manifest: postgres://internal".into(),
+        ));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+    }
+
+    #[compio::test]
+    async fn worker_logs_infrastructure_error_response_is_sanitized() {
+        let resp = infrastructure_error_response(
+            StatusCode::BAD_GATEWAY,
+            "worker logs unavailable",
+            "http://worker.internal:8080 HTTP 500: secret body",
+        );
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "internal error"}));
+    }
 }
 
 #[cfg(test)]
