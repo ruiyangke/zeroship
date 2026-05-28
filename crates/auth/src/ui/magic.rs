@@ -387,6 +387,24 @@ pub async fn verify(
             return render_error_page("internal error", Some("redeem"));
         }
     };
+    if redeemed.purpose != magic_link::LOGIN_PURPOSE {
+        tracing::error!(
+            purpose = %redeemed.purpose,
+            "magic_link::redeem returned non-login purpose"
+        );
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "magic_redeem",
+                outcome: "failure",
+                auth_method: Some("magic"),
+                detail: json!({ "reason": "unexpected_purpose" }),
+                ..Default::default()
+            },
+        )
+        .await;
+        return render_error_page("link invalid or expired", None);
+    }
 
     // 2. Same-device predicate.
     let cookie_header = req

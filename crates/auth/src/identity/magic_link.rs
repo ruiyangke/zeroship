@@ -9,9 +9,9 @@
 //!   requesting device).
 //!
 //! - **Redeem**: SHA-256 the raw token, atomically `UPDATE … RETURNING`
-//!   the row by `token_hash` with the predicates `consumed_at IS NULL`
-//!   AND `expires_at > NOW()`. Single-use is enforced at the database
-//!   layer — the UPDATE only matches once.
+//!   the login row by `(token_hash, purpose='login')` with the predicates
+//!   `consumed_at IS NULL` AND `expires_at > NOW()`. Single-use is
+//!   enforced at the database layer — the UPDATE only matches once.
 //!
 //! - **TTL**: 15 minutes. The shorter window limits the attack surface
 //!   of a leaked email link far more than the user-experience cost of
@@ -40,6 +40,10 @@ const TOKEN_LEN_BYTES: usize = 32;
 /// `__Host-zsidp_csrf` cookie's entropy.
 const CSRF_NONCE_LEN_BYTES: usize = 16;
 
+/// Distinguishing `purpose` written into `auth.magic_links.purpose` for
+/// login magic links.
+pub const LOGIN_PURPOSE: &str = "login";
+
 /// Result of [`issue`] — the values the HTTP layer needs to assemble the
 /// email body and the requesting-device cookie.
 #[derive(Debug, Clone)]
@@ -52,9 +56,10 @@ pub struct IssuedToken {
     pub csrf_nonce: String,
 }
 
-/// Result of a successful [`redeem`] — the row's identifying fields.
+/// Result of a successful login-purpose [`redeem`] — the row's
+/// identifying fields.
 #[derive(Debug, Clone)]
-pub struct RedeemedToken {
+pub struct RedeemedLoginToken {
     pub email: String,
     pub csrf_nonce: String,
     pub purpose: String,
@@ -117,32 +122,35 @@ pub async fn issue(conn: &Client, email: &str, purpose: &str) -> Result<IssuedTo
     Ok(IssuedToken { raw, csrf_nonce })
 }
 
-/// Atomically redeem a magic-link token. Returns `Ok(Some(_))` on a
-/// successful one-shot consume, `Ok(None)` if the token doesn't match
-/// any unconsumed, unexpired row.
+/// Atomically redeem a login-purpose magic-link token. Returns
+/// `Ok(Some(_))` on a successful one-shot consume, `Ok(None)` if the
+/// token doesn't match any unconsumed, unexpired `purpose = 'login'`
+/// row.
 ///
 /// Implementation: single `UPDATE … RETURNING` keyed by
-/// `token_hash = SHA-256(raw_token)`. `PostgreSQL` guarantees only one
-/// concurrent caller observes the row in the unconsumed state — race-
-/// free single-use.
+/// `(token_hash, purpose)`. The purpose predicate prevents password-
+/// reset rows from being repurposed as login sessions. `PostgreSQL`
+/// guarantees only one concurrent caller observes the row in the
+/// unconsumed state — race-free single-use.
 ///
 /// # Errors
 ///
 /// [`AuthError::Db`] on PG failure.
-pub async fn redeem(conn: &Client, raw_token: &str) -> Result<Option<RedeemedToken>> {
+pub async fn redeem(conn: &Client, raw_token: &str) -> Result<Option<RedeemedLoginToken>> {
     let token_hash = sha256(raw_token);
     let rows = conn
         .query(
             "UPDATE auth.magic_links SET consumed_at = NOW() \
              WHERE token_hash = $1 \
+               AND purpose = $2 \
                AND consumed_at IS NULL \
                AND expires_at > NOW() \
              RETURNING email::text, csrf_nonce, purpose",
-            &[&token_hash.as_slice()],
+            &[&token_hash.as_slice(), &LOGIN_PURPOSE],
         )
         .await
         .map_err(|e| AuthError::Db(format!("magic_link redeem: {e}")))?;
-    Ok(rows.first().map(|row| RedeemedToken {
+    Ok(rows.first().map(|row| RedeemedLoginToken {
         email: row.get("email"),
         csrf_nonce: row.get("csrf_nonce"),
         purpose: row.get("purpose"),
