@@ -2573,19 +2573,32 @@ await open("components-otpfield--basic");
     active.dispatchEvent(event);
   });
   await page.waitForTimeout(100);
-  // Read every cell's value; expect them to spell out "654321".
-  const values = await page.evaluate(() => {
+  // Read every cell's value AND verify Base UI advanced focus to the
+  // last cell after the paste (the paste-fill contract is "drop the
+  // full code in AND park the caret on the trailing cell so a backspace
+  // erases the last digit, not the first one"). Without this, a regression
+  // where Base UI splits the value but leaves focus on cell 0 would slip
+  // through — values would still match.
+  const { values, activeIndex, activeCount } = await page.evaluate(() => {
     const cells = Array.from(
       document.querySelectorAll('[data-testid^="otp-basic-cell-"]'),
     );
-    return cells.map((el) => el.value);
+    const active = document.activeElement;
+    const activeIndex = cells.findIndex((el) => el === active);
+    return {
+      values: cells.map((el) => el.value),
+      activeIndex,
+      activeCount: cells.length,
+    };
   });
   const joined = values.join("");
-  const ok = joined === "654321";
+  const valuesOk = joined === "654321";
+  const focusOk = activeIndex === activeCount - 1;
+  const ok = valuesOk && focusOk;
   report(
-    "OtpField paste of N digits fills all cells",
+    "OtpField paste of N digits fills all cells + advances focus",
     ok,
-    `joined="${joined}" expected="654321"`,
+    `joined="${joined}" expected="654321" activeIndex=${activeIndex} expected=${activeCount - 1}`,
   );
 }
 
