@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use chrono::{Duration, Utc};
 use compio_postgres::{connect, NoTls};
@@ -51,7 +53,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new(db_url: &str, label: &str) -> Self {
-        let hydra = MockHydra::start().await;
+        let hydra = MockHydra::start();
         let (auth_pg_client, auth_pg_conn) = connect(db_url, NoTls).await.expect("auth-pg connect");
         compio::runtime::spawn(async move {
             let _ = auth_pg_conn.run().await;
@@ -147,36 +149,70 @@ struct MockHydraState {
 struct MockHydra {
     base: String,
     state: Arc<Mutex<MockHydraState>>,
-    _srv: web::test::TestServer,
+    shutdown: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl MockHydra {
-    async fn start() -> Self {
+    fn start() -> Self {
+        // ntex's test server requires an ntex System runtime; #[compio::test]
+        // doesn't provide one. Spawn a dedicated thread that owns an ntex
+        // System for the mock — same pattern as crates/core/tests/hydra_introspect.rs.
         let state = Arc::new(Mutex::new(MockHydraState::default()));
         let factory_state = state.clone();
-        let srv = web::test::server(move || {
-            let state = factory_state.clone();
-            async move {
-                web::App::new()
-                    .state(state)
-                    .service(web::resource("/admin/clients").route(web::post().to(mock_create_client)))
-                    .service(
-                        web::resource("/admin/clients/{id}")
-                            .route(web::delete().to(mock_delete_client)),
-                    )
-            }
-        })
-        .await;
-        let base = format!("http://{}", srv.addr());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            ntex::rt::System::build()
+                .name("mock-hydra-oauth-admin")
+                .testing()
+                .build(ntex::rt::DefaultRuntime)
+                .block_on(async move {
+                    let server = web::test::server(move || {
+                        let state = factory_state.clone();
+                        async move {
+                            web::App::new()
+                                .state(state)
+                                .service(
+                                    web::resource("/admin/clients")
+                                        .route(web::post().to(mock_create_client)),
+                                )
+                                .service(
+                                    web::resource("/admin/clients/{id}")
+                                        .route(web::delete().to(mock_delete_client)),
+                                )
+                        }
+                    })
+                    .await;
+                    let addr = server.addr();
+                    started_tx.send(addr).expect("send mock hydra addr");
+                    let _ = shutdown_rx.recv();
+                    drop(server);
+                });
+        });
+        let addr = started_rx.recv().expect("mock hydra starts");
+        let base = format!("http://{addr}");
         Self {
             base,
             state,
-            _srv: srv,
+            shutdown: Some(shutdown_tx),
+            thread: Some(thread),
         }
     }
 
     fn requests(&self) -> Vec<RecordedHydraRequest> {
         self.state.lock().expect("mock hydra state").requests.clone()
+    }
+}
+
+impl Drop for MockHydra {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
