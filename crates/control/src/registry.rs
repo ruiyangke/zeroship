@@ -254,6 +254,33 @@ impl Registry {
         )
         .await
         .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "WITH ranked AS (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY creator_id
+                           ORDER BY linked_at DESC, id DESC
+                       ) AS rn
+                FROM creator_account_history
+                WHERE unlinked_at IS NULL
+            )
+            UPDATE creator_account_history h
+               SET unlinked_at = NOW()
+              FROM ranked r
+             WHERE h.id = r.id
+               AND r.rn > 1",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_creator_account_history_one_open
+             ON creator_account_history(creator_id)
+             WHERE unlinked_at IS NULL",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("migration: {e}"))?;
 
         // Ledger of revenue events. Keyed by Stripe's evt_xxx to keep
         // webhook delivery idempotent. `payload_hash` lets us detect

@@ -100,35 +100,9 @@ impl StripeStore {
         }
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
 
-        // Same-account idempotency: a creator double-clicking "Connect
-        // Stripe" should NOT pollute the audit history with duplicate
-        // rows. Check the current LIVE binding first; if it matches
-        // exactly, just touch onboarded_at and return.
-        let current = conn
-            .query(
-                "SELECT stripe_account_id FROM creator_accounts
-                 WHERE creator_id = $1 AND unlinked_at IS NULL",
-                &[&creator_id],
-            )
-            .await
-            .map_err(|e| StripeError::Db(e.to_string()))?;
-        if let Some(row) = current.first() {
-            let current_acct: String = row.get("stripe_account_id");
-            if current_acct == stripe_account_id {
-                // Same account, still linked — refresh timestamp only.
-                conn.execute(
-                    "UPDATE creator_accounts SET onboarded_at = NOW() WHERE creator_id = $1",
-                    &[&creator_id],
-                )
-                .await
-                .map_err(|e| StripeError::Db(e.to_string()))?;
-                return Ok(());
-            }
-        }
-
-        // Genuine link or relink-with-different-account. Wrap the
-        // multi-statement update in a transaction so a conn drop
-        // between any two leaves the table consistent.
+        // Wrap the live-row check and history mutation in one transaction.
+        // Existing links are read FOR UPDATE so concurrent relinks for the
+        // same creator serialize before closing/opening history spans.
         conn.execute("BEGIN", &[])
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -388,6 +362,31 @@ async fn link_account_txn(
     creator_id: Uuid,
     stripe_account_id: &str,
 ) -> Result<(), StripeError> {
+    // Same-account idempotency: a creator double-clicking "Connect
+    // Stripe" should NOT pollute the audit history with duplicate rows.
+    // FOR UPDATE serializes genuine relinks for creators with a live row.
+    let current = conn
+        .query(
+            "SELECT stripe_account_id FROM creator_accounts
+             WHERE creator_id = $1 AND unlinked_at IS NULL
+             FOR UPDATE",
+            &[&creator_id],
+        )
+        .await
+        .map_err(|e| StripeError::Db(e.to_string()))?;
+    if let Some(row) = current.first() {
+        let current_acct: String = row.get("stripe_account_id");
+        if current_acct == stripe_account_id {
+            conn.execute(
+                "UPDATE creator_accounts SET onboarded_at = NOW() WHERE creator_id = $1",
+                &[&creator_id],
+            )
+            .await
+            .map_err(|e| StripeError::Db(e.to_string()))?;
+            return Ok(());
+        }
+    }
+
     // Close any open history row.
     conn.execute(
         "UPDATE creator_account_history SET unlinked_at = NOW()

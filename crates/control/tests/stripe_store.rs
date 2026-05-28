@@ -2,13 +2,23 @@
 //!
 //! Set `CONTROL_TEST_DB` to run; tests silently skip otherwise.
 
+use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
-use zeroship_control::{Registry, StripeStore};
 use zeroship_control::stripe_store::StripeError;
+use zeroship_control::{Registry, StripeStore};
 
 fn db_url() -> Option<String> { std::env::var("CONTROL_TEST_DB").ok() }
 
 fn fresh_creator_id() -> Uuid { Uuid::new_v4() }
+
+async fn pg(db_url: &str) -> compio_postgres::Client {
+    let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
+    compio::runtime::spawn(async move {
+        let _ = conn.run().await;
+    })
+    .detach();
+    client
+}
 
 #[compio::test]
 async fn link_account_roundtrip() {
@@ -354,6 +364,37 @@ async fn same_account_link_is_idempotent_no_history_pollution() {
     assert_eq!(h.len(), 1, "same-account relinks must not append history");
     assert_eq!(h[0].stripe_account_id, "acct_idempotentLink123");
     assert!(h[0].unlinked_at.is_none());
+}
+
+#[compio::test]
+async fn creator_history_allows_only_one_open_row_per_creator() {
+    let Some(url) = db_url() else { return; };
+    Registry::new(&url).await.expect("registry");
+    let pg = pg(&url).await;
+    let creator = fresh_creator_id();
+
+    pg.execute(
+        "INSERT INTO creator_account_history (creator_id, stripe_account_id)
+         VALUES ($1, 'acct_openHistoryA12')",
+        &[&creator],
+    )
+    .await
+    .expect("insert first open history row");
+    let duplicate = pg
+        .execute(
+            "INSERT INTO creator_account_history (creator_id, stripe_account_id)
+             VALUES ($1, 'acct_openHistoryB34')",
+            &[&creator],
+        )
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "schema must reject a second open creator_account_history row"
+    );
+
+    pg.execute("DELETE FROM creator_account_history WHERE creator_id = $1", &[&creator])
+        .await
+        .ok();
 }
 
 #[compio::test]
