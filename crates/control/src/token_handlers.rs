@@ -384,6 +384,7 @@ async fn validate_grant_subset(
                 let ctx = AuthzContext {
                     principal_id: guard.principal_id,
                     token_id: None,
+                    token_policy: None,
                     action: *action,
                     resource: resource.clone(),
                     request_ip: guard.request_ip,

@@ -97,6 +97,9 @@ impl Fixture {
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
+            hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
+                "http://127.0.0.1:9",
+            )),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         });
 

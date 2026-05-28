@@ -20,6 +20,7 @@ pub enum AuthzDecision {
 pub struct AuthzContext<'a> {
     pub principal_id: Uuid,
     pub token_id: Option<Uuid>,
+    pub token_policy: Option<Policy>,
     pub action: Action,
     pub resource: Resource,
     pub request_ip: Option<IpAddr>,
@@ -30,9 +31,9 @@ pub struct AuthzContext<'a> {
 
 /// Enforce static owner permissions and optional token policies.
 ///
-/// When `token_id` is present this intentionally calls Cedar twice:
-/// owner-without-token first, then token policies. This preserves TOKEN ⊂ USER
-/// after app memberships or platform roles change.
+/// When `token_id` or `token_policy` is present this intentionally calls Cedar
+/// twice: owner-without-token first, then token policies. This preserves
+/// TOKEN ⊂ USER after app memberships or platform roles change.
 pub async fn enforce(
     pg: &Client,
     static_policies: &PolicySet,
@@ -40,7 +41,7 @@ pub async fn enforce(
 ) -> Result<AuthzDecision, AuthzError> {
     let entities = assemble_entities(pg, ctx.principal_id, ctx.action, ctx.resource.clone()).await?;
 
-    if ctx.token_id.is_some() {
+    if ctx.token_id.is_some() || ctx.token_policy.is_some() {
         let owner_req = build_request(ctx)?;
         let owner_decision =
             cedar_policy::Authorizer::new().is_authorized(&owner_req, static_policies, &entities);
@@ -50,7 +51,9 @@ pub async fn enforce(
         }
     }
 
-    let final_policies = if let Some(token_id) = ctx.token_id {
+    let final_policies = if let Some(token_policy) = &ctx.token_policy {
+        policy_set_from_policy(token_policy)?
+    } else if let Some(token_id) = ctx.token_id {
         load_token_policies(pg, token_id).await?
     } else {
         static_policies.clone()
@@ -66,6 +69,10 @@ pub async fn enforce(
     };
     audit_decision(pg, ctx, decision).await;
     Ok(decision)
+}
+
+fn policy_set_from_policy(policy: &Policy) -> Result<PolicySet, AuthzError> {
+    PolicySet::from_str(&lower(policy)).map_err(|err| AuthzError::CedarParse(err.to_string()))
 }
 
 async fn load_token_policies(pg: &Client, token_id: Uuid) -> Result<PolicySet, AuthzError> {
@@ -84,7 +91,7 @@ async fn load_token_policies(pg: &Client, token_id: Uuid) -> Result<PolicySet, A
         .ok_or_else(|| AuthzError::Validation(format!("permission token not active: {token_id}")))?;
     let wrapper_json: Value = row.get("policies");
     let wrapper = Policy::from_json_value(&wrapper_json)?;
-    PolicySet::from_str(&lower(&wrapper)).map_err(|err| AuthzError::CedarParse(err.to_string()))
+    policy_set_from_policy(&wrapper)
 }
 
 fn build_request(ctx: &AuthzContext<'_>) -> Result<Request, AuthzError> {

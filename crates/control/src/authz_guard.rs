@@ -13,6 +13,7 @@ use crate::{http_util, AppState};
 pub struct AuthzGuard {
     pub principal_id: Uuid,
     pub token_id: Option<Uuid>,
+    pub token_policy: Option<authz::Policy>,
     pub mfa_verified: bool,
     pub mfa_age_seconds: Option<u32>,
     pub request_ip: Option<IpAddr>,
@@ -46,6 +47,7 @@ impl AuthzGuard {
         let ctx = AuthzContext {
             principal_id: self.principal_id,
             token_id: self.token_id,
+            token_policy: self.token_policy.clone(),
             action,
             resource,
             request_ip: self.request_ip,
@@ -79,6 +81,7 @@ async fn guard_from_session(
     Ok(AuthzGuard {
         principal_id,
         token_id: None,
+        token_policy: None,
         mfa_verified: false,
         mfa_age_seconds: None,
         request_ip,
@@ -98,13 +101,16 @@ async fn guard_from_bearer(
     let Some(raw) = zeroship_core::auth::extract_bearer(header) else {
         return Ok(None);
     };
-    let claims = state
-        .pat_issuer
-        .verify(raw)
-        .map_err(|err| {
-            tracing::warn!(error = %err, "control: PAT verify failed");
-            web::error::ErrorUnauthorized("invalid bearer token")
-        })?;
+    let claims = match state.pat_issuer.verify(raw) {
+        Ok(claims) => claims,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "control: bearer was not a valid PAT; trying OAuth introspection"
+            );
+            return oauth_guard_from_bearer(raw, state, request_ip).await;
+        }
+    };
     let token_id = Uuid::parse_str(&claims.jti)
         .map_err(|_| web::error::ErrorUnauthorized("invalid bearer token id"))?;
     let owner_id = Uuid::parse_str(&claims.owner)
@@ -146,6 +152,45 @@ async fn guard_from_bearer(
     Ok(Some(AuthzGuard {
         principal_id,
         token_id: Some(token_id),
+        token_policy: None,
+        mfa_verified: false,
+        mfa_age_seconds: None,
+        request_ip,
+    }))
+}
+
+async fn oauth_guard_from_bearer(
+    token: &str,
+    state: &AppState,
+    request_ip: Option<IpAddr>,
+) -> Result<Option<AuthzGuard>, web::Error> {
+    let result = state
+        .hydra_introspector
+        .introspect(token)
+        .await
+        .map_err(|err| {
+            tracing::warn!(error = %err, "control: hydra introspect failed");
+            web::error::ErrorUnauthorized("oauth introspection failed")
+        })?;
+    if !result.active {
+        return Err(web::error::ErrorUnauthorized("inactive oauth token").into());
+    }
+
+    let sub = result
+        .sub
+        .ok_or_else(|| web::error::ErrorUnauthorized("missing oauth sub"))?;
+    let principal_id =
+        Uuid::parse_str(&sub).map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
+
+    let raw_scope = result.scope.unwrap_or_default();
+    let scopes = authz::parse_scope_string(&raw_scope)
+        .map_err(|_| web::error::ErrorUnauthorized("invalid oauth scope"))?;
+    let token_policy = authz::scopes_to_policy(&scopes);
+
+    Ok(Some(AuthzGuard {
+        principal_id,
+        token_id: None,
+        token_policy: Some(token_policy),
         mfa_verified: false,
         mfa_age_seconds: None,
         request_ip,
