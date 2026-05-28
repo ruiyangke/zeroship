@@ -389,6 +389,17 @@ const stories = [
   "components-drawer--nested",
   "components-drawer--rtl",
   "components-drawer--close-as-child",
+  // Slice 18: ScrollArea — 10 stories.
+  "components-scrollarea--basic-vertical",
+  "components-scrollarea--basic-horizontal",
+  "components-scrollarea--both",
+  "components-scrollarea--always-visible",
+  "components-scrollarea--hover-only",
+  "components-scrollarea--long-list",
+  "components-scrollarea--grid-content",
+  "components-scrollarea--inside-card",
+  "components-scrollarea--rtl",
+  "components-scrollarea--keyboard-scroll",
 ];
 
 async function launchBrowser() {

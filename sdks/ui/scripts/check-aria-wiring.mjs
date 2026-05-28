@@ -4353,6 +4353,132 @@ await openStoryAndTrigger(
   );
 }
 
+/* ─── 87. Slice 18: ScrollArea type=auto + overflow → vertical bar present ── *
+ *
+ * The shorthand `<ScrollArea>` over a constrained Viewport with long
+ * content MUST render a `.zs-scrollarea__scrollbar` carrying
+ * `data-orientation="vertical"` once Base UI's overflow observer fires.
+ * We don't assert opacity here — the visibility policy is exercised by
+ * the hover-fade assertion below. */
+await open("components-scrollarea--basic-vertical");
+{
+  const root = page.locator('[data-testid="scrollarea-basic-vertical"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  // Give Base UI's ResizeObserver a frame to detect the overflow.
+  await page.waitForTimeout(200);
+  const bar = root.locator(
+    '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+  );
+  const present = (await bar.count()) > 0;
+  const visibility = await root.getAttribute("data-visibility");
+  report(
+    "ScrollArea type=auto vertical bar present on overflow",
+    present && visibility === "auto",
+    `bar-count=${await bar.count()}, data-visibility=${visibility}`,
+  );
+}
+
+/* ─── 88. Slice 18: thumb drag updates Viewport.scrollTop ────────────── *
+ *
+ * Dragging the vertical thumb downward MUST move the Viewport's
+ * `scrollTop` forward proportionally. We use page.mouse.down/move/up
+ * over the thumb's bounding box; the synthetic drag triggers Base UI's
+ * pointer-tracking, which writes to the real overflow container. */
+await open("components-scrollarea--always-visible");
+{
+  const root = page.locator('[data-testid="scrollarea-always-visible"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(200);
+  const thumb = root.locator(".zs-scrollarea__thumb").first();
+  const viewport = root.locator(".zs-scrollarea__viewport").first();
+  const present = (await thumb.count()) > 0;
+  if (!present) {
+    report("ScrollArea thumb drag updates scrollTop", false, "thumb-missing");
+  } else {
+    const before = await viewport.evaluate((el) => el.scrollTop);
+    const box = await thumb.boundingBox();
+    if (!box) {
+      report("ScrollArea thumb drag updates scrollTop", false, "thumb-no-bbox");
+    } else {
+      const startX = box.x + box.width / 2;
+      const startY = box.y + box.height / 2;
+      await page.mouse.move(startX, startY);
+      await page.mouse.down();
+      // Drag down 60px so the proportional scroll-top jumps significantly.
+      await page.mouse.move(startX, startY + 60, { steps: 6 });
+      await page.mouse.up();
+      await page.waitForTimeout(150);
+      const after = await viewport.evaluate((el) => el.scrollTop);
+      report(
+        "ScrollArea thumb drag updates Viewport.scrollTop",
+        after > before,
+        `before=${before}, after=${after}`,
+      );
+    }
+  }
+}
+
+/* ─── 89. Slice 18: keyboard End on focused Viewport scrolls forward ── *
+ *
+ * The compound-API story exposes the Viewport with `tabIndex={0}` so
+ * it can take focus. Pressing End MUST move scrollTop > 0 — ScrollArea
+ * does not intercept native keyboard scroll. */
+await open("components-scrollarea--keyboard-scroll");
+{
+  const viewport = page.locator(
+    '[data-testid="scrollarea-keyboard-viewport"]',
+  );
+  await viewport.waitFor({ state: "visible", timeout: 5000 });
+  await viewport.evaluate((el) => el.focus());
+  const before = await viewport.evaluate((el) => el.scrollTop);
+  await page.keyboard.press("End");
+  await page.waitForTimeout(150);
+  const after = await viewport.evaluate((el) => el.scrollTop);
+  report(
+    "ScrollArea keyboard End scrolls Viewport forward",
+    after > before,
+    `before=${before}, after=${after}`,
+  );
+}
+
+/* ─── 90. Slice 18: type=hover starts hidden, hover reveals scrollbar ── *
+ *
+ * `type="hover"` keeps the scrollbar at opacity 0 until the pointer
+ * enters the Root or Viewport. We assert the resting opacity is < 0.5
+ * and that hover lifts it to > 0.5. The cursor is parked at (5, 5)
+ * first so the resting-state read isn't contaminated by a stale
+ * pointer position from a previous assertion. */
+await open("components-scrollarea--hover-only");
+{
+  const root = page.locator('[data-testid="scrollarea-hover-only"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  // Park the pointer outside any interactive surface before measuring.
+  await page.mouse.move(5, 5);
+  await page.waitForTimeout(300);
+  const bar = root.locator(
+    '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+  );
+  const present = (await bar.count()) > 0;
+  if (!present) {
+    report("ScrollArea hover policy reveals bar", false, "bar-missing");
+  } else {
+    const restingOpacity = await bar.evaluate(
+      (el) => parseFloat(getComputedStyle(el).opacity || "0"),
+    );
+    await root.hover();
+    await page.waitForTimeout(350);
+    const hoveredOpacity = await bar.evaluate(
+      (el) => parseFloat(getComputedStyle(el).opacity || "0"),
+    );
+    const ok = restingOpacity < 0.5 && hoveredOpacity > 0.5;
+    report(
+      "ScrollArea type=hover bar reveals on hover",
+      ok,
+      `resting=${restingOpacity}, hovered=${hoveredOpacity}`,
+    );
+  }
+}
+
 await ctx.close();
 await browser.close();
 

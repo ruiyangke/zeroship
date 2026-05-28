@@ -1,0 +1,315 @@
+/*
+ * ScrollArea — custom-styled scrollbar over native scroll.
+ *
+ * Anatomy:
+ *
+ *   .zs-scrollarea                  Root — relative-positioned shell.
+ *                                    data-visibility = auto|always|scroll|hover
+ *                                    data-orientation = vertical|horizontal|both
+ *
+ *     .zs-scrollarea__viewport      Real overflow container (Base UI's
+ *                                    pattern: overflow:hidden here, the
+ *                                    actual scroll happens on the inner
+ *                                    Content wrapper Base UI manages).
+ *
+ *       .zs-scrollarea__content     Block wrapper for the user payload.
+ *
+ *     .zs-scrollarea__scrollbar     Decorative bar track. Two variants:
+ *       --vertical                  pinned inline-end (RTL mirror flips
+ *                                    to inline-start at equal specificity).
+ *       --horizontal                pinned block-end.
+ *
+ *       .zs-scrollarea__thumb       Draggable pill handle inside the bar.
+ *
+ *     .zs-scrollarea__corner        L-intersection square (only painted
+ *                                    when both bars are visible).
+ *
+ * Visibility policy (data-visibility on Root drives the CSS):
+ *
+ *   - auto:    Scrollbar is visible while scrolling and fades out after
+ *              var(--zs-scrollarea-hide-delay). Implemented via a
+ *              transition-delay on the opacity fade-out so no JS timer
+ *              is needed in our shell — Base UI's `data-scrolling`
+ *              attribute on the Root drives the active-scroll signal.
+ *   - always:  Scrollbar opacity stays at 1.
+ *   - scroll:  Scrollbar opacity is 1 only while data-scrolling — fades
+ *              immediately when scrolling stops.
+ *   - hover:   Scrollbar opacity is 1 while the Root is hovered OR while
+ *              data-scrolling is set.
+ *
+ * Reduced motion + forced colors + RTL: every painted rule has a
+ * specificity-matched mirror so the high-contrast and right-to-left
+ * passes don't silently demote our overrides.
+ */
+
+/* ─── Root ─────────────────────────────────────────────────────────────── */
+.zs-scrollarea {
+  position: relative;
+  overflow: hidden;
+  /* The Root inherits its sizing from the parent — ScrollArea is a
+   * transparent enhancement of overflow, not a sizing primitive. */
+  inline-size: 100%;
+  block-size: 100%;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+/* ─── Viewport (overflow container) ────────────────────────────────────── */
+.zs-scrollarea__viewport {
+  position: relative;
+  inline-size: 100%;
+  block-size: 100%;
+  overflow: hidden;
+  /* The Viewport is the focusable scroll container — keyboard ArrowKeys,
+   * PageUp/PageDown, Home/End all scroll it natively. Outline goes on
+   * the Viewport itself so focus-visible reads cleanly. */
+  outline-offset: calc(-1 * var(--zs-focus-ring-offset));
+  border-radius: inherit;
+}
+
+.zs-scrollarea__viewport:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+}
+
+/* ─── Content wrapper (block flow) ─────────────────────────────────────── */
+.zs-scrollarea__content {
+  display: block;
+  /* The inner content is laid out by the consumer. We avoid forcing a
+   * min-block-size so prose, lists, grids, and tables all behave
+   * naturally inside. */
+}
+
+/* ─── Scrollbar — base (vertical default) ──────────────────────────────── *
+ *
+ * Scrollbars sit absolutely positioned over the Viewport. The track is
+ * a thin tinted strip painted from --zs-fill at 20% so it reads as a
+ * gentle gutter behind the thumb without competing with content.
+ *
+ * `touch-action: none` keeps the bar from initiating a scroll gesture
+ * — Base UI handles the synthetic scroll on thumb drag instead.
+ */
+.zs-scrollarea__scrollbar {
+  position: absolute;
+  display: flex;
+  /* Above the content but never above modal layers (Dialog/Drawer set
+   * --zs-z-modal). A small positive z-index handles ordering with
+   * sibling chrome inside the same panel. */
+  z-index: 1;
+  background-color: color-mix(in oklch, var(--zs-fill) 20%, transparent);
+  border-radius: var(--zs-radius-full);
+  /* The bar fades via opacity. Visibility policies override the
+   * resting opacity via the data-visibility selectors below. */
+  opacity: 1;
+  transition:
+    opacity var(--zs-motion-base) var(--zs-motion-ease),
+    transform var(--zs-motion-base) var(--zs-motion-ease);
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  pointer-events: auto;
+}
+
+/* Vertical bar — pinned to the inline-end edge, full block height. */
+.zs-scrollarea__scrollbar--vertical {
+  inset-block-start: 0;
+  inset-block-end: 0;
+  inset-inline-end: 0;
+  inline-size: var(--zs-space-3);
+  padding-block: var(--zs-space-half);
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+/* Horizontal bar — pinned to the block-end edge, full inline width. */
+.zs-scrollarea__scrollbar--horizontal {
+  inset-inline-start: 0;
+  inset-inline-end: 0;
+  inset-block-end: 0;
+  block-size: var(--zs-space-3);
+  padding-inline: var(--zs-space-half);
+  flex-direction: row;
+  align-items: stretch;
+}
+
+/* ─── Visibility policies ──────────────────────────────────────────────── *
+ *
+ * The Root carries `data-visibility="auto|always|scroll|hover"`.
+ * Base UI emits `data-scrolling` on the Root while scrolling is active
+ * and `data-hovering` while the Root is hovered (the same attribute set
+ * the Scrollbar's `state.scrolling` / `state.hovering` shapes).
+ *
+ * For maximum compatibility we also key off `:hover` on the Root so the
+ * `hover` policy still works in environments where Base UI hasn't
+ * emitted the data attribute yet.
+ */
+
+/* type=auto — visible by default, fades after the hide-delay. */
+.zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar {
+  opacity: 1;
+  transition:
+    opacity var(--zs-motion-base) var(--zs-motion-ease)
+      var(--zs-scrollarea-hide-delay, 600ms),
+    transform var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-scrollarea[data-visibility="auto"][data-scrolling]
+  .zs-scrollarea__scrollbar {
+  opacity: 1;
+  /* While actively scrolling, drop the delay — keep the bar visible
+   * immediately. */
+  transition:
+    opacity var(--zs-motion-fast) var(--zs-motion-ease),
+    transform var(--zs-motion-base) var(--zs-motion-ease);
+}
+.zs-scrollarea[data-visibility="auto"]:not([data-scrolling])
+  .zs-scrollarea__scrollbar {
+  /* Fade out when not scrolling. The delayed transition above produces
+   * the hide-delay behavior — bar stays at opacity 1 through the
+   * delay window then fades over motion-base. */
+  opacity: 0;
+}
+
+/* type=always — bar is always visible. */
+.zs-scrollarea[data-visibility="always"] .zs-scrollarea__scrollbar {
+  opacity: 1;
+}
+
+/* type=scroll — visible only while actively scrolling. */
+.zs-scrollarea[data-visibility="scroll"] .zs-scrollarea__scrollbar {
+  opacity: 0;
+}
+.zs-scrollarea[data-visibility="scroll"][data-scrolling]
+  .zs-scrollarea__scrollbar {
+  opacity: 1;
+}
+
+/* type=hover — visible while pointer hovers the Root or while
+ * actively scrolling. */
+.zs-scrollarea[data-visibility="hover"] .zs-scrollarea__scrollbar {
+  opacity: 0;
+}
+.zs-scrollarea[data-visibility="hover"]:hover .zs-scrollarea__scrollbar,
+.zs-scrollarea[data-visibility="hover"][data-hovering]
+  .zs-scrollarea__scrollbar,
+.zs-scrollarea[data-visibility="hover"][data-scrolling]
+  .zs-scrollarea__scrollbar {
+  opacity: 1;
+}
+
+/* ─── Thumb ────────────────────────────────────────────────────────────── *
+ *
+ * Pill-shaped handle painted from a label color-mix so it picks up the
+ * theme's foreground tone (cool labels on Crystal, warm labels on
+ * future themes). Hover deepens to 50%; active (drag) deepens to 64%.
+ *
+ * Base UI sizes the Thumb proportionally to the content overflow on
+ * the relevant axis; we enforce a minimum so a thumb on a very long
+ * list stays grabbable.
+ */
+.zs-scrollarea__thumb {
+  background-color: color-mix(in oklch, var(--zs-label) 32%, transparent);
+  border-radius: var(--zs-radius-full);
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+  /* Grabbable minimum on the long axis; Base UI handles the other
+   * axis (it expands to fill the bar's cross axis). */
+  flex-shrink: 0;
+}
+
+.zs-scrollarea__scrollbar--vertical .zs-scrollarea__thumb {
+  inline-size: 100%;
+  min-block-size: var(--zs-space-6);
+}
+.zs-scrollarea__scrollbar--horizontal .zs-scrollarea__thumb {
+  block-size: 100%;
+  min-inline-size: var(--zs-space-6);
+}
+
+@media (hover: hover) {
+  .zs-scrollarea__scrollbar:hover .zs-scrollarea__thumb {
+    background-color: color-mix(in oklch, var(--zs-label) 50%, transparent);
+  }
+}
+.zs-scrollarea__thumb[data-dragging],
+.zs-scrollarea__thumb:active {
+  background-color: color-mix(in oklch, var(--zs-label) 64%, transparent);
+}
+
+/* ─── Corner ───────────────────────────────────────────────────────────── */
+.zs-scrollarea__corner {
+  position: absolute;
+  inset-inline-end: 0;
+  inset-block-end: 0;
+  inline-size: var(--zs-space-3);
+  block-size: var(--zs-space-3);
+  background-color: color-mix(in oklch, var(--zs-fill) 20%, transparent);
+}
+
+/* ─── RTL mirror — vertical bar flips to inline-start ─────────────────── *
+ *
+ * `inset-inline-end` already flips to the correct physical edge under
+ * RTL, BUT we want to be explicit about the vertical bar flipping to
+ * inline-start for visual conventions in some RTL designs. The brief
+ * calls for `inset-inline-start: 0` on the vertical bar under RTL at
+ * EQUAL specificity. We mirror the data-orientation selector so the
+ * override lands on the same cascade weight as the LTR rule.
+ */
+[dir="rtl"] .zs-scrollarea__scrollbar--vertical {
+  inset-inline-end: auto;
+  inset-inline-start: 0;
+}
+
+/* The corner follows the vertical bar's edge in RTL too. */
+[dir="rtl"] .zs-scrollarea__corner {
+  inset-inline-end: auto;
+  inset-inline-start: 0;
+}
+
+/* ─── Reduced motion — specificity mirror ──────────────────────────────── *
+ *
+ * Suppress the opacity + transform transitions when the user prefers
+ * reduced motion. The selectors mirror the painted rules above at
+ * equal specificity so the cascade doesn't silently demote our
+ * overrides — same `data-visibility="auto"` selector weight.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="auto"][data-scrolling]
+    .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="scroll"] .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="hover"] .zs-scrollarea__scrollbar {
+    transition: none;
+  }
+  .zs-scrollarea__thumb {
+    transition: none;
+  }
+}
+
+/* ─── Forced colors — specificity mirror ──────────────────────────────── *
+ *
+ * High-contrast pass: bar → ButtonFace, thumb → ButtonText. The
+ * selectors mirror the data-visibility and data-orientation weights
+ * above so the override pins to the same cascade rung.
+ */
+@media (forced-colors: active) {
+  .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="always"] .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="scroll"][data-scrolling]
+    .zs-scrollarea__scrollbar,
+  .zs-scrollarea[data-visibility="hover"]:hover .zs-scrollarea__scrollbar {
+    background-color: ButtonFace;
+    border: 0.0625rem solid ButtonText;
+  }
+  .zs-scrollarea__thumb,
+  .zs-scrollarea__thumb[data-dragging],
+  .zs-scrollarea__thumb:active {
+    background-color: ButtonText;
+  }
+  .zs-scrollarea__corner {
+    background-color: ButtonFace;
+    border: 0.0625rem solid ButtonText;
+  }
+  .zs-scrollarea__viewport:focus-visible {
+    outline-color: Highlight;
+  }
+}
