@@ -8,7 +8,7 @@ use ntex::web;
 use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     admin_handlers, api, backchannel_logout, env_handlers, internal, oidc_rp, stripe_handlers,
-    AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
+    token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
 #[global_allocator]
@@ -41,6 +41,7 @@ async fn main() -> std::io::Result<()> {
     let master_key = arg_or_env(&args, "--master-key", "MASTER_KEY", "");
     let workers_str = arg_or_env(&args, "--workers", "WORKER_URLS", "http://localhost:8080");
     let worker_key = arg_or_env(&args, "--worker-key", "WORKER_KEY", "");
+    let signing_key_file = arg_or_env(&args, "--signing-key-file", "SIGNING_KEY_FILE", "");
     let stripe_webhook_secret = arg_or_env(&args, "--stripe-webhook-secret", "STRIPE_WEBHOOK_SECRET", "");
     // Comma-separated list of previous master keys, tried as fallbacks
     // on decrypt failure during a rotation grace period.
@@ -102,6 +103,7 @@ async fn main() -> std::io::Result<()> {
         let mut missing = Vec::new();
         if master_key.is_empty() { missing.push("--master-key / MASTER_KEY"); }
         if control_key.is_empty() { missing.push("--control-key / CONTROL_KEY"); }
+        if signing_key_file.is_empty() { missing.push("--signing-key-file / SIGNING_KEY_FILE"); }
         if !missing.is_empty() {
             tracing::error!(
                 missing = %missing.join(", "),
@@ -125,6 +127,23 @@ async fn main() -> std::io::Result<()> {
     if insecure_dev {
         tracing::warn!("control: --dev-insecure set; admin + internal auth disabled");
     }
+
+    let pat_issuer = if signing_key_file.is_empty() {
+        tracing::warn!("control: using dev-only PAT signing key");
+        Arc::new(token_handlers::PatIssuer::dev_insecure())
+    } else {
+        let signing_key = token_handlers::load_signing_key_from_path(
+            std::path::Path::new(&signing_key_file),
+        )
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: failed to load PAT signing key");
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+        })?;
+        Arc::new(token_handlers::PatIssuer::new(&signing_key).map_err(|err| {
+            tracing::error!(error = %err, "control: failed to initialize PAT issuer");
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+        })?)
+    };
 
     let registry = Registry::new(&db_url)
         .await
@@ -284,6 +303,7 @@ async fn main() -> std::io::Result<()> {
         auth_pg,
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
+        pat_issuer,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
@@ -362,6 +382,7 @@ async fn main() -> std::io::Result<()> {
             // with `auth_service` / `auth_handlers`; this is now the
             // only console-auth surface.
             .service(web::resource("/auth/callback").route(web::get().to(api::auth_callback)))
+            .configure(token_handlers::configure)
             // OIDC Back-Channel Logout 1.0 RP endpoint. Hydra POSTs
             // here on user sign-out; we verify the logout_token and
             // revoke the user's console sessions. The URI must match

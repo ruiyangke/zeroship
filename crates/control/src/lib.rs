@@ -21,6 +21,7 @@ pub mod rate_limit;
 pub mod registry;
 pub mod stripe_handlers;
 pub mod stripe_store;
+pub mod token_handlers;
 
 use std::sync::Arc;
 
@@ -134,6 +135,10 @@ pub struct AppState {
     /// Parsed once at boot; per-token policies are loaded by the authz
     /// evaluator only when a token-bearing request needs them.
     pub static_policies: zeroship_authz::PolicySet,
+    /// Ed25519 issuer/verifier for first-party Personal Access Tokens.
+    /// Control uses the same key material as the gateway's
+    /// `--signing-key-file` wrapper-token issuer for P9 v1.
+    pub pat_issuer: Arc<token_handlers::PatIssuer>,
     /// In-process replay cache for OIDC Back-Channel Logout
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.

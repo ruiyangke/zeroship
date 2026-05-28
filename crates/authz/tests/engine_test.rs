@@ -111,7 +111,7 @@ fn policy_hash_is_stable_and_unique() {
         "name": "test",
         "statements": [{
             "effect": "allow",
-            "actions": ["apps_deploy"],
+            "actions": ["apps:deploy"],
             "resources": [{"type": "app", "id": "blog"}],
             "conditions": []
         }]
@@ -119,7 +119,7 @@ fn policy_hash_is_stable_and_unique() {
     let same_policy_different_key_order = json!({
         "statements": [{
             "resources": [{"id": "blog", "type": "app"}],
-            "actions": ["apps_deploy"],
+            "actions": ["apps:deploy"],
             "conditions": [],
             "effect": "allow"
         }],
@@ -129,7 +129,7 @@ fn policy_hash_is_stable_and_unique() {
         "name": "test",
         "statements": [{
             "effect": "allow",
-            "actions": ["env_read"],
+            "actions": ["env:read"],
             "resources": [{"type": "app", "id": "blog"}],
             "conditions": []
         }]
