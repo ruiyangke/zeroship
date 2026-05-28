@@ -27,6 +27,7 @@ use std::sync::Arc;
 use ntex::web::{self, types::Form, types::State, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
+use zeroship_auth::audit::{self, AuditEvent};
 
 use crate::console_sessions;
 use crate::AppState;
@@ -197,21 +198,16 @@ async fn emit_revocation_audit(
         "jti": jti,
         "revoked": revoked,
     });
-    if let Err(e) = db
-        .execute(
-            "INSERT INTO auth.audit_events \
-                (event_type, outcome, client_id, auth_method, detail) \
-             VALUES ($1, $2, $3, $4, $5)",
-            &[
-                &"backchannel_logout_revoke",
-                &"success",
-                &client_id,
-                &"oidc_backchannel_logout",
-                &detail,
-            ],
-        )
-        .await
-    {
-        tracing::warn!(error = %e, "console backchannel_logout: audit insert failed");
-    }
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "backchannel_logout_revoke",
+            outcome: "success",
+            client_id: Some(client_id),
+            auth_method: Some("oidc_backchannel_logout"),
+            detail,
+            ..Default::default()
+        },
+    )
+    .await;
 }

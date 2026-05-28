@@ -6,7 +6,7 @@
 //! audited later, do it at the gateway layer with a sampling
 //! middleware instead.
 //!
-use serde_json::Value;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::registry::{Registry, RegistryError};
@@ -61,6 +61,18 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
 /// Best-effort audit insert with structured detail JSON for operations where
 /// `resource` alone is not enough to reconstruct the mutation.
 pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail: &Value) {
+    let stdout_payload = json!({
+        "app_id": entry.app_id,
+        "creator_id": entry.creator_id,
+        "actor_user_id": entry.actor_user_id,
+        "actor_token_id": entry.actor_token_id,
+        "action": entry.action.as_str(),
+        "resource": entry.resource,
+        "source_ip": entry.source_ip,
+        "detail": detail,
+    });
+    tracing::info!(target: "control.audit", payload = %stdout_payload, "app audit event");
+
     let conn = match registry.conn().await {
         Ok(c) => c,
         Err(e) => {

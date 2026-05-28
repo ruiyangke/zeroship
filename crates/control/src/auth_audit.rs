@@ -36,7 +36,7 @@ pub async fn emit_guard_event(
     })
 }
 
-fn auth_method(guard: &AuthzGuard) -> &'static str {
+pub fn auth_method(guard: &AuthzGuard) -> &'static str {
     if guard.token_id.is_some() {
         "pat"
     } else if guard.token_policy.is_some() {
