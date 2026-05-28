@@ -10,6 +10,37 @@ use ntex::http::HeaderMap;
 use ntex::service::{cfg::SharedCfg, Middleware, Service, ServiceCtx};
 use ntex::web::{WebRequest, WebResponse};
 
+const DEFAULT_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+         script-src 'self'; \
+         style-src 'self'; \
+         img-src 'self' data: https://*.zeroship.ai \
+                       https://lh3.googleusercontent.com \
+                       https://avatars.githubusercontent.com; \
+         connect-src 'self'; \
+         form-action 'self'; \
+         frame-ancestors 'none'; \
+         base-uri 'none'; \
+         object-src 'none'; \
+         upgrade-insecure-requests";
+
+#[must_use]
+pub fn content_security_policy_with_script_nonce(nonce: &str) -> String {
+    format!(
+        "default-src 'self'; \
+         script-src 'self' 'nonce-{nonce}'; \
+         style-src 'self'; \
+         img-src 'self' data: https://*.zeroship.ai \
+                       https://lh3.googleusercontent.com \
+                       https://avatars.githubusercontent.com; \
+         connect-src 'self'; \
+         form-action 'self'; \
+         frame-ancestors 'none'; \
+         base-uri 'none'; \
+         object-src 'none'; \
+         upgrade-insecure-requests"
+    )
+}
+
 /// Apply the standard security headers to an outgoing response's header map.
 ///
 /// Values are all static ASCII strings; this is a pure writer with no
@@ -38,21 +69,10 @@ pub fn apply(headers: &mut HeaderMap) {
     // CSP — same shape as proposal §14. `'nonce-...'` and per-page hardening
     // are added by handlers that render inline scripts; the baseline blocks
     // everything else.
-    static_set(
+    static_set_if_absent(
         headers,
         "content-security-policy",
-        "default-src 'self'; \
-         script-src 'self'; \
-         style-src 'self'; \
-         img-src 'self' data: https://*.zeroship.ai \
-                       https://lh3.googleusercontent.com \
-                       https://avatars.githubusercontent.com; \
-         connect-src 'self'; \
-         form-action 'self'; \
-         frame-ancestors 'none'; \
-         base-uri 'none'; \
-         object-src 'none'; \
-         upgrade-insecure-requests",
+        DEFAULT_CONTENT_SECURITY_POLICY,
     );
 }
 
@@ -61,6 +81,13 @@ fn static_set(headers: &mut HeaderMap, name: &'static str, value: &'static str) 
         HeaderName::from_static(name),
         HeaderValue::from_static(value),
     );
+}
+
+fn static_set_if_absent(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
+    let name = HeaderName::from_static(name);
+    if !headers.contains_key(&name) {
+        headers.insert(name, HeaderValue::from_static(value));
+    }
 }
 
 /// ntex middleware factory that runs [`apply`] on every outgoing response.

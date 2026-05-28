@@ -13,12 +13,15 @@
 //!   code-entry form. The check-email page already embeds the same form
 //!   inside a `<details>` toggle; this route exists for direct entry.
 //!
-//! - **GET `/magic/verify?token=<token>&login_challenge=<…>`** — redeem the
-//!   magic-link token. If the redeeming browser presents the matching
-//!   `__Host-zsidp_magic_csrf` cookie (same-device path) → mint session,
-//!   `accept_login`, 302 to hydra. If the cookie is missing or different
-//!   (cross-device) → generate a 6-digit code, persist it under the
-//!   magic-link's CSRF nonce, render the code on the redeeming device.
+//! - **GET `/magic/verify?token=<token>&login_challenge=<…>`** — render a
+//!   POST interstitial so the token leaves the URL before it is redeemed.
+//!
+//! - **POST `/magic/verify/redeem`** — redeem the magic-link token. If the
+//!   redeeming browser presents the matching `__Host-zsidp_magic_csrf`
+//!   cookie (same-device path) → mint session, `accept_login`, 302 to hydra.
+//!   If the cookie is missing or different (cross-device) → generate a
+//!   6-digit code, persist it under the magic-link's CSRF nonce, render the
+//!   code on the redeeming device.
 //!
 //! - **POST `/magic/complete`** — the cross-device completion form. The
 //!   requesting device posts the 6-digit code it saw on the redeeming
@@ -54,7 +57,8 @@ use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::{
-    ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage, MagicShowCodePage, PublicErrorMessage,
+    render_token_interstitial, ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage,
+    MagicShowCodePage, PublicErrorMessage, TokenRedeemInterstitial,
 };
 
 // ─── Cookie helpers ──────────────────────────────────────────────────
@@ -111,6 +115,13 @@ pub(crate) fn parse_magic_csrf_cookie(cookie_header: &str, insecure_dev: bool) -
         }
     }
     None
+}
+
+fn safe_csrf_value(value: &str) -> bool {
+    (16..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 // ─── POST /magic/start ───────────────────────────────────────────────
@@ -352,8 +363,42 @@ pub struct MagicVerifyQuery {
     pub login_challenge: String,
 }
 
-/// `/magic/verify` — the link the user clicks in the email. Atomically
-/// redeem the token, then branch on whether the redeeming browser
+#[derive(Debug, Deserialize)]
+pub struct MagicRedeemForm {
+    pub csrf: Option<String>,
+    pub token: String,
+    pub login_challenge: String,
+}
+
+/// `/magic/verify` — the link the user clicks in the email. Renders a
+/// one-shot interstitial that immediately POSTs to `/magic/verify/redeem`.
+#[allow(clippy::future_not_send)]
+pub async fn verify(
+    req: HttpRequest,
+    query: ntex::web::types::Query<MagicVerifyQuery>,
+    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+) -> HttpResponse {
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let csrf_token = parse_magic_csrf_cookie(cookie_header, cfg.insecure_dev)
+        .filter(|value| safe_csrf_value(value))
+        .unwrap_or_else(csrf::generate_token);
+    let page = TokenRedeemInterstitial {
+        title: "Sign in",
+        action: "/magic/verify/redeem",
+        token: &query.token,
+        csrf: &csrf_token,
+        extra_fields: vec![("login_challenge", query.login_challenge.as_str())],
+    };
+    let csrf_set_cookie = magic_csrf_set_cookie(&csrf_token, cfg.insecure_dev);
+    render_token_interstitial(&page, &csrf_set_cookie)
+}
+
+/// `/magic/verify/redeem` — atomically redeem the token, then branch on
+/// whether the redeeming browser
 /// presents the matching `__Host-zsidp_magic_csrf` cookie:
 ///
 /// - **Same-device**: mint a session, `accept_login`, 302 to hydra.
@@ -361,15 +406,22 @@ pub struct MagicVerifyQuery {
 ///   `auth.magic_completions`, render the code on this device for the
 ///   user to type back on the requesting device.
 #[allow(clippy::future_not_send)]
-pub async fn verify(
+pub async fn verify_redeem(
     req: HttpRequest,
-    query: ntex::web::types::Query<MagicVerifyQuery>,
+    form: ntex::web::types::Form<MagicRedeemForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     admin: ntex::web::types::State<HydraAdmin>,
 ) -> HttpResponse {
+    if !valid_magic_csrf(&req, form.csrf.as_deref(), &cfg) {
+        return render_error_page_with_status(
+            PublicErrorMessage::InvalidRequest,
+            StatusCode::FORBIDDEN,
+        );
+    }
+
     // 1. Redeem.
-    let redeemed = match magic_link::redeem_pending(db.as_ref(), &query.token).await {
+    let redeemed = match magic_link::redeem_pending(db.as_ref(), &form.token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             audit::emit(
@@ -457,7 +509,7 @@ pub async fn verify(
             &cfg,
             &redeemed.token_hash,
             user_id,
-            &query.login_challenge,
+            &form.login_challenge,
         )
         .await
     } else {
@@ -467,10 +519,23 @@ pub async fn verify(
             user_id,
             &redeemed.email,
             &redeemed.csrf_nonce,
-            &query.login_challenge,
+            &form.login_challenge,
         )
         .await
     }
+}
+
+fn valid_magic_csrf(req: &HttpRequest, form_csrf: Option<&str>, cfg: &AuthConfig) -> bool {
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    let cookie_token = parse_magic_csrf_cookie(cookie_header, cfg.insecure_dev);
+    cookie_token
+        .as_deref()
+        .zip(form_csrf)
+        .is_some_and(|(cookie, form)| csrf::matches(form, cookie))
 }
 
 /// Same-device path: mint session, `accept_login`, 302 to hydra.

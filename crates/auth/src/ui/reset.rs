@@ -29,6 +29,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::{AuthError, Result};
+use crate::headers;
 use crate::identity::{password, password_reset};
 use crate::store::users;
 use crate::ui::ResetPage;
@@ -299,6 +300,12 @@ fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpRespon
         .unwrap_or_else(|_| "<h1>error</h1>".to_string());
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
+    resp.header("Cache-Control", "no-store");
+    resp.header("Pragma", "no-cache");
+    resp.header(
+        "Content-Security-Policy",
+        headers::content_security_policy_with_script_nonce(&csrf_token),
+    );
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
 }
