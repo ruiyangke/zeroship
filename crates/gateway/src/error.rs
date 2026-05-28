@@ -16,6 +16,13 @@ pub enum GatewayError {
     /// parse as a PKCS#8 Ed25519 private key (Phase 8 U1).
     #[error("config: {0}")]
     Config(String),
+    /// Refuse to boot with a credential file that can be read or
+    /// modified by group/world users.
+    #[error("insecure permissions on {path}: mode {mode:o}")]
+    InsecurePermissions {
+        path: std::path::PathBuf,
+        mode: u32,
+    },
     /// Runtime failure that shouldn't happen in a healthy gateway —
     /// JWT encode/decode error, system clock failure, etc. Used by
     /// `wrapper_token::Issuer::issue` and `Verifier::verify` (Phase 8
