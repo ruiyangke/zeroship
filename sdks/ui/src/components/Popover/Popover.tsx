@@ -363,6 +363,16 @@ const PopoverClose = forwardRef<HTMLButtonElement, PopoverCloseProps>(
             );
           }
 
+          // Compose our right-aligned Close marker class with the
+          // caller's optional className. `rest.className` is `string |
+          // undefined` (Button's prop type) so we can flatten via
+          // classnames() — no need to reach for composeBaseClass's
+          // callback overload here.
+          const callerClassName = (rest as { className?: string }).className;
+          const composedClassName = callerClassName
+            ? `zs-popover__close ${callerClassName}`
+            : "zs-popover__close";
+
           return (
             <Button
               {...closeProps}
@@ -374,6 +384,7 @@ const PopoverClose = forwardRef<HTMLButtonElement, PopoverCloseProps>(
               onClick={composedOnClick}
               variant={variant}
               intent={intent}
+              className={composedClassName}
             >
               {children}
             </Button>

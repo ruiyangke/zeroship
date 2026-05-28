@@ -220,6 +220,23 @@
       color-mix(in oklch, var(--zs-label) 12%, transparent),
     0 0 0 0.0625rem color-mix(in oklch, var(--zs-label) 6%, transparent);
 
+  /* Popover elevation — lighter than dialog, three-layer label-mix.
+     Popovers are anchored panels (helper copy, settings sub-flyouts);
+     reusing --zs-shadow-dialog made them read as full sheets and
+     competed with real dialogs for visual weight. This token keeps the
+     two-layer drop tighter (space-4/space-8 ambient + space-1/space-4
+     crisp) and replaces the wide outer ring with an even thinner
+     hairline so the popup edges read as cut-out, not chrome. The inner
+     hairline at the Popup selector still uses --zs-separator for the
+     surface-on-surface line. */
+  --zs-shadow-popover:
+    0 var(--zs-space-4) var(--zs-space-8)
+      color-mix(in oklch, var(--zs-label) 16%, transparent),
+    0 var(--zs-space-1) var(--zs-space-4)
+      color-mix(in oklch, var(--zs-label) 10%, transparent),
+    0 0 0 var(--zs-selection-hairline)
+      color-mix(in oklch, var(--zs-label) 10%, transparent);
+
   /* ─── Card sizing */
   --zs-card-radius-sm: var(--zs-radius-4);     /* 10 */
   --zs-card-radius-md: var(--zs-radius-5);     /* 12 — default */

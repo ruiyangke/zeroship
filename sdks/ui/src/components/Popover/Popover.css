@@ -72,20 +72,27 @@
   background-color: var(--zs-surface);
   color: var(--zs-label);
   font-family: var(--zs-font-system);
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
+  /* Callout type by default — popovers carry helper copy, not body
+   * prose. Body-size was reading as dialog-weight (Slice-10 visual
+   * review item 3). */
+  font-size: var(--zs-text-callout-size);
+  line-height: var(--zs-text-callout-line);
   /* Logical sizing so RTL flows naturally. */
-  min-inline-size: 14rem;
-  max-inline-size: min(24rem, calc(100dvw - var(--zs-space-6) * 2));
+  min-inline-size: 12rem;
+  max-inline-size: min(22rem, calc(100dvw - var(--zs-space-6) * 2));
   padding-block: var(--zs-space-3);
-  padding-inline: var(--zs-space-4);
+  padding-inline: var(--zs-space-3);
   display: flex;
   flex-direction: column;
   gap: var(--zs-space-2);
   border-radius: var(--zs-radius-5);
+  /* Popover-specific elevation (lighter than dialog). The arrow drop-
+   * shadow extends past the popup rect, so `overflow: visible` keeps
+   * the triangle visible when it sits half outside the popup. */
   box-shadow:
-    var(--zs-shadow-dialog),
+    var(--zs-shadow-popover),
     inset 0 0 0 var(--zs-selection-hairline) var(--zs-separator);
+  overflow: visible;
   backdrop-filter: var(--zs-dialog-backdrop-filter, var(--zs-material-regular));
   -webkit-backdrop-filter: var(
     --zs-dialog-backdrop-filter,
@@ -99,6 +106,19 @@
   transition:
     transform var(--zs-motion-base) var(--zs-motion-ease),
     opacity var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* ─── Close ─────────────────────────────────────────────────────────── *
+ *
+ * Popover.Popup is `display: flex; flex-direction: column`, so a default
+ * `<Button>` Close stretches to fill the cross-axis and reads as a full-
+ * width gray slab (Slice-10 visual review item 4). Right-align it and
+ * cap min-inline-size so it sits as a real "Got it" affordance with
+ * a small top breath separating it from the description above. */
+.zs-popover__close {
+  align-self: flex-end;
+  min-inline-size: 6rem;
+  margin-block-start: var(--zs-space-1);
 }
 
 /* ─── enter/leave transitions ──────────────────────────────────────── *
@@ -167,11 +187,24 @@
   inline-size: 1rem;
   block-size: 0.5rem;
   color: var(--zs-surface);
+  /* Sit behind the popup chrome. Without this the arrow rectangle
+   * (Floating UI positions it inside the popup bounding box) overlaps
+   * the title text and reads as a triangle stamped onto the content
+   * (Slice-10 visual review item 1). `isolation: isolate` on
+   * `.zs-popover-popup` already establishes the stacking context, so
+   * the -1 only sinks the arrow below sibling content — it doesn't
+   * escape the popup. */
+  z-index: -1;
   /* Drop-shadow gives the arrow tip the same edge the popup shadow
    * paints — without it the triangle reads as a flat sticker on the
    * page. The filter is the only way to get the shadow to follow the
-   * triangle outline (box-shadow paints on the rect, not the path). */
-  filter: drop-shadow(0 0 0.0625rem color-mix(in oklch, var(--zs-label) 18%, transparent));
+   * triangle outline (box-shadow paints on the rect, not the path).
+   * Bumped to the popup's own label-mix 24% / space-half blur so the
+   * shadow reads at the same weight as the popup edge. */
+  filter: drop-shadow(
+    0 var(--zs-selection-hairline) var(--zs-space-half)
+      color-mix(in oklch, var(--zs-label) 24%, transparent)
+  );
 }
 .zs-popover-arrow > svg {
   display: block;

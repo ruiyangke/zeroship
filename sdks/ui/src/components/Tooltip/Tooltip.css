@@ -55,8 +55,9 @@
   border-radius: var(--zs-radius-2);
   box-shadow:
     0 var(--zs-space-1) var(--zs-space-3)
-      color-mix(in oklch, var(--zs-label) 32%, transparent),
-    0 0 0 0.0625rem color-mix(in oklch, var(--zs-label) 12%, transparent);
+      color-mix(in oklch, var(--zs-label) 22%, transparent),
+    0 0 0 var(--zs-selection-hairline)
+      color-mix(in oklch, var(--zs-label) 10%, transparent);
   /* Opaque background guarantees axe contrast walk terminates here. */
   opacity: 1;
   outline: none;
@@ -109,9 +110,16 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  inline-size: 0.75rem;
-  block-size: 0.375rem;
+  /* Bumped from 0.75 × 0.375rem — the smaller glyph disappeared against
+   * the dark inverted chip (Slice-10 visual review item 5). Drop-shadow
+   * gives the tip the same soft label-mix edge the popup carries. */
+  inline-size: 1rem;
+  block-size: 0.5rem;
   color: var(--zs-label);
+  filter: drop-shadow(
+    0 var(--zs-selection-hairline) var(--zs-space-half)
+      color-mix(in oklch, var(--zs-label) 24%, transparent)
+  );
 }
 .zs-tooltip-arrow > svg {
   display: block;
