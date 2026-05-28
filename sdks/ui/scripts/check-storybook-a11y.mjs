@@ -341,6 +341,18 @@ const stories = [
   "components-navigationmenu--keyboard-nav",
   "components-navigationmenu--disabled",
   "components-navigationmenu--rtl",
+  // Slice 15: Drawer — 11 stories.
+  "components-drawer--basic",
+  "components-drawer--left-side",
+  "components-drawer--top",
+  "components-drawer--bottom",
+  "components-drawer--sizes",
+  "components-drawer--controlled",
+  "components-drawer--with-form",
+  "components-drawer--with-long-content",
+  "components-drawer--nested",
+  "components-drawer--rtl",
+  "components-drawer--close-as-child",
 ];
 
 async function launchBrowser() {

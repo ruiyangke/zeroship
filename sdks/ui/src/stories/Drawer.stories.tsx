@@ -1,0 +1,524 @@
+import type { Meta, StoryObj } from "@storybook/react";
+import { useState } from "react";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
+import { Button, Drawer, Field, Input } from "../components";
+
+const meta: Meta<typeof Drawer> = {
+  title: "Components/Drawer",
+  component: Drawer,
+  parameters: {
+    layout: "fullscreen",
+  },
+};
+
+export default meta;
+
+type Story = StoryObj<typeof Drawer>;
+
+/* ─── 1. Basic — right-side default ──────────────────────────────────── */
+export const Basic: Story = {
+  name: "Basic (end side)",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Basic drawer">
+      <Drawer>
+        <Drawer.Trigger
+          render={<Button data-testid="drawer-trigger">Open drawer</Button>}
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content data-testid="drawer-basic-content">
+            <Drawer.Header>
+              <Drawer.Title>Notifications</Drawer.Title>
+              <Drawer.Description>
+                Side-anchored panel — default `side="end"` pins to the
+                trailing edge (right in LTR, left in RTL).
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              The drawer reuses Base UI Dialog under the hood — it&rsquo;s a
+              side-anchored Dialog with custom positioning. Logical
+              sides flip naturally in RTL.
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Dismiss</Drawer.Close>
+              <Button>Mark all read</Button>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+};
+
+/* ─── 2. Left side (logical start) ───────────────────────────────────── */
+export const LeftSide: Story = {
+  name: "Start side (left in LTR)",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Start-side drawer">
+      <Drawer>
+        <Drawer.Trigger
+          render={
+            <Button data-testid="drawer-trigger">Open navigation</Button>
+          }
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content side="start" data-testid="drawer-start-content">
+            <Drawer.Header>
+              <Drawer.Title>Navigation</Drawer.Title>
+              <Drawer.Description>
+                The canonical mobile-nav pattern — leading edge.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              <nav aria-label="Primary">
+                <ul>
+                  <li>Dashboard</li>
+                  <li>Projects</li>
+                  <li>Settings</li>
+                </ul>
+              </nav>
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Close</Drawer.Close>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+};
+
+/* ─── 3. Top side ────────────────────────────────────────────────────── */
+export const Top: Story = {
+  name: "Top",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Top drawer">
+      <Drawer>
+        <Drawer.Trigger
+          render={
+            <Button data-testid="drawer-trigger">Open from top</Button>
+          }
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content side="top" data-testid="drawer-top-content">
+            <Drawer.Header>
+              <Drawer.Title>Quick search</Drawer.Title>
+              <Drawer.Description>
+                A top-anchored sheet for command palettes and search
+                overlays.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              <Field>
+                <Field.Label>Search</Field.Label>
+                <Input
+                  placeholder="Type to search…"
+                  data-testid="drawer-top-search"
+                />
+              </Field>
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Close</Drawer.Close>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+};
+
+/* ─── 4. Bottom side ─────────────────────────────────────────────────── */
+export const Bottom: Story = {
+  name: "Bottom",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Bottom drawer">
+      <Drawer>
+        <Drawer.Trigger
+          render={
+            <Button data-testid="drawer-trigger">Open from bottom</Button>
+          }
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content side="bottom" data-testid="drawer-bottom-content">
+            <Drawer.Header>
+              <Drawer.Title>Share to&hellip;</Drawer.Title>
+              <Drawer.Description>
+                Bottom sheet — the iOS / Android action-sheet metaphor.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              Pick a target to send this item.
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Cancel</Drawer.Close>
+              <Button>Send</Button>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+};
+
+/* ─── 5. Sizes ───────────────────────────────────────────────────────── */
+export const Sizes: Story = {
+  name: "Sizes",
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="All drawer sizes">
+      {(["sm", "md", "lg", "full"] as const).map((size) => (
+        <Drawer key={size}>
+          <Drawer.Trigger
+            render={
+              <Button
+                variant="tinted"
+                data-testid={`drawer-trigger-${size}`}
+              >
+                Open {size}
+              </Button>
+            }
+          />
+          <Drawer.Portal>
+            <Drawer.Backdrop />
+            <Drawer.Content
+              size={size}
+              data-testid={`drawer-size-${size}`}
+            >
+              <Drawer.Header>
+                <Drawer.Title>Size: {size}</Drawer.Title>
+                <Drawer.Description>
+                  Cross-axis size preset for the panel chrome.
+                </Drawer.Description>
+              </Drawer.Header>
+              <Drawer.Body>
+                <p>Content fills the preset cross-axis dimension.</p>
+              </Drawer.Body>
+              <Drawer.Footer>
+                <Drawer.Close>Close</Drawer.Close>
+              </Drawer.Footer>
+            </Drawer.Content>
+          </Drawer.Portal>
+        </Drawer>
+      ))}
+    </div>
+  ),
+};
+
+/* ─── 6. Controlled ──────────────────────────────────────────────────── */
+function ControlledStory() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Controlled drawer"
+    >
+      <p data-testid="drawer-controlled-status">
+        Status: {open ? "open" : "closed"}
+      </p>
+      <Button
+        data-testid="drawer-trigger"
+        onClick={() => setOpen(true)}
+      >
+        Open programmatically
+      </Button>
+      <Drawer open={open} onOpenChange={setOpen}>
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content data-testid="drawer-controlled-content">
+            <Drawer.Header>
+              <Drawer.Title>Controlled drawer</Drawer.Title>
+              <Drawer.Description>
+                Open state lives in React state; closing flows through
+                `onOpenChange`.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              The Trigger is OUTSIDE the Drawer subtree — typical for
+              imperative open flows (a row click that opens a detail
+              panel, a hotkey, etc).
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Done</Drawer.Close>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  );
+}
+export const Controlled: Story = {
+  name: "Controlled",
+  render: () => <ControlledStory />,
+};
+
+/* ─── 7. With form ───────────────────────────────────────────────────── */
+export const WithForm: Story = {
+  name: "With form",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Drawer containing a form"
+    >
+      <Drawer>
+        <Drawer.Trigger
+          render={<Button data-testid="drawer-trigger">Edit profile</Button>}
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content size="lg" data-testid="drawer-with-form">
+            <Drawer.Header>
+              <Drawer.Title>Edit profile</Drawer.Title>
+              <Drawer.Description>
+                Focus is trapped while the drawer is open.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              <Field>
+                <Field.Label>Display name</Field.Label>
+                <Input
+                  defaultValue="Ada Lovelace"
+                  data-testid="drawer-form-name"
+                />
+              </Field>
+              <Field>
+                <Field.Label>Email</Field.Label>
+                <Input type="email" defaultValue="ada@example.com" />
+              </Field>
+              <Field>
+                <Field.Label>Bio</Field.Label>
+                <Input defaultValue="" />
+              </Field>
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>Cancel</Drawer.Close>
+              <Button>Save</Button>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+};
+
+/* ─── 8. With long content (scroll) ──────────────────────────────────── */
+export const WithLongContent: Story = {
+  name: "With long content (scrolls)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Drawer with scrolling body"
+    >
+      <Drawer>
+        <Drawer.Trigger
+          render={<Button data-testid="drawer-trigger">Open terms</Button>}
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content data-testid="drawer-long-content">
+            <Drawer.Header>
+              <Drawer.Title>Terms of service</Drawer.Title>
+              <Drawer.Description>
+                Body scrolls independently while Header + Footer stay
+                pinned.
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Body>
+              {Array.from({ length: 24 }, (_, i) => (
+                <p key={i}>
+                  Section {i + 1}. The body region uses `overflow-y: auto`
+                  with a `min-block-size: 0` so it can scroll
+                  independently of the Header / Footer pinned chrome.
+                  This block exists to make the scroll behavior
+                  visually obvious in the captured screenshots.
+                </p>
+              ))}
+            </Drawer.Body>
+            <Drawer.Footer>
+              <Drawer.Close>I&rsquo;ve read it</Drawer.Close>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+};
+
+/* ─── 9. Nested ──────────────────────────────────────────────────────────
+ *
+ * The brief calls "Nested" out as "drawer inside main content" — we
+ * render a card-shell that contains content alongside a Drawer, so the
+ * captured PNG shows the drawer co-existing with the main column.
+ */
+export const Nested: Story = {
+  name: "Nested (drawer alongside main content)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Drawer inside main content"
+    >
+      <main
+        style={{
+          padding: "var(--zs-space-6)",
+          minBlockSize: "60dvh",
+          background: "var(--zs-fill-secondary)",
+          color: "var(--zs-label)",
+          display: "flex",
+          flexDirection: "column",
+          gap: "var(--zs-space-4)",
+        }}
+      >
+        <h2 style={{ margin: 0 }}>Main content</h2>
+        <p>
+          The drawer renders into a Portal — it overlays the main content
+          while leaving the document layout untouched.
+        </p>
+        <Drawer>
+          <Drawer.Trigger
+            render={
+              <Button data-testid="drawer-trigger">
+                Open detail drawer
+              </Button>
+            }
+          />
+          <Drawer.Portal>
+            <Drawer.Backdrop />
+            <Drawer.Content data-testid="drawer-nested-content">
+              <Drawer.Header>
+                <Drawer.Title>Detail</Drawer.Title>
+                <Drawer.Description>
+                  Drawers are portaled to the document body so they
+                  overlay any positioned ancestor.
+                </Drawer.Description>
+              </Drawer.Header>
+              <Drawer.Body>
+                Inspect the selected row without leaving the main
+                content.
+              </Drawer.Body>
+              <Drawer.Footer>
+                <Drawer.Close>Close</Drawer.Close>
+              </Drawer.Footer>
+            </Drawer.Content>
+          </Drawer.Portal>
+        </Drawer>
+      </main>
+    </div>
+  ),
+};
+
+/* ─── 10. RTL ────────────────────────────────────────────────────────────
+ *
+ * Hebrew / Arabic right-to-left. `side="start"` flips to the right
+ * edge automatically via `inset-inline-start`. The translate is
+ * physical-axis, but our CSS mirrors it under `[dir="rtl"]` so the
+ * closed-state drawer flies off the correct edge.
+ */
+export const RTL: Story = {
+  name: "RTL",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Hebrew / Arabic right-to-left. The Drawer side=\"start\" " +
+          "pins to the right edge automatically (logical inset). The " +
+          "translate is physical, but a [dir=\"rtl\"] mirror inverts " +
+          "the X component so the closed-state panel flies off the " +
+          "correct edge.",
+      },
+    },
+  },
+  render: () => (
+    // DirectionProvider tells Base UI to propagate `dir="rtl"`
+    // through its component tree. Because Portal renders into
+    // document.body (which is LTR), we ALSO stamp `dir="rtl"`
+    // directly on Backdrop + Content so the portaled subtree carries
+    // the direction — `inset-inline-start` resolves against the
+    // nearest `dir` ancestor, and our RTL transform mirror keys off
+    // the same attribute.
+    <DirectionProvider direction="rtl">
+      <div
+        dir="rtl"
+        className="zs-story-row"
+        role="group"
+        aria-label="Drawer RTL"
+      >
+        <Drawer>
+          <Drawer.Trigger
+            render={<Button data-testid="drawer-trigger">פתח מגירה</Button>}
+          />
+          <Drawer.Portal>
+            <Drawer.Backdrop dir="rtl" />
+            <Drawer.Content
+              dir="rtl"
+              side="start"
+              data-testid="drawer-rtl-content"
+            >
+              <Drawer.Header>
+                <Drawer.Title>ניווט</Drawer.Title>
+                <Drawer.Description>
+                  המגירה מעוגנת בקצה ההתחלה לפי כיוון הטקסט.
+                </Drawer.Description>
+              </Drawer.Header>
+              <Drawer.Body>
+                The start side flips to the RIGHT edge under RTL via
+                `inset-inline-start`; the slide-in translate mirrors so
+                the panel always enters from the anchored edge.
+              </Drawer.Body>
+              <Drawer.Footer>
+                <Drawer.Close>סגור</Drawer.Close>
+                <Drawer.Close variant="filled">אישור</Drawer.Close>
+              </Drawer.Footer>
+            </Drawer.Content>
+          </Drawer.Portal>
+        </Drawer>
+      </div>
+    </DirectionProvider>
+  ),
+};
+
+/* ─── 11. Close asChild ─────────────────────────────────────────────── */
+export const CloseAsChild: Story = {
+  name: "Close — asChild (Slot)",
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Drawer close asChild"
+    >
+      <Drawer>
+        <Drawer.Trigger
+          render={<Button data-testid="drawer-trigger">Open</Button>}
+        />
+        <Drawer.Portal>
+          <Drawer.Backdrop />
+          <Drawer.Content data-testid="drawer-close-aschild-content">
+            <Drawer.Header>
+              <Drawer.Title>Custom close target</Drawer.Title>
+              <Drawer.Description>
+                The asChild Slot routes className, style, refs, and
+                onClick composition through the shared `_slot.ts`
+                helper (mirrors Dialog.Close `3a64a726`).
+              </Drawer.Description>
+            </Drawer.Header>
+            <Drawer.Footer>
+              <Drawer.Close asChild>
+                <button
+                  type="button"
+                  className="zs-button zs-button--gray zs-button--medium"
+                  data-testid="drawer-close-aschild-target"
+                >
+                  Done
+                </button>
+              </Drawer.Close>
+            </Drawer.Footer>
+          </Drawer.Content>
+        </Drawer.Portal>
+      </Drawer>
+    </div>
+  ),
+};

@@ -3357,6 +3357,174 @@ await open("components-navigationmenu--keyboard-nav");
   );
 }
 
+/* ─── 82. Slice 15: Drawer — Trigger opens + role + label/description ─
+ *
+ * The Drawer Basic story renders a Trigger that opens a side-anchored
+ * Dialog. Once open, the Content must carry role="dialog" and have
+ * aria-labelledby / aria-describedby referencing visible Title /
+ * Description text.
+ *
+ * Note: Base UI Dialog deliberately omits `aria-modal="true"` —
+ * modern ARIA APG guidance treats role=dialog + an active focus trap
+ * as sufficient, and aria-modal can suppress assistive tech
+ * background navigation in surprising ways. We assert role + ID
+ * wiring instead; the focus-trap assertion below covers modality
+ * behaviorally.
+ */
+await openStoryAndTrigger(
+  "components-drawer--basic",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-basic-content"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  const role = await content.getAttribute("role");
+  const labelledBy = await content.getAttribute("aria-labelledby");
+  const describedBy = await content.getAttribute("aria-describedby");
+  const title = labelledBy ? page.locator(`[id="${labelledBy}"]`) : null;
+  const desc = describedBy ? page.locator(`[id="${describedBy}"]`) : null;
+  const titleText = title ? (await title.innerText().catch(() => "")).trim() : "";
+  const descText = desc ? (await desc.innerText().catch(() => "")).trim() : "";
+  const ok =
+    role === "dialog" &&
+    Boolean(labelledBy) &&
+    Boolean(describedBy) &&
+    titleText.length > 0 &&
+    descText.length > 0;
+  report(
+    "Drawer Trigger opens + role + labelled/described",
+    ok,
+    `role=${role} labelledby=${labelledBy} (=> "${titleText}") describedby=${describedBy} (=> "${descText}")`,
+  );
+}
+
+/* ─── 83. Slice 15: Drawer — Escape closes ─────────────────────────── */
+await openStoryAndTrigger(
+  "components-drawer--basic",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-basic-content"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+  const isHidden =
+    (await content.count()) === 0 ||
+    !(await content.first().isVisible().catch(() => false));
+  report(
+    "Drawer Escape closes",
+    isHidden,
+    `hidden=${isHidden}`,
+  );
+}
+
+/* ─── 84. Slice 15: Drawer — focus is trapped (wrap recapture) ──────
+ *
+ * Mirrors the Dialog focus-trap assertion. Base UI's focus guards
+ * briefly hold focus between cycles; we verify focus is RE-CAPTURED
+ * back into the panel after Tab from the last focusable and
+ * Shift+Tab from the first.
+ */
+await openStoryAndTrigger(
+  "components-drawer--with-form",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-with-form"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  const focusables = await content
+    .locator(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    )
+    .all();
+  const count = focusables.length;
+  if (count < 2) {
+    report("Drawer focus trap", false, `not enough focusables (${count})`);
+  } else {
+    async function focusInsideContent() {
+      return page.evaluate(() => {
+        const node = document.querySelector('[data-testid="drawer-with-form"]');
+        return (
+          !!node &&
+          !!document.activeElement &&
+          (node === document.activeElement ||
+            node.contains(document.activeElement))
+        );
+      });
+    }
+    await focusables[count - 1].focus();
+    let recapturedForward = false;
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press("Tab");
+      if (await focusInsideContent()) {
+        recapturedForward = true;
+        break;
+      }
+    }
+    await focusables[0].focus();
+    let recapturedBackward = false;
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press("Shift+Tab");
+      if (await focusInsideContent()) {
+        recapturedBackward = true;
+        break;
+      }
+    }
+    report(
+      "Drawer focus trap (recaptured on wrap)",
+      recapturedForward && recapturedBackward,
+      `forward-recapture=${recapturedForward}, backward-recapture=${recapturedBackward}`,
+    );
+  }
+}
+
+/* ─── 85. Slice 15: Drawer.Close inside Content closes the panel ──── */
+await openStoryAndTrigger(
+  "components-drawer--close-as-child",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-close-aschild-content"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  const customClose = page.locator(
+    '[data-testid="drawer-close-aschild-target"]',
+  );
+  await customClose.waitFor({ state: "visible", timeout: 5000 });
+  await customClose.click();
+  await page.waitForTimeout(500);
+  const hidden =
+    (await content.count()) === 0 ||
+    !(await content.first().isVisible().catch(() => false));
+  report(
+    "Drawer.Close inside Content closes",
+    hidden,
+    `hidden=${hidden}`,
+  );
+}
+
+/* ─── 86. Slice 15: Backdrop click closes when modal=true (default) ── */
+await openStoryAndTrigger(
+  "components-drawer--basic",
+  '[data-testid="drawer-trigger"]',
+);
+{
+  const content = page.locator('[data-testid="drawer-basic-content"]');
+  await content.waitFor({ state: "visible", timeout: 5000 });
+  // Click the top-left corner — the Drawer is anchored to the end
+  // (right) side by default so the backdrop covers the entire left
+  // half of the viewport.
+  await page.mouse.click(10, 10);
+  await page.waitForTimeout(500);
+  const hidden =
+    (await content.count()) === 0 ||
+    !(await content.first().isVisible().catch(() => false));
+  report(
+    "Drawer Backdrop click closes (modal=true)",
+    hidden,
+    `hidden=${hidden}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
