@@ -2,10 +2,10 @@
  * Switch — binary state primitive (on / off, immediate effect).
  *
  * Anatomy:
- *   .zs-switch-field          — focusable row (label + track + hidden input)
- *     ├─ .zs-switch           — track (Base UI's <span> for SwitchRoot)
- *     │   └─ .zs-switch__thumb — sliding pip (Base UI's <span> for Thumb)
- *     └─ hidden <input>       — form submission + AT semantics
+ *   .zs-switch                 — track (Base UI's <span>, focusable)
+ *     └─ .zs-switch__thumb     — sliding pip (Base UI's <span>)
+ *   (Base UI also emits a hidden <input> beside the track for form
+ *    submission; we don't style it.)
  *
  * Modifier classes (one of each axis):
  *   size: --sm | --md | --lg
@@ -35,6 +35,21 @@
  *      Logical properties + `inset-inline-start` keep the direction
  *      correct without per-direction CSS variables. Verified by the
  *      RTL story capture.
+ *
+ *   5. Focus ring on the track ROOT (slice-4 review fix item 2) — the
+ *      `<span tabIndex=0>` Base UI emits IS the focus target; earlier
+ *      the ring keyed off the hidden input via `:has()`, which painted
+ *      nothing on the canonical Field pattern.
+ *
+ *   6. Hit-target floor lives on an invisible `::before` overlay on the
+ *      track so a bare track still meets ≥ 2.75rem on coarse pointers
+ *      (slice-4 review fix item 3).
+ *
+ *   7. Tokens only — no raw oklch literals (slice-4 review fix item 4).
+ *      The thumb shadow recipes its alpha-stops via color-mix on
+ *      --zs-label so dark themes will de-shift the shadow when they
+ *      land; the disabled-checked background mixes the accent INTO an
+ *      opaque fill so the glass-surface invariant holds.
  */
 
 /* ─── component-local tokens ────────────────────────────────────────── */
@@ -59,29 +74,13 @@
   --zs-switch-track-bg-checked: var(--zs-accent);
   --zs-switch-track-bg-checked-hover: var(--zs-accent-hover);
   --zs-switch-thumb-bg: var(--zs-accent-ink);
+  /* Thumb shadow uses label-mix so the alpha-stops de-shift on dark
+   * themes once those land. Earlier this was a raw color literal
+   * (black-with-alpha-α) — banned in component CSS by the token-purity
+   * rule (slice-4 review fix item 4). */
   --zs-switch-thumb-shadow:
-    0 0.0625rem 0.125rem oklch(0 0 0 / 0.18),
-    0 0 0 0.0625rem oklch(0 0 0 / 0.04);
-}
-
-/* ─── focusable row ─────────────────────────────────────────────────── */
-.zs-switch-field {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--zs-space-2);
-  min-block-size: 1.75rem;
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
-  cursor: pointer;
-}
-@media (pointer: coarse) {
-  .zs-switch-field {
-    min-block-size: var(--zs-hit-min);
-  }
-}
-.zs-switch-field[data-disabled] {
-  cursor: not-allowed;
-  color: var(--zs-label-tertiary);
+    0 0.0625rem 0.125rem color-mix(in oklch, var(--zs-label) 18%, transparent),
+    0 0 0 0.0625rem color-mix(in oklch, var(--zs-label) 4%, transparent);
 }
 
 /* ─── track ─────────────────────────────────────────────────────────── */
@@ -102,9 +101,34 @@
     background-color var(--zs-motion-fast) var(--zs-motion-ease),
     box-shadow var(--zs-motion-fast) var(--zs-motion-ease);
   cursor: pointer;
-  /* Hide whatever children Base UI renders for the hidden input —
-     the track's only visible content is the thumb. */
   vertical-align: middle;
+}
+
+/* ─── hit-target overlay ─────────────────────────────────────────────── *
+ *
+ * Invisible `::before` extends the tap rect to ≥ 1.75rem / 2.75rem
+ * without changing the visible track size. `pointer-events: auto`
+ * (default for pseudos) lets clicks on the overlay register against
+ * the track itself (pseudo-elements hit-test as part of the parent).
+ * The thumb inside is positioned absolutely too, so the overlay
+ * doesn't block it — both stack at z-index auto and the thumb's
+ * inset positioning keeps it above. */
+.zs-switch::before {
+  content: "";
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  translate: -50% -50%;
+  min-inline-size: var(--zs-hit-target, 1.75rem);
+  min-block-size: var(--zs-hit-target, 1.75rem);
+  inline-size: 100%;
+  block-size: 100%;
+  pointer-events: auto;
+}
+@media (pointer: coarse) {
+  .zs-switch::before {
+    --zs-hit-target: var(--zs-hit-min);
+  }
 }
 
 .zs-switch--sm {
@@ -118,10 +142,10 @@
 
 /* ─── hover ─────────────────────────────────────────────────────────── */
 @media (hover: hover) {
-  .zs-switch-field:not([data-disabled]):hover .zs-switch:not([data-checked]) {
+  .zs-switch:not([data-disabled]):not([data-checked]):hover {
     background-color: var(--zs-switch-track-bg-hover);
   }
-  .zs-switch-field:not([data-disabled]):hover .zs-switch[data-checked] {
+  .zs-switch:not([data-disabled])[data-checked]:hover {
     background-color: var(--zs-switch-track-bg-checked-hover);
   }
 }
@@ -132,11 +156,10 @@
   box-shadow: inset 0 0 0 0.0625rem transparent;
 }
 
-/* ─── focus ring on the track when the hidden input is :focus-visible ─ */
-.zs-switch-field:has(> input:focus-visible) .zs-switch {
-  box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-accent),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+/* ─── focus ring on the track itself ────────────────────────────────── */
+.zs-switch:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
@@ -145,8 +168,11 @@
   box-shadow: inset 0 0 0 0.0625rem var(--zs-fill-tertiary);
   cursor: not-allowed;
 }
+/* Mix the accent INTO an opaque fill (not transparent) so the
+ * glass-surface invariant holds — same gray-with-accent-hint pattern
+ * the destructive-button-disabled fix used (slice-4 review fix item 4). */
 .zs-switch[data-disabled][data-checked] {
-  background-color: color-mix(in oklch, var(--zs-accent) 45%, transparent);
+  background-color: color-mix(in oklch, var(--zs-accent) 45%, var(--zs-fill-secondary));
 }
 
 /* ─── readonly ──────────────────────────────────────────────────────── */
@@ -228,14 +254,6 @@
   translate: calc(-1 * var(--zs-switch-thumb-offset)) 0;
 }
 
-/* ─── label slot ────────────────────────────────────────────────────── */
-.zs-switch-field__text {
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  color: inherit;
-  user-select: none;
-}
-
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .zs-switch,
@@ -262,10 +280,8 @@
   .zs-switch[data-checked] .zs-switch__thumb {
     background-color: HighlightText;
   }
-  .zs-switch-field:has(> input:focus-visible) .zs-switch {
-    box-shadow:
-      inset 0 0 0 0.0625rem Highlight,
-      0 0 0 0.125rem Highlight;
+  .zs-switch:focus-visible {
+    outline-color: Highlight;
   }
   .zs-switch[data-disabled] {
     background-color: Canvas;

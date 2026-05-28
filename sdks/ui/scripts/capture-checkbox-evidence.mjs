@@ -27,6 +27,7 @@ const stories = [
   "components-checkbox--with-description",
   "components-checkbox--required",
   "components-checkbox--indeterminate-parent",
+  "components-checkbox--indeterminate-from-group",
   "components-checkbox--inside-form",
   "components-checkbox--disabled",
   "components-checkbox--rtl",

@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { useMemo, useState } from "react";
 import { Form } from "@base-ui/react/form";
+import { CheckboxGroup } from "@base-ui/react/checkbox-group";
 import { Button, Checkbox, Field } from "../components";
 
 const meta: Meta<typeof Checkbox> = {
@@ -199,9 +200,14 @@ export const Required: Story = {
             <Field.Label>
               I agree to the terms <Field.Required />
             </Field.Label>
+            {/* `required` intentionally NOT set on the Checkbox — it
+                must cascade from the Field via context. The aria-wiring
+                assertion submits the form and verifies the hidden
+                input's aria-invalid flips, which only happens if the
+                cascade actually delivered the requiredness. Slice-4
+                review fix item 7. */}
             <Checkbox
               data-testid="checkbox-required"
-              required
               name="agree"
             />
             <Field.Error match="valueMissing">
@@ -383,4 +389,70 @@ export const RTL: Story = {
       </div>
     </div>
   ),
+};
+
+/* ─── 11. Indeterminate from group (slice-4 review fix item 6) ───────
+ *
+ * Base UI's `CheckboxGroup` parent-of-children pattern: name the
+ * parent Checkbox with `allValues=[...]` so it represents the
+ * aggregate of the children. When some-but-not-all children are
+ * ticked, Base UI computes `data-indeterminate` on the parent
+ * WITHOUT the wrapper having to set the `indeterminate` prop. The
+ * minus glyph must show — earlier the wrapper only rendered the
+ * checkmark unless the explicit prop was set, so the group-computed
+ * indeterminate state painted the wrong glyph. */
+export const IndeterminateFromGroup: Story = {
+  name: "Indeterminate from group",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "CheckboxGroup with `allValues=[red,green,blue]` and only " +
+          "`red` selected. The parent Checkbox uses `name=\"parent\"` " +
+          "so Base UI sees it as the aggregate row; with one of three " +
+          "children checked, the parent's data-indeterminate flips on " +
+          "and the minus glyph paints — entirely from Base UI's " +
+          "computed state, with no explicit `indeterminate` prop on " +
+          "the wrapper.",
+      },
+    },
+  },
+  render: function IndeterminateFromGroupRender() {
+    // Uncontrolled CheckboxGroup so Base UI owns the value array
+    // entirely — that's the cleanest exercise of "parent computes
+    // its indeterminate state from group context".
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Indeterminate from group"
+        data-testid="indeterminate-from-group-row"
+      >
+        <div
+          className="zs-story-cell"
+          style={{ maxWidth: "22rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}
+        >
+          <CheckboxGroup
+            defaultValue={["red"]}
+            allValues={["red", "green", "blue"]}
+          >
+            {/* The `parent` prop wires this Checkbox to Base UI's
+                useCheckboxGroupParent — its checked/indeterminate
+                state derives from the group's value array vs
+                allValues, with no explicit `indeterminate` prop. */}
+            <Checkbox
+              label="All colors"
+              parent
+              data-testid="indeterminate-from-group-parent"
+            />
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", paddingInlineStart: "1.5rem" }}>
+              <Checkbox label="Red" name="red" />
+              <Checkbox label="Green" name="green" />
+              <Checkbox label="Blue" name="blue" />
+            </div>
+          </CheckboxGroup>
+        </div>
+      </div>
+    );
+  },
 };

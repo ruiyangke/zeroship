@@ -26,23 +26,35 @@
  *      sign of the translate. Verified by the RTL story capture.
  *
  *   5. Hit target ≥ 1.75rem (fine pointer), ≥ 2.75rem (coarse). The
- *      wrapping <label> when `label` is set is the click surface;
- *      the visible track stays small.
+ *      track's invisible `::before` overlay extends the tap rect so a
+ *      bare track (no wrapping label) still meets the floor on coarse
+ *      pointers (slice-4 review fix item 3).
+ *
+ *   6. Focus ring lives on the track ROOT (`.zs-switch:focus-visible`)
+ *      so the canonical Field-without-component-label pattern shows
+ *      a ring (slice-4 review fix item 2).
  *
  * Field integration mirrors Checkbox: `size` reads from
  * `useFieldVisualSize()`, `disabled` from `useFieldDisabledContext()`,
- * explicit prop always wins.
+ * `required` from `useFieldContext()`; explicit prop always wins.
+ *
+ * The track itself takes `className` for custom styling — there's no
+ * asChild escape hatch (selection primitives are chips with hidden
+ * inputs, not button-shaped surfaces — slice-4 review fix item 1).
  */
 import {
   forwardRef,
-  type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type ReactNode,
 } from "react";
 import { Switch as BaseSwitch } from "@base-ui/react/switch";
-import { useFieldDisabledContext, useFieldVisualSize } from "../Field";
+import {
+  useFieldContext,
+  useFieldDisabledContext,
+  useFieldVisualSize,
+} from "../Field";
 import { classnames } from "../_classnames";
-import { Slot } from "../_slot";
+import { SelectionRow } from "../_selection-row";
 
 export type SwitchSize = "sm" | "md" | "lg";
 
@@ -52,13 +64,6 @@ export interface SwitchProps
   extends Omit<BaseSwitchRootProps, "className" | "render" | "children"> {
   /** Visual size — small 1.5rem wide, medium 2rem (default), large 2.5rem. */
   size?: SwitchSize;
-
-  /**
-   * Render-as a custom element. Composes via Slot — the consumer's
-   * element receives our classNames + data attributes; the focusable
-   * surface semantics still come from Base UI.
-   */
-  asChild?: boolean;
 
   /** Class name for the visible track. */
   className?: string;
@@ -75,18 +80,21 @@ export interface SwitchProps
   fieldClassName?: string;
 
   /** Extra props for the wrapping <label> (when `label` is present). */
-  fieldProps?: ComponentPropsWithoutRef<"label">;
+  fieldProps?: ComponentPropsWithRef<"label">;
 }
 
-export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(function Switch(
+// Base UI's SwitchRoot renders a `<span>` with `tabIndex=0`; its
+// forwarded ref is typed `HTMLElement`. Narrow to `HTMLSpanElement`
+// to reflect the actual rendered element (slice-4 review fix item 5).
+export const Switch = forwardRef<HTMLSpanElement, SwitchProps>(function Switch(
   {
     size: sizeProp,
-    asChild = false,
     className,
     label,
     fieldClassName,
     fieldProps,
     disabled: disabledProp,
+    required: requiredProp,
     ...rest
   },
   ref,
@@ -94,8 +102,10 @@ export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(function Switch
   // Unconditional hook calls — cascade resolution happens after.
   const fieldSize = useFieldVisualSize();
   const fieldDisabled = useFieldDisabledContext();
+  const fieldCtx = useFieldContext();
   const size: SwitchSize = sizeProp ?? fieldSize ?? "md";
   const disabled = disabledProp ?? fieldDisabled;
+  const required = requiredProp ?? fieldCtx?.required ?? false;
 
   const trackClassName = classnames(
     "zs-switch",
@@ -106,22 +116,11 @@ export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(function Switch
   const track = (
     <BaseSwitch.Root
       {...rest}
-      ref={ref}
+      ref={ref as React.Ref<HTMLElement>}
       disabled={disabled || undefined}
+      required={required || undefined}
       className={trackClassName}
       data-size={size}
-      render={
-        asChild
-          ? (props, state) => (
-              <Slot
-                {...props}
-                data-checked={state.checked || undefined}
-                data-disabled={state.disabled || undefined}
-                data-readonly={state.readOnly || undefined}
-              />
-            )
-          : undefined
-      }
     >
       <BaseSwitch.Thumb className="zs-switch__thumb" />
     </BaseSwitch.Root>
@@ -129,20 +128,16 @@ export const Switch = forwardRef<HTMLButtonElement, SwitchProps>(function Switch
 
   if (label != null) {
     return (
-      <label
-        {...fieldProps}
-        className={classnames(
-          "zs-switch-field",
-          `zs-switch-field--${size}`,
-          fieldClassName,
-          fieldProps?.className,
-        )}
-        data-size={size}
-        data-disabled={disabled || undefined}
+      <SelectionRow
+        base="switch"
+        size={size}
+        disabled={disabled}
+        className={fieldClassName}
+        fieldProps={fieldProps}
       >
         {track}
         <span className="zs-switch-field__text">{label}</span>
-      </label>
+      </SelectionRow>
     );
   }
 

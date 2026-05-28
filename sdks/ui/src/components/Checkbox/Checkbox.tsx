@@ -16,15 +16,22 @@
  *   2. Indeterminate = parent of partially-checked children. Never
  *      use indeterminate as a "maybe" or "unknown" state — that's
  *      a separate tri-state checkbox a future slice can introduce.
+ *      The indeterminate glyph follows Base UI's COMPUTED state
+ *      (`data-indeterminate`), not the wrapper prop alone — both
+ *      glyphs render simultaneously and CSS swaps visibility from
+ *      the chip's data attributes. That makes the parent-of-group
+ *      pattern Just Work without the wrapper having to thread an
+ *      explicit `indeterminate` prop (slice-4 review fix item 6).
  *
  *   3. The checked glyph (checkmark) and indeterminate glyph (minus)
  *      are visually distinct paths. Two state signals — fill + shape —
  *      so colorblind users get the same information.
  *
  *   4. The whole row (chip + label text) is the click surface. The
- *      visible chip is small for visual rhythm; the underlying
- *      Field.Label or <label> wraps both so a finger lands inside.
- *      Hit target ≥ 1.75rem on fine pointers, ≥ 2.75rem on coarse.
+ *      visible chip is small for visual rhythm; the chip's invisible
+ *      `::before` overlay extends the hit rect to ≥ 1.75rem on fine
+ *      pointers and ≥ 2.75rem on coarse — so a bare chip without a
+ *      wrapping label is still tappable (slice-4 review fix item 3).
  *
  *   5. The accent fill is the SYSTEM signal — overriding it loses
  *      the cross-control affordance Switch and Radio share. Consumers
@@ -36,21 +43,31 @@
  *   - `disabled` inherits from `useFieldDisabledContext()`; the prop
  *     always wins so a consumer can re-enable one chip inside a
  *     disabled Field if needed.
+ *   - `required` inherits from `useFieldContext()` so a
+ *     `<Field required>` cascades to the contained Checkbox without
+ *     having to set the prop twice (slice-4 review fix item 7,
+ *     mirroring Input.tsx).
  *
- * The asChild path swaps the chip's outer host (the focusable surface
- * Base UI renders) for a consumer-supplied element via Slot. The hidden
- * input still ships beside it for form submission.
+ * The chip itself takes `className` for custom styling — Base UI's
+ * `[data-checked]` / `[data-indeterminate]` data attributes do the
+ * work without needing an asChild escape hatch. (Selection primitives
+ * are *visual chips with a hidden input*, not button-shaped surfaces,
+ * so the swap-the-whole-element idiom doesn't apply — see slice-4
+ * review fix item 1.)
  */
 import {
   forwardRef,
-  type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type ReactNode,
 } from "react";
 import { Checkbox as BaseCheckbox } from "@base-ui/react/checkbox";
-import { useFieldDisabledContext, useFieldVisualSize } from "../Field";
+import {
+  useFieldContext,
+  useFieldDisabledContext,
+  useFieldVisualSize,
+} from "../Field";
 import { classnames } from "../_classnames";
-import { Slot } from "../_slot";
+import { SelectionRow } from "../_selection-row";
 
 export type CheckboxSize = "sm" | "md" | "lg";
 export type CheckboxVariant = "default" | "tinted";
@@ -69,13 +86,6 @@ export interface CheckboxProps
    */
   variant?: CheckboxVariant;
 
-  /**
-   * Render-as a custom element. Composes via Slot — the consumer's
-   * element receives our classNames + data attributes; the focusable
-   * surface semantics still come from Base UI's CheckboxRoot.
-   */
-  asChild?: boolean;
-
   /** Class name for the visible chip. */
   className?: string;
 
@@ -91,7 +101,7 @@ export interface CheckboxProps
   fieldClassName?: string;
 
   /** Extra props for the wrapping <label> (when `label` is present). */
-  fieldProps?: ComponentPropsWithoutRef<"label">;
+  fieldProps?: ComponentPropsWithRef<"label">;
 }
 
 /* ─── indicator glyphs — two distinct paths so shape ≠ color ────────
@@ -100,10 +110,17 @@ export interface CheckboxProps
  * paints them. The checkmark is the standard tick; the minus is a
  * single horizontal bar so the indeterminate state is unmistakable
  * even in monochrome.
+ *
+ * Both glyphs render simultaneously inside the Indicator and CSS
+ * swaps visibility off the chip's `data-checked` / `data-indeterminate`
+ * attributes — that way the indeterminate state derives from Base UI's
+ * COMPUTED state (the `CheckboxGroup` parent-of-children pattern
+ * doesn't require the wrapper to set `indeterminate` explicitly).
  */
 function IndicatorCheck() {
   return (
     <svg
+      data-glyph="check"
       viewBox="0 0 16 16"
       role="presentation"
       focusable="false"
@@ -119,6 +136,7 @@ function IndicatorCheck() {
 function IndicatorMinus() {
   return (
     <svg
+      data-glyph="minus"
       viewBox="0 0 16 16"
       role="presentation"
       focusable="false"
@@ -136,17 +154,23 @@ function IndicatorMinus() {
   );
 }
 
-export const Checkbox = forwardRef<HTMLButtonElement, CheckboxProps>(
+// Base UI renders CheckboxRoot as a `<span>` with `tabIndex=0` (verified
+// against @base-ui/react@1.5.0 — see node_modules/.pnpm/@base-ui+react@
+// 1.5.0/.../checkbox/root/CheckboxRoot.d.ts:13: `RefAttributes<HTMLElement>`,
+// and the file-header comment "Renders a <span> element"). Earlier the
+// ref was typed `HTMLButtonElement` which let `inputRef.current.disabled`
+// type-check but return undefined — slice-4 review fix item 5.
+export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
   function Checkbox(
     {
       size: sizeProp,
       variant = "default",
-      asChild = false,
       className,
       label,
       fieldClassName,
       fieldProps,
       disabled: disabledProp,
+      required: requiredProp,
       indeterminate,
       ...rest
     },
@@ -158,8 +182,10 @@ export const Checkbox = forwardRef<HTMLButtonElement, CheckboxProps>(
     // the explicit prop is set on one render and absent on the next.
     const fieldSize = useFieldVisualSize();
     const fieldDisabled = useFieldDisabledContext();
+    const fieldCtx = useFieldContext();
     const size: CheckboxSize = sizeProp ?? fieldSize ?? "md";
     const disabled = disabledProp ?? fieldDisabled;
+    const required = requiredProp ?? fieldCtx?.required ?? false;
 
     const chipClassName = classnames(
       "zs-checkbox",
@@ -174,32 +200,25 @@ export const Checkbox = forwardRef<HTMLButtonElement, CheckboxProps>(
     const chip = (
       <BaseCheckbox.Root
         {...rest}
-        ref={ref}
+        ref={ref as React.Ref<HTMLElement>}
         disabled={disabled || undefined}
+        required={required || undefined}
         indeterminate={indeterminate || undefined}
         className={chipClassName}
         data-size={size}
         data-variant={variant}
-        render={
-          asChild
-            ? (props, state) => (
-                <Slot
-                  {...props}
-                  data-checked={state.checked || undefined}
-                  data-indeterminate={state.indeterminate || undefined}
-                  data-disabled={state.disabled || undefined}
-                  data-readonly={state.readOnly || undefined}
-                />
-              )
-            : undefined
-        }
       >
-        <BaseCheckbox.Indicator className="zs-checkbox__indicator">
-          {/* Base UI re-mounts children on state flip, but we want
-              the indicator container to persist (CSS fade reads
-              opacity, not mount). Render BOTH glyphs and let CSS
-              swap by selector. */}
-          {indeterminate ? <IndicatorMinus /> : <IndicatorCheck />}
+        {/*
+         * `keepMounted` keeps the Indicator span in the DOM across
+         * state flips so the CSS opacity-fade has something to animate
+         * against (slice-4 review fix item 6). Both glyphs render
+         * simultaneously inside — CSS reads `data-glyph` on the SVG
+         * and the chip's `data-checked` / `data-indeterminate` to
+         * decide which one is visible.
+         */}
+        <BaseCheckbox.Indicator keepMounted className="zs-checkbox__indicator">
+          <IndicatorCheck />
+          <IndicatorMinus />
         </BaseCheckbox.Indicator>
       </BaseCheckbox.Root>
     );
@@ -209,20 +228,16 @@ export const Checkbox = forwardRef<HTMLButtonElement, CheckboxProps>(
     // is what receives the click; Base UI handles the propagation.
     if (label != null) {
       return (
-        <label
-          {...fieldProps}
-          className={classnames(
-            "zs-checkbox-field",
-            `zs-checkbox-field--${size}`,
-            fieldClassName,
-            fieldProps?.className,
-          )}
-          data-size={size}
-          data-disabled={disabled || undefined}
+        <SelectionRow
+          base="checkbox"
+          size={size}
+          disabled={disabled}
+          className={fieldClassName}
+          fieldProps={fieldProps}
         >
           {chip}
           <span className="zs-checkbox-field__text">{label}</span>
-        </label>
+        </SelectionRow>
       );
     }
 

@@ -11,7 +11,10 @@
  *   1. Use Radio for MUTUALLY EXCLUSIVE choice — exactly one of N.
  *      Two to five options is comfortable; beyond that, a Select
  *      ships later in the forms slate. A single Radio with no group
- *      is a usage error (warned once in dev).
+ *      is a usage error (warned ONCE at module level in dev — the
+ *      warning is module-deduped rather than per-mount, so noisy
+ *      reload-heavy dev sessions don't drown in repeat-warnings —
+ *      slice-4 review fix item 11).
  *
  *   2. The group OWNS the value (`value` / `defaultValue` /
  *      `onValueChange`); each Radio only carries its discriminant
@@ -31,28 +34,43 @@
  *      stays centered inside the chip. Logical properties handle
  *      the flip automatically.
  *
+ *   6. Focus ring on the chip ROOT (slice-4 review fix item 2) so
+ *      the canonical Field pattern paints a ring even on a bare
+ *      Radio without the in-component `label` prop.
+ *
+ *   7. Hit-target floor lives on an invisible `::before` overlay on
+ *      the chip — a bare chip still meets ≥ 2.75rem on coarse
+ *      pointers (slice-4 review fix item 3).
+ *
  * Field integration mirrors Checkbox / Switch: `size` inherits via
  * `useFieldVisualSize()`, `disabled` via `useFieldDisabledContext()`,
- * explicit prop always wins. RadioGroup itself ALSO accepts `size`
- * which cascades to every contained Radio (children read via the
- * Field context fallback OR a group-local context — we use the
- * Field context for symmetry with the other primitives).
+ * `required` via `useFieldContext()`; explicit prop always wins.
+ * RadioGroup itself ALSO accepts `size` which cascades to every
+ * contained Radio (children read via the Field context fallback OR a
+ * group-local context — we use the Field context for symmetry with
+ * the other primitives).
+ *
+ * The chip itself takes `className` for custom styling — there's no
+ * asChild escape hatch (selection primitives are chips with hidden
+ * inputs, not button-shaped surfaces — slice-4 review fix item 1).
  */
 import {
   createContext,
   forwardRef,
   useContext,
   useEffect,
-  useRef,
-  type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type ReactNode,
 } from "react";
 import { Radio as BaseRadio } from "@base-ui/react/radio";
 import { RadioGroup as BaseRadioGroup } from "@base-ui/react/radio-group";
-import { useFieldDisabledContext, useFieldVisualSize } from "../Field";
+import {
+  useFieldContext,
+  useFieldDisabledContext,
+  useFieldVisualSize,
+} from "../Field";
 import { classnames } from "../_classnames";
-import { Slot } from "../_slot";
+import { SelectionRow } from "../_selection-row";
 
 export type RadioSize = "sm" | "md" | "lg";
 export type RadioOrientation = "vertical" | "horizontal";
@@ -78,15 +96,11 @@ function useRadioGroupContext() {
 
 /* ─── RadioGroup ────────────────────────────────────────────────────── */
 
-type BaseRadioGroupProps<V> = ComponentPropsWithRef<typeof BaseRadioGroup> & {
-  value?: V;
-  defaultValue?: V;
-  onValueChange?: (value: V, eventDetails: unknown) => void;
-};
+type BaseRadioGroupProps = ComponentPropsWithRef<typeof BaseRadioGroup>;
 
 export interface RadioGroupProps<T = string>
   extends Omit<
-    BaseRadioGroupProps<T>,
+    BaseRadioGroupProps,
     "className" | "render" | "children" | "value" | "defaultValue" | "onValueChange"
   > {
   /** Layout — `vertical` stacks (default); `horizontal` is a wrapping row. */
@@ -111,6 +125,14 @@ function RadioGroupInner<T = string>(
     disabled: disabledProp,
     className,
     children,
+    // Pull the typed value props out so Base UI sees them as named
+    // props with our `<T>` typing rather than as part of `...rest` —
+    // that drops the `as any` cast the old code used (slice-4 review
+    // fix item 8). The named props win over `...rest` if Base UI ever
+    // adds its own non-generic surface for them.
+    value,
+    defaultValue,
+    onValueChange,
     ...rest
   }: RadioGroupProps<T>,
   ref: React.ForwardedRef<HTMLDivElement>,
@@ -125,9 +147,13 @@ function RadioGroupInner<T = string>(
   return (
     <RadioGroupContext.Provider value={{ size, disabled }}>
       <BaseRadioGroup
-        // Cast keeps the typed value through Base UI's generic
-        // signature without leaking `any` into our public API.
-        {...(rest as ComponentPropsWithoutRef<typeof BaseRadioGroup>)}
+        {...rest}
+        // Base UI's value props are untyped (`unknown` at the public
+        // surface). The `as never` keeps our `<T>` discipline visible
+        // to TypeScript while threading through cleanly — no `any`.
+        value={value as never}
+        defaultValue={defaultValue as never}
+        onValueChange={onValueChange as never}
         ref={ref}
         disabled={disabled || undefined}
         className={classnames(
@@ -152,13 +178,11 @@ const RadioGroup = forwardRef(RadioGroupInner) as <T = string>(
 
 /* ─── Radio ─────────────────────────────────────────────────────────── */
 
-type BaseRadioRootProps<V> = ComponentPropsWithRef<typeof BaseRadio.Root> & {
-  value: V;
-};
+type BaseRadioRootProps = ComponentPropsWithRef<typeof BaseRadio.Root>;
 
 export interface RadioProps<T = string>
   extends Omit<
-    BaseRadioRootProps<T>,
+    BaseRadioRootProps,
     "className" | "render" | "children" | "value"
   > {
   /** The discriminant value this Radio represents in the group. */
@@ -166,12 +190,6 @@ export interface RadioProps<T = string>
 
   /** Inherited from the enclosing RadioGroup / Field by default. */
   size?: RadioSize;
-
-  /**
-   * Render-as a custom element for the visible chip. Composes via
-   * Slot — semantics still come from Base UI's RadioRoot.
-   */
-  asChild?: boolean;
 
   className?: string;
 
@@ -186,39 +204,50 @@ export interface RadioProps<T = string>
   fieldClassName?: string;
 
   /** Extra props for the wrapping <label> (when `label` is present). */
-  fieldProps?: ComponentPropsWithoutRef<"label">;
+  fieldProps?: ComponentPropsWithRef<"label">;
 }
+
+/* Module-level dev-warn dedup (slice-4 review fix item 11).
+ * One warning per process lifetime — survives StrictMode double-render,
+ * survives noisy reload-heavy dev sessions. Vite/esbuild DCE the whole
+ * branch in production builds because `process.env.NODE_ENV === "production"`
+ * (no optional-chain) is statically replaceable. */
+let radioWithoutGroupWarned = false;
 
 function RadioInner<T = string>(
   {
     value,
     size: sizeProp,
-    asChild = false,
     className,
     label,
     fieldClassName,
     fieldProps,
     disabled: disabledProp,
+    required: requiredProp,
     ...rest
   }: RadioProps<T>,
-  ref: React.ForwardedRef<HTMLButtonElement>,
+  ref: React.ForwardedRef<HTMLSpanElement>,
 ) {
   // Group context wins over field context for size — a group is a
   // tighter scope. Explicit prop still beats both.
   const fieldSize = useFieldVisualSize();
   const fieldDisabled = useFieldDisabledContext();
+  const fieldCtx = useFieldContext();
   const groupCtx = useRadioGroupContext();
 
   const size: RadioSize = sizeProp ?? groupCtx?.size ?? fieldSize ?? "md";
   const disabled = disabledProp ?? groupCtx?.disabled ?? fieldDisabled;
+  const required = requiredProp ?? fieldCtx?.required ?? false;
 
   // Dev-mode usage check: a Radio outside a RadioGroup is almost
-  // always a bug. Warn once per mount. Production builds DCE this.
-  const warnedRef = useRef(false);
+  // always a bug. Module-level dedup ensures one warn per process; the
+  // production build DCEs this branch entirely (no optional-chain in
+  // the NODE_ENV compare so esbuild can statically replace it).
   useEffect(() => {
-    if (typeof process === "undefined" || process.env?.NODE_ENV === "production") return;
-    if (groupCtx == null && !warnedRef.current) {
-      warnedRef.current = true;
+    if (typeof process === "undefined") return;
+    if (process.env.NODE_ENV === "production") return;
+    if (groupCtx == null && !radioWithoutGroupWarned) {
+      radioWithoutGroupWarned = true;
       // eslint-disable-next-line no-console
       console.warn(
         "[Radio] Rendered without a Radio.Group ancestor. Radios are " +
@@ -236,27 +265,15 @@ function RadioInner<T = string>(
 
   const chip = (
     <BaseRadio.Root
-      // Same cast pattern as RadioGroup — keeps the typed `value`
-      // through Base UI's generic signature.
-      {...(rest as ComponentPropsWithoutRef<typeof BaseRadio.Root>)}
-      ref={ref}
-      // Pass the typed value through the Base UI prop.
-      value={value as unknown as string}
+      {...rest}
+      ref={ref as React.Ref<HTMLElement>}
+      // Pass the typed value through the Base UI prop. The `as never`
+      // keeps the generic `<T>` story visible without leaking `any`.
+      value={value as never}
       disabled={disabled || undefined}
+      required={required || undefined}
       className={chipClassName}
       data-size={size}
-      render={
-        asChild
-          ? (props, state) => (
-              <Slot
-                {...props}
-                data-checked={state.checked || undefined}
-                data-disabled={state.disabled || undefined}
-                data-readonly={state.readOnly || undefined}
-              />
-            )
-          : undefined
-      }
     >
       <BaseRadio.Indicator className="zs-radio__indicator" />
     </BaseRadio.Root>
@@ -264,20 +281,16 @@ function RadioInner<T = string>(
 
   if (label != null) {
     return (
-      <label
-        {...fieldProps}
-        className={classnames(
-          "zs-radio-field",
-          `zs-radio-field--${size}`,
-          fieldClassName,
-          fieldProps?.className,
-        )}
-        data-size={size}
-        data-disabled={disabled || undefined}
+      <SelectionRow
+        base="radio"
+        size={size}
+        disabled={disabled}
+        className={fieldClassName}
+        fieldProps={fieldProps}
       >
         {chip}
         <span className="zs-radio-field__text">{label}</span>
-      </label>
+      </SelectionRow>
     );
   }
 
@@ -288,8 +301,12 @@ function RadioInner<T = string>(
 // namespace shape without complaining about the forwardRef intermediate
 // erasing the `<T>`. Same pattern used to surface AlertDialog's compound
 // namespace on top of the forwardRef wrapper.
+//
+// Base UI renders RadioRoot as a `<span>` with `tabIndex=0` — narrow to
+// `HTMLSpanElement` rather than `HTMLButtonElement` (slice-4 review fix
+// item 5).
 const RadioForwarded = forwardRef(RadioInner) as unknown as (<T = string>(
-  props: RadioProps<T> & { ref?: React.Ref<HTMLButtonElement> },
+  props: RadioProps<T> & { ref?: React.Ref<HTMLSpanElement> },
 ) => React.JSX.Element) & {
   Group: typeof RadioGroup;
   displayName?: string;

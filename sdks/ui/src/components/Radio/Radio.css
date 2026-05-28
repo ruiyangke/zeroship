@@ -3,10 +3,9 @@
  *
  * Anatomy:
  *   .zs-radio-group           — Base UI's <div> with the group context
- *     ├─ .zs-radio-field      — focusable row (label + chip + hidden input)
- *     │   ├─ .zs-radio        — visible chip (Base UI's <span>)
- *     │   │   └─ .zs-radio__indicator — inner dot (Base UI Indicator)
- *     │   └─ hidden <input>
+ *     ├─ .zs-radio            — visible chip (Base UI's <span>, focusable)
+ *     │   └─ .zs-radio__indicator — inner dot (Base UI Indicator)
+ *     │  (and a hidden <input> Base UI emits beside the chip)
  *     └─ … repeated …
  *
  * Modifier classes:
@@ -32,10 +31,15 @@
  *      so a colorblind user reads checked vs unchecked from shape,
  *      not from hue.
  *
- *   4. Hit target ≥ 1.75rem (fine), ≥ 2.75rem (coarse). The wrapping
- *      <label> when used inline is the click surface.
+ *   4. Hit-target floor lives on an invisible `::before` overlay on
+ *      the chip — a bare chip still meets ≥ 1.75rem / 2.75rem
+ *      (slice-4 review fix item 3).
  *
- *   5. RTL: the chip stays on the inline-start of its row; the dot
+ *   5. Focus ring lives on the chip ROOT (`.zs-radio:focus-visible`)
+ *      so the canonical Field pattern paints a ring without needing
+ *      the in-component label-row wrapper (slice-4 review fix item 2).
+ *
+ *   6. RTL: the chip stays on the inline-start of its row; the dot
  *      stays centered inside the chip. Logical properties carry the
  *      flip without per-direction CSS.
  */
@@ -71,24 +75,6 @@
   align-items: center;
 }
 
-/* ─── focusable row ─────────────────────────────────────────────────── */
-.zs-radio-field {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--zs-space-2);
-  min-block-size: 1.75rem;
-  cursor: pointer;
-}
-@media (pointer: coarse) {
-  .zs-radio-field {
-    min-block-size: var(--zs-hit-min);
-  }
-}
-.zs-radio-field[data-disabled] {
-  cursor: not-allowed;
-  color: var(--zs-label-tertiary);
-}
-
 /* ─── the chip ──────────────────────────────────────────────────────── */
 .zs-radio {
   position: relative;
@@ -109,6 +95,30 @@
   cursor: pointer;
 }
 
+/* ─── hit-target overlay ─────────────────────────────────────────────── *
+ *
+ * Invisible `::before` extends the tap rect to ≥ 1.75rem / 2.75rem
+ * without changing the visible chip size. `pointer-events: auto`
+ * (default for pseudos) lets clicks on the overlay register against
+ * the chip itself (pseudo-elements hit-test as part of the parent). */
+.zs-radio::before {
+  content: "";
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  translate: -50% -50%;
+  min-inline-size: var(--zs-hit-target, 1.75rem);
+  min-block-size: var(--zs-hit-target, 1.75rem);
+  inline-size: 100%;
+  block-size: 100%;
+  pointer-events: auto;
+}
+@media (pointer: coarse) {
+  .zs-radio::before {
+    --zs-hit-target: var(--zs-hit-min);
+  }
+}
+
 /* ─── sizes ─────────────────────────────────────────────────────────── */
 .zs-radio--sm {
   inline-size: var(--zs-radio-size-sm);
@@ -121,7 +131,7 @@
 
 /* ─── hover ─────────────────────────────────────────────────────────── */
 @media (hover: hover) {
-  .zs-radio-field:not([data-disabled]):hover .zs-radio:not([data-checked]) {
+  .zs-radio:not([data-disabled]):not([data-checked]):hover {
     background-color: var(--zs-radio-bg-hover);
     box-shadow:
       inset 0 0 0 0.0625rem var(--zs-radio-border-hover),
@@ -137,16 +147,10 @@
     0 0 0 0 transparent;
 }
 
-/* ─── focus ring on the chip when the hidden input is :focus-visible ─ */
-.zs-radio-field:has(> input:focus-visible) .zs-radio {
-  box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-radio-border),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
-}
-.zs-radio-field:has(> input:focus-visible) .zs-radio[data-checked] {
-  box-shadow:
-    inset 0 0 0 0.125rem var(--zs-radio-border-checked),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+/* ─── focus ring on the chip itself ─────────────────────────────────── */
+.zs-radio:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
@@ -193,14 +197,6 @@
   background-color: var(--zs-fill-secondary);
 }
 
-/* ─── label slot ────────────────────────────────────────────────────── */
-.zs-radio-field__text {
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  color: inherit;
-  user-select: none;
-}
-
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .zs-radio,
@@ -226,10 +222,8 @@
   .zs-radio__indicator {
     background-color: Highlight;
   }
-  .zs-radio-field:has(> input:focus-visible) .zs-radio {
-    box-shadow:
-      inset 0 0 0 0.0625rem Highlight,
-      0 0 0 0.125rem Highlight;
+  .zs-radio:focus-visible {
+    outline-color: Highlight;
   }
   .zs-radio[data-disabled] {
     box-shadow:

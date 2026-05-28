@@ -851,6 +851,174 @@ await open("components-radio--required");
   );
 }
 
+/* ─── 24-26. Focus ring paints on the BARE chip after Tab (slice-4 fix 2) ──
+ *
+ * Both reviewers caught that the original CSS keyed the focus ring off
+ * the wrapping `.zs-X-field`'s hidden-input `:focus-visible`, which
+ * doesn't exist on the canonical `<Field><Field.Label>…</Field.Label>
+ * <Chip /></Field>` pattern. The fix moved the ring to the chip ROOT;
+ * these three assertions verify that pressing Tab into a bare chip
+ * paints a 2px outline (the rendered value of 0.125rem at default
+ * 16px font-size). */
+async function focusRingAssertion(label, storyId, chipSelector) {
+  await open(storyId);
+  const chip = page.locator(chipSelector);
+  await chip.waitFor({ state: "visible", timeout: 5000 });
+  // Focus via keyboard — :focus-visible only applies after a key event,
+  // not after .focus() invoked programmatically. We click somewhere
+  // neutral first to clear focus, then Tab until the chip is the
+  // active element (max a few presses since the stories are small).
+  await page.mouse.click(1, 1);
+  await page.waitForTimeout(50);
+  let landed = false;
+  for (let i = 0; i < 30; i++) {
+    await page.keyboard.press("Tab");
+    const isFocused = await chip.evaluate((el) => el === document.activeElement);
+    if (isFocused) {
+      landed = true;
+      break;
+    }
+  }
+  const outline = await chip.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return {
+      width: cs.outlineWidth,
+      style: cs.outlineStyle,
+      color: cs.outlineColor,
+    };
+  });
+  const ok = landed && outline.width === "2px" && outline.style === "solid";
+  report(
+    label,
+    ok,
+    `landed=${landed} outline.width=${outline.width} style=${outline.style} color=${outline.color}`,
+  );
+}
+
+await focusRingAssertion(
+  "Checkbox bare chip focus ring (2px outline)",
+  "components-checkbox--with-label",
+  '[data-testid="checkbox-with-label"]',
+);
+await focusRingAssertion(
+  "Switch bare track focus ring (2px outline)",
+  "components-switch--with-label",
+  '[data-testid="switch-with-label"]',
+);
+await focusRingAssertion(
+  "Radio bare chip focus ring (2px outline)",
+  "components-radio--two-options",
+  '[data-testid="radio-two-email"]',
+);
+
+/* ─── 27-29. Hit-target overlay extends tap rect (slice-4 fix 3) ──────
+ *
+ * Click at an offset 0.6rem (9.6px at default font-size) from the
+ * chip's center — that's outside the visual chip (sm chips are
+ * 1rem ≈ 16px wide, radius 8px) but inside the hit-target floor
+ * (1.75rem ≈ 28px wide, radius 14px). The chip's invisible
+ * `::before` overlay must extend the hit rect so the click reaches
+ * the chip and flips its state. */
+async function hitTargetAssertion(label, storyId, chipSelector, hiddenInputType) {
+  await open(storyId);
+  const chip = page.locator(chipSelector);
+  await chip.waitFor({ state: "visible", timeout: 5000 });
+  const box = await chip.boundingBox();
+  if (!box) {
+    report(label, false, "no boundingBox");
+    return;
+  }
+  const before = await page.evaluate(
+    ({ sel, type }) => {
+      const node = document.querySelector(sel);
+      if (!node) return null;
+      const parent = node.parentElement;
+      if (!parent) return null;
+      const input = parent.querySelector(`input[type="${type}"]`);
+      return input instanceof HTMLInputElement ? input.checked : null;
+    },
+    { sel: chipSelector, type: hiddenInputType },
+  );
+  // 0.6rem ≈ 9.6px to the inline-end of the chip's center.
+  const offsetPx = 0.6 * 16;
+  const clickX = box.x + box.width / 2 + offsetPx;
+  const clickY = box.y + box.height / 2;
+  await page.mouse.click(clickX, clickY);
+  await page.waitForTimeout(150);
+  const after = await page.evaluate(
+    ({ sel, type }) => {
+      const node = document.querySelector(sel);
+      if (!node) return null;
+      const parent = node.parentElement;
+      if (!parent) return null;
+      const input = parent.querySelector(`input[type="${type}"]`);
+      return input instanceof HTMLInputElement ? input.checked : null;
+    },
+    { sel: chipSelector, type: hiddenInputType },
+  );
+  const ok = before === false && after === true;
+  report(
+    label,
+    ok,
+    `before=${before} after=${after} clickX=${clickX.toFixed(1)} chipCenterX=${(box.x + box.width / 2).toFixed(1)} chipRightEdge=${(box.x + box.width).toFixed(1)}`,
+  );
+}
+
+await hitTargetAssertion(
+  "Checkbox hit-target overlay — click at +0.6rem flips state",
+  "components-checkbox--with-label",
+  '[data-testid="checkbox-with-label"]',
+  "checkbox",
+);
+await hitTargetAssertion(
+  "Switch hit-target overlay — click at +0.6rem flips state",
+  "components-switch--with-label",
+  '[data-testid="switch-with-label"]',
+  "checkbox",
+);
+await hitTargetAssertion(
+  "Radio hit-target overlay — click at +0.6rem selects",
+  "components-radio--two-options",
+  '[data-testid="radio-two-sms"]',
+  "radio",
+);
+
+/* ─── 30. IndeterminateFromGroup (slice-4 fix 6) ─────────────────────
+ *
+ * Verify the parent Checkbox shows the minus glyph when its
+ * CheckboxGroup has only some-but-not-all children selected — entirely
+ * from Base UI's computed state, with no explicit `indeterminate` prop
+ * on the wrapper. Two checks: (a) the parent chip carries
+ * `data-indeterminate`, (b) the minus glyph's opacity is 1 (visible)
+ * AND the checkmark glyph's opacity is 0 (hidden). */
+await open("components-checkbox--indeterminate-from-group");
+{
+  const parent = page.locator('[data-testid="indeterminate-from-group-parent"]');
+  await parent.waitFor({ state: "visible", timeout: 5000 });
+  const hasIndeterminate = await parent.evaluate(
+    (el) => el.getAttribute("data-indeterminate") !== null,
+  );
+  const hasChecked = await parent.evaluate(
+    (el) => el.getAttribute("data-checked") !== null,
+  );
+  const glyphOpacities = await parent.evaluate((el) => {
+    const check = el.querySelector('[data-glyph="check"]');
+    const minus = el.querySelector('[data-glyph="minus"]');
+    return {
+      check: check ? getComputedStyle(check).opacity : null,
+      minus: minus ? getComputedStyle(minus).opacity : null,
+    };
+  });
+  const minusVisible = glyphOpacities.minus === "1";
+  const checkHidden = glyphOpacities.check === "0";
+  const ok = hasIndeterminate && minusVisible && checkHidden;
+  report(
+    "Checkbox IndeterminateFromGroup — parent shows minus from group state",
+    ok,
+    `data-indeterminate=${hasIndeterminate} data-checked=${hasChecked} check.opacity=${glyphOpacities.check} minus.opacity=${glyphOpacities.minus}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

@@ -3,7 +3,7 @@
  *
  * Anatomy:
  *   .zs-checkbox                  — focusable surface (Base UI's <span>)
- *     ├─ .zs-checkbox__indicator  — checkmark / minus glyph (SVG)
+ *     ├─ .zs-checkbox__indicator  — checkmark / minus glyph container (SVG)
  *     └─ hidden <input>           — Base UI renders this beside the chip
  *
  * Modifier classes (one of each axis):
@@ -26,9 +26,20 @@
  *      escape hatch; the default keeps the system-control affordance.
  *
  *   3. Hit target ≥ 1.75rem no matter how small the visible chip is.
- *      The whole row (chip + label) is the click surface; the chip
- *      visually scales with `size` but the wrapping <label> stays
- *      tappable on coarse pointers (44pt minimum via min-block-size).
+ *      The chip's invisible `::before` overlay extends the tap rect so
+ *      a BARE chip (no wrapping label) still meets the floor — earlier
+ *      the floor lived on `.zs-checkbox-field` (only applied when the
+ *      component's own `label` prop was set), so the canonical
+ *      `<Field><Field.Label>…</Field.Label><Checkbox /></Field>`
+ *      pattern violated it. Slice-4 review fix item 3.
+ *
+ *   4. Focus ring lives on the chip ROOT (`.zs-checkbox:focus-visible`),
+ *      not on a wrapper. Base UI emits the chip as a `<span tabIndex=0>`
+ *      with a hidden `<input tabIndex=-1>` beside it; keyboard focus
+ *      lands on the chip. Earlier the ring was keyed off the hidden
+ *      input via `:has(> input:focus-visible)` — wrong target AND
+ *      blind to the canonical Field-without-component-label pattern.
+ *      Slice-4 review fix item 2.
  *
  * Layout discipline:
  *   - 0.0625rem hairline via box-shadow inset (no `border:`) so state
@@ -37,6 +48,9 @@
  *     for free.
  *   - opaque background-color on every visible element so the glass
  *     surface composes correctly under axe contrast walks.
+ *   - The wrapping `<label>` row layout (gap, cursor, disabled-color)
+ *     lives in `_selection-row.css` — shared with Switch + Radio so the
+ *     three primitives stay visually identical.
  */
 
 /* ─── component-local tokens (consumer override hooks) ──────────────── */
@@ -62,32 +76,6 @@
   --zs-checkbox-bg-tinted-hover: var(--zs-fill-secondary);
 }
 
-/* ─── the wrapping focusable row (.zs-checkbox-field) ──────────────── *
- *
- * Wraps the chip + Base UI's hidden <input>. The native <label> sits
- * outside in the consumer's Field, so the row stays a simple inline
- * cluster. Min-block-size grows on coarse pointers so a finger lands
- * inside the row even when the chip itself is 1rem.
- */
-.zs-checkbox-field {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--zs-space-2);
-  min-block-size: 1.75rem;          /* 28 — keeps a comfortable click box */
-  font-family: var(--zs-font-system);
-  color: var(--zs-label);
-  cursor: pointer;
-}
-@media (pointer: coarse) {
-  .zs-checkbox-field {
-    min-block-size: var(--zs-hit-min);
-  }
-}
-.zs-checkbox-field[data-disabled] {
-  cursor: not-allowed;
-  color: var(--zs-label-tertiary);
-}
-
 /* ─── the visible chip (.zs-checkbox) ──────────────────────────────── */
 .zs-checkbox {
   position: relative;
@@ -107,19 +95,36 @@
     background-color var(--zs-motion-fast) var(--zs-motion-ease),
     box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
     color var(--zs-motion-fast) var(--zs-motion-ease);
-  /* Keyboard focus lives on the hidden <input> Base UI manages; the
-     chip mirrors via :has() so the visual ring tracks the actual
-     focus. Older browsers without :has() still get a working
-     checkbox via the underlying input; the ring just won't paint. */
   cursor: pointer;
 }
 
-/* Strip any UA outline on the hidden input — the chip carries the ring. */
-.zs-checkbox-field > input {
-  /* hidden input visuals: Base UI already positions it absolutely; we
-     ensure no UA chrome leaks through if a future Base UI version
-     changes that. */
-  outline: none;
+/* ─── hit-target overlay ─────────────────────────────────────────────── *
+ *
+ * An invisible `::before` extends the tap rect to ≥ 1.75rem (fine
+ * pointers) / ≥ 2.75rem (coarse) without changing the chip's visual
+ * size. The overlay is `pointer-events: auto` so clicks on it
+ * register against the chip (pseudo-elements hit-test as part of
+ * their parent). Same trick Button uses for the 44pt coarse-pointer
+ * minimum. Stacking-wise it sits BEHIND the indicator since the
+ * indicator inside is `position: relative` (its z-index auto wins
+ * over the absolute `::before` at z-index auto), so the glyph stays
+ * tappable too. Slice-4 review fix item 3. */
+.zs-checkbox::before {
+  content: "";
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  translate: -50% -50%;
+  min-inline-size: var(--zs-hit-target, 1.75rem);
+  min-block-size: var(--zs-hit-target, 1.75rem);
+  inline-size: 100%;
+  block-size: 100%;
+  pointer-events: auto;
+}
+@media (pointer: coarse) {
+  .zs-checkbox::before {
+    --zs-hit-target: var(--zs-hit-min);
+  }
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
@@ -143,13 +148,13 @@
 
 /* ─── hover (hover-capable pointers only) ──────────────────────────── */
 @media (hover: hover) {
-  .zs-checkbox-field:not([data-disabled]):hover .zs-checkbox:not([data-checked]):not([data-indeterminate]) {
+  .zs-checkbox:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
     background-color: var(--zs-checkbox-bg-hover);
     box-shadow:
       inset 0 0 0 0.0625rem var(--zs-checkbox-border-hover),
       0 0 0 0 transparent;
   }
-  .zs-checkbox-field:not([data-disabled]):hover .zs-checkbox--tinted:not([data-checked]):not([data-indeterminate]) {
+  .zs-checkbox--tinted:not([data-disabled]):not([data-checked]):not([data-indeterminate]):hover {
     background-color: var(--zs-checkbox-bg-tinted-hover);
     box-shadow:
       inset 0 0 0 0.0625rem transparent,
@@ -166,16 +171,16 @@
     0 0 0 0 transparent;
 }
 
-/* ─── focus ring on the chip when the hidden input is :focus-visible ─ */
-.zs-checkbox-field:has(> input:focus-visible) .zs-checkbox {
-  box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-checkbox-border-checked),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
-}
-.zs-checkbox-field:has(> input:focus-visible) .zs-checkbox:not([data-checked]):not([data-indeterminate]) {
-  box-shadow:
-    inset 0 0 0 0.0625rem var(--zs-checkbox-border),
-    0 0 0 var(--zs-focus-ring-width) var(--zs-button-focus-ring-color);
+/* ─── focus ring on the chip itself ─────────────────────────────────── *
+ *
+ * Base UI emits the chip as a focusable `<span tabIndex=0>` with a
+ * hidden `<input tabIndex=-1>` beside it; the chip is the actual focus
+ * target. Use `outline` (not `box-shadow`) so the ring paints even
+ * when checked/indeterminate already use box-shadow for the inner
+ * border. The forced-colors fallback inherits this. */
+.zs-checkbox:focus-visible {
+  outline: 0.125rem solid var(--zs-button-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
@@ -202,27 +207,38 @@
 
 /* ─── the indicator glyph ───────────────────────────────────────────── */
 .zs-checkbox__indicator {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   inline-size: 100%;
   block-size: 100%;
   color: currentColor;
-  /* Reduced-motion users get an instant swap; everyone else gets a
-     subtle fade so the glyph doesn't pop. */
-  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
 }
-.zs-checkbox:not([data-checked]):not([data-indeterminate]) .zs-checkbox__indicator {
-  opacity: 0;
-}
-.zs-checkbox[data-checked] .zs-checkbox__indicator,
-.zs-checkbox[data-indeterminate] .zs-checkbox__indicator {
-  opacity: 1;
-}
-.zs-checkbox__indicator svg {
+
+/* Both glyphs render simultaneously inside the Indicator; opacity-fade
+ * swaps which one is visible based on the chip's data-* state. Mounting
+ * BOTH (with `keepMounted` on the Base UI Indicator) means the
+ * indeterminate state derived from a CheckboxGroup parent works even
+ * without the wrapper threading the `indeterminate` prop explicitly
+ * (slice-4 review fix item 6). The two SVGs stack via absolute
+ * positioning inside the relatively-positioned indicator container. */
+.zs-checkbox__indicator [data-glyph] {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  translate: -50% -50%;
   inline-size: 75%;       /* 0.75em of the chip — same proportion across sizes */
   block-size: 75%;
   display: block;
+  opacity: 0;
+  transition: opacity var(--zs-motion-fast) var(--zs-motion-ease);
+}
+.zs-checkbox[data-checked]:not([data-indeterminate]) .zs-checkbox__indicator [data-glyph="check"] {
+  opacity: 1;
+}
+.zs-checkbox[data-indeterminate] .zs-checkbox__indicator [data-glyph="minus"] {
+  opacity: 1;
 }
 
 /* The checkmark and the indeterminate bar are two distinct paths so
@@ -238,19 +254,10 @@
   fill: currentColor;
 }
 
-/* ─── label slot — pairs naturally with Field.Label, but we also
-   support a same-row label via consumer markup. ────────────────────── */
-.zs-checkbox-field__text {
-  font-size: var(--zs-text-body-size);
-  line-height: var(--zs-text-body-line);
-  color: inherit;
-  user-select: none;
-}
-
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .zs-checkbox,
-  .zs-checkbox__indicator {
+  .zs-checkbox__indicator [data-glyph] {
     transition: none;
   }
 }
@@ -278,10 +285,8 @@
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0 transparent;
   }
-  .zs-checkbox-field:has(> input:focus-visible) .zs-checkbox {
-    box-shadow:
-      inset 0 0 0 0.0625rem Highlight,
-      0 0 0 0.125rem Highlight;
+  .zs-checkbox:focus-visible {
+    outline-color: Highlight;
   }
   .zs-checkbox[data-disabled] {
     color: GrayText;

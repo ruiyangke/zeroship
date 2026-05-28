@@ -1,0 +1,46 @@
+/*
+ * SelectionRow — shared layout for the wrapping <label> of Checkbox /
+ * Switch / Radio when they carry an inline `label` prop.
+ *
+ * Discipline (slice-4 review-fix items 2, 3, 10):
+ *   - The row owns LAYOUT only — gap, cursor, disabled-color.
+ *   - Focus ring lives on the chip (`.zs-X:focus-visible`) so the
+ *     canonical `<Field><Field.Label>…</Field.Label><Chip /></Field>`
+ *     pattern paints a ring even without a wrapping row.
+ *   - Hit-target floor lives on the chip via an invisible `::before`
+ *     overlay so a bare chip is still tappable on coarse pointers.
+ *
+ * The three primitives' rows are visually identical — same gap, same
+ * cursor, same disabled tint. Per-primitive overrides (if any future
+ * slice needs them) can extend `.zs-checkbox-field`, `.zs-switch-field`,
+ * `.zs-radio-field` in their own CSS.
+ */
+.zs-checkbox-field,
+.zs-switch-field,
+.zs-radio-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  cursor: pointer;
+}
+
+.zs-checkbox-field[data-disabled],
+.zs-switch-field[data-disabled],
+.zs-radio-field[data-disabled] {
+  cursor: not-allowed;
+  color: var(--zs-label-tertiary);
+}
+
+/* The shared inline label text. Each primitive uses the same class
+ * shape (`zs-X-field__text`) so the row layout and the chip stay
+ * decoupled. */
+.zs-checkbox-field__text,
+.zs-switch-field__text,
+.zs-radio-field__text {
+  font-size: var(--zs-text-body-size);
+  line-height: var(--zs-text-body-line);
+  color: inherit;
+  user-select: none;
+}

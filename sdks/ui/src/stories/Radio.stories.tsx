@@ -222,8 +222,10 @@ export const Required: Story = {
             <Field.Label>
               Account type <Field.Required />
             </Field.Label>
+            {/* `required` intentionally omitted on the Radio.Group —
+                each contained Radio reads required from the Field
+                context. Slice-4 review fix item 7 (cascade test). */}
             <Radio.Group
-              required
               name="account-type"
               data-testid="radio-required-group"
             >
