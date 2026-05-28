@@ -4499,7 +4499,9 @@ await open("components-toast--error-variant");
 /* ─── 84. Slice 16: Toast — Close button dismisses the toast ────────── *
  *
  * Brief assertion 3: clicking Toast.Close dismisses the toast; the
- * Root unmounts after the exit transition. */
+ * Root unmounts after the exit transition. Base UI hides the close
+ * button (`aria-hidden="true"`) until the viewport is expanded, so we
+ * hover the viewport to mirror the real user gesture. */
 await open("components-toast--persistent");
 {
   const trigger = page.locator('[data-testid="toast-persistent-trigger"]');
@@ -4508,6 +4510,8 @@ await open("components-toast--persistent");
   const toast = page.locator(".zs-toast-root").first();
   await toast.waitFor({ state: "visible", timeout: 5000 });
   await page.waitForTimeout(150);
+  await page.locator(".zs-toast-viewport").hover();
+  await page.waitForTimeout(200);
   const closeBtn = page.locator(".zs-toast-close").first();
   await closeBtn.waitFor({ state: "visible", timeout: 5000 });
   await closeBtn.click();
@@ -4529,8 +4533,18 @@ await open("components-toast--persistent");
 
 /* ─── 85. Slice 16: Toast — Action click runs callback AND dismisses ── *
  *
- * Brief assertion 4: clicking Toast.Action runs the consumer callback
- * (verified by side-effect on a ref) and then dismisses the toast. */
+ * Brief assertion 4 + review fix F7: clicking Toast.Action runs the
+ * consumer callback EXACTLY ONCE (verified by reading the window-level
+ * counter the WithAction story bumps from inside its `onClick`) and
+ * then dismisses the toast. The exact-count assertion is what catches
+ * F2 — pre-fix, `DefaultToastList` spread `{...entry.actionProps}` AND
+ * Base UI's `ToastAction` consumed the same payload from root context,
+ * so `mergeProps` chained the same `onClick` twice.
+ *
+ * Base UI keeps `aria-hidden="true"` on the Action/Close until the
+ * viewport is expanded (hover or focus), so we hover the viewport
+ * before clicking — that mirrors the real user gesture and unhides the
+ * action surface. */
 await open("components-toast--with-action");
 {
   const trigger = page.locator('[data-testid="toast-action-trigger"]');
@@ -4539,6 +4553,9 @@ await open("components-toast--with-action");
   const toast = page.locator(".zs-toast-root").first();
   await toast.waitFor({ state: "visible", timeout: 5000 });
   await page.waitForTimeout(150);
+  // Expand the viewport so Action loses aria-hidden=true.
+  await page.locator(".zs-toast-viewport").hover();
+  await page.waitForTimeout(200);
   const actionBtn = page.locator(".zs-toast-action").first();
   await actionBtn.waitFor({ state: "visible", timeout: 5000 });
   await actionBtn.click();
@@ -4547,11 +4564,96 @@ await open("components-toast--with-action");
     .locator(".zs-toast-root")
     .count()
     .catch(() => -1);
-  const ok = stillMounted === 0;
+  // The WithAction story's onClick mutates `window.__zsToastActionCalls`
+  // — reading it from the page evaluate confirms the callback fired
+  // EXACTLY once (F2 regression: pre-fix this would be 2).
+  const callCount = await page
+    .evaluate(() => window.__zsToastActionCalls ?? -1)
+    .catch(() => -1);
+  const ok = stillMounted === 0 && callCount === 1;
   report(
-    "Toast — Action click dismisses (callback runs + unmount)",
+    "Toast — Action click dismisses + callback fires EXACTLY once",
     ok,
-    `toast-root count after action: ${stillMounted}`,
+    `toast-root count after action: ${stillMounted}, callbackCount=${callCount}`,
+  );
+}
+
+/* ─── 85a. Slice 16 review fix F1: Toast — same-id update keeps stack=1 ─
+ *
+ * Regression for the same-id contract documented at `useToast.ts:45`
+ * and `Toast.tsx:25`. The ImperativeUpdate story emits two toasts with
+ * the same `id`; Base UI's manager treats the second as an upsert
+ * (the live entry's fields swap, its auto-dismiss timer restarts)
+ * rather than mounting a second stack row.
+ *
+ * The story already asserts the description swap; this block asserts
+ * the stronger structural invariant — `.zs-toast-root` count stays
+ * EXACTLY 1 after the second emit — so a future regression where the
+ * wrapper accidentally always mints a fresh id (or where Base UI's
+ * upsert path stops firing) trips the assertion immediately. */
+await open("components-toast--imperative-update");
+{
+  const start = page.locator('[data-testid="toast-update-start"]');
+  const finish = page.locator('[data-testid="toast-update-finish"]');
+  await start.waitFor({ state: "visible", timeout: 5000 });
+  await start.click();
+  const firstToast = page.locator(".zs-toast-root").first();
+  await firstToast.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  await finish.click();
+  await page.waitForTimeout(300);
+  const rootCount = await page
+    .locator(".zs-toast-root")
+    .count()
+    .catch(() => -1);
+  const updatedTitleVisible = await page
+    .locator(".zs-toast-title")
+    .filter({ hasText: /upload complete/i })
+    .first()
+    .isVisible()
+    .catch(() => false);
+  const ok = rootCount === 1 && updatedTitleVisible;
+  report(
+    "Toast — same-id second emit upserts (stack count stays 1)",
+    ok,
+    `root count after second emit: ${rootCount}, updated title visible: ${updatedTitleVisible}`,
+  );
+}
+
+/* ─── 85b. Slice 16 review fix F3: Toast.Root ARIA contract is locked ─
+ *
+ * Regression for the variant-resolved role/aria-live lock. The
+ * AriaOverrideAttempt story renders a custom Viewport child that
+ * reaches in via a runtime cast and tries to push
+ * `role="navigation"` + `aria-live="off"` through Toast.Root.
+ *
+ * Pre-fix, `<BaseToast.Root>` spread `{...rest}` AFTER the variant-
+ * resolved `role`/`aria-live`, so the consumer override survived and
+ * the brief-mandated `status`/`alert` + live-region mapping silently
+ * downgraded to whatever the caller passed. Post-fix, the locked keys
+ * are stripped from `rest` AND the internal props are applied last,
+ * so the contract wins regardless of caller intent. */
+await open("components-toast--aria-override-attempt");
+{
+  const trigger = page.locator(
+    '[data-testid="toast-aria-override-trigger"]',
+  );
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const toast = page.locator(".zs-toast-root").first();
+  await toast.waitFor({ state: "visible", timeout: 5000 });
+  await page.waitForTimeout(150);
+  const role = await toast.getAttribute("role");
+  const ariaLive = await toast.getAttribute("aria-live");
+  const variant = await toast.getAttribute("data-variant");
+  const ok =
+    role === "alert" &&
+    ariaLive === "assertive" &&
+    variant === "error";
+  report(
+    "Toast — Root ARIA contract resists consumer override",
+    ok,
+    `role=${role} aria-live=${ariaLive} data-variant=${variant} (override attempted: role=navigation aria-live=off)`,
   );
 }
 

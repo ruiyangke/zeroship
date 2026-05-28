@@ -114,6 +114,11 @@ const stories = [
     trigger: '[data-testid="toast-rtl-trigger"]',
     waitMs: 400,
   },
+  {
+    id: "components-toast--aria-override-attempt",
+    trigger: '[data-testid="toast-aria-override-trigger"]',
+    waitMs: 400,
+  },
 ];
 
 const mimeMap = new Map([
@@ -192,6 +197,14 @@ try {
       const target = `${baseUrl}/iframe.html?id=${story.id}&globals=theme:${themeGlobal}`;
       await page.goto(target, { waitUntil: "networkidle" });
       await page.evaluate(() => document.fonts && document.fonts.ready);
+      // Storybook 8.6 autoplay can leave a `.sb-errordisplay` overlay
+      // up after a play()-time race that's harmless for capture; remove
+      // it so our trigger click isn't intercepted by the overlay.
+      await page.evaluate(() => {
+        document
+          .querySelectorAll(".sb-errordisplay, .sb-wrapper")
+          .forEach((node) => node.remove());
+      });
       const triggerEl = page.locator(story.trigger).first();
       await triggerEl.waitFor({ state: "visible", timeout: 5000 });
       await triggerEl.click();

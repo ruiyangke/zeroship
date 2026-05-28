@@ -345,9 +345,10 @@ export type {
   CollapsibleTriggerProps,
   CollapsiblePanelProps,
 } from "./Collapsible";
-export { Toast, useToast } from "./Toast";
+export { Toast, useToast, useToastManager } from "./Toast";
 export type {
   ToastComponent,
+  ToastPayload,
   ToastProviderProps,
   ToastViewportProps,
   ToastPortalProps,

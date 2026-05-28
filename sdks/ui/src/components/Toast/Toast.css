@@ -95,15 +95,23 @@
   inset-inline-end: 0;
   flex-direction: column-reverse;
 }
+/* Centered viewports use logical-axis centering — `inset-inline: 0`
+ * combined with `margin-inline: auto` keeps the stack visually centered
+ * under both LTR and RTL without a physical `translateX(-50%)` (which
+ * would drift the box off-axis when `inset-inline-start` resolves to
+ * `right` under RTL). The `inline-size` clamp matches the default
+ * viewport width so wide content doesn't bleed past the visual edges. */
 .zs-toast-viewport--top {
   inset-block-start: 0;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
+  inset-inline: 0;
+  margin-inline: auto;
+  inline-size: min(24rem, calc(100% - 2 * var(--zs-space-4)));
 }
 .zs-toast-viewport--bottom {
   inset-block-end: 0;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
+  inset-inline: 0;
+  margin-inline: auto;
+  inline-size: min(24rem, calc(100% - 2 * var(--zs-space-4)));
   flex-direction: column-reverse;
 }
 
@@ -129,9 +137,9 @@
    * mount). Without this, an empty Root collapses to 0 rows × 0 px
    * and Playwright / Testing Library see it as `not visible` even
    * though it carries the correct role + aria-live + classes. The
-   * `--zs-space-12` fallback (3rem) covers the very first paint
+   * `--zs-space-10` fallback (4rem = 64px) covers the very first paint
    * before Base UI's measurement runs. */
-  min-block-size: var(--toast-height, var(--zs-space-9));
+  min-block-size: var(--toast-height, var(--zs-space-10));
   /* Logical padding so RTL flips for free. */
   padding-block: var(--zs-space-3);
   padding-inline: var(--zs-space-4);
@@ -289,6 +297,21 @@
   outline-offset: var(--zs-selection-hairline);
 }
 
+/* ─── Root focus ring ───────────────────────────────────────────────── *
+ *
+ * Base UI Toast roots are tab-focusable (the Viewport supports F6
+ * navigation onto the toast surface, and Tab can also land there when
+ * the toast carries no inner focusable). The base `outline: none` rule
+ * silences the browser default, so without a replacement focus-visible
+ * ring there's no indicator when keyboard focus lands on the surface.
+ *
+ * Mirror the action/close pattern — quiet hairline accent at equal
+ * specificity. Forced-colors mirrored below. */
+.zs-toast-root:focus-visible {
+  outline: var(--zs-focus-ring-width) solid var(--zs-focus-ring-color);
+  outline-offset: var(--zs-focus-ring-offset);
+}
+
 /* ─── Enter / exit transitions ──────────────────────────────────────── *
  *
  * Slide-in from the anchored viewport edge along the logical inline
@@ -303,24 +326,41 @@
 .zs-toast-root[data-starting-style],
 .zs-toast-root[data-ending-style] {
   opacity: 0;
-  transform: translateX(100%);
+  transform: translateX(calc(var(--zs-toast-inline-sign, 1) * 100%));
 }
 
 /* Position-aware enter — read the data-position the Viewport stamps so
  * the toast slides in from the correct corner. We attach the data
  * attribute to the Viewport; here we scope by descendant selector at
- * EQUAL specificity to the base transform rule above. */
+ * EQUAL specificity to the base transform rule above.
+ *
+ * `--zs-toast-inline-sign` mirrors the slide axis under RTL so the
+ * end-anchored toast still slides in from its visually-anchored edge
+ * (logical inline-end resolves to LEFT under RTL, so translateX must
+ * flip to a negative offset). Foundation default is `1`; the `[dir]`
+ * override below flips it to `-1` and the CSS variable propagates
+ * through every selector that consumes it. */
+.zs-toast-root {
+  --zs-toast-inline-sign: 1;
+}
+[dir="rtl"] .zs-toast-root {
+  --zs-toast-inline-sign: -1;
+}
 .zs-toast-viewport--top-end .zs-toast-root[data-starting-style],
 .zs-toast-viewport--top-end .zs-toast-root[data-ending-style],
 .zs-toast-viewport--bottom-end .zs-toast-root[data-starting-style],
 .zs-toast-viewport--bottom-end .zs-toast-root[data-ending-style] {
-  transform: translateX(calc(100% + var(--zs-space-4)));
+  transform: translateX(
+    calc(var(--zs-toast-inline-sign) * (100% + var(--zs-space-4)))
+  );
 }
 .zs-toast-viewport--top-start .zs-toast-root[data-starting-style],
 .zs-toast-viewport--top-start .zs-toast-root[data-ending-style],
 .zs-toast-viewport--bottom-start .zs-toast-root[data-starting-style],
 .zs-toast-viewport--bottom-start .zs-toast-root[data-ending-style] {
-  transform: translateX(calc(-100% - var(--zs-space-4)));
+  transform: translateX(
+    calc(var(--zs-toast-inline-sign) * (-100% - var(--zs-space-4)))
+  );
 }
 .zs-toast-viewport--top .zs-toast-root[data-starting-style],
 .zs-toast-viewport--top .zs-toast-root[data-ending-style] {
@@ -377,7 +417,7 @@
   .zs-toast-root {
     background-color: Canvas;
     color: CanvasText;
-    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    box-shadow: inset 0 0 0 var(--zs-selection-hairline) CanvasText;
     forced-color-adjust: none;
   }
   .zs-toast-root--default {
@@ -410,8 +450,10 @@
     background-color: Highlight;
     color: HighlightText;
   }
+  .zs-toast-root:focus-visible,
   .zs-toast-action:focus-visible,
   .zs-toast-close:focus-visible {
-    outline: 0.125rem solid Highlight;
+    outline: var(--zs-focus-ring-width) solid Highlight;
+    outline-offset: var(--zs-focus-ring-offset);
   }
 }

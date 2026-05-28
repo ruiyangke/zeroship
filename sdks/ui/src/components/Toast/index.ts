@@ -1,6 +1,7 @@
-export { Toast } from "./Toast";
+export { Toast, useToastManager } from "./Toast";
 export type {
   ToastComponent,
+  ToastPayload,
   ToastProviderProps,
   ToastViewportProps,
   ToastPortalProps,

@@ -1,7 +1,13 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { useRef, type ReactNode } from "react";
-import { Button, Toast, useToast } from "../components";
+import {
+  Button,
+  Toast,
+  useToast,
+  useToastManager,
+  type ToastPayload,
+} from "../components";
 
 /* Storybook 8.6 doesn't expose a global decorator slot for arbitrary
  * providers. `Wrap` mounts the Toast.Provider + the default Viewport
@@ -49,6 +55,15 @@ async function findToastByTitle(
   const body = getDocument(canvasElement);
   let toast: HTMLElement | null = null;
 
+  // Wait for BOTH the element to be in the DOM AND its enter transition
+  // to land. Base UI's Toast.Root carries `data-starting-style` during
+  // the enter motion; our CSS sets `opacity: 0` while that attribute is
+  // present and `transition: opacity` to ramp back to 1 once it's gone.
+  // Testing-library's `toBeVisible` walks ancestors and fails on any
+  // opacity === "0" / 0; pairing it with `findToastByTitle` would race
+  // the motion. We wait for the entering attribute to drop AND for the
+  // computed opacity to land at the resting value (> 0.99 — strictly
+  // greater than the floating-point quirk of mid-transition reads).
   await waitFor(() => {
     const match = body
       .getAllByText(title)
@@ -56,6 +71,9 @@ async function findToastByTitle(
       .find((node): node is HTMLElement => node instanceof HTMLElement);
 
     expect(match).toBeTruthy();
+    expect(match?.hasAttribute("data-starting-style")).toBeFalsy();
+    const opacity = match ? Number(getComputedStyle(match).opacity) : 0;
+    expect(opacity).toBeGreaterThan(0.99);
     toast = match ?? null;
   });
 
@@ -89,6 +107,32 @@ async function waitForToastGone(
   const body = getDocument(canvasElement);
   await waitFor(() => {
     expect(body.queryByText(title)).not.toBeInTheDocument();
+  });
+}
+
+/** Expand the toast viewport so Base UI lifts the `aria-hidden="true"`
+ * it parks on Toast.Close / Toast.Action until the user interacts with
+ * the stack. Without this, role-based queries (`getByRole("button",
+ * { name: /dismiss/ })`) can't see those buttons and the play() races
+ * fail. We hover the viewport, which mirrors the real desktop gesture
+ * that expands the stack (focus is the keyboard equivalent). */
+async function expandViewport(canvasElement: HTMLElement) {
+  const viewport = canvasElement.ownerDocument.querySelector(
+    ".zs-toast-viewport",
+  );
+  if (!(viewport instanceof HTMLElement)) return;
+  viewport.dispatchEvent(
+    new MouseEvent("mouseenter", { bubbles: true, cancelable: true }),
+  );
+  viewport.dispatchEvent(
+    new MouseEvent("mouseover", { bubbles: true, cancelable: true }),
+  );
+  // Base UI's expansion logic flips on next frame — wait for it.
+  await waitFor(() => {
+    const close = canvasElement.ownerDocument.querySelector(
+      ".zs-toast-close",
+    );
+    expect(close?.getAttribute("aria-hidden")).not.toBe("true");
   });
 }
 
@@ -135,6 +179,7 @@ export const Basic: Story = {
     expectToastShown(toast);
     await expect(toast).toHaveAttribute("aria-live", "polite");
 
+    await expandViewport(canvasElement);
     await userEvent.click(
       body.getByRole("button", { name: /dismiss notification/i }),
     );
@@ -194,6 +239,18 @@ export const WithDescription: Story = {
 };
 
 /* ─── 3. WithAction ─────────────────────────────────────────────────── */
+
+/** Window-level slot the WithAction story bumps on every action-button
+ * click. The aria-wiring runner reads this from the page evaluate so the
+ * regression for fix F2 can assert the callback fired EXACTLY once
+ * (pre-fix it fired twice because both `entry.actionProps.onClick` and
+ * the spread-through `elementProps.onClick` reached `mergeProps`). */
+declare global {
+  interface Window {
+    __zsToastActionCalls?: number;
+  }
+}
+
 export const WithAction: Story = {
   name: "With action",
   parameters: {
@@ -214,7 +271,13 @@ export const WithAction: Story = {
         <div style={{ display: "flex", gap: "0.5rem" }}>
           <Button
             data-testid="toast-action-trigger"
-            onClick={() =>
+            onClick={() => {
+              // Reset the window-level counter on every fresh trigger so
+              // a re-mount story run starts from zero — the regression
+              // for F2 asserts the post-click value is EXACTLY 1.
+              if (typeof window !== "undefined") {
+                window.__zsToastActionCalls = 0;
+              }
               toast({
                 id: "action-demo",
                 title: "Message deleted",
@@ -223,10 +286,14 @@ export const WithAction: Story = {
                   label: "Undo",
                   onClick: () => {
                     actionCountRef.current += 1;
+                    if (typeof window !== "undefined") {
+                      window.__zsToastActionCalls =
+                        (window.__zsToastActionCalls ?? 0) + 1;
+                    }
                   },
                 },
-              })
-            }
+              });
+            }}
           >
             Show action toast
           </Button>
@@ -249,8 +316,14 @@ export const WithAction: Story = {
     await expect(
       await findToastByTitle(canvasElement, /message deleted/i),
     ).toBeVisible();
+    await expandViewport(canvasElement);
     await userEvent.click(body.getByRole("button", { name: /undo/i }));
     await waitForToastGone(canvasElement, /message deleted/i);
+    // F2 regression: action callback must fire EXACTLY once. Pre-fix
+    // the default render loop spread `{...entry.actionProps}` AND Base
+    // UI's `ToastAction` consumed `toast.actionProps` from root context,
+    // so `mergeProps` chained the same `onClick` twice.
+    await expect(window.__zsToastActionCalls).toBe(1);
   },
 };
 
@@ -354,6 +427,7 @@ export const ErrorVariant: Story = {
     await expect(toast).toHaveAttribute("aria-live", "assertive");
     await expect(toast).toHaveAttribute("data-variant", "error");
 
+    await expandViewport(canvasElement);
     await userEvent.click(body.getByRole("button", { name: /retry/i }));
     await waitForToastGone(canvasElement, /upload failed/i);
   },
@@ -641,6 +715,14 @@ export const ImperativeUpdate: Story = {
     );
     await expect(body.getByText(/upload complete/i)).toBeVisible();
     await expect(body.queryByText(/processing 12 files/i)).not.toBeInTheDocument();
+    // Same-id contract: the manager upserts by id (Base UI's `add` with
+    // an existing id resets fields + restarts the auto-dismiss timer
+    // instead of mounting a second toast), so the stack must still
+    // contain EXACTLY one root after the second emit.
+    const rootCount = canvasElement.ownerDocument.querySelectorAll(
+      ".zs-toast-root",
+    ).length;
+    await expect(rootCount).toBe(1);
   },
 };
 
@@ -835,6 +917,7 @@ export const SwipeToDismiss: Story = {
     await expect(
       await findToastByTitle(canvasElement, /swipe me away/i),
     ).toBeVisible();
+    await expandViewport(canvasElement);
     await userEvent.click(
       body.getByRole("button", { name: /dismiss notification/i }),
     );
@@ -889,5 +972,103 @@ export const Rtl: Story = {
     const toast = await findToastByTitle(canvasElement, /התראה/i);
     expectToastShown(toast);
     await expect(toast).toHaveAttribute("data-variant", "success");
+  },
+};
+
+/* ─── 16. AriaOverrideAttempt ───────────────────────────────────────── *
+ *
+ * Regression coverage for the role/aria-live lock (review fix F3).
+ *
+ * Reaches in via a runtime cast and tries to pass `role="navigation"`
+ * + `aria-live="off"` directly to `Toast.Root`. The internal contract
+ * — variant-resolved role and aria-live applied AFTER the spread, with
+ * the keys also stripped from `...rest` — must keep the live-region
+ * mapping intact so screen-reader semantics can't be silently
+ * downgraded by a careless compound-API consumer. */
+export const AriaOverrideAttempt: Story = {
+  name: "ARIA override attempt (custom Viewport)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Custom Viewport child reaches in via `as unknown as never` and " +
+          "passes `role=\"navigation\"` + `aria-live=\"off\"`. The " +
+          "rendered toast must still carry `role=\"alert\"` + " +
+          "`aria-live=\"assertive\"` from the error variant — locked " +
+          "props win regardless of caller intent.",
+      },
+    },
+  },
+  render: () => {
+    function CustomList() {
+      const manager = useToastManager();
+      return (
+        <>
+          {manager.toasts.map((entry: ToastPayload) => (
+            <Toast.Root
+              key={entry.id}
+              toast={entry}
+              // Force-feed the override path: a consumer with a stray
+              // cast (or a wrapper that re-emits arbitrary attrs) MUST
+              // NOT be able to clobber the brief-mandated ARIA mapping.
+              {...({
+                role: "navigation",
+                "aria-live": "off",
+              } as unknown as Record<string, never>)}
+            >
+              <div className="zs-toast-content">
+                {entry.title ? (
+                  <Toast.Title>{entry.title}</Toast.Title>
+                ) : null}
+                {entry.description ? (
+                  <Toast.Description>{entry.description}</Toast.Description>
+                ) : null}
+              </div>
+              <Toast.Close />
+            </Toast.Root>
+          ))}
+        </>
+      );
+    }
+    function Trigger() {
+      const { toast } = useToast();
+      return (
+        <Button
+          data-testid="toast-aria-override-trigger"
+          onClick={() =>
+            toast.error({
+              id: "aria-override-demo",
+              title: "Override blocked",
+              description: "Internal ARIA contract wins.",
+            })
+          }
+        >
+          Trigger override attempt
+        </Button>
+      );
+    }
+    return (
+      <Toast.Provider>
+        <div className="zs-story-row" role="group" aria-label="Toast demo">
+          <Trigger />
+        </div>
+        <Toast.Viewport position="bottom-end">
+          <CustomList />
+        </Toast.Viewport>
+      </Toast.Provider>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(
+      canvas.getByRole("button", { name: /trigger override attempt/i }),
+    );
+    const toast = await findToastByTitle(canvasElement, /override blocked/i, "alert");
+    // Variant-locked role/aria-live MUST win regardless of the override
+    // attempt above. Pre-fix the consumer override survived because
+    // `{...rest}` was spread after the internal props on `<BaseToast.Root>`.
+    await expect(toast).toHaveAttribute("role", "alert");
+    await expect(toast).toHaveAttribute("aria-live", "assertive");
   },
 };

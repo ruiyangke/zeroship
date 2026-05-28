@@ -62,7 +62,9 @@
  *     color-contrast walk terminates inside the toast.
  */
 import {
+  createContext,
   forwardRef,
+  useContext,
   type ComponentPropsWithoutRef,
   type ComponentPropsWithRef,
   type ReactNode,
@@ -71,6 +73,7 @@ import {
   Toast as BaseToast,
   type ToastRootToastObject,
 } from "@base-ui/react/toast";
+import { useDirection } from "@base-ui/react/direction-provider";
 import { composeBaseClass, classnames } from "../_classnames";
 
 /** Base UI's per-toast payload. The manager publishes this for each
@@ -113,6 +116,20 @@ export type ToastSwipeDirection = "start" | "end" | "up" | "down";
 
 type BaseProviderProps = ComponentPropsWithoutRef<typeof BaseToast.Provider>;
 
+/** Config the Provider broadcasts to its descendants — `DefaultToastList`
+ * reads this so a global `swipeDirection` on the Provider applies to
+ * every default-rendered toast without the caller wiring it on each
+ * `Toast.Root`. */
+interface ToastConfigContextValue {
+  /** Global swipe direction the default render loop forwards to every
+   * Toast.Root that doesn't carry an explicit `swipeDirection`. */
+  swipeDirection: ToastSwipeDirection | ToastSwipeDirection[] | undefined;
+}
+
+const ToastConfigContext = createContext<ToastConfigContextValue>({
+  swipeDirection: undefined,
+});
+
 export interface ToastProviderProps
   extends Omit<BaseProviderProps, "timeout"> {
   /**
@@ -130,6 +147,18 @@ export interface ToastProviderProps
    * @default 3
    */
   limit?: number;
+  /**
+   * Global swipe direction the default render loop applies to every
+   * toast. Per-toast Root overrides via `<Toast.Root swipeDirection>`
+   * still win when consumers go through the compound API.
+   *
+   * Logical `start`/`end` map to the inline axis (correct under RTL);
+   * `up`/`down` map to the block axis. Pass an array for multi-axis
+   * gestures.
+   *
+   * @default ["end", "down"]
+   */
+  swipeDirection?: ToastSwipeDirection | ToastSwipeDirection[];
   /** Children render INSIDE the provider — usually a `<Toast.Viewport>`
    * plus the rest of your app. */
   children?: ReactNode;
@@ -138,6 +167,7 @@ export interface ToastProviderProps
 function ToastProvider({
   duration = 5000,
   limit = 3,
+  swipeDirection,
   children,
   ...rest
 }: ToastProviderProps) {
@@ -147,7 +177,9 @@ function ToastProvider({
       limit={limit}
       {...rest}
     >
-      {children}
+      <ToastConfigContext.Provider value={{ swipeDirection }}>
+        {children}
+      </ToastConfigContext.Provider>
     </BaseToast.Provider>
   );
 }
@@ -219,21 +251,34 @@ ToastViewport.displayName = "Toast.Viewport";
 /** Default render loop for the Viewport. Subscribes to the manager,
  * walks the live toast list, and renders each entry with the standard
  * anatomy (leading icon paints via CSS ::before; Action mounts only
- * when the manager carries `actionProps`). */
+ * when the manager carries `actionProps`).
+ *
+ * Action is rendered as a bare `<ToastAction />` — Base UI's
+ * `ToastAction` pulls `children` + `onClick` off the per-toast
+ * `actionProps` payload via root context, so spreading them again here
+ * would compose the same `onClick` twice (mergeProps stacks event
+ * handlers when both `elementProps` and `toast.actionProps` carry one).
+ *
+ * `swipeDirection` propagates from the Provider via `ToastConfigContext`
+ * so callers get a single global setting on `<Toast.Provider>` instead
+ * of repeating it per toast. */
 function DefaultToastList() {
   const manager = BaseToast.useToastManager();
+  const { swipeDirection } = useContext(ToastConfigContext);
   return (
     <>
       {manager.toasts.map((entry) => (
-        <ToastRoot key={entry.id} toast={entry}>
+        <ToastRoot
+          key={entry.id}
+          toast={entry}
+          swipeDirection={swipeDirection}
+        >
           <div className="zs-toast-content">
             {entry.title ? <ToastTitle>{entry.title}</ToastTitle> : null}
             {entry.description ? (
               <ToastDescription>{entry.description}</ToastDescription>
             ) : null}
-            {entry.actionProps ? (
-              <ToastAction {...entry.actionProps} />
-            ) : null}
+            {entry.actionProps ? <ToastAction /> : null}
           </div>
           <ToastClose />
         </ToastRoot>
@@ -276,12 +321,30 @@ ToastPortal.displayName = "Toast.Portal";
 
 type BaseRootProps = ComponentPropsWithRef<typeof BaseToast.Root>;
 
+/**
+ * Public props for `Toast.Root`.
+ *
+ * `role`, `aria-live`, and Base UI's polymorphic `render` are stripped
+ * from the public surface — the variant-resolved role/live-region
+ * mapping (status/polite for default/info/success, status/assertive
+ * for warning, alert/assertive for error) is a brief-level contract;
+ * callers MUST NOT be able to silently downgrade it via a stray
+ * prop spread or a custom `render` that drops the attrs on the floor.
+ * Internal `data-variant` / `className` reach the DOM unconditionally
+ * because we apply them last, after `...rest`.
+ */
 export interface ToastRootProps
-  extends Omit<BaseRootProps, "className" | "swipeDirection"> {
+  extends Omit<
+    BaseRootProps,
+    "className" | "swipeDirection" | "role" | "aria-live" | "render"
+  > {
   /**
    * Direction(s) the toast can be swiped to dismiss. Logical `start`/
-   * `end` map to the inline axis (correct under RTL); `up`/`down` map
-   * to the block axis. Pass an array to enable multiple directions.
+   * `end` map to the inline axis (resolved at render time off the
+   * `DirectionProvider` direction so RTL flips for free); `up`/`down`
+   * map to the block axis. Pass an array to enable multiple directions.
+   *
+   * Omit on the Root to inherit the Provider-level `swipeDirection`.
    *
    * @default ["end", "down"]
    */
@@ -290,16 +353,24 @@ export interface ToastRootProps
   className?: string;
 }
 
+/** Resolve our logical `start`/`end` swipe ends to the physical
+ * `left`/`right` Base UI consumes, mirrored under RTL. We read direction
+ * off Base UI's `DirectionProvider` (defaults to `'ltr'` when the
+ * provider is absent — see `DirectionContext` in `@base-ui/react`) so
+ * `dir="rtl"` content gets gestures that match the visual layout. */
 function resolveSwipeDirection(
   swipe: ToastSwipeDirection | ToastSwipeDirection[] | undefined,
+  direction: "ltr" | "rtl",
 ): BaseRootProps["swipeDirection"] {
+  const inlineStart = direction === "rtl" ? "right" : "left";
+  const inlineEnd = direction === "rtl" ? "left" : "right";
   const map: Record<ToastSwipeDirection, "left" | "right" | "up" | "down"> = {
-    start: "left",
-    end: "right",
+    start: inlineStart,
+    end: inlineEnd,
     up: "up",
     down: "down",
   };
-  if (swipe === undefined) return ["right", "down"];
+  if (swipe === undefined) return [inlineEnd, "down"];
   if (Array.isArray(swipe)) return swipe.map((dir) => map[dir]);
   return map[swipe];
 }
@@ -314,19 +385,42 @@ function resolveAriaLive(variant: ToastVariant): "polite" | "assertive" {
     : "polite";
 }
 
+/** Keys we strip from any `...rest` before passing through to Base UI,
+ * so consumers who reach in via a type cast still can't downgrade the
+ * variant-locked ARIA contract. Kept colocated with the resolvers so
+ * the lock list never drifts from the props it protects.
+ *
+ * `aria-modal` is also locked AND force-set to `undefined` below because
+ * Base UI's Toast.Root defaults `aria-modal="false"` (carried over from
+ * the dialog-flavoured base), and `aria-modal` is not a valid attribute
+ * on `role="status"` / `role="alert"` — axe flags it as a critical
+ * `aria-allowed-attr` violation. The brief's variant contract is the
+ * live-region pair, not a modal flag. */
+const LOCKED_ROOT_KEYS = ["role", "aria-live", "aria-modal", "render"] as const;
+
 const ToastRoot = forwardRef<HTMLDivElement, ToastRootProps>(
   function ToastRoot(
     { toast, swipeDirection, className, ...rest },
     ref,
   ) {
+    const direction = useDirection();
     // `toast.type` is our variant — set by useToast() when adding.
     // Default to "default" when omitted so role/aria-live still resolve.
     const variant = (toast.type as ToastVariant | undefined) ?? "default";
+    // Strip locked attributes from `rest` so a runtime cast (or a stale
+    // descriptor on a forwarded ref) can't override them. Internal
+    // values are written below, after the spread, so the variant-derived
+    // contract wins regardless of caller intent.
+    const restRecord = rest as Record<string, unknown>;
+    for (const key of LOCKED_ROOT_KEYS) {
+      delete restRecord[key];
+    }
     return (
       <BaseToast.Root
         ref={ref}
         toast={toast}
-        swipeDirection={resolveSwipeDirection(swipeDirection)}
+        {...rest}
+        swipeDirection={resolveSwipeDirection(swipeDirection, direction)}
         role={resolveRole(variant)}
         aria-live={resolveAriaLive(variant)}
         /* Base UI stamps `aria-hidden="true"` on high-priority
@@ -343,13 +437,17 @@ const ToastRoot = forwardRef<HTMLDivElement, ToastRootProps>(
          * sole announce channel and the rendered toast is
          * AT-discoverable on focus as it should be. */
         aria-hidden={undefined}
+        // Suppress Base UI's default `aria-modal="false"` — invalid on
+        // `role="status"`/`role="alert"`, and a toast is never modal
+        // anyway. Setting `undefined` lets `mergeProps`'s last-wins rule
+        // omit the attribute from the rendered DOM.
+        aria-modal={undefined}
         data-variant={variant}
         className={classnames(
           "zs-toast-root",
           `zs-toast-root--${variant}`,
           className,
         )}
-        {...rest}
       />
     );
   },
@@ -481,6 +579,16 @@ function CloseGlyph() {
     </svg>
   );
 }
+
+/* ─── Public manager hook ───────────────────────────────────────────── *
+ *
+ * `useToastManager` exposes Base UI's low-level manager (toast list,
+ * `add` / `update` / `close` / `promise`) so consumers writing a
+ * custom Viewport render-prop can subscribe to the same store the
+ * default loop uses. The imperative `useToast()` hook is the canonical
+ * surface; this is the escape hatch for callers who explicitly opt
+ * into the compound API. */
+export const useToastManager = BaseToast.useToastManager;
 
 /* ─── public namespace ──────────────────────────────────────────────── */
 
