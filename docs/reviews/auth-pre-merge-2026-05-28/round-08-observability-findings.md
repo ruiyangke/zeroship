@@ -712,3 +712,28 @@ chain forms the integrity proof, not the id.
   on the GC actions they perform (e.g., wrapper-revoked-subjects
   sweep, jwk_rotation). `jwk_rotation.rs:234` logs to tracing only;
   no audit row for "key X was retired".
+
+## Status
+
+### CLOSED
+
+- C1 — `3c0c3763` (`fix(audit): make audit tables append-only`)
+- C2 — `d76bc1d` (`fix(audit): record structured control actors`)
+- H1 — `6220a85a` (`fix(auth-audit): attach request metadata`)
+- H2 — `0f06ed41` (`fix(auth-audit): cover credential and consent flows`)
+- H3 — `fca37071` (`fix(stripe): audit recorded payout webhooks`)
+- H4 — `b490b827` (`fix(authz): propagate request ids from guards`)
+- H5 — `54e79dcb` (`fix(audit): unify audit fanout paths`)
+- H6 — `930d55c9` (`fix(auth): scrub email local parts from tracing`)
+
+### DEFERRED
+
+- C1 optional hash-chain column and verification cron
+- M1 — audit event/outcome enum constraints
+- M2 — split `/readyz` readiness endpoints
+- M3 — sanitize OAuth callback failure detail
+- M4 — populate logout `user_id`
+- M5 — add account-created and duplicate-signup audit events
+- L1 — strict audit stdout/PG ordering
+- L2 — strip control bytes from audit detail strings
+- L3 — replace `BIGSERIAL` audit id side channel
