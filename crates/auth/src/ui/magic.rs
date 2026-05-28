@@ -49,7 +49,7 @@ use crate::hydra_client::HydraAdmin;
 use crate::identity::magic_link;
 use crate::mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
 use crate::mailer::{Address, Mailer};
-use crate::ratelimit::{self, Bucket};
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::{ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage, MagicShowCodePage};
@@ -166,8 +166,8 @@ pub async fn start(
     let mut throttled = false;
     for (key, bucket) in &buckets {
         match ratelimit::consume(db.as_ref(), key, *bucket).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
+            Ok(RateLimitDecision::Allowed) => {}
+            Ok(RateLimitDecision::Throttled(_)) => {
                 throttled = true;
                 audit::emit(
                     db.as_ref(),

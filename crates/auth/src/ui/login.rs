@@ -24,7 +24,7 @@ use crate::csrf;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
 use crate::identity::password;
-use crate::ratelimit::{self, Bucket};
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::LoginPage;
@@ -203,8 +203,8 @@ pub async fn post(
     ];
     for (key, bucket) in &buckets {
         match ratelimit::consume(db.as_ref(), key, *bucket).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
+            Ok(RateLimitDecision::Allowed) => {}
+            Ok(RateLimitDecision::Throttled(_)) => {
                 audit::emit(
                     db.as_ref(),
                     &AuditEvent {
