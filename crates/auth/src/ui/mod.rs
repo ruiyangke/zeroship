@@ -54,9 +54,39 @@ pub struct SignupPage<'a> {
 /// Generic OAuth/auth-flow error page.
 #[derive(Debug, Template)]
 #[template(path = "error.html")]
-pub struct ErrorPage<'a> {
-    pub error: &'a str,
-    pub error_description: Option<&'a str>,
+pub struct ErrorPage {
+    pub message: PublicErrorMessage,
+    pub error_code: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicErrorMessage {
+    InvalidRequest,
+    SessionExpired,
+    PleaseTryAgain,
+    ContactSupport,
+}
+
+impl PublicErrorMessage {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid request",
+            Self::SessionExpired => "session expired",
+            Self::PleaseTryAgain => "please try again",
+            Self::ContactSupport => "contact support",
+        }
+    }
+
+    #[must_use]
+    pub const fn error_code(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::SessionExpired => "session_expired",
+            Self::PleaseTryAgain => "please_try_again",
+            Self::ContactSupport => "contact_support",
+        }
+    }
 }
 
 /// `/link` GET/POST page — shown after a federation callback detects an
@@ -196,4 +226,28 @@ pub struct MePage<'a> {
     pub csrf: &'a str,
     pub error: Option<&'a str>,
     pub success: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use askama::Template;
+
+    use super::{ErrorPage, PublicErrorMessage};
+
+    #[test]
+    fn error_page_renders_only_public_message() {
+        let sensitive = "DB host=internal.zeroship.svc.cluster.local";
+        let page = ErrorPage {
+            message: PublicErrorMessage::ContactSupport,
+            error_code: PublicErrorMessage::ContactSupport.error_code(),
+        };
+
+        let html = page.render().expect("error page renders");
+
+        assert!(
+            !html.contains(sensitive),
+            "error page must not render sensitive error details"
+        );
+        assert!(html.contains(PublicErrorMessage::ContactSupport.as_str()));
+    }
 }

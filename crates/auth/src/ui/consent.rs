@@ -29,7 +29,7 @@ use crate::hydra_client::types::{
 };
 use crate::hydra_client::HydraAdmin;
 use crate::store::users;
-use crate::ui::ConsentPage;
+use crate::ui::{ConsentPage, PublicErrorMessage};
 
 /// Hydra's "remember this consent" window when the user ticks the checkbox.
 /// Matches the proposal §10.3 spec (30 days).
@@ -56,7 +56,7 @@ pub async fn get(
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(error = %e, challenge = %challenge, "consent challenge fetch failed");
-            return render_error(&e.to_string());
+            return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
 
@@ -99,7 +99,7 @@ pub async fn get(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "render consent.html failed");
-            return render_error("internal error");
+            return render_error(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -153,7 +153,7 @@ pub async fn post(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_error("invalid request");
+        return render_error(PublicErrorMessage::InvalidRequest);
     }
 
     // 2. Re-fetch the challenge from hydra. The form-carried challenge is
@@ -164,7 +164,7 @@ pub async fn post(
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(error = %e, challenge = %challenge, "POST /consent: get_consent failed");
-            return render_error(&e.to_string());
+            return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
 
@@ -179,7 +179,7 @@ pub async fn post(
             Ok(resp) => redirect(&resp.redirect_to),
             Err(e) => {
                 tracing::error!(error = %e, "reject_consent failed");
-                render_error(&e.to_string())
+                render_error(PublicErrorMessage::ContactSupport)
             }
         };
     }
@@ -188,7 +188,7 @@ pub async fn post(
     // (the template only renders Allow/Deny buttons). Treat it as a bad
     // request rather than silently accepting.
     if form.decision != "allow" {
-        return render_error("invalid decision");
+        return render_error(PublicErrorMessage::InvalidRequest);
     }
 
     // 4. Allow path. Build session claims from the granted scopes.
@@ -212,7 +212,7 @@ pub async fn post(
         Ok(resp) => redirect(&resp.redirect_to),
         Err(e) => {
             tracing::error!(error = %e, "accept_consent failed");
-            render_error(&e.to_string())
+            render_error(PublicErrorMessage::ContactSupport)
         }
     }
 }
@@ -245,7 +245,7 @@ async fn silent_accept(
         Ok(resp) => redirect(&resp.redirect_to),
         Err(e) => {
             tracing::error!(error = %e, "accept_consent (silent) failed");
-            render_error(&e.to_string())
+            render_error(PublicErrorMessage::ContactSupport)
         }
     }
 }
@@ -316,13 +316,15 @@ fn redirect(to: &str) -> HttpResponse {
     r.finish()
 }
 
-fn render_error(msg: &str) -> HttpResponse {
+fn render_error(message: PublicErrorMessage) -> HttpResponse {
     use crate::ui::ErrorPage;
     let page = ErrorPage {
-        error: "Consent failed",
-        error_description: Some(msg),
+        message,
+        error_code: message.error_code(),
     };
-    let body = page.render().unwrap_or_else(|_| format!("<h1>{msg}</h1>"));
+    let body = page
+        .render()
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut r = HttpResponse::Ok();
     r.content_type("text/html; charset=utf-8");
     r.body(body)

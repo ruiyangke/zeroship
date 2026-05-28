@@ -36,7 +36,7 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::HydraAdmin;
 use crate::store::sessions;
-use crate::ui::{ErrorPage, LogoutPage};
+use crate::ui::{ErrorPage, LogoutPage, PublicErrorMessage};
 
 #[derive(Debug, Deserialize)]
 pub struct LogoutQuery {
@@ -67,7 +67,7 @@ pub async fn get(
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(error = %e, challenge = %challenge, "logout challenge fetch failed");
-            return render_error("invalid logout request", Some(&e.to_string()));
+            return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
 
@@ -114,7 +114,7 @@ pub async fn post(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_error("invalid request", Some("csrf"));
+        return render_error(PublicErrorMessage::InvalidRequest);
     }
 
     let challenge = form.logout_challenge.as_str();
@@ -126,7 +126,7 @@ pub async fn post(
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(error = %e, challenge = %challenge, "POST /logout: get_logout failed");
-            return render_error("invalid logout request", Some(&e.to_string()));
+            return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
 
@@ -147,7 +147,7 @@ pub async fn post(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "accept_logout failed");
-            return render_error("internal error", Some(&e.to_string()));
+            return render_error(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -185,14 +185,14 @@ pub async fn post(
     http_resp.finish()
 }
 
-fn render_error(error: &str, error_description: Option<&str>) -> HttpResponse {
+fn render_error(message: PublicErrorMessage) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
     let body = page
         .render()
-        .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::BadRequest();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)

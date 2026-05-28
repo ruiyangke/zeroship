@@ -42,7 +42,7 @@ use crate::identity::linker::PendingLink;
 use crate::identity::password;
 use crate::sessions::login as session_cookie;
 use crate::store::{identities, sessions, users};
-use crate::ui::{ErrorPage, LinkPage};
+use crate::ui::{ErrorPage, LinkPage, PublicErrorMessage};
 
 /// ACR + AMR tags for the post-link `IdP` session.
 ///
@@ -80,7 +80,7 @@ pub async fn get(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
     let Some(pending) = PendingLink::decode(&query.token, cfg.stash_signing_key.as_bytes()) else {
-        return render_error_page("invalid or expired link token", None);
+        return render_error_page(PublicErrorMessage::SessionExpired);
     };
 
     let csrf_token = csrf::generate_token();
@@ -95,7 +95,7 @@ pub async fn get(
         Ok(b) => b,
         Err(e) => {
             tracing::error!(error = %e, "render link.html failed");
-            return render_error_page("internal error", Some("template render"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -149,12 +149,12 @@ pub async fn post(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_error_page("invalid request", Some("csrf"));
+        return render_error_page(PublicErrorMessage::InvalidRequest);
     }
 
     // 2. Decode + verify the pending token.
     let Some(pending) = PendingLink::decode(&form.token, cfg.stash_signing_key.as_bytes()) else {
-        return render_error_page("invalid or expired link token", None);
+        return render_error_page(PublicErrorMessage::SessionExpired);
     };
 
     // 3. Look up the user. The pending token's HMAC guarantees the
@@ -165,7 +165,7 @@ pub async fn post(
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "users::find_by_email failed");
-            return render_error_page("internal error", Some("db"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -233,7 +233,7 @@ pub async fn post(
     .await
     {
         tracing::error!(error = %e, "identities::link failed");
-        return render_error_page("internal error", Some("link"));
+        return render_error_page(PublicErrorMessage::ContactSupport);
     }
 
     // 5b. Create the IdP session row.
@@ -256,7 +256,7 @@ pub async fn post(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "sessions::create failed");
-            return render_error_page("internal error", Some("session"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -280,7 +280,7 @@ pub async fn post(
         Ok(r) => r.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "accept_login failed");
-            return render_error_page("internal error", Some("hydra"));
+            return render_error_page(PublicErrorMessage::ContactSupport);
         }
     };
 
@@ -340,14 +340,14 @@ fn render_link_error(
     resp.body(body)
 }
 
-fn render_error_page(error: &str, error_description: Option<&str>) -> HttpResponse {
+fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
     let page = ErrorPage {
-        error,
-        error_description,
+        message,
+        error_code: message.error_code(),
     };
     let body = page
         .render()
-        .unwrap_or_else(|_| format!("<h1>{error}</h1>"));
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.body(body)
