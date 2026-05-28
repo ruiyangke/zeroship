@@ -452,7 +452,7 @@ async fn validate_grant_subset(
                     request_ip: guard.request_ip,
                     mfa_verified: guard.mfa_verified,
                     mfa_age_seconds: guard.mfa_age_seconds,
-                    request_id: None,
+                    request_id: Some(guard.request_id.as_str()),
                 };
 
                 let authorized = if matches!(resource, Resource::Any) {

@@ -19,6 +19,7 @@ pub async fn emit_guard_event(
         outcome: "success",
         user_id: Some(&guard.principal_id),
         client_id,
+        request_id: Some(guard.request_id.clone()),
         ip: guard.request_ip,
         auth_method: Some(auth_method(guard)),
         detail,
