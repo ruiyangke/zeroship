@@ -2204,6 +2204,161 @@ await injectCoarsePointerOverride();
   );
 }
 
+/* ─── 63. OtpField typing first cell auto-advances focus (slice 9) ─── *
+ *
+ * Type a single character into cell 0. Base UI advances focus to
+ * cell 1 automatically. Assert that document.activeElement is the
+ * second cell after the keystroke. */
+await open("components-otpfield--basic");
+{
+  const cell0 = page.locator('[data-testid="otp-basic-cell-0"]');
+  const cell1 = page.locator('[data-testid="otp-basic-cell-1"]');
+  await cell0.waitFor({ state: "visible", timeout: 5000 });
+  await cell0.focus();
+  await cell0.press("1");
+  // Settle the focus advance.
+  await page.waitForTimeout(50);
+  const activeIsCell1 = await cell1.evaluate(
+    (el) => el === document.activeElement,
+  );
+  report(
+    "OtpField typing auto-advances focus to next cell",
+    activeIsCell1,
+    `activeElement matches cell-1: ${activeIsCell1}`,
+  );
+}
+
+/* ─── 64. OtpField paste of 6 digits fills all cells (slice 9) ─────── */
+await open("components-otpfield--basic");
+{
+  const cell0 = page.locator('[data-testid="otp-basic-cell-0"]');
+  await cell0.waitFor({ state: "visible", timeout: 5000 });
+  await cell0.focus();
+  // Use the clipboard paste path: dispatch a synthetic paste event with
+  // the 6-digit code. Base UI listens for paste on the focused cell and
+  // splits the text across all cells.
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (!active) return;
+    const dt = new DataTransfer();
+    dt.setData("text/plain", "654321");
+    const event = new ClipboardEvent("paste", {
+      clipboardData: dt,
+      bubbles: true,
+      cancelable: true,
+    });
+    active.dispatchEvent(event);
+  });
+  await page.waitForTimeout(100);
+  // Read every cell's value; expect them to spell out "654321".
+  const values = await page.evaluate(() => {
+    const cells = Array.from(
+      document.querySelectorAll('[data-testid^="otp-basic-cell-"]'),
+    );
+    return cells.map((el) => el.value);
+  });
+  const joined = values.join("");
+  const ok = joined === "654321";
+  report(
+    "OtpField paste of N digits fills all cells",
+    ok,
+    `joined="${joined}" expected="654321"`,
+  );
+}
+
+/* ─── 65. OtpField Required + Field.Error fires on incomplete submit ─ *
+ *
+ * The RequiredInvalid story auto-submits an empty form on mount. The
+ * Field.Error message paints (Base UI flips data-invalid on the
+ * empty OtpField) and the live-region announces it. We assert the
+ * `[role=alert]` payload has the error text. */
+await open("components-otpfield--required-invalid");
+{
+  // Give the auto-submit RAF a tick to fire.
+  await page.waitForTimeout(200);
+  const alert = page.locator("[role=alert]").first();
+  let errorText = "";
+  try {
+    await alert.waitFor({ state: "visible", timeout: 2000 });
+    errorText = (await alert.innerText().catch(() => "")).trim();
+  } catch {
+    errorText = "";
+  }
+  const otp = page.locator('[data-testid="otp-required-invalid"]');
+  const dataInvalid = await otp.getAttribute("data-invalid");
+  const invalidFlagged = dataInvalid !== null;
+  const ok = errorText.length > 0 && invalidFlagged;
+  report(
+    "OtpField required + incomplete submit → Field.Error announced",
+    ok,
+    `errorText="${errorText}" data-invalid=${dataInvalid}`,
+  );
+}
+
+/* ─── 66. Meter aria-valuenow reflects current value (slice 9) ─────── */
+await open("components-meter--basic");
+{
+  const meter = page.locator('[data-testid="meter-basic"]');
+  await meter.waitFor({ state: "visible", timeout: 5000 });
+  const role = await meter.getAttribute("role");
+  const valueMin = await meter.getAttribute("aria-valuemin");
+  const valueMax = await meter.getAttribute("aria-valuemax");
+  const valueNow = await meter.getAttribute("aria-valuenow");
+  const ok =
+    role === "meter" &&
+    valueMin === "0" &&
+    valueMax === "100" &&
+    valueNow === "60";
+  report(
+    "Meter aria-valuenow reflects current value",
+    ok,
+    `role=${role} min=${valueMin} max=${valueMax} now=${valueNow}`,
+  );
+}
+
+/* ─── 67. Progress determinate aria-valuenow reflects value ────────── */
+await open("components-progress--determinate");
+{
+  const prog = page.locator('[data-testid="progress-determinate"]');
+  await prog.waitFor({ state: "visible", timeout: 5000 });
+  const role = await prog.getAttribute("role");
+  const valueNow = await prog.getAttribute("aria-valuenow");
+  const status = await prog.getAttribute("data-status");
+  const ok =
+    role === "progressbar" && valueNow === "42" && status === "progressing";
+  report(
+    "Progress determinate aria-valuenow reflects current value",
+    ok,
+    `role=${role} now=${valueNow} status=${status}`,
+  );
+}
+
+/* ─── 68. Progress indeterminate has aria-valuetext, no aria-valuenow ─ */
+await open("components-progress--indeterminate");
+{
+  const prog = page.locator('[data-testid="progress-indeterminate"]');
+  await prog.waitFor({ state: "visible", timeout: 5000 });
+  const role = await prog.getAttribute("role");
+  const valueNow = await prog.getAttribute("aria-valuenow");
+  const valueText = await prog.getAttribute("aria-valuetext");
+  const status = await prog.getAttribute("data-status");
+  const ok =
+    role === "progressbar" &&
+    status === "indeterminate" &&
+    // Base UI omits aria-valuenow for indeterminate progress; Some Base
+    // UI builds emit aria-valuetext automatically. We accept either an
+    // explicit "Loading" valuetext OR the absence of aria-valuenow with
+    // an indeterminate status as evidence of the intended contract —
+    // both shapes carry the "no specific %" signal to AT.
+    (valueNow == null) &&
+    (valueText == null || /loading|indeterminate/i.test(valueText));
+  report(
+    "Progress indeterminate omits aria-valuenow; status=indeterminate",
+    ok,
+    `role=${role} now=${valueNow} valuetext="${valueText}" status=${status}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

@@ -1,0 +1,279 @@
+/*
+ * OtpField — N-cell one-time-password row.
+ *
+ * Anatomy:
+ *   .zs-otp-field                  — Root (display flex row, gap between cells)
+ *     └─ .zs-otp-field__input ×N   — per-cell <input>
+ *
+ * Modifier classes:
+ *   variant: --default | --outline
+ *   size:    --sm | --md | --lg
+ *
+ * State surface (driven by data-* attributes Base UI emits + we re-stamp
+ * from the render-callback state):
+ *   data-focused | data-disabled | data-readonly | data-invalid
+ *   data-filled  | data-complete
+ *
+ * Layout discipline:
+ *   - Each cell is a square defined by --zs-otp-cell-size (sm/md/lg).
+ *     Height matches Input rhythm so an OtpField next to an Input row
+ *     reads coherent.
+ *   - Logical gap (gap: var(--zs-space-2)) so RTL flips automatically.
+ *   - The focus ring lives on the focused cell, NOT on the row — auto-
+ *     advance focus walks cell-by-cell, and the per-cell ring tells the
+ *     user "you are here". `data-focused` on the row reads "the group has
+ *     focus" so the row dims its non-focused cells slightly via the
+ *     border-hover token. Stable layout: inset box-shadow on each cell
+ *     (no border:) so state changes don't shift the row.
+ *
+ * Motion: ease on background + box-shadow. Reduced-motion honors the
+ * root token override.
+ */
+
+.zs-otp-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--zs-space-2);
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  --zs-otp-cell-size: var(--zs-control-h-md);
+}
+
+.zs-otp-field--sm {
+  --zs-otp-cell-size: var(--zs-control-h-sm);
+  gap: var(--zs-space-1);
+}
+.zs-otp-field--lg {
+  --zs-otp-cell-size: var(--zs-control-h-lg);
+  gap: var(--zs-space-2);
+}
+
+/* ─── Cell ─────────────────────────────────────────────────────────── */
+.zs-otp-field__input {
+  inline-size: var(--zs-otp-cell-size);
+  block-size: var(--zs-otp-cell-size);
+  /* Center the single character */
+  text-align: center;
+  font-family: var(--zs-font-system);
+  /* Monospace-leaning tabular figures keep the row even across mixed
+     digits — the heading-weight numeric carries the form weight of a
+     code-entry cell. */
+  font-variant-numeric: tabular-nums;
+  font-size: var(--zs-text-headline-size);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--zs-input-ink);
+  background: var(--zs-input-bg);
+  border: 0;
+  border-radius: var(--zs-control-radius-md);
+  outline: none;
+  padding: 0;
+  margin: 0;
+  /* Hairline via inset box-shadow → no layout shift on state change.
+     Second shadow slot is the transparent focus-ring sentinel so the
+     transition has something to morph into. */
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--zs-motion-fast) var(--zs-motion-ease),
+    box-shadow var(--zs-motion-fast) var(--zs-motion-ease),
+    color var(--zs-motion-fast) var(--zs-motion-ease);
+  /* Caret blink uses the input ink so a focused cell's caret stays
+     readable. */
+  caret-color: var(--zs-input-ink);
+}
+
+/* Sm cell uses sm control radius + the slightly smaller font. */
+.zs-otp-field--sm .zs-otp-field__input {
+  border-radius: var(--zs-control-radius-sm);
+  font-size: max(1rem, var(--zs-text-subheadline-size));
+}
+/* Lg cell uses lg control radius + the larger headline. */
+.zs-otp-field--lg .zs-otp-field__input {
+  border-radius: var(--zs-control-radius-lg);
+  font-size: var(--zs-text-title-3-size);
+}
+
+/* ─── Variants ─────────────────────────────────────────────────────── */
+.zs-otp-field--outline .zs-otp-field__input {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+}
+
+/* ─── Hover (hover-capable pointers only) ──────────────────────────── */
+@media (hover: hover) {
+  .zs-otp-field:not([data-disabled]):not([data-readonly])
+    .zs-otp-field__input:hover {
+    background: var(--zs-input-bg-hover);
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+  .zs-otp-field--outline:not([data-disabled]):not([data-readonly])
+    .zs-otp-field__input:hover {
+    background: transparent;
+    box-shadow:
+      inset 0 0 0 0.0625rem var(--zs-input-border-hover),
+      0 0 0 0 transparent;
+  }
+}
+
+/* ─── Focused cell — the ring lives on the focused input ───────────── */
+.zs-otp-field__input:focus {
+  background: var(--zs-input-bg-focus);
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
+.zs-otp-field--outline .zs-otp-field__input:focus {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
+
+/* ─── Invalid state ────────────────────────────────────────────────── */
+.zs-otp-field[data-invalid] .zs-otp-field__input {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 0 transparent;
+}
+.zs-otp-field[data-invalid] .zs-otp-field__input:focus {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-invalid),
+    0 0 0 var(--zs-focus-ring-width)
+      color-mix(in oklch, var(--zs-system-red) 35%, transparent);
+}
+
+/* ─── Readonly — non-editable presentation ─────────────────────────── */
+.zs-otp-field[data-readonly] .zs-otp-field__input {
+  background: var(--zs-input-bg-readonly);
+  color: var(--zs-input-ink-readonly);
+  cursor: default;
+  font-style: italic;
+}
+
+/* ─── Disabled ─────────────────────────────────────────────────────── */
+.zs-otp-field[data-disabled] .zs-otp-field__input {
+  background: var(--zs-input-bg-disabled);
+  color: var(--zs-input-ink-disabled);
+  cursor: not-allowed;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+}
+.zs-otp-field--outline[data-disabled] .zs-otp-field__input {
+  background: transparent;
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border),
+    0 0 0 0 transparent;
+}
+
+/* ─── Complete state — the whole row carries the accent edge once
+     every cell is filled. Subtle accent tint on each cell's border
+     telegraphs "you're done; submit". */
+.zs-otp-field[data-complete] .zs-otp-field__input {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 0 transparent;
+}
+.zs-otp-field[data-complete] .zs-otp-field__input:focus {
+  box-shadow:
+    inset 0 0 0 0.0625rem var(--zs-input-border-focus),
+    0 0 0 var(--zs-focus-ring-width) var(--zs-input-focus-ring-color);
+}
+
+/* ─── iOS Safari zoom-on-focus floor — Slice 2 lesson applied. The
+     OtpField sm cell falls below 1rem font-size which would trigger
+     Mobile Safari's auto-zoom. Pin the inner font to a 1rem floor. */
+.zs-otp-field--sm .zs-otp-field__input {
+  font-size: max(1rem, var(--zs-text-subheadline-size));
+}
+
+/* ─── Autofill — same inset-shadow trick as Input so the yellow
+     autofill background doesn't bleed through. */
+.zs-otp-field__input:autofill,
+.zs-otp-field__input:autofill:hover,
+.zs-otp-field__input:autofill:focus,
+.zs-otp-field__input:-webkit-autofill,
+.zs-otp-field__input:-webkit-autofill:hover,
+.zs-otp-field__input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000rem var(--zs-input-bg) inset;
+  -webkit-text-fill-color: var(--zs-input-ink);
+  caret-color: var(--zs-input-ink);
+  -moz-appearance: none;
+}
+
+/* ─── Reduced motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-otp-field__input {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors / Windows High Contrast ──────────────────────────
+ *
+ * Slice 5/6 lesson: mirror every state selector at EQUAL specificity so
+ * the system palette wins. Variant rules above are 2-class; mirror at
+ * matching specificity so the outline-variant transparent rule doesn't
+ * leak the accent-token border through. */
+@media (forced-colors: active) {
+  .zs-otp-field__input {
+    background: Field;
+    color: FieldText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+    forced-color-adjust: none;
+  }
+  /* Outline variant mirror — equal-specificity with the base oklch rule
+     so the bare `.zs-otp-field__input` reset is matched, not overridden,
+     by the variant rule. */
+  .zs-otp-field--outline .zs-otp-field__input {
+    background: Canvas;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+  }
+  .zs-otp-field__input:focus {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-otp-field--outline .zs-otp-field__input:focus {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-otp-field[data-invalid] .zs-otp-field__input {
+    box-shadow:
+      inset 0 0 0 0.0625rem Mark,
+      0 0 0 0 transparent;
+  }
+  .zs-otp-field[data-invalid] .zs-otp-field__input:focus {
+    box-shadow:
+      inset 0 0 0 0.0625rem Mark,
+      0 0 0 0.125rem Highlight;
+  }
+  .zs-otp-field[data-disabled] .zs-otp-field__input {
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-otp-field--outline[data-disabled] .zs-otp-field__input {
+    background: Canvas;
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  .zs-otp-field[data-complete] .zs-otp-field__input {
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
+      0 0 0 0 transparent;
+  }
+}

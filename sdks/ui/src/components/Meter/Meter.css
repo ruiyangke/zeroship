@@ -1,0 +1,178 @@
+/*
+ * Meter — static gauge bar.
+ *
+ * Anatomy:
+ *   .zs-meter                        — Root row (grid: header + track)
+ *     ├─ .zs-meter__header           — optional label + value row
+ *     │   ├─ .zs-meter__label        — inline-start label
+ *     │   └─ .zs-meter__value        — inline-end numeric badge
+ *     └─ .zs-meter__track            — the rail
+ *         └─ .zs-meter__indicator    — the filled segment
+ *
+ * Modifier classes:
+ *   intent: --neutral | --success | --warning | --danger
+ *   size:   --sm | --md | --lg     (track block-size 0.25 / 0.375 / 0.5rem)
+ *
+ * State surface:
+ *   data-intent | data-size
+ *
+ * Layout discipline:
+ *   - Logical sizing (inline-size / block-size) so RTL flips the
+ *     indicator fill direction automatically.
+ *   - The header is a flex row using `justify-content: space-between` so
+ *     the label hugs the inline-start and the value hugs the inline-end.
+ *
+ * Motion: ease on background-color only (the indicator's extent is set
+ * by Base UI via inline styles; we don't animate the width here so the
+ * gauge reads as a measurement, not as motion).
+ */
+
+.zs-meter {
+  display: grid;
+  inline-size: 100%;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  gap: var(--zs-space-1);
+  /* Intent color — defaults to the accent for the neutral variant.
+     Each --intent class below overrides. */
+  --zs-meter-color: var(--zs-accent);
+  /* Track block-size — defaults to md; sm/lg modifiers override. */
+  --zs-meter-track-block: 0.375rem;
+}
+
+.zs-meter--sm {
+  --zs-meter-track-block: 0.25rem;
+}
+.zs-meter--lg {
+  --zs-meter-track-block: 0.5rem;
+}
+
+/* Intent palette — neutral = accent; the others map to system color
+   tokens themed per-theme. `warning` lands on the system-orange (amber
+   side of the orange/yellow split — yellow-on-white loses contrast
+   below AA, so the orange-leaning hue is the readable choice). */
+.zs-meter--neutral {
+  --zs-meter-color: var(--zs-accent);
+}
+.zs-meter--success {
+  --zs-meter-color: var(--zs-system-green);
+}
+.zs-meter--warning {
+  --zs-meter-color: var(--zs-system-orange);
+}
+.zs-meter--danger {
+  --zs-meter-color: var(--zs-system-red);
+}
+
+/* ─── Header row ───────────────────────────────────────────────────── */
+.zs-meter__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--zs-space-2);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+.zs-meter__label {
+  color: var(--zs-label-secondary);
+  font-weight: 500;
+}
+
+.zs-meter__value {
+  color: var(--zs-label);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* ─── Track — the rail ─────────────────────────────────────────────── */
+.zs-meter__track {
+  position: relative;
+  inline-size: 100%;
+  block-size: var(--zs-meter-track-block);
+  background: var(--zs-fill-secondary);
+  border-radius: var(--zs-radius-full);
+  overflow: hidden;
+}
+
+/* ─── Indicator — the filled segment ───────────────────────────────── *
+ *
+ * Base UI emits its own inline `width: NN%` on the indicator. We only
+ * paint surface here (background + radius). The rounded ends carry
+ * `inherit` so they hug the track's pill curve at the leading edge. */
+.zs-meter__indicator {
+  block-size: 100%;
+  background: var(--zs-meter-color);
+  border-radius: inherit;
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* ─── Disabled — when consumers pass aria-disabled or data-disabled
+     manually (Base UI's Meter doesn't expose a `disabled` prop because
+     meter is a static read-only gauge; a creator marking the row
+     disabled signals "this measurement is currently unavailable"). */
+.zs-meter[data-disabled] .zs-meter__track {
+  background: var(--zs-fill-quaternary);
+}
+.zs-meter[data-disabled] .zs-meter__indicator {
+  background: var(--zs-label-quaternary);
+}
+.zs-meter[data-disabled] .zs-meter__label,
+.zs-meter[data-disabled] .zs-meter__value {
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── Reduced motion ───────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-meter__indicator {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors / Windows High Contrast ──────────────────────────
+ *
+ * Slice 5/6 lesson: mirror every state selector at EQUAL specificity so
+ * the system palette wins. The intent surface tokens (--zs-system-*)
+ * collapse to the system's two semantic slots:
+ *   - success / neutral → Highlight (positive measurement read)
+ *   - warning / danger  → Mark (attention-needed measurement)
+ *
+ * The system palette doesn't carry a four-step semantic gradient, so we
+ * map our four intents to the two available system slots. The text
+ * label / value falls back to CanvasText so the row stays readable. */
+@media (forced-colors: active) {
+  .zs-meter__track {
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-meter__indicator {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+  /* Variant mirrors — equal-specificity (2 classes) so the intent rule
+     doesn't bleed the oklch-token surface through under high-contrast. */
+  .zs-meter--neutral .zs-meter__indicator,
+  .zs-meter--success .zs-meter__indicator {
+    background: Highlight;
+  }
+  .zs-meter--warning .zs-meter__indicator,
+  .zs-meter--danger .zs-meter__indicator {
+    background: Mark;
+  }
+  .zs-meter__label,
+  .zs-meter__value {
+    color: CanvasText;
+  }
+  .zs-meter[data-disabled] .zs-meter__track {
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-meter[data-disabled] .zs-meter__indicator {
+    background: GrayText;
+  }
+  .zs-meter[data-disabled] .zs-meter__label,
+  .zs-meter[data-disabled] .zs-meter__value {
+    color: GrayText;
+  }
+}

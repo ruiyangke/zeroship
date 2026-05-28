@@ -29,6 +29,9 @@
 @import "./components/Autocomplete/Autocomplete.css";
 @import "./components/NumberField/NumberField.css";
 @import "./components/Slider/Slider.css";
+@import "./components/OtpField/OtpField.css";
+@import "./components/Meter/Meter.css";
+@import "./components/Progress/Progress.css";
 
 *,
 *::before,

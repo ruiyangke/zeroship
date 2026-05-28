@@ -1,0 +1,209 @@
+/*
+ * Progress — task bar (determinate / indeterminate).
+ *
+ * Anatomy:
+ *   .zs-progress                       — Root row (grid: header + track)
+ *     ├─ .zs-progress__header          — optional label + value row
+ *     │   ├─ .zs-progress__label
+ *     │   └─ .zs-progress__value
+ *     └─ .zs-progress__track           — the rail
+ *         └─ .zs-progress__indicator   — fill (determinate) / shimmer (indeterminate)
+ *
+ * Modifier classes:
+ *   size:   --sm | --md | --lg     (track block-size 0.25 / 0.375 / 0.5rem)
+ *
+ * State surface (data-status from Base UI):
+ *   data-status="indeterminate" | "progressing" | "complete"
+ *
+ * Layout discipline:
+ *   - Logical sizing (inline-size / block-size) so RTL flips the
+ *     indicator fill direction automatically.
+ *   - The indeterminate animation uses logical `translate` so the sweep
+ *     direction follows writing-mode (LTR sweeps left-to-right; RTL
+ *     sweeps right-to-left).
+ *
+ * Motion: the determinate width change is set inline by Base UI; we
+ * transition `background-color` only on the indicator surface. The
+ * indeterminate shimmer is a keyframe animation that respects
+ * `prefers-reduced-motion: reduce`.
+ */
+
+.zs-progress {
+  display: grid;
+  inline-size: 100%;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+  gap: var(--zs-space-1);
+  /* The progress color is accent for in-progress; success-green for
+     complete. The state-keyed selectors below swap. */
+  --zs-progress-color: var(--zs-accent);
+  --zs-progress-track-block: 0.375rem;
+}
+
+.zs-progress--sm {
+  --zs-progress-track-block: 0.25rem;
+}
+.zs-progress--lg {
+  --zs-progress-track-block: 0.5rem;
+}
+
+/* CompletionCelebrate state — value === max. Indicator collapses to
+   system-green so a finished bar reads "done" instead of "in progress". */
+.zs-progress[data-status="complete"] {
+  --zs-progress-color: var(--zs-system-green);
+}
+
+/* ─── Header row ───────────────────────────────────────────────────── */
+.zs-progress__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--zs-space-2);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
+}
+
+.zs-progress__label {
+  color: var(--zs-label-secondary);
+  font-weight: 500;
+}
+
+.zs-progress__value {
+  color: var(--zs-label);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* ─── Track — the rail ─────────────────────────────────────────────── */
+.zs-progress__track {
+  position: relative;
+  inline-size: 100%;
+  block-size: var(--zs-progress-track-block);
+  background: var(--zs-fill-secondary);
+  border-radius: var(--zs-radius-full);
+  overflow: hidden;
+}
+
+/* ─── Indicator ────────────────────────────────────────────────────── *
+ *
+ * Determinate: Base UI emits an inline `width: NN%` on the indicator.
+ * Indeterminate: Base UI doesn't size the indicator; we render an
+ *   inline-size 33% pill that shimmers across the track via keyframes.
+ *
+ * Both modes share the surface color (accent → system-green on
+ * complete). */
+.zs-progress__indicator {
+  block-size: 100%;
+  background: var(--zs-progress-color);
+  border-radius: inherit;
+  transition: background-color var(--zs-motion-fast) var(--zs-motion-ease);
+}
+
+/* Indeterminate — Base UI doesn't paint width inline; size the shimmer
+   bar to 33% of the track and sweep it horizontally. */
+.zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+  inline-size: 33%;
+  animation: zs-progress-shimmer 1.4s var(--zs-motion-ease) infinite;
+}
+
+@keyframes zs-progress-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+/* RTL flip — translate runs the opposite direction so the sweep reads
+   right-to-left for RTL writing modes. */
+[dir="rtl"] .zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+  animation-name: zs-progress-shimmer-rtl;
+}
+@keyframes zs-progress-shimmer-rtl {
+  0% {
+    transform: translateX(100%);
+  }
+  100% {
+    transform: translateX(-400%);
+  }
+}
+
+/* ─── Disabled — when consumers mark the row disabled (e.g. paused
+     upload). Track dims; indicator goes to label-quaternary. The
+     indeterminate animation stops so the row reads "paused" rather than
+     "still loading". */
+.zs-progress[data-disabled] .zs-progress__track {
+  background: var(--zs-fill-quaternary);
+}
+.zs-progress[data-disabled] .zs-progress__indicator {
+  background: var(--zs-label-quaternary);
+  animation: none;
+}
+.zs-progress[data-disabled] .zs-progress__label,
+.zs-progress[data-disabled] .zs-progress__value {
+  color: var(--zs-label-tertiary);
+}
+
+/* ─── Reduced motion ───────────────────────────────────────────────── *
+ *
+ * The brief calls out: "Respect prefers-reduced-motion → no animation".
+ * Replace the shimmer with a static dim accent surface so the user
+ * still gets a "this is in progress" cue without the motion. */
+@media (prefers-reduced-motion: reduce) {
+  .zs-progress__indicator {
+    transition: none;
+  }
+  .zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+    animation: none;
+    /* Static fill at 100% so the bar looks "active but not animating".
+       The dimmer color-mix below tells the eye "this is a placeholder,
+       not actual progress" without violating the reduced-motion contract. */
+    inline-size: 100%;
+    background: color-mix(in oklch, var(--zs-accent) 45%, transparent);
+  }
+}
+
+/* ─── forced-colors / Windows High Contrast ──────────────────────────
+ *
+ * Slice 5/6 lesson: mirror every state selector at EQUAL specificity so
+ * the system palette wins. */
+@media (forced-colors: active) {
+  .zs-progress__track {
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem CanvasText;
+    forced-color-adjust: none;
+  }
+  .zs-progress__indicator {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+  /* Completion mirror — under forced-colors there's no green slot, so we
+     keep Highlight (Mark would read as warning, not "done"). The visual
+     cue under forced-colors is the bar at 100% width — that's enough. */
+  .zs-progress[data-status="complete"] .zs-progress__indicator {
+    background: Highlight;
+  }
+  /* Suppress the indeterminate shimmer under forced-colors so the
+     Highlight surface doesn't translate / flicker. */
+  .zs-progress[data-status="indeterminate"] .zs-progress__indicator {
+    animation: none;
+    inline-size: 100%;
+  }
+  .zs-progress__label,
+  .zs-progress__value {
+    color: CanvasText;
+  }
+  .zs-progress[data-disabled] .zs-progress__track {
+    background: Canvas;
+    box-shadow: inset 0 0 0 0.0625rem GrayText;
+  }
+  .zs-progress[data-disabled] .zs-progress__indicator {
+    background: GrayText;
+    animation: none;
+  }
+  .zs-progress[data-disabled] .zs-progress__label,
+  .zs-progress[data-disabled] .zs-progress__value {
+    color: GrayText;
+  }
+}
