@@ -115,6 +115,10 @@ pub struct GateState {
     /// horizontally this becomes a redis-backed shared cache so a
     /// replayed proof on a sibling gateway is still rejected.
     pub dpop_jti_cache: Arc<zeroship_core::dpop::JtiCache>,
+    /// In-process replay cache for OIDC Back-Channel Logout
+    /// `logout_token.jti` claims. Replays are answered with 200 for
+    /// webhook idempotency but do not run session revocation again.
+    pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
     /// Gateway-issued wrapper-token signing key (Phase 8 U1). Loaded
     /// from a PKCS#8 PEM/DER file at boot via `--signing-key-file`.
     /// `None` when the operator runs without the flag — DPoP-exchange

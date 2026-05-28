@@ -262,6 +262,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         oidc_rp,
         auth_pg,
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
     Fixture {

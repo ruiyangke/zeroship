@@ -756,6 +756,9 @@ mod tests {
             )),
             db: None,
             dpop_jti_cache: StdArc::new(zeroship_core::dpop::JtiCache::default()),
+            logout_jti_cache: StdArc::new(
+                zeroship_core::logout_token::LogoutJtiCache::default(),
+            ),
             signing_key: Some(StdArc::new(signing)),
             wrapper_issuer: Some(StdArc::new(issuer)),
             wrapper_verifier: Some(StdArc::new(verifier)),

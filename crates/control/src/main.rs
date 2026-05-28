@@ -282,6 +282,7 @@ async fn main() -> std::io::Result<()> {
         deploy_tmp_dir,
         oidc_rp,
         auth_pg,
+        logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
     let bind_addr = format!("0.0.0.0:{port}");
