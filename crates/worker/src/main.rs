@@ -106,7 +106,7 @@ struct WorkerCli {
     check_config: bool,
 
     /// Output format for `--check-config`: `text` (default) or `json`.
-    #[arg(long = "check-config-format", default_value = "text")]
+    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
     check_config_format: String,
 
     /// Observability CLI/env overrides.

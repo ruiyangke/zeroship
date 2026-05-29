@@ -237,6 +237,25 @@ else
 fi
 echo ""
 
+echo "=== Case 7: DSN secrets not leaked in --help (S2 / NEW-1) ==="
+HELP_OUT="$TMPDIR/control-help.txt"
+env -i PATH="$PATH" HOME="${HOME:-}" \
+    DATABASE_URL="postgres://u:SUPERSECRETPW1@h/d" \
+    AUTH_DB_URL="postgres://u:SUPERSECRETPW2@h/d" \
+    "$CONTROL" --help >"$HELP_OUT" 2>&1 || true
+if grep -Fq "SUPERSECRETPW" "$HELP_OUT"; then
+    fail "control --help must not print DSN env secrets (hide_env_values on --db AND --auth-db)"
+else
+    pass "control --help hides DSN env secrets"
+fi
+echo ""
+
+echo "=== Case 8: invalid --check-config-format rejected (NEW-2) ==="
+run_cmd control-bad-format "$CONTROL" --check-config --check-config-format xml --dev-insecure
+show_last_output
+expect_nonzero "control rejects an unknown --check-config-format value (no silent text fallback)"
+echo ""
+
 echo "============================================"
 echo "Summary: $PASS passed, $FAIL failed"
 echo "============================================"

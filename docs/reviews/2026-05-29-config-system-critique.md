@@ -63,6 +63,15 @@ Fixed on `feat/server-config-unification` across commits `ea7d740b` (auto-discov
 | O6 dangling D8 | ✅ fixed | D8 row added to the proposal table |
 | O7 proposal self-contradiction | ✅ fixed | line 60 corrected (auto-discovery commit) |
 
+**Phase-4 adversarial re-verification (read-only):** independently confirmed S1–S8 + M1–M7
+genuinely hold in code (by probe, not just passing tests) and that the refactor dropped no
+base guard. It surfaced two fresh gaps, both now fixed:
+- **NEW-1 (was High):** control's `--auth-db`/`AUTH_DB_URL` lacked `hide_env_values` → leaked the
+  DSN password in `--help` (an S2 miss on the *second* DSN field). Fixed; e2e Case 7 (`--help`
+  must not print the secret) guards it.
+- **NEW-2 (Low):** `--check-config-format=<unknown>` silently fell back to text. Now a clap
+  `value_parser` rejects unknowns on all four binaries; e2e Case 8 guards it.
+
 **Not part of config (flagged separately):** the full `cargo test -p zeroship-auth` integration
 suite has pre-existing compile breakage in `device_grant_test`/`logout_test`/`magic_link_test`/
 `consent_ui_test`/`migrations_smoke` (`CreateSession.expected_credential_version`, `pg_connect`

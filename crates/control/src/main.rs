@@ -152,7 +152,7 @@ struct ControlCli {
     check_config: bool,
 
     /// Output format for `--check-config`: `text` (default) or `json`.
-    #[arg(long = "check-config-format", default_value = "text")]
+    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
     check_config_format: String,
 
     /// Observability CLI/env overrides.
@@ -198,7 +198,7 @@ struct ControlCli {
     stash_signing_key: String,
 
     /// PostgreSQL DSN for auth/console session tables.
-    #[arg(long = "auth-db", env = "AUTH_DB_URL", default_value = "")]
+    #[arg(long = "auth-db", env = "AUTH_DB_URL", default_value = "", hide_env_values = true)]
     auth_db_url: String,
 
     /// Expected OAuth access-token audience for control bearer auth.

@@ -27,7 +27,7 @@ pub struct AuthConfig {
     pub check_config: bool,
 
     /// `--check-config` output format: `text` (default) or `json`.
-    #[arg(long = "check-config-format", default_value = "text")]
+    #[arg(long = "check-config-format", default_value = "text", value_parser = ["text", "json"])]
     pub check_config_format: String,
 
     /// Observability CLI/env overrides.
