@@ -8384,6 +8384,44 @@ await open("components-button--as-child-disabled-is-inert");
   );
 }
 
+/* ─── Wave 8 fix — Tooltip detached handle carries aria-describedby ────
+ *
+ * createTooltipHandle augments Base UI's handle with a stable popupId so a
+ * Trigger mounted outside any Root subtree still carries the popup id in
+ * aria-describedby. */
+await open("components-tooltip--detached-handle");
+{
+  const trigger = page.locator('[data-testid="tooltip-detached-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(120);
+  await trigger.hover();
+  const popup = page.locator('[data-testid="tooltip-detached-popup"]');
+  await popup.waitFor({ state: "attached", timeout: 1500 });
+  const wiring = await page.evaluate(() => {
+    const t = document.querySelector('[data-testid="tooltip-detached-trigger"]');
+    const p = document.querySelector('[data-testid="tooltip-detached-popup"]');
+    if (!t) return null;
+    const describedBy = t.getAttribute("aria-describedby") ?? "";
+    const popupId = p ? p.id : "";
+    const tokens = describedBy.split(/\s+/).filter(Boolean);
+    const resolves = popupId.length > 0 && document.getElementById(popupId) !== null;
+    return {
+      describedBy,
+      popupId,
+      hasToken: popupId.length > 0 && tokens.includes(popupId),
+      resolves,
+    };
+  });
+  const ok =
+    wiring !== null && wiring.popupId.length > 0 && wiring.hasToken && wiring.resolves;
+  report(
+    "Tooltip detached handle — aria-describedby on Trigger refs Popup id (Wave 8 fix)",
+    ok,
+    `describedBy="${wiring?.describedBy ?? ""}" popupId="${wiring?.popupId ?? ""}" hasToken=${wiring?.hasToken ?? false} resolves=${wiring?.resolves ?? false}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

@@ -266,6 +266,7 @@ const stories = [
   "components-tooltip--rich-content",
   "components-tooltip--disabled",
   "components-tooltip--rtl",
+  "components-tooltip--detached-handle",
   // Slice 8: Form + Fieldset (structural wrappers).
   "components-form--basic-submit",
   "components-form--with-validation",
