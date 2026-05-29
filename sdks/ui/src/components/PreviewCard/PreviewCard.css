@@ -13,12 +13,16 @@
  * visible state off those so motion is declarative and reduced-motion
  * respectful.
  *
- * Glass-surface invariant: the Popup declares an opaque `background-
- * color` (--zs-surface-raised) so axe-core's color-contrast walk
- * terminates inside the popup. The optional `backdrop-filter` (gated by
- * --zs-dialog-backdrop-filter, falling back to --zs-material-regular)
- * gives themes a frosted look when the surface is translucent —
- * augmentation only, never the sole visual signal.
+ * Glass-surface invariant: the Popup declares an OPAQUE base
+ * (`--zs-surface`) so axe-core's color-contrast walk terminates inside
+ * the popup. The optional `backdrop-filter` (gated by
+ * `--zs-dialog-backdrop-filter`, falling back to `--zs-material-regular`)
+ * layers a frosted material on TOP of that opaque base — augmentation
+ * only, never the sole visual signal. The earlier revision painted on
+ * `--zs-surface-raised`, which in the crystal theme resolves to a
+ * translucent alpha-55% white, breaking the invariant: with
+ * `backdrop-filter` unsupported the popup let the page bleed through.
+ * `--zs-surface` is the same opaque token Popover.Popup paints on.
  *
  * Forced-colors mirror (Slice-5/6/7 lesson): every painting selector
  * (background / color / box-shadow / border / filter) is re-emitted
@@ -84,10 +88,11 @@
 /* ─── Popup ────────────────────────────────────────────────────────── */
 .zs-preview-card-popup {
   /* Glass-surface invariant: opaque background-color + optional
-   * backdrop-filter augmentation. Themes that swap --zs-surface-raised
-   * to translucent get the frosted look automatically; opaque themes
-   * stay solid. */
-  background-color: var(--zs-surface-raised);
+   * backdrop-filter augmentation. `--zs-surface` is the opaque token
+   * Popover.Popup uses; if a future theme genuinely wants a translucent
+   * popup it must layer the frosted material on top of the opaque
+   * base, never replace it. */
+  background-color: var(--zs-surface);
   color: var(--zs-label);
   font-family: var(--zs-font-system);
   font-size: var(--zs-text-callout-size);
@@ -251,7 +256,10 @@
   justify-content: center;
   inline-size: 1rem;
   block-size: 0.5rem;
-  color: var(--zs-surface-raised);
+  /* Arrow fill must match the popup's painted body so the apex reads
+   * as a continuation of the popup. The popup paints on `--zs-surface`
+   * (opaque) per the glass invariant; the arrow tracks that token. */
+  color: var(--zs-surface);
   /* Sit behind the popup chrome so the rectangle of the arrow wrapper
    * doesn't paint over the popup body. `isolation: isolate` on
    * .zs-preview-card-popup establishes the stacking context. */

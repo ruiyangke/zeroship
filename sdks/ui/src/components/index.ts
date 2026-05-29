@@ -205,6 +205,7 @@ export type {
   PreviewCardPopupProps,
   PreviewCardArrowProps,
   PreviewCardComponent,
+  PreviewCardHandle,
 } from "./PreviewCard";
 
 export { Tooltip, createTooltipHandle } from "./Tooltip";

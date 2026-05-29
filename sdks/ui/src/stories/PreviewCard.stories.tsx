@@ -1,7 +1,12 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { Button, PreviewCard } from "../components";
+import { useMemo } from "react";
+import {
+  Button,
+  PreviewCard,
+  createPreviewCardHandle,
+} from "../components";
 
 /* Token-driven placeholder thumbnail used in the Basic / LinkPreview
  * stories. Previous revisions used SVG data URIs that contained URL-
@@ -568,5 +573,110 @@ export const Rtl: Story = {
       undefined,
       { timeout: 3000 },
     );
+  },
+};
+
+/* ─── 9. DetachedHandle — Root/Trigger paired across the tree ──────── *
+ *
+ * Imperative-pairing surface (`createHandle()`) for the case where the
+ * Trigger renders in a different React subtree from the Root (table
+ * row inside one cell, popup mounted from a parent layout, etc.). The
+ * story exercises two invariants the wrapper owns:
+ *
+ *   1. `aria-describedby` on the detached Trigger still references the
+ *      Popup id — the augmented handle carries `popupId`.
+ *   2. The Root's `delay` / `closeDelay` props still drive timing —
+ *      the augmented handle carries those fields too. React context
+ *      cannot bridge the gap so the handle is the only carrier.
+ *
+ * The story sets `delay={0}` and `closeDelay={50}` on the Root so the
+ * regression test can observe the popup mounting and unmounting on
+ * short timers; the detached-handle pair was historically silently
+ * stuck on Base UI's 600ms / 300ms defaults. */
+export const DetachedHandle: Story = {
+  name: "Detached handle (delay/closeDelay through handle)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Trigger and Root are paired via `createPreviewCardHandle()` " +
+          "across separate subtrees. Root's `delay` / `closeDelay` flow " +
+          "through the augmented handle so the detached Trigger honors " +
+          "them even though no React context bridges the two sides.",
+      },
+    },
+  },
+  render: () => {
+    function DetachedRow() {
+      // `useMemo` so the handle is stable across renders — recreating
+      // it on every render would tear down the pairing on each commit.
+      const handle = useMemo(() => createPreviewCardHandle(), []);
+      return (
+        <div
+          className="zs-story-row"
+          role="group"
+          aria-label="Detached handle"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: "2rem",
+            padding: "2rem",
+          }}
+        >
+          {/* Trigger subtree — no Root, only the imperative handle. */}
+          <div data-testid="previewcard-detached-trigger-subtree">
+            <PreviewCard.Trigger
+              asChild
+              handle={handle}
+              data-testid="previewcard-detached-trigger"
+            >
+              <Button aria-label="Preview Detached">
+                Hover me (detached)
+              </Button>
+            </PreviewCard.Trigger>
+          </div>
+          {/* Root subtree — same handle, separate location in the
+              tree. The Root publishes delay=0 + closeDelay=50 so the
+              detached-trigger regression test can observe the timing
+              actually crossing the handle. */}
+          <div data-testid="previewcard-detached-root-subtree">
+            <PreviewCard handle={handle} delay={0} closeDelay={50}>
+              <PreviewCard.Portal>
+                <PreviewCard.Popup
+                  data-testid="previewcard-detached-popup"
+                >
+                  <h3>Detached preview</h3>
+                  <p>
+                    The Trigger up there shares this Root via{" "}
+                    <code>createPreviewCardHandle()</code>. The Root&apos;s
+                    timing flows through the handle so the popup opens
+                    immediately and closes after 50ms.
+                  </p>
+                </PreviewCard.Popup>
+              </PreviewCard.Portal>
+            </PreviewCard>
+          </div>
+        </div>
+      );
+    }
+    return <DetachedRow />;
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+    const trigger = canvas.getByTestId("previewcard-detached-trigger");
+    await userEvent.hover(trigger);
+    const popup = await body.findByTestId(
+      "previewcard-detached-popup",
+      undefined,
+      { timeout: 1500 },
+    );
+    await expect(popup).toBeInTheDocument();
+    // aria-describedby crosses the handle: the Trigger must reference
+    // the Popup's actual mounted id.
+    const describedBy = trigger.getAttribute("aria-describedby") ?? "";
+    const popupId = popup.id;
+    await expect(popupId.length).toBeGreaterThan(0);
+    await expect(describedBy.split(/\s+/)).toContain(popupId);
   },
 };

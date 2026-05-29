@@ -226,6 +226,7 @@ export {
   type PreviewCardPopupProps,
   type PreviewCardArrowProps,
   type PreviewCardComponent,
+  type PreviewCardHandle,
   Menu,
   createMenuHandle,
   type MenuProps,

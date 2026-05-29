@@ -427,7 +427,7 @@ const stories = [
   "components-separator--inside-list",
   "components-separator--inside-toolbar",
   "components-separator--rtl",
-  // Slice 19: PreviewCard. 8 stories — hover-anchored rich preview
+  // Slice 19: PreviewCard. 9 stories — hover-anchored rich preview
   // surface. Triggers render visible `<a>` / `<button>` so axe doesn't
   // need the popup mounted to validate the resting state.
   "components-previewcard--basic",
@@ -438,6 +438,7 @@ const stories = [
   "components-previewcard--with-arrow",
   "components-previewcard--placement-side",
   "components-previewcard--rtl",
+  "components-previewcard--detached-handle",
   // Slice 20: CheckboxGroup. Layout-only primitive; axe walks each
   // story's chip + label cluster.
   "components-checkboxgroup--basic",
