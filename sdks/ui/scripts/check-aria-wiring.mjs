@@ -7344,6 +7344,36 @@ await open("components-popover--payload-render");
   );
 }
 
+/* ─── Wave 7 fix #3 — Toolbar.Separator orientation/role/aria lock ─────
+ *
+ * Regression for Wave 7 Toolbar fix #3. Pre-fix, `ToolbarSeparatorProps`
+ * was a bare alias of Base UI's separator props and forwarded
+ * everything; a caller could spread `orientation="horizontal"`,
+ * `role="navigation"`, and `aria-orientation="horizontal"` on a
+ * separator inside a horizontal toolbar, and Base UI's
+ * spread-after-defaults pattern would propagate the overrides — the
+ * rendered DOM would carry the wrong axis and the wrong role. The
+ * wrapper now omits all three at the type layer AND strips them at
+ * runtime, so the rendered separator stays `role="separator"` +
+ * `aria-orientation="vertical"` (the perpendicular Base UI computes
+ * from the parent context). The
+ * SeparatorOrientationLockRegression story passes the bypass via an
+ * untyped spread; if the runtime strip is missing, the assertion
+ * below fails. */
+await open("components-toolbar--separator-orientation-lock-regression");
+{
+  const sep = page.locator('[data-testid="toolbar-separator-lock"]');
+  await sep.waitFor({ state: "visible", timeout: 5000 });
+  const role = await sep.getAttribute("role");
+  const ariaOrientation = await sep.getAttribute("aria-orientation");
+  const ok = role === "separator" && ariaOrientation === "vertical";
+  report(
+    "Toolbar.Separator — orientation/role/aria-orientation locked against caller spread (Wave 7 fix #3)",
+    ok,
+    `role=${role} aria-orientation=${ariaOrientation}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

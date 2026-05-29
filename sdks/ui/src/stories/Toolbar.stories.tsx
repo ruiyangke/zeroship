@@ -618,3 +618,77 @@ export const AriaOrientationLockRegression: Story = {
     await expect(toolbar).toHaveAttribute("aria-orientation", "horizontal");
   },
 };
+
+/* ─── 14. SeparatorOrientationLockRegression — Wave 7 fix #3 ─────────── *
+ *
+ * Regression for Wave 7 fix #3. `Toolbar.Separator` LOCKS its
+ * `orientation` / `role` / `aria-orientation` to the perpendicular of
+ * the parent Toolbar axis. Pre-fix, `ToolbarSeparatorProps` was a bare
+ * alias of Base UI's separator props and forwarded everything; a
+ * caller could pass `orientation="horizontal"` (or `role="navigation"`
+ * / `aria-orientation="horizontal"`) inside a horizontal toolbar and
+ * Base UI's spread-after-defaults pattern would propagate the
+ * override — the rendered DOM would carry the wrong axis. The wrapper
+ * now omits all three at the type layer AND strips them at runtime,
+ * so a typed-bypass spread cannot ship the inconsistency.
+ *
+ * Inside a horizontal toolbar, the correct separator carries
+ * `aria-orientation="vertical"` (the perpendicular). We try to spread
+ * `orientation="horizontal"`, `role="navigation"`, and
+ * `aria-orientation="horizontal"` via an untyped bag. The runtime
+ * strip MUST drop them so the rendered separator stays
+ * `role="separator"` + `aria-orientation="vertical"`. */
+export const SeparatorOrientationLockRegression: Story = {
+  name: "Separator orientation lock — caller override is stripped",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Pass `orientation=\"horizontal\"`, `role=\"navigation\"`, and " +
+          "`aria-orientation=\"horizontal\"` via untyped spread on a " +
+          "`Toolbar.Separator` inside a horizontal toolbar. The wrapper's " +
+          "runtime strip MUST keep the rendered separator at " +
+          "`role=\"separator\"` + `aria-orientation=\"vertical\"` " +
+          "(the perpendicular Base UI computes from the parent context).",
+      },
+    },
+  },
+  render: () => {
+    // Type-bypass via a spread. The new `Omit<…, "render" | "orientation"
+    // | "role" | "aria-orientation">` rejects direct overrides, so we
+    // route through an untyped bag. The wrapper's runtime strip MUST
+    // drop all three before forwarding into Base UI.
+    const bypass = {
+      orientation: "horizontal",
+      role: "navigation",
+      "aria-orientation": "horizontal",
+    } as Record<string, unknown>;
+    return (
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="Separator orientation lock regression"
+      >
+        <Toolbar
+          data-testid="toolbar-separator-lock-host"
+          orientation="horizontal"
+        >
+          <Toolbar.Button>Cut</Toolbar.Button>
+          <Toolbar.Separator
+            data-testid="toolbar-separator-lock"
+            {...bypass}
+          />
+          <Toolbar.Button>Copy</Toolbar.Button>
+        </Toolbar>
+      </div>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const sep = canvasElement.querySelector(
+      '[data-testid="toolbar-separator-lock"]',
+    );
+    await expect(sep).not.toBeNull();
+    await expect(sep).toHaveAttribute("role", "separator");
+    await expect(sep).toHaveAttribute("aria-orientation", "vertical");
+  },
+};
