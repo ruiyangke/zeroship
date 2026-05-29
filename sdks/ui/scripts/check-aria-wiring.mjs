@@ -104,6 +104,64 @@ function report(label, ok, extra) {
   );
 }
 
+/* ─── Wave 9 Menu fix 🔴 #1 — Menu public root re-export regression ─── *
+ *
+ * Pre-fix (before f4a2307d): `import { Menu } from "@zeroship/ui"`
+ * resolved to `undefined` because the public root `src/index.ts` only
+ * re-exported a narrow surface; the Slice-11 components shipped only via
+ * the internal `src/components/index.ts` barrel. Real consumers of the
+ * package root saw the symbol as missing.
+ *
+ * The Round 5 surface walker below catches this transitively, but the
+ * regression for the Menu-specific 🔴 names the symbols out loud so a
+ * future drop of any single binding (Menu / createMenuHandle) fails with
+ * a Menu-named message instead of a generic "missing" diff. */
+{
+  const distUrl = new URL("../dist/index.js", import.meta.url);
+  let mod = null;
+  let importError = null;
+  try {
+    mod = await import(distUrl.href);
+  } catch (err) {
+    importError = err instanceof Error ? err.message : String(err);
+  }
+  const isComponentExport = (value) =>
+    value !== undefined &&
+    value !== null &&
+    (typeof value === "function" || typeof value === "object");
+  const hasMenu = !!(mod && isComponentExport(mod.Menu));
+  const hasCreateHandle =
+    !!(mod && typeof mod.createMenuHandle === "function");
+  // Subpart bindings live as static properties on the Menu namespace —
+  // verifying a few of the unique ones (Backdrop, Submenu, LinkItem,
+  // Arrow) confirms the namespace assembled, not just the root symbol.
+  const hasTrigger = !!(mod && mod.Menu && isComponentExport(mod.Menu.Trigger));
+  const hasPortal = !!(mod && mod.Menu && isComponentExport(mod.Menu.Portal));
+  const hasBackdrop = !!(mod && mod.Menu && isComponentExport(mod.Menu.Backdrop));
+  const hasPopup = !!(mod && mod.Menu && isComponentExport(mod.Menu.Popup));
+  const hasLinkItem = !!(mod && mod.Menu && isComponentExport(mod.Menu.LinkItem));
+  const hasSubmenu = !!(mod && mod.Menu && isComponentExport(mod.Menu.Submenu));
+  const hasArrow = !!(mod && mod.Menu && isComponentExport(mod.Menu.Arrow));
+  const ok =
+    !importError &&
+    hasMenu &&
+    hasCreateHandle &&
+    hasTrigger &&
+    hasPortal &&
+    hasBackdrop &&
+    hasPopup &&
+    hasLinkItem &&
+    hasSubmenu &&
+    hasArrow;
+  report(
+    "@zeroship/ui public root re-exports Menu + createMenuHandle (wave9 🔴 1)",
+    ok,
+    importError
+      ? `importError=${importError}`
+      : `Menu=${hasMenu} createMenuHandle=${hasCreateHandle} Trigger=${hasTrigger} Portal=${hasPortal} Backdrop=${hasBackdrop} Popup=${hasPopup} LinkItem=${hasLinkItem} Submenu=${hasSubmenu} Arrow=${hasArrow}`,
+  );
+}
+
 /* ─── Round 5 fix #1 — exhaustive dist-import surface regression ────── *
  *
  * Walks the value bindings exported from `src/components/index.ts` AND
@@ -3741,13 +3799,16 @@ await open("components-menu--basic-items");
     openBefore === null &&
     openAfter !== null &&
     popupVisible;
+  // Cleanup runs BEFORE `report(...)` so the block's last statement is
+  // the report call — keeps each Menu/ContextMenu block's close shape
+  // matching `);\n}\n`. (Slice 11 review-fix close-shape clean-up.) */
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   report(
     "Menu Trigger click — popup opens + trigger stamps data-popup-open",
     ok,
     `aria-haspopup=${haspopupBefore} data-popup-open=${openBefore}->${openAfter} popupVisible=${popupVisible}`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
 }
 
 /* ─── 68. Menu ArrowDown navigates + ArrowUp loops ──────────────────── *
@@ -3788,13 +3849,14 @@ await open("components-menu--basic-items");
   const maxReached = Math.max(...indices);
   const loopedBack = indices[indices.length - 1] === 0;
   const ok = itemCount >= 2 && maxReached >= itemCount - 1 && loopedBack;
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   report(
     "Menu ArrowDown navigates items + loops",
     ok,
     `items=${itemCount} indices=[${indices.join(",")}] maxReached=${maxReached} loopedBack=${loopedBack}`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
 }
 
 /* ─── 69. Menu CheckboxItem click → aria-checked flips + state updates ── *
@@ -3828,13 +3890,14 @@ await open("components-menu--with-checkbox-item");
   // false (aria-checked="false" OR no data-checked attribute).
   const isUnchecked = ariaAfter === "false" || dataAfter === null;
   const ok = flipped && isUnchecked;
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   report(
     "Menu CheckboxItem click — aria-checked flips",
     ok,
     `aria=${ariaBefore}->${ariaAfter} data=${dataBefore}->${dataAfter} flipped=${flipped}`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
 }
 
 /* ─── 70. Menu RadioGroup selection changes between RadioItems ──────── *
@@ -3869,13 +3932,14 @@ await open("components-menu--with-radio-group");
     .getAttribute("aria-checked");
   const ok =
     systemBefore === "true" && lightAfter === "true" && systemAfter === "false";
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   report(
     "Menu RadioGroup selection changes between RadioItems",
     ok,
     `system=${systemBefore}->${systemAfter}, light->${lightAfter}`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
 }
 
 /* ─── 71. ContextMenu right-click on Trigger area → popup opens ─────── *
@@ -3901,13 +3965,14 @@ await open("components-contextmenu--basic-right-click-area");
     .isVisible()
     .catch(() => false);
   const ok = visible && itemVisible;
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   report(
     "ContextMenu right-click on Trigger — popup opens at pointer",
     ok,
     `popupVisible=${visible} firstItemVisible=${itemVisible}`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
 }
 
 /* ─── 72. Slice 11 review-fix #1: shortcut text doesn't leak into
@@ -3979,13 +4044,14 @@ await open("components-menu--with-keyboard-shortcuts");
     typeof highlightedLabel === "string" &&
     /^P/i.test(highlightedLabel) &&
     afterVLabel === firstLabel;
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   report(
     "Menu typeahead — `shortcut` text doesn't leak into label match",
     ok,
     `P→${JSON.stringify(highlightedLabel)} V-stayed=${afterVLabel === firstLabel} (was ${JSON.stringify(firstLabel)}, became ${JSON.stringify(afterVLabel)})`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
 }
 
 /* ─── 73. Slice 11 review-fix #2: forced-colors mirror covers the
@@ -4048,13 +4114,14 @@ await open("components-menu--with-keyboard-shortcuts");
     /^rgba?\(/.test(highlightedColor) &&
     !/oklch/i.test(highlightedColor);
   const ok = allRgb && highlightedRgb;
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   report(
     "Menu forced-colors — shortcut tail uses system color (not oklch token)",
     ok,
     `idleSamples=${idleColors.length} idleColors=${JSON.stringify(idleColors[0] ?? null)} highlighted=${highlightedColor}`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(200);
 }
 await page.emulateMedia({ forcedColors: "none" });
 
@@ -4134,15 +4201,16 @@ await open("components-menu--rtl");
     !!triggerBox &&
     !!submenuBox &&
     submenuBox.x + submenuBox.width <= triggerBox.x + 1;
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
   report(
     "Menu Submenu RTL — popup opens on the LEFT of trigger",
     ok,
     `trigger.x=${triggerBox?.x} submenu.x+w=${submenuBox ? submenuBox.x + submenuBox.width : "?"}`,
   );
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(150);
-  await page.keyboard.press("Escape");
-  await page.waitForTimeout(150);
 }
 
 /* ─── 76. Slice 11 review-fix #8: Menu.LinkItem asChild renders the
@@ -4183,6 +4251,70 @@ await open("components-menu--with-link-item-as-child");
     "Menu.LinkItem asChild — renders consumer's <a> + Escape closes",
     ok,
     `tag=${tagName} href=${href} hasClass=${hasItemClass} popupClosed=${popupGone}`,
+  );
+}
+
+/* ─── 76b. Wave 9 Menu fix 🔴 #2 — LinkItem wrapper ref single attach ── *
+ *
+ * Pre-fix, `Menu.LinkItem` passed the forwarded `ref` to
+ * `<BaseMenu.LinkItem>`. Base UI internally merged that into
+ * `linkProps.ref` (its [linkRef, buttonRef, forwardedRef, listItem.ref]
+ * chain → see `useRenderElement`). The wrapper render then composed
+ * `(forwardedRef, linkProps.ref)` again — `linkProps.ref` was already
+ * calling the forwarded ref under the hood, so the caller's callback
+ * fired TWICE per attach event. The fix drops the outer ref pass-through
+ * on `<BaseMenu.LinkItem>`.
+ *
+ * Story `LinkItemAsChildSingleAttach` installs TWO callback refs:
+ *   - wrapperRef on `<Menu.LinkItem ref>`: the buggy surface.
+ *   - domRef on the rendered DOM `<a>` (via asChild): a control ref that
+ *     fires once per attach regardless of the bug.
+ *
+ * The story writes "wrapper=N dom=M" into a status span. Post-fix N ==
+ * M; pre-fix N == 2*M. We read the snapshot from outside the popup
+ * (the span lives in the canvas body). Mirrors block 14c (Card title
+ * asChild single attach). */
+await open("components-menu--link-item-as-child-single-attach");
+{
+  const trigger = page.locator('[data-testid="menu-link-attach-trigger"]');
+  await trigger.waitFor({ state: "visible", timeout: 5000 });
+  await trigger.click();
+  const popup = page.locator('[data-testid="menu-link-attach-popup"]');
+  await popup.waitFor({ state: "visible", timeout: 5000 });
+  const anchor = page.locator('[data-testid="menu-link-attach-anchor"]');
+  await anchor.waitFor({ state: "visible", timeout: 5000 });
+  const status = page.locator('[data-testid="menu-link-attach-count"]');
+  await status.waitFor({ state: "attached", timeout: 5000 });
+  // Wait until the dom ref has fired at least once — the asChild <a>
+  // mounted inside the popup. We poll the textContent because the
+  // counter is written outside React's render path (writeStatus).
+  await page.waitForFunction(
+    () => {
+      const node = document.querySelector(
+        '[data-testid="menu-link-attach-count"]',
+      );
+      const m = node && (node.textContent || "").match(/wrapper=(\d+)\s+dom=(\d+)/);
+      return !!(m && Number(m[2]) > 0);
+    },
+    null,
+    { timeout: 5000 },
+  );
+  const text = (await status.innerText()).trim();
+  const match = text.match(/wrapper=(\d+)\s+dom=(\d+)/);
+  const wrapper = match ? Number(match[1]) : NaN;
+  const dom = match ? Number(match[2]) : NaN;
+  // Pre-fix: wrapper === 2 * dom. Post-fix: wrapper === dom (both
+  // counters fire exactly once per ref-attach event). The strict
+  // equality is the regression signal — accepting wrapper < 2*dom
+  // would let a partial fix slip through.
+  const ok = !!match && dom > 0 && wrapper === dom;
+  // Cleanup BEFORE report — see block 67 comment.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  report(
+    "Menu.LinkItem ref — single attach event per commit (wave9 🔴 2)",
+    ok,
+    `status="${text}" wrapper=${wrapper} dom=${dom}`,
   );
 }
 

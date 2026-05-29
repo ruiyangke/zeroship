@@ -324,6 +324,10 @@ const stories = [
   "components-menu--disabled-item",
   "components-menu--placement-side",
   "components-menu--rtl",
+  // Slice 11 review-fix (wave9 🔴 2 regression): the new LinkItem
+  // single-ref-attach story and the existing asChild LinkItem story.
+  "components-menu--with-link-item-as-child",
+  "components-menu--link-item-as-child-single-attach",
   "components-contextmenu--basic-right-click-area",
   "components-contextmenu--with-checkbox-item",
   "components-contextmenu--nested-submenu",

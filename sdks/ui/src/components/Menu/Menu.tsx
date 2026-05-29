@@ -51,8 +51,9 @@
  *     `asChild` via Slot for callers passing a router `<Link>`.
  *   - Submenu is a sugar wrapper around `SubmenuRoot + SubmenuTrigger +
  *     Portal + Positioner + Popup`. The trigger row reads as a
- *     Menu.Item with a chevron tail. `side="right"` default; Floating UI
- *     flips to left near the viewport edge.
+ *     Menu.Item with a chevron tail. `side="inline-end"` default
+ *     (visual right in LTR, visual left in RTL); Floating UI flips
+ *     toward the opposite side near the viewport edge.
  *   - Arrow renders an SVG triangle scoped to the popup surface color
  *     (same `M 0,0 L 8,8 L 16,0 Z` path Popover uses).
  *
@@ -110,7 +111,11 @@ type BaseRootProps = ComponentPropsWithRef<typeof BaseMenu.Root>;
  * the prop has no meaning at this layer. Same shape Dialog/Popover use.
  */
 export interface MenuProps extends Omit<BaseRootProps, "render"> {
-  children?: ReactNode;
+  /** Menu subparts. Accepts either a `ReactNode` tree (the common case)
+   *  or Base UI's payload render-function escape hatch — Base UI's
+   *  `Menu.Root` types `children` as `ReactNode | ((payload) => …)`, and
+   *  the wrapper forwards both shapes verbatim. */
+  children?: BaseRootProps["children"];
 }
 
 /**
@@ -543,7 +548,13 @@ function RadioDotGlyph() {
  * default `<a>` path renders via Base UI's MenuLinkItem. */
 
 type BaseLinkItemProps = ComponentPropsWithoutRef<typeof BaseMenu.LinkItem>;
-export interface MenuLinkItemProps extends BaseLinkItemProps {
+/**
+ * Props for `Menu.LinkItem`. Mirrors Base UI's `Menu.LinkItem` minus
+ * `render` — the wrapper always supplies its own render callback (the
+ * `<a>` / `asChild` Slot path), so exposing Base UI's `render` would be
+ * a TypeScript-accepted, runtime-ignored prop. Pre-launch API honesty:
+ * omit the prop rather than silently overwrite it. */
+export interface MenuLinkItemProps extends Omit<BaseLinkItemProps, "render"> {
   /** Render the single child element instead of our `<a>`. */
   asChild?: boolean;
   /** Trailing keyboard-shortcut hint. See `MenuItemProps.shortcut`.
@@ -583,7 +594,13 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
     return (
       <BaseMenu.LinkItem
         {...rest}
-        ref={ref as Ref<HTMLAnchorElement>}
+        // NOTE: do NOT pass the forwarded `ref` to <BaseMenu.LinkItem>.
+        // Base UI's render-prop hands us `linkProps.ref` already pointing
+        // at the element it would render; passing the outer ref here
+        // would round-trip back through `linkProps.ref`, and composing
+        // (outerRef, linkProps.ref) would then invoke the caller's
+        // callback ref TWICE per attach. Mirrors Dialog.Close, which
+        // also composes only inside the render-prop. */
         className={composeBaseClass("zs-menu-item zs-menu-link-item", className)}
         label={autoLabel}
         render={(linkProps) => {
@@ -597,9 +614,9 @@ const MenuLinkItem = forwardRef<HTMLAnchorElement, MenuLinkItemProps>(
             //
             // Slot composes the child's own ref via
             // `composeRefs(ourRef, getElementRef(child))` internally,
-            // so we MUST NOT pre-merge the child ref here — a
-            // double-compose would invoke the child ref twice on
-            // every mount. Mirrors Dialog.Close (3a64a726). */
+            // so we pass a SINGLE composed ref here — Slot handles
+            // the child-side composition. Mirrors Dialog.Close
+            // (3a64a726). */
             if (!isValidElement(children)) return <></>;
             return (
               <Slot
@@ -644,8 +661,9 @@ MenuLinkItem.displayName = "Menu.LinkItem";
  *
  * The trigger row reads as a Menu.Item with a chevron tail; the
  * chevron glyph is appended automatically so consumers don't need to
- * remember it. `side="right"` default; Floating UI flips to left when
- * the viewport edge would clip the popup. */
+ * remember it. `side="inline-end"` default (RTL-aware: flips to the
+ * visual left when `dir="rtl"` is in scope); Floating UI flips toward
+ * the opposite side when the viewport edge would clip the popup. */
 
 type BaseSubmenuRootProps = ComponentPropsWithoutRef<
   typeof BaseMenu.SubmenuRoot
