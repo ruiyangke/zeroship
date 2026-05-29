@@ -135,14 +135,195 @@ pub fn is_loopback_url(url: &str) -> bool {
     host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
+/// A secret input: a literal value, or a URN/ARN reference to an external source.
+///
+/// Detection is by RESERVED PREFIX: a value starting with `urn:` or `arn:` is a
+/// reference; anything else is a [`SecretRef::Literal`] (so existing literal
+/// secrets are untouched).
+#[derive(Debug, PartialEq, Eq)]
+pub enum SecretRef<'a> {
+    /// A literal secret value, used verbatim.
+    Literal(&'a str),
+    /// `urn:zeroship:env:<VARNAME>` — resolves to the named environment variable.
+    Env(&'a str),
+    /// `urn:zeroship:file:<path>` — resolves to the (newline-trimmed) file contents.
+    File(&'a str),
+    /// `urn:zeroship:vault:<nss>` — `HashiCorp` Vault (resolution not yet implemented).
+    Vault(&'a str),
+    /// `urn:zeroship:awssm:<nss>` or `arn:aws:secretsmanager:<...>` — AWS Secrets
+    /// Manager (resolution not yet implemented). The ARN form keeps the whole ARN.
+    AwsSecretsManager(&'a str),
+}
+
+/// Failure modes for resolving a [`SecretRef`].
+#[derive(Debug, thiserror::Error)]
+pub enum SecretError {
+    /// `urn:zeroship:env:<VAR>` named a variable that is not set in the environment.
+    #[error("secret reference env var '{0}' is not set")]
+    EnvUnset(String),
+    /// `urn:zeroship:file:<path>` could not be read.
+    #[error("read secret file '{path}': {source}")]
+    FileIo {
+        /// The path that failed to read.
+        path: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A well-formed reference to a backend whose resolver is not implemented yet.
+    #[error("secret backend '{backend}' is not yet implemented (reference '{reference}'); use a literal value, urn:zeroship:env:<VAR>, or urn:zeroship:file:<path>")]
+    BackendUnavailable {
+        /// Short backend identifier (`"vault"`, `"awssm"`).
+        backend: &'static str,
+        /// The original reference, echoed for operator diagnosis.
+        reference: String,
+    },
+    /// A value with a reserved `urn:`/`arn:` prefix that is not a recognized reference.
+    #[error("malformed secret reference '{0}' (a value starting with urn:/arn: must be a recognized reference: urn:zeroship:{{env|file|vault|awssm}}:<...> or arn:aws:secretsmanager:<...>)")]
+    Malformed(String),
+}
+
+const URN_ENV: &str = "urn:zeroship:env:";
+const URN_FILE: &str = "urn:zeroship:file:";
+const URN_VAULT: &str = "urn:zeroship:vault:";
+const URN_AWSSM: &str = "urn:zeroship:awssm:";
+const ARN_AWSSM: &str = "arn:aws:secretsmanager:";
+
+/// Parse a raw secret input into a [`SecretRef`].
+///
+/// A value NOT starting with `urn:` or `arn:` is always [`SecretRef::Literal`].
+/// A `urn:`/`arn:` value MUST be a recognized reference, else this returns
+/// [`SecretError::Malformed`] — reserved prefixes never silently become literals.
+///
+/// # Errors
+///
+/// Returns [`SecretError::Malformed`] when a `urn:`/`arn:` value is not a
+/// recognized reference, or names a recognized scheme with an empty body.
+pub fn parse_secret_ref(raw: &str) -> Result<SecretRef<'_>, SecretError> {
+    if !raw.starts_with("urn:") && !raw.starts_with("arn:") {
+        return Ok(SecretRef::Literal(raw));
+    }
+
+    // ARN form keeps the whole ARN (it has internal structure callers may need),
+    // but still requires a non-empty body after the prefix — symmetric with the
+    // urn: schemes, so a bare `arn:aws:secretsmanager:` is Malformed, not a ref.
+    if let Some(rest) = raw.strip_prefix(ARN_AWSSM) {
+        non_empty(rest, raw)?;
+        return Ok(SecretRef::AwsSecretsManager(raw));
+    }
+
+    // urn:zeroship:<scheme>:<rest>; rest must be non-empty for every scheme.
+    if let Some(rest) = raw.strip_prefix(URN_ENV) {
+        return non_empty(rest, raw).map(SecretRef::Env);
+    }
+    if let Some(rest) = raw.strip_prefix(URN_FILE) {
+        return non_empty(rest, raw).map(SecretRef::File);
+    }
+    if let Some(rest) = raw.strip_prefix(URN_VAULT) {
+        return non_empty(rest, raw).map(SecretRef::Vault);
+    }
+    if let Some(rest) = raw.strip_prefix(URN_AWSSM) {
+        return non_empty(rest, raw).map(SecretRef::AwsSecretsManager);
+    }
+
+    Err(SecretError::Malformed(raw.to_owned()))
+}
+
+/// A recognized scheme with an empty body is [`SecretError::Malformed`].
+fn non_empty<'a>(rest: &'a str, raw: &str) -> Result<&'a str, SecretError> {
+    if rest.is_empty() {
+        Err(SecretError::Malformed(raw.to_owned()))
+    } else {
+        Ok(rest)
+    }
+}
+
+/// Resolve a secret input to its literal value. Literals pass through unchanged.
+///
+/// PERFORMS SIDE EFFECTS (env read, file read, future network fetch) — do NOT
+/// call during `--check-config`; use [`validate_secret_ref`] there instead.
+///
+/// Reserved-prefix tradeoff: because any value starting with `urn:` or `arn:` is
+/// treated as a reference, a *literal* secret whose own text begins with `urn:`
+/// or `arn:` cannot be expressed as a [`SecretRef::Literal`] — it will parse as a
+/// reference (and error as malformed if it is not a recognized one). Operators
+/// who genuinely need such a literal must front it with one of the indirection
+/// schemes (e.g. `urn:zeroship:env:MY_SECRET` or `urn:zeroship:file:/path`); a
+/// bare literal beginning with these reserved prefixes is not representable.
+///
+/// # Errors
+///
+/// Returns [`SecretError::EnvUnset`] for an unset env var, [`SecretError::FileIo`]
+/// for an unreadable file, [`SecretError::BackendUnavailable`] for vault/awssm
+/// references (resolution not yet implemented), and [`SecretError::Malformed`]
+/// for an unrecognized `urn:`/`arn:` value.
+pub fn resolve_secret(raw: &str) -> Result<String, SecretError> {
+    match parse_secret_ref(raw)? {
+        SecretRef::Literal(s) => Ok(s.to_owned()),
+        SecretRef::Env(name) => {
+            std::env::var(name).map_err(|_| SecretError::EnvUnset(name.to_owned()))
+        }
+        SecretRef::File(path) => match std::fs::read_to_string(path) {
+            Ok(mut contents) => {
+                // Strip a single trailing '\n' (and a preceding '\r' if present),
+                // matching how `printf 'secret' > file` vs an editor's trailing
+                // newline differ.
+                if contents.ends_with('\n') {
+                    contents.pop();
+                    if contents.ends_with('\r') {
+                        contents.pop();
+                    }
+                }
+                Ok(contents)
+            }
+            Err(source) => Err(SecretError::FileIo {
+                path: path.to_owned(),
+                source,
+            }),
+        },
+        SecretRef::Vault(_) => Err(SecretError::BackendUnavailable {
+            backend: "vault",
+            reference: raw.to_owned(),
+        }),
+        SecretRef::AwsSecretsManager(_) => Err(SecretError::BackendUnavailable {
+            backend: "awssm",
+            reference: raw.to_owned(),
+        }),
+    }
+}
+
+/// Validate a secret reference's FORMAT only — NO env/file/network access.
+///
+/// For `--check-config` dry runs. Literals and well-formed refs are `Ok`; a
+/// malformed `urn:`/`arn:` is an error. A well-formed `urn:zeroship:file:/missing`
+/// path is `Ok` (format is valid; existence is NOT checked here). Vault and AWS
+/// Secrets Manager references are also `Ok` (their format is valid even though
+/// resolution is not implemented yet).
+///
+/// # Errors
+///
+/// Returns [`SecretError::Malformed`] when a `urn:`/`arn:` value is not a
+/// recognized reference. Performs no side effects.
+pub fn validate_secret_ref(raw: &str) -> Result<(), SecretError> {
+    parse_secret_ref(raw).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+    use std::sync::Mutex;
+
     use base64::Engine as _;
 
     use super::{
-        decoded_master_key_len, is_loopback_url, require_unless_dev, validate_master_key_material,
-        validate_stash_key, DEV_STASH_SIGNING_KEY,
+        decoded_master_key_len, is_loopback_url, parse_secret_ref, require_unless_dev,
+        resolve_secret, validate_master_key_material, validate_secret_ref, validate_stash_key,
+        SecretError, SecretRef, DEV_STASH_SIGNING_KEY,
     };
+
+    // `std::env::set_var` mutates process-global state; serialize the env-touching
+    // tests behind a mutex so parallel test threads don't race each other.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
     #[test]
     fn require_unless_dev_rejects_missing_only_outside_dev() {
@@ -231,5 +412,169 @@ mod tests {
 
         // garbage / no host
         assert!(!is_loopback_url("not a url"));
+    }
+
+    #[test]
+    fn literal_passthrough_including_colons() {
+        let literal = "hunter2hunter2hunter2hunter2hunter2";
+        assert_eq!(
+            parse_secret_ref(literal).expect("literal parses"),
+            SecretRef::Literal(literal)
+        );
+        assert_eq!(resolve_secret(literal).expect("literal resolves"), literal);
+
+        // A DSN-like literal full of colons must NOT be mistaken for a reference.
+        let dsn = "postgres://u:p@h/db";
+        assert_eq!(
+            parse_secret_ref(dsn).expect("dsn parses"),
+            SecretRef::Literal(dsn)
+        );
+        assert_eq!(resolve_secret(dsn).expect("dsn resolves"), dsn);
+    }
+
+    #[test]
+    fn env_reference_resolves_and_reports_unset() {
+        let _guard = ENV_GUARD.lock().expect("env guard");
+        let key = format!("ZEROSHIP_TEST_SECRET_ENV_{}", std::process::id());
+        let reference = format!("urn:zeroship:env:{key}");
+
+        // edition 2021: set_var is safe (no unsafe block; workspace denies unsafe_code).
+        std::env::set_var(&key, "s3cr3t-from-env");
+        assert_eq!(
+            parse_secret_ref(&reference).expect("env ref parses"),
+            SecretRef::Env(&key)
+        );
+        assert_eq!(
+            resolve_secret(&reference).expect("env var resolves"),
+            "s3cr3t-from-env"
+        );
+
+        std::env::remove_var(&key);
+        match resolve_secret(&reference) {
+            Err(SecretError::EnvUnset(name)) => assert_eq!(name, key),
+            other => panic!("expected EnvUnset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_reference_trims_trailing_newline() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("zeroship_secret_{}.txt", std::process::id()));
+        // RAII cleanup: remove the temp file even if an assertion below panics.
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(path.clone());
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp secret");
+            // Trailing newline (and a CR) must be stripped on resolve.
+            f.write_all(b"file-secret-value\r\n").expect("write secret");
+        }
+        let path_str = path.to_str().expect("utf8 path");
+        let reference = format!("urn:zeroship:file:{path_str}");
+
+        assert_eq!(
+            parse_secret_ref(&reference).expect("file ref parses"),
+            SecretRef::File(path_str)
+        );
+        assert_eq!(
+            resolve_secret(&reference).expect("file resolves"),
+            "file-secret-value"
+        );
+
+        // Nonexistent path => FileIo on resolve.
+        let missing = "urn:zeroship:file:/no/such/zeroship/secret/path";
+        match resolve_secret(missing) {
+            Err(SecretError::FileIo { path, .. }) => {
+                assert_eq!(path, "/no/such/zeroship/secret/path");
+            }
+            other => panic!("expected FileIo, got {other:?}"),
+        }
+
+        // But validate (format-only) accepts it without touching the filesystem.
+        validate_secret_ref(missing).expect("missing file path is format-valid");
+    }
+
+    #[test]
+    fn vault_and_awssm_parse_but_are_unavailable() {
+        // vault urn
+        assert_eq!(
+            parse_secret_ref("urn:zeroship:vault:secret/data/app#token").expect("vault parses"),
+            SecretRef::Vault("secret/data/app#token")
+        );
+        match resolve_secret("urn:zeroship:vault:secret/data/app") {
+            Err(SecretError::BackendUnavailable { backend, reference }) => {
+                assert_eq!(backend, "vault");
+                assert_eq!(reference, "urn:zeroship:vault:secret/data/app");
+            }
+            other => panic!("expected BackendUnavailable(vault), got {other:?}"),
+        }
+
+        // awssm urn form
+        assert_eq!(
+            parse_secret_ref("urn:zeroship:awssm:prod/db").expect("awssm parses"),
+            SecretRef::AwsSecretsManager("prod/db")
+        );
+        match resolve_secret("urn:zeroship:awssm:prod/db") {
+            Err(SecretError::BackendUnavailable { backend, .. }) => assert_eq!(backend, "awssm"),
+            other => panic!("expected BackendUnavailable(awssm), got {other:?}"),
+        }
+
+        // arn form keeps the whole ARN.
+        let arn = "arn:aws:secretsmanager:us-east-1:123:secret:x";
+        assert_eq!(
+            parse_secret_ref(arn).expect("arn parses"),
+            SecretRef::AwsSecretsManager(arn)
+        );
+        match resolve_secret(arn) {
+            Err(SecretError::BackendUnavailable { backend, reference }) => {
+                assert_eq!(backend, "awssm");
+                assert_eq!(reference, arn);
+            }
+            other => panic!("expected BackendUnavailable(awssm), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_references_are_rejected() {
+        for bad in [
+            "urn:bogus:x",
+            "urn:zeroship:nope:x",
+            "urn:zeroship:env:", // recognized scheme, empty body
+            "arn:aws:secretsmanager:", // recognized ARN prefix, empty body
+            "arn:aws:s3:::bucket",
+        ] {
+            match parse_secret_ref(bad) {
+                Err(SecretError::Malformed(r)) => assert_eq!(r, bad),
+                other => panic!("expected Malformed for {bad:?}, got {other:?}"),
+            }
+            match resolve_secret(bad) {
+                Err(SecretError::Malformed(r)) => assert_eq!(r, bad),
+                other => panic!("expected Malformed (resolve) for {bad:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn validate_secret_ref_performs_no_side_effects() {
+        // Validating an env reference must NOT read the env: an unset var is still
+        // format-Ok (format only, never resolution).
+        validate_secret_ref("urn:zeroship:env:DEFINITELY_UNSET_VAR")
+            .expect("unset env ref is format-valid");
+
+        // Vault / awssm are format-valid even though resolution is unimplemented.
+        validate_secret_ref("urn:zeroship:vault:secret/x").expect("vault format-valid");
+        validate_secret_ref("urn:zeroship:awssm:prod/x").expect("awssm format-valid");
+        validate_secret_ref("arn:aws:secretsmanager:us-east-1:123:secret:x")
+            .expect("arn format-valid");
+
+        // Malformed still propagates from validate.
+        assert!(matches!(
+            validate_secret_ref("urn:zeroship:nope:x"),
+            Err(SecretError::Malformed(_))
+        ));
     }
 }
