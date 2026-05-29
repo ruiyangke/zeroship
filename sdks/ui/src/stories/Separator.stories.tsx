@@ -267,20 +267,20 @@ export const InsideToolbar: Story = {
       aria-label="Toolbar separators"
       style={{ alignItems: "center", gap: "0.5rem" }}
     >
-      <Button size="sm" variant="plain" data-testid="separator-tool-1">
+      <Button size="small" variant="plain" data-testid="separator-tool-1">
         Bold
       </Button>
-      <Button size="sm" variant="plain" data-testid="separator-tool-2">
+      <Button size="small" variant="plain" data-testid="separator-tool-2">
         Italic
       </Button>
       <Separator
         orientation="vertical"
         data-testid="separator-toolbar-divider"
       />
-      <Button size="sm" variant="plain" data-testid="separator-tool-3">
+      <Button size="small" variant="plain" data-testid="separator-tool-3">
         Link
       </Button>
-      <Button size="sm" variant="plain" data-testid="separator-tool-4">
+      <Button size="small" variant="plain" data-testid="separator-tool-4">
         Image
       </Button>
     </div>
@@ -292,7 +292,64 @@ export const InsideToolbar: Story = {
   },
 };
 
-/* ─── 8. RTL — logical-property regression ──────────────────────────── */
+/* ─── 8. RoleLock — caller cannot override controlled ARIA ─────────── */
+export const RoleLock: Story = {
+  name: "Role lock (caller cannot override ARIA)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Regression for the role-lock fix. The public `SeparatorProps` " +
+          "Omits `role` / `aria-orientation`; the runtime spread strips " +
+          "them defensively. Even an untyped consumer (e.g. " +
+          "`{...untypedProps}`) cannot contradict the controlled ARIA. " +
+          "We assert: decorative=true with role=\"navigation\" still " +
+          "renders role=\"none\"; decorative=false with " +
+          "aria-orientation=\"vertical\" on a horizontal Separator " +
+          "still emits aria-orientation=\"horizontal\".",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Role lock"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: "0" }}
+    >
+      <Separator
+        data-testid="separator-rolelock-decorative"
+        {...({ role: "navigation", "aria-hidden": "false" } as Record<
+          string,
+          unknown
+        >)}
+      />
+      <div style={{ height: "1rem" }} />
+      <Separator
+        decorative={false}
+        orientation="horizontal"
+        data-testid="separator-rolelock-semantic"
+        {...({
+          role: "navigation",
+          "aria-orientation": "vertical",
+        } as Record<string, unknown>)}
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const decorative = canvas.getByTestId(
+      "separator-rolelock-decorative",
+    );
+    await expect(decorative).toHaveAttribute("role", "none");
+    await expect(decorative).toHaveAttribute("aria-hidden", "true");
+    const semantic = canvas.getByTestId("separator-rolelock-semantic");
+    await expect(semantic).toHaveAttribute("role", "separator");
+    await expect(semantic).toHaveAttribute("aria-orientation", "horizontal");
+  },
+};
+
+/* ─── 9. RTL — logical-property regression ──────────────────────────── */
 export const RTL: Story = {
   name: "RTL",
   parameters: {

@@ -193,6 +193,20 @@ export {
   Progress,
   type ProgressProps,
   type ProgressSize,
+  Avatar,
+  AvatarRoot,
+  AvatarImage,
+  AvatarFallback,
+  type AvatarProps,
+  type AvatarRootProps,
+  type AvatarImageProps,
+  type AvatarFallbackProps,
+  type AvatarSize,
+  type AvatarShape,
+  Separator,
+  type SeparatorProps,
+  type SeparatorOrientation,
+  type SeparatorVariant,
 } from "./components";
 
 // Temporary placeholders — see ./placeholders.tsx for migration tracking.

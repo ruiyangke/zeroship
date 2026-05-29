@@ -53,6 +53,57 @@ function report(label, ok, extra) {
   if (!ok) failures++;
 }
 
+/* ─── Slice 17 public-package smoke import regression ───────────────── *
+ *
+ * Regression for Fix 2. The aria-wiring script runs after `pnpm
+ * --filter @zeroship/ui build`, so `dist/index.js` exists. We assert
+ * that Avatar and Separator are reachable from the package root the
+ * way real consumers will reach them: `import { Avatar } from
+ * "@zeroship/ui"`. Pre-fix code exported them only from the internal
+ * components barrel, so `dist/index.js` did not re-export them and
+ * this import would resolve to `undefined`.
+ *
+ * The aria-wiring script lives at `sdks/ui/scripts/check-aria-wiring
+ * .mjs`; the build emits `sdks/ui/dist/index.js`. We resolve the path
+ * relative to `import.meta.url` to stay independent of the CWD the
+ * script is launched from. */
+{
+  const distUrl = new URL("../dist/index.js", import.meta.url);
+  let mod = null;
+  let importError = null;
+  try {
+    mod = await import(distUrl.href);
+  } catch (err) {
+    importError = err instanceof Error ? err.message : String(err);
+  }
+  // Each binding is a React `forwardRef` (an exotic object), so we
+  // accept either `object` or `function` — what matters is the
+  // binding exists on the package root and is not `undefined`.
+  const isComponentExport = (value) =>
+    value !== undefined &&
+    value !== null &&
+    (typeof value === "function" || typeof value === "object");
+  const hasAvatar = !!(mod && isComponentExport(mod.Avatar));
+  const hasAvatarRoot = !!(mod && isComponentExport(mod.AvatarRoot));
+  const hasAvatarImage = !!(mod && isComponentExport(mod.AvatarImage));
+  const hasAvatarFallback = !!(mod && isComponentExport(mod.AvatarFallback));
+  const hasSeparator = !!(mod && isComponentExport(mod.Separator));
+  const ok =
+    !importError &&
+    hasAvatar &&
+    hasAvatarRoot &&
+    hasAvatarImage &&
+    hasAvatarFallback &&
+    hasSeparator;
+  report(
+    "@zeroship/ui public root re-exports Avatar + Separator",
+    ok,
+    importError
+      ? `importError=${importError}`
+      : `Avatar=${hasAvatar}, AvatarRoot=${hasAvatarRoot}, AvatarImage=${hasAvatarImage}, AvatarFallback=${hasAvatarFallback}, Separator=${hasSeparator}`,
+  );
+}
+
 async function open(storyId) {
   await page.goto(
     `${baseUrl}/iframe.html?id=${storyId}&globals=theme:Crystal`,
@@ -5287,26 +5338,67 @@ await open("components-avatar--basic");
   );
 }
 
-/* ─── 88. Slice 17: Avatar — broken src → fallback after delay ──────── */
+/* ─── 88. Slice 17: Avatar — broken src → visible fallback text ─────── *
+ *
+ * Real-path contract: the Fallback children must be visibly rendered.
+ * Base UI's avatar stateAttributesMapping returns `null` for
+ * imageLoadingStatus — the `data-image-loading-status` attribute is
+ * NEVER emitted on Root — so a status-based OR branch is a phantom
+ * false positive. We assert the fallback TEXT alone; status is used
+ * only as diagnostics. */
 await open("components-avatar--fallback-on-error");
 {
   const root = page.locator('[data-testid="avatar-error"]');
   await root.waitFor({ state: "visible", timeout: 5000 });
-  let fallbackVisible = false;
-  let status = null;
+  let fallbackText = "";
+  let phantomStatus = null;
   for (let i = 0; i < 60; i++) {
-    const text = (await root.innerText().catch(() => "")) || "";
-    status = await root.getAttribute("data-image-loading-status");
-    if (text.includes("BR") || status === "error") {
-      fallbackVisible = true;
-      break;
-    }
+    fallbackText = (await root.innerText().catch(() => "")) || "";
+    // Diagnostics only — should always be null. If a future Base UI
+    // version starts emitting this attribute we'll see it in the
+    // FAIL line and can revisit.
+    phantomStatus = await root.getAttribute("data-image-loading-status");
+    if (fallbackText.includes("BR")) break;
     await page.waitForTimeout(100);
   }
+  const ok = fallbackText.includes("BR");
   report(
-    "Avatar broken src → fallback after delay",
-    fallbackVisible,
-    `fallbackVisible=${fallbackVisible}, status="${status}"`,
+    "Avatar broken src → visible fallback text rendered",
+    ok,
+    `text="${fallbackText.trim()}", phantom-status="${phantomStatus}"`,
+  );
+}
+
+/* ─── 88b. Slice 17: Avatar — fallbackDelay actually plumbed ────────── *
+ *
+ * Regression for Fix 4. The FallbackDelay story uses a non-zero
+ * `fallbackDelay` so the Fallback render is gated by Base UI's delay
+ * timer. The story's own `play()` is what asserts the
+ * absent-then-present transition with `waitFor` bracketing (real-path
+ * timing inside the iframe before autoplay rolls past the delay).
+ *
+ * By the time this aria-wiring script's `open()` resolves
+ * `networkidle`, autoplay has already advanced past the delay window
+ * and the fallback text is painted — so this block can only check
+ * the steady-state outcome. The presence of the rendered fallback
+ * text confirms (a) the story is wired with a non-zero delay, (b)
+ * the delay path resolves, and (c) the Fallback eventually paints.
+ * The absent-on-first-paint claim is the story play()'s job. */
+await open("components-avatar--fallback-delay");
+{
+  const root = page.locator('[data-testid="avatar-delay"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  let finalText = "";
+  for (let i = 0; i < 60; i++) {
+    finalText = (await root.innerText().catch(() => "")) || "";
+    if (finalText.includes("DL")) break;
+    await page.waitForTimeout(100);
+  }
+  const eventuallyVisible = finalText.includes("DL");
+  report(
+    "Avatar fallbackDelay (non-zero) → fallback eventually rendered",
+    eventuallyVisible,
+    `finalText="${finalText.trim()}"`,
   );
 }
 
@@ -5349,6 +5441,45 @@ await open("components-separator--not-decorative");
     "Separator decorative=false → role=separator + aria-orientation",
     ok,
     `h:role="${hRole}"/orient="${hOrient}", v:role="${vRole}"/orient="${vOrient}"`,
+  );
+}
+
+/* ─── 90b. Slice 17: Separator role/aria-orientation lock ───────────── *
+ *
+ * Regression for Fix 5. The Separator's controlled ARIA must survive
+ * a caller-supplied `role` / `aria-orientation` spread. The RoleLock
+ * story passes `role="navigation"` + `aria-orientation="vertical"` on
+ * a horizontal semantic Separator via an untyped spread; both must be
+ * silently dropped at runtime. Pre-fix code forwarded `rest` without
+ * filtering and the caller props would win. */
+await open("components-separator--role-lock");
+{
+  // Separator with no inline content renders as a zero-area `<div>`
+  // (just a logical border). Playwright reports `visible: false` for
+  // zero-area nodes, so we wait on `attached` and read attributes
+  // off the DOM directly — visibility isn't part of the contract
+  // under test here.
+  const decorative = page.locator(
+    '[data-testid="separator-rolelock-decorative"]',
+  );
+  await decorative.waitFor({ state: "attached", timeout: 5000 });
+  const dRole = await decorative.getAttribute("role");
+  const dHidden = await decorative.getAttribute("aria-hidden");
+  const semantic = page.locator(
+    '[data-testid="separator-rolelock-semantic"]',
+  );
+  await semantic.waitFor({ state: "attached", timeout: 5000 });
+  const sRole = await semantic.getAttribute("role");
+  const sOrient = await semantic.getAttribute("aria-orientation");
+  const ok =
+    dRole === "none" &&
+    dHidden === "true" &&
+    sRole === "separator" &&
+    sOrient === "horizontal";
+  report(
+    "Separator role/aria-orientation locked against caller spread",
+    ok,
+    `decorative:role="${dRole}"/hidden="${dHidden}", semantic:role="${sRole}"/orient="${sOrient}"`,
   );
 }
 

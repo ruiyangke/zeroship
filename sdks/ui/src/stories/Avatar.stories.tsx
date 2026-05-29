@@ -105,16 +105,17 @@ export const Fallback: Story = {
   },
 };
 
-/* ─── 3. FallbackOnError — broken src → fallback after delay ────────── */
+/* ─── 3. FallbackOnError — broken src → visible fallback ────────────── */
 export const FallbackOnError: Story = {
   name: "Fallback on error (broken src)",
   parameters: {
     docs: {
       description: {
         story:
-          "Broken `src` → Base UI transitions imageLoadingStatus to " +
-          "`error` and mounts the Fallback. The `fallbackDelay` prop " +
-          "suppresses a flash of initials during the loading window.",
+          "Broken `src` → Base UI mounts the Fallback once the image " +
+          "load fails. The assertion requires the fallback TEXT to be " +
+          "visibly rendered — status flags alone are not sufficient " +
+          "(Base UI's `imageLoadingStatus` is not stamped on the DOM).",
       },
     },
   },
@@ -133,14 +134,64 @@ export const FallbackOnError: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("avatar-error");
     await expect(root).toBeInTheDocument();
+    // Real-path assertion: the fallback TEXT must actually paint.
+    // Status flags alone (e.g. data-image-loading-status) are a
+    // phantom — Base UI's stateAttributesMapping returns `null` for
+    // imageLoadingStatus so the attribute never reaches the DOM.
     await waitFor(
       async () => {
-        // Either the fallback has appeared OR the status is "error".
-        // We don't gate on a specific timing; once the broken image
-        // gives up, the fallback paints.
-        const hasFallback = !!root.textContent?.includes("BR");
-        const status = root.getAttribute("data-image-loading-status");
-        await expect(hasFallback || status === "error").toBe(true);
+        await expect(root).toHaveTextContent("BR");
+      },
+      { timeout: 5000 },
+    );
+  },
+};
+
+/* ─── 3b. FallbackDelay — fallback gated by non-zero delay ──────────── */
+export const FallbackDelay: Story = {
+  name: "Fallback delay (non-zero)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Broken `src` with `fallbackDelay={1500}` — Base UI holds the " +
+          "Fallback offscreen until the delay elapses, then paints the " +
+          "initials. Asserts the delay is actually plumbed: fallback " +
+          "text is ABSENT initially, then PRESENT after the delay.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Fallback delay non-zero"
+    >
+      <Avatar
+        src={BROKEN_SRC}
+        alt="Broken portrait"
+        fallback="DL"
+        fallbackDelay={1500}
+        data-testid="avatar-delay"
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("avatar-delay");
+    await expect(root).toBeInTheDocument();
+    // The fallback must eventually paint visible text. We don't gate
+    // on the upper bound of the delay window — Base UI's image-load
+    // failure timing varies across runners — but we DO require that
+    // the rendered text content carry the fallback string. If the
+    // `fallbackDelay` prop were silently dropped, this assertion
+    // would still pass once the broken image gave up; the absence
+    // assertion below is what proves the delay path actually fires.
+    const initialText = root.textContent ?? "";
+    await expect(initialText.includes("DL")).toBe(false);
+    await waitFor(
+      async () => {
+        await expect(root).toHaveTextContent("DL");
       },
       { timeout: 5000 },
     );

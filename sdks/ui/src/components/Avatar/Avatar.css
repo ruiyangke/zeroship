@@ -10,8 +10,14 @@
  *   size:    --xs | --sm | --md | --lg | --xl
  *   shape:   --circle | --square | --rounded
  *
- * State surface (data-* from Base UI):
- *   data-image-loading-status="idle" | "loading" | "loaded" | "error"
+ * State surface:
+ *   Base UI's avatar stateAttributesMapping returns `null` for
+ *   imageLoadingStatus — i.e. NO `data-image-loading-status` attribute
+ *   is emitted on the Root. The loading branch is observable instead
+ *   via Avatar.Image's `onLoadingStatusChange` callback, or by the
+ *   presence/absence of the rendered Fallback text. The state-surface
+ *   line that lived here previously was a phantom; do not re-add it
+ *   without first stamping the attribute yourself in TS.
  *
  * Layout discipline:
  *   - The Root is `inline-flex` with a fixed inline-size + block-size.
@@ -127,7 +133,7 @@
   font-size: var(--zs-avatar-text-size);
   line-height: var(--zs-avatar-text-line);
   font-weight: var(--zs-avatar-text-weight);
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   text-transform: uppercase;
   color: var(--zs-label);
 }
@@ -172,10 +178,9 @@
 
 /* ─── Reduced motion ───────────────────────────────────────────────── *
  *
- * No-op block — Avatar has no transitions. Block exists for parity
- * with the rest of the surface so a future maintainer adding (e.g.) a
- * fade-in on `data-image-loading-status="loaded"` finds the hook
- * pre-wired. */
+ * No-op block — Avatar has no transitions today. Block exists for
+ * parity with the rest of the surface so a future maintainer adding a
+ * fade-in on Fallback mount has the gate already in place. */
 @media (prefers-reduced-motion: reduce) {
   .zs-avatar,
   .zs-avatar__image,
