@@ -204,6 +204,8 @@ export {
   AvatarImage,
   AvatarFallback,
   type AvatarProps,
+  type AvatarPropsWithSrc,
+  type AvatarPropsWithoutSrc,
   type AvatarRootProps,
   type AvatarImageProps,
   type AvatarFallbackProps,

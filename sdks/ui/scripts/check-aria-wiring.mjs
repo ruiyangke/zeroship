@@ -6735,6 +6735,114 @@ await open("components-avatar--fallback-delay");
   );
 }
 
+/* ─── 88c. Wave 9 review-fix 🔴 — decorative path hides fallback ────── *
+ *
+ * `<Avatar src="…" alt="" fallback="…" />` is the decorative-image
+ * contract. Pre-fix the rendered <img> correctly carried `alt=""`,
+ * but while loading and after errors the Fallback substitute leaked
+ * the raw initials text to AT — contradicting the caller's explicit
+ * decorative request. The fix stamps `aria-hidden="true"` on the
+ * Fallback whenever the shorthand is invoked with `src` + `alt === ""`,
+ * so the decorative contract holds across all three image-load states
+ * (loading, loaded, errored). The DecorativeFallback story drives a
+ * deterministically-broken data: src so the Fallback paints (real
+ * path), and we assert `aria-hidden="true"` on it. */
+await open("components-avatar--decorative-fallback");
+{
+  const root = page.locator('[data-testid="avatar-decorative"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const fallback = root.locator(".zs-avatar__fallback");
+  await fallback.waitFor({ state: "attached", timeout: 5000 });
+  // Wait for the fallback text to actually paint — that's the
+  // post-error steady state where the AT-leak would manifest.
+  let fallbackText = "";
+  for (let i = 0; i < 60; i++) {
+    fallbackText = (await fallback.innerText().catch(() => "")) || "";
+    if (fallbackText.includes("DC")) break;
+    await page.waitForTimeout(100);
+  }
+  const ariaHidden = await fallback.getAttribute("aria-hidden");
+  const role = await fallback.getAttribute("role");
+  const ariaLabel = await fallback.getAttribute("aria-label");
+  const ok =
+    fallbackText.includes("DC") &&
+    ariaHidden === "true" &&
+    role !== "img" &&
+    ariaLabel === null;
+  report(
+    "Avatar decorative (src+alt=\"\") → fallback aria-hidden=true",
+    ok,
+    `text="${fallbackText.trim()}", aria-hidden="${ariaHidden}", role="${role}", aria-label="${ariaLabel}"`,
+  );
+}
+
+/* ─── 88d. Wave 9 review-fix 🔴 — identity path mirrors `alt` ──────── *
+ *
+ * `<Avatar src="…" alt="Ada Lovelace" fallback="AL" />` — the
+ * identity contract. The image's `alt` is the documented accessible
+ * name. Pre-fix the Fallback substitute (loading + errored states)
+ * announced the raw initials ("A L") instead of the identity ("Ada
+ * Lovelace"), so AT users got a different accessible name depending
+ * on the image's load state. The fix gives the Fallback
+ * `role="img"` + `aria-label={alt}` so the lockup's accessible name
+ * is stable across loading, loaded, and errored. */
+await open("components-avatar--fallback-on-error");
+{
+  const root = page.locator('[data-testid="avatar-error"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const fallback = root.locator(".zs-avatar__fallback");
+  await fallback.waitFor({ state: "attached", timeout: 5000 });
+  let fallbackText = "";
+  for (let i = 0; i < 60; i++) {
+    fallbackText = (await fallback.innerText().catch(() => "")) || "";
+    if (fallbackText.includes("BR")) break;
+    await page.waitForTimeout(100);
+  }
+  const role = await fallback.getAttribute("role");
+  const ariaLabel = await fallback.getAttribute("aria-label");
+  const ariaHidden = await fallback.getAttribute("aria-hidden");
+  const ok =
+    fallbackText.includes("BR") &&
+    role === "img" &&
+    ariaLabel === "Broken portrait" &&
+    ariaHidden === null;
+  report(
+    "Avatar identity (src+alt=\"…\") → fallback role=img + aria-label mirrors alt",
+    ok,
+    `text="${fallbackText.trim()}", role="${role}", aria-label="${ariaLabel}", aria-hidden="${ariaHidden}"`,
+  );
+}
+
+/* ─── 88e. Wave 9 review-fix 🔴 — fallback-only path is unannotated ── *
+ *
+ * `<Avatar fallback="AL" />` (no `src`): the initials text IS the
+ * accessible name; captioning beyond that is the caller's job. The
+ * wrapper must NOT stamp aria-hidden / role=img / aria-label in this
+ * branch — those belong to the substitute-for-image branches only.
+ * This block guards against an over-eager fix that ariaHides or
+ * relabels the wrong branch. */
+await open("components-avatar--fallback");
+{
+  const root = page.locator('[data-testid="avatar-fallback-only"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const fallback = root.locator(".zs-avatar__fallback");
+  await fallback.waitFor({ state: "attached", timeout: 5000 });
+  const fallbackText = (await fallback.innerText().catch(() => "")) || "";
+  const ariaHidden = await fallback.getAttribute("aria-hidden");
+  const role = await fallback.getAttribute("role");
+  const ariaLabel = await fallback.getAttribute("aria-label");
+  const ok =
+    fallbackText.includes("AL") &&
+    ariaHidden === null &&
+    role !== "img" &&
+    ariaLabel === null;
+  report(
+    "Avatar fallback-only (no src) → no aria-hidden / role=img / aria-label",
+    ok,
+    `text="${fallbackText.trim()}", aria-hidden="${ariaHidden}", role="${role}", aria-label="${ariaLabel}"`,
+  );
+}
+
 /* ─── 89. Slice 17: Separator decorative=true → role=none + hidden ── */
 await open("components-separator--horizontal");
 {

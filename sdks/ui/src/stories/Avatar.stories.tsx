@@ -24,8 +24,14 @@ const AVATAR_DATA_URL =
   "C0lEQVR42mP8/x8AAuMB8DtXNJsAAAAASUVORK5CYII=";
 
 /* A guaranteed-failing src so the FallbackOnError path executes the
- * Base UI status transition. The protocol-only URL never resolves. */
-const BROKEN_SRC = "https://0.0.0.0/never-resolves.png";
+ * Base UI status transition. Review-fix 🟡: previously this was a real
+ * network URL (`https://0.0.0.0/...`) whose error timing depended on
+ * the runner's network stack and could race `networkidle`. We use a
+ * deterministic malformed `data:` image URL instead — the base64
+ * payload is not a valid PNG, so the browser fires `error` during
+ * decode (synchronous-ish, no network round-trip, no runner skew). */
+const BROKEN_SRC =
+  "data:image/png;base64,bm90LWEtcG5n";
 
 function UserGlyph() {
   return (
@@ -102,6 +108,15 @@ export const Fallback: Story = {
     await expect(root).toBeInTheDocument();
     await expect(root).toHaveTextContent("AL");
     await expect(root.querySelector("img")).toBeNull();
+    // Regression for 🔴 fix: when `src` is unset the fallback IS the
+    // accessible name — captioning is on the caller. So the wrapper
+    // must NOT stamp aria-hidden / role=img / aria-label on it (those
+    // belong to the substitute-for-image branches only).
+    const fallback = root.querySelector(".zs-avatar__fallback");
+    await expect(fallback).not.toBeNull();
+    await expect(fallback).not.toHaveAttribute("aria-hidden");
+    await expect(fallback).not.toHaveAttribute("role", "img");
+    await expect(fallback).not.toHaveAttribute("aria-label");
   },
 };
 
@@ -115,7 +130,11 @@ export const FallbackOnError: Story = {
           "Broken `src` → Base UI mounts the Fallback once the image " +
           "load fails. The assertion requires the fallback TEXT to be " +
           "visibly rendered — status flags alone are not sufficient " +
-          "(Base UI's `imageLoadingStatus` is not stamped on the DOM).",
+          "(Base UI's `imageLoadingStatus` is not stamped on the DOM). " +
+          "Identity-image path (non-empty `alt`): the Fallback inherits " +
+          "the image's accessible name via `role=img` + `aria-label`, so " +
+          "AT announces the identity (\"Broken portrait\") instead of " +
+          "leaking the raw initials text (\"B R\").",
       },
     },
   },
@@ -144,6 +163,66 @@ export const FallbackOnError: Story = {
       },
       { timeout: 5000 },
     );
+    // Regression for 🔴 fix: the fallback substituting for the image
+    // must mirror the image's accessible name. Pre-fix the fallback
+    // was a plain <span> whose initials text leaked to AT instead of
+    // the documented `alt` contract.
+    const fallback = root.querySelector(".zs-avatar__fallback");
+    await expect(fallback).not.toBeNull();
+    await expect(fallback).toHaveAttribute("role", "img");
+    await expect(fallback).toHaveAttribute("aria-label", "Broken portrait");
+  },
+};
+
+/* ─── 3a. DecorativeFallback — src + alt="" → fallback hidden from AT ─ */
+export const DecorativeFallback: Story = {
+  name: "Decorative fallback (src + alt=\"\")",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "When a caller marks the image decorative with `alt=\"\"`, " +
+          "the Fallback that substitutes for the image MUST also be " +
+          "hidden from AT — otherwise the decorative contract only " +
+          "holds in the loaded state and the load/error states leak " +
+          "the raw initials text. Asserts `aria-hidden=\"true\"` on the " +
+          "rendered fallback.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Decorative fallback"
+    >
+      <Avatar
+        src={BROKEN_SRC}
+        alt=""
+        fallback="DC"
+        fallbackDelay={0}
+        data-testid="avatar-decorative"
+      />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const root = canvas.getByTestId("avatar-decorative");
+    await expect(root).toBeInTheDocument();
+    await waitFor(
+      async () => {
+        await expect(root).toHaveTextContent("DC");
+      },
+      { timeout: 5000 },
+    );
+    // Regression for 🔴 fix: the fallback must be aria-hidden when the
+    // caller asked for decorative semantics via `alt=""`.
+    const fallback = root.querySelector(".zs-avatar__fallback");
+    await expect(fallback).not.toBeNull();
+    await expect(fallback).toHaveAttribute("aria-hidden", "true");
+    // And it must NOT carry the identity-path aria-label.
+    await expect(fallback).not.toHaveAttribute("aria-label");
+    await expect(fallback).not.toHaveAttribute("role", "img");
   },
 };
 
