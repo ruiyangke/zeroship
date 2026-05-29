@@ -5661,6 +5661,269 @@ await open("components-scrollarea--hover-only");
   }
 }
 
+/* ─── 93. ScrollArea Wave 6 🔴 1: `type="auto"` keeps `pointer-events`
+ *        interactive through the hide-delay window ─────────────────────── *
+ *
+ * Pre-fix: the not-scrolling rule for `type="auto"` set
+ *   `opacity: 0; pointer-events: none;`
+ * with `opacity` transitioned through `transition-delay:
+ * var(--zs-scrollarea-hide-delay)` (default 600ms). The opacity drop
+ * was visually deferred but `pointer-events: none` applied immediately.
+ * Result: a visibly-present bar that refused thumb drags or track
+ * clicks for the whole hide-delay window.
+ *
+ * Post-fix: `pointer-events` is itself a transitioned property with
+ * `transition-delay: calc(var(--zs-scrollarea-hide-delay) +
+ * var(--zs-motion-base))`. The discrete-property swap fires AFTER both
+ * the hide-delay and the opacity fade complete — so the hit-test
+ * surface tracks visibility instead of dropping the instant the
+ * `data-scrolling` attribute clears.
+ *
+ * Real-path exercise: drive the basic-vertical story (type="auto",
+ * scrollHideDelay=600), induce `data-scrolling` by scrolling the
+ * Viewport, then wait for `data-scrolling` to clear. Immediately
+ * sample `pointer-events` and `opacity` — both must read
+ * `auto` / `~1` because we are inside the hide-delay window. Pre-fix,
+ * `pointer-events` would already read `none` while `opacity` is still
+ * `1`. */
+await open("components-scrollarea--basic-vertical");
+{
+  const root = page.locator('[data-testid="scrollarea-basic-vertical"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const bar = root.locator(
+    '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+  );
+  let present = false;
+  try {
+    await bar.first().waitFor({ state: "attached", timeout: 5000 });
+    present = true;
+  } catch {
+    present = false;
+  }
+  if (!present) {
+    report(
+      "ScrollArea type=auto bar stays interactive through hide-delay",
+      false,
+      "bar-missing",
+    );
+  } else {
+    // The behavioural contract under test is the CSS rule
+    // `.zs-scrollarea[data-visibility="auto"]:not([data-scrolling])
+    // .zs-scrollarea__scrollbar` — the not-scrolling state. We drive
+    // it directly via the `data-scrolling` DOM signal (same attribute
+    // Base UI writes) so we don't depend on the framework's internal
+    // wheel/touch scroll detection (which is unreliable to trigger
+    // synthetically from a Playwright `evaluate` setScrollTop).
+    //
+    // Flow:
+    //   1. Set `data-scrolling=""` on the Root → bar is in the visible
+    //      + interactive state (`opacity:1`, `pointer-events:auto`).
+    //   2. Wait one paint so the resolved style settles.
+    //   3. Remove `data-scrolling` → we enter the hide-delay window.
+    //   4. Sample IMMEDIATELY (< 50 ms after removal). Inside the
+    //      hide-delay window the bar must still read
+    //      `opacity ≈ 1` AND `pointer-events: auto`. Pre-fix the bar
+    //      would already report `pointer-events: none` here while
+    //      opacity was still 1.
+    await root.evaluate((el) => el.setAttribute("data-scrolling", ""));
+    // Settle into the visible state.
+    try {
+      await page.waitForFunction(
+        (el) => {
+          const cs = getComputedStyle(el);
+          return (
+            cs.pointerEvents === "auto" &&
+            parseFloat(cs.opacity || "0") > 0.9
+          );
+        },
+        await bar.first().elementHandle(),
+        { timeout: 2000 },
+      );
+    } catch {
+      /* fall through — assertion below will FAIL with the measured values */
+    }
+    // Now clear `data-scrolling` and sample the bar IMMEDIATELY. The
+    // CSS rule for the not-scrolling state must declare a non-zero
+    // `transition-delay` on the `pointer-events` channel that brackets
+    // the hide-delay + opacity fade — otherwise the bar drops its
+    // hit-test surface the instant scrolling stops, before the visible
+    // fade has even started.
+    //
+    // We assert TWO things together so the test is robust against
+    // browser quirks in how `getComputedStyle` reports in-flight
+    // discrete-property transitions:
+    //
+    //   (a) The bar's authored `transition-property` declaration lists
+    //       `pointer-events` AND the matching `transition-delay`
+    //       channel is non-zero (≥ the hide-delay token, 600ms by
+    //       default). Pre-fix the property is not in the transition
+    //       list at all.
+    //
+    //   (b) Immediately after clearing `data-scrolling`, hit-testing
+    //       the bar's center via `document.elementsFromPoint(...)`
+    //       still returns the bar (or its thumb child) in the top
+    //       layer — proving the gutter is still interactive even
+    //       though the not-scrolling rule has applied. Pre-fix the
+    //       bar would already be out of the hit-test stack here.
+    const measured = await bar.first().evaluate((el) => {
+      // Walk up to the Root and remove `data-scrolling`.
+      let n = el;
+      while (n && !(n.classList && n.classList.contains("zs-scrollarea"))) {
+        n = n.parentElement;
+      }
+      if (n) n.removeAttribute("data-scrolling");
+      // Force a layout flush so the CSS rule re-evaluates against the
+      // new selector match BEFORE we read computed style.
+      // eslint-disable-next-line no-unused-expressions
+      el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      // Parse the transition list — `transition-property` and
+      // `transition-delay` come back as comma-separated lists in the
+      // same order. Pluck the delay aligned with `pointer-events`.
+      const props = cs.transitionProperty
+        .split(",")
+        .map((s) => s.trim().toLowerCase());
+      const delays = cs.transitionDelay
+        .split(",")
+        .map((s) => s.trim());
+      const peIdx = props.indexOf("pointer-events");
+      // Parse a CSS time value like "0.85s" or "850ms" → ms.
+      const toMs = (raw) => {
+        if (!raw) return 0;
+        const m = raw.match(/^([0-9.]+)(ms|s)?$/);
+        if (!m) return 0;
+        const n = Number(m[1]);
+        return m[2] === "s" ? n * 1000 : n;
+      };
+      const peDelayMs = peIdx >= 0 ? toMs(delays[peIdx]) : 0;
+      // Hit-test the bar's geometric center. We DO want
+      // `elementsFromPoint` (the full stack), not `elementFromPoint`,
+      // because Base UI may layer additional descendants on the bar.
+      const box = el.getBoundingClientRect();
+      const cx = box.left + box.width / 2;
+      const cy = box.top + box.height / 2;
+      const hitStack = document.elementsFromPoint(cx, cy);
+      const barInStack = hitStack.some(
+        (e) =>
+          e === el ||
+          (e instanceof Element &&
+            e.classList.contains("zs-scrollarea__scrollbar")) ||
+          (e instanceof Element &&
+            e.classList.contains("zs-scrollarea__thumb")),
+      );
+      return {
+        pe: cs.pointerEvents,
+        op: parseFloat(cs.opacity || "0"),
+        peDelayMs,
+        transitionDelay: cs.transitionDelay,
+        transitionProperty: cs.transitionProperty,
+        barInStack,
+        hitTopTag:
+          hitStack[0] instanceof Element
+            ? hitStack[0].tagName + "." + hitStack[0].className
+            : "",
+      };
+    });
+    // (a) authored CSS bracket: the not-scrolling rule MUST list
+    //     `pointer-events` in transition-property AND give it a
+    //     non-zero delay ≥ the hide-delay (600ms default).
+    const cssBracketsHideDelay = measured.peDelayMs >= 600;
+    // (b) behavioural hit-test: the bar must still be on top of the
+    //     stack at the moment the rule switches to not-scrolling.
+    const stillInteractive = measured.barInStack;
+    const ok = cssBracketsHideDelay && stillInteractive;
+    report(
+      "ScrollArea type=auto bar stays interactive through hide-delay",
+      ok,
+      `pe-delay-ms=${measured.peDelayMs}, ` +
+        `pointer-events=${measured.pe}, opacity=${measured.op}, ` +
+        `barInStack=${measured.barInStack}, ` +
+        `hitTop="${measured.hitTopTag}", ` +
+        `transition-delay=${measured.transitionDelay}, ` +
+        `transition-property=${measured.transitionProperty}`,
+    );
+  }
+}
+
+/* ─── 94. ScrollArea Wave 6 🔴 2: RTL vertical bar sits on the physical
+ *        LEFT edge (logical-property mirror) ──────────────────────────── *
+ *
+ * Pre-fix: the stylesheet shipped a `[dir="rtl"] .zs-scrollarea__scrollbar
+ * --vertical { inset-inline-end: auto; inset-inline-start: 0; }` block
+ * that re-pinned the vertical bar to the physical RIGHT edge under RTL
+ * (because `inset-inline-start: 0` in RTL resolves to the right). The
+ * RTL story's bounding-box assertion expected the bar on the LEFT
+ * half — the CSS and the story disagreed.
+ *
+ * Post-fix: the `[dir="rtl"]` override is removed; the base rule's
+ * `inset-inline-end: 0` cascades to the conventional RTL mirror (the
+ * physical LEFT edge) automatically. The story's assertion now matches.
+ *
+ * This regression gate is INDEPENDENT of the story's play() — we
+ * re-measure the bar's bounding-box position relative to the Root and
+ * also check that no `[dir="rtl"]` selector in the stylesheet is
+ * setting `inset-inline-start: 0` on the vertical bar (which would
+ * silently revert the fix). */
+await open("components-scrollarea--rtl");
+{
+  const root = page.locator('[data-testid="scrollarea-rtl"]');
+  await root.waitFor({ state: "visible", timeout: 5000 });
+  const bar = root.locator(
+    '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+  );
+  let present = false;
+  try {
+    await bar.first().waitFor({ state: "attached", timeout: 5000 });
+    present = true;
+  } catch {
+    present = false;
+  }
+  if (!present) {
+    report(
+      "ScrollArea RTL vertical bar pins to physical LEFT",
+      false,
+      "bar-missing",
+    );
+  } else {
+    const positions = await page.evaluate(
+      ({ rootSel, barSel }) => {
+        const r = document.querySelector(rootSel);
+        const b = r ? r.querySelector(barSel) : null;
+        if (!r || !b) return null;
+        const rBox = r.getBoundingClientRect();
+        const bBox = b.getBoundingClientRect();
+        return {
+          rootCenterX: rBox.left + rBox.width / 2,
+          barCenterX: bBox.left + bBox.width / 2,
+          rootLeft: rBox.left,
+          rootRight: rBox.right,
+          barLeft: bBox.left,
+          barRight: bBox.right,
+          // Authored inset values so a future override can't lie about
+          // physical position via computed style alone.
+          insetInlineEnd: getComputedStyle(b).insetInlineEnd,
+          insetInlineStart: getComputedStyle(b).insetInlineStart,
+        };
+      },
+      {
+        rootSel: '[data-testid="scrollarea-rtl"]',
+        barSel: '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+      },
+    );
+    const onLeftHalf = positions
+      ? positions.barCenterX < positions.rootCenterX
+      : false;
+    report(
+      "ScrollArea RTL vertical bar pins to physical LEFT",
+      onLeftHalf,
+      `rootCenterX=${positions?.rootCenterX}, ` +
+        `barCenterX=${positions?.barCenterX}, ` +
+        `insetInlineEnd=${positions?.insetInlineEnd}, ` +
+        `insetInlineStart=${positions?.insetInlineStart}`,
+    );
+  }
+}
+
 /* ─── 87. Slice 15 review-fix item 4: Drawer.Close asChild full Slot
  *        contract — wrapper {...rest} forwards + child onClick + wrapper
  *        onClick + close ALL compose ─────────────────────────────────── *

@@ -15,8 +15,11 @@
  *       .zs-scrollarea__content     Block wrapper for the user payload.
  *
  *     .zs-scrollarea__scrollbar     Decorative bar track. Two variants:
- *       --vertical                  pinned inline-end (RTL mirror flips
- *                                    to inline-start at equal specificity).
+ *       --vertical                  pinned inline-end (the logical-
+ *                                    property cascade flips this to
+ *                                    the physical LEFT edge under RTL
+ *                                    automatically — no explicit
+ *                                    `[dir="rtl"]` override needed).
  *       --horizontal                pinned block-end.
  *
  *       .zs-scrollarea__thumb       Draggable pill handle inside the bar.
@@ -106,9 +109,21 @@
   /* The bar fades via opacity. Visibility policies override the
    * resting opacity via the data-visibility selectors below. */
   opacity: 1;
+  /* `pointer-events` is a DISCRETE-type property — under the default
+   * `transition-behavior: normal`, it swaps INSTANTLY at the start of
+   * a transition regardless of `transition-delay`. We opt in to
+   * `allow-discrete` so the engine defers the discrete-value swap to
+   * the END of the `duration + delay` window for the
+   * `pointer-events` channel. The visibility selectors below align
+   * that delay with the opacity fade so the hit-test surface tracks
+   * the visible window instead of dropping the instant the policy
+   * changes (which would leave a fading-but-uninteractive bar during
+   * the hide-delay window of `type="auto"`). */
   transition:
     opacity var(--zs-motion-base) var(--zs-motion-ease),
-    transform var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    pointer-events 0s linear 0s;
+  transition-behavior: allow-discrete;
   touch-action: none;
   -webkit-user-select: none;
   user-select: none;
@@ -161,14 +176,29 @@
  * `.zs-scrollarea__scrollbar` above.
  */
 
-/* type=auto — visible by default, fades after the hide-delay. */
+/* type=auto — visible by default, fades after the hide-delay.
+ *
+ * The not-scrolling state below drops opacity to 0; the visible state
+ * holds opacity at 1 with the same hide-delay. `pointer-events` is a
+ * DISCRETE-type property — under the default `transition-behavior:
+ * normal` it would swap instantly at the start of the transition,
+ * regardless of `transition-delay`. With `transition-behavior:
+ * allow-discrete` (set on `.zs-scrollarea__scrollbar` above), the
+ * discrete swap is deferred to the END of `duration + delay`. We
+ * align the `pointer-events` delay with the opacity fade so the
+ * hit-test surface stays `auto` for the FULL hide-delay + fade window
+ * then flips to `none` exactly when the bar finishes fading. Without
+ * this, the bar would be visibly present but refuse thumb drags and
+ * track clicks during the hide-delay window. */
 .zs-scrollarea[data-visibility="auto"] .zs-scrollarea__scrollbar {
   opacity: 1;
   pointer-events: auto;
   transition:
     opacity var(--zs-motion-base) var(--zs-motion-ease)
       var(--zs-scrollarea-hide-delay),
-    transform var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    pointer-events 0s linear 0s;
+  transition-behavior: allow-discrete;
 }
 .zs-scrollarea[data-visibility="auto"][data-scrolling]
   .zs-scrollarea__scrollbar {
@@ -178,15 +208,28 @@
    * immediately. */
   transition:
     opacity var(--zs-motion-fast) var(--zs-motion-ease),
-    transform var(--zs-motion-base) var(--zs-motion-ease);
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    pointer-events 0s linear 0s;
+  transition-behavior: allow-discrete;
 }
 .zs-scrollarea[data-visibility="auto"]:not([data-scrolling])
   .zs-scrollarea__scrollbar {
-  /* Fade out when not scrolling. The delayed transition above produces
-   * the hide-delay behavior — bar stays at opacity 1 through the
-   * delay window then fades over motion-base. */
+  /* Fade out when not scrolling. The delayed transition produces the
+   * hide-delay behavior — bar stays at opacity 1 through the delay
+   * window then fades over motion-base. `pointer-events` swaps to
+   * `none` AFTER both the hide-delay AND the fade complete (because
+   * `transition-behavior: allow-discrete` defers the discrete swap
+   * to the end of the transition window), so the bar stays clickable
+   * for the entire visible window. */
   opacity: 0;
   pointer-events: none;
+  transition:
+    opacity var(--zs-motion-base) var(--zs-motion-ease)
+      var(--zs-scrollarea-hide-delay),
+    transform var(--zs-motion-base) var(--zs-motion-ease),
+    pointer-events 0s linear
+      calc(var(--zs-scrollarea-hide-delay) + var(--zs-motion-base));
+  transition-behavior: allow-discrete;
 }
 
 /* type=always — bar is always visible. */
@@ -294,25 +337,21 @@
   background-color: color-mix(in oklch, var(--zs-fill) 20%, transparent);
 }
 
-/* ─── RTL mirror — vertical bar flips to inline-start ─────────────────── *
+/* ─── RTL — logical properties handle the mirror ──────────────────────── *
  *
- * `inset-inline-end` already flips to the correct physical edge under
- * RTL, BUT we want to be explicit about the vertical bar flipping to
- * inline-start for visual conventions in some RTL designs. The brief
- * calls for `inset-inline-start: 0` on the vertical bar under RTL at
- * EQUAL specificity. We mirror the data-orientation selector so the
- * override lands on the same cascade weight as the LTR rule.
- */
-[dir="rtl"] .zs-scrollarea__scrollbar--vertical {
-  inset-inline-end: auto;
-  inset-inline-start: 0;
-}
-
-/* The corner follows the vertical bar's edge in RTL too. */
-[dir="rtl"] .zs-scrollarea__corner {
-  inset-inline-end: auto;
-  inset-inline-start: 0;
-}
+ * The base rules already use `inset-inline-end` for the vertical bar
+ * and the corner; under `dir="rtl"` that property resolves to the
+ * physical LEFT edge, which is the conventional RTL mirror (vertical
+ * scrollbar moves to the LEFT side, opposite of LTR's right). No
+ * `[dir="rtl"]` override is needed — adding one would re-pin the bar
+ * to the physical RIGHT (because `inset-inline-start: 0` in RTL is
+ * the right edge), which CONTRADICTS the RTL convention and the
+ * RTL story's bounding-box assertion.
+ *
+ * Earlier revisions of this stylesheet shipped a `[dir="rtl"]` block
+ * that did exactly that — flipped to `inset-inline-start: 0`. It was
+ * removed because logical properties give us the correct mirror for
+ * free. Keeping this comment as a guardrail against a regression. */
 
 /* ─── Reduced motion — specificity mirror ──────────────────────────────── *
  *

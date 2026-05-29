@@ -41,8 +41,9 @@
  *
  *   - Scrollbar: the bar track. `orientation` selects vertical (the
  *     default) or horizontal. We position vertical bars at
- *     `inset-inline-end: 0` (flips under RTL via the [dir="rtl"]
- *     specificity mirror) and horizontal bars at `inset-block-end: 0`.
+ *     `inset-inline-end: 0` (logical-property cascade flips to the
+ *     physical LEFT edge under RTL — the conventional mirror) and
+ *     horizontal bars at `inset-block-end: 0`.
  *
  *   - Thumb: the draggable handle. Native pointer handling lives in
  *     Base UI; we just style it (pill, label-tinted, hover/active
@@ -285,9 +286,10 @@ export interface ScrollAreaScrollbarProps
   /**
    * Which axis this Scrollbar controls. `vertical` (default) renders a
    * tall bar pinned to the inline-end edge; `horizontal` renders a wide
-   * bar pinned to the block-end edge. The vertical bar's inline-end
-   * anchor flips to inline-start under RTL via the specificity mirror
-   * in `ScrollArea.css`.
+   * bar pinned to the block-end edge. Logical-property cascade gives
+   * the vertical bar the conventional RTL mirror automatically — the
+   * `inset-inline-end` anchor resolves to the physical LEFT edge under
+   * `dir="rtl"`, no explicit override required.
    *
    * @default "vertical"
    */
