@@ -429,6 +429,16 @@ const stories = [
   "components-previewcard--with-arrow",
   "components-previewcard--placement-side",
   "components-previewcard--rtl",
+  // Slice 20: CheckboxGroup. Layout-only primitive; axe walks each
+  // story's chip + label cluster.
+  "components-checkboxgroup--basic",
+  "components-checkboxgroup--controlled",
+  "components-checkboxgroup--disabled",
+  "components-checkboxgroup--horizontal",
+  "components-checkboxgroup--nested-fieldset",
+  "components-checkboxgroup--rtl",
+  "components-checkboxgroup--all-selected",
+  "components-checkboxgroup--none-selected",
 ];
 
 async function launchBrowser() {

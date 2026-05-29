@@ -1,0 +1,58 @@
+/*
+ * CheckboxGroup — layout-only primitive.
+ *
+ * Anatomy:
+ *   .zs-checkbox-group           — Base UI's <div> (CheckboxGroupContext)
+ *     └─ <Checkbox /> children — each paints its own chip + (optional) label
+ *
+ * Modifier classes:
+ *   orientation: --vertical | --horizontal
+ *
+ * State surface (driven by data-* Base UI emits on the group):
+ *   data-disabled
+ *
+ * Design guarantees:
+ *
+ *   1. The group has NO paint of its own — no background, no border,
+ *      no shadow. Layout + gap is all this primitive supplies. Children
+ *      paint chips, labels, focus rings.
+ *
+ *   2. Vertical (default) stacks via `flex-direction: column` and
+ *      `gap: var(--zs-space-2)` — same rhythm as a column of Field
+ *      controls so a CheckboxGroup nested in a Field reads as a single
+ *      cluster.
+ *
+ *   3. Horizontal becomes `flex-direction: row` + `flex-wrap: wrap`,
+ *      using the wider `--zs-space-4` gap so adjacent checkbox rows
+ *      breathe. Wrap is intentional: horizontal groups that overflow
+ *      the inline axis flow to the next row rather than clipping.
+ *
+ *   4. RTL: logical properties only; the row orientation flips
+ *      automatically because `flex-direction: row` honors the
+ *      inline-base-direction of the writing mode. No per-direction
+ *      override needed.
+ *
+ *   5. Reduced motion: no transitions to disable on this primitive.
+ *      Children handle their own motion overrides.
+ *
+ *   6. Forced colors: nothing painted, nothing to mirror. The chips
+ *      inside paint their own high-contrast surfaces (see
+ *      Checkbox.css forced-colors block).
+ */
+
+/* ─── group container ───────────────────────────────────────────────── */
+.zs-checkbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--zs-space-2);
+  min-inline-size: 0;
+  font-family: var(--zs-font-system);
+  color: var(--zs-label);
+}
+
+.zs-checkbox-group--horizontal {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--zs-space-4);
+  align-items: center;
+}

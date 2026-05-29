@@ -25,6 +25,13 @@ export type {
   CheckboxVariant,
 } from "./Checkbox";
 
+export { CheckboxGroup } from "./CheckboxGroup";
+export type {
+  CheckboxGroupProps,
+  CheckboxGroupOrientation,
+  CheckboxGroupValue,
+} from "./CheckboxGroup";
+
 export { Switch } from "./Switch";
 export type { SwitchProps, SwitchSize } from "./Switch";
 
