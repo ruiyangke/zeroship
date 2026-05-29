@@ -4,6 +4,7 @@ export type {
   PreviewCardSide,
   PreviewCardAlign,
   PreviewCardSize,
+  PreviewCardHandle,
   PreviewCardTriggerProps,
   PreviewCardPortalProps,
   PreviewCardBackdropProps,

@@ -1,6 +1,38 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { expect, userEvent, waitFor, within } from "@storybook/test";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Button, PreviewCard } from "../components";
+
+/* Token-driven placeholder thumbnail used in the Basic / LinkPreview
+ * stories. Previous revisions used SVG data URIs that contained URL-
+ * encoded hex literals which bypassed the literal-hash token-purity
+ * grep but still violated the `--zs-*`-only rule. The placeholder now
+ * paints with token-driven gradients so the rule holds end-to-end
+ * (token-purity hex = 0 inclusive of URL-encoded forms). */
+function ThumbnailPlaceholder({
+  label,
+  tone = "accent",
+}: {
+  label: string;
+  tone?: "accent" | "subtle";
+}) {
+  const background =
+    tone === "accent"
+      ? "linear-gradient(135deg, var(--zs-accent), var(--zs-system-orange))"
+      : "linear-gradient(135deg, var(--zs-fill-quaternary), var(--zs-fill-tertiary))";
+  return (
+    <div
+      role="img"
+      aria-label={label}
+      style={{
+        inlineSize: "100%",
+        blockSize: "6.25rem",
+        borderRadius: "var(--zs-radius-2)",
+        background,
+      }}
+    />
+  );
+}
 
 /* PreviewCard is the rich-hover analog of Tooltip: small intent delay
  * before open, generous close grace so the cursor can cross from the
@@ -46,10 +78,7 @@ export const Basic: Story = {
         </PreviewCard.Trigger>
         <PreviewCard.Portal>
           <PreviewCard.Popup data-testid="previewcard-basic-popup">
-            <img
-              alt="Mountain landscape placeholder"
-              src="data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20320%20140%22%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22g%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%221%22%20y2%3D%221%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%23cfe1ff%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23e7d1ff%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3Crect%20width%3D%22320%22%20height%3D%22140%22%20fill%3D%22url(%23g)%22%2F%3E%3Cpolygon%20points%3D%220%2C140%20100%2C60%20180%2C110%20260%2C50%20320%2C95%20320%2C140%22%20fill%3D%22%23b9c9ff%22%2F%3E%3C%2Fsvg%3E"
-            />
+            <ThumbnailPlaceholder label="Yosemite trip thumbnail" tone="accent" />
             <h3>Yosemite trip notes</h3>
             <p>
               A weekend of granite walls and quiet alpine lakes. Quick read
@@ -190,9 +219,9 @@ export const LinkPreview: Story = {
           </PreviewCard.Trigger>
           <PreviewCard.Portal>
             <PreviewCard.Popup data-testid="previewcard-linkpreview-popup">
-              <img
-                alt="Article thumbnail placeholder"
-                src="data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20320%20120%22%3E%3Crect%20width%3D%22320%22%20height%3D%22120%22%20fill%3D%22%23eef2ff%22%2F%3E%3Cg%20fill%3D%22%237c87ff%22%3E%3Crect%20x%3D%2228%22%20y%3D%2228%22%20width%3D%22160%22%20height%3D%2210%22%20rx%3D%224%22%2F%3E%3Crect%20x%3D%2228%22%20y%3D%2250%22%20width%3D%22240%22%20height%3D%226%22%20rx%3D%223%22%20opacity%3D%22.5%22%2F%3E%3Crect%20x%3D%2228%22%20y%3D%2266%22%20width%3D%22210%22%20height%3D%226%22%20rx%3D%223%22%20opacity%3D%22.45%22%2F%3E%3Crect%20x%3D%2228%22%20y%3D%2282%22%20width%3D%22180%22%20height%3D%226%22%20rx%3D%223%22%20opacity%3D%22.4%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E"
+              <ThumbnailPlaceholder
+                label="Article thumbnail"
+                tone="subtle"
               />
               <h3>io_uring runtime</h3>
               <p style={{ color: "var(--zs-label-tertiary)" }}>
@@ -317,10 +346,18 @@ export const AsChild: Story = {
   render: () => (
     <div className="zs-story-row" role="group" aria-label="AsChild">
       <PreviewCard delay={50}>
-        <PreviewCard.Trigger asChild>
+        {/* `className="zs-aschild-wrapper-class"` on the wrapper
+            Trigger MUST flow through onto the consumer's `<a>` — the
+            asChild branch routes the prop through the shared Slot
+            helper so the rendered element ends up with both the
+            consumer's own className AND the wrapper's. An earlier
+            revision destructured `className` but never re-passed it,
+            silently dropping it (codex review fix 2). */}
+        <PreviewCard.Trigger asChild className="zs-aschild-wrapper-class">
           <a
             data-testid="previewcard-aschild-trigger"
             href="https://example.com/post/42"
+            className="zs-aschild-consumer-class"
             style={{ color: "var(--zs-accent)" }}
           >
             Read the announcement post →
@@ -345,6 +382,10 @@ export const AsChild: Story = {
     const trigger = canvas.getByTestId("previewcard-aschild-trigger");
     await expect(trigger.tagName.toLowerCase()).toBe("a");
     await expect(trigger).toHaveAttribute("href", "https://example.com/post/42");
+    // The wrapper's className flows through the Slot onto the
+    // consumer's element alongside the consumer's own className.
+    await expect(trigger).toHaveClass("zs-aschild-wrapper-class");
+    await expect(trigger).toHaveClass("zs-aschild-consumer-class");
     await userEvent.hover(trigger);
     await body.findByTestId(
       "previewcard-aschild-popup",
@@ -478,37 +519,44 @@ export const Rtl: Story = {
     },
   },
   render: () => (
-    <div
-      className="zs-story-row"
-      role="group"
-      aria-label="RTL"
-      dir="rtl"
-      lang="he"
-      style={{ padding: "4rem" }}
-    >
-      <PreviewCard delay={50}>
-        <PreviewCard.Trigger
-          asChild
-          data-testid="previewcard-rtl-trigger"
-        >
-          <Button aria-label="Preview RTL">ריחוף לתצוגה</Button>
-        </PreviewCard.Trigger>
-        <PreviewCard.Portal>
-          <PreviewCard.Popup
-            side="inline-end"
-            size="md"
-            data-testid="previewcard-rtl-popup"
+    // DirectionProvider seeds Base UI's DirectionContext so the Floating
+    // UI positioner resolves `inline-start` / `inline-end` against the
+    // RTL axis. A bare `dir="rtl"` div is invisible to Base UI — the
+    // popup portals to document.body and the attribute never propagates
+    // across that boundary. Slice 11 documented this exact failure mode
+    // in `Menu.stories.tsx:566-571`; Slice 19 mirrors it.
+    <DirectionProvider direction="rtl">
+      <div
+        className="zs-story-row"
+        role="group"
+        aria-label="RTL"
+        lang="he"
+        style={{ padding: "4rem" }}
+      >
+        <PreviewCard delay={50}>
+          <PreviewCard.Trigger
+            asChild
+            data-testid="previewcard-rtl-trigger"
           >
-            <PreviewCard.Arrow />
-            <h3>תצוגה מקדימה</h3>
-            <p>
-              טקסט בעברית עם פריסה לוגית. הצד מתורגם למיקום הפיזי
-              הנכון תחת direction: rtl.
-            </p>
-          </PreviewCard.Popup>
-        </PreviewCard.Portal>
-      </PreviewCard>
-    </div>
+            <Button aria-label="Preview RTL">ריחוף לתצוגה</Button>
+          </PreviewCard.Trigger>
+          <PreviewCard.Portal>
+            <PreviewCard.Popup
+              side="inline-end"
+              size="md"
+              data-testid="previewcard-rtl-popup"
+            >
+              <PreviewCard.Arrow />
+              <h3>תצוגה מקדימה</h3>
+              <p>
+                טקסט בעברית עם פריסה לוגית. הצד מתורגם למיקום הפיזי
+                הנכון תחת direction: rtl.
+              </p>
+            </PreviewCard.Popup>
+          </PreviewCard.Portal>
+        </PreviewCard>
+      </div>
+    </DirectionProvider>
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
