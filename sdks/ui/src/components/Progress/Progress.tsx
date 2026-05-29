@@ -143,11 +143,14 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
           rootProps: HTMLAttributes<HTMLDivElement>,
           state: ProgressRootRenderState,
         ) => {
-          // Re-stamp data-* attributes from the render-callback state so
-          // CSS attribute selectors (`.zs-progress[data-status="…"]`)
-          // light up consistently. Base UI also sets `data-status` itself,
-          // but re-stamping keeps the contract local + survives a future
-          // Base UI internal rename.
+          // Re-stamp `data-status` from the render-callback state so CSS
+          // attribute selectors (`.zs-progress[data-status="…"]`) light
+          // up consistently. Base UI itself only emits the per-status
+          // marker attributes (`data-progressing` / `data-complete` /
+          // `data-indeterminate`) on the Root — NOT a unified
+          // `data-status`. We synthesise the unified attribute here so
+          // CSS + tests can branch on a single key and stay independent
+          // of Base UI's individual-flag shape.
           return (
             <div
               {...rootProps}

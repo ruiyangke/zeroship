@@ -9850,6 +9850,200 @@ await open(
   );
 }
 await page.emulateMedia({ forcedColors: "none" });
+/* ─── Wave 10 fix (Progress #1) — Indeterminate emits explicit "Loading"
+ *  aria-valuetext, not Base UI's default "indeterminate progress" ──────
+ *
+ * Pre-fix the Indeterminate story passed only `aria-label="Loading"` and
+ * its play() asserted `aria-valuetext === "Loading"`. Base UI's
+ * `getDefaultAriaValueText(value=null)` returns the literal string
+ * `"indeterminate progress"` — never the consumer-supplied aria-label —
+ * so the play() never matched and test-storybook flagged the story red.
+ *
+ * The fix forwards an explicit `aria-valuetext="Loading"` prop through
+ * the Progress shell to Base UI. This block locks the contract so a
+ * future regression that drops the prop OR re-introduces the Base UI
+ * default re-trips the runner with a focused error. */
+await open("components-progress--indeterminate");
+{
+  const prog = page.locator('[data-testid="progress-indeterminate"]');
+  await prog.waitFor({ state: "visible", timeout: 5000 });
+  const valueText = await prog.getAttribute("aria-valuetext");
+  const valueNow = await prog.getAttribute("aria-valuenow");
+  const status = await prog.getAttribute("data-status");
+  // STRICT contract: aria-valuetext is exactly "Loading" (the story's
+  // explicit prop). Base UI's default "indeterminate progress" would
+  // FAIL this check — that's the regression signal.
+  const ok =
+    status === "indeterminate" &&
+    valueNow === null &&
+    valueText === "Loading";
+  report(
+    "Progress Indeterminate — aria-valuetext is the explicit story prop, not Base UI default (Wave 10 fix #1)",
+    ok,
+    `valuetext="${valueText}" now=${valueNow} status=${status}`,
+  );
+}
+
+/* ─── Wave 10 fix (Progress #2) — ExternalAriaLabelling drops showValue
+ *  so Base UI's `Intl.NumberFormat {style: 'percent'}` doesn't paint a
+ *  misleading "N%" badge on a custom-range progress ──────────────────
+ *
+ * Pre-fix the story passed `showValue` alongside `value=7, max=10`.
+ * Base UI's default percent formatter divides the raw `value` by 100
+ * (not by `max`), so the visible Progress.Value rendered "7%" while
+ * the bar itself was 70% full — directly contradicting the SR-only
+ * `aria-valuetext="Seven of ten rows imported"`.
+ *
+ * The fix is the Meter-wave10 shape: drop `showValue` on the custom-
+ * range path; let the filled track + aria-valuetext carry the readout.
+ * This block locks that contract by asserting the aria triplet AND that
+ * neither "7%" (the misleading badge) nor "70%" (the would-be-correct
+ * percent) leak into the rendered text. */
+await open("components-progress--external-aria-labelling");
+{
+  const prog = page.locator('[data-testid="progress-external-aria"]');
+  await prog.waitFor({ state: "visible", timeout: 5000 });
+  const role = await prog.getAttribute("role");
+  const valueMin = await prog.getAttribute("aria-valuemin");
+  const valueMax = await prog.getAttribute("aria-valuemax");
+  const valueNow = await prog.getAttribute("aria-valuenow");
+  const valueText = await prog.getAttribute("aria-valuetext");
+  const labelledBy = await prog.getAttribute("aria-labelledby");
+  const describedBy = await prog.getAttribute("aria-describedby");
+  // Target the Progress.Value subtree directly (`.zs-progress__value`)
+  // instead of `page.locator('body').innerText()` so a visually-hidden
+  // Value (display:none, visibility:hidden, opacity:0, etc.) still gets
+  // caught — `innerText` skips visually-hidden subtrees, but the
+  // misleading percent badge would still be there in the DOM. The
+  // assertion also covers the case where the Value element is absent
+  // entirely (the wave10 fix #2 contract): if no `.zs-progress__value`
+  // element exists, `valueText` resolves to the empty string and both
+  // regexes return false — which is the pass condition we want.
+  const valueElText = await prog.evaluate((el) => {
+    const v = el.querySelector(".zs-progress__value");
+    return v ? (v.textContent ?? "") : "";
+  });
+  const has7Pct = /\b7%/.test(valueElText);
+  const has70Pct = /\b70%/.test(valueElText);
+  const ok =
+    role === "progressbar" &&
+    valueMin === "0" &&
+    valueMax === "10" &&
+    valueNow === "7" &&
+    valueText === "Seven of ten rows imported" &&
+    labelledBy === "progress-import-label" &&
+    describedBy === "progress-import-description" &&
+    !has7Pct &&
+    !has70Pct;
+  report(
+    "Progress custom-range external-aria forwards triplet; no misleading percent badge (Wave 10 fix #2)",
+    ok,
+    `role=${role} min=${valueMin} max=${valueMax} now=${valueNow} valuetext="${valueText}" labelledby=${labelledBy} describedby=${describedBy} valueElText="${valueElText}" has7%=${has7Pct} has70%=${has70Pct}`,
+  );
+}
+
+/* ─── Wave 10 fix (Progress #3) — Disabled+indeterminate under prefers-
+ *  reduced-motion keeps disabled paint, not reduced-motion placeholder ─
+ *
+ * Pre-fix the base `.zs-progress[data-disabled] .zs-progress__indicator`
+ * rule painted the indicator at `var(--zs-label-quaternary)` (solid,
+ * alpha=1), but an equal-specificity rule inside `@media (prefers-
+ * reduced-motion: reduce)` re-painted the indeterminate indicator with
+ * `color-mix(in oklch, var(--zs-accent) 45%, transparent)` (≈ alpha
+ * 0.45) and appeared LATER in source order, so the reduced-motion rule
+ * won the cascade on a `data-disabled + data-status="indeterminate"`
+ * row.
+ *
+ * The fix mirrors the disabled selectors inside the @media block AFTER
+ * the reduced-motion indeterminate rule so source order resolves the
+ * cascade in favour of the disabled paint.
+ *
+ * This block emulates reducedMotion=reduce, opens the DisabledIndetermi-
+ * nate story, reads the indicator's computed background-color, and
+ * asserts (a) alpha ≈ 1 (solid disabled paint, NOT the 45%-alpha
+ * reduced-motion fill) and (b) the colour matches a sibling probe
+ * painted with `var(--zs-label-quaternary)`. Either signal alone would
+ * catch the bug; both together lock the contract. */
+await page.emulateMedia({ reducedMotion: "reduce" });
+await open("components-progress--disabled-indeterminate");
+{
+  const prog = page.locator(
+    '[data-testid="progress-disabled-indeterminate"]',
+  );
+  await prog.waitFor({ state: "visible", timeout: 5000 });
+  const status = await prog.getAttribute("data-status");
+  const disabled = await prog.getAttribute("data-disabled");
+
+  // Probe the indicator computed style + a reference element painted
+  // with `var(--zs-label-quaternary)` for direct colour comparison.
+  // Returning the rgba string from the indicator alongside the
+  // reference lets the assertion match colours even though the
+  // browser canonicalises oklch through its own colour pipeline.
+  const probe = await prog.evaluate((el) => {
+    const indicator = el.querySelector(".zs-progress__indicator");
+    const track = el.querySelector(".zs-progress__track");
+    if (!indicator || !track) {
+      return { error: "no indicator/track" };
+    }
+    const indicatorBg = getComputedStyle(indicator).backgroundColor;
+    const trackBg = getComputedStyle(track).backgroundColor;
+    const animation = getComputedStyle(indicator).animationName;
+
+    // Reference paint: mount a sibling div under the same root using
+    // the disabled token, read its computed background-color. If the
+    // indicator's bg matches the reference, the disabled paint won
+    // the cascade; if it doesn't, the reduced-motion color-mix leaked
+    // through.
+    const refIndicator = document.createElement("div");
+    refIndicator.style.background = "var(--zs-label-quaternary)";
+    el.appendChild(refIndicator);
+    const refIndicatorBg = getComputedStyle(refIndicator).backgroundColor;
+    refIndicator.remove();
+
+    const refTrack = document.createElement("div");
+    refTrack.style.background = "var(--zs-fill-quaternary)";
+    el.appendChild(refTrack);
+    const refTrackBg = getComputedStyle(refTrack).backgroundColor;
+    refTrack.remove();
+
+    // Extract alpha from the indicator's computed rgba string. The
+    // reduced-motion fallback uses color-mix(..., transparent) which
+    // resolves to ≈ alpha 0.45; the disabled paint is a solid token
+    // with alpha 1. Anything below 0.95 means the reduced-motion rule
+    // is still winning.
+    const alphaMatch = indicatorBg.match(/rgba?\([^)]*?,\s*([\d.]+)\s*\)$/);
+    const alpha = alphaMatch ? Number(alphaMatch[1]) : 1;
+
+    return {
+      indicatorBg,
+      trackBg,
+      refIndicatorBg,
+      refTrackBg,
+      animation,
+      alpha,
+    };
+  });
+
+  const indicatorMatches = probe.indicatorBg === probe.refIndicatorBg;
+  const trackMatches = probe.trackBg === probe.refTrackBg;
+  const alphaSolid = probe.alpha >= 0.95;
+  const animationStopped =
+    probe.animation === "none" || probe.animation === "";
+  const ok =
+    status === "indeterminate" &&
+    disabled === "" &&
+    indicatorMatches &&
+    trackMatches &&
+    alphaSolid &&
+    animationStopped;
+  report(
+    "Progress disabled+indeterminate under prefers-reduced-motion keeps disabled paint (Wave 10 fix #3)",
+    ok,
+    `status=${status} disabled="${disabled}" indicator="${probe.indicatorBg}" ref="${probe.refIndicatorBg}" track="${probe.trackBg}" trackRef="${probe.refTrackBg}" alpha=${probe.alpha} animation="${probe.animation}"`,
+  );
+}
+await page.emulateMedia({ reducedMotion: "no-preference" });
+
 await ctx.close();
 await browser.close();
 

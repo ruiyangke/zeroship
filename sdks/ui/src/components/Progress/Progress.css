@@ -167,6 +167,27 @@
     inline-size: 100%;
     background: color-mix(in oklch, var(--zs-accent) 45%, transparent);
   }
+  /* Disabled mirror inside the reduced-motion block — must follow the
+     indeterminate rule above so a `data-disabled + data-status=
+     "indeterminate"` row keeps its disabled paint instead of inheriting
+     the active-but-dim color-mix. The base disabled rule outside the
+     @media block sits earlier in source order, so without this mirror
+     the equal-specificity reduced-motion indeterminate rule wins and
+     repaints disabled indeterminate progress as active accent under
+     `prefers-reduced-motion: reduce`. Re-emit at the same (0,2,1)
+     specificity so the cascade resolves on source order in favour of
+     the disabled paint. */
+  .zs-progress[data-disabled] .zs-progress__track {
+    background: var(--zs-fill-quaternary);
+  }
+  .zs-progress[data-disabled] .zs-progress__indicator {
+    background: var(--zs-label-quaternary);
+    animation: none;
+  }
+  .zs-progress[data-disabled] .zs-progress__label,
+  .zs-progress[data-disabled] .zs-progress__value {
+    color: var(--zs-label-tertiary);
+  }
 }
 
 /* ─── forced-colors / Windows High Contrast ──────────────────────────

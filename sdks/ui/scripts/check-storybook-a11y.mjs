@@ -317,6 +317,10 @@ const stories = [
   "components-progress--all-sizes",
   "components-progress--with-value",
   "components-progress--completion-celebrate",
+  // wave10 fix: ExternalAriaLabelling dropped showValue to suppress the
+  // misleading "7%" Base UI percent badge on a custom-range progress;
+  // including the story in the a11y sweep keeps that path covered.
+  "components-progress--external-aria-labelling",
   "components-progress--with-label",
   "components-progress--rtl",
   // Slice 11: Menu + ContextMenu. 12 Menu + 6 ContextMenu = 18 new entries.
