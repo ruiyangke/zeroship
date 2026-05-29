@@ -3,6 +3,11 @@
 
 [auth]
 hydra_admin_url       = "http://hydra:4445"
+# COMPOSE-INTERNAL value: inside the docker network hydra's public/issuer
+# endpoint is reachable as http://hydra:4444. This intentionally differs from
+# the production template in ops/zeroship.example.toml, which shows the public
+# issuer https://auth.zeroship.ai. One file per environment — do not copy this
+# value into a prod overlay.
 hydra_public_url      = "http://hydra:4444"
 trusted_oauth_clients = ["zeroship-builder"]
 

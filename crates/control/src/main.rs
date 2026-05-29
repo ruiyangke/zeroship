@@ -33,6 +33,10 @@ struct ControlCli {
     #[arg(long, env = "CONTROL_PORT", default_value_t = 9090)]
     port: u16,
 
+    /// Address to bind. Defaults to loopback; pass 0.0.0.0 to expose across a network.
+    #[arg(long, env = "CONTROL_BIND", default_value = "127.0.0.1")]
+    bind: String,
+
     /// PostgreSQL DSN for control-plane data.
     #[arg(
         long = "db",
@@ -216,6 +220,7 @@ impl std::fmt::Debug for ControlCli {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlCli")
             .field("port", &self.port)
+            .field("bind", &self.bind)
             .field("db", &"<redacted>")
             .field("blob_store", &self.blob_store)
             .field("control_key", &"<redacted>")
@@ -284,10 +289,11 @@ fn main() -> std::io::Result<()> {
     );
 
     // S8: control consumes the privileged Hydra ADMIN API. A non-loopback admin
-    // URL outside dev is refused unless explicitly opted in — literal loopback
-    // only (no DNS), closing the rebind/TOCTOU window.
+    // URL is refused unless explicitly opted in via --allow-remote-hydra-admin —
+    // literal loopback only (no DNS), closing the rebind/TOCTOU window. Dev mode
+    // does NOT bypass this (matching auth): allowing a privileged remote admin
+    // endpoint is its own deliberate opt-in, separate from --dev-insecure.
     if !hydra_admin_url.is_empty()
-        && !insecure_dev
         && !allow_remote_hydra_admin
         && !is_loopback_url(&hydra_admin_url)
     {
@@ -304,6 +310,7 @@ fn main() -> std::io::Result<()> {
     }
 
     let port = cli.port;
+    let bind_host = cli.bind;
     let db_url = cli.db;
     let blob_store_root = cli.blob_store;
     let control_key = cli.control_key;
@@ -456,6 +463,7 @@ fn main() -> std::io::Result<()> {
 
         let mut report = CheckConfigReport::new();
         report.field("port", CheckValue::Count(usize::from(port)));
+        report.field("bind", CheckValue::Plain(bind_host.clone()));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
@@ -687,7 +695,14 @@ fn main() -> std::io::Result<()> {
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
     });
 
-    let bind_addr = format!("0.0.0.0:{port}");
+    let bind_addr = format!("{bind_host}:{port}");
+    if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
+        tracing::warn!(
+            bind = %bind_addr,
+            "control: binding a non-loopback address under --dev-insecure (admin + internal \
+             auth disabled) — do NOT expose this on an untrusted network"
+        );
+    }
     tracing::info!(bind = %bind_addr, "zeroship-control listening");
 
     web::server(async move || {
@@ -916,28 +931,20 @@ mod tests {
 
     // S8: a non-loopback Hydra admin URL is rejected outside dev unless
     // --allow-remote-hydra-admin is set. This mirrors the guard in `main`.
-    fn hydra_admin_guard_rejects(
-        hydra_admin_url: &str,
-        insecure_dev: bool,
-        allow_remote: bool,
-    ) -> bool {
-        !hydra_admin_url.is_empty()
-            && !insecure_dev
-            && !allow_remote
-            && !is_loopback_url(hydra_admin_url)
+    fn hydra_admin_guard_rejects(hydra_admin_url: &str, allow_remote: bool) -> bool {
+        !hydra_admin_url.is_empty() && !allow_remote && !is_loopback_url(hydra_admin_url)
     }
 
     #[test]
     fn non_loopback_hydra_admin_rejected_without_opt_in() {
-        // Remote admin URL, prod, no opt-in -> rejected.
-        assert!(hydra_admin_guard_rejects("http://hydra:4445", false, false));
+        // Remote admin URL, no opt-in -> rejected. Dev mode does NOT bypass this:
+        // allowing a privileged remote admin endpoint is its own explicit opt-in.
+        assert!(hydra_admin_guard_rejects("http://hydra:4445", false));
         // Loopback admin URL -> allowed.
-        assert!(!hydra_admin_guard_rejects("http://127.0.0.1:4445", false, false));
-        assert!(!hydra_admin_guard_rejects("http://localhost:4445", false, false));
-        // Remote admin URL with explicit opt-in -> allowed.
-        assert!(!hydra_admin_guard_rejects("http://hydra:4445", false, true));
-        // Remote admin URL in dev -> allowed.
-        assert!(!hydra_admin_guard_rejects("http://hydra:4445", true, false));
+        assert!(!hydra_admin_guard_rejects("http://127.0.0.1:4445", false));
+        assert!(!hydra_admin_guard_rejects("http://localhost:4445", false));
+        // Remote admin URL with explicit --allow-remote-hydra-admin -> allowed.
+        assert!(!hydra_admin_guard_rejects("http://hydra:4445", true));
     }
 
     // M4: resolve_trusted_oauth_clients distinguishes absent / present.

@@ -31,6 +31,10 @@ struct GateCli {
     #[arg(long, env = "GATE_PORT", default_value_t = 80)]
     port: u16,
 
+    /// Address to bind. Defaults to loopback; pass 0.0.0.0 to expose across a network.
+    #[arg(long, env = "GATE_BIND", default_value = "127.0.0.1")]
+    bind: String,
+
     /// Control-plane API base URL.
     #[arg(long = "control", env = "CONTROL_URL", default_value = "http://localhost:9090")]
     control: String,
@@ -195,6 +199,7 @@ fn main() -> std::io::Result<()> {
     );
 
     let port = cli.port;
+    let bind_host = cli.bind;
     let control_url = cli.control;
     let control_key = cli.control_key;
     // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
@@ -306,6 +311,7 @@ fn main() -> std::io::Result<()> {
             .map_or_else(|| "auto".to_string(), |f| f.to_string());
         let mut report = CheckConfigReport::new();
         report.field("port", CheckValue::Count(usize::from(port)));
+        report.field("bind", CheckValue::Plain(bind_host.clone()));
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
@@ -464,7 +470,14 @@ fn main() -> std::io::Result<()> {
 
     sync::start_sync(state.clone());
 
-    let bind_addr = format!("0.0.0.0:{port}");
+    let bind_addr = format!("{bind_host}:{port}");
+    if insecure_dev && bind_host != "127.0.0.1" && bind_host != "::1" && bind_host != "localhost" {
+        tracing::warn!(
+            bind = %bind_addr,
+            "gateway: binding a non-loopback address under --dev-insecure on an untrusted \
+             network is unsafe"
+        );
+    }
     tracing::info!(bind = %bind_addr, "gateway listening");
 
     web::server(async move || {

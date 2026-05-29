@@ -156,7 +156,7 @@ WORKER="$BIN/zeroship-worker"
 AUTH="$BIN/zeroship-auth"
 
 echo "=== Case 1: overlay-applied ==="
-run_cmd control-overlay "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure
+run_cmd control-overlay "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --allow-remote-hydra-admin
 show_last_output
 expect_status 0 "control exits 0"
 expect_stdout_contains "hydra_admin_url = http://hydra-from-file:4445" "control uses file hydra admin URL"
@@ -183,7 +183,7 @@ expect_stdout_contains "hydra_public_url = http://hydra-pub-from-file:4444" "aut
 echo ""
 
 echo "=== Case 2: CLI-overrides-file ==="
-run_cmd control-cli-override "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --hydra-admin-url http://cli-override:9999
+run_cmd control-cli-override "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --allow-remote-hydra-admin --hydra-admin-url http://cli-override:9999
 show_last_output
 expect_status 0 "control CLI override exits 0"
 expect_stdout_contains "hydra_admin_url = http://cli-override:9999" "control CLI hydra admin overrides file"
@@ -196,6 +196,12 @@ show_last_output
 expect_nonzero "auth rejects file-supplied remote Hydra admin without allow flag"
 echo ""
 
+# Symmetric guard on control: dev mode does NOT bypass the remote-admin opt-in.
+run_cmd control-remote-guard "$CONTROL" --check-config --config "$TMPDIR/remote-hydra.toml" --dev-insecure
+show_last_output
+expect_nonzero "control rejects file-supplied remote Hydra admin without allow flag"
+echo ""
+
 echo "=== Case 4: bad-filter-tolerant ==="
 run_cmd control-bad-filter "$CONTROL" --check-config --config "$TMPDIR/bad-filter.toml" --dev-insecure
 show_last_output
@@ -206,7 +212,7 @@ echo ""
 echo "=== Case 5: config-source ==="
 # $TMPDIR is an absolute path (mktemp -d), so shared.toml is an absolute path.
 SHARED_ABS="$TMPDIR/shared.toml"
-run_cmd control-source "$CONTROL" --check-config --config "$SHARED_ABS" --dev-insecure
+run_cmd control-source "$CONTROL" --check-config --config "$SHARED_ABS" --dev-insecure --allow-remote-hydra-admin
 show_last_output
 expect_status 0 "control config-source exits 0"
 expect_stdout_contains "config_source = $SHARED_ABS" "control reports explicit config_source path"

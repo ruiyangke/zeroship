@@ -16,9 +16,40 @@ Services and host ports from the live file:
 - `postgres` → `localhost:5440`
 - `control` (`zeroship-control`) → `localhost:9090`
 - `gateway` (`zeroship-gate`) → `localhost:8000`
+- `auth` (`zeroship-auth`) → `localhost:9092`
 - `sandbox` (`zeroship-sandbox`) → `localhost:9091`
 - `builder` (`apps/zeroship-builder` Vite dev server) → `localhost:3001`
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
+
+### Bind addresses
+
+All four web binaries default to a **loopback** bind for safety, so each compose
+command explicitly opts into a non-loopback address to be reachable across the
+container network: `control` and `gateway` pass `--bind 0.0.0.0`, `zeroship-worker`
+passes `--bind 0.0.0.0` (paired with `--worker-key`), and `zeroship-auth` passes
+`--addr 0.0.0.0:9092`. Outside compose (single-host dev), the loopback defaults
+need no override. Under `--dev-insecure`, control/gateway emit a warning when bound
+non-loopback because app/admin auth is relaxed — only do this on a trusted network.
+
+### Auth service
+
+The `auth` service runs `zeroship-auth`, the OIDC IdP UI + RP that sits in front
+of the hydra kernel. The gateway redirects unauthenticated end users to it
+(`--auth-ui-url http://auth:9092`). It runs with `--dev-insecure` (relaxes
+cookie/secret guards for the private compose network), `--bootstrap` (first-boot
+JWK + client creation), and `--allow-remote-hydra-admin` because the shared
+overlay points it at the non-loopback `http://hydra:4445` admin API. It mounts
+the shared overlay (for `hydra_admin_url` / `hydra_public_url`) and
+`ops/auth-clients.example.toml` at the well-known `--clients-config` path
+(`/etc/zeroship/auth-clients.toml`), which it reconciles against hydra admin at
+boot. The stash signing key is unset; under `--dev-insecure` it falls back to
+the built-in dev key.
+
+### Blob store
+
+`control`, `gateway`, and `worker` all mount the `bundles` volume at
+`/data/bundles` and pass `--blob-store /data/bundles`, so every service reads
+and writes the same content-addressed deploy blobs.
 
 The compose file already sets the current service names, keys, and sandbox env vars. Use it as the source of truth before copying flags into ad-hoc commands.
 
@@ -30,11 +61,14 @@ before starting Vite. The file is local dev state and is ignored by git.
 
 ### Configuration overlay
 
-`docker-compose.yml` mounts `./ops/zeroship.toml` into `control` and `gateway`
-at the well-known path `/etc/zeroship/zeroship.toml`. The compose stack relies on
-auto-discovery: because the file lives at the system well-known path, neither
-service passes `--config` — `FileConfig::resolve()` finds it automatically. The
-worker and auth server are not wired to this overlay in the compose stack.
+`docker-compose.yml` mounts `./ops/zeroship.toml` into `control`, `gateway`,
+`worker`, and `auth` at the well-known path `/etc/zeroship/zeroship.toml`. The
+compose stack relies on auto-discovery: because the file lives at the system
+well-known path, no service passes `--config` — each binary's config resolver
+finds it automatically. The worker reads only `[observability]` from it; `auth`
+reads the `[auth]` Hydra URLs. (Any service that does not mount the file simply
+falls back to compiled defaults — discovery only fires when the file is present
+at the well-known path.)
 
 The overlay provides the shared `[auth]` Hydra URLs, `trusted_oauth_clients`,
 and `[observability]` defaults so those values are defined once instead of per

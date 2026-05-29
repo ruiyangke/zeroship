@@ -24,8 +24,11 @@ hydra_admin_url = "http://hydra:4445"
 hydra_public_url = "https://auth.zeroship.ai"
 
 # First-party OAuth client IDs that skip Hydra consent screens.
-# Optional; absent => compiled default.
-# Precedence: this file > default. List keys do not have CLI/env overrides.
+# Option<Vec<String>> semantics: OMIT this key entirely => the platform's
+# compiled default set is used; a PRESENT list => exactly that set (no merge
+# with the default); a present-but-EMPTY list (`trusted_oauth_clients = []`)
+# => no trusted clients at all. This key is file/default ONLY — there is no
+# CLI flag or env var that overrides it.
 trusted_oauth_clients = ["zeroship-builder"]
 
 [observability]
