@@ -193,11 +193,36 @@ fn main() -> std::io::Result<()> {
     let port = cli.port;
     let workers_count = resolve_worker_threads(cli.worker_threads);
     let control_url = cli.control;
-    let control_key = cli.control_key;
+    // Secret-reference resolution (env:/file:/vault:/awssm: indirection). On the
+    // real boot path we resolve to the live value (side effects: env/file read);
+    // under --check-config we only validate the reference FORMAT, leaving the raw
+    // ref string in place so no env/file/network read happens during a dry run.
+    let control_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "CONTROL_KEY / --control-key",
+            &cli.control_key,
+        );
+        cli.control_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit(
+            "CONTROL_KEY / --control-key",
+            &cli.control_key,
+        )
+    };
     let max_isolates = cli.max_isolates;
     let poll_interval = cli.poll_interval;
-    let db_url = cli.db;
-    let worker_key = cli.worker_key;
+    let db_url = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("DATABASE_URL / --db", &cli.db);
+        cli.db
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("DATABASE_URL / --db", &cli.db)
+    };
+    let worker_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("WORKER_KEY / --worker-key", &cli.worker_key);
+        cli.worker_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("WORKER_KEY / --worker-key", &cli.worker_key)
+    };
     let shutdown_timeout = cli.shutdown_timeout;
     let blob_store_root = cli.blob_store;
     let bind_host = cli.bind;
@@ -456,6 +481,55 @@ mod tests {
         assert_eq!(env_only.dev_insecure, Some(true));
 
         std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+    }
+
+    // --- secret-reference resolver wiring (control_key / worker_key / db) ---
+
+    /// A literal secret resolves to itself byte-for-byte: the resolver is a
+    /// pass-through for any value that is not a `urn:`/`arn:` reference. This is
+    /// the contract the real boot path relies on — literal secrets must behave
+    /// exactly as they did before the resolver was wired in.
+    #[test]
+    fn worker_literal_secret_resolves_to_itself() {
+        let literal = "super-secret-control-key-value";
+        let resolved =
+            zeroship_core::config::resolve_secret(literal).expect("literal must resolve");
+        assert_eq!(resolved, literal);
+    }
+
+    /// `is_secret_ref` distinguishes a reference from a literal. The
+    /// check-config guard-skip in other binaries keys off this; here we lock the
+    /// boolean so a literal is never mistaken for a reference (which would
+    /// wrongly skip a strength guard) and a reference is always recognised
+    /// (so a raw `env:`/`file:` string is never fed to a strength check during
+    /// `--check-config`).
+    #[test]
+    fn worker_is_secret_ref_gates_literal_vs_reference() {
+        // Literal: NOT a reference — a strength guard `!check || !is_ref` would
+        // still RUN for a literal under check-config.
+        assert!(!zeroship_core::config::is_secret_ref(
+            "super-secret-control-key-value"
+        ));
+        // References: urn:zeroship:{env,file}: forms are recognised, so the
+        // `!is_ref` half of the guard skip is true (guard skipped under check).
+        assert!(zeroship_core::config::is_secret_ref(
+            "urn:zeroship:env:CONTROL_KEY"
+        ));
+        assert!(zeroship_core::config::is_secret_ref(
+            "urn:zeroship:file:/etc/zeroship/key"
+        ));
+    }
+
+    /// A malformed reference is rejected by the format validator used on the
+    /// `--check-config` path (`validate_secret_ref_or_exit` calls this and
+    /// exits non-zero). A reserved `urn:`/`arn:` prefix that does not name a
+    /// recognised scheme is malformed.
+    #[test]
+    fn worker_malformed_secret_ref_is_rejected() {
+        assert!(zeroship_core::config::validate_secret_ref("urn:bogus:nope").is_err());
+        // A well-formed reference and a plain literal both validate cleanly.
+        assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:env:WORKER_KEY").is_ok());
+        assert!(zeroship_core::config::validate_secret_ref("a-plain-literal").is_ok());
     }
 
     /// Bare `--dev-insecure` (no value) enables insecure mode via the

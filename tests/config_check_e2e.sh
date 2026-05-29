@@ -256,6 +256,44 @@ show_last_output
 expect_nonzero "control rejects an unknown --check-config-format value (no silent text fallback)"
 echo ""
 
+echo "=== Case 9: MASTER_KEY secret-ref FORMAT validated, NOT fetched ==="
+# A well-formed urn:zeroship:file:<path> ref must pass --check-config with exit 0
+# because validate is FORMAT-only: it must NOT read the file. To prove no-fetch
+# we point the ref at a NONEXISTENT path AND seed the file with strong material
+# so that, were check-config to dereference it, the strength check would still
+# pass — but the path does not exist, so the only way exit 0 is reachable is if
+# the file is never opened. (The file content is incidental; the path is dead.)
+KEYFILE="$TMPDIR/master.key"
+# 48 chars of fake-but-strong key material (well over the 32-char minimum).
+printf '%s' "this-is-a-fake-but-strong-master-key-1234567890" >"$KEYFILE"
+MISSING_KEYFILE="$TMPDIR/does-not-exist-master.key"
+LAST_STDOUT="$TMPDIR/control-secret-ref.stdout"
+LAST_STDERR="$TMPDIR/control-secret-ref.stderr"
+set +e
+env -i PATH="$PATH" HOME="${HOME:-}" \
+    MASTER_KEY="urn:zeroship:file:$MISSING_KEYFILE" \
+    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --allow-remote-hydra-admin \
+    >"$LAST_STDOUT" 2>"$LAST_STDERR"
+LAST_STATUS=$?
+set -e
+show_last_output
+expect_status 0 "control accepts a well-formed MASTER_KEY file ref under --check-config without reading the (nonexistent) file"
+echo ""
+
+echo "=== Case 10: malformed MASTER_KEY secret-ref rejected ==="
+LAST_STDOUT="$TMPDIR/control-bad-ref.stdout"
+LAST_STDERR="$TMPDIR/control-bad-ref.stderr"
+set +e
+env -i PATH="$PATH" HOME="${HOME:-}" \
+    MASTER_KEY="urn:zeroship:bogus:x" \
+    "$CONTROL" --check-config --config "$TMPDIR/shared.toml" --dev-insecure --allow-remote-hydra-admin \
+    >"$LAST_STDOUT" 2>"$LAST_STDERR"
+LAST_STATUS=$?
+set -e
+show_last_output
+expect_nonzero "control rejects a malformed MASTER_KEY secret reference under --check-config"
+echo ""
+
 echo "============================================"
 echo "Summary: $PASS passed, $FAIL failed"
 echo "============================================"

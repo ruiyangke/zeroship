@@ -311,29 +311,107 @@ fn main() -> std::io::Result<()> {
 
     let port = cli.port;
     let bind_host = cli.bind;
-    let db_url = cli.db;
+    // Secret-bearing inputs (the fields `ControlCli::Debug` redacts) are resolved
+    // through the shared secret-reference resolver. On the real boot path a
+    // `urn:zeroship:{env,file,...}` / `arn:aws:secretsmanager:...` reference is
+    // dereferenced to its value; under `--check-config` only the reference FORMAT
+    // is validated (no env/file/network side effects) and the raw ref string is
+    // kept for the read-only report. A literal secret passes through byte-for-byte
+    // in both modes. DSN fields (`--db`, `--auth-db`) carry passwords, so they go
+    // through the same path. Pure file-PATH fields (`--signing-key-file`,
+    // `--builder-client-secret-file`) name a file to read and are NOT resolved here.
+    let db_url = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("DATABASE_URL / --db", &cli.db);
+        cli.db
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("DATABASE_URL / --db", &cli.db)
+    };
     let blob_store_root = cli.blob_store;
-    let control_key = cli.control_key;
-    let master_key = cli.master_key;
+    let control_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("CONTROL_KEY / --control-key", &cli.control_key);
+        cli.control_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("CONTROL_KEY / --control-key", &cli.control_key)
+    };
+    let master_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("MASTER_KEY / --master-key", &cli.master_key);
+        cli.master_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("MASTER_KEY / --master-key", &cli.master_key)
+    };
     let workers_str = cli.workers;
-    let worker_key = cli.worker_key;
+    let worker_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("WORKER_KEY / --worker-key", &cli.worker_key);
+        cli.worker_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("WORKER_KEY / --worker-key", &cli.worker_key)
+    };
     let signing_key_file = cli.signing_key_file;
-    let stripe_webhook_secret = cli.stripe_webhook_secret;
+    let stripe_webhook_secret = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "STRIPE_WEBHOOK_SECRET / --stripe-webhook-secret",
+            &cli.stripe_webhook_secret,
+        );
+        cli.stripe_webhook_secret
+    } else {
+        zeroship_core::config::resolve_secret_or_exit(
+            "STRIPE_WEBHOOK_SECRET / --stripe-webhook-secret",
+            &cli.stripe_webhook_secret,
+        )
+    };
     // Comma-separated list of previous master keys, tried as fallbacks
-    // on decrypt failure during a rotation grace period.
+    // on decrypt failure during a rotation grace period. Each non-empty entry is
+    // resolved/validated like a standalone secret (validate-format under
+    // check-config, dereference on real boot).
     let legacy_master_keys_raw = cli.legacy_master_keys;
     let legacy_keys: Vec<String> = legacy_master_keys_raw
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+        .enumerate()
+        .map(|(idx, entry)| {
+            let label = format!("LEGACY_MASTER_KEYS[{idx}]");
+            if cli.check_config {
+                zeroship_core::config::validate_secret_ref_or_exit(&label, entry);
+                entry.to_owned()
+            } else {
+                zeroship_core::config::resolve_secret_or_exit(&label, entry)
+            }
+        })
         .collect();
     let builder_redirect_uri = cli.builder_redirect_uri;
     let builder_client_secret_path = cli.builder_client_secret_file;
     let deploy_tmp_dir_str = cli.deploy_tmp_dir;
-    let console_oidc_secret = cli.console_oidc_secret;
-    let stash_signing_key = cli.stash_signing_key;
-    let auth_db_url = cli.auth_db_url;
+    let console_oidc_secret = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "CONSOLE_OIDC_SECRET / --console-oidc-secret",
+            &cli.console_oidc_secret,
+        );
+        cli.console_oidc_secret
+    } else {
+        zeroship_core::config::resolve_secret_or_exit(
+            "CONSOLE_OIDC_SECRET / --console-oidc-secret",
+            &cli.console_oidc_secret,
+        )
+    };
+    let stash_signing_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "STASH_SIGNING_KEY / --stash-signing-key",
+            &cli.stash_signing_key,
+        );
+        cli.stash_signing_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit(
+            "STASH_SIGNING_KEY / --stash-signing-key",
+            &cli.stash_signing_key,
+        )
+    };
+    let auth_db_url = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("AUTH_DB_URL / --auth-db", &cli.auth_db_url);
+        cli.auth_db_url
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("AUTH_DB_URL / --auth-db", &cli.auth_db_url)
+    };
     let expected_oauth_audience = cli.oauth_audience;
 
     // Pure path resolution only — the writability PROBE (create_dir_all + probe
@@ -376,19 +454,31 @@ fn main() -> std::io::Result<()> {
             );
             std::process::exit(1);
         }
-        if let Err(message) = validate_master_key_material("MASTER_KEY", &master_key, insecure_dev)
-        {
-            tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
-            std::process::exit(1);
+        // Strength guards run on the RESOLVED value at real boot. During
+        // `--check-config` a secret REFERENCE is still the raw `urn:`/`arn:`
+        // string (not yet dereferenced), so skip the strength check for a ref —
+        // it would wrongly fail length/entropy on the reference text. A literal
+        // is checked in both modes.
+        if !cli.check_config || !zeroship_core::config::is_secret_ref(&master_key) {
+            if let Err(message) =
+                validate_master_key_material("MASTER_KEY", &master_key, insecure_dev)
+            {
+                tracing::error!(error = %message, "control: refusing to start with weak MASTER_KEY");
+                std::process::exit(1);
+            }
         }
         for (idx, legacy_key) in legacy_keys.iter().enumerate() {
             let label = format!("LEGACY_MASTER_KEYS[{idx}]");
-            if let Err(message) = validate_master_key_material(&label, legacy_key, insecure_dev) {
-                tracing::error!(
-                    error = %message,
-                    "control: refusing to start with weak legacy master key"
-                );
-                std::process::exit(1);
+            if !cli.check_config || !zeroship_core::config::is_secret_ref(legacy_key) {
+                if let Err(message) =
+                    validate_master_key_material(&label, legacy_key, insecure_dev)
+                {
+                    tracing::error!(
+                        error = %message,
+                        "control: refusing to start with weak legacy master key"
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         if stripe_webhook_secret.is_empty() {
@@ -442,11 +532,16 @@ fn main() -> std::io::Result<()> {
         // already had it). Empty is reported by the missing-secrets block
         // above; this additionally rejects a present-but-weak key (<32
         // bytes), which also catches the dev sentinel (27 bytes) in prod.
-        if let Err(message) =
-            zeroship_core::config::validate_stash_key(&stash_signing_key, insecure_dev)
-        {
-            tracing::error!(error = %message, "control: refusing to start with weak STASH_SIGNING_KEY");
-            std::process::exit(1);
+        // Skipped for a secret REFERENCE under --check-config (the local is
+        // then the raw ref string, which would wrongly fail the length check);
+        // it runs on the resolved value at real boot.
+        if !cli.check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
+            if let Err(message) =
+                zeroship_core::config::validate_stash_key(&stash_signing_key, insecure_dev)
+            {
+                tracing::error!(error = %message, "control: refusing to start with weak STASH_SIGNING_KEY");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -979,5 +1074,58 @@ mod tests {
         assert_eq!(resolved.len(), 2);
         assert!(resolved.contains("a"));
         assert!(resolved.contains("b"));
+    }
+
+    // Secret-reference resolver wiring. The resolution/validation helpers live in
+    // `zeroship_core::config::secrets` (fully tested there). These assert control's
+    // wiring contract: literals pass through byte-identically, the strength-guard
+    // skip is gated on `is_secret_ref`, and malformed references are rejected.
+
+    // (a) A literal secret resolves to itself byte-for-byte through the public
+    // resolver — control must keep literal behavior unchanged on the boot path.
+    #[test]
+    fn literal_secret_resolves_to_itself() {
+        let literal = "00".repeat(32); // a typical 32-byte-hex master key literal
+        assert_eq!(
+            zeroship_core::config::resolve_secret(&literal).expect("literal resolves"),
+            literal
+        );
+        // A DSN literal (carries a password) is likewise unchanged.
+        let dsn = "postgres://user:pass@db.internal:5432/zeroship";
+        assert_eq!(
+            zeroship_core::config::resolve_secret(dsn).expect("dsn literal resolves"),
+            dsn
+        );
+    }
+
+    // (b) The boolean that gates each strength guard: under --check-config a
+    // *referenced* secret SKIPS the strength check (the local is the raw ref
+    // string), while a *literal* still triggers it. At real boot the guard always
+    // runs. This is exactly `!check_config || !is_secret_ref(value)`.
+    #[test]
+    fn check_config_skips_strength_guard_for_reference_only() {
+        let is_ref = zeroship_core::config::is_secret_ref;
+        let guard_runs = |check_config: bool, value: &str| !check_config || !is_ref(value);
+
+        let reference = "urn:zeroship:env:MASTER_KEY";
+        let literal = "00".repeat(32);
+
+        // check-config + reference -> guard SKIPPED (would wrongly fail on ref text).
+        assert!(!guard_runs(true, reference));
+        // check-config + literal -> guard RUNS (literal must still be strength-checked).
+        assert!(guard_runs(true, &literal));
+        // real boot -> guard always RUNS, ref or literal (value is already resolved).
+        assert!(guard_runs(false, reference));
+        assert!(guard_runs(false, &literal));
+    }
+
+    // (c) A malformed reference (reserved `urn:zeroship:` scheme, unknown backend)
+    // is rejected by the format-only validator the check-config path uses.
+    #[test]
+    fn malformed_reference_is_rejected() {
+        assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:nope:x").is_err());
+        // A well-formed reference and a plain literal both validate.
+        assert!(zeroship_core::config::validate_secret_ref("urn:zeroship:env:MY_VAR").is_ok());
+        assert!(zeroship_core::config::validate_secret_ref(&"00".repeat(32)).is_ok());
     }
 }

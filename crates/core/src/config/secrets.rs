@@ -308,6 +308,52 @@ pub fn validate_secret_ref(raw: &str) -> Result<(), SecretError> {
     parse_secret_ref(raw).map(|_| ())
 }
 
+/// True when `raw` is a (non-literal) secret REFERENCE.
+///
+/// A malformed reference still counts as a reference: it starts with a reserved
+/// `urn:`/`arn:` prefix, so [`parse_secret_ref`] returns an error rather than a
+/// [`SecretRef::Literal`]. Only a value that parses cleanly as a literal is "not
+/// a reference".
+#[must_use]
+pub fn is_secret_ref(raw: &str) -> bool {
+    !matches!(parse_secret_ref(raw), Ok(SecretRef::Literal(_)))
+}
+
+/// Resolve a secret input for real startup, exiting(1) with a uniform message on
+/// failure.
+///
+/// The single binary-boundary exit point for secret resolution (mirrors
+/// `bootstrap_or_exit`). Use on the REAL boot path, NOT during `--check-config`
+/// — it performs side effects (env/file read, future network fetch). For a dry
+/// run use [`validate_secret_ref_or_exit`].
+#[must_use]
+pub fn resolve_secret_or_exit(label: &str, raw: &str) -> String {
+    match resolve_secret(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            let m = format!("config: {label}: {e}");
+            tracing::error!("{m}");
+            eprintln!("{m}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Validate a secret reference's FORMAT for a `--check-config` dry run (no fetch),
+/// exiting(1) on a malformed reference.
+///
+/// Mirrors [`resolve_secret_or_exit`] for the check-config path: it never reads
+/// env/file/network, so the caller keeps using `raw` as the (unresolved)
+/// check-config value.
+pub fn validate_secret_ref_or_exit(label: &str, raw: &str) {
+    if let Err(e) = validate_secret_ref(raw) {
+        let m = format!("config: {label}: {e}");
+        tracing::error!("{m}");
+        eprintln!("{m}");
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
@@ -316,9 +362,9 @@ mod tests {
     use base64::Engine as _;
 
     use super::{
-        decoded_master_key_len, is_loopback_url, parse_secret_ref, require_unless_dev,
-        resolve_secret, validate_master_key_material, validate_secret_ref, validate_stash_key,
-        SecretError, SecretRef, DEV_STASH_SIGNING_KEY,
+        decoded_master_key_len, is_loopback_url, is_secret_ref, parse_secret_ref,
+        require_unless_dev, resolve_secret, validate_master_key_material, validate_secret_ref,
+        validate_stash_key, SecretError, SecretRef, DEV_STASH_SIGNING_KEY,
     };
 
     // `std::env::set_var` mutates process-global state; serialize the env-touching
@@ -556,6 +602,27 @@ mod tests {
                 other => panic!("expected Malformed (resolve) for {bad:?}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn is_secret_ref_classifies_by_reserved_prefix() {
+        // Recognized references are references.
+        assert!(is_secret_ref("urn:zeroship:env:MY_VAR"));
+        assert!(is_secret_ref("urn:zeroship:file:/etc/secret"));
+        assert!(is_secret_ref("urn:zeroship:vault:secret/x"));
+        assert!(is_secret_ref("urn:zeroship:awssm:prod/db"));
+        assert!(is_secret_ref("arn:aws:secretsmanager:us-east-1:123:secret:x"));
+
+        // Malformed urn:/arn: values still count as references (they don't parse
+        // as a literal).
+        assert!(is_secret_ref("urn:bogus:x"));
+        assert!(is_secret_ref("urn:zeroship:nope:x"));
+        assert!(is_secret_ref("urn:zeroship:env:")); // recognized scheme, empty body
+        assert!(is_secret_ref("arn:aws:s3:::bucket"));
+
+        // Literals (including a colon-laden DSN) are NOT references.
+        assert!(!is_secret_ref("hunter2hunter2hunter2hunter2hunter2"));
+        assert!(!is_secret_ref("postgres://u:p@h/db"));
     }
 
     #[test]

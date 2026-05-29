@@ -201,21 +201,77 @@ fn main() -> std::io::Result<()> {
     let port = cli.port;
     let bind_host = cli.bind;
     let control_url = cli.control;
-    let control_key = cli.control_key;
+    // Secret-bearing inputs are resolved through the secret-reference
+    // resolver: a literal value passes through byte-identically, while a
+    // `urn:zeroship:{env|file|...}:…` / `arn:…` reference is dereferenced
+    // at real boot. During `--check-config` we only validate the reference
+    // FORMAT (no env/file/network reads), keeping the local as the raw ref
+    // string for the (non-secret) report.
+    let control_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "CONTROL_KEY / --control-key",
+            &cli.control_key,
+        );
+        cli.control_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit(
+            "CONTROL_KEY / --control-key",
+            &cli.control_key,
+        )
+    };
     // M7 — parse the worker URL list ONCE (rejecting empty/whitespace
     // entries) and reuse it for both the check-config count and the
     // runtime hash ring, so the two can never disagree.
     let worker_urls = parse_worker_urls(&cli.workers);
     let poll_interval = cli.poll_interval;
-    let worker_key = cli.worker_key;
+    let worker_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "WORKER_KEY / --worker-key",
+            &cli.worker_key,
+        );
+        cli.worker_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("WORKER_KEY / --worker-key", &cli.worker_key)
+    };
     let blob_store_root = cli.blob_store;
     let blob_cache_mem_mb = cli.blob_cache_mem_mb;
     let blob_cache_disk_gb = cli.blob_cache_disk_gb;
     let blob_cache_disk_root = cli.blob_cache_disk_root;
     let auth_ui_url = cli.auth_ui_url;
-    let pg_dsn = cli.db;
-    let oidc_client_secret = cli.gateway_oidc_secret;
-    let stash_signing_key = cli.stash_signing_key;
+    // DSN carries the database password, so it is resolved like any other
+    // secret (literals — including colon-laden DSNs — pass through unchanged).
+    let pg_dsn = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit("DATABASE_URL / --db", &cli.db);
+        cli.db
+    } else {
+        zeroship_core::config::resolve_secret_or_exit("DATABASE_URL / --db", &cli.db)
+    };
+    let oidc_client_secret = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+            &cli.gateway_oidc_secret,
+        );
+        cli.gateway_oidc_secret
+    } else {
+        zeroship_core::config::resolve_secret_or_exit(
+            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
+            &cli.gateway_oidc_secret,
+        )
+    };
+    let stash_signing_key = if cli.check_config {
+        zeroship_core::config::validate_secret_ref_or_exit(
+            "STASH_SIGNING_KEY / --stash-signing-key",
+            &cli.stash_signing_key,
+        );
+        cli.stash_signing_key
+    } else {
+        zeroship_core::config::resolve_secret_or_exit(
+            "STASH_SIGNING_KEY / --stash-signing-key",
+            &cli.stash_signing_key,
+        )
+    };
+    // File-PATH field (names a file to read), NOT a secret value — left
+    // unresolved; the signing key is loaded from this path below.
     let signing_key_path = cli.gateway_signing_key_file;
     let public_url = cli.gateway_public_url;
 
@@ -240,9 +296,16 @@ fn main() -> std::io::Result<()> {
         oidc_client_secret
     };
 
-    if let Err(message) = validate_stash_key(&stash_signing_key, insecure_dev) {
-        tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
-        std::process::exit(1);
+    // STRENGTH guard. At real boot `stash_signing_key` is the resolved value,
+    // so the length/sentinel checks apply to the real material. During
+    // `--check-config` the local is still the raw reference string (we only
+    // format-validated it above); a reference's text is not the secret, so
+    // running a strength check on it would wrongly fail — skip it then.
+    if !cli.check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
+        if let Err(message) = validate_stash_key(&stash_signing_key, insecure_dev) {
+            tracing::error!(error = %message, "gateway: refusing to start with unsafe stash signing key");
+            std::process::exit(1);
+        }
     }
     let stash_signing_key = if stash_signing_key.is_empty() {
         DEV_STASH_SIGNING_KEY.to_string()
@@ -668,5 +731,73 @@ mod tests {
     fn gateway_stash_key_allows_dev_default_in_insecure_dev() {
         assert!(validate_stash_key(DEV_STASH_SIGNING_KEY, true).is_ok());
         assert!(validate_stash_key("", true).is_ok());
+    }
+
+    // --- secret-reference resolver wiring (server-config) ---
+
+    // (a) A literal secret passes through the resolver byte-identically.
+    // This is the guarantee that wiring the resolver does not change
+    // behavior for the existing literal-secret deployments.
+    #[test]
+    fn literal_secret_resolves_to_itself() {
+        let literal = "super-secret-control-key-value";
+        assert_eq!(
+            zeroship_core::config::resolve_secret(literal).expect("literal resolves"),
+            literal,
+        );
+        // A colon-laden DSN literal must NOT be mistaken for a reference.
+        let dsn = "postgres://user:pass@host:5432/db";
+        assert_eq!(
+            zeroship_core::config::resolve_secret(dsn).expect("dsn resolves"),
+            dsn,
+        );
+    }
+
+    // (b) The exact boolean the stash-key strength guard is gated on. In
+    // check-config, a REFERENCE skips the strength guard (the local is the
+    // raw ref string, not the material) while a LITERAL still runs it.
+    // Mirrors `!cli.check_config || !is_secret_ref(&stash_signing_key)`.
+    #[test]
+    fn check_config_ref_skips_strength_guard_literal_still_runs() {
+        let check_config = true;
+        // A short literal in check-config: guard must RUN (and would reject it).
+        let literal = "short";
+        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(literal);
+        assert!(runs_guard, "literal in check-config must run the strength guard");
+        assert!(
+            validate_stash_key(literal, false).is_err(),
+            "the short literal would fail the guard once it runs"
+        );
+
+        // A reference in check-config: guard must be SKIPPED (the raw ref
+        // string `urn:…` is not the secret material and would wrongly fail
+        // the length check).
+        let reference = "urn:zeroship:env:STASH_SIGNING_KEY";
+        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(reference);
+        assert!(!runs_guard, "reference in check-config must skip the strength guard");
+
+        // Outside check-config the guard always runs, ref or not.
+        let check_config = false;
+        let runs_guard = !check_config || !zeroship_core::config::is_secret_ref(reference);
+        assert!(runs_guard, "outside check-config the guard always runs");
+    }
+
+    // (c) A malformed reference is rejected by the format validator used on
+    // the check-config path (validate_secret_ref_or_exit calls this).
+    #[test]
+    fn malformed_secret_ref_is_rejected() {
+        assert!(
+            zeroship_core::config::validate_secret_ref("urn:zeroship:nope:x").is_err(),
+            "an unrecognized urn: scheme must be rejected"
+        );
+        assert!(
+            zeroship_core::config::validate_secret_ref("urn:zeroship:env:").is_err(),
+            "a recognized scheme with an empty body must be rejected"
+        );
+        // A well-formed reference and a plain literal both pass format check.
+        zeroship_core::config::validate_secret_ref("urn:zeroship:env:MY_VAR")
+            .expect("well-formed ref is format-valid");
+        zeroship_core::config::validate_secret_ref("a-plain-literal")
+            .expect("a literal is format-valid");
     }
 }

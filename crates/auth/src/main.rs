@@ -10,7 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
-    bootstrap_or_exit, validate_stash_key, CheckConfigReport, CheckFormat, CheckValue,
+    bootstrap_or_exit, resolve_secret_or_exit, validate_secret_ref_or_exit, validate_stash_key,
+    CheckConfigReport, CheckFormat, CheckValue,
 };
 use zeroship_core::oidc_verify::JwksCache;
 
@@ -37,6 +38,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let file = &boot.overlay.config;
     cfg.resolve(file.auth.clone());
+
+    // Resolve secret-reference inputs (urn:zeroship:env|file|vault, arn:…) before
+    // any guard or use. On real boot we resolve to the literal value (env/file
+    // read); under --check-config we only validate the reference FORMAT and keep
+    // the raw ref string so no side effects fire (mirrors bootstrap_or_exit). A
+    // plain literal passes through byte-identically in both modes. Pure file-PATH
+    // fields (none in auth today) are excluded; these are the exact fields the
+    // redacting Debug impl prints as "<redacted>" minus the OAuth client *IDs*.
+    resolve_auth_secrets(&mut cfg);
+
     tracing::info!(addr = %cfg.addr, "starting zeroship-auth");
 
     // Loopback is the default; a non-loopback bind under --dev-insecure is
@@ -48,9 +59,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    if let Err(message) = validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev) {
-        tracing::error!("{message}");
-        std::process::exit(1);
+    // Strength guard runs on the RESOLVED value at real boot (cfg.stash_signing_key
+    // is already the literal there). During --check-config a secret REFERENCE is
+    // still the raw `urn:`/`arn:` string — running a strength check on it would
+    // wrongly fail, so skip it for a reference in that mode only (format was
+    // already validated by resolve_auth_secrets).
+    if !cfg.check_config || !zeroship_core::config::is_secret_ref(&cfg.stash_signing_key) {
+        if let Err(message) = validate_stash_key(&cfg.stash_signing_key, cfg.insecure_dev) {
+            tracing::error!("{message}");
+            std::process::exit(1);
+        }
     }
     if let Err(message) = validate_hydra_admin_url(&cfg) {
         tracing::error!("{message}");
@@ -175,6 +193,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
 }
 
+/// Resolve every secret-reference-bearing input in place.
+///
+/// Each field here is one the redacting [`AuthConfig`] `Debug` impl prints as
+/// `<redacted>` (DSN, stash signing key, OAuth client *secrets*, SMTP/Resend
+/// keys, webhook password) — never the cleartext OAuth client *IDs*. On real
+/// boot the value is resolved to its literal (env/file read via
+/// [`resolve_secret_or_exit`]); under `--check-config` only the reference FORMAT
+/// is validated ([`validate_secret_ref_or_exit`]) and the raw ref is kept so no
+/// side effects fire. A plain literal is byte-identical in both modes.
+///
+/// `Option<String>` secrets are resolved only when present and non-empty; an
+/// absent OAuth/mailer credential stays `None` (its provider arm is disabled).
+fn resolve_auth_secrets(cfg: &mut AuthConfig) {
+    let check = cfg.check_config;
+
+    // Required-string secrets (always present on the CLI struct).
+    resolve_required(check, "AUTH_DB_URL / --db-url", &mut cfg.db_url);
+    resolve_required(
+        check,
+        "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
+        &mut cfg.stash_signing_key,
+    );
+
+    // Optional secrets — resolve in place only when set & non-empty.
+    resolve_optional(
+        check,
+        "AUTH_GOOGLE_CLIENT_SECRET / --google-client-secret",
+        &mut cfg.google_client_secret,
+    );
+    resolve_optional(
+        check,
+        "AUTH_GITHUB_CLIENT_SECRET / --github-client-secret",
+        &mut cfg.github_client_secret,
+    );
+    resolve_optional(
+        check,
+        "AUTH_SMTP_PASSWORD / --smtp-password",
+        &mut cfg.smtp_password,
+    );
+    resolve_optional(
+        check,
+        "AUTH_RESEND_API_KEY / --resend-api-key",
+        &mut cfg.resend_api_key,
+    );
+    resolve_optional(
+        check,
+        "AUTH_POSTMARK_WEBHOOK_PASSWORD / --postmark-webhook-password",
+        &mut cfg.postmark_webhook_password,
+    );
+}
+
+/// Resolve one required-string secret in place (see [`resolve_auth_secrets`]).
+fn resolve_required(check_config: bool, label: &str, field: &mut String) {
+    if check_config {
+        validate_secret_ref_or_exit(label, field);
+    } else {
+        *field = resolve_secret_or_exit(label, field);
+    }
+}
+
+/// Resolve one optional secret in place. Absent/empty values are left untouched
+/// (the corresponding provider arm stays disabled); see [`resolve_auth_secrets`].
+fn resolve_optional(check_config: bool, label: &str, field: &mut Option<String>) {
+    let Some(raw) = field.as_deref() else { return };
+    if raw.is_empty() {
+        return;
+    }
+    if check_config {
+        validate_secret_ref_or_exit(label, raw);
+    } else {
+        *field = Some(resolve_secret_or_exit(label, raw));
+    }
+}
+
 /// Translate `--mailer` + per-driver flags into a concrete
 /// `Arc<dyn Mailer>`. Returns [`AuthError::Config`] when the selected
 /// driver's required credentials aren't set, so the startup error
@@ -231,6 +323,9 @@ fn is_loopback_addr(addr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::is_loopback_addr;
+    use zeroship_core::config::{
+        is_secret_ref, resolve_secret, validate_secret_ref, validate_stash_key,
+    };
 
     #[test]
     fn loopback_addr_recognises_literal_loopback_only() {
@@ -240,5 +335,82 @@ mod tests {
         // non-loopback binds (the ones the dev-insecure warn fires on)
         assert!(!is_loopback_addr("0.0.0.0:9092"));
         assert!(!is_loopback_addr("10.0.0.5:9092"));
+    }
+
+    // (a) A literal secret passes through the resolver byte-identically — the
+    // wiring (resolve_required/resolve_optional → resolve_secret_or_exit) must
+    // not mangle a plain value. Asserts via the public resolver the *_or_exit
+    // helpers delegate to.
+    #[test]
+    fn literal_secret_resolves_to_itself() {
+        let literal = "0123456789abcdef0123456789abcdef"; // strong, ≥32 bytes
+        assert_eq!(
+            resolve_secret(literal).expect("literal resolves"),
+            literal,
+            "a literal secret must pass through unchanged"
+        );
+        // A DSN literal (the db_url shape) is also a literal, not a ref.
+        let dsn = "postgres://u:p@h/db";
+        assert_eq!(resolve_secret(dsn).expect("dsn resolves"), dsn);
+        assert!(!is_secret_ref(dsn), "a DSN literal is not a reference");
+    }
+
+    // (b) The is_secret_ref-gated guard logic. The guard at boot is:
+    //     if !check_config || !is_secret_ref(&stash_signing_key) { validate_stash_key(..) }
+    // A ref'd stash key under --check-config must SKIP the strength guard
+    // (the local is the raw `urn:…` ref, which would wrongly fail length/format
+    // checks); a literal must STILL be guarded even under --check-config.
+    fn stash_guard_runs(check_config: bool, stash_key: &str) -> bool {
+        !check_config || !is_secret_ref(stash_key)
+    }
+
+    #[test]
+    fn refd_stash_key_skips_strength_guard_in_check_config() {
+        // A short env ref: valid reference FORMAT, but only 18 bytes — so the
+        // strength guard (length ≥ 32) would WRONGLY reject it if it ran on the
+        // raw ref string. That is exactly why the guard is skipped for a
+        // reference under --check-config.
+        let reference = "urn:zeroship:env:K";
+        assert!(is_secret_ref(reference), "the test fixture must be a reference");
+        assert!(
+            validate_secret_ref(reference).is_ok(),
+            "the ref FORMAT itself is valid (only the strength guard would reject it)"
+        );
+        assert!(
+            validate_stash_key(reference, false).is_err(),
+            "raw ref string must fail the strength guard if (wrongly) checked"
+        );
+
+        // check-config + reference ⇒ guard is skipped.
+        assert!(
+            !stash_guard_runs(true, reference),
+            "a ref'd stash key under --check-config must skip the strength guard"
+        );
+        // check-config + literal ⇒ guard still runs (a weak literal must fail).
+        assert!(
+            stash_guard_runs(true, "weak"),
+            "a literal stash key must still be guarded under --check-config"
+        );
+        // Real boot (not check-config) ⇒ guard ALWAYS runs, even on a reference
+        // (the local is the resolved literal there, so this is correct).
+        assert!(
+            stash_guard_runs(false, reference),
+            "outside --check-config the guard always runs (value is resolved)"
+        );
+        assert!(stash_guard_runs(false, "literal"));
+    }
+
+    // (c) A malformed reference is rejected by the format validator the
+    // check-config path uses (validate_secret_ref_or_exit delegates to this).
+    #[test]
+    fn malformed_secret_ref_is_rejected() {
+        // Reserved prefix but unrecognized scheme ⇒ malformed.
+        assert!(validate_secret_ref("urn:zeroship:nope:x").is_err());
+        // Recognized scheme with an empty body ⇒ malformed.
+        assert!(validate_secret_ref("urn:zeroship:env:").is_err());
+        // A bare reserved prefix ⇒ malformed.
+        assert!(validate_secret_ref("urn:bogus:x").is_err());
+        // A well-formed env reference is NOT malformed (format-only check).
+        assert!(validate_secret_ref("urn:zeroship:env:MY_VAR").is_ok());
     }
 }

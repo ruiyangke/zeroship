@@ -22,9 +22,9 @@ pub use bootstrap::{
 pub use env::{env_is_exact, env_is_truthy, parse_bool_flag};
 pub use file::{AuthSection, ConfigError, FileConfig, ObsSection};
 pub use secrets::{
-    decoded_master_key_len, is_loopback_url, parse_secret_ref, require_unless_dev, resolve_secret,
-    validate_master_key_material, validate_secret_ref, validate_stash_key, SecretError, SecretRef,
-    DEV_STASH_SIGNING_KEY,
+    decoded_master_key_len, is_loopback_url, is_secret_ref, parse_secret_ref, require_unless_dev,
+    resolve_secret, resolve_secret_or_exit, validate_master_key_material, validate_secret_ref,
+    validate_secret_ref_or_exit, validate_stash_key, SecretError, SecretRef, DEV_STASH_SIGNING_KEY,
 };
 pub use source::{
     load_overlay, log_overlay_source, resolve_overlay_string, ConfigSource, LoadedOverlay,
