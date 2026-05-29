@@ -21,6 +21,7 @@ const stories = [
   "components-avatar--basic",
   "components-avatar--fallback",
   "components-avatar--fallback-on-error",
+  "components-avatar--fallback-delay",
   "components-avatar--sizes",
   "components-avatar--shapes",
   "components-avatar--with-icon",

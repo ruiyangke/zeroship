@@ -63,7 +63,10 @@ export type SeparatorVariant = "hairline" | "thick";
 type BaseSeparatorProps = ComponentPropsWithRef<typeof BaseSeparator>;
 
 export interface SeparatorProps
-  extends Omit<BaseSeparatorProps, "className" | "render" | "orientation"> {
+  extends Omit<
+    BaseSeparatorProps,
+    "className" | "render" | "orientation" | "role" | "aria-orientation"
+  > {
   /**
    * Layout axis — `horizontal` (default) cuts a row; `vertical` cuts a
    * column. Drives both the visible line direction (border on the end
@@ -116,32 +119,49 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
       className,
     );
 
+    // Strip `role` / `aria-orientation` defensively in case a caller
+    // bypasses the type system (e.g., `<Separator {...untypedProps}>`).
+    // `SeparatorProps` `Omit`s both at compile time; this guard keeps
+    // the contract intact under runtime spread so neither branch can
+    // be coerced into the wrong semantics. Mirrors Toolbar's role-lock.
+    const {
+      role: _role,
+      "aria-orientation": _ariaOrientation,
+      ...restLocked
+    } = rest as Record<string, unknown> & {
+      role?: string;
+      "aria-orientation"?: string;
+    };
+    void _role;
+    void _ariaOrientation;
+
     if (decorative) {
       // Plain `<div>` path — no role from Base UI to fight with. We
-      // forward `rest` so consumers can still attach data-* / id /
-      // style. `role="none"` + `aria-hidden="true"` is the
-      // documented "skip me" combo for AT.
+      // forward `restLocked` so consumers can still attach data-* / id
+      // / style. `role="none"` + `aria-hidden="true"` is the
+      // documented "skip me" combo for AT; reasserted AFTER the spread
+      // so even a runtime-attempted override loses.
       return (
         <div
-          {...(rest as React.HTMLAttributes<HTMLDivElement>)}
+          {...(restLocked as React.HTMLAttributes<HTMLDivElement>)}
           ref={ref}
-          role="none"
-          aria-hidden="true"
           className={composedClassName}
           data-orientation={orientation}
           data-variant={variant}
+          role="none"
+          aria-hidden="true"
         />
       );
     }
 
     // Semantic path — Base UI's Separator emits role="separator" and
-    // aria-orientation. We forward all consumer props through `rest`;
-    // Base UI's spread order (consumer wins over its defaults) keeps
-    // data-* and id reaching the DOM. The orientation prop is named
-    // identically so Base UI's value flows straight through.
+    // aria-orientation. We forward consumer props through `restLocked`
+    // (role / aria-orientation already stripped) so neither can
+    // override Base UI's controlled semantics. The orientation prop is
+    // named identically so the value flows straight through.
     return (
       <BaseSeparator
-        {...(rest as BaseSeparatorProps)}
+        {...(restLocked as BaseSeparatorProps)}
         ref={ref as Ref<HTMLDivElement>}
         orientation={orientation}
         className={composedClassName}

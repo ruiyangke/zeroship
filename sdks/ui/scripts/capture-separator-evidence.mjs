@@ -25,6 +25,7 @@ const stories = [
   "components-separator--not-decorative",
   "components-separator--inside-list",
   "components-separator--inside-toolbar",
+  "components-separator--role-lock",
   "components-separator--rtl",
 ];
 
