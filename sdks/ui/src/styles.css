@@ -21,6 +21,7 @@
 @import "./components/AlertDialog/AlertDialog.css";
 @import "./components/_selection-row.css";
 @import "./components/Checkbox/Checkbox.css";
+@import "./components/CheckboxGroup/CheckboxGroup.css";
 @import "./components/Switch/Switch.css";
 @import "./components/Radio/Radio.css";
 @import "./components/Toggle/Toggle.css";

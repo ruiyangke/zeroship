@@ -5611,6 +5611,122 @@ await open("components-toast--basic");
   );
 }
 
+/* ─── Slice 20 — CheckboxGroup controlled value round-trip ───────────── *
+ *
+ * Slice 20 brief assertion 3: clicking each checkbox toggles its `name`
+ * in/out of the controlled value array. We assert the value READOUT
+ * (rendered by the Controlled story below the group) reflects the toggle
+ * sequence — that exercises the full round-trip: click → Base UI emits
+ * onValueChange → React setState → DOM repaint of the readout. The
+ * initial defaultValue is `["product"]`; clicking `newsletter` should
+ * push it onto the array, and a follow-up click on `product` should
+ * remove it. Order = click order (Base UI appends new ticks, removes
+ * by value). */
+await open("components-checkboxgroup--controlled");
+{
+  const readout = page.locator(
+    '[data-testid="checkboxgroup-controlled-readout"]',
+  );
+  await readout.waitFor({ state: "visible", timeout: 5000 });
+  const initial = (await readout.innerText()).trim();
+  const newsletter = page.locator(
+    '[data-testid="checkboxgroup-controlled-newsletter"]',
+  );
+  const product = page.locator(
+    '[data-testid="checkboxgroup-controlled-product"]',
+  );
+  await newsletter.waitFor({ state: "visible", timeout: 5000 });
+  await newsletter.click();
+  await page.waitForTimeout(120);
+  const afterAdd = (await readout.innerText()).trim();
+  await product.click();
+  await page.waitForTimeout(120);
+  const afterRemove = (await readout.innerText()).trim();
+  // Initial: defaultValue=["product"]. After adding newsletter the
+  // readout should contain BOTH `product` and `newsletter`. After
+  // removing product, only `newsletter` should remain. Case-
+  // insensitive regex because the story-label CSS uppercases the
+  // rendered text (text-transform: uppercase) — the value array
+  // itself is still the canonical lowercase, but innerText returns
+  // the upper-cased visual form.
+  const initialHasProduct = /product/i.test(initial);
+  const initialMissingNewsletter = !/newsletter/i.test(initial);
+  const addedHasBoth =
+    /product/i.test(afterAdd) && /newsletter/i.test(afterAdd);
+  const removedHasOnlyNewsletter =
+    !/product/i.test(afterRemove) && /newsletter/i.test(afterRemove);
+  const ok =
+    initialHasProduct &&
+    initialMissingNewsletter &&
+    addedHasBoth &&
+    removedHasOnlyNewsletter;
+  report(
+    "CheckboxGroup Controlled — value array round-trips on click",
+    ok,
+    `initial="${initial}" afterAdd="${afterAdd}" afterRemove="${afterRemove}"`,
+  );
+}
+
+/* ─── Slice 20 — CheckboxGroup keyboard nav (Space toggles) ─────────── *
+ *
+ * Slice 20 brief assertion 4: Tab focuses a Checkbox child; Space
+ * toggles its checked state via Base UI's hidden-input forwarding.
+ * Base UI's CheckboxGroup does NOT implement roving tabindex (each
+ * Checkbox is a normal focusable in the tab order — distinct from
+ * Radio/Toggle groups where Arrow keys move between siblings). The
+ * brief's "ArrowDown moves between siblings (if Base UI emits roving)"
+ * phrasing is satisfied by the if-clause: roving is NOT emitted here,
+ * so the real assertion is Tab + Space.
+ *
+ * We focus the first chip, press Space, then verify its aria-checked
+ * flips from "false" to "true". Then Tab moves focus to the next chip
+ * (normal tab order) and Space toggles that one too. */
+await open("components-checkboxgroup--basic");
+{
+  // Basic ships with defaultValue=["newsletter","beta"]; pick the
+  // `product` chip — its initial aria-checked is "false" — so the
+  // Space-toggle assertion is unambiguous. After Space, the next
+  // child in tab order is `beta` (NEWSLETTER_OPTIONS = newsletter,
+  // product, beta, events). Verify Tab moves focus to `beta` and a
+  // follow-up Space toggles it (here it untoggles since it ships
+  // checked).
+  const product = page.locator(
+    '[data-testid="checkboxgroup-basic-product"]',
+  );
+  const beta = page.locator('[data-testid="checkboxgroup-basic-beta"]');
+  await product.waitFor({ state: "visible", timeout: 5000 });
+  const beforeProduct = await product.getAttribute("aria-checked");
+  await product.focus();
+  await page.waitForTimeout(50);
+  await page.keyboard.press(" ");
+  await page.waitForTimeout(150);
+  const afterProduct = await product.getAttribute("aria-checked");
+  // Tab moves focus along the normal sequence to `beta` — the next
+  // sibling Checkbox child in the group.
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(80);
+  const betaFocused = await beta.evaluate(
+    (el) => el === document.activeElement,
+  );
+  const beforeBeta = await beta.getAttribute("aria-checked");
+  await page.keyboard.press(" ");
+  await page.waitForTimeout(150);
+  const afterBeta = await beta.getAttribute("aria-checked");
+  // product: false → true (added to value); beta: true → false
+  // (removed from value, since defaultValue pre-ticked it).
+  const ok =
+    beforeProduct === "false" &&
+    afterProduct === "true" &&
+    betaFocused &&
+    beforeBeta === "true" &&
+    afterBeta === "false";
+  report(
+    "CheckboxGroup Basic — Tab + Space toggles each child",
+    ok,
+    `product:${beforeProduct}->${afterProduct} betaFocused=${betaFocused} beta:${beforeBeta}->${afterBeta}`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 
