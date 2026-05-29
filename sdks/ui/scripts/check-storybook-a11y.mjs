@@ -440,6 +440,10 @@ const stories = [
   "components-avatar--basic",
   "components-avatar--fallback",
   "components-avatar--fallback-on-error",
+  // Wave 9 review-fix 🔴: decorative-image + identity-image aria-wiring
+  // for the substitute-for-image Fallback states.
+  "components-avatar--decorative-fallback",
+  "components-avatar--fallback-delay",
   "components-avatar--sizes",
   "components-avatar--shapes",
   "components-avatar--with-icon",

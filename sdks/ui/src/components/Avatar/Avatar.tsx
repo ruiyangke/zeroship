@@ -131,24 +131,39 @@ const AvatarRoot = forwardRef<HTMLSpanElement, AvatarRootProps>(
 );
 AvatarRoot.displayName = "Avatar.Root";
 
-/* ─── Avatar.Image ──────────────────────────────────────────────────── */
+/* ─── Avatar.Image ──────────────────────────────────────────────────── *
+ *
+ * `alt` is REQUIRED here for the same reason it's required on the
+ * shorthand: an `<img>` rendered into the lockup without `alt` either
+ * leaks the raw URL to assistive tech (older AT defaulting to filename)
+ * or fails WCAG 1.1.1 outright. Pass `alt=""` explicitly for decorative
+ * portraits; pass a descriptive string for identity images. We can't
+ * default to `""` because that would silently mark every identity
+ * avatar decorative and ship a worse-than-nothing default. */
 
 export interface AvatarImageProps
-  extends Omit<BaseImageProps, "className" | "render"> {
+  extends Omit<BaseImageProps, "className" | "render" | "alt"> {
   /**
    * Optional class hook on the underlying `<img>`. The default class
    * paints the image flush against the Root's content-box at the
    * Root's `border-radius`.
    */
   className?: string;
+  /**
+   * Alt text for the image. REQUIRED. Pass `alt=""` for decorative
+   * images (AT skips the node); pass a descriptive string for identity
+   * images.
+   */
+  alt: string;
 }
 
 const AvatarImage = forwardRef<HTMLImageElement, AvatarImageProps>(
-  function AvatarImage({ className, ...rest }, ref) {
+  function AvatarImage({ className, alt, ...rest }, ref) {
     return (
       <BaseAvatar.Image
         {...(rest as BaseImageProps)}
         ref={ref}
+        alt={alt}
         className={classnames("zs-avatar__image", className)}
       />
     );
@@ -194,17 +209,17 @@ AvatarFallback.displayName = "Avatar.Fallback";
  * Root + Image + Fallback under the hood. Consumers needing finer
  * control (e.g. lazy-loading, IntersectionObserver) reach for the
  * decomposed surface via `Avatar.Root` / `Avatar.Image` / `Avatar.Fallback`.
+ *
+ * Discriminated union (review-fix 🟡): the public type contract
+ * requires `alt` whenever `src` is set. Pre-fix the optional `alt?`
+ * left a path where `<Avatar src="…" />` typechecked and then ran
+ * through `Avatar.Image` with `alt={undefined}` — silently producing
+ * an `<img>` whose accessible name is the raw URL. The union mirrors
+ * Toggle.Group / Select's discriminated-union pattern: TypeScript
+ * narrows by the presence of `src` and the missing `alt` becomes a
+ * compile-time error.
  */
-export interface AvatarProps
-  extends Omit<AvatarRootProps, "children"> {
-  /** Image source — when set, mounts Avatar.Image inside the lockup. */
-  src?: string;
-  /**
-   * Alt text for the image. REQUIRED when `src` is set. Pass `alt=""`
-   * for decorative images (AT will skip the node). A dev-warn fires
-   * once per `src` when `src` is set and `alt` is omitted.
-   */
-  alt?: string;
+interface AvatarPropsBase extends Omit<AvatarRootProps, "children"> {
   /**
    * Fallback content — initials (1–2 uppercase chars), an icon, or
    * any ReactNode. Painted while the image loads and after errors;
@@ -221,11 +236,32 @@ export interface AvatarProps
   children?: ReactNode;
 }
 
+/** Image-bearing branch — `src` is set, so `alt` is required. */
+export interface AvatarPropsWithSrc extends AvatarPropsBase {
+  /** Image source — mounts Avatar.Image inside the lockup. */
+  src: string;
+  /**
+   * Alt text for the image. REQUIRED whenever `src` is set. Pass
+   * `alt=""` for decorative portraits (AT will skip the image AND the
+   * fallback that substitutes for it); pass a descriptive string for
+   * identity images (the fallback inherits that accessible name while
+   * it stands in for the loading / broken image).
+   */
+  alt: string;
+}
+
+/** Fallback-only branch — no `src`, no `alt`. */
+export interface AvatarPropsWithoutSrc extends AvatarPropsBase {
+  src?: undefined;
+  alt?: undefined;
+}
+
+export type AvatarProps = AvatarPropsWithSrc | AvatarPropsWithoutSrc;
+
 const AvatarShorthand = forwardRef<HTMLSpanElement, AvatarProps>(
-  function Avatar(
-    { src, alt, fallback, fallbackDelay, children, ...rootRest },
-    ref,
-  ) {
+  function Avatar(props, ref) {
+    const { src, alt, fallback, fallbackDelay, children, ...rootRest } =
+      props as AvatarPropsBase & { src?: string; alt?: string };
     useEffect(() => {
       if (typeof process === "undefined") return;
       if (process.env.NODE_ENV === "production") return;
@@ -244,12 +280,48 @@ const AvatarShorthand = forwardRef<HTMLSpanElement, AvatarProps>(
       }
     }, [src, alt]);
 
+    /* ─── aria-wiring for the Fallback substitute (review-fix 🔴) ───
+     *
+     * When `src` is set the Fallback paints WHILE the image loads and
+     * AFTER it errors — i.e. it stands in for the image. The image's
+     * `alt` is the documented contract for the lockup's accessible
+     * name; the fallback must mirror that contract, not leak a second
+     * announcement of the raw initials text.
+     *
+     * - `alt === ""` (decorative): hide the fallback from AT so the
+     *   decorative semantics the caller asked for hold across the
+     *   load / error states, not only the loaded state.
+     * - `alt` is a non-empty string (identity image): give the fallback
+     *   `role="img"` + `aria-label={alt}` so AT announces the actual
+     *   identity ("Ada Lovelace") instead of reading the raw initials
+     *   ("A L") as text content.
+     * - `src` unset (fallback-only avatar): leave the fallback as plain
+     *   text so the initials ARE the accessible name. Captioning is
+     *   the caller's responsibility in that case.
+     */
+    const fallbackA11y: {
+      "aria-hidden"?: "true";
+      role?: "img";
+      "aria-label"?: string;
+    } =
+      src === undefined
+        ? {}
+        : alt === ""
+          ? { "aria-hidden": "true" }
+          : alt !== undefined
+            ? { role: "img", "aria-label": alt }
+            : {};
+
     return (
       <AvatarRoot {...rootRest} ref={ref}>
         {children ?? (
           <>
-            {src ? <AvatarImage src={src} alt={alt} /> : null}
-            <AvatarFallback delay={fallbackDelay}>{fallback}</AvatarFallback>
+            {src !== undefined && alt !== undefined ? (
+              <AvatarImage src={src} alt={alt} />
+            ) : null}
+            <AvatarFallback delay={fallbackDelay} {...fallbackA11y}>
+              {fallback}
+            </AvatarFallback>
           </>
         )}
       </AvatarRoot>
