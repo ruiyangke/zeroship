@@ -611,6 +611,61 @@ export const RTL: Story = {
   ),
 };
 
+/* ─── 10b. RTL glyph centering (wave-7 red regression) ────────────────
+ *
+ * Wave-7 review red item #1. The chip's `::before` hit-target overlay
+ * and the indicator SVG glyphs used logical `inset-inline-start: 50%`
+ * paired with physical `translate: -50% -50%`. Under `dir="rtl"`,
+ * `inset-inline-start` maps to `right: 50%`, but the translate stays
+ * physical — the net effect slides the overlay AND the glyph off the
+ * chip's inline-end edge. The fix replaces the logical/physical mix
+ * with purely physical `top/left + translate` (geometric centering
+ * doesn't care about writing direction). This story renders a checked
+ * chip + an indeterminate chip under RTL so the aria-wiring script can
+ * measure the SVG glyph bbox center against the chip's bbox center and
+ * assert the delta stays under ~1px. Pre-fix the delta would have been
+ * roughly half the chip width. */
+export const RTLGlyphCentering: Story = {
+  name: "RTL — glyph centering regression",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Wave-7 red regression. Renders a checked + an indeterminate " +
+          "checkbox under `dir=\"rtl\"` so the aria-wiring script can " +
+          "verify the indicator glyph remains centered inside the chip. " +
+          "Pre-fix the logical/physical centering mix slid the glyph off " +
+          "the chip in RTL.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      dir="rtl"
+      className="zs-story-row"
+      role="group"
+      aria-label="RTL glyph centering"
+    >
+      <div className="zs-story-cell">
+        <span className="zs-story-label">RTL — checked</span>
+        <Checkbox
+          data-testid="checkbox-rtl-checked"
+          defaultChecked
+          label="RTL checked"
+        />
+      </div>
+      <div className="zs-story-cell">
+        <span className="zs-story-label">RTL — indeterminate</span>
+        <Checkbox
+          data-testid="checkbox-rtl-indeterminate"
+          indeterminate
+          label="RTL indeterminate"
+        />
+      </div>
+    </div>
+  ),
+};
+
 /* ─── 11. Indeterminate from group (slice-4 review fix item 6) ───────
  *
  * Base UI's `CheckboxGroup` parent-of-children pattern: name the

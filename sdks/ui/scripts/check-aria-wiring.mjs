@@ -7344,6 +7344,189 @@ await open("components-popover--payload-render");
   );
 }
 
+/* ─── Wave-7 Checkbox red #1 — RTL glyph centering regression ────────
+ *
+ * The Checkbox chip's `::before` hit overlay and indicator SVGs
+ * previously used logical `inset-inline-start: 50%` paired with
+ * physical `translate: -50% -50%`. Under `dir="rtl"` that means
+ * `inset-inline-start` resolves to `right: 50%`, so the translate moves
+ * the element along the WRONG axis convention — net effect: the SVG
+ * glyph and hit-target overlay slide off the chip. The fix uses purely
+ * physical `top/left + translate(-50%, -50%)` (geometric centering is
+ * direction-agnostic).
+ *
+ * Regression measurement: for the checked + indeterminate chips in the
+ * RTLGlyphCentering story, read the chip's bounding box and the visible
+ * glyph SVG's bounding box. The horizontal centre delta must be ≤ 1px
+ * (allowing for sub-pixel rounding). Pre-fix the delta was ~half the
+ * chip width, since the translate(-50%) was applied relative to the
+ * right edge instead of the left edge. */
+await open("components-checkbox--rtl-glyph-centering");
+{
+  async function centerDelta(testId, glyph) {
+    const chip = page.locator(`[data-testid="${testId}"]`);
+    await chip.waitFor({ state: "attached", timeout: 5000 });
+    const visibleGlyph = chip.locator(`[data-glyph="${glyph}"]`);
+    await visibleGlyph.waitFor({ state: "attached", timeout: 5000 });
+    return await page.evaluate(
+      ({ id, g }) => {
+        const chipEl = document.querySelector(`[data-testid="${id}"]`);
+        if (!chipEl) return { ok: false, reason: "no chip" };
+        const glyphEl = chipEl.querySelector(`[data-glyph="${g}"]`);
+        if (!glyphEl) return { ok: false, reason: "no glyph" };
+        const cRect = chipEl.getBoundingClientRect();
+        const gRect = glyphEl.getBoundingClientRect();
+        const chipCenterX = cRect.left + cRect.width / 2;
+        const glyphCenterX = gRect.left + gRect.width / 2;
+        const chipCenterY = cRect.top + cRect.height / 2;
+        const glyphCenterY = gRect.top + gRect.height / 2;
+        const dirRoot = chipEl.closest("[dir]");
+        const dir = dirRoot ? dirRoot.getAttribute("dir") : "ltr";
+        return {
+          ok: true,
+          dx: Math.abs(chipCenterX - glyphCenterX),
+          dy: Math.abs(chipCenterY - glyphCenterY),
+          dir,
+        };
+      },
+      { id: testId, g: glyph },
+    );
+  }
+  const checked = await centerDelta("checkbox-rtl-checked", "check");
+  const indeterminate = await centerDelta(
+    "checkbox-rtl-indeterminate",
+    "minus",
+  );
+  // Allow ≤ 1.5px to cover sub-pixel rounding under different DPIs.
+  // Pre-fix the delta was roughly half the chip width (~10px on the
+  // 20px md chip) so the threshold is loose-enough to be stable
+  // post-fix while still failing pre-fix by a wide margin.
+  const okChecked =
+    checked.ok && checked.dir === "rtl" && checked.dx <= 1.5 && checked.dy <= 1.5;
+  const okIndeterminate =
+    indeterminate.ok &&
+    indeterminate.dir === "rtl" &&
+    indeterminate.dx <= 1.5 &&
+    indeterminate.dy <= 1.5;
+  const ok = okChecked && okIndeterminate;
+  report(
+    "Checkbox — RTL glyph stays centered (wave-7 red #1)",
+    ok,
+    `checked={dir=${checked.dir},dx=${checked.dx?.toFixed(2)},dy=${checked.dy?.toFixed(
+      2,
+    )}} indeterminate={dir=${indeterminate.dir},dx=${indeterminate.dx?.toFixed(
+      2,
+    )},dy=${indeterminate.dy?.toFixed(2)}}`,
+  );
+}
+
+/* ─── Wave-7 Checkbox red #2 — forced-colors specificity mirror ─────────
+ *
+ * The forced-colors block must paint system colors (Canvas / CanvasText
+ * / Highlight / GrayText) at specificity equal to or greater than the
+ * normal-mode rules that paint `--zs-*` tokens for the same selector
+ * combinations. Without that, a normal-mode rule at e.g. (0,2,1)
+ * defeats a forced-colors rule at (0,1,1) for the same selector — and
+ * the disabled-checked / disabled-indeterminate / readonly chips keep
+ * their accent fills under high contrast.
+ *
+ * Regression scan: read `Checkbox.css` as text. For every selector
+ * inside a normal-mode rule that combines `.zs-checkbox` with two of
+ * `data-disabled` / `data-readonly` / `data-checked` /
+ * `data-indeterminate`, require a forced-colors rule (inside the same
+ * file's `@media (forced-colors: active)` block) that targets the
+ * SAME combination. Specificity of `.cls[attr][attr]` is (0,2,1) for
+ * either form, so equal class + attr counts is sufficient.
+ *
+ * Pre-fix this block fails with `disabled+checked`,
+ * `disabled+indeterminate`, `readonly`, and `readonly+checked`/
+ * `readonly+indeterminate` missing from the forced-colors block. */
+{
+  const fs = await import("node:fs/promises");
+  const cssUrl = new URL(
+    "../src/components/Checkbox/Checkbox.css",
+    import.meta.url,
+  );
+  let scanError = null;
+  let missing = [];
+  let combos = [];
+  try {
+    const source = await fs.readFile(cssUrl, "utf8");
+    // Extract the `@media (forced-colors: active) { … }` block by
+    // matching balanced braces from the `(forced-colors: active)`
+    // header to its closing brace. We use a manual depth scan because
+    // a regex can't balance arbitrary nesting in CSS.
+    const headerIdx = source.search(
+      /@media\s*\(\s*forced-colors\s*:\s*active\s*\)\s*\{/,
+    );
+    let forcedBlock = "";
+    if (headerIdx >= 0) {
+      const openIdx = source.indexOf("{", headerIdx);
+      let depth = 0;
+      let end = -1;
+      for (let i = openIdx; i < source.length; i++) {
+        const ch = source[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
+      if (end > openIdx) forcedBlock = source.slice(openIdx + 1, end);
+    }
+    // Strip the forced-colors block out of the normal-mode source so
+    // we don't double-count its selectors as "normal-mode".
+    const normalSource =
+      headerIdx >= 0
+        ? source.slice(0, headerIdx) +
+          source.slice(headerIdx + forcedBlock.length + 100)
+        : source;
+
+    // Collect every combination of attribute selectors attached to
+    // `.zs-checkbox` in the normal-mode source. We only care about
+    // state-combination selectors (≥ 2 attrs), because single-attr
+    // rules already had their forced-colors counterpart pre-fix.
+    const stateAttrs = new Set([
+      "data-disabled",
+      "data-readonly",
+      "data-checked",
+      "data-indeterminate",
+    ]);
+    function collectCombos(text) {
+      const found = new Set();
+      // Match `.zs-checkbox` followed by ≥ 1 `[attr]` (no whitespace
+      // between class and brackets) up to whitespace / comma / `{`.
+      const re = /\.zs-checkbox((?:\[[^\]]+\])+)/g;
+      let m;
+      while ((m = re.exec(text))) {
+        const attrs = [...m[1].matchAll(/\[([^\]=]+)(?:=[^\]]*)?\]/g)]
+          .map((a) => a[1].trim())
+          .filter((a) => stateAttrs.has(a))
+          .sort();
+        if (attrs.length >= 2) found.add(attrs.join("+"));
+      }
+      return found;
+    }
+    const normalCombos = collectCombos(normalSource);
+    const forcedCombos = collectCombos(forcedBlock);
+    combos = [...normalCombos].sort();
+    missing = combos.filter((c) => !forcedCombos.has(c));
+  } catch (err) {
+    scanError = err instanceof Error ? err.message : String(err);
+  }
+  const ok = !scanError && missing.length === 0;
+  report(
+    "Checkbox — forced-colors mirrors every state-combination (wave-7 red #2)",
+    ok,
+    scanError
+      ? `scanError=${scanError}`
+      : `combos=[${combos.join(",")}] missing=[${missing.join(",")}]`,
+  );
+}
+
 await ctx.close();
 await browser.close();
 

@@ -124,9 +124,17 @@
 .zs-checkbox::before {
   content: "";
   position: absolute;
-  inset-block-start: 50%;
-  inset-inline-start: 50%;
-  translate: -50% -50%;
+  /* Physical centering is correct here: this is purely geometric
+   * (center the overlay inside its parent), NOT direction-dependent
+   * positioning. Logical `inset-inline-start: 50%` maps to `right: 50%`
+   * under RTL while the paired `translate: -50%` stays physical, which
+   * pushes the overlay off the chip on RTL roots. Wave-7 review
+   * regression: a `dir="rtl"` Checkbox had its hit-target slid past the
+   * chip's inline-end edge. Use `top`/`left` so the centering is
+   * direction-agnostic. */
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   min-inline-size: var(--zs-hit-target, 1.75rem);
   min-block-size: var(--zs-hit-target, 1.75rem);
   inline-size: 100%;
@@ -267,9 +275,14 @@
  * positioning inside the relatively-positioned indicator container. */
 .zs-checkbox__indicator [data-glyph] {
   position: absolute;
-  inset-block-start: 50%;
-  inset-inline-start: 50%;
-  translate: -50% -50%;
+  /* Physical centering (see `.zs-checkbox::before` for the same
+   * rationale): the glyph is centered inside a symmetric indicator
+   * container, so the positioning is direction-agnostic. Logical
+   * `inset-inline-start: 50%` + physical `translate: -50%` mismatched
+   * under RTL and shifted the checkmark off the chip. Wave-7 fix. */
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   inline-size: 75%;       /* 0.75em of the chip — same proportion across sizes */
   block-size: 75%;
   display: block;
@@ -309,7 +322,19 @@
  * Forced-colors strips most color but preserves system semantic tokens
  * (Canvas, CanvasText, Highlight, GrayText). Reach for those so the
  * chip stays legible and the checked state stays announced visually.
- */
+ *
+ * SPECIFICITY MIRROR: every normal-mode state selector that paints
+ * --zs-* tokens has a forced-colors counterpart at equal or greater
+ * specificity. Earlier the block only carried the base/checked/
+ * indeterminate/disabled selectors at (0,1,1) and (0,2,1) — but the
+ * normal-mode rules for `data-disabled + data-checked`,
+ * `data-disabled + data-indeterminate`, and the readonly variants sit
+ * at the SAME or higher specificity, so they kept painting accent
+ * tokens (var(--zs-fill-secondary), var(--zs-accent)) under high
+ * contrast, defeating the system-color contract. Wave-7 review
+ * regression: a disabled-checked chip in HC mode still read as the
+ * normal accent fill instead of the GrayText border + Canvas fill the
+ * disabled affordance demands. */
 @media (forced-colors: active) {
   .zs-checkbox {
     background-color: Canvas;
@@ -331,9 +356,48 @@
     outline-color: Highlight;
   }
   .zs-checkbox[data-disabled] {
+    background-color: Canvas;
     color: GrayText;
     box-shadow:
       inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  /* Disabled + on-state — mirrors the normal-mode (0,2,1) selectors.
+   * Without these, a disabled-checked or disabled-indeterminate chip
+   * keeps painting Highlight (because the (0,1,1) [data-disabled] rule
+   * loses to the (0,2,1) [data-checked]/[data-indeterminate] rule
+   * above). Paint GrayText border + Canvas fill + GrayText glyph so
+   * the disabled affordance wins, and the on-state still reads via
+   * shape (check / minus). */
+  .zs-checkbox[data-disabled][data-checked],
+  .zs-checkbox[data-disabled][data-indeterminate] {
+    background-color: Canvas;
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem GrayText,
+      0 0 0 0 transparent;
+  }
+  /* Readonly — distinct from disabled in normal mode; in HC we still
+   * want a clear "not editable" signal. Use CanvasText border so the
+   * chip stays present (it's not disabled), but the consumer can tell
+   * by hover/cursor that interaction is suppressed. */
+  .zs-checkbox[data-readonly]:not([data-checked]):not([data-indeterminate]) {
+    background-color: Canvas;
+    color: CanvasText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+  }
+  /* Readonly + on-state — keep the Highlight fill so the "selected"
+   * signal survives, and pair with a HighlightText glyph so the check
+   * remains legible. Specificity (0,2,1) mirrors the normal-mode
+   * readonly+checked selector. */
+  .zs-checkbox[data-readonly][data-checked],
+  .zs-checkbox[data-readonly][data-indeterminate] {
+    background-color: Highlight;
+    color: HighlightText;
+    box-shadow:
+      inset 0 0 0 0.0625rem Highlight,
       0 0 0 0 transparent;
   }
   .zs-checkbox-field[data-disabled] {
