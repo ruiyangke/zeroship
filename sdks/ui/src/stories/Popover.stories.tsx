@@ -35,7 +35,15 @@ export const Basic: Story = {
           render={<Button data-testid="popover-basic-trigger">Open popover</Button>}
         />
         <Popover.Portal>
-          <Popover.Popup data-testid="popover-basic-popup">
+          {/* Bare-content popups (no Title) MUST carry their own
+              accessible name. Base UI exposes the popup as
+              `role="dialog"`, and an unnamed dialog announces as just
+              "dialog" to screen readers. `aria-label` satisfies the
+              missing-name warning the wrapper logs in dev. */}
+          <Popover.Popup
+            data-testid="popover-basic-popup"
+            aria-label="Helper hint"
+          >
             A short helper hint anchored below the trigger.
           </Popover.Popup>
         </Popover.Portal>
@@ -47,11 +55,17 @@ export const Basic: Story = {
     const body = within(canvasElement.ownerDocument.body);
 
     await userEvent.click(canvas.getByRole("button", { name: /open popover/i }));
-    await expect(await body.findByRole("dialog")).toHaveTextContent(
+    // Look up by accessible name — the popup must be a NAMED dialog.
+    const dialog = await body.findByRole("dialog", { name: /helper hint/i });
+    await expect(dialog).toHaveTextContent(
       "A short helper hint anchored below the trigger.",
     );
     await userEvent.keyboard("{Escape}");
-    await waitFor(() => expect(body.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        body.queryByRole("dialog", { name: /helper hint/i }),
+      ).not.toBeInTheDocument(),
+    );
   },
 };
 
@@ -694,5 +708,104 @@ export const CloseAsChildForwardsRest: Story = {
     await expect(target).toHaveClass("custom-close-class");
     await expect(target).toHaveAttribute("data-side-effect", "logged");
     await expect(target).toHaveAttribute("aria-keyshortcuts", "Escape");
+  },
+};
+
+/* ─── 13. PayloadRender — Round 6 fix #1 (PopoverProps payload) ─────── *
+ *
+ * Regression for the `PopoverProps.children` narrowing bug. Pre-fix,
+ * the wrapper typed `children?: ReactNode`, which excluded Base UI's
+ * `PayloadChildRenderFunction<Payload>` — a render function that
+ * receives the active trigger's `payload`. TypeScript would reject the
+ * function child outright (build-time regression), and at runtime
+ * React would either render a function as text or throw "Functions
+ * are not valid as a React child".
+ *
+ * Post-fix, `PopoverProps<Payload>` is generic and re-exposes Base
+ * UI's `ReactNode | PayloadChildRenderFunction<Payload>` union, so the
+ * function child compiles AND Base UI invokes it with `{ payload }`.
+ *
+ * The story declares two triggers carrying distinct payloads; the
+ * Root's function child renders the payload's `label` field inside
+ * the popup. Clicking each trigger swaps the rendered label, proving
+ * the payload channel survives the wrapper. */
+type PopoverPayload = { label: string };
+
+// Stable payload references — Base UI's trigger-data-forwarding effect
+// spreads `payload` into its dep array; an inline object literal would
+// rebuild every render and tip the effect into an update loop.
+const ALPHA_PAYLOAD: PopoverPayload = { label: "Alpha" };
+const BETA_PAYLOAD: PopoverPayload = { label: "Beta" };
+
+export const PayloadRender: Story = {
+  name: "Payload render-function child (Round 6 regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Base UI's `Popover.Root` accepts a render function child " +
+          "receiving the active trigger's payload. The wrapper must " +
+          "forward this API verbatim; pre-fix, the wrapper narrowed " +
+          "`children` to `ReactNode` and silently rejected the " +
+          "function form.",
+      },
+    },
+  },
+  render: () => (
+    <div className="zs-story-row" role="group" aria-label="Payload render">
+      {/* Single function-child carries the entire subtree so the Root's
+          `PayloadChildRenderFunction` is invoked instead of being
+          mixed with sibling React nodes (JSX would otherwise widen
+          children to ReactNode[] and reject the function form). */}
+      <Popover<PopoverPayload>>
+        {({ payload }) => (
+          <>
+            <Popover.Trigger
+              payload={ALPHA_PAYLOAD}
+              render={
+                <Button data-testid="popover-payload-trigger-alpha">
+                  Open alpha
+                </Button>
+              }
+            />
+            <Popover.Trigger
+              payload={BETA_PAYLOAD}
+              render={
+                <Button data-testid="popover-payload-trigger-beta">
+                  Open beta
+                </Button>
+              }
+            />
+            <Popover.Portal>
+              <Popover.Popup
+                aria-label="Payload render popup"
+                data-testid="popover-payload-popup"
+              >
+                <Popover.Title>Payload</Popover.Title>
+                <Popover.Description data-testid="popover-payload-label">
+                  {payload?.label ?? "no-payload"}
+                </Popover.Description>
+              </Popover.Popup>
+            </Popover.Portal>
+          </>
+        )}
+      </Popover>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const body = within(canvasElement.ownerDocument.body);
+
+    await userEvent.click(canvas.getByRole("button", { name: /open alpha/i }));
+    const alpha = await body.findByTestId("popover-payload-label");
+    await expect(alpha).toHaveTextContent("Alpha");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(body.queryByTestId("popover-payload-label")).not.toBeInTheDocument(),
+    );
+
+    await userEvent.click(canvas.getByRole("button", { name: /open beta/i }));
+    const beta = await body.findByTestId("popover-payload-label");
+    await expect(beta).toHaveTextContent("Beta");
   },
 };
