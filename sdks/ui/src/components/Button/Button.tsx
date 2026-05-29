@@ -6,6 +6,8 @@ import {
   useImperativeHandle,
   useRef,
   type ButtonHTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
   type Ref,
@@ -169,11 +171,59 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
     // support it); express state via `aria-disabled` + `aria-busy`.
     // No default `type` (anchors don't take it).
     if (!isValidElement(children)) return null;
-    const onlyChild = children as ReactElement<{ children?: ReactNode }>;
+    type AsChildProps = {
+      children?: ReactNode;
+      onClick?: (event: ReactMouseEvent) => void;
+      onKeyDown?: (event: ReactKeyboardEvent) => void;
+    };
+    const onlyChild = children as ReactElement<AsChildProps>;
     const labelContent = onlyChild.props.children;
+
+    // Pre-composition activation guard. When the rendered child is an
+    // <a> (or any element where the HTML `disabled` attribute does not
+    // apply), the CSS disabled styling alone cannot stop navigation or
+    // suppress the child/caller's onClick — both fire normally and the
+    // anchor's href is followed. We therefore overwrite the child's
+    // onClick and onKeyDown when isDisabled is true so that:
+    //   - `event.preventDefault()` blocks default activation (e.g.
+    //     anchor navigation, form-submit anchors).
+    //   - `event.stopPropagation()` stops bubbling so any caller-attached
+    //     listener farther up the tree does not observe an activation
+    //     either.
+    //   - the child's own onClick (read off `onlyChild.props` BEFORE we
+    //     overwrite) is dropped — we never invoke it. This is the
+    //     contract: a disabled button does not run handlers, even those
+    //     attached directly to the child element under asChild.
+    // The Slot's later `mergeProps` composition runs child handlers
+    // FIRST then ours; by replacing the child's handler at clone time
+    // with a guard that prevents the event, our `rest.onClick` (if any)
+    // is also skipped because Slot's composer respects defaultPrevented.
+    const childOnClick = onlyChild.props.onClick;
+    const childOnKeyDown = onlyChild.props.onKeyDown;
+    const guardedOnClick = isDisabled
+      ? (event: ReactMouseEvent) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      : childOnClick;
+    const guardedOnKeyDown = isDisabled
+      ? (event: ReactKeyboardEvent) => {
+          // Enter activates anchors; Space is non-activating per HTML
+          // spec but some assistive layers synthesize it as a click. We
+          // suppress both for consistency with a disabled <button>.
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        }
+      : childOnKeyDown;
+
     const wrappedChild = cloneElement(
       onlyChild,
-      undefined,
+      {
+        onClick: guardedOnClick,
+        onKeyDown: guardedOnKeyDown,
+      },
       <>
         {buildInner(labelContent)}
         {isBusy ? <Spinner /> : null}
