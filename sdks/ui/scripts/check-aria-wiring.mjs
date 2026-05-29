@@ -7829,6 +7829,181 @@ await open("components-checkbox--rtl-glyph-centering");
   );
 }
 
+/* ─── Wave 8 🔴 #1 — Switch keyboard Space activates (nativeButton lock) ──
+ *
+ * The wave-8 review caught that `SwitchProps` inherited `nativeButton`
+ * from Base UI's Switch.Root props even though we never expose `render`
+ * / asChild on the public surface. Base UI's Switch.Root on the default
+ * `<span tabIndex=0>` ships its OWN Space/Enter handler — the moment
+ * `nativeButton={true}` flips on, Base UI assumes the host element is a
+ * real <button> and stops attaching the non-native key handler, so
+ * Space-activation silently dies. The fix omits `nativeButton` from the
+ * public type AND forces `nativeButton={false}` AFTER `...rest` so a
+ * caller spreading `{ nativeButton: true }` via an untyped path can't
+ * bypass the lock.
+ *
+ * Pre-fix regression: an untyped caller could pass `nativeButton`
+ * through, breaking Space activation. The runtime assertion below
+ * focuses the inline switch and presses Space — if the span is being
+ * treated as a native button, the Base UI non-native handler is silent
+ * AND a span with `tabIndex` doesn't get the built-in button activation,
+ * so the switch would NOT toggle. The post-fix code force-pins
+ * `nativeButton={false}`, so the non-native handler is active and Space
+ * flips state. */
+await open("components-switch--inline");
+{
+  const track = page.locator('[data-testid="switch-inline-public"]');
+  await track.waitFor({ state: "visible", timeout: 5000 });
+  // Confirm the track is rendered as a non-button span — Base UI on
+  // span emits `<span tabIndex="0" role="switch">`. If `nativeButton`
+  // ever flipped on, Base UI would render `<button>`.
+  const tagName = await track.evaluate((el) => el.tagName.toLowerCase());
+  const role = await track.getAttribute("role");
+  await track.focus();
+  await page.waitForTimeout(50);
+  const before = await track.getAttribute("aria-checked");
+  await page.keyboard.press("Space");
+  await page.waitForTimeout(150);
+  const after = await track.getAttribute("aria-checked");
+  const ok =
+    tagName === "span" &&
+    role === "switch" &&
+    before === "false" &&
+    after === "true";
+  report(
+    "Switch keyboard Space activates on the span root (nativeButton lock)",
+    ok,
+    `tag=${tagName} role=${role} aria-checked before=${before} after=${after}`,
+  );
+}
+
+/* ─── Wave 8 🔴 #2 — Switch forced-colors mirrors higher-specificity ───
+ *
+ * The wave-8 review caught that the `@media (forced-colors: active)`
+ * block in Switch.css only covered base, base-checked, disabled, and
+ * disabled-thumb selectors — but the non-forced rules at hover-not-
+ * disabled, disabled+checked, readonly-not-checked, readonly+checked,
+ * and readonly+checked-thumb have higher specificity and WON inside
+ * forced-colors mode. That violates the forced-colors specificity
+ * mirror standard: a checked-readonly track would still paint
+ * `--zs-selection-bg-readonly` (a translucent oklch token), with the
+ * `--zs-accent` hairline rather than `Highlight`.
+ *
+ * Pre-fix regression: with forced-colors active, the readonly+checked
+ * track's background computed to the token's oklch mix; post-fix it
+ * resolves to `Canvas` (system color rgb()). Same shape for the
+ * thumb: pre-fix `--zs-accent` token, post-fix `Highlight`.
+ *
+ * Story: AllStates has a "Read only" switch with `defaultChecked`. */
+await page.emulateMedia({ forcedColors: "active" });
+await open("components-switch--all-states");
+{
+  // Chromium's forced-colors emulator paints `Highlight` with a
+  // platform-specific alpha (Linux ≈ rgba(5, 0, 73, 0.8)) — that's a
+  // SYSTEM-COLOR resolution, not an oklch token bleed. Accept any
+  // rgb()/rgba() form; the load-bearing assertion is "not oklch", which
+  // is the actual cascade-leak failure mode the wave-8 review flagged.
+  const isSystemColor = (s) => /^rgba?\(/i.test(s);
+  const isOklch = (s) => /oklch\(/i.test(s);
+  // Read-only checked switch — text/name is "Read only".
+  const readOnly = page.getByRole("switch", { name: /^read only$/i });
+  await readOnly.waitFor({ state: "visible", timeout: 5000 });
+  // Forced-colors repaints take an extra frame in some Chromium builds.
+  await page.waitForTimeout(150);
+  const trackBg = await readOnly.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  const thumb = readOnly.locator(".zs-switch__thumb");
+  const thumbBg = await thumb.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+  // Disabled-checked switch — "Disabled, on" label in the story.
+  const disabledChecked = page.getByRole("switch", {
+    name: /^disabled, on$/i,
+  });
+  await disabledChecked.waitFor({ state: "visible", timeout: 5000 });
+  const disabledCheckedBg = await disabledChecked.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+
+  const trackOk = isSystemColor(trackBg) && !isOklch(trackBg);
+  const thumbOk = isSystemColor(thumbBg) && !isOklch(thumbBg);
+  const disabledCheckedOk =
+    isSystemColor(disabledCheckedBg) && !isOklch(disabledCheckedBg);
+  const ok = trackOk && thumbOk && disabledCheckedOk;
+  report(
+    "Switch forced-colors mirrors — readonly-checked + disabled-checked paint with system colors",
+    ok,
+    `readonly trackBg="${trackBg}" (${trackOk}) thumbBg="${thumbBg}" (${thumbOk}) ` +
+      `disabled+checked bg="${disabledCheckedBg}" (${disabledCheckedOk})`,
+  );
+}
+await page.emulateMedia({ forcedColors: "none" });
+
+/* ─── Wave 8 fix — Switch Inline label-click toggles track + input ────
+ *
+ * The Switch `label` prop's main contract is "a click on the inline text
+ * toggles the switch" — the SelectionRow renders a real `<label>` so the
+ * browser's native label→control click forwarding owns the toggle. Wave-
+ * 8 review flagged that no real-path assertion verified this; the unit
+ * stories click the track itself, not the text node.
+ *
+ * Pre-fix regression: there was no caller-visible assertion that the
+ * text click flipped state. This block:
+ *   (1) opens the `Inline label` story
+ *   (2) reads the BEFORE state of the track's `aria-checked` and the
+ *       sibling hidden <input>'s `.checked`
+ *   (3) clicks the visible label TEXT (the `.zs-switch-field__text`
+ *       span — NOT the track), driving the real native-label code path
+ *   (4) verifies both flipped together
+ *
+ * "Public profile" starts unchecked in the story (no `defaultChecked`),
+ * so before=false → after=true is the expected delta. */
+// Story ID is derived from the EXPORT name (`Inline`), not the
+// `name` field — Storybook's `toId` lowercases the export and joins
+// kind + story with `--`.
+await open("components-switch--inline");
+{
+  const track = page.locator('[data-testid="switch-inline-public"]');
+  await track.waitFor({ state: "visible", timeout: 5000 });
+  // Walk to the wrapping <label> (SelectionRow renders `.zs-switch-field`)
+  // and grab the inline text span. Clicking the text — not the track —
+  // is what exercises the native label→control click forward.
+  const textSel =
+    '.zs-switch-field:has([data-testid="switch-inline-public"]) .zs-switch-field__text';
+  const textNode = page.locator(textSel);
+  await textNode.waitFor({ state: "visible", timeout: 5000 });
+  const readState = () =>
+    page.evaluate(() => {
+      const t = document.querySelector('[data-testid="switch-inline-public"]');
+      if (!t) return null;
+      const label = t.closest(".zs-switch-field");
+      if (!label) return null;
+      const input = label.querySelector('input[type="checkbox"]');
+      const checked = input instanceof HTMLInputElement ? input.checked : null;
+      return {
+        aria: t.getAttribute("aria-checked"),
+        checked,
+      };
+    });
+  const before = await readState();
+  await textNode.click();
+  await page.waitForTimeout(150);
+  const after = await readState();
+  const ok =
+    before !== null &&
+    after !== null &&
+    before.aria === "false" &&
+    before.checked === false &&
+    after.aria === "true" &&
+    after.checked === true;
+  report(
+    "Switch Inline — text click toggles track aria-checked + hidden input",
+    ok,
+    `before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+  );
+}
+
 /* ─── Wave 7 fix #3 — Toolbar.Separator orientation/role/aria lock ─────
  *
  * Pre-fix, ToolbarSeparatorProps was a bare alias of Base UI's separator
