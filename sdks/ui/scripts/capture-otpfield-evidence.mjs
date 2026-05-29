@@ -25,6 +25,8 @@ const stories = [
   "components-otpfield--with-label",
   "components-otpfield--required-invalid",
   "components-otpfield--disabled",
+  "components-otpfield--readonly",
+  "components-otpfield--standalone-aria-paths",
   "components-otpfield--rtl",
 ];
 

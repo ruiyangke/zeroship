@@ -2824,6 +2824,292 @@ await open("components-otpfield--required-invalid");
   );
 }
 
+/* ─── OtpField 🔴 fix #1 — every cell (incl. cell 0) has a name ────── *
+ *
+ * Regression for the wave 5 review #1: pre-fix the component stamped
+ * `aria-label="Character N of M"` on every BaseOTPField.Input. Base
+ * UI deliberately drops `aria-label` on cell 0 (so a real `<label>` /
+ * Field.Label can name it) AND blanks `aria-labelledby` on cells
+ * 1..N-1 when `aria-label` is present (so the group name disappears).
+ * Net effect: cell 0 was unnamed under Field-wrapped + standalone
+ * paths, cells 1..N-1 lost the row name.
+ *
+ * Post-fix: every cell carries `aria-labelledby` composing the group
+ * label id (Field.Label / consumer / hidden-span fallback) + a
+ * per-cell visually-hidden span. So every cell announces
+ * "<group>, character N of M".
+ *
+ * We assert:
+ *   - In the Field-wrapped Basic story: cell 0 has `aria-labelledby`
+ *     pointing at >=2 ids whose resolved text contains BOTH the
+ *     Field.Label text ("Verification code") AND "Character 1 of 6".
+ *   - In the StandaloneAriaPaths hidden-label-fallback row: cell 0
+ *     has `aria-labelledby` whose resolved text contains BOTH
+ *     "Verification code" AND "Character 1 of 3".
+ *   - In the StandaloneAriaPaths aria-label row: cell 0 resolves to
+ *     "Backup code" + "Character 1 of 3" (aria-label was mirrored
+ *     into a hidden span and chained per cell).
+ */
+await open("components-otpfield--basic");
+{
+  const cell0 = page.locator('[data-testid="otp-basic-cell-0"]');
+  await cell0.waitFor({ state: "visible", timeout: 5000 });
+  const cell0Name = await cell0.evaluate((el) => {
+    const labelledBy = el.getAttribute("aria-labelledby") || "";
+    const ids = labelledBy.split(/\s+/).filter(Boolean);
+    if (ids.length === 0) return "";
+    return ids
+      .map((id) => {
+        const node = document.getElementById(id);
+        return node ? (node.textContent || "").trim() : "";
+      })
+      .join(" ");
+  });
+  const hasGroup = /Verification code/i.test(cell0Name);
+  const hasCharIndex = /character\s+1\s+of\s+6/i.test(cell0Name);
+  const ok = hasGroup && hasCharIndex;
+  report(
+    "OtpField cell-0 labelled with group + 'character N of M' (Field) — wave5 fix #1",
+    ok,
+    `name="${cell0Name}" hasGroup=${hasGroup} hasCharIndex=${hasCharIndex}`,
+  );
+}
+
+await open("components-otpfield--standalone-aria-paths");
+{
+  // Story renders three OtpFields with length=3 → 9 visible cells.
+  // Base UI also emits ONE hidden form-validation `<input type="text"
+  // aria-hidden>` per OtpField (3 extras); we filter them out by
+  // `:not([aria-hidden])`.
+  //   cells[0..2] — hidden-label fallback (no Field, no aria-*)
+  //   cells[3..5] — aria-label="Backup code" + aria-describedby
+  //   cells[6..8] — aria-labelledby="otp-labelledby"
+  const cells = await page
+    .locator('input[type="text"]:not([aria-hidden="true"])')
+    .all();
+  // Helper to resolve aria-labelledby text in DOM.
+  async function resolveName(el) {
+    return el.evaluate((node) => {
+      const labelledBy = node.getAttribute("aria-labelledby") || "";
+      const ids = labelledBy.split(/\s+/).filter(Boolean);
+      if (ids.length === 0) {
+        // Fall back to aria-label if no labelledby chain.
+        return node.getAttribute("aria-label") || "";
+      }
+      return ids
+        .map((id) => {
+          const found = document.getElementById(id);
+          return found ? (found.textContent || "").trim() : "";
+        })
+        .join(" ");
+    });
+  }
+  const name0 = await resolveName(cells[0]);
+  const name3 = await resolveName(cells[3]);
+  const name6 = await resolveName(cells[6]);
+  // Row 1 — hidden-label fallback. Expect "Verification code" + "Character 1 of 3".
+  const row1Ok =
+    /Verification code/i.test(name0) && /character\s+1\s+of\s+3/i.test(name0);
+  // Row 2 — aria-label="Backup code". Expect "Backup code" + "Character 1 of 3".
+  const row2Ok =
+    /Backup code/i.test(name3) && /character\s+1\s+of\s+3/i.test(name3);
+  // Row 3 — aria-labelledby="otp-labelledby" → "Recovery code" + "Character 1 of 3".
+  const row3Ok =
+    /Recovery code/i.test(name6) && /character\s+1\s+of\s+3/i.test(name6);
+  const ok = row1Ok && row2Ok && row3Ok;
+  report(
+    "OtpField standalone cell-0 named via every group path — wave5 fix #1",
+    ok,
+    `row1="${name0}" row2="${name3}" row3="${name6}"`,
+  );
+}
+
+/* ─── OtpField 🔴 fix #2 — aria-describedby on each cell ────────────── *
+ *
+ * Regression for the wave 5 review #2: pre-fix the OtpField forwarded
+ * `aria-describedby` to the ROOT only. The Root is `<div role="group">`
+ * — not focusable — so screen readers never announced the description
+ * on cell focus. Post-fix each cell input carries the merged
+ * `aria-describedby` (Field-auto-wired description id + caller-provided
+ * ids) so it surfaces on focus.
+ *
+ * WithLabel story has a Field.Description ("We sent a 6-digit code to
+ * your email."). We assert each cell's `aria-describedby` resolves to
+ * that text. */
+await open("components-otpfield--with-label");
+{
+  const cells = await page.locator('[data-testid^="otp-with-label-cell-"]').all();
+  const cellCount = cells.length;
+  let allHaveDescription = cellCount > 0;
+  const resolvedTexts = [];
+  for (const cell of cells) {
+    const text = await cell.evaluate((el) => {
+      const describedBy = el.getAttribute("aria-describedby") || "";
+      const ids = describedBy.split(/\s+/).filter(Boolean);
+      if (ids.length === 0) return "";
+      return ids
+        .map((id) => {
+          const node = document.getElementById(id);
+          return node ? (node.textContent || "").trim() : "";
+        })
+        .join(" ");
+    });
+    resolvedTexts.push(text);
+    if (!/We sent a 6-digit code/i.test(text)) {
+      allHaveDescription = false;
+    }
+  }
+  report(
+    "OtpField every cell's aria-describedby surfaces Field.Description — wave5 fix #2",
+    allHaveDescription,
+    `cellCount=${cellCount} resolved=${JSON.stringify(resolvedTexts)}`,
+  );
+}
+
+/* ─── OtpField 🔴 fix #3 — coarse-pointer md hit-target floor ───────── *
+ *
+ * Regression for the wave 5 review #3: pre-fix the coarse-pointer
+ * `@media (pointer: coarse)` block bumped only `.zs-otp-field--sm`,
+ * leaving the default md cell at `--zs-control-h-md` (2.5rem = 40px),
+ * under the WCAG 2.5.5 floor of 44 device-units (`--zs-hit-min` =
+ * 2.75rem = 44px). Post-fix the CSS uses `max(<size>,
+ * var(--zs-hit-min))` on every size so md and lg also satisfy the
+ * floor.
+ *
+ * Playwright's hasTouch + isMobile signals don't toggle the
+ * `(pointer: coarse)` media query alone; we instead read the
+ * StylesheetList directly and assert the CSS rule shape is correct.
+ * That sidesteps test-environment drift between desktop browser
+ * defaults and the actual mobile UA. */
+{
+  const fs = await import("node:fs/promises");
+  const cssUrl = new URL(
+    "../src/components/OtpField/OtpField.css",
+    import.meta.url,
+  );
+  const cssSource = await fs.readFile(cssUrl, "utf8");
+  // Capture the body of `@media (pointer: coarse) { … }`. Use
+  // balanced-brace walk because the block contains nested `{ … }`
+  // selectors and a naive non-greedy match terminates at the first
+  // inner `}`.
+  let coarseBody = "";
+  {
+    const coarseStart = cssSource.search(
+      /@media\s*\(\s*pointer:\s*coarse\s*\)\s*\{/,
+    );
+    if (coarseStart >= 0) {
+      const openBraceIdx = cssSource.indexOf("{", coarseStart);
+      let depth = 1;
+      let i = openBraceIdx + 1;
+      while (i < cssSource.length && depth > 0) {
+        const ch = cssSource[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") depth--;
+        i++;
+      }
+      coarseBody = cssSource.slice(openBraceIdx + 1, i - 1);
+    }
+  }
+  // Every size — including the default md (the `.zs-otp-field` bare
+  // selector OR an explicit `--md` declaration) — must clamp the cell
+  // size against `--zs-hit-min`. The new shape uses `max(...,
+  // var(--zs-hit-min))` on the bare `.zs-otp-field` selector + the
+  // `--sm` and `--lg` modifiers. We slice the per-selector body and
+  // assert it contains both `max(` and `var(--zs-hit-min)` — a regex
+  // that walks both nested parens would be brittle.
+  function selectorBodyHasMaxHitMin(body, selectorRe) {
+    const match = body.match(selectorRe);
+    if (!match) return false;
+    const after = body.slice(match.index + match[0].length);
+    const openIdx = after.indexOf("{");
+    const closeIdx = after.indexOf("}", openIdx);
+    if (openIdx < 0 || closeIdx < 0) return false;
+    const ruleBody = after.slice(openIdx + 1, closeIdx);
+    return /max\(/.test(ruleBody) && /var\(--zs-hit-min\)/.test(ruleBody);
+  }
+  const bareHasMax = selectorBodyHasMaxHitMin(
+    coarseBody,
+    /\.zs-otp-field(?=\s*\{)/,
+  );
+  const smHasMax = selectorBodyHasMaxHitMin(
+    coarseBody,
+    /\.zs-otp-field--sm(?=\s*\{)/,
+  );
+  const lgHasMax = selectorBodyHasMaxHitMin(
+    coarseBody,
+    /\.zs-otp-field--lg(?=\s*\{)/,
+  );
+  const ok = bareHasMax && smHasMax && lgHasMax;
+  report(
+    "OtpField coarse-pointer hit-target floors every size — wave5 fix #3",
+    ok,
+    `bare=${bareHasMax} sm=${smHasMax} lg=${lgHasMax}`,
+  );
+}
+
+/* ─── OtpField 🔴 fix #4 — forced-colors readonly + completed-focus ─── *
+ *
+ * Regression for the wave 5 review #4: pre-fix the
+ * `@media (forced-colors: active)` block had mirrors for base / focus /
+ * invalid / disabled / complete / hover but no readonly mirror and no
+ * completed-focus mirror, leaving those two states painted in oklch
+ * tokens under high-contrast.
+ *
+ * Post-fix two new selectors live inside the forced-colors block:
+ *   `.zs-otp-field[data-readonly] .zs-otp-field__input`
+ *   `.zs-otp-field[data-complete] .zs-otp-field__input:focus`
+ * Both at equal specificity to their outside-forced-colors twins so
+ * the system palette wins.
+ *
+ * We parse the CSS for those selectors INSIDE the forced-colors block. */
+{
+  const fs = await import("node:fs/promises");
+  const cssUrl = new URL(
+    "../src/components/OtpField/OtpField.css",
+    import.meta.url,
+  );
+  const cssSource = await fs.readFile(cssUrl, "utf8");
+  // The forced-colors block has nested @media (hover: hover) inside it,
+  // so we need a balanced-brace match instead of a naive non-greedy one.
+  // Locate the opening `{` of `@media (forced-colors: active)` and walk
+  // to the matching closing brace.
+  const fcStart = cssSource.search(
+    /@media\s*\(\s*forced-colors:\s*active\s*\)\s*\{/,
+  );
+  let fcBody = "";
+  if (fcStart >= 0) {
+    const openBraceIdx = cssSource.indexOf("{", fcStart);
+    let depth = 1;
+    let i = openBraceIdx + 1;
+    while (i < cssSource.length && depth > 0) {
+      const ch = cssSource[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      i++;
+    }
+    fcBody = cssSource.slice(openBraceIdx + 1, i - 1);
+  }
+  // Readonly mirror — equal specificity (2 classes: .zs-otp-field +
+  // [data-readonly] + .zs-otp-field__input → still the 2-class+attr
+  // selector). Use Field/GrayText for the body.
+  const hasReadonlyMirror =
+    /\.zs-otp-field\[data-readonly\][^{]*\.zs-otp-field__input\s*\{[^}]*(?:Field|GrayText)/.test(
+      fcBody,
+    );
+  // Completed-focus mirror — `[data-complete] .input:focus` with
+  // Highlight on the outer ring.
+  const hasCompletedFocusMirror =
+    /\.zs-otp-field\[data-complete\][^{]*\.zs-otp-field__input:focus\s*\{[^}]*Highlight/.test(
+      fcBody,
+    );
+  const ok = hasReadonlyMirror && hasCompletedFocusMirror;
+  report(
+    "OtpField forced-colors readonly + completed-focus mirrors present — wave5 fix #4",
+    ok,
+    `readonly=${hasReadonlyMirror} completedFocus=${hasCompletedFocusMirror}`,
+  );
+}
+
 /* ─── 66. Meter aria-valuenow reflects current value (slice 9) ─────── */
 await open("components-meter--basic");
 {
