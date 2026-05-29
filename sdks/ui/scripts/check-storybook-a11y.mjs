@@ -382,6 +382,10 @@ const stories = [
   "components-navigationmenu--keyboard-nav",
   "components-navigationmenu--disabled",
   "components-navigationmenu--rtl",
+  // Wave 10 review regressions:
+  "components-navigationmenu--as-child-ref-attach-regression",
+  "components-navigationmenu--icon-rotation-regression",
+  "components-navigationmenu--popup-min-width-clamp-regression",
   // Slice 14: Accordion + Collapsible.
   "components-accordion--basic",
   "components-accordion--multiple-open",
