@@ -21,9 +21,14 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* Default (md) size; per-size modifiers override below. */
+  /* Default (md) size; per-size modifiers override the size below.
+     The track width is derived from the size (1/8 of the diameter) so
+     the arc proportion stays identical across sm/md/lg instead of each
+     size picking a hand-tuned width that drifts the ratio. */
   --zs-spinner-size: 1.5rem;
-  --zs-spinner-track: 0.1875rem;
+  --zs-spinner-track: calc(var(--zs-spinner-size) / 8);
+  /* Track color — the muted ring behind the accent arc. */
+  --zs-spinner-track-color: var(--zs-fill-secondary);
   inline-size: var(--zs-spinner-size);
   block-size: var(--zs-spinner-size);
   color: var(--zs-accent);
@@ -31,11 +36,12 @@
 
 .zs-spinner--sm {
   --zs-spinner-size: 1rem;
-  --zs-spinner-track: 0.125rem;
+  /* At 1rem the derived track is hairline-thin; lift the track contrast
+     one step so the ring stays legible against the page. */
+  --zs-spinner-track-color: var(--zs-separator);
 }
 .zs-spinner--lg {
   --zs-spinner-size: 2.5rem;
-  --zs-spinner-track: 0.25rem;
 }
 
 .zs-spinner__ring {
@@ -44,7 +50,7 @@
   border-radius: var(--zs-radius-full);
   /* A ring in the muted fill with the top arc in the accent (current
      color), so the spin reads as a moving highlight around the track. */
-  border: var(--zs-spinner-track) solid var(--zs-fill-secondary);
+  border: var(--zs-spinner-track) solid var(--zs-spinner-track-color);
   border-block-start-color: currentColor;
   animation: zs-spinner-spin 0.7s linear infinite;
 }

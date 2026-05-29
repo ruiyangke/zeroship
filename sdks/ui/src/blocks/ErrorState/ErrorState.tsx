@@ -153,7 +153,7 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
           ) : null}
           {onRetry != null ? (
             <ErrorStateActions>
-              <Button variant="tinted" onClick={onRetry}>
+              <Button variant="filled" onClick={onRetry}>
                 Retry
               </Button>
             </ErrorStateActions>

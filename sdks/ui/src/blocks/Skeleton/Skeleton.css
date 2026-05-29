@@ -8,8 +8,8 @@
  *     --circle : full-radius circle, square aspect
  *   .zs-skeleton-lines            — container for multi-line text (N bars)
  *
- * Paint: a base fill (--zs-fill-secondary) with a diagonal shimmer
- * sweep painted in --zs-fill-tertiary via a moving gradient. The base
+ * Paint: a base fill (--zs-fill-tertiary) with a diagonal shimmer
+ * sweep painted in --zs-fill-quaternary via a moving gradient. The base
  * fill is ALWAYS painted — the animation only moves the highlight, so
  * disabling it (reduced motion / forced colors) leaves a visible
  * placeholder.
@@ -21,14 +21,17 @@
 
 .zs-skeleton {
   display: block;
-  /* Base placeholder fill — always visible, even with motion off. */
-  background-color: var(--zs-fill-secondary);
+  /* Base placeholder fill — always visible, even with motion off. One
+     step lighter than secondary so the placeholder reads soft/warm
+     rather than a cold high-contrast block. */
+  background-color: var(--zs-fill-tertiary);
   /* Shimmer highlight: a band of the lighter fill sweeping across the
-     base. background-size 200% lets the gradient translate fully. */
+     base. background-size 200% lets the gradient translate fully. Kept
+     one step below the base so the sweep stays a subtle lift. */
   background-image: linear-gradient(
     90deg,
     transparent 0%,
-    var(--zs-fill-tertiary) 50%,
+    var(--zs-fill-quaternary) 50%,
     transparent 100%
   );
   background-size: 200% 100%;
@@ -74,7 +77,7 @@
 /* The last bar is shortened so the block reads as a finished paragraph
    rather than a solid rectangle. */
 .zs-skeleton-lines .zs-skeleton:last-child:not(:only-child) {
-  inline-size: 60%;
+  inline-size: 50%;
 }
 
 @keyframes zs-skeleton-shimmer {

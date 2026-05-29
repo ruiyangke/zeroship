@@ -44,7 +44,9 @@
   align-items: center;
   justify-content: center;
   color: var(--zs-error-state-icon-color);
-  font-size: var(--zs-text-large-title-size);
+  /* One step smaller than the large-title scale so the alert glyph sits
+     lighter against the type rather than dominating the panel. */
+  font-size: var(--zs-text-title-1-size);
   line-height: 1;
 }
 
@@ -53,8 +55,9 @@
   block-size: 1em;
   fill: none;
   stroke: currentColor;
-  /* SVG attribute units (viewBox space), not CSS px. */
-  stroke-width: 2;
+  /* SVG attribute units (viewBox space), not CSS px. Thinned from 2 so
+     the glyph weight pairs with the type rather than reading heavy. */
+  stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -75,9 +78,11 @@
 
 .zs-error-state__description {
   margin: 0;
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  /* One step softer + smaller than the title so the heading owns the
+     hierarchy and the description reads as quiet secondary copy. */
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
   margin-block-start: calc(-1 * var(--zs-space-1));
 }
 

@@ -58,9 +58,11 @@
 
 .zs-empty-state__description {
   margin: 0;
-  color: var(--zs-label-secondary);
-  font-size: var(--zs-text-subheadline-size);
-  line-height: var(--zs-text-subheadline-line);
+  /* One step softer + smaller than the title so the heading owns the
+     hierarchy and the description reads as quiet secondary copy. */
+  color: var(--zs-label-tertiary);
+  font-size: var(--zs-text-footnote-size);
+  line-height: var(--zs-text-footnote-line);
   /* Tighten the title↔description pairing: the Stack gap governs the
      inter-part rhythm, but the description should sit a touch closer to
      its title than to the action row. A small negative top margin pulls
