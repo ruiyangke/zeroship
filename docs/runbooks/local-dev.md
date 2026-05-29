@@ -63,10 +63,9 @@ Terminal 1:
 ./target/release/zeroship-control \
   --port 9090 \
   --db postgres://localhost:5432/zeroship \
-  --bundles ./bundles \
+  --blob-store ./bundles \
   --control-key dev-control \
-  --master-key dev-master \
-  --jwt-secret dev-jwt-secret
+  --master-key dev-master
 ```
 
 Terminal 2:
@@ -94,7 +93,7 @@ Terminal 3:
 
 Notes:
 
-- `zeroship-control` uses `--jwt-secret`; `zeroship-gate` must use the same value via `--auth-secret`.
+- `zeroship-gate` uses `--auth-secret` / `AUTH_SECRET` for gateway auth paths.
 - `zeroship-worker` binds `127.0.0.1` by default. Only add `--bind 0.0.0.0` together with `--worker-key`.
 - To seed the Builder OAuth client in local dev, start control with
   `BOOTSTRAP_BUILDER_OAUTH_CLIENT=1` or `--bootstrap-builder-client` while

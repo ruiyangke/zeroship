@@ -36,8 +36,8 @@ struct ControlCli {
     db: String,
 
     /// Root directory for bundles and content-addressed deploy blobs.
-    #[arg(long = "bundles", env = "BUNDLES_DIR", default_value = "./bundles")]
-    bundles: String,
+    #[arg(long = "blob-store", env = "BLOB_STORE", default_value = "./bundles")]
+    blob_store: String,
 
     /// Admin/control API shared secret.
     #[arg(long = "control-key", env = "CONTROL_KEY", default_value = "", hide_env_values = true)]
@@ -272,7 +272,7 @@ async fn main() -> std::io::Result<()> {
 
     let port = cli.port;
     let db_url = cli.db;
-    let bundles_dir = cli.bundles;
+    let blob_store_root = cli.blob_store;
     let control_key = cli.control_key;
     let master_key = cli.master_key;
     let workers_str = cli.workers;
@@ -396,15 +396,15 @@ async fn main() -> std::io::Result<()> {
         .expect("failed to connect to database");
 
     let vfs = Arc::new(
-        LocalFs::new(&bundles_dir).expect("failed to initialise bundle store"),
+        LocalFs::new(&blob_store_root).expect("failed to initialise bundle store"),
     ) as Arc<dyn BundleStore + Send + Sync>;
 
     // BlobStore lives alongside the legacy BundleStore on the same
-    // root. New `.zship` deploys land in `<bundles_dir>/blobs/` and
-    // `<bundles_dir>/manifests/`; legacy `<bundles_dir>/<app_id>/...`
+    // root. New `.zship` deploys land in `<blob_store_root>/blobs/` and
+    // `<blob_store_root>/manifests/`; legacy `<blob_store_root>/<app_id>/...`
     // files stay where they are until the old BundleStore path is
     // retired.
-    let blob_root = PathBuf::from(&bundles_dir);
+    let blob_root = PathBuf::from(&blob_store_root);
     let blob_store: Arc<dyn BlobStore> = Arc::new(
         LocalDiskBlobStore::new(blob_root)
             .expect("failed to initialise blob store"),
@@ -727,6 +727,27 @@ async fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_blob_store_flag_uses_unified_name() {
+        let cli =
+            ControlCli::try_parse_from(["zeroship-control", "--blob-store", "/tmp/blob-root"])
+                .expect("blob-store flag should parse");
+
+        assert_eq!(cli.blob_store, "/tmp/blob-root");
+    }
+
+    #[test]
+    fn control_rejects_removed_bundles_flag() {
+        let err = ControlCli::try_parse_from([
+            "zeroship-control",
+            "--bundles",
+            "/tmp/bundle-root",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 
     #[test]
     fn master_key_rejects_dictionary_string_in_non_dev() {

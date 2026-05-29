@@ -26,7 +26,7 @@ services:
       zeroship-control
         --port 9090
         --db postgres://postgres:zeroship@postgres:5432/zeroship
-        --bundles /data/bundles
+        --blob-store /data/bundles
         --control-key platform-key
         --master-key master-key
         --dev-insecure

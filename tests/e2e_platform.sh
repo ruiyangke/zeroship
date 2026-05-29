@@ -108,7 +108,7 @@ rm -rf /tmp/zeroship-e2e-bundles
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start control
-"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DB_URL" --bundles /tmp/zeroship-e2e-bundles \
+"$BIN/zeroship-control" --port $CONTROL_PORT --db "$DB_URL" --blob-store /tmp/zeroship-e2e-bundles \
     --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
