@@ -74,7 +74,7 @@ RUN cargo build --release \
 # Stage 3 — runtime image.
 # ---------------------------------------------------------------------------
 # Use Ubuntu 24.04 (glibc 2.39) instead of Debian bookworm (glibc 2.36)
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS runtime
 # `docker.io` gives us the docker CLI inside the sandbox container so
 # zeroship-sandbox can shell out via docker.sock (Docker-out-of-Docker).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -85,3 +85,17 @@ COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-sandbox /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
+
+# ---------------------------------------------------------------------------
+# Stage 4 — frontend dev image: the runtime image (so it has the `zeroship`
+# CLI built for THIS glibc) PLUS Node 22. The AI builder's `vite dev` runs the
+# vite-plugin dev-bootstrap, which SPAWNS `zeroship` to host the app's server
+# functions in the real runtime — so the builder container needs both Node
+# (for vite) and the zeroship binary on PATH (built for ubuntu 24.04's glibc;
+# a plain node:22-bookworm image is glibc 2.36 and can't run it).
+# ---------------------------------------------------------------------------
+FROM runtime AS frontend
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get update && apt-get install -y --no-install-recommends nodejs git \
+ && rm -rf /var/lib/apt/lists/* \
+ && corepack enable

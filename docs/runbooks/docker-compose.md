@@ -7,14 +7,26 @@ zeroship stack, fronted by a Caddy reverse proxy on the `*.zeroship.localhost`
 dev domain. From the repo root:
 
 ```bash
-docker compose up --build              # build + boot the whole stack
+# Build everything ahead (so `up` never builds): the shared runtime image
+# (control/gateway/worker/auth/sandbox) + the frontend image (builder), plus
+# the external images (postgres, hydra, caddy, verdaccio).
+docker compose build                   # all Dockerfile-based services
+docker compose pull                    # external images
+
+docker compose up -d                   # boot the whole stack (build-free)
 docker compose up -d --scale worker=10
 docker compose logs -f
 docker compose down -v
 ```
 
-The first `up` runs `--build` because the image now also compiles the SDKs
-(needed by the runtime crate) and `zeroship-auth` — see [Image build](#image-build).
+`docker compose up --build` also works (builds on the fly the first time). The
+image compiles the SDKs (needed by the runtime crate) and all six binaries incl.
+`zeroship-auth` — see [Image build](#image-build). The `builder` service uses a
+separate `frontend` image target (the runtime image + Node 22) because its
+`vite dev` spawns the `zeroship` runtime for the app's server functions.
+
+> First boot is heavy: the image does a full `pnpm build` + release `cargo build`
+> of the V8 runtime. Pre-building with `docker compose build` keeps later `up`s instant.
 
 ### Dev domain (via Caddy)
 

@@ -299,10 +299,19 @@ services:
       - seccomp:unconfined
 
   builder:
-    image: node:22-bookworm
+    # Frontend dev image = the runtime image (carries the `zeroship` CLI built
+    # for this glibc) + Node 22. vite dev's dev-bootstrap spawns `zeroship`.
+    build:
+      context: .
+      target: frontend
     # Self-heal: builder waits for control to write /data/builder-client-secret;
     # if control is still bootstrapping, retry rather than exit.
     restart: on-failure
+    # vite dev spawns the `zeroship` runtime (io_uring/compio); the default
+    # seccomp profile blocks io_uring_setup → PermissionDenied. Same opt-in the
+    # other runtime-bearing services use.
+    security_opt:
+      - seccomp:unconfined
     working_dir: /workspace
     entrypoint: /bin/sh
     command:
@@ -326,7 +335,7 @@ services:
         # "Failed to resolve entry for package @zeroship/vite-plugin". dist is
         # written into the mounted repo, so a restart reuses it (build once).
         pnpm build
-        exec pnpm --dir apps/zeroship-builder dev -- --host 0.0.0.0 --port 3001 --strictPort
+        exec pnpm --dir apps/zeroship-builder dev --host 0.0.0.0 --port 3001 --strictPort
     environment:
       CONTROL_URL: http://control:9090
       CONTROL_KEY: platform-key
