@@ -354,6 +354,7 @@ const stories = [
   "components-toolbar--rtl",
   "components-toolbar--role-lock-regression",
   "components-toolbar--roving",
+  "components-toolbar--separator-orientation-lock-regression",
   "components-navigationmenu--basic",
   "components-navigationmenu--with-content",
   "components-navigationmenu--with-icons",

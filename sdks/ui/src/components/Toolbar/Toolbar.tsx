@@ -225,17 +225,65 @@ ToolbarInput.displayName = "Toolbar.Input";
  *
  * Cluster boundary inside the toolbar — `aria-orientation` is the
  * perpendicular of the toolbar axis (a vertical hairline inside a
- * horizontal toolbar, and vice versa). Base UI handles the ARIA wiring;
- * we just paint. */
+ * horizontal toolbar, and vice versa). Base UI computes the
+ * perpendicular orientation from the parent Toolbar context, then
+ * spreads `...props` AFTER it (see @base-ui Toolbar.Separator), so a
+ * caller-passed `orientation` / `role` / `aria-orientation` would
+ * override the contract. We Omit all three at the type layer AND
+ * runtime-strip them before forwarding, so the rendered DOM always
+ * carries `role="separator"` + the perpendicular `aria-orientation`.
+ * `render` is also Omit'd: we own the `<div>` rendering surface (no
+ * asChild path here) so the separator role contract sticks. */
 
 type BaseSeparatorProps = ComponentPropsWithoutRef<typeof BaseToolbar.Separator>;
-export type ToolbarSeparatorProps = BaseSeparatorProps;
+
+/**
+ * Public Toolbar.Separator props. We deliberately omit:
+ *
+ *   - `render`: we own the `<div>` rendering surface; an asChild path
+ *     would have to be routed through `_slot.ts` to preserve the
+ *     `role="separator"` contract.
+ *   - `orientation`: LOCKED to the perpendicular of the parent
+ *     Toolbar's `orientation` (vertical separator inside a horizontal
+ *     toolbar, and vice versa). Base UI's `ToolbarSeparator` computes
+ *     this from the parent context; a caller-passed override would
+ *     break the cluster-boundary semantics.
+ *   - `role`: LOCKED to `"separator"` by Base UI. Surfacing it would
+ *     be misleading.
+ *   - `aria-orientation`: LOCKED to track the resolved orientation.
+ */
+export interface ToolbarSeparatorProps
+  extends Omit<
+    BaseSeparatorProps,
+    "render" | "orientation" | "role" | "aria-orientation"
+  > {
+  /** Optional class hook on the separator. */
+  className?: string;
+}
 
 const ToolbarSeparator = forwardRef<HTMLDivElement, ToolbarSeparatorProps>(
   function ToolbarSeparator({ className, ...rest }, ref) {
+    // Runtime strip mirrors the `Omit` above. Bypasses through
+    // untyped spreads (`<Toolbar.Separator {...untypedProps}>`) would
+    // otherwise let Base UI's spread-after-defaults pattern override
+    // `orientation` / `role` / `aria-orientation`. Stripping here
+    // keeps the cluster-boundary contract intact under runtime spread.
+    const {
+      orientation: _orientation,
+      role: _role,
+      "aria-orientation": _ariaOrientation,
+      ...restLocked
+    } = rest as Record<string, unknown> & {
+      orientation?: string;
+      role?: string;
+      "aria-orientation"?: string;
+    };
+    void _orientation;
+    void _role;
+    void _ariaOrientation;
     return (
       <BaseToolbar.Separator
-        {...rest}
+        {...(restLocked as BaseSeparatorProps)}
         ref={ref}
         className={composeBaseClass("zs-toolbar-separator", className)}
       />
