@@ -3672,6 +3672,45 @@ await open("components-meter--basic");
   );
 }
 
+/* ─── 66b. Wave-9 fix #2 — Meter custom-range external-aria, no 3% ──── *
+ *
+ * ExternalAriaLabelling renders value=3 / max=5 with aria-valuetext
+ * "Three of five incidents" and intentionally omits showValue so Base
+ * UI's default percent formatter cannot mount the misleading "3%"
+ * badge against a 0..5 range. The aria-* triplet (labelledby /
+ * describedby / valuetext) must reach the meter root, the values must
+ * read in domain units (3 of 5), and neither "3%" nor the percent-
+ * normalised "60%" string may appear in the rendered DOM.
+ */
+await open("components-meter--external-aria-labelling");
+{
+  const meter = page.locator('[data-testid="meter-external-aria"]');
+  await meter.waitFor({ state: "visible", timeout: 5000 });
+  const role = await meter.getAttribute("role");
+  const valueMin = await meter.getAttribute("aria-valuemin");
+  const valueMax = await meter.getAttribute("aria-valuemax");
+  const valueNow = await meter.getAttribute("aria-valuenow");
+  const valueText = await meter.getAttribute("aria-valuetext");
+  const labelledBy = await meter.getAttribute("aria-labelledby");
+  const describedBy = await meter.getAttribute("aria-describedby");
+  const bodyText = await page.locator("body").innerText();
+  const hasMisleadingPercent = /\b3%\b/.test(bodyText) || /\b60%\b/.test(bodyText);
+  const ok =
+    role === "meter" &&
+    valueMin === "0" &&
+    valueMax === "5" &&
+    valueNow === "3" &&
+    valueText === "Three of five incidents" &&
+    labelledBy === "meter-incidents-label" &&
+    describedBy === "meter-incidents-description" &&
+    !hasMisleadingPercent;
+  report(
+    "Meter custom-range external-aria forwards triplet; no misleading percent badge",
+    ok,
+    `role=${role} min=${valueMin} max=${valueMax} now=${valueNow} valuetext="${valueText}" labelledby=${labelledBy} describedby=${describedBy} misleadingPercent=${hasMisleadingPercent}`,
+  );
+}
+
 /* ─── 67. Progress determinate aria-valuenow reflects value ────────── */
 await open("components-progress--determinate");
 {

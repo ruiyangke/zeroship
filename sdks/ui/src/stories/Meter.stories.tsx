@@ -156,10 +156,23 @@ export const AllSizes: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const meter = canvas.getByRole("meter", { name: /storage used/i });
-
-    await expect(meter).toHaveAttribute("aria-valuenow", "72");
-    await expect(canvas.getByText("72%")).toBeInTheDocument();
+    // AllSizes renders three rows (Small / Medium / Large) at value=70.
+    // Wave-9 fix: the previous play asserted /storage used/i + 72% which
+    // belonged to the WithValue story; against AllSizes the lookup would
+    // throw immediately. Real path is three meters at aria-valuenow=70.
+    for (const label of [/small meter/i, /medium meter/i, /large meter/i]) {
+      const meter = canvas.getByRole("meter", { name: label });
+      await expect(meter).toHaveAttribute("aria-valuenow", "70");
+    }
+    await expect(
+      canvas.getByRole("meter", { name: /small meter/i }),
+    ).toHaveAttribute("data-size", "sm");
+    await expect(
+      canvas.getByRole("meter", { name: /medium meter/i }),
+    ).toHaveAttribute("data-size", "md");
+    await expect(
+      canvas.getByRole("meter", { name: /large meter/i }),
+    ).toHaveAttribute("data-size", "lg");
   },
 };
 
@@ -295,8 +308,15 @@ export const ExternalAriaLabelling: Story = {
       description: {
         story:
           "External aria-labelledby and aria-describedby forwarded " +
-          "directly to the meter root while showValue renders the " +
-          "standalone numeric badge.",
+          "directly to the meter root. Custom range (0-5) carries an " +
+          "explicit aria-valuetext (\"Three of five incidents\") so " +
+          "assistive tech reads the measurement in domain units. The " +
+          "showValue badge is intentionally NOT used here — Base UI's " +
+          "default formatter normalizes value/max to a percent string, " +
+          "which on a 3/5 meter would render the misleading text " +
+          "\"3%\". Custom-range meters should rely on aria-valuetext " +
+          "for the screen-reader readout and let the bar telegraph the " +
+          "ratio visually.",
       },
     },
   },
@@ -313,10 +333,10 @@ export const ExternalAriaLabelling: Story = {
           value={3}
           min={0}
           max={5}
-          showValue
           aria-labelledby="meter-incidents-label"
           aria-describedby="meter-incidents-description"
           aria-valuetext="Three of five incidents"
+          data-testid="meter-external-aria"
         />
       </div>
     </div>
@@ -326,11 +346,21 @@ export const ExternalAriaLabelling: Story = {
     const meter = canvas.getByRole("meter", { name: /incident budget/i });
 
     await expect(meter).toHaveAttribute("aria-valuenow", "3");
-    await expect(meter).toHaveAttribute("aria-valuetext", "Three of five incidents");
+    await expect(meter).toHaveAttribute("aria-valuemin", "0");
+    await expect(meter).toHaveAttribute("aria-valuemax", "5");
+    await expect(meter).toHaveAttribute(
+      "aria-valuetext",
+      "Three of five incidents",
+    );
     await expect(meter).toHaveAttribute(
       "aria-describedby",
       "meter-incidents-description",
     );
+    // Wave-9 regression for the misleading-percent 🔴: with showValue
+    // dropped, Base UI's default percent formatter is NOT mounted, so
+    // the row must not surface a "3%" badge against the 0..5 range.
+    await expect(canvas.queryByText("3%")).not.toBeInTheDocument();
+    await expect(canvas.queryByText("60%")).not.toBeInTheDocument();
   },
 };
 
