@@ -299,6 +299,160 @@ await open("components-input--input-ref-integration");
   report("Input ref integration", ok, `status="${statusText}", activeElement matches: ${isFocused}`);
 }
 
+/* ─── 2a. Input combined-shorthand `disabled` propagation (wave-6 🔴) ──
+ *
+ * Regression for the wave-6 focused-review 🔴: the combined-shorthand
+ * inline `<Field>` previously forwarded `invalid` + `required` but
+ * dropped `disabled`. So `<Input label="Region" disabled />` greyed
+ * only the native input — the auto-bound `<Field.Label>` and the row
+ * stayed live. Decomposed `<Field disabled><Field.Label/><Input/></Field>`
+ * worked because the consumer wrote `disabled` on Field directly.
+ *
+ * Post-fix the inline `<Field>` carries `disabled={props.disabled}`,
+ * which mirrors `data-disabled=""` to the `.zs-field` root. We assert
+ * BOTH the field-root `data-disabled` (the regression target) AND
+ * the native input's `disabled` attribute (control). */
+await open("components-input--combined-disabled-propagation");
+{
+  const disabledRoot = page.locator(
+    '[data-testid="input-combined-disabled-wrapper"] .zs-field',
+  );
+  const enabledRoot = page.locator(
+    '[data-testid="input-combined-enabled-wrapper"] .zs-field',
+  );
+  await disabledRoot.waitFor({ state: "visible", timeout: 5000 });
+  const disabledHasAttr = await disabledRoot.evaluate((el) =>
+    el.hasAttribute("data-disabled"),
+  );
+  const enabledHasAttr = await enabledRoot.evaluate((el) =>
+    el.hasAttribute("data-disabled"),
+  );
+  const disabledInput = page.locator(
+    '[data-testid="input-combined-disabled-wrapper"] input',
+  );
+  const enabledInput = page.locator(
+    '[data-testid="input-combined-enabled-wrapper"] input',
+  );
+  const disabledInputAttr = await disabledInput.evaluate((el) =>
+    /** @type {HTMLInputElement} */ (el).disabled,
+  );
+  const enabledInputAttr = await enabledInput.evaluate((el) =>
+    /** @type {HTMLInputElement} */ (el).disabled,
+  );
+  // The auto-bound `<Field.Label>` must live inside the disabled
+  // field root so the `.zs-field[data-disabled] > .zs-field__label`
+  // rule fires and the label takes the disabled fill.
+  const disabledLabelInside = await page.evaluate(() => {
+    const root = document.querySelector(
+      '[data-testid="input-combined-disabled-wrapper"] .zs-field',
+    );
+    const label = root?.querySelector(".zs-field__label");
+    return !!(root && label && root.contains(label));
+  });
+  const ok =
+    disabledHasAttr &&
+    !enabledHasAttr &&
+    disabledInputAttr === true &&
+    enabledInputAttr === false &&
+    disabledLabelInside;
+  report(
+    "Input combined-shorthand `disabled` reaches inline Field root (wave-6 🔴)",
+    ok,
+    `fieldRoot[data-disabled]: disabled=${disabledHasAttr} enabled=${enabledHasAttr}, ` +
+      `input.disabled: disabled=${disabledInputAttr} enabled=${enabledInputAttr}, ` +
+      `labelInside=${disabledLabelInside}`,
+  );
+}
+
+/* ─── 2b. Input forced-colors hover + readonly mirrors (wave-6 🔴) ─────
+ *
+ * Regression for the wave-6 focused-review 🔴: the `@media
+ * (forced-colors: active)` block in Input.css mirrored base, focused,
+ * invalid, and disabled — but DROPPED hover and readonly. The
+ * token-coloured hover rules at lines 117 / 123 / 129 outrank the
+ * forced-colors base reset on specificity (the `:hover` + `:not()`
+ * chain beats `.zs-input`), so hovering an input in Windows High
+ * Contrast painted `--zs-input-bg-hover` over the system `Field`
+ * swatch. Readonly had no forced-colors mirror at all.
+ *
+ * Playwright's `emulateMedia({ forcedColors: 'active' })` flips the
+ * media query in Chromium 92+ (the installed version is well above
+ * that). We hover each variant and assert the background resolves to
+ * a system-color (solid rgb()), not the translucent oklch mix. For
+ * readonly we check the resolved colour (foreground) — post-fix it
+ * maps to `GrayText`, which resolves to a solid rgb(). */
+await page.emulateMedia({ forcedColors: "active" });
+await open("components-input--forced-colors-hover-readonly");
+{
+  const isSystemColor = (s) =>
+    /^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/.test(s) ||
+    /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*1\s*\)$/.test(s);
+  const isOklch = (s) => /oklch\(/i.test(s);
+
+  // Hover each variant and read the resolved shell background. The
+  // forced-colors paint takes one extra frame in some Chromium builds.
+  async function hoverBg(testId) {
+    const shell = page
+      .locator(`[data-testid="${testId}"]`)
+      .locator("xpath=ancestor::div[contains(@class,'zs-input')][1]");
+    await shell.waitFor({ state: "visible", timeout: 5000 });
+    await shell.hover();
+    // Forced-colors repaints take an extra frame in some Chromium
+    // builds — wait 150ms (the same settle used for the Toggle.Group
+    // forced-colors block below) to avoid intermittent pre-paint reads.
+    await page.waitForTimeout(150);
+    return shell.evaluate((el) => getComputedStyle(el).backgroundColor);
+  }
+
+  const outlineBg = await hoverBg("input-forced-colors-outline");
+  const filledBg = await hoverBg("input-forced-colors-filled");
+  // Plain hover keeps transparent background; the hairline shifts to
+  // Highlight on the bottom-inset shadow. The background being
+  // transparent in forced-colors is the correct mirror (system
+  // backgrounds aren't repainted on a transparent shell).
+  const plainBg = await hoverBg("input-forced-colors-plain");
+
+  // Readonly: foreground colour must paint with GrayText (system).
+  const readonlyShell = page
+    .locator('[data-testid="input-forced-colors-readonly"]')
+    .locator("xpath=ancestor::div[contains(@class,'zs-input')][1]");
+  await readonlyShell.waitFor({ state: "visible", timeout: 5000 });
+  const readonlyColor = await readonlyShell.evaluate(
+    (el) => getComputedStyle(el).color,
+  );
+  // The readonly shell background should also resolve to a system
+  // colour (Field), not the token fill.
+  const readonlyBg = await readonlyShell.evaluate(
+    (el) => getComputedStyle(el).backgroundColor,
+  );
+
+  const outlineOk = isSystemColor(outlineBg) && !isOklch(outlineBg);
+  const filledOk = isSystemColor(filledBg) && !isOklch(filledBg);
+  // Plain hover: transparent (any alpha-0 rgba) is acceptable AND
+  // expected — the plain variant intentionally has no fill. Reject any
+  // oklch token mix and any partially-translucent paint.
+  const isAlphaZero = (s) =>
+    /^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)$/.test(s) ||
+    s === "transparent";
+  const plainOk =
+    !isOklch(plainBg) && (isAlphaZero(plainBg) || isSystemColor(plainBg));
+  const readonlyColorOk =
+    isSystemColor(readonlyColor) && !isOklch(readonlyColor);
+  const readonlyBgOk = isSystemColor(readonlyBg) && !isOklch(readonlyBg);
+
+  const ok =
+    outlineOk && filledOk && plainOk && readonlyColorOk && readonlyBgOk;
+  report(
+    "Input forced-colors hover + readonly mirrors (wave-6 🔴)",
+    ok,
+    `outlineBg="${outlineBg}" (${outlineOk}), filledBg="${filledBg}" (${filledOk}), ` +
+      `plainBg="${plainBg}" (${plainOk}), readonlyColor="${readonlyColor}" (${readonlyColorOk}), ` +
+      `readonlyBg="${readonlyBg}" (${readonlyBgOk})`,
+  );
+}
+// Reset the emulation so subsequent navigations aren't affected.
+await page.emulateMedia({ forcedColors: "none" });
+
 /* ─── 3. Dialog default: role + aria-labelledby + aria-describedby ──── */
 await openStoryAndTrigger(
   "components-dialog--default",

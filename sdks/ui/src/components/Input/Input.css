@@ -359,6 +359,39 @@
       0 0 0 0 transparent;
     forced-color-adjust: none;
   }
+  /* Hover mirrors: the token-coloured hover rules above (lines 117 /
+     123 / 129) outrank this base forced-colors reset on specificity
+     because they include the `:hover` pseudo + `:not()` chain. Without
+     equal-specificity hover mirrors inside the forced-colors query,
+     hovering an input in Windows High Contrast paints the
+     `--zs-input-bg-hover` token over the system `Field` swatch and
+     loses the user's chosen contrast theme. We re-state the same
+     selectors here and clamp to system colors. The plain variant's
+     hover hairline lifts to `Highlight` so a hover-capable pointer
+     still sees an affordance change in high-contrast mode. */
+  @media (hover: hover) {
+    .zs-input:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+      background: Field;
+      color: FieldText;
+      box-shadow:
+        inset 0 0 0 0.0625rem CanvasText,
+        0 0 0 0 transparent;
+    }
+    .zs-input--filled:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+      background: Field;
+      color: FieldText;
+      box-shadow:
+        inset 0 0 0 0.0625rem CanvasText,
+        0 0 0 0 transparent;
+    }
+    .zs-input--plain:not([data-disabled]):not([data-focused]):not([data-readonly]):hover {
+      background: transparent;
+      color: FieldText;
+      box-shadow:
+        inset 0 -0.0625rem 0 0 Highlight,
+        0 0 0 0 transparent;
+    }
+  }
   .zs-input[data-focused] {
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
@@ -373,6 +406,23 @@
     box-shadow:
       inset 0 0 0 0.0625rem Mark,
       0 0 0 0.125rem Highlight;
+  }
+  /* Readonly mirror: the editable-vs-static distinction must survive
+     into high-contrast mode. We can't rely on the token-painted
+     `--zs-input-bg-readonly` fill (forced colors wipes it), so we
+     mark readonly by switching the foreground to GrayText — the same
+     system colour the disabled mirror uses for ink. The shell itself
+     stays on `CanvasText` so it remains a discoverable control (it's
+     still focusable, unlike disabled). */
+  .zs-input[data-readonly] {
+    background: Field;
+    color: GrayText;
+    box-shadow:
+      inset 0 0 0 0.0625rem CanvasText,
+      0 0 0 0 transparent;
+  }
+  .zs-input[data-readonly] .zs-input__control {
+    color: GrayText;
   }
   .zs-input[data-disabled] {
     color: GrayText;
@@ -391,6 +441,11 @@
      full-contrast CanvasText. Item 15 of the slice-2 review fix
      brief. */
   .zs-input[data-disabled] .zs-input__slot {
+    color: GrayText;
+  }
+  /* Readonly slot mirrors disabled — visually quieter than the
+     active-input slot, distinguishing static-text presentation. */
+  .zs-input[data-readonly] .zs-input__slot {
     color: GrayText;
   }
 }

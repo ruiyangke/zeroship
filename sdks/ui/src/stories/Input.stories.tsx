@@ -798,6 +798,202 @@ export const FieldDisabledPropagation: Story = {
   },
 };
 
+/* ─── 16b. Combined shorthand disabled propagation (regression) ──────
+ *
+ * Regression for the wave-6 review 🔴: the combined-shorthand inline
+ * `<Field>` previously forwarded `invalid` and `required` but dropped
+ * `disabled`. Result: `<Input label="Region" disabled />` greyed only
+ * the native input — the auto-bound `<Field.Label>` and the field
+ * row stayed live, so the linked label did not visually mirror the
+ * disabled state and a click on the label still focused (or tried
+ * to focus) the disabled input.
+ *
+ * Post-fix: the inline `<Field>` receives `disabled={props.disabled}`
+ * so `data-disabled=""` sits on `.zs-field`, the label takes the
+ * disabled fill via Field.css, and Base UI's Field.Root reports
+ * `state.disabled === true` to the auto-bound `<Field.Label>`.
+ *
+ * This story is the real-path equivalent of decomposed
+ * `<Field disabled>` — the play assertion verifies BOTH surfaces
+ * disable in the same way. */
+export const CombinedDisabledPropagation: Story = {
+  name: "Combined disabled propagation (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Verifies that the combined-shorthand `<Input label disabled />` " +
+          "propagates `disabled` to the inline Field root, so the label " +
+          "and row visually disable together — matching the decomposed " +
+          "form. Pre-fix, only the native input was disabled.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Combined shorthand disabled propagation"
+    >
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 18rem", minWidth: "14rem" }}
+      >
+        <span className="zs-story-label">Combined: label + disabled</span>
+        <div data-testid="input-combined-disabled-wrapper">
+          <Input
+            label="Region"
+            description="Cannot be changed after deploy."
+            defaultValue="us-east-1"
+            disabled
+          />
+        </div>
+      </div>
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 18rem", minWidth: "14rem" }}
+      >
+        <span className="zs-story-label">Combined: label only (control)</span>
+        <div data-testid="input-combined-enabled-wrapper">
+          <Input
+            label="Region"
+            description="Cannot be changed after deploy."
+            defaultValue="us-east-1"
+          />
+        </div>
+      </div>
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const disabledWrapper = canvas.getByTestId(
+      "input-combined-disabled-wrapper",
+    );
+    const enabledWrapper = canvas.getByTestId(
+      "input-combined-enabled-wrapper",
+    );
+
+    // The inline Field root is `.zs-field` and Base UI's Field.Root
+    // mirrors `disabled` to `data-disabled`. Pre-fix this attribute
+    // was missing on the disabled cell — the regression target.
+    const disabledFieldRoot = disabledWrapper.querySelector(".zs-field");
+    const enabledFieldRoot = enabledWrapper.querySelector(".zs-field");
+    await expect(disabledFieldRoot).not.toBeNull();
+    await expect(enabledFieldRoot).not.toBeNull();
+    await expect(disabledFieldRoot).toHaveAttribute("data-disabled");
+    await expect(enabledFieldRoot).not.toHaveAttribute("data-disabled");
+
+    // The native input itself is disabled in both states (this part
+    // worked pre-fix too because `disabled` is in `...rest`).
+    const [disabledInput, enabledInput] = canvas.getAllByRole("textbox", {
+      name: /region/i,
+    });
+    await expect(disabledInput).toBeDisabled();
+    await expect(enabledInput).not.toBeDisabled();
+
+    // The auto-bound Field.Label takes the disabled fill via the
+    // `.zs-field[data-disabled] > .zs-field__label` rule. Verify the
+    // label sits inside the disabled field root.
+    const disabledLabel = disabledWrapper.querySelector(".zs-field__label");
+    await expect(disabledLabel).not.toBeNull();
+    await expect(
+      disabledFieldRoot?.contains(disabledLabel as Node),
+    ).toBe(true);
+  },
+};
+
+/* ─── 16c. Forced-colors hover + readonly mirrors (regression) ──────
+ *
+ * Regression for the wave-6 review 🔴: the `@media (forced-colors:
+ * active)` block in Input.css mirrored base / focused / invalid /
+ * disabled but DROPPED hover and readonly. The token-coloured hover
+ * rules (lines 117 / 123 / 129) outrank the forced-colors base reset
+ * on specificity, so hovering an input in Windows High Contrast mode
+ * painted the `--zs-input-bg-hover` token over the system `Field`
+ * swatch and lost the user's contrast theme. Readonly had no
+ * forced-colors entry at all.
+ *
+ * This story renders the three variants (outline / filled / plain)
+ * plus a readonly cell at a stable size for the aria-wiring script
+ * to drive `page.emulateMedia({ forcedColors: "active" })` against. */
+export const ForcedColorsHoverReadonly: Story = {
+  name: "Forced-colors hover + readonly (regression)",
+  parameters: {
+    docs: {
+      description: {
+        story:
+          "Renders the three variants and a readonly cell so the " +
+          "Playwright forced-colors emulation can assert each surface " +
+          "paints with system colors on hover and in the readonly state.",
+      },
+    },
+  },
+  render: () => (
+    <div
+      className="zs-story-row"
+      role="group"
+      aria-label="Forced-colors hover and readonly"
+    >
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 14rem", minWidth: "12rem" }}
+      >
+        <span className="zs-story-label">Outline hover target</span>
+        <Field>
+          <Field.Label>Outline</Field.Label>
+          <Input
+            data-testid="input-forced-colors-outline"
+            variant="outline"
+            defaultValue="hover me"
+          />
+        </Field>
+      </div>
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 14rem", minWidth: "12rem" }}
+      >
+        <span className="zs-story-label">Filled hover target</span>
+        <Field>
+          <Field.Label>Filled</Field.Label>
+          <Input
+            data-testid="input-forced-colors-filled"
+            variant="filled"
+            defaultValue="hover me"
+          />
+        </Field>
+      </div>
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 14rem", minWidth: "12rem" }}
+      >
+        <span className="zs-story-label">Plain hover target</span>
+        <Field>
+          <Field.Label>Plain</Field.Label>
+          <Input
+            data-testid="input-forced-colors-plain"
+            variant="plain"
+            defaultValue="hover me"
+          />
+        </Field>
+      </div>
+      <div
+        className="zs-story-cell"
+        style={{ flex: "1 1 14rem", minWidth: "12rem" }}
+      >
+        <span className="zs-story-label">Readonly cell</span>
+        <Field>
+          <Field.Label>Slug</Field.Label>
+          <Input
+            data-testid="input-forced-colors-readonly"
+            readOnly
+            defaultValue="acme-prod"
+          />
+        </Field>
+      </div>
+    </div>
+  ),
+};
+
 /* ─── 17. Horizontal layout with error ───────────────────────────────── */
 export const HorizontalLayoutWithError: Story = {
   name: "Horizontal layout with error",
