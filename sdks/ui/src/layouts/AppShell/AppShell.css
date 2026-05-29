@@ -1,0 +1,122 @@
+/*
+ * AppShell — application frame composition.
+ *
+ * Anatomy:
+ *   .zs-app-shell            — the full-height flex column (Header / body / Footer)
+ *   .zs-app-shell__header    — top band (<header>): raised surface + bottom hairline
+ *   .zs-app-shell__body      — the body row (a `Split`: Sidebar rail + Main)
+ *   .zs-app-shell__sidebar   — the fixed-width rail (<aside> / <nav>)
+ *   .zs-app-shell__main      — the fluid main region (<main>)
+ *   .zs-app-shell__footer    — optional bottom band (<footer>)
+ *
+ * Driven by inline custom properties / data-attributes set from props:
+ *   --app-shell-sidebar-width   length (default 16rem) — rail inline-size
+ *   [data-sidebar-side]         start | end  (flows to the body Split side)
+ *   [data-sidebar-open]         present when open; absent collapses the rail
+ *
+ * Layout discipline:
+ *   - The root is a flex COLUMN so the three bands stack; it sets
+ *     `min-block-size: 100dvh` so the shell fills the dynamic viewport
+ *     height (dvh, not px — tracks mobile browser-chrome show/hide; the
+ *     no-raw-px rule explicitly permits dvh/%). The body Split gets
+ *     `flex: 1` so it absorbs the remaining height between Header/Footer.
+ *   - The Header paints `--zs-surface-raised` with a bottom hairline
+ *     (`--zs-separator`); the Footer paints a top hairline. These are the
+ *     only painted bands — the Split body and Main stay arrange-only.
+ *   - The sidebar collapse is a width/visibility toggle keyed off
+ *     `[data-sidebar-open]`: open → the rail keeps its
+ *     `--app-shell-sidebar-width`; closed → it collapses to zero and is
+ *     removed from layout (`display: none`) so Main spans full width.
+ *     The inline-size transition is guarded by `prefers-reduced-motion`.
+ *   - Logical properties throughout (block/inline) so RTL + vertical
+ *     writing modes stay correct.
+ *
+ * Theme: the shell MUST NOT set `data-theme` — the theme host is <html>.
+ */
+
+.zs-app-shell {
+  display: flex;
+  flex-direction: column;
+  /* dvh (dynamic viewport height) tracks the visible viewport as mobile
+   * browser chrome shows/hides — not a raw px length. Permitted by the
+   * no-raw-px rule (dvh/% are allowed). */
+  min-block-size: 100dvh;
+  background: var(--zs-surface);
+  color: var(--zs-label);
+}
+
+/* ─── Header — raised band + bottom hairline ──────────────────────────── */
+.zs-app-shell__header {
+  flex: 0 0 auto;
+  background: var(--zs-surface-raised);
+  border-block-end: 0.0625rem solid var(--zs-separator);
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+}
+
+/* ─── Body — the Split row fills the remaining block-size ─────────────── */
+.zs-app-shell__body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+}
+
+/* ─── Sidebar rail ────────────────────────────────────────────────────── */
+.zs-app-shell__sidebar {
+  /* Open width comes from the rail var the root sets; the Split.Side
+   * `flex-basis` already uses --app-shell-sidebar-width via sideWidth, so
+   * this only needs the collapse transition + padding. */
+  overflow: auto;
+  padding-block: var(--zs-space-4);
+  padding-inline: var(--zs-space-4);
+  transition: flex-basis var(--zs-motion-base) var(--zs-motion-ease),
+    inline-size var(--zs-motion-base) var(--zs-motion-ease);
+}
+
+/* Closed — the rail collapses out of the layout. The collapse is keyed
+ * off the body Split losing [data-sidebar-open]; we target the sidebar
+ * inside a closed body so Main spans full width. Using `display: none`
+ * (not just zero width) so the rail leaves the layout AND the AT tree
+ * when collapsed. */
+.zs-app-shell__body:not([data-sidebar-open]) > .zs-app-shell__sidebar {
+  display: none;
+}
+
+/* ─── Main — fluid; arrange-only (no paint of its own) ────────────────── */
+.zs-app-shell__main {
+  min-inline-size: 0;
+  overflow: auto;
+}
+
+/* ─── Footer — top hairline ───────────────────────────────────────────── */
+.zs-app-shell__footer {
+  flex: 0 0 auto;
+  border-block-start: 0.0625rem solid var(--zs-separator);
+  padding-block: var(--zs-space-3);
+  padding-inline: var(--zs-space-4);
+}
+
+/* ─── prefers-reduced-motion — drop the rail collapse transition ──────── */
+@media (prefers-reduced-motion: reduce) {
+  .zs-app-shell__sidebar {
+    transition: none;
+  }
+}
+
+/* ─── forced-colors — keep the band edges legible ─────────────────────────
+ *
+ * In a forced-colors pass the authored surface/separator tokens are
+ * dropped; mirror the painted bands so the Header/Footer keep a visible
+ * system-color edge against the page. */
+@media (forced-colors: active) {
+  .zs-app-shell {
+    background: Canvas;
+    color: CanvasText;
+  }
+  .zs-app-shell__header {
+    background: Canvas;
+    border-block-end-color: CanvasText;
+  }
+  .zs-app-shell__footer {
+    border-block-start-color: CanvasText;
+  }
+}

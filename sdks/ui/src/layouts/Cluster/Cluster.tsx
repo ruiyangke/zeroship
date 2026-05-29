@@ -49,6 +49,12 @@ export interface ClusterProps extends ComponentPropsWithoutRef<"div"> {
   justify?: Justify;
   /** Render-as the single child element rather than a `<div>`. */
   asChild?: boolean;
+  /**
+   * Root `data-slot` value. Defaults to `"cluster"`. A composing block
+   * (e.g. `PageHeader.Actions`) overrides it so consumers can target the
+   * outer element via the block's own slot vocabulary. Mirrors Card.
+   */
+  "data-slot"?: string;
 }
 
 /**
@@ -65,6 +71,7 @@ export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(function Cluster
     className,
     style,
     children,
+    "data-slot": dataSlot = "cluster",
     ...rest
   },
   ref,
@@ -95,7 +102,7 @@ export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(function Cluster
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot="cluster"
+      data-slot={dataSlot}
       className={composedClassName}
       style={layoutVars}
     >

@@ -58,15 +58,31 @@ export interface SplitProps extends ComponentPropsWithoutRef<"div"> {
   collapseBelow?: SplitCollapse;
   /** Render-as the single child element rather than a `<div>`. */
   asChild?: boolean;
+  /**
+   * Root `data-slot` value. Defaults to `"split"`. A composing block
+   * (e.g. `AppShell.Body`) overrides it so consumers can target the
+   * outer element via the block's own slot vocabulary. Mirrors Card.
+   */
+  "data-slot"?: string;
 }
 
 export type SplitSideProps = ComponentPropsWithoutRef<"div"> & {
   /** Render-as the single child element rather than a `<div>`. */
   asChild?: boolean;
+  /**
+   * `data-slot` value. Defaults to `"split-side"`. A composing block
+   * (e.g. `AppShell.Sidebar`) overrides it. Mirrors Card.
+   */
+  "data-slot"?: string;
 };
 export type SplitMainProps = ComponentPropsWithoutRef<"div"> & {
   /** Render-as the single child element rather than a `<div>`. */
   asChild?: boolean;
+  /**
+   * `data-slot` value. Defaults to `"split-main"`. A composing block
+   * (e.g. `AppShell.Main`) overrides it. Mirrors Card.
+   */
+  "data-slot"?: string;
 };
 
 /* ─── Split root ──────────────────────────────────────────────────────── */
@@ -81,6 +97,7 @@ const SplitRoot = forwardRef<HTMLDivElement, SplitProps>(function SplitRoot(
     className,
     style,
     children,
+    "data-slot": dataSlot = "split",
     ...rest
   },
   ref,
@@ -110,7 +127,7 @@ const SplitRoot = forwardRef<HTMLDivElement, SplitProps>(function SplitRoot(
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot="split"
+      data-slot={dataSlot}
       data-side={side}
       data-collapse={collapseBelow}
       className={composedClassName}
@@ -125,7 +142,16 @@ SplitRoot.displayName = "Split";
 /* ─── Parts ───────────────────────────────────────────────────────────── */
 
 const SplitSideEl = forwardRef<HTMLDivElement, SplitSideProps>(
-  function SplitSide({ asChild = false, className, children, ...rest }, ref) {
+  function SplitSide(
+    {
+      asChild = false,
+      className,
+      children,
+      "data-slot": dataSlot = "split-side",
+      ...rest
+    },
+    ref,
+  ) {
     // Dev-mode parity with Card: warn when asChild has no single valid
     // element child (Slot would render nothing silently). DCEs in prod.
     if (process.env.NODE_ENV !== "production") {
@@ -141,7 +167,7 @@ const SplitSideEl = forwardRef<HTMLDivElement, SplitSideProps>(
       <Comp
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        data-slot="split-side"
+        data-slot={dataSlot}
         className={classnames("zs-split__side", className)}
       >
         {children}
@@ -152,7 +178,16 @@ const SplitSideEl = forwardRef<HTMLDivElement, SplitSideProps>(
 SplitSideEl.displayName = "Split.Side";
 
 const SplitMainEl = forwardRef<HTMLDivElement, SplitMainProps>(
-  function SplitMain({ asChild = false, className, children, ...rest }, ref) {
+  function SplitMain(
+    {
+      asChild = false,
+      className,
+      children,
+      "data-slot": dataSlot = "split-main",
+      ...rest
+    },
+    ref,
+  ) {
     // Dev-mode parity with Card: warn when asChild has no single valid
     // element child (Slot would render nothing silently). DCEs in prod.
     if (process.env.NODE_ENV !== "production") {
@@ -168,7 +203,7 @@ const SplitMainEl = forwardRef<HTMLDivElement, SplitMainProps>(
       <Comp
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        data-slot="split-main"
+        data-slot={dataSlot}
         className={classnames("zs-split__main", className)}
       >
         {children}

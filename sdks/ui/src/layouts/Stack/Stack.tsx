@@ -65,6 +65,12 @@ export interface StackProps extends ComponentPropsWithoutRef<"div"> {
    * style / refs compose under React 19.
    */
   asChild?: boolean;
+  /**
+   * Root `data-slot` value. Defaults to `"stack"`. A composing block
+   * (e.g. `PageHeader.Text`) overrides it so consumers can target the
+   * outer element via the block's own slot vocabulary. Mirrors Card.
+   */
+  "data-slot"?: string;
 }
 
 /**
@@ -82,6 +88,7 @@ export const Stack = forwardRef<HTMLDivElement, StackProps>(function Stack(
     className,
     style,
     children,
+    "data-slot": dataSlot = "stack",
     ...rest
   },
   ref,
@@ -118,7 +125,7 @@ export const Stack = forwardRef<HTMLDivElement, StackProps>(function Stack(
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot="stack"
+      data-slot={dataSlot}
       className={composedClassName}
       style={layoutVars}
     >

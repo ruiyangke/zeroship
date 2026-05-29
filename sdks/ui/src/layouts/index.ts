@@ -24,3 +24,25 @@ export type {
 
 export { Center } from "./Center";
 export type { CenterProps } from "./Center";
+
+/* ─── Layout compositions — built FROM the primitives above. */
+export { AppShell, useAppShellSidebar } from "./AppShell";
+export type {
+  AppShellProps,
+  AppShellHeaderProps,
+  AppShellSidebarProps,
+  AppShellBodyProps,
+  AppShellMainProps,
+  AppShellFooterProps,
+  AppShellSidebarSide,
+} from "./AppShell";
+
+export { PageHeader } from "./PageHeader";
+export type {
+  PageHeaderProps,
+  PageHeaderBreadcrumbsProps,
+  PageHeaderTitleProps,
+  PageHeaderDescriptionProps,
+  PageHeaderActionsProps,
+  PageHeaderTextProps,
+} from "./PageHeader";

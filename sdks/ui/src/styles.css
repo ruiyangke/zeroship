@@ -60,6 +60,10 @@
 @import "./layouts/Split/Split.css";
 @import "./layouts/Center/Center.css";
 
+/* ─── Layout compositions — built FROM the primitives above. */
+@import "./layouts/AppShell/AppShell.css";
+@import "./layouts/PageHeader/PageHeader.css";
+
 /* ─── Composed blocks — empty/error/loading state family. */
 @import "./blocks/EmptyState/EmptyState.css";
 @import "./blocks/ErrorState/ErrorState.css";
@@ -95,6 +99,57 @@
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* Skip-to-content link — the canonical "jump past the chrome" affordance
+   baked into AppShell as the first focusable child. It reuses the
+   visually-hidden idiom (the same 1px clip-box recipe as
+   .zs-visually-hidden — the one place raw px is allowed) so it is offered
+   to the AT tree but invisible until keyboard focus lands on it; on
+   :focus / :focus-visible it un-hides and pins to the inline-start/top of
+   the shell as a real, styled control. Logical properties keep the pin
+   correct under RTL. */
+.zs-skip-link {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.zs-skip-link:focus,
+.zs-skip-link:focus-visible {
+  position: fixed;
+  inset-block-start: var(--zs-space-2);
+  inset-inline-start: var(--zs-space-2);
+  z-index: var(--zs-z-modal);
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding-block: var(--zs-space-2);
+  padding-inline: var(--zs-space-4);
+  overflow: visible;
+  clip: auto;
+  background: var(--zs-surface-raised);
+  color: var(--zs-label);
+  border: 0.0625rem solid var(--zs-separator);
+  border-radius: var(--zs-radius-3);
+  box-shadow: var(--zs-shadow-2);
+  text-decoration: none;
+  outline-color: var(--zs-focus);
+}
+
+@media (forced-colors: active) {
+  .zs-skip-link:focus,
+  .zs-skip-link:focus-visible {
+    background: Canvas;
+    color: CanvasText;
+    border-color: CanvasText;
+  }
 }
 
 :root {
